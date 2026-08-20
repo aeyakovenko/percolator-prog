@@ -5731,8 +5731,26 @@ impl ScenarioRunner {
         let mut observed_short_oi = [0u128; ASSET_COUNT];
         let mut observed_long_count = [0u64; ASSET_COUNT];
         let mut observed_short_count = [0u64; ASSET_COUNT];
+        let mut observed_long_stale_count = [0u64; ASSET_COUNT];
+        let mut observed_short_stale_count = [0u64; ASSET_COUNT];
+        let mut observed_long_pending_count = [0u64; ASSET_COUNT];
+        let mut observed_short_pending_count = [0u64; ASSET_COUNT];
+        let mut observed_long_loss_weight = [0u128; ASSET_COUNT];
+        let mut observed_short_loss_weight = [0u128; ASSET_COUNT];
+        let mut observed_stale_certificate_count = 0u64;
+        let mut observed_b_stale_account_count = 0u64;
+        let mut observed_negative_pnl_account_count = 0u64;
         for (actor, row) in observed.iter_mut().enumerate() {
             let account = self.env.primary_portfolio(actor);
+            observed_stale_certificate_count = observed_stale_certificate_count
+                .checked_add(u64::from(account.stale_state != 0))
+                .ok_or("observed stale-certificate count overflow")?;
+            observed_b_stale_account_count = observed_b_stale_account_count
+                .checked_add(u64::from(account.b_stale_state != 0))
+                .ok_or("observed B-stale account count overflow")?;
+            observed_negative_pnl_account_count = observed_negative_pnl_account_count
+                .checked_add(u64::from(account.pnl.get() < 0))
+                .ok_or("observed negative-PnL account count overflow")?;
             let mut seen_assets = [false; ASSET_COUNT];
             for (slot, encoded_leg) in account.legs.iter().enumerate() {
                 let leg = encoded_leg.try_to_runtime().map_err(|error| {
@@ -5795,6 +5813,9 @@ impl ScenarioRunner {
                         leg.side, leg.epoch_snap, side_mode, side_epoch
                     ));
                 }
+                let prior_reset_obligation = side_mode == SideModeV16::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(side_epoch);
+                let pending_obligation = leg.basis_pos_q == 0 && leg.loss_weight != 0;
                 if leg.basis_pos_q == i128::MIN
                     || (leg.basis_pos_q > 0 && leg.side != SideV16::Long)
                     || (leg.basis_pos_q < 0 && leg.side != SideV16::Short)
@@ -5815,6 +5836,17 @@ impl ScenarioRunner {
                         observed_long_count[asset] = observed_long_count[asset]
                             .checked_add(1)
                             .ok_or("observed long position-count overflow")?;
+                        observed_long_stale_count[asset] = observed_long_stale_count[asset]
+                            .checked_add(u64::from(leg.stale))
+                            .ok_or("observed long stale-count overflow")?;
+                        observed_long_pending_count[asset] = observed_long_pending_count[asset]
+                            .checked_add(u64::from(pending_obligation))
+                            .ok_or("observed long pending-obligation count overflow")?;
+                        if !prior_reset_obligation {
+                            observed_long_loss_weight[asset] = observed_long_loss_weight[asset]
+                                .checked_add(leg.loss_weight)
+                                .ok_or("observed long loss-weight overflow")?;
+                        }
                     }
                     SideV16::Short => {
                         observed_short_oi[asset] = observed_short_oi[asset]
@@ -5823,6 +5855,17 @@ impl ScenarioRunner {
                         observed_short_count[asset] = observed_short_count[asset]
                             .checked_add(1)
                             .ok_or("observed short position-count overflow")?;
+                        observed_short_stale_count[asset] = observed_short_stale_count[asset]
+                            .checked_add(u64::from(leg.stale))
+                            .ok_or("observed short stale-count overflow")?;
+                        observed_short_pending_count[asset] = observed_short_pending_count[asset]
+                            .checked_add(u64::from(pending_obligation))
+                            .ok_or("observed short pending-obligation count overflow")?;
+                        if !prior_reset_obligation {
+                            observed_short_loss_weight[asset] = observed_short_loss_weight[asset]
+                                .checked_add(leg.loss_weight)
+                                .ok_or("observed short loss-weight overflow")?;
+                        }
                     }
                 }
             }
@@ -5832,6 +5875,20 @@ impl ScenarioRunner {
             return Err(format!(
                 "public position deltas diverged from ghost model\nobserved={observed:?}\nghost={:?}",
                 self.positions
+            ));
+        }
+        if group.stale_certificate_count != observed_stale_certificate_count
+            || group.b_stale_account_count != observed_b_stale_account_count
+            || group.negative_pnl_account_count != observed_negative_pnl_account_count
+        {
+            return Err(format!(
+                "deployed account summary counts stale/B-stale/negative {}/{}/{} != independent {}/{}/{}",
+                group.stale_certificate_count,
+                group.b_stale_account_count,
+                group.negative_pnl_account_count,
+                observed_stale_certificate_count,
+                observed_b_stale_account_count,
+                observed_negative_pnl_account_count,
             ));
         }
         for asset in 0..ASSET_COUNT {
@@ -5857,6 +5914,30 @@ impl ScenarioRunner {
                     engine_asset.stored_pos_count_short,
                     observed_long_count[asset],
                     observed_short_count[asset]
+                ));
+            }
+            if observed_long_stale_count[asset] != engine_asset.stale_account_count_long
+                || observed_short_stale_count[asset] != engine_asset.stale_account_count_short
+                || observed_long_pending_count[asset] != engine_asset.pending_obligation_count_long
+                || observed_short_pending_count[asset]
+                    != engine_asset.pending_obligation_count_short
+                || observed_long_loss_weight[asset] != engine_asset.loss_weight_sum_long
+                || observed_short_loss_weight[asset] != engine_asset.loss_weight_sum_short
+            {
+                return Err(format!(
+                    "asset {asset} deployed stale/pending/weight summaries {}/{}, {}/{}, {}/{} != independent {}/{}, {}/{}, {}/{}",
+                    engine_asset.stale_account_count_long,
+                    engine_asset.stale_account_count_short,
+                    engine_asset.pending_obligation_count_long,
+                    engine_asset.pending_obligation_count_short,
+                    engine_asset.loss_weight_sum_long,
+                    engine_asset.loss_weight_sum_short,
+                    observed_long_stale_count[asset],
+                    observed_short_stale_count[asset],
+                    observed_long_pending_count[asset],
+                    observed_short_pending_count[asset],
+                    observed_long_loss_weight[asset],
+                    observed_short_loss_weight[asset],
                 ));
             }
             if engine_asset.oi_eff_long_q > observed_long_oi[asset]
@@ -6518,6 +6599,9 @@ pub struct PendingCloseRankEvidence {
 pub struct CurePendingObligationDosEvidence {
     pub cure_deposit: u128,
     pub close_canceled: bool,
+    pub intermediate_pending_obligation_count: u64,
+    pub intermediate_leg_loss_weight: u128,
+    pub intermediate_market_loss_weight: u128,
     pub pending_obligation_count: u64,
     pub bankruptcy_hlock_active: bool,
     pub retained_basis_pos_q: i128,
@@ -6682,6 +6766,7 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
             Err(error) => return Err(format!("old-episode cure control: {error}")),
         }
     }
+    runner.assert_global_invariants()?;
 
     let canceled_close = runner
         .env
@@ -6698,6 +6783,10 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
     let retained_leg = runner.env.primary_portfolio(FIRST_WINNER).legs[0]
         .try_to_runtime()
         .map_err(|error| format!("retained winner leg decode: {error:?}"))?;
+    let intermediate_market_loss_weight = match retained_leg.side {
+        SideV16::Long => asset.loss_weight_sum_long,
+        SideV16::Short => asset.loss_weight_sum_short,
+    };
     if !canceled_close.canceled
         || pending_obligation_count == 0
         || !group.bankruptcy_hlock_active
@@ -6730,6 +6819,7 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
             .env
             .crank(FIRST_WINNER, runner.env.current_slot(), observations)
             .map_err(|error| format!("post-cure crank {iteration} rejected: {error}"))?;
+        runner.assert_global_invariants()?;
         if runner.snapshot() == before {
             successful_noop_cranks += 1;
         } else {
@@ -6779,6 +6869,9 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
     Ok(CurePendingObligationDosEvidence {
         cure_deposit,
         close_canceled: canceled_close.canceled,
+        intermediate_pending_obligation_count: pending_obligation_count,
+        intermediate_leg_loss_weight: retained_leg.loss_weight,
+        intermediate_market_loss_weight,
         pending_obligation_count: final_pending_obligation_count,
         bankruptcy_hlock_active: final_group.bankruptcy_hlock_active,
         retained_basis_pos_q: final_leg.basis_pos_q,

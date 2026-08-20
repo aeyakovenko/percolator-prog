@@ -13,7 +13,9 @@
 //! and exact destination/SPL-vault/engine-vault deltas. After every public transition the shared oracle
 //! rejects undecodable or hidden legs, duplicate same-asset legs, stale
 //! generation bindings, source-lien classification mismatches, stored-position/OI drift, and
-//! net-position drift. Successful non-token routes must preserve every tracked SPL account
+//! net-position drift. It also rebuilds per-side stale/pending counts and social-loss weights from
+//! every leg, and rebuilds stale-certificate, B-stale, and negative-PnL account counts from every
+//! materialized portfolio. Successful non-token routes must preserve every tracked SPL account
 //! byte-for-byte; value routes may mutate only their canonical source/destination and vault, with
 //! exact authorized deltas. Every rejected route must roll back all tracked program bytes, SPL
 //! data, and economic-account lamports.

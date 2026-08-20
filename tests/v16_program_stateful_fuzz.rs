@@ -215,3 +215,6 @@ mod inv_082_state_indexed_liveness_theorem;
 
 #[path = "invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs"]
 mod inv_086_reference_model_and_deployed_transition_equivalence;
+
+#[path = "invariants/stateful/inv_088_global_summaries_are_not_account_local_proofs.rs"]
+mod inv_088_global_summaries_are_not_account_local_proofs;
