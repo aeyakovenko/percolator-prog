@@ -36,7 +36,9 @@ use support::{
         AssetIntentKind, ExpiredBackingConsumerKind, RetainedMaturityKind, RetryIntentKind,
         SupersededIntentKind,
     },
-    open_lof_manifest::{certified_prs, missing_prs, quarantined_prs, validate_manifest},
+    open_lof_manifest::{
+        certified_prs, missing_prs, nonqualifying_prs, quarantined_prs, validate_manifest,
+    },
 };
 
 #[path = "invariants/public_sbf/inv_001_market_incarnation_binding.rs"]

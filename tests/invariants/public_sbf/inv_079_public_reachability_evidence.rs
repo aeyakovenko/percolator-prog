@@ -102,101 +102,31 @@ fn v16_program_open_lof_manifest_snapshot_is_structurally_honest() {
     assert_eq!(
         quarantined_prs(),
         [
-            220, 223, 224, 231, 251, 253, 255, 267, 271, 272, 273, 274, 275, 276, 277, 278, 279,
-            281, 283, 285, 290, 294, 295, 296, 299, 301, 303, 304, 305, 307, 309, 310, 311, 314,
-            315, 317, 318, 320, 321, 322, 325, 326, 328, 329, 331, 334, 335, 336, 337, 338, 339,
-            340, 343, 344, 345, 346, 347, 349, 350, 351, 353, 355, 362, 365, 366, 367, 380, 381
+            220, 223, 224, 231, 251, 253, 255, 259, 267, 271, 272, 273, 274, 275, 276, 277, 278,
+            279, 281, 283, 284, 285, 290, 293, 294, 295, 296, 299, 301, 303, 304, 305, 307, 309,
+            310, 311, 314, 315, 317, 318, 320, 321, 322, 325, 326, 328, 329, 331, 334, 335, 336,
+            337, 338, 339, 340, 343, 344, 345, 346, 347, 349, 350, 351, 353, 355, 360, 362, 365,
+            366, 367, 375, 380, 381
         ]
     );
     assert_eq!(
         certified_prs(),
-        [225, 260, 264, 265, 280, 282, 332, 333, 356, 369],
+        [
+            225, 254, 256, 260, 264, 265, 280, 282, 292, 312, 313, 316, 330, 332, 333, 356, 363,
+            369
+        ],
         "fixed-pin adapters must not remain classified as vulnerable quarantines"
     );
-    let missing = missing_prs();
     assert_eq!(
-        missing.len(),
-        21,
-        "update the explicit evidence state when an executable adapter lands"
+        nonqualifying_prs(),
+        [237, 258, 286, 287, 370, 372, 373, 374],
+        "nonqualifying rows must retain executable public-route disposition evidence"
     );
-    assert!(!missing.contains(&220));
-    assert!(!missing.contains(&223));
-    assert!(!missing.contains(&224));
-    assert!(!missing.contains(&225));
-    assert!(!missing.contains(&231));
-    assert!(!missing.contains(&251));
-    assert!(!missing.contains(&253));
-    assert!(!missing.contains(&255));
-    assert!(!missing.contains(&260));
-    assert!(!missing.contains(&264));
-    assert!(!missing.contains(&265));
-    assert!(!missing.contains(&267));
-    assert!(!missing.contains(&271));
-    assert!(!missing.contains(&272));
-    assert!(!missing.contains(&273));
-    assert!(!missing.contains(&274));
-    assert!(!missing.contains(&275));
-    assert!(!missing.contains(&276));
-    assert!(!missing.contains(&277));
-    assert!(!missing.contains(&278));
-    assert!(!missing.contains(&279));
-    assert!(!missing.contains(&280));
-    assert!(!missing.contains(&281));
-    assert!(!missing.contains(&282));
-    assert!(!missing.contains(&283));
-    assert!(!missing.contains(&285));
-    assert!(!missing.contains(&290));
-    assert!(!missing.contains(&294));
-    assert!(!missing.contains(&295));
-    assert!(!missing.contains(&296));
-    assert!(!missing.contains(&299));
-    assert!(!missing.contains(&301));
-    assert!(!missing.contains(&303));
-    assert!(!missing.contains(&304));
-    assert!(!missing.contains(&305));
-    assert!(!missing.contains(&307));
-    assert!(!missing.contains(&309));
-    assert!(!missing.contains(&310));
-    assert!(!missing.contains(&311));
-    assert!(!missing.contains(&314));
-    assert!(!missing.contains(&315));
-    assert!(!missing.contains(&317));
-    assert!(!missing.contains(&318));
-    assert!(!missing.contains(&320));
-    assert!(!missing.contains(&321));
-    assert!(!missing.contains(&322));
-    assert!(!missing.contains(&325));
-    assert!(!missing.contains(&326));
-    assert!(!missing.contains(&328));
-    assert!(!missing.contains(&329));
-    assert!(!missing.contains(&331));
-    assert!(!missing.contains(&332));
-    assert!(!missing.contains(&333));
-    assert!(!missing.contains(&334));
-    assert!(!missing.contains(&335));
-    assert!(!missing.contains(&336));
-    assert!(!missing.contains(&337));
-    assert!(!missing.contains(&338));
-    assert!(!missing.contains(&339));
-    assert!(!missing.contains(&340));
-    assert!(!missing.contains(&343));
-    assert!(!missing.contains(&344));
-    assert!(!missing.contains(&345));
-    assert!(!missing.contains(&346));
-    assert!(!missing.contains(&347));
-    assert!(!missing.contains(&349));
-    assert!(!missing.contains(&350));
-    assert!(!missing.contains(&351));
-    assert!(!missing.contains(&353));
-    assert!(!missing.contains(&355));
-    assert!(!missing.contains(&356));
-    assert!(!missing.contains(&362));
-    assert!(!missing.contains(&365));
-    assert!(!missing.contains(&366));
-    assert!(!missing.contains(&367));
-    assert!(!missing.contains(&369));
-    assert!(!missing.contains(&380));
-    assert!(!missing.contains(&381));
+    let missing = missing_prs();
+    assert!(
+        missing.is_empty(),
+        "every finding in the dated manifest must have an executable disposition: {missing:?}"
+    );
 }
 
 #[test]

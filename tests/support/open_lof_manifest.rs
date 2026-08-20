@@ -26,6 +26,9 @@ pub enum BlockerAdapter {
     Pr231AssetGenerationTradeReplay,
     Pr251DelayedAssetAuthorityRevival,
     Pr253RoundedFundingOmission,
+    Pr254ShutdownCommittedFunding,
+    Pr256LiveFeeConsent,
+    Pr259DirectBackingFeeConsent,
     Pr279CollateralTopUpGenerationReplay,
     Pr321BackingTopUpGenerationReplay,
     Pr328InsuranceWithdrawalGenerationReplay,
@@ -76,8 +79,15 @@ pub enum BlockerAdapter {
     Pr281CrossDomainBSettlement,
     Pr282PendingEwmaTargetOverride,
     Pr283TerminalDustPayoutErasure,
+    Pr284SignedDirectionSideAttribution,
+    Pr292RebalancePortfolioIncarnation,
+    Pr293RebalanceMarketIncarnation,
     Pr290CrossMarginInsuranceDrain,
     Pr331CompositeOracleTimeSkew,
+    Pr312ResolvePolicyGenerationReplay,
+    Pr313CpiBaseFeeConsent,
+    Pr316RebalancePositionEpisode,
+    Pr330TerminalBankruptcyResidual,
     TargetStaging,
     Pr356PendingMarkFeeReward,
     Pr365FractionalCapSettlement,
@@ -86,6 +96,9 @@ pub enum BlockerAdapter {
     CompositeOracleRounding,
     Pr343TradeRetryReplay,
     Pr367PostExpiryBacking,
+    Pr360StaleCohortNovation,
+    Pr363ExpiredBackingConversion,
+    Pr375FundedRoleAdminSeizure,
 }
 
 impl BlockerAdapter {
@@ -98,6 +111,9 @@ impl BlockerAdapter {
             Self::Pr231AssetGenerationTradeReplay => 231,
             Self::Pr251DelayedAssetAuthorityRevival => 251,
             Self::Pr253RoundedFundingOmission => 253,
+            Self::Pr254ShutdownCommittedFunding => 254,
+            Self::Pr256LiveFeeConsent => 256,
+            Self::Pr259DirectBackingFeeConsent => 259,
             Self::Pr279CollateralTopUpGenerationReplay => 279,
             Self::Pr321BackingTopUpGenerationReplay => 321,
             Self::Pr328InsuranceWithdrawalGenerationReplay => 328,
@@ -148,8 +164,15 @@ impl BlockerAdapter {
             Self::Pr281CrossDomainBSettlement => 281,
             Self::Pr282PendingEwmaTargetOverride => 282,
             Self::Pr283TerminalDustPayoutErasure => 283,
+            Self::Pr284SignedDirectionSideAttribution => 284,
+            Self::Pr292RebalancePortfolioIncarnation => 292,
+            Self::Pr293RebalanceMarketIncarnation => 293,
             Self::Pr290CrossMarginInsuranceDrain => 290,
             Self::Pr331CompositeOracleTimeSkew => 331,
+            Self::Pr312ResolvePolicyGenerationReplay => 312,
+            Self::Pr313CpiBaseFeeConsent => 313,
+            Self::Pr316RebalancePositionEpisode => 316,
+            Self::Pr330TerminalBankruptcyResidual => 330,
             Self::TargetStaging => 332,
             Self::Pr356PendingMarkFeeReward => 356,
             Self::Pr365FractionalCapSettlement => 365,
@@ -158,6 +181,9 @@ impl BlockerAdapter {
             Self::CompositeOracleRounding => 329,
             Self::Pr343TradeRetryReplay => 343,
             Self::Pr367PostExpiryBacking => 367,
+            Self::Pr360StaleCohortNovation => 360,
+            Self::Pr363ExpiredBackingConversion => 363,
+            Self::Pr375FundedRoleAdminSeizure => 375,
         }
     }
 
@@ -181,6 +207,7 @@ pub enum LofEvidence {
     Missing,
     Quarantined(BlockerAdapter),
     Certified(BlockerAdapter),
+    Nonqualifying,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +255,15 @@ impl OpenLof {
             evidence: LofEvidence::Certified(adapter),
         }
     }
+
+    const fn nonqualifying(pr: u16, severity: LofSeverity, family: LofFamily) -> Self {
+        Self {
+            pr,
+            severity,
+            family,
+            evidence: LofEvidence::Nonqualifying,
+        }
+    }
 }
 
 use LofFamily::{
@@ -271,7 +307,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr231AssetGenerationTradeReplay,
     ),
-    OpenLof::missing(237, Privileged, PrivilegedLifecycle),
+    OpenLof::nonqualifying(237, Privileged, PrivilegedLifecycle),
     OpenLof::quarantined(
         251,
         Blocker,
@@ -284,16 +320,31 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr253RoundedFundingOmission,
     ),
-    OpenLof::missing(254, Privileged, PrivilegedLifecycle),
+    OpenLof::certified(
+        254,
+        Privileged,
+        PrivilegedLifecycle,
+        BlockerAdapter::Pr254ShutdownCommittedFunding,
+    ),
     OpenLof::quarantined(
         255,
         Blocker,
         RecoveryTerminal,
         BlockerAdapter::Pr255ResolveBeforeCommittedAccrual,
     ),
-    OpenLof::missing(256, Hardening, FeeConsent),
-    OpenLof::missing(258, Privileged, PrivilegedLifecycle),
-    OpenLof::missing(259, Privileged, FeeConsent),
+    OpenLof::certified(
+        256,
+        Hardening,
+        FeeConsent,
+        BlockerAdapter::Pr256LiveFeeConsent,
+    ),
+    OpenLof::nonqualifying(258, Privileged, PrivilegedLifecycle),
+    OpenLof::quarantined(
+        259,
+        Privileged,
+        FeeConsent,
+        BlockerAdapter::Pr259DirectBackingFeeConsent,
+    ),
     OpenLof::certified(
         260,
         Blocker,
@@ -386,23 +437,38 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         RecoveryTerminal,
         BlockerAdapter::Pr283TerminalDustPayoutErasure,
     ),
-    OpenLof::missing(284, Blocker, DomainValue),
+    OpenLof::quarantined(
+        284,
+        Blocker,
+        DomainValue,
+        BlockerAdapter::Pr284SignedDirectionSideAttribution,
+    ),
     OpenLof::quarantined(
         285,
         Hardening,
         ReplayIncarnation,
         BlockerAdapter::PortfolioAuthorityIncarnationReplayFamily,
     ),
-    OpenLof::missing(286, Blocker, RecoveryTerminal),
-    OpenLof::missing(287, Blocker, RecoveryTerminal),
+    OpenLof::nonqualifying(286, Blocker, RecoveryTerminal),
+    OpenLof::nonqualifying(287, Blocker, RecoveryTerminal),
     OpenLof::quarantined(
         290,
         Blocker,
         DomainValue,
         BlockerAdapter::Pr290CrossMarginInsuranceDrain,
     ),
-    OpenLof::missing(292, Hardening, ReplayIncarnation),
-    OpenLof::missing(293, Hardening, ReplayIncarnation),
+    OpenLof::certified(
+        292,
+        Hardening,
+        ReplayIncarnation,
+        BlockerAdapter::Pr292RebalancePortfolioIncarnation,
+    ),
+    OpenLof::quarantined(
+        293,
+        Hardening,
+        ReplayIncarnation,
+        BlockerAdapter::Pr293RebalanceMarketIncarnation,
+    ),
     OpenLof::quarantined(
         294,
         Hardening,
@@ -475,8 +541,18 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr311ResolveGenerationReplay,
     ),
-    OpenLof::missing(312, Blocker, ReplayIncarnation),
-    OpenLof::missing(313, Privileged, FeeConsent),
+    OpenLof::certified(
+        312,
+        Blocker,
+        ReplayIncarnation,
+        BlockerAdapter::Pr312ResolvePolicyGenerationReplay,
+    ),
+    OpenLof::certified(
+        313,
+        Privileged,
+        FeeConsent,
+        BlockerAdapter::Pr313CpiBaseFeeConsent,
+    ),
     OpenLof::quarantined(
         314,
         Blocker,
@@ -489,7 +565,12 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr315ShutdownGenerationReplay,
     ),
-    OpenLof::missing(316, Hardening, ReplayIncarnation),
+    OpenLof::certified(
+        316,
+        Hardening,
+        ReplayIncarnation,
+        BlockerAdapter::Pr316RebalancePositionEpisode,
+    ),
     OpenLof::quarantined(
         317,
         Blocker,
@@ -544,7 +625,12 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::CompositeOracleRounding,
     ),
-    OpenLof::missing(330, Blocker, RecoveryTerminal),
+    OpenLof::certified(
+        330,
+        Blocker,
+        RecoveryTerminal,
+        BlockerAdapter::Pr330TerminalBankruptcyResidual,
+    ),
     OpenLof::quarantined(
         331,
         Blocker,
@@ -661,14 +747,24 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr356PendingMarkFeeReward,
     ),
-    OpenLof::missing(360, Blocker, DomainValue),
+    OpenLof::quarantined(
+        360,
+        Blocker,
+        DomainValue,
+        BlockerAdapter::Pr360StaleCohortNovation,
+    ),
     OpenLof::quarantined(
         362,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr362ActivationRetryReplay,
     ),
-    OpenLof::missing(363, Blocker, DomainValue),
+    OpenLof::certified(
+        363,
+        Blocker,
+        DomainValue,
+        BlockerAdapter::Pr363ExpiredBackingConversion,
+    ),
     OpenLof::quarantined(
         365,
         Blocker,
@@ -693,11 +789,16 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         FeeConsent,
         BlockerAdapter::Pr369BilateralFeeSupport,
     ),
-    OpenLof::missing(370, Blocker, RecoveryTerminal),
-    OpenLof::missing(372, Blocker, RecoveryTerminal),
-    OpenLof::missing(373, Blocker, RecoveryTerminal),
-    OpenLof::missing(374, Blocker, RecoveryTerminal),
-    OpenLof::missing(375, Privileged, PrivilegedLifecycle),
+    OpenLof::nonqualifying(370, Blocker, RecoveryTerminal),
+    OpenLof::nonqualifying(372, Blocker, RecoveryTerminal),
+    OpenLof::nonqualifying(373, Blocker, RecoveryTerminal),
+    OpenLof::nonqualifying(374, Blocker, RecoveryTerminal),
+    OpenLof::quarantined(
+        375,
+        Privileged,
+        PrivilegedLifecycle,
+        BlockerAdapter::Pr375FundedRoleAdminSeizure,
+    ),
     OpenLof::quarantined(
         380,
         Blocker,
@@ -762,7 +863,9 @@ pub fn missing_prs() -> Vec<u16> {
         .iter()
         .filter_map(|entry| match entry.evidence {
             LofEvidence::Missing => Some(entry.pr),
-            LofEvidence::Quarantined(_) | LofEvidence::Certified(_) => None,
+            LofEvidence::Quarantined(_)
+            | LofEvidence::Certified(_)
+            | LofEvidence::Nonqualifying => None,
         })
         .collect()
 }
@@ -771,7 +874,7 @@ pub fn quarantined_prs() -> Vec<u16> {
     OPEN_LOFS
         .iter()
         .filter_map(|entry| match entry.evidence {
-            LofEvidence::Missing => None,
+            LofEvidence::Missing | LofEvidence::Nonqualifying => None,
             LofEvidence::Quarantined(_) => Some(entry.pr),
             LofEvidence::Certified(_) => None,
         })
@@ -783,7 +886,17 @@ pub fn certified_prs() -> Vec<u16> {
         .iter()
         .filter_map(|entry| match entry.evidence {
             LofEvidence::Certified(_) => Some(entry.pr),
-            LofEvidence::Missing | LofEvidence::Quarantined(_) => None,
+            LofEvidence::Missing | LofEvidence::Quarantined(_) | LofEvidence::Nonqualifying => None,
+        })
+        .collect()
+}
+
+pub fn nonqualifying_prs() -> Vec<u16> {
+    OPEN_LOFS
+        .iter()
+        .filter_map(|entry| match entry.evidence {
+            LofEvidence::Nonqualifying => Some(entry.pr),
+            LofEvidence::Missing | LofEvidence::Quarantined(_) | LofEvidence::Certified(_) => None,
         })
         .collect()
 }

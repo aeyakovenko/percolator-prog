@@ -287,10 +287,10 @@ and formal-composition gaps.
 
 ### Immediate next work
 
-1. Replace each of the 21 `Missing` entries in the executable 99-finding manifest with a public
-   fixed/vulnerable adapter or a public nonqualifying proof. Then convert the 68 remaining
-   `Quarantined` adapters to `Certified` only after the current pin satisfies their positive
-   economic and liveness postconditions.
+1. Convert the 73 `Quarantined` adapters to `Certified` only after the current pin satisfies their
+   positive economic and liveness postconditions. The other 26 entries already have explicit
+   executable disposition: 18 fixed-pin certifications and 8 public nonqualifying proofs. Do not
+   promote a vulnerable counterexample merely because its broader invariant has other green tests.
 2. Extend INV-045's accepted-mark generator across raw `0`, `1`, and `u64::MAX`, same-slot and
    maximum-dt boundaries, partial fills, repeated catch-up, all oracle modes, and all route/order
    combinations. Retain exact fee attribution, terminal supply, user-exit, and max-shape CU oracles.
@@ -337,11 +337,13 @@ state-preserving because the wrapper returns the error and SVM rollback applies.
 | `cu/` | 767 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, including issue-404 transient-rent boundaries, issue-405 selected-Switchboard-result provenance, issue-406 matcher-inventory synchronization, issue-408 maintenance seniority, canonical portfolio and auxiliary-ledger account sizing, complete portfolio-ID/PDA/token-move callsite ownership, INV-002/INV-004/INV-008 retained-route and writer completeness rosters, lifecycle wire migration coverage, failed-SPL-CPI same-intent retry for all three top-up routes, eleven positive issues-407/409 crank-partition comparisons including full 14-leg/32-step shape, all fourteen single-omission full-refresh guards, public irreversible-close admission/terminal-progress and four-route retired/reactivation compositions, a source-complete discovery-hint surface guard, matched/mismatched two-asset Pyth tail permutations, pending-close/Recovery hostile-hint rollback with honest progress, Resolved hint-inert payout equivalence, and a complete six-struct wrapper-owned persisted-field roster; no standalone top-level tests |
 | `kani/` | 131 | Symbolic wrapper arithmetic, exact portfolio/position tuple acceptance and episode invalidation, retained-close and owner-value sequence binding, all four trade tuple bindings, strict full-width top-up watermark ordering, matcher binding and synchronization policy, ordering, strict-decoder, and proof-assumption nonvacuity harnesses. The roster includes rejection of legacy deposit/withdraw/trade/top-up schemas; all full-width fields in the four exact shipping trade-body decoders as tractable per-field proofs; exact current-versus-frontier asset-generation selection; authority-wire binding; exact deployed portfolio-ID allocator monotonicity/non-reuse; and exhaustive acceptance/rejection of the persisted oracle carry and reserved-byte domains. Full `cargo kani --tests --default-unwind 18` remains the required verification command. |
 
-The executable 99-finding manifest currently contains 10 `Certified`, 68 `Quarantined`, and 21
-`Missing` entries. Certified adapters assert positive safety/liveness outcomes on this fixed pin;
-quarantined adapters still reproduce vulnerable behavior, and missing entries have no executable
-adapter. A vulnerable-pin counterexample proves public reachability but does not certify the
-invariant until the fixed pin rejects the attack or preserves the required safe outcome.
+The executable 99-finding manifest currently contains 18 `Certified`, 73 `Quarantined`, 8
+`Nonqualifying`, and 0 `Missing` entries. Certified adapters assert positive safety/liveness
+outcomes on this fixed pin; quarantined adapters still reproduce vulnerable behavior; and every
+nonqualifying row is tied to a public proof that the alleged route is privileged-only, transient,
+or unreachable on this pin. A vulnerable-pin counterexample proves public reachability but does
+not certify the invariant until the fixed pin rejects the attack or preserves the required safe
+outcome.
 
 The current fixed pin enforces matcher consent for CPI backing fees (PR223), ignores unsigned CPI
 caller fees (PR224), requires bilateral no-CPI consent to the live base fee (PR310), and caps an
@@ -672,9 +674,10 @@ public-route LoF or DoS class. It maps every row to a primary invariant. PR135 c
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
 `tests/support/open_lof_manifest.rs` retains the executable adapter mapping for its 99-LoF snapshot:
-10 are `Certified`, 68 remain `Quarantined`, and 21 are `Missing`. Its `Quarantined` entries mean
-**Direct regression**, not **Independent discovery**. The unified TSV's classification criterion is
-met for its dated snapshot, but executable fixed-pin certification is not complete.
+18 are `Certified`, 73 remain `Quarantined`, 8 are `Nonqualifying`, and none are `Missing`. Its
+`Quarantined` entries mean **Direct regression**, not **Independent discovery**. The unified TSV's
+classification criterion is met for its dated snapshot, but executable fixed-pin certification is
+not complete while any quarantine remains.
 
 Every benchmark increment must:
 
