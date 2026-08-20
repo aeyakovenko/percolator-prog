@@ -12,11 +12,13 @@
 //! economic-account lamports. Generated scenarios also place ordinary public
 //! actions before and after these lifecycle actions.
 //! `v16_program_unilateral_zero_oi_reset_route_side_matrix_finalizes_permissionlessly`
-//! reaches `ResetPending` without state injection in all eight trade-route/reducer-side worlds: one
-//! owner fully reduces a matched leg, an early global finalizer rejects atomically while the
-//! prior-epoch counterparty leg remains, bounded public auto-cranks detach that leg, and the
-//! permissionless finalizer restores Normal. A fresh matched open/close through the same route and
-//! full owner withdrawals prove the reset does not orphan funds or permanently disable the asset.
+//! reaches `ResetPending` without state injection in all sixteen
+//! base/dynamic-asset/trade-route/reducer-side worlds: one owner fully reduces a matched leg, an
+//! early global finalizer rejects atomically while the prior-epoch counterparty leg remains,
+//! bounded public auto-cranks detach that leg, and the permissionless finalizer restores Normal. A
+//! fresh matched open/close through the same route and full owner withdrawals prove the reset does
+//! not orphan funds or permanently disable the asset. Each dynamic-asset world additionally enters
+//! DrainOnly and Retired, proving reset history cannot become a terminal retirement lock.
 //!
 //! This is bounded generated coverage, not exhaustive reset/recovery/retirement
 //! reachability.
@@ -26,7 +28,7 @@ use crate::support::fuzz_model::{
     assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
 };
 use crate::support::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, TX_CU_LIMIT};
-use percolator::{SideModeV16, POS_SCALE};
+use percolator::{AssetLifecycleV16, SideModeV16, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
 
 #[test]
@@ -67,12 +69,16 @@ fn v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit() {
     );
 }
 
-fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u8; 32]) {
+fn assert_public_reset_lifecycle(
+    route: TradeRoute,
+    reducer_long: bool,
+    asset_index: u16,
+    seed: [u8; 32],
+) {
     const REDUCER: usize = 0;
     const STALE_COUNTERPARTY: usize = 1;
     const FRESH_LONG: usize = 2;
     const FRESH_SHORT: usize = 3;
-    const ASSET: u16 = 0;
     const SIZE_Q: u128 = POS_SCALE;
 
     let signed_size_q = if reducer_long {
@@ -81,7 +87,7 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
         -(SIZE_Q as i128)
     };
     let reset_side = u8::from(reducer_long);
-    let case = format!("{route:?}/reducer_long={reducer_long}");
+    let case = format!("{route:?}/asset={asset_index}/reducer_long={reducer_long}");
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
     let reducer_destination_before = env.token_amount(env.actors[REDUCER].destination_token);
@@ -92,7 +98,7 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
         route,
         REDUCER,
         STALE_COUNTERPARTY,
-        ASSET,
+        asset_index,
         signed_size_q,
         INITIAL_PRICE,
         0,
@@ -107,10 +113,10 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
         .expect("matched open encumbrance census");
 
     let reduce = env
-        .rebalance_reduce(REDUCER, ASSET, SIZE_Q)
+        .rebalance_reduce(REDUCER, asset_index, SIZE_Q)
         .expect("full owner reduction must enter the opposite-side reset episode");
     max_compute_units = max_compute_units.max(reduce.compute_units);
-    let reset = env.primary_market_state().1.assets[ASSET as usize];
+    let reset = env.primary_market_state().1.assets[asset_index as usize];
     assert_eq!(reset.oi_eff_long_q, 0);
     assert_eq!(reset.oi_eff_short_q, 0);
     let (reset_mode, reset_stored_count) = if reducer_long {
@@ -130,7 +136,7 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
         .map(|actor| env.primary_portfolio_data(actor))
         .collect::<Vec<_>>();
     let tokens_before_early_finalize = env.all_token_account_data();
-    env.finalize_reset_side(ASSET, reset_side)
+    env.finalize_reset_side(asset_index, reset_side)
         .expect_err("the old counterparty leg must block premature reset finalization");
     assert_eq!(env.market_data(false), market_before_early_finalize);
     assert_eq!(
@@ -142,12 +148,12 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
     assert_eq!(env.all_token_account_data(), tokens_before_early_finalize);
 
     let observation = vec![CrankObservationHint {
-        asset_index: ASSET,
-        oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
+        asset_index,
+        oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
     }];
     let mut crank_calls = 0usize;
     for _ in 0..8 {
-        let asset = env.primary_market_state().1.assets[ASSET as usize];
+        let asset = env.primary_market_state().1.assets[asset_index as usize];
         let stored_count = if reducer_long {
             asset.stored_pos_count_short
         } else {
@@ -170,7 +176,7 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
         crank_calls > 0,
         "reset cleanup must execute real public work"
     );
-    let ready = env.primary_market_state().1.assets[ASSET as usize];
+    let ready = env.primary_market_state().1.assets[asset_index as usize];
     let (stored_count, stale_count, pending_count) = if reducer_long {
         (
             ready.stored_pos_count_short,
@@ -197,14 +203,14 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
 
     let risk_epoch_before = env.primary_market_state().1.risk_epoch;
     let finalize = env
-        .finalize_reset_side(ASSET, reset_side)
+        .finalize_reset_side(asset_index, reset_side)
         .expect("a clean ResetPending side must finalize permissionlessly");
     max_compute_units = max_compute_units.max(finalize.compute_units);
     let finalized = env.primary_market_state().1;
     let finalized_mode = if reducer_long {
-        finalized.assets[ASSET as usize].mode_short
+        finalized.assets[asset_index as usize].mode_short
     } else {
-        finalized.assets[ASSET as usize].mode_long
+        finalized.assets[asset_index as usize].mode_long
     };
     assert_eq!(finalized_mode, SideModeV16::Normal, "{case}");
     assert!(finalized.risk_epoch > risk_epoch_before);
@@ -218,7 +224,7 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
         route,
         FRESH_LONG,
         FRESH_SHORT,
-        ASSET,
+        asset_index,
         signed_size_q,
         INITIAL_PRICE,
         0,
@@ -232,7 +238,7 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
         route,
         FRESH_LONG,
         FRESH_SHORT,
-        ASSET,
+        asset_index,
         -signed_size_q,
         INITIAL_PRICE,
         0,
@@ -241,13 +247,43 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
         panic!("{case}: fresh matched risk must retain a bounded bilateral exit: {error}")
     });
     max_compute_units = max_compute_units.max(reclose.compute_units);
-    let after_fresh_close = env.primary_market_state().1.assets[ASSET as usize];
+    let after_fresh_close = env.primary_market_state().1.assets[asset_index as usize];
     assert_eq!(after_fresh_close.oi_eff_long_q, 0);
     assert_eq!(after_fresh_close.oi_eff_short_q, 0);
     assert_public_stock_census("INV-065 after fresh post-reset roundtrip", &env)
         .expect("post-reset roundtrip stock census");
     assert_public_encumbrance_census("INV-065 after fresh post-reset roundtrip", &env)
         .expect("post-reset roundtrip encumbrance census");
+
+    if asset_index != 0 {
+        let generation_before_retire = after_fresh_close.market_id;
+        let drain = env
+            .drain_only_asset(asset_index, 0)
+            .expect("an empty post-reset asset must enter DrainOnly");
+        max_compute_units = max_compute_units.max(drain.compute_units);
+        assert_eq!(
+            env.primary_market_state().1.assets[asset_index as usize].lifecycle,
+            AssetLifecycleV16::DrainOnly,
+            "{case}"
+        );
+        let retire_slot = env.current_slot().checked_add(1).expect("bounded slot");
+        env.warp_to_slot(retire_slot);
+        let retire = env
+            .retire_asset(asset_index, retire_slot)
+            .expect("reset history must not block empty-asset retirement");
+        max_compute_units = max_compute_units.max(retire.compute_units);
+        let retired = env.primary_market_state().1.assets[asset_index as usize];
+        assert_eq!(retired.lifecycle, AssetLifecycleV16::Retired, "{case}");
+        assert_eq!(retired.market_id, generation_before_retire, "{case}");
+        assert_eq!(retired.oi_eff_long_q, 0, "{case}");
+        assert_eq!(retired.oi_eff_short_q, 0, "{case}");
+        assert_eq!(retired.stored_pos_count_long, 0, "{case}");
+        assert_eq!(retired.stored_pos_count_short, 0, "{case}");
+        assert_public_stock_census("INV-065 after reset-history retirement", &env)
+            .expect("reset-history retirement stock census");
+        assert_public_encumbrance_census("INV-065 after reset-history retirement", &env)
+            .expect("reset-history retirement encumbrance census");
+    }
 
     let reducer_capital = env.primary_portfolio(REDUCER).capital.get();
     let counterparty_capital = env.primary_portfolio(STALE_COUNTERPARTY).capital.get();
@@ -259,6 +295,13 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
         .withdraw_primary(STALE_COUNTERPARTY, counterparty_capital)
         .expect("the detached counterparty must recover all remaining capital");
     max_compute_units = max_compute_units.max(counterparty_withdraw.compute_units);
+    for actor in [FRESH_LONG, FRESH_SHORT] {
+        let capital = env.primary_portfolio(actor).capital.get();
+        let withdraw = env
+            .withdraw_primary(actor, capital)
+            .expect("a flat post-reset portfolio must retain its complete public exit");
+        max_compute_units = max_compute_units.max(withdraw.compute_units);
+    }
     assert_eq!(
         env.token_amount(env.actors[REDUCER].destination_token),
         reducer_destination_before + reducer_capital as u64
@@ -280,20 +323,23 @@ fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u
 
 #[test]
 fn v16_program_unilateral_zero_oi_reset_route_side_matrix_finalizes_permissionlessly() {
-    for (route_index, route) in [
-        TradeRoute::NoCpi,
-        TradeRoute::Cpi,
-        TradeRoute::BatchNoCpi,
-        TradeRoute::BatchCpi,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        for reducer_long in [false, true] {
-            let mut seed = [0x45; 32];
-            seed[0] ^= route_index as u8;
-            seed[1] ^= u8::from(reducer_long);
-            assert_public_reset_lifecycle(route, reducer_long, seed);
+    for asset_index in [0u16, 1u16] {
+        for (route_index, route) in [
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for reducer_long in [false, true] {
+                let mut seed = [0x45; 32];
+                seed[0] ^= route_index as u8;
+                seed[1] ^= u8::from(reducer_long);
+                seed[2] ^= asset_index as u8;
+                assert_public_reset_lifecycle(route, reducer_long, asset_index, seed);
+            }
         }
     }
 }
