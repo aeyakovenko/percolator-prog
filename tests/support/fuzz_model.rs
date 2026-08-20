@@ -10185,6 +10185,8 @@ pub fn verify_cpi_backing_fee_consent(
         .map_err(|error| format!("configure attacker AuthMark: {error}"))?;
     env.top_up_backing_bucket_for_actor(0, WINNING_DOMAIN, 5_000, 100)
         .map_err(|error| format!("fund attacker backing domain: {error}"))?;
+    assert_public_stock_census("INV-088 after backing-provider funding", &env)?;
+    assert_public_encumbrance_census("INV-088 after backing-provider funding", &env)?;
 
     env.trade_cpi(1, 2, 1, -WINNING_SIZE_Q, 0, 0)
         .map_err(|error| format!("open LP winning leg: {error}"))?;
@@ -10310,6 +10312,8 @@ pub fn verify_cpi_backing_fee_consent(
             "consented CPI backing fee did not transfer LP capital to provider: LP {lp_before}->{lp_after}, earnings {provider_before}->{provider_after}"
         ));
     }
+    assert_public_stock_census("INV-088 after backing-provider earnings accrue", &env)?;
+    assert_public_encumbrance_census("INV-088 after backing-provider earnings accrue", &env)?;
     let zero_cap_update = env
         .set_matcher_backing_fee_cap(2, 0)
         .map_err(|error| format!("restore zero matcher cap: {error}"))?;
@@ -10338,6 +10342,8 @@ pub fn verify_cpi_backing_fee_consent(
 
     env.withdraw_backing_bucket_earnings_for_actor(0, WINNING_DOMAIN, provider_earnings)
         .map_err(|error| format!("withdraw LP-funded provider earnings: {error}"))?;
+    assert_public_stock_census("INV-088 after backing-provider earnings withdrawal", &env)?;
+    assert_public_encumbrance_census("INV-088 after backing-provider earnings withdrawal", &env)?;
     let provider_destination_after = env.token_amount(env.actors[0].destination_token);
     let extracted_tokens = provider_destination_after
         .checked_sub(provider_destination_before)

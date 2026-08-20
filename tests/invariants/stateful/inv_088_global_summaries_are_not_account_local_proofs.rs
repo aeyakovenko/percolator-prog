@@ -14,15 +14,22 @@
 //! PnL atom and bound-number totals from raw portfolios, and proves the public transition system
 //! cannot create a nonzero matured-PnL summary. The test separately requires the intermediate
 //! obligation, weight, and positive PnL to be nonzero so the census cannot pass vacuously.
+//! `v16_program_materialized_portfolio_summary_tracks_close_and_recreate` proves the same stock
+//! and encumbrance census follows a real same-address portfolio dematerialization/reinitialization
+//! while the program-assigned incarnation advances. `v16_program_backing_earnings_summary_tracks_public_accrual_and_withdrawal`
+//! creates nonzero provider earnings through a consented CPI trade, independently reconciles the
+//! aggregate at funding/accrual/withdrawal, and requires the aggregate decrement to equal the
+//! provider's SPL credit.
 //!
 //! Guarantee boundary: the shared oracle now independently rebuilds every persisted stock/count
 //! aggregate with an account, asset, domain, or bucket census. This focused route closes the
-//! positive-PnL and pending-obligation/loss-weight families in a one-asset topology. Complete
-//! public-writer route coverage and larger adversarial asset/account touch-order cross-products
-//! remain.
+//! positive-PnL, pending-obligation/loss-weight, materialized-account, and backing-earnings writer
+//! families in bounded public topologies. Complete public-writer route coverage and larger
+//! adversarial asset/account touch-order cross-products remain.
 
 use crate::support::fuzz_model::{
     run_cure_pending_obligation_dos_probe, run_materialized_portfolio_lifecycle_census,
+    verify_cpi_backing_fee_consent,
 };
 
 #[test]
@@ -84,5 +91,20 @@ fn v16_program_pending_obligation_summaries_match_the_complete_portfolio_census(
     assert_eq!(
         evidence.retained_loss_weight, 0,
         "bounded public cleanup must remove the account-local weight"
+    );
+}
+
+#[test]
+fn v16_program_backing_earnings_summary_tracks_public_accrual_and_withdrawal() {
+    let evidence = verify_cpi_backing_fee_consent([0x88; 32])
+        .expect("public backing earnings must satisfy the independent aggregate census");
+    assert!(
+        evidence.provider_earnings > 0,
+        "the route must make the backing-earnings writer nonvacuous"
+    );
+    assert_eq!(
+        evidence.provider_earnings,
+        u128::from(evidence.extracted_tokens),
+        "the aggregate decrement must equal the provider's SPL credit"
     );
 }
