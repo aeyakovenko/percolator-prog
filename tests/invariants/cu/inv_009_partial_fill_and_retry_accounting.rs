@@ -278,6 +278,171 @@ fn v16_program_tradecpi_flagged_partial_accounts_actual_fill_and_requires_fresh_
     assert_eq!(after_retry.c_tot + after_retry.insurance, after_retry.vault);
 }
 
+fn run_flagged_partial_partition(total_units: u128, partial_rounds: usize) {
+    let (mut env, taker, _lp, taker_account, lp_account, matcher, ctx, delegate) =
+        setup_hostile_partial_env(1);
+    let total_q = (total_units * POS_SCALE) as i128;
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(matcher, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    let (_, market_before) = env.market_state();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let taker_epoch_before = env.portfolio_position_epoch(taker_account);
+    let lp_epoch_before = env.portfolio_position_epoch(lp_account);
+    let mut remaining_q = total_q;
+    let mut cumulative_q = 0i128;
+
+    for round in 0..partial_rounds {
+        assert_eq!(
+            remaining_q % 2,
+            0,
+            "partition fixture must request an exactly divisible quantity"
+        );
+        set_hostile_matcher_mode(&mut env, ctx, matcher, FLAGGED_PARTIAL_MODE);
+        let stale_request = env.trade_cpi_ix(taker_account, lp_account, 0, remaining_q, 100, 0);
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(stale_request.clone(), accounts(&env), &[&taker])
+            .expect("each flagged partial request must execute");
+        assert_cu_within("TradeCpi repeated flagged partial fill", cu, 1_400_000);
+
+        let executed_q = remaining_q / 2;
+        cumulative_q += executed_q;
+        remaining_q -= executed_q;
+        let accepted_steps = (round + 1) as u64;
+        let taker_state = env.portfolio_state(taker_account);
+        let lp_state = env.portfolio_state(lp_account);
+        assert_eq!(
+            active_leg_for_asset(&taker_state, 0).basis_pos_q,
+            cumulative_q
+        );
+        assert_eq!(
+            active_leg_for_asset(&lp_state, 0).basis_pos_q,
+            -cumulative_q
+        );
+        assert_eq!(
+            env.portfolio_position_epoch(taker_account),
+            taker_epoch_before + accepted_steps
+        );
+        assert_eq!(
+            env.portfolio_position_epoch(lp_account),
+            lp_epoch_before + accepted_steps
+        );
+
+        let (_, market_after_partial) = env.market_state();
+        let cumulative_fee_atoms = 2 * (cumulative_q as u128 / POS_SCALE);
+        assert_eq!(
+            market_after_partial.assets[0].oi_eff_long_q,
+            cumulative_q as u128
+        );
+        assert_eq!(
+            market_after_partial.assets[0].oi_eff_short_q,
+            cumulative_q as u128
+        );
+        assert_eq!(
+            market_after_partial.insurance - market_before.insurance,
+            cumulative_fee_atoms
+        );
+        assert_eq!(
+            market_before.c_tot - market_after_partial.c_tot,
+            cumulative_fee_atoms
+        );
+        assert_eq!(market_after_partial.vault, market_before.vault);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+        let signer_before_stale = env.svm.get_account(&taker.pubkey()).unwrap();
+        let market_before_stale = env.svm.get_account(&env.market).unwrap();
+        let taker_before_stale = env.svm.get_account(&taker_account).unwrap();
+        let lp_before_stale = env.svm.get_account(&lp_account).unwrap();
+        let ctx_before_stale = env.svm.get_account(&ctx).unwrap();
+        env.svm.expire_blockhash();
+        let stale = env.send(stale_request, accounts(&env), &[&taker]);
+        assert!(
+            stale.is_err(),
+            "round {round}: a consumed partial-fill request must not replay"
+        );
+        assert_eq!(
+            env.svm.get_account(&taker.pubkey()).unwrap(),
+            signer_before_stale
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_stale
+        );
+        assert_eq!(
+            env.svm.get_account(&taker_account).unwrap(),
+            taker_before_stale
+        );
+        assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before_stale);
+        assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before_stale);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+
+    set_hostile_matcher_mode(&mut env, ctx, matcher, 9);
+    env.svm.expire_blockhash();
+    let final_cu = env
+        .send(
+            env.trade_cpi_ix(taker_account, lp_account, 0, remaining_q, 100, 0),
+            accounts(&env),
+            &[&taker],
+        )
+        .expect("a fresh final request must execute the exact residual");
+    assert_cu_within(
+        "TradeCpi full fill after repeated partials",
+        final_cu,
+        1_400_000,
+    );
+
+    let taker_after = env.portfolio_state(taker_account);
+    let lp_after = env.portfolio_state(lp_account);
+    assert_eq!(active_leg_for_asset(&taker_after, 0).basis_pos_q, total_q);
+    assert_eq!(active_leg_for_asset(&lp_after, 0).basis_pos_q, -total_q);
+    assert_eq!(
+        env.portfolio_position_epoch(taker_account),
+        taker_epoch_before + partial_rounds as u64 + 1
+    );
+    assert_eq!(
+        env.portfolio_position_epoch(lp_account),
+        lp_epoch_before + partial_rounds as u64 + 1
+    );
+    let (_, market_after) = env.market_state();
+    let aggregate_fee_atoms = 2 * total_units;
+    assert_eq!(market_after.assets[0].oi_eff_long_q, total_q as u128);
+    assert_eq!(market_after.assets[0].oi_eff_short_q, total_q as u128);
+    assert_eq!(
+        market_after.insurance - market_before.insurance,
+        aggregate_fee_atoms
+    );
+    assert_eq!(
+        market_before.c_tot - market_after.c_tot,
+        aggregate_fee_atoms
+    );
+    assert_eq!(
+        market_after.c_tot + market_after.insurance,
+        market_after.vault
+    );
+    assert_eq!(market_after.vault, market_before.vault);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+}
+
+#[test]
+fn v16_program_tradecpi_partial_partition_matrix_preserves_cumulative_budget() {
+    for (total_units, max_partial_rounds) in [(8u128, 3usize), (16, 4), (32, 5)] {
+        for partial_rounds in 1..=max_partial_rounds {
+            run_flagged_partial_partition(total_units, partial_rounds);
+        }
+    }
+}
+
 #[test]
 fn v16_program_batch_tradecpi_flagged_partial_cannot_change_atomic_leg_ratio() {
     for mode in [FLAGGED_PARTIAL_MODE, ASYMMETRIC_BATCH_PARTIAL_MODE] {
