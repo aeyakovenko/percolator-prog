@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Expired backing is normalized before every consumer and cannot remain economically fresh.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capitalization`, `v16_program_post_snapshot_expiry_prerequisite_hits_live_stale_lock`, `v16_probe_post_expiry_trade_cannot_charge_backing_fee`, `v16_attack_lapsed_live_source_backing_expires_bounded_and_owner_can_reduce`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capitalization`, `v16_program_post_snapshot_expiry_rejects_stale_trade_then_owner_progresses`, `v16_probe_post_expiry_trade_cannot_charge_backing_fee`, `v16_attack_lapsed_live_source_backing_expires_bounded_and_owner_can_reduce`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -196,7 +196,7 @@ fn v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capi
 }
 
 #[test]
-fn v16_program_post_snapshot_expiry_prerequisite_hits_live_stale_lock() {
+fn v16_program_post_snapshot_expiry_rejects_stale_trade_then_owner_progresses() {
     const CAPITAL: u128 = 1_000;
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
     env.configure_auth_mark_for_asset_as_admin(0, 0, 100);
@@ -353,6 +353,63 @@ fn v16_program_post_snapshot_expiry_prerequisite_hits_live_stale_lock() {
     assert_eq!(env.svm.get_account(&attacker_loser).unwrap(), loser_before);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
     assert!(has_active_leg_for_asset(&env.portfolio_state(attacker), 1));
+
+    let exposure_before = active_leg_for_asset(&env.portfolio_state(attacker), 1)
+        .basis_pos_q
+        .unsigned_abs();
+    for (step, label) in [
+        "post-snapshot backing expiry",
+        "post-snapshot account recertification",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let market_before_crank = env.svm.get_account(&env.market).unwrap();
+        let account_before_crank = env.svm.get_account(&attacker).unwrap();
+        env.svm.expire_blockhash();
+        let crank_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: close_slot,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(attacker, false),
+                ],
+                &[],
+            )
+            .expect("the canonical permissionless path must advance after backing expiry");
+        assert_cu_within(label, crank_cu, CRANK_CU_LIMIT);
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before_crank
+                || env.svm.get_account(&attacker).unwrap() != account_before_crank,
+            "successful expiry continuation {step} must mutate toward the exit"
+        );
+        if step == 0 {
+            assert_eq!(
+                env.market_state().1.source_backing_buckets[3].status,
+                BackingBucketStatusV16::Expired,
+                "the first continuation must normalize the lapsed source bucket"
+            );
+        } else {
+            assert!(
+                health_cert(&env.portfolio_state(attacker)).valid,
+                "the second continuation must recertify the owner after normalization"
+            );
+        }
+    }
+    let exit_cu = env.rebalance_reduce_with_cu(&attacker_owner, attacker, 1, exposure_before);
+    assert_cu_within(
+        "post-expiry owner reduction after stale bilateral close",
+        exit_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(attacker), 1),
+        "the expired backing dependency must not strand the owner's position"
+    );
 }
 
 #[test]
