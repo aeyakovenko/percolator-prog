@@ -22,11 +22,15 @@
 //! A separate bounded graph exhausts every action word through depth two over
 //! thirteen wrapper actions, including authority resolution and resolved close. Its
 //! normalized node includes every portfolio's PnL, escrow, close ledger, payout receipt,
-//! and account status plus the market payout snapshot and ledger. It replays each edge
-//! from the same public genesis,
-//! applies the independent state oracles after every transition, records exact
-//! rollback as a self-edge, and distinguishes normalized economic states. This
-//! is finite reachability evidence, not equivalence over unbounded sequences.
+//! and account status plus the market payout snapshot, per-domain source credit,
+//! backing buckets, and insurance reservations. It replays each edge from the same
+//! public genesis, applies the independent state oracles after every transition,
+//! records exact rollback as a self-edge, and distinguishes normalized economic states.
+//! A second terminal subgraph starts from twelve independently replayed public prefixes
+//! that create a genuinely partial underfunded receipt. It crosses all expiry boundaries,
+//! two claimant orders, and both close/claim priorities; claim-priority paths must move
+//! real SPL value and every terminal edge remains subject to the same reference oracles.
+//! This is finite reachability evidence, not equivalence over unbounded sequences.
 
 use super::*;
 use crate::support::fuzz_model::run_bounded_reference_equivalence_graph;
@@ -62,6 +66,29 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
             .all(|changes| *changes != 0),
         "every action class must produce a real normalized state transition: {evidence:?}"
     );
+    assert_eq!(
+        evidence.underfunded_terminal_world_count, 12,
+        "must replay 3 expiry boundaries x 2 claimant orders x 2 route priorities"
+    );
+    assert!(
+        evidence.underfunded_terminal_transition_count
+            >= evidence.underfunded_terminal_world_count * 2
+            && evidence.underfunded_terminal_unique_node_count >= 12
+            && evidence.underfunded_terminal_unique_edge_count >= 12,
+        "underfunded terminal graph collapsed to vacuous state coverage: {evidence:?}"
+    );
+    assert_eq!(
+        evidence.partial_receipt_seed_count, 12,
+        "every terminal world must start from a genuine partial receipt"
+    );
+    assert_eq!(
+        evidence.value_moving_claim_world_count, 6,
+        "every claim-priority world must execute a value-moving payout top-up"
+    );
+    assert_eq!(
+        evidence.expiry_normalization_world_count, 8,
+        "exact- and post-expiry worlds must normalize backing on a public edge"
+    );
     assert_ne!(
         evidence.coverage.loaded_program_hash, [0; 32],
         "bounded evidence must bind the production SBF artifact"
@@ -75,7 +102,9 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
             && evidence.coverage.resolve_policy_updates != 0
             && evidence.coverage.lifecycle_updates != 0
             && evidence.coverage.terminal_resolves != 0
-            && evidence.coverage.resolved_close_mutations != 0,
+            && evidence.coverage.resolved_close_mutations != 0
+            && evidence.coverage.resolved_claim_mutations != 0
+            && evidence.coverage.resolved_payout_atoms != 0,
         "bounded graph must exercise value, trade, policy, authority, lifecycle, and terminal edges: {evidence:?}"
     );
 }

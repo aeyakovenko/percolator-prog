@@ -3604,7 +3604,14 @@ impl ScenarioRunner {
             .resolved_payout_atoms
             .checked_add(payout)
             .ok_or("terminal payout coverage overflow")?;
-        self.assert_receipt_transition(actor, route, receipt_before, receipt_after, &group_after)?;
+        self.assert_receipt_transition(
+            actor,
+            route,
+            receipt_before,
+            receipt_after,
+            &group_after,
+            payout,
+        )?;
         self.reconcile_terminal_account_transition(
             actor,
             &account_before,
@@ -3637,6 +3644,7 @@ impl ScenarioRunner {
         before: percolator::ResolvedPayoutReceiptV16,
         after: percolator::ResolvedPayoutReceiptV16,
         group_after: &MarketGroupV16,
+        route_payout: u128,
     ) -> Result<(), String> {
         if after.present {
             let exact_num = after
@@ -3671,10 +3679,12 @@ impl ScenarioRunner {
             .checked_sub(before.paid_effective)
             .ok_or("terminal receipt paid amount exceeds current entitlement")?;
             if !before.finalized
-                && (ledger.terminal_claim_bound_unreceipted_num != 0 || claimable != 0)
+                && (ledger.terminal_claim_bound_unreceipted_num != 0 || route_payout != claimable)
             {
                 return Err(format!(
-                    "actor {actor} {route:?} cleared a still-claimable receipt: {before:?}; ledger={ledger:?}"
+                    "actor {actor} {route:?} cleared a receipt without paying its remaining \
+                     entitlement: receipt={before:?}, claimable={claimable}, \
+                     route_payout={route_payout}, ledger={ledger:?}"
                 ));
             }
         }
@@ -7283,6 +7293,26 @@ struct BoundedPayoutLedgerNode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundedSourceCreditNode {
+    amounts: [u128; 11],
+    credit_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundedBackingBucketNode {
+    market_id: u64,
+    amounts: [u128; 5],
+    expiry_slot: u64,
+    status: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundedInsuranceReservationNode {
+    amounts: [u128; 4],
+    source_credit_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedReferenceNode {
     positions: [[i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
     protocol_positions: [i128; ASSET_COUNT],
@@ -7310,6 +7340,9 @@ struct BoundedReferenceNode {
     insurance: u128,
     source_claim_bound_total_num: u128,
     source_fresh_backing_total_num: u128,
+    source_credit: Vec<BoundedSourceCreditNode>,
+    source_backing_buckets: Vec<BoundedBackingBucketNode>,
+    insurance_credit_reservations: Vec<BoundedInsuranceReservationNode>,
     resolved_slot: u64,
     payout_snapshot: u128,
     payout_snapshot_pnl_pos_tot: u128,
@@ -7328,6 +7361,13 @@ pub struct BoundedReferenceGraphEvidence {
     pub unique_edge_count: usize,
     pub action_attempts: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
     pub action_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+    pub underfunded_terminal_world_count: usize,
+    pub underfunded_terminal_transition_count: usize,
+    pub underfunded_terminal_unique_node_count: usize,
+    pub underfunded_terminal_unique_edge_count: usize,
+    pub partial_receipt_seed_count: usize,
+    pub value_moving_claim_world_count: usize,
+    pub expiry_normalization_world_count: usize,
     pub coverage: Coverage,
 }
 
@@ -7435,6 +7475,55 @@ impl ScenarioRunner {
                         .checked_add(source.fresh_reserved_backing_num)
                         .ok_or("bounded reference backing total overflow")
                 })?;
+        let source_credit = group
+            .source_credit
+            .iter()
+            .map(|source| BoundedSourceCreditNode {
+                amounts: [
+                    source.positive_claim_bound_num,
+                    source.exact_positive_claim_num,
+                    source.fresh_reserved_backing_num,
+                    source.spent_backing_num,
+                    source.provider_receivable_num,
+                    source.valid_liened_backing_num,
+                    source.impaired_liened_backing_num,
+                    source.insurance_credit_reserved_num,
+                    source.valid_liened_insurance_num,
+                    source.impaired_liened_insurance_num,
+                    source.credit_rate_num,
+                ],
+                credit_epoch: source.credit_epoch,
+            })
+            .collect();
+        let source_backing_buckets = group
+            .source_backing_buckets
+            .iter()
+            .map(|bucket| BoundedBackingBucketNode {
+                market_id: bucket.market_id,
+                amounts: [
+                    bucket.fresh_unliened_backing_num,
+                    bucket.valid_liened_backing_num,
+                    bucket.consumed_liened_backing_num,
+                    bucket.impaired_liened_backing_num,
+                    bucket.utilization_fee_earnings,
+                ],
+                expiry_slot: bucket.expiry_slot,
+                status: bucket.status as u8,
+            })
+            .collect();
+        let insurance_credit_reservations = group
+            .insurance_credit_reservations
+            .iter()
+            .map(|reservation| BoundedInsuranceReservationNode {
+                amounts: [
+                    reservation.insurance_credit_reserved_num,
+                    reservation.valid_liened_insurance_num,
+                    reservation.impaired_liened_insurance_num,
+                    reservation.consumed_insurance_num,
+                ],
+                source_credit_epoch: reservation.source_credit_epoch,
+            })
+            .collect();
 
         Ok(BoundedReferenceNode {
             positions: self.positions,
@@ -7463,6 +7552,9 @@ impl ScenarioRunner {
             insurance: group.insurance,
             source_claim_bound_total_num: group.source_claim_bound_total_num,
             source_fresh_backing_total_num,
+            source_credit,
+            source_backing_buckets,
+            insurance_credit_reservations,
             resolved_slot: group.resolved_slot,
             payout_snapshot: group.payout_snapshot,
             payout_snapshot_pnl_pos_tot: group.payout_snapshot_pnl_pos_tot,
@@ -7563,6 +7655,611 @@ fn bounded_reference_actions() -> [Action; BOUNDED_REFERENCE_ACTION_COUNT] {
     ]
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundedExpiryLanding {
+    Before,
+    At,
+    After,
+}
+
+impl BoundedExpiryLanding {
+    const ALL: [Self; 3] = [Self::Before, Self::At, Self::After];
+
+    fn slot(self, expiry_slot: u64) -> u64 {
+        match self {
+            Self::Before => expiry_slot - 1,
+            Self::At => expiry_slot,
+            Self::After => expiry_slot + 1,
+        }
+    }
+
+    fn seed_tag(self) -> u8 {
+        match self {
+            Self::Before => 1,
+            Self::At => 2,
+            Self::After => 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BoundedTerminalEconomicOutcome {
+    payouts: [u128; PRIMARY_ACTOR_COUNT],
+    source_amounts: [u128; 11],
+    bucket_amounts: [u128; 5],
+    bucket_status: u8,
+    final_engine_vault: u128,
+    final_spl_vault: u128,
+}
+
+type BoundedTerminalEdge = (BoundedReferenceNode, u8, BoundedReferenceNode);
+
+struct UnderfundedResolvedSeed {
+    runner: ScenarioRunner,
+    engine_vault_at_resolution: u128,
+    spl_vault_at_resolution: u128,
+    destinations_at_resolution: [u128; PRIMARY_ACTOR_COUNT],
+}
+
+struct UnderfundedTerminalWorld {
+    outcome: BoundedTerminalEconomicOutcome,
+    transition_count: usize,
+    partial_receipt_seeded: bool,
+    value_moving_claim: bool,
+    expiry_normalized_on_edge: bool,
+}
+
+struct UnderfundedTerminalGraphEvidence {
+    world_count: usize,
+    transition_count: usize,
+    unique_node_count: usize,
+    unique_edge_count: usize,
+    partial_receipt_seed_count: usize,
+    value_moving_claim_world_count: usize,
+    expiry_normalization_world_count: usize,
+    coverage: Coverage,
+}
+
+fn bounded_reference_top_up_backing(
+    runner: &mut ScenarioRunner,
+    domain: u16,
+    amount: u128,
+    expiry_slot: u64,
+    include_ledger: bool,
+) -> Result<(), String> {
+    let before = runner.snapshot();
+    let source_before = u128::from(runner.env.token_amount(runner.env.provider_source_token));
+    let vault_before = u128::from(runner.env.token_amount(runner.env.vault));
+    let result = if include_ledger {
+        runner
+            .env
+            .top_up_backing_bucket(domain, amount, expiry_slot)
+    } else {
+        runner
+            .env
+            .top_up_backing_bucket_without_ledger(domain, amount, expiry_slot)
+    };
+    let success = result.map_err(|error| {
+        format!("INV-086 public backing top-up domain {domain}, ledger={include_ledger}: {error}")
+    })?;
+    runner.coverage.backing_topups += 1;
+    runner.coverage.observe_success(None, &success);
+    runner.assert_portfolio_frame(&before, &[])?;
+    let source_after = u128::from(runner.env.token_amount(runner.env.provider_source_token));
+    let vault_after = u128::from(runner.env.token_amount(runner.env.vault));
+    if source_after.checked_add(amount) != Some(source_before)
+        || vault_before.checked_add(amount) != Some(vault_after)
+    {
+        return Err(format!(
+            "INV-086 backing top-up domain {domain} did not preserve exact source/vault deltas"
+        ));
+    }
+    runner.assert_token_frame(
+        &before,
+        &[runner.env.provider_source_token, runner.env.vault],
+    )?;
+    runner.assert_global_invariants()
+}
+
+fn bounded_reference_push_mark(
+    runner: &mut ScenarioRunner,
+    asset: u16,
+    slot: u64,
+    mark: u64,
+) -> Result<(), String> {
+    runner.env.warp_to_slot(slot);
+    let before = runner.snapshot();
+    let success = runner
+        .env
+        .push_auth_mark(asset, slot, mark)
+        .map_err(|error| format!("INV-086 publish asset {asset} mark {mark}: {error}"))?;
+    runner.coverage.mark_updates += 1;
+    runner.coverage.observe_success(None, &success);
+    runner.assert_portfolio_frame(&before, &[])?;
+    runner.assert_no_token_side_effects(&before)?;
+    runner.assert_global_invariants()
+}
+
+fn drain_bounded_terminal_subset(
+    runner: &mut ScenarioRunner,
+    actors: &[usize],
+    label: &str,
+) -> Result<u128, String> {
+    const SWEEP_LIMIT: usize = 16;
+    let mut payout = 0u128;
+    for sweep in 0..SWEEP_LIMIT {
+        if actors
+            .iter()
+            .copied()
+            .map(|actor| runner.portfolio_is_economically_terminal(actor))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .all(|terminal| terminal)
+        {
+            return Ok(payout);
+        }
+        let mut mutated = false;
+        for actor in actors.iter().copied() {
+            if runner.portfolio_is_economically_terminal(actor)? {
+                continue;
+            }
+            for route in [TerminalRoute::Close, TerminalRoute::Claim] {
+                let result = runner.execute_terminal_route(actor, route)?;
+                payout = payout
+                    .checked_add(result.payout)
+                    .ok_or_else(|| format!("{label} payout overflow"))?;
+                mutated |= result.mutated;
+                runner.assert_global_invariants()?;
+                if runner.portfolio_is_economically_terminal(actor)? {
+                    break;
+                }
+            }
+        }
+        if !mutated {
+            return Err(format!(
+                "{label} reached a nonterminal fixed point at sweep {sweep}"
+            ));
+        }
+    }
+    Err(format!(
+        "{label} did not converge in {SWEEP_LIMIT} bounded sweeps"
+    ))
+}
+
+fn build_underfunded_resolved_reference_seed(
+    landing: BoundedExpiryLanding,
+    reverse_tail: bool,
+    claim_first: bool,
+) -> Result<UnderfundedResolvedSeed, String> {
+    const JUNIOR_WINNER: usize = 0;
+    const JUNIOR_LOSER: usize = 1;
+    const BACKED_WINNER: usize = 2;
+    const BACKED_LOSER: usize = 3;
+    const PROVIDER: usize = 4;
+    const BACKED_ASSET: usize = 1;
+    const JUNIOR_DOMAIN: u16 = 1;
+    const BACKED_DOMAIN: u16 = 3;
+    const INITIAL_PRICE: u64 = 100;
+    const WINNING_MARK: u64 = 150;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const SNAPSHOT_SLOT: u64 = 12;
+    const EXPIRY_SLOT: u64 = 13;
+
+    let mut seed = [0x8a; 32];
+    seed[0] ^= landing.seed_tag();
+    seed[1] ^= u8::from(reverse_tail);
+    seed[2] ^= u8::from(claim_first);
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config(
+        seed,
+        MarketConfig {
+            initial_price: INITIAL_PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1_000, 250, 1_000, 250, 0],
+            ..MarketConfig::default()
+        },
+    )?;
+
+    bounded_reference_top_up_backing(&mut runner, JUNIOR_DOMAIN, 1, SNAPSHOT_SLOT, true)?;
+    bounded_reference_top_up_backing(&mut runner, BACKED_DOMAIN, 1_500, EXPIRY_SLOT, false)?;
+    runner.execute_trade(
+        TradeRoute::NoCpi,
+        JUNIOR_WINNER,
+        JUNIOR_LOSER,
+        vec![(0, SIZE_Q)],
+        0,
+        0,
+        true,
+    )?;
+    runner.assert_global_invariants()?;
+    runner.execute_trade(
+        TradeRoute::NoCpi,
+        BACKED_WINNER,
+        BACKED_LOSER,
+        vec![(BACKED_ASSET, SIZE_Q)],
+        0,
+        0,
+        true,
+    )?;
+    runner.assert_global_invariants()?;
+
+    for (offset, mark) in (105..=WINNING_MARK).step_by(5).enumerate() {
+        let slot = 2 + u64::try_from(offset).expect("bounded INV-086 mark sequence");
+        bounded_reference_push_mark(&mut runner, 0, slot, mark)?;
+        bounded_reference_push_mark(&mut runner, BACKED_ASSET as u16, slot, mark)?;
+        for actor in [JUNIOR_LOSER, JUNIOR_WINNER, BACKED_LOSER, BACKED_WINNER] {
+            runner
+                .execute_crank(actor, HintMode::Complete, false)
+                .map_err(CrankFailure::into_message)?;
+            runner.assert_global_invariants()?;
+        }
+    }
+
+    runner.execute_trade(
+        TradeRoute::NoCpi,
+        JUNIOR_WINNER,
+        JUNIOR_LOSER,
+        vec![(0, -SIZE_Q)],
+        0,
+        0,
+        true,
+    )?;
+    runner.assert_global_invariants()?;
+    runner.execute_trade(
+        TradeRoute::NoCpi,
+        BACKED_WINNER,
+        BACKED_LOSER,
+        vec![(BACKED_ASSET, -SIZE_Q)],
+        0,
+        0,
+        true,
+    )?;
+    runner.assert_global_invariants()?;
+
+    let before_resolution = runner.env.primary_market_state().1;
+    if before_resolution.source_credit[JUNIOR_DOMAIN as usize].positive_claim_bound_num == 0
+        || before_resolution.source_credit[BACKED_DOMAIN as usize].positive_claim_bound_num == 0
+        || before_resolution.source_backing_buckets[JUNIOR_DOMAIN as usize].status
+            != BackingBucketStatusV16::Fresh
+        || before_resolution.source_backing_buckets[BACKED_DOMAIN as usize].status
+            != BackingBucketStatusV16::Fresh
+    {
+        return Err("INV-086 public prefix did not create both backed claim domains".into());
+    }
+
+    runner.env.warp_to_slot(SNAPSHOT_SLOT);
+    runner.execute_resolve_market()?;
+    runner.assert_global_invariants()?;
+    let engine_vault_at_resolution = runner.env.primary_market_state().1.vault;
+    let spl_vault_at_resolution = u128::from(runner.env.token_amount(runner.env.vault));
+    let destinations_at_resolution = std::array::from_fn(|actor| {
+        u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        )
+    });
+
+    let premature_payout = drain_bounded_terminal_subset(
+        &mut runner,
+        &[JUNIOR_LOSER, BACKED_LOSER, PROVIDER],
+        "INV-086 pre-snapshot blockers",
+    )?;
+    if premature_payout != 0 || runner.env.primary_market_state().1.payout_snapshot_captured {
+        return Err(format!(
+            "INV-086 nonclaimant prefix unexpectedly paid {premature_payout} or captured snapshot"
+        ));
+    }
+
+    for step in 0..8 {
+        let receipt = runner
+            .env
+            .primary_portfolio(JUNIOR_WINNER)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("INV-086 partial receipt decode: {error:?}"))?;
+        if receipt.present {
+            break;
+        }
+        let result = runner.execute_terminal_route(JUNIOR_WINNER, TerminalRoute::Close)?;
+        if !result.landed || !result.mutated {
+            return Err(format!(
+                "INV-086 snapshot close did not progress at step {step}: {result:?}"
+            ));
+        }
+        runner.assert_global_invariants()?;
+    }
+    let receipt = runner
+        .env
+        .primary_portfolio(JUNIOR_WINNER)
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .map_err(|error| format!("INV-086 seeded receipt decode: {error:?}"))?;
+    if !runner.env.primary_market_state().1.payout_snapshot_captured
+        || !receipt.present
+        || receipt.finalized
+    {
+        return Err(format!(
+            "INV-086 public prefix did not leave a partial receipt: {receipt:?}"
+        ));
+    }
+
+    runner.env.warp_to_slot(landing.slot(EXPIRY_SLOT));
+    Ok(UnderfundedResolvedSeed {
+        runner,
+        engine_vault_at_resolution,
+        spl_vault_at_resolution,
+        destinations_at_resolution,
+    })
+}
+
+fn run_underfunded_terminal_world(
+    landing: BoundedExpiryLanding,
+    reverse_tail: bool,
+    claim_first: bool,
+    nodes: &mut BTreeSet<BoundedReferenceNode>,
+    edges: &mut BTreeSet<BoundedTerminalEdge>,
+) -> Result<(UnderfundedTerminalWorld, Coverage), String> {
+    const JUNIOR_WINNER: usize = 0;
+    const JUNIOR_LOSER: usize = 1;
+    const BACKED_WINNER: usize = 2;
+    const BACKED_LOSER: usize = 3;
+    const PROVIDER: usize = 4;
+    const BACKED_DOMAIN: usize = 3;
+    const SWEEP_LIMIT: usize = 32;
+
+    let UnderfundedResolvedSeed {
+        mut runner,
+        engine_vault_at_resolution,
+        spl_vault_at_resolution,
+        destinations_at_resolution,
+    } = build_underfunded_resolved_reference_seed(landing, reverse_tail, claim_first)?;
+    let seeded = runner.bounded_reference_node()?;
+    let partial_receipt_seeded = seeded.payout_receipts[JUNIOR_WINNER].flags == [true, false];
+    if !partial_receipt_seeded {
+        return Err("INV-086 terminal graph seed lacks a genuine partial receipt".into());
+    }
+    if seeded.source_backing_buckets[BACKED_DOMAIN].status != BackingBucketStatusV16::Fresh as u8 {
+        return Err("INV-086 terminal graph seed backing was not fresh".into());
+    }
+    nodes.insert(seeded);
+
+    let actor_order = if reverse_tail {
+        [
+            BACKED_LOSER,
+            JUNIOR_LOSER,
+            BACKED_WINNER,
+            PROVIDER,
+            JUNIOR_WINNER,
+        ]
+    } else {
+        [
+            BACKED_WINNER,
+            JUNIOR_LOSER,
+            BACKED_LOSER,
+            PROVIDER,
+            JUNIOR_WINNER,
+        ]
+    };
+    let route_order = if claim_first {
+        [TerminalRoute::Claim, TerminalRoute::Close]
+    } else {
+        [TerminalRoute::Close, TerminalRoute::Claim]
+    };
+    let mut transition_count = 0usize;
+    let mut claim_payout = 0u128;
+    let mut expiry_normalized_on_edge = false;
+
+    for sweep in 0..SWEEP_LIMIT {
+        if actor_order
+            .iter()
+            .copied()
+            .map(|actor| runner.portfolio_is_economically_terminal(actor))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .all(|terminal| terminal)
+        {
+            break;
+        }
+        let mut sweep_mutated = false;
+        for actor in actor_order.iter().copied() {
+            if runner.portfolio_is_economically_terminal(actor)? {
+                continue;
+            }
+            for route in route_order {
+                let before = runner.bounded_reference_node()?;
+                let result = runner.execute_terminal_route(actor, route)?;
+                runner.assert_global_invariants()?;
+                let after = runner.bounded_reference_node()?;
+                let route_index = match route {
+                    TerminalRoute::Close => 0u8,
+                    TerminalRoute::Claim => 1u8,
+                    TerminalRoute::Crank => 2u8,
+                };
+                let edge_label = u8::try_from(actor)
+                    .map_err(|_| "INV-086 terminal actor index exceeds u8")?
+                    .checked_mul(3)
+                    .and_then(|value| value.checked_add(route_index))
+                    .ok_or("INV-086 terminal edge label overflow")?;
+                expiry_normalized_on_edge |= before.source_backing_buckets[BACKED_DOMAIN].status
+                    == BackingBucketStatusV16::Fresh as u8
+                    && after.source_backing_buckets[BACKED_DOMAIN].status
+                        != BackingBucketStatusV16::Fresh as u8;
+                if matches!(route, TerminalRoute::Claim) {
+                    claim_payout = claim_payout
+                        .checked_add(result.payout)
+                        .ok_or("INV-086 claim payout overflow")?;
+                }
+                sweep_mutated |= result.mutated;
+                transition_count += 1;
+                nodes.insert(before.clone());
+                nodes.insert(after.clone());
+                edges.insert((before, edge_label, after));
+                if runner.portfolio_is_economically_terminal(actor)? {
+                    break;
+                }
+            }
+        }
+        if !sweep_mutated {
+            return Err(format!(
+                "INV-086 underfunded terminal graph fixed at nonterminal sweep {sweep}"
+            ));
+        }
+    }
+    if !(0..PRIMARY_ACTOR_COUNT)
+        .map(|actor| runner.portfolio_is_economically_terminal(actor))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .all(|terminal| terminal)
+    {
+        return Err(format!(
+            "INV-086 underfunded terminal graph did not converge in {SWEEP_LIMIT} sweeps"
+        ));
+    }
+
+    let final_node = runner.bounded_reference_node()?;
+    let mut payouts = [0u128; PRIMARY_ACTOR_COUNT];
+    for (actor, payout) in payouts.iter_mut().enumerate() {
+        let destination_after = u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        );
+        *payout = destination_after
+            .checked_sub(destinations_at_resolution[actor])
+            .ok_or_else(|| format!("INV-086 actor {actor} terminal destination decreased"))?;
+    }
+    let payout_total = payouts
+        .iter()
+        .try_fold(0u128, |total, payout| total.checked_add(*payout));
+    let Some(payout_total) = payout_total else {
+        return Err("INV-086 terminal payout total overflow".into());
+    };
+    if engine_vault_at_resolution.checked_sub(final_node.vault) != Some(payout_total)
+        || spl_vault_at_resolution
+            .checked_sub(u128::from(runner.env.token_amount(runner.env.vault)))
+            != Some(payout_total)
+    {
+        return Err(format!(
+            "INV-086 terminal graph custody mismatch: payouts={payout_total}, engine={engine_vault_at_resolution}->{}, SPL={spl_vault_at_resolution}->{}",
+            final_node.vault,
+            runner.env.token_amount(runner.env.vault)
+        ));
+    }
+
+    let source = final_node.source_credit[BACKED_DOMAIN].clone();
+    let bucket = final_node.source_backing_buckets[BACKED_DOMAIN].clone();
+    let outcome = BoundedTerminalEconomicOutcome {
+        payouts,
+        source_amounts: source.amounts,
+        bucket_amounts: bucket.amounts,
+        bucket_status: bucket.status,
+        final_engine_vault: final_node.vault,
+        final_spl_vault: u128::from(runner.env.token_amount(runner.env.vault)),
+    };
+    let coverage = runner.coverage;
+    Ok((
+        UnderfundedTerminalWorld {
+            outcome,
+            transition_count,
+            partial_receipt_seeded,
+            value_moving_claim: claim_payout != 0,
+            expiry_normalized_on_edge,
+        },
+        coverage,
+    ))
+}
+
+fn run_underfunded_terminal_reference_subgraph() -> Result<UnderfundedTerminalGraphEvidence, String>
+{
+    let mut nodes = BTreeSet::new();
+    let mut edges = BTreeSet::new();
+    let mut coverage = Coverage::default();
+    let mut world_count = 0usize;
+    let mut transition_count = 0usize;
+    let mut partial_receipt_seed_count = 0usize;
+    let mut value_moving_claim_world_count = 0usize;
+    let mut expiry_normalization_world_count = 0usize;
+    let mut canonical = Vec::new();
+
+    for landing in BoundedExpiryLanding::ALL {
+        let mut outcomes = Vec::new();
+        for reverse_tail in [false, true] {
+            for claim_first in [false, true] {
+                let (world, world_coverage) = run_underfunded_terminal_world(
+                    landing,
+                    reverse_tail,
+                    claim_first,
+                    &mut nodes,
+                    &mut edges,
+                )?;
+                if claim_first && !world.value_moving_claim {
+                    return Err(format!(
+                        "INV-086 {landing:?}/reverse={reverse_tail} claim-priority path moved no value"
+                    ));
+                }
+                if matches!(
+                    landing,
+                    BoundedExpiryLanding::At | BoundedExpiryLanding::After
+                ) {
+                    if !world.expiry_normalized_on_edge
+                        || world.outcome.bucket_status == BackingBucketStatusV16::Fresh as u8
+                        || world.outcome.bucket_amounts[..4]
+                            .iter()
+                            .any(|amount| *amount != 0)
+                        || world.outcome.source_amounts[2] != 0
+                        || world.outcome.source_amounts[5] != 0
+                    {
+                        return Err(format!(
+                            "INV-086 {landing:?}/reverse={reverse_tail}/claim_first={claim_first} did not normalize expired backing: {:?}",
+                            world.outcome
+                        ));
+                    }
+                    expiry_normalization_world_count += 1;
+                } else if world.outcome.bucket_amounts[2] == 0 {
+                    return Err(format!(
+                        "INV-086 fresh backing path consumed no backing: {:?}",
+                        world.outcome
+                    ));
+                }
+                world_count += 1;
+                transition_count += world.transition_count;
+                partial_receipt_seed_count += usize::from(world.partial_receipt_seeded);
+                value_moving_claim_world_count +=
+                    usize::from(claim_first && world.value_moving_claim);
+                outcomes.push(world.outcome);
+                coverage.merge(world_coverage);
+            }
+        }
+        if !outcomes.windows(2).all(|pair| pair[0] == pair[1]) {
+            return Err(format!(
+                "INV-086 {landing:?} terminal economics depend on route/order: {outcomes:?}"
+            ));
+        }
+        canonical.push(outcomes.remove(0));
+    }
+    if canonical[1] != canonical[2] {
+        return Err(format!(
+            "INV-086 exact/late expiry terminal economics diverged: {:?} != {:?}",
+            canonical[1], canonical[2]
+        ));
+    }
+
+    Ok(UnderfundedTerminalGraphEvidence {
+        world_count,
+        transition_count,
+        unique_node_count: nodes.len(),
+        unique_edge_count: edges.len(),
+        partial_receipt_seed_count,
+        value_moving_claim_world_count,
+        expiry_normalization_world_count,
+        coverage,
+    })
+}
+
 pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraphEvidence, String> {
     type Edge = (BoundedReferenceNode, u8, BoundedReferenceNode);
 
@@ -7645,6 +8342,9 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
         }
     }
 
+    let underfunded = run_underfunded_terminal_reference_subgraph()?;
+    coverage.merge(underfunded.coverage);
+
     Ok(BoundedReferenceGraphEvidence {
         word_count,
         transition_count,
@@ -7652,6 +8352,13 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
         unique_edge_count: edges.len(),
         action_attempts,
         action_state_changes,
+        underfunded_terminal_world_count: underfunded.world_count,
+        underfunded_terminal_transition_count: underfunded.transition_count,
+        underfunded_terminal_unique_node_count: underfunded.unique_node_count,
+        underfunded_terminal_unique_edge_count: underfunded.unique_edge_count,
+        partial_receipt_seed_count: underfunded.partial_receipt_seed_count,
+        value_moving_claim_world_count: underfunded.value_moving_claim_world_count,
+        expiry_normalization_world_count: underfunded.expiry_normalization_world_count,
         coverage,
     })
 }
