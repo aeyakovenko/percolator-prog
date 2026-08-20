@@ -24,14 +24,598 @@
 //! `v16_program_matcher_route_matrix_rejects_one_sided_mark_subsidy` crosses the same modes with
 //! single and batch CPI matcher exits and requires every mark-moving fee to be bilaterally funded;
 //! it measures independent victim loss, fee-counterparty loss, insurance credit, and external
-//! coalition profit. Direct impact tests remain below. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! coalition profit. `v16_program_accepted_mark_boundary_matrix_is_paid_atomic_and_exit_live`
+//! composes all four trade routes and all four deployed mark regimes with same-slot/maximum-dt
+//! landings. Valid raw/quoted prices `1` and `MAX_ORACLE_PRICE` execute as two repeated partial
+//! reductions, every same-slot follow-up is movement-free, and any movement is independently
+//! bounded by both the accepted-price envelope and collected fee. Raw zero and `u64::MAX` no-CPI
+//! inputs, plus equivalent zero/above-maximum CPI quotes, reject with exact economic rollback
+//! before a control reduction proves the owner exit remains live. Direct impact tests remain below.
+//! These tests exercise the deployed public wrapper with real SBF/LiteSVM account construction and
+//! assert economic state, token, rollback, liveness, or compute outcomes appropriate to the
+//! invariant.
 //!
 //! Guarantee boundary: these matrices are fixed-pin certification over generated seeds and public
 //! LiteSVM routes; they are not exhaustive proofs over all full-width state combinations.
 
 use super::*;
+use crate::support::v16_svm::{MarketConfig, TxSuccess, V16Svm};
+use percolator::POS_SCALE;
+use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcceptedMarkMode {
+    AuthMark,
+    EwmaMark,
+    HybridFresh,
+    HybridAfterHours,
+}
+
+impl AcceptedMarkMode {
+    const ALL: [Self; 4] = [
+        Self::AuthMark,
+        Self::EwmaMark,
+        Self::HybridFresh,
+        Self::HybridAfterHours,
+    ];
+
+    fn updates_from_trade(self) -> bool {
+        matches!(self, Self::EwmaMark | Self::HybridAfterHours)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcceptedMarkDt {
+    SameSlot,
+    Maximum,
+}
+
+impl AcceptedMarkDt {
+    const ALL: [Self; 2] = [Self::SameSlot, Self::Maximum];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcceptedMarkBoundary {
+    Zero,
+    One,
+    Maximum,
+    U64MaximumOrCpiAboveMaximum,
+}
+
+impl AcceptedMarkBoundary {
+    const VALID: [Self; 2] = [Self::One, Self::Maximum];
+    const INVALID: [Self; 2] = [Self::Zero, Self::U64MaximumOrCpiAboveMaximum];
+
+    fn anchor(self) -> u64 {
+        match self {
+            Self::Zero | Self::One => 10_000,
+            Self::Maximum => percolator::MAX_ORACLE_PRICE / 2,
+            Self::U64MaximumOrCpiAboveMaximum => percolator::MAX_ORACLE_PRICE,
+        }
+    }
+
+    fn signed_size(self) -> i128 {
+        match self {
+            Self::Zero | Self::One => -(POS_SCALE as i128),
+            Self::Maximum | Self::U64MaximumOrCpiAboveMaximum => 2,
+        }
+    }
+
+    fn no_cpi_price(self) -> u64 {
+        match self {
+            Self::Zero => 0,
+            Self::One => 1,
+            Self::Maximum => percolator::MAX_ORACLE_PRICE,
+            Self::U64MaximumOrCpiAboveMaximum => u64::MAX,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AcceptedMarkSnapshot {
+    market: Vec<u8>,
+    foreign_market: Vec<u8>,
+    portfolios: Vec<Vec<u8>>,
+    foreign_portfolio: Vec<u8>,
+    tokens: Vec<(solana_sdk::pubkey::Pubkey, Vec<u8>)>,
+    lamports: Vec<(solana_sdk::pubkey::Pubkey, u64)>,
+}
+
+fn accepted_mark_snapshot(env: &V16Svm) -> AcceptedMarkSnapshot {
+    AcceptedMarkSnapshot {
+        market: env.market_data(false),
+        foreign_market: env.market_data(true),
+        portfolios: env.all_primary_portfolio_data(),
+        foreign_portfolio: env.foreign_portfolio_data(),
+        tokens: env.all_token_account_data(),
+        lamports: env.all_economic_account_lamports(),
+    }
+}
+
+fn accepted_mark_reference_clamp(anchor: u64, target: u64, cap_bps: u64, dt: u64) -> u64 {
+    if anchor == 0 || target == 0 {
+        return target;
+    }
+    if cap_bps == 0 || dt == 0 {
+        return anchor;
+    }
+    let max_delta = (anchor as u128)
+        .checked_mul(cap_bps as u128)
+        .and_then(|value| value.checked_mul(dt as u128))
+        .expect("accepted-mark reference delta")
+        / 10_000;
+    let max_delta = u64::try_from(max_delta.min(u64::MAX as u128)).unwrap();
+    if target > anchor {
+        target.min(anchor.saturating_add(max_delta))
+    } else {
+        target.max(anchor.saturating_sub(max_delta))
+    }
+}
+
+fn accepted_mark_reference_move_bps(old: u64, new: u64) -> u64 {
+    if old == new {
+        return 0;
+    }
+    let numerator = (old.abs_diff(new) as u128)
+        .checked_mul(10_000)
+        .and_then(|value| value.checked_add(old as u128 - 1))
+        .expect("accepted-mark reference movement");
+    u64::try_from(numerator / old as u128).expect("accepted-mark movement fits u64")
+}
+
+fn accepted_mark_pair_value_and_insurance(env: &V16Svm) -> i128 {
+    let group = env.primary_market_state().1;
+    let account_value = [0usize, 1]
+        .into_iter()
+        .map(|actor| {
+            let account = env.primary_portfolio(actor);
+            i128::try_from(account.capital.get()).expect("test capital fits i128")
+                + account.pnl.get()
+        })
+        .sum::<i128>();
+    account_value + i128::try_from(group.insurance).expect("test insurance fits i128")
+}
+
+fn accepted_mark_route_is_cpi(route: DiscoveryTradeRoute) -> bool {
+    matches!(
+        route,
+        DiscoveryTradeRoute::Cpi | DiscoveryTradeRoute::BatchCpi
+    )
+}
+
+fn configure_accepted_mark_quote(
+    env: &mut V16Svm,
+    route: DiscoveryTradeRoute,
+    boundary: AcceptedMarkBoundary,
+) -> Result<u64, String> {
+    if !accepted_mark_route_is_cpi(route) {
+        return Ok(boundary.no_cpi_price());
+    }
+    let (bid_spread_bps, ask_spread_bps, quoted_price) = match boundary {
+        AcceptedMarkBoundary::Zero => (10_000, 0, 0),
+        AcceptedMarkBoundary::One => (9_999, 0, 1),
+        AcceptedMarkBoundary::Maximum => (0, 10_000, percolator::MAX_ORACLE_PRICE),
+        AcceptedMarkBoundary::U64MaximumOrCpiAboveMaximum => (
+            0,
+            10_000,
+            percolator::MAX_ORACLE_PRICE
+                .checked_mul(2)
+                .expect("CPI above-maximum quote"),
+        ),
+    };
+    env.set_matcher_spreads(1, bid_spread_bps, ask_spread_bps)
+        .map_err(|error| format!("configure {route:?} boundary matcher: {error}"))?;
+    Ok(quoted_price)
+}
+
+fn submit_accepted_mark_trade(
+    env: &mut V16Svm,
+    route: DiscoveryTradeRoute,
+    size_q: i128,
+    no_cpi_price: u64,
+) -> Result<TxSuccess, String> {
+    let market_id = env.primary_market_state().1.assets[0].market_id;
+    match route {
+        DiscoveryTradeRoute::NoCpi => env.trade_no_cpi(0, 1, 0, size_q, no_cpi_price, 0),
+        DiscoveryTradeRoute::BatchNoCpi => env.batch_trade_no_cpi(
+            0,
+            1,
+            vec![BatchTradeLeg {
+                asset_index: 0,
+                market_id,
+                size_q,
+                exec_price: no_cpi_price,
+                fee_bps: 0,
+            }],
+        ),
+        DiscoveryTradeRoute::Cpi => env.trade_cpi(0, 1, 0, size_q, 0, 0),
+        DiscoveryTradeRoute::BatchCpi => env.batch_trade_cpi(
+            0,
+            1,
+            vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                market_id,
+                size_q,
+                fee_bps: 0,
+                limit_price: 0,
+            }],
+        ),
+    }
+}
+
+fn configure_accepted_mark_mode(
+    env: &mut V16Svm,
+    mode: AcceptedMarkMode,
+    anchor: u64,
+) -> Result<Option<solana_sdk::pubkey::Pubkey>, String> {
+    let oracle = match mode {
+        AcceptedMarkMode::AuthMark => None,
+        AcceptedMarkMode::EwmaMark => {
+            env.configure_ewma_mark(0, 1, anchor, 1, 0)
+                .map_err(|error| format!("configure EWMA boundary world: {error}"))?;
+            None
+        }
+        AcceptedMarkMode::HybridFresh | AcceptedMarkMode::HybridAfterHours => {
+            env.set_clock(1, 100);
+            let mut feed = [0x45; 32];
+            feed[0] = match mode {
+                AcceptedMarkMode::HybridFresh => 0xf1,
+                AcceptedMarkMode::HybridAfterHours => 0xa1,
+                _ => unreachable!(),
+            };
+            let oracle = env.set_pyth_price(&feed, anchor as i64, -6, 0, 100);
+            let soft_stale_slots = match mode {
+                AcceptedMarkMode::HybridFresh => 100,
+                AcceptedMarkMode::HybridAfterHours => 1,
+                _ => unreachable!(),
+            };
+            env.configure_hybrid_oracle(
+                0,
+                1,
+                100,
+                0,
+                [feed, [0; 32], [0; 32]],
+                &[oracle],
+                soft_stale_slots,
+                0,
+            )
+            .map_err(|error| format!("configure {mode:?} boundary world: {error}"))?;
+            Some(oracle)
+        }
+    };
+
+    Ok(oracle)
+}
+
+fn prepare_accepted_mark_landing(
+    env: &mut V16Svm,
+    mode: AcceptedMarkMode,
+    dt: AcceptedMarkDt,
+    oracle: Option<solana_sdk::pubkey::Pubkey>,
+) -> Result<u64, String> {
+    const MAX_DT: u64 = 4;
+    let landing_slot = match (mode, dt) {
+        (AcceptedMarkMode::HybridAfterHours, AcceptedMarkDt::SameSlot) => {
+            // Mature the fallback, then advance the live asset through the canonical public crank.
+            // The tested boundary trade lands in that same asset slot while stale-hybrid mode is active.
+            env.set_clock(3, 1_000);
+            let oracle = oracle.ok_or_else(|| "stale-hybrid oracle missing".to_string())?;
+            env.crank_with_oracles(
+                0,
+                3,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                }],
+                &[oracle],
+            )
+            .map_err(|error| format!("prime stale-hybrid same-slot crank: {error}"))?;
+            let slot_last = env.primary_market_state().1.assets[0].slot_last;
+            if slot_last != 3 {
+                return Err(format!(
+                    "stale-hybrid primer did not advance the asset to slot 3: {slot_last}"
+                ));
+            }
+            3
+        }
+        (_, AcceptedMarkDt::SameSlot) => 1,
+        (_, AcceptedMarkDt::Maximum) => 1 + MAX_DT,
+    };
+    match mode {
+        AcceptedMarkMode::HybridFresh => env.set_clock(landing_slot, 100 + landing_slot as i64),
+        AcceptedMarkMode::HybridAfterHours => env.set_clock(landing_slot, 1_000),
+        AcceptedMarkMode::AuthMark | AcceptedMarkMode::EwmaMark => env.warp_to_slot(landing_slot),
+    }
+    Ok(landing_slot)
+}
+
+fn run_valid_accepted_mark_boundary(
+    mode: AcceptedMarkMode,
+    route: DiscoveryTradeRoute,
+    dt: AcceptedMarkDt,
+    boundary: AcceptedMarkBoundary,
+) -> Result<u64, String> {
+    const CAP_BPS: u64 = 50;
+    const MAX_DT: u64 = 4;
+    let anchor = boundary.anchor();
+    let mut seed = [0x45; 32];
+    seed[0] = mode as u8;
+    seed[1] = route as u8;
+    seed[2] = dt as u8;
+    seed[3] = boundary as u8;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: anchor,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: CAP_BPS,
+            max_accrual_dt_slots: MAX_DT,
+            min_funding_lifetime_slots: MAX_DT,
+            ..MarketConfig::default()
+        },
+    );
+    let oracle = configure_accepted_mark_mode(&mut env, mode, anchor)?;
+    let total_size = boundary.signed_size();
+    let half_size = total_size / 2;
+    if half_size == 0 || half_size.checked_mul(2) != Some(total_size) {
+        return Err(format!("{boundary:?}: split-fill size is not exact"));
+    }
+    if accepted_mark_route_is_cpi(route) {
+        env.set_matcher_spreads(1, 0, 0)
+            .map_err(|error| format!("configure {route:?} setup matcher: {error}"))?;
+    }
+    let setup = submit_accepted_mark_trade(&mut env, route, -total_size, anchor)
+        .map_err(|error| format!("{mode:?}/{route:?}/{dt:?}/{boundary:?} setup open: {error}"))?;
+    let setup_group = env.primary_market_state().1;
+    if setup_group.assets[0].oi_eff_long_q != total_size.unsigned_abs()
+        || setup_group.assets[0].oi_eff_short_q != total_size.unsigned_abs()
+    {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: setup did not create exact matched OI"
+        ));
+    }
+    let landing_slot = prepare_accepted_mark_landing(&mut env, mode, dt, oracle)?;
+    let quoted_price = configure_accepted_mark_quote(&mut env, route, boundary)?;
+
+    let before_profile = env.primary_profile(0);
+    let before_group = env.primary_market_state().1;
+    let before_pair_value = accepted_mark_pair_value_and_insurance(&env);
+    let before_supply = env.token_supply_observed();
+    let before_foreign = env.market_data(true);
+    let asset_dt = landing_slot
+        .checked_sub(before_group.assets[0].slot_last)
+        .ok_or_else(|| "accepted-mark landing preceded asset slot".to_string())?;
+    let expected_dt = match dt {
+        AcceptedMarkDt::SameSlot => 0,
+        AcceptedMarkDt::Maximum => MAX_DT,
+    };
+    if asset_dt != expected_dt {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: expected asset dt {expected_dt}, got {asset_dt}"
+        ));
+    }
+
+    let first = submit_accepted_mark_trade(&mut env, route, half_size, boundary.no_cpi_price())
+        .map_err(|error| format!("{mode:?}/{route:?}/{dt:?}/{boundary:?} first fill: {error}"))?;
+    let first_profile = env.primary_profile(0);
+    let first_group = env.primary_market_state().1;
+    let expected_accepted = if mode.updates_from_trade() {
+        accepted_mark_reference_clamp(anchor, quoted_price, CAP_BPS, asset_dt)
+    } else {
+        before_group.assets[0].effective_price
+    };
+    let low = before_profile.mark_ewma_e6.min(expected_accepted);
+    let high = before_profile.mark_ewma_e6.max(expected_accepted);
+    if first_profile.mark_ewma_e6 < low || first_profile.mark_ewma_e6 > high {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: mark {} escaped accepted interval [{low}, {high}]",
+            first_profile.mark_ewma_e6
+        ));
+    }
+    if (!mode.updates_from_trade() || asset_dt == 0)
+        && first_profile.mark_ewma_e6 != before_profile.mark_ewma_e6
+    {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: non-updating/same-slot trade moved mark"
+        ));
+    }
+    if mode.updates_from_trade()
+        && asset_dt == MAX_DT
+        && first_profile.mark_ewma_e6 == before_profile.mark_ewma_e6
+    {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: maximum-dt paid boundary was vacuous"
+        ));
+    }
+    let move_bps =
+        accepted_mark_reference_move_bps(before_profile.mark_ewma_e6, first_profile.mark_ewma_e6);
+    let insurance_gain = first_group
+        .insurance
+        .checked_sub(before_group.insurance)
+        .ok_or_else(|| "accepted-mark fill reduced insurance".to_string())?;
+    let trade_notional = half_size
+        .unsigned_abs()
+        .checked_mul(expected_accepted as u128)
+        .and_then(|value| value.checked_add(POS_SCALE - 1))
+        .ok_or_else(|| "accepted-mark trade notional overflow".to_string())?
+        / POS_SCALE;
+    let externality_price = before_group.assets[0]
+        .effective_price
+        .max(before_profile.mark_ewma_e6);
+    let max_side_notional = before_group.assets[0]
+        .oi_eff_long_q
+        .max(before_group.assets[0].oi_eff_short_q)
+        .checked_mul(externality_price as u128)
+        .and_then(|value| value.checked_add(POS_SCALE - 1))
+        .ok_or_else(|| "accepted-mark passive notional overflow".to_string())?
+        / POS_SCALE;
+    let externality_notional = max_side_notional
+        .max(trade_notional)
+        .checked_mul(2)
+        .ok_or_else(|| "accepted-mark externality overflow".to_string())?;
+    let required_movement_fee = externality_notional
+        .checked_mul(move_bps as u128)
+        .and_then(|value| value.checked_add(9_999))
+        .ok_or_else(|| "accepted-mark required fee overflow".to_string())?
+        / 10_000;
+    if insurance_gain < required_movement_fee || (move_bps != 0 && insurance_gain == 0) {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: {move_bps} bps movement required {required_movement_fee}, collected {insurance_gain}"
+        ));
+    }
+    if mode.updates_from_trade() {
+        if first_group.assets[0].raw_oracle_target_price != first_profile.mark_ewma_e6 {
+            return Err(format!(
+                "{mode:?}/{route:?}/{dt:?}/{boundary:?}: wrapper/engine target staging diverged"
+            ));
+        }
+    } else if first_group.assets[0].raw_oracle_target_price
+        != before_group.assets[0].raw_oracle_target_price
+    {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: trade rewrote a non-trade-driven target"
+        ));
+    }
+
+    let second = submit_accepted_mark_trade(&mut env, route, half_size, boundary.no_cpi_price())
+        .map_err(|error| format!("{mode:?}/{route:?}/{dt:?}/{boundary:?} second fill: {error}"))?;
+    let second_profile = env.primary_profile(0);
+    if second_profile.mark_ewma_e6 != first_profile.mark_ewma_e6 {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: repeated same-slot partial fill compounded mark movement"
+        ));
+    }
+    let exited = env.primary_market_state().1;
+    if exited.assets[0].oi_eff_long_q != 0 || exited.assets[0].oi_eff_short_q != 0 {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: bounded exit left OI"
+        ));
+    }
+    if accepted_mark_pair_value_and_insurance(&env) != before_pair_value
+        || env.token_supply_observed() != before_supply
+        || env.market_data(true) != before_foreign
+    {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: partial-reduction sequence changed attributed pair value, token supply, or foreign state"
+        ));
+    }
+    let max_cu = first
+        .compute_units
+        .max(second.compute_units)
+        .max(setup.compute_units);
+    if max_cu >= crate::support::v16_svm::TX_CU_LIMIT {
+        return Err(format!(
+            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: boundary route consumed {max_cu} CU"
+        ));
+    }
+    Ok(max_cu)
+}
+
+fn run_invalid_accepted_mark_boundary(
+    route: DiscoveryTradeRoute,
+    dt: AcceptedMarkDt,
+    boundary: AcceptedMarkBoundary,
+) -> Result<u64, String> {
+    const MAX_DT: u64 = 4;
+    let mode = AcceptedMarkMode::EwmaMark;
+    let anchor = boundary.anchor();
+    let mut seed = [0xb5; 32];
+    seed[0] = route as u8;
+    seed[1] = dt as u8;
+    seed[2] = boundary as u8;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: anchor,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 50,
+            max_accrual_dt_slots: MAX_DT,
+            min_funding_lifetime_slots: MAX_DT,
+            ..MarketConfig::default()
+        },
+    );
+    let oracle = configure_accepted_mark_mode(&mut env, mode, anchor)?;
+    if accepted_mark_route_is_cpi(route) {
+        env.set_matcher_spreads(1, 0, 0)
+            .map_err(|error| format!("configure invalid {route:?} setup matcher: {error}"))?;
+    }
+    let setup = submit_accepted_mark_trade(&mut env, route, -boundary.signed_size(), anchor)
+        .map_err(|error| format!("{route:?}/{dt:?}/{boundary:?} setup open: {error}"))?;
+    prepare_accepted_mark_landing(&mut env, mode, dt, oracle)?;
+    let _quoted_price = configure_accepted_mark_quote(&mut env, route, boundary)?;
+    let before = accepted_mark_snapshot(&env);
+    let rejected = submit_accepted_mark_trade(
+        &mut env,
+        route,
+        boundary.signed_size(),
+        boundary.no_cpi_price(),
+    );
+    if rejected.is_ok() || accepted_mark_snapshot(&env) != before {
+        return Err(format!(
+            "{route:?}/{dt:?}/{boundary:?}: invalid raw/quoted price did not reject with exact rollback"
+        ));
+    }
+
+    if accepted_mark_route_is_cpi(route) {
+        env.set_matcher_spreads(1, 0, 0)
+            .map_err(|error| format!("reset invalid {route:?} matcher: {error}"))?;
+    }
+    let pair_before = accepted_mark_pair_value_and_insurance(&env);
+    let supply_before = env.token_supply_observed();
+    let close = submit_accepted_mark_trade(&mut env, route, boundary.signed_size(), anchor)
+        .map_err(|error| format!("{route:?}/{dt:?}/{boundary:?} control close: {error}"))?;
+    let group = env.primary_market_state().1;
+    if group.assets[0].oi_eff_long_q != 0
+        || group.assets[0].oi_eff_short_q != 0
+        || accepted_mark_pair_value_and_insurance(&env) != pair_before
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "{route:?}/{dt:?}/{boundary:?}: rejected boundary poisoned the control exit"
+        ));
+    }
+    let max_cu = setup.compute_units.max(close.compute_units);
+    if max_cu >= crate::support::v16_svm::TX_CU_LIMIT {
+        return Err(format!(
+            "{route:?}/{dt:?}/{boundary:?}: control route consumed {max_cu} CU"
+        ));
+    }
+    Ok(max_cu)
+}
+
+#[test]
+fn v16_program_accepted_mark_boundary_matrix_is_paid_atomic_and_exit_live() {
+    let mut valid_cells = 0usize;
+    let mut invalid_cells = 0usize;
+    let mut max_cu = 0u64;
+    for mode in AcceptedMarkMode::ALL {
+        for route in DiscoveryTradeRoute::ALL {
+            for dt in AcceptedMarkDt::ALL {
+                for boundary in AcceptedMarkBoundary::VALID {
+                    max_cu = max_cu.max(
+                        run_valid_accepted_mark_boundary(mode, route, dt, boundary)
+                            .unwrap_or_else(|error| panic!("valid accepted-mark cell: {error}")),
+                    );
+                    valid_cells += 1;
+                }
+            }
+        }
+    }
+    for route in DiscoveryTradeRoute::ALL {
+        for dt in AcceptedMarkDt::ALL {
+            for boundary in AcceptedMarkBoundary::INVALID {
+                max_cu = max_cu.max(
+                    run_invalid_accepted_mark_boundary(route, dt, boundary)
+                        .unwrap_or_else(|error| panic!("invalid accepted-mark cell: {error}")),
+                );
+                invalid_cells += 1;
+            }
+        }
+    }
+    assert_eq!(valid_cells, 64, "complete valid mode/route/dt matrix");
+    assert_eq!(invalid_cells, 16, "complete invalid route/dt matrix");
+    assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {
