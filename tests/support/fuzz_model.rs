@@ -2024,9 +2024,7 @@ fn assert_primary_source_claim_bound_attribution(label: &str, env: &V16Svm) -> R
 
 pub fn assert_public_encumbrance_census(label: &str, env: &V16Svm) -> Result<(), String> {
     let (_, primary) = env.primary_market_state();
-    let primary_portfolios = (0..env.actors.len())
-        .map(|actor| env.primary_portfolio(actor))
-        .collect::<Vec<_>>();
+    let primary_portfolios = materialized_primary_portfolios(label, env)?;
     assert_reservation_encumbrance_census(
         &format!("{label} primary"),
         &primary,
@@ -2034,7 +2032,7 @@ pub fn assert_public_encumbrance_census(label: &str, env: &V16Svm) -> Result<(),
     )?;
 
     let (_, foreign) = env.foreign_market_state();
-    let foreign_portfolios = [env.foreign_portfolio()];
+    let foreign_portfolios = materialized_foreign_portfolios(label, env)?;
     assert_reservation_encumbrance_census(
         &format!("{label} foreign"),
         &foreign,
@@ -2047,6 +2045,42 @@ fn checked_stock_add(total: &mut u128, value: u128, label: &str) -> Result<(), S
         .checked_add(value)
         .ok_or_else(|| format!("{label}: independent stock census overflow"))?;
     Ok(())
+}
+
+fn materialized_primary_portfolios(
+    label: &str,
+    env: &V16Svm,
+) -> Result<Vec<PortfolioAccountV16>, String> {
+    let mut portfolios = Vec::with_capacity(env.actors.len());
+    for (actor, fixture) in env.actors.iter().enumerate() {
+        let account = env
+            .svm
+            .get_account(&fixture.portfolio)
+            .ok_or_else(|| format!("{label}: tracked primary portfolio {actor} disappeared"))?;
+        if account.owner != env.program_id || account.data.iter().all(|byte| *byte == 0) {
+            continue;
+        }
+        portfolios.push(state::read_portfolio(&account.data).map_err(|error| {
+            format!("{label}: materialized primary portfolio {actor} is invalid: {error:?}")
+        })?);
+    }
+    Ok(portfolios)
+}
+
+fn materialized_foreign_portfolios(
+    label: &str,
+    env: &V16Svm,
+) -> Result<Vec<PortfolioAccountV16>, String> {
+    let account = env
+        .svm
+        .get_account(&env.foreign_actor.portfolio)
+        .ok_or_else(|| format!("{label}: tracked foreign portfolio disappeared"))?;
+    if account.owner != env.program_id || account.data.iter().all(|byte| *byte == 0) {
+        return Ok(Vec::new());
+    }
+    Ok(vec![state::read_portfolio(&account.data).map_err(
+        |error| format!("{label}: materialized foreign portfolio is invalid: {error:?}"),
+    )?])
 }
 
 fn checked_count_add(total: &mut u64, value: u64, label: &str) -> Result<(), String> {
@@ -2344,19 +2378,7 @@ fn assert_market_stock_census(
 
 pub fn assert_public_stock_census(label: &str, env: &V16Svm) -> Result<(), String> {
     let (_, primary) = env.primary_market_state();
-    let mut primary_portfolios = Vec::with_capacity(env.actors.len());
-    for (actor, fixture) in env.actors.iter().enumerate() {
-        let account = env
-            .svm
-            .get_account(&fixture.portfolio)
-            .ok_or_else(|| format!("{label}: tracked primary portfolio {actor} disappeared"))?;
-        if account.owner != env.program_id || account.data.iter().all(|byte| *byte == 0) {
-            continue;
-        }
-        primary_portfolios.push(state::read_portfolio(&account.data).map_err(|error| {
-            format!("{label}: materialized primary portfolio {actor} is invalid: {error:?}")
-        })?);
-    }
+    let primary_portfolios = materialized_primary_portfolios(label, env)?;
     assert_market_stock_census(
         &format!("{label} primary"),
         &primary,
@@ -2366,21 +2388,7 @@ pub fn assert_public_stock_census(label: &str, env: &V16Svm) -> Result<(), Strin
     )?;
 
     let (_, foreign) = env.foreign_market_state();
-    let foreign_account = env
-        .svm
-        .get_account(&env.foreign_actor.portfolio)
-        .ok_or_else(|| format!("{label}: tracked foreign portfolio disappeared"))?;
-    let foreign_portfolios = if foreign_account.owner == env.program_id
-        && foreign_account.data.iter().any(|byte| *byte != 0)
-    {
-        vec![
-            state::read_portfolio(&foreign_account.data).map_err(|error| {
-                format!("{label}: materialized foreign portfolio is invalid: {error:?}")
-            })?,
-        ]
-    } else {
-        Vec::new()
-    };
+    let foreign_portfolios = materialized_foreign_portfolios(label, env)?;
     assert_market_stock_census(
         &format!("{label} foreign"),
         &foreign,
@@ -6956,12 +6964,14 @@ pub fn run_materialized_portfolio_lifecycle_census(
         },
     );
     assert_public_stock_census("INV-088 initialized portfolio generation", &env)?;
+    assert_public_encumbrance_census("INV-088 initialized portfolio generation", &env)?;
     let initial_count = env.primary_market_state().1.materialized_portfolio_count;
     let old_portfolio_id = env.primary_portfolio_id(OWNER);
 
     env.close_primary_portfolio(OWNER)
         .map_err(|error| format!("INV-088 close empty portfolio: {error}"))?;
     assert_public_stock_census("INV-088 closed portfolio generation", &env)?;
+    assert_public_encumbrance_census("INV-088 closed portfolio generation", &env)?;
     let after_close_count = env.primary_market_state().1.materialized_portfolio_count;
 
     env.fund_closed_primary_portfolio(OWNER, 1_000_000_000)
@@ -6969,6 +6979,7 @@ pub fn run_materialized_portfolio_lifecycle_census(
     env.reinitialize_primary_portfolio(OWNER)
         .map_err(|error| format!("INV-088 reinitialize portfolio generation: {error}"))?;
     assert_public_stock_census("INV-088 replacement portfolio generation", &env)?;
+    assert_public_encumbrance_census("INV-088 replacement portfolio generation", &env)?;
     let after_reinitialize_count = env.primary_market_state().1.materialized_portfolio_count;
     let new_portfolio_id = env.primary_portfolio_id(OWNER);
 

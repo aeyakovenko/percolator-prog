@@ -2550,6 +2550,25 @@ impl V16Svm {
         )
     }
 
+    pub fn withdraw_terminal_insurance_as_admin(
+        &mut self,
+        amount: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::WithdrawInsurance { amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.provider_destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn update_asset_authority_from_admin(
         &mut self,
         asset_index: u16,
@@ -2721,6 +2740,27 @@ impl V16Svm {
                 intent_id,
                 domain,
                 market_id,
+                amount,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.provider_source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn top_up_insurance(&mut self, amount: u128) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        let market_id = self.primary_market_state().1.assets[0].market_id;
+        let intent_id = next_control_sequence(self.primary_control_sequences(0).insurance_top_up);
+        self.send_program(
+            ProgInstruction::TopUpInsurance {
+                market_id,
+                intent_id,
                 amount,
             },
             vec![

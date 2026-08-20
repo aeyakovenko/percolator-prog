@@ -204,3 +204,101 @@ fn v16_program_full_terminal_lifecycle_is_claimant_order_independent() {
         );
     }
 }
+
+#[test]
+fn v16_program_prior_insurance_drains_after_every_user_claim_before_close_slab() {
+    const INSURANCE_ATOMS: u128 = 37;
+
+    let config = MarketConfig::default();
+    let mut env = V16Svm::new([0x70; 32], config);
+    let supply_before = env.token_supply_observed();
+    let foreign_market_before = env.market_data(true);
+    let provider_source_before = env.token_amount(env.provider_source_token);
+    let provider_destination_before = env.token_amount(env.provider_destination_token);
+    let vault_before = env.token_amount(env.vault);
+    let mut max_compute_units = 0;
+
+    let top_up = env
+        .top_up_insurance(INSURANCE_ATOMS)
+        .map_err(|error| format!("legacy asset-0 insurance top-up: {error}"))
+        .expect("the canonical insurance authority must fund terminal insurance");
+    max_compute_units = max_compute_units.max(top_up.compute_units);
+    assert_eq!(
+        env.token_amount(env.provider_source_token) + INSURANCE_ATOMS as u64,
+        provider_source_before,
+        "insurance funding must debit the authority's SPL source exactly"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        vault_before + INSURANCE_ATOMS as u64,
+        "insurance funding must credit canonical custody exactly"
+    );
+    assert_eq!(env.primary_market_state().1.insurance, INSURANCE_ATOMS);
+    assert_public_stock_census("INV-070 after prior insurance funding", &env)
+        .expect("prior insurance funding must satisfy the complete stock census");
+    assert_public_encumbrance_census("INV-070 after prior insurance funding", &env)
+        .expect("prior insurance funding must not create an untracked encumbrance");
+
+    let resolve = env
+        .resolve_market()
+        .expect("an unchanged live market must resolve");
+    max_compute_units = max_compute_units.max(resolve.compute_units);
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let close = env
+            .close_resolved_primary(actor)
+            .unwrap_or_else(|error| panic!("resolve claimant {actor}: {error}"));
+        max_compute_units = max_compute_units.max(close.compute_units);
+        assert_public_stock_census(&format!("INV-070 after claimant {actor}"), &env)
+            .unwrap_or_else(|error| panic!("claimant {actor} stock census: {error}"));
+        assert_public_encumbrance_census(&format!("INV-070 after claimant {actor}"), &env)
+            .unwrap_or_else(|error| panic!("claimant {actor} encumbrance census: {error}"));
+    }
+
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let close = env
+            .close_primary_portfolio(actor)
+            .unwrap_or_else(|error| panic!("close terminal portfolio {actor}: {error}"));
+        max_compute_units = max_compute_units.max(close.compute_units);
+        assert_public_stock_census(&format!("INV-070 after portfolio close {actor}"), &env)
+            .unwrap_or_else(|error| panic!("portfolio close {actor} stock census: {error}"));
+        assert_public_encumbrance_census(&format!("INV-070 after portfolio close {actor}"), &env)
+            .unwrap_or_else(|error| panic!("portfolio close {actor} encumbrance census: {error}"));
+    }
+
+    let before_withdraw = env.primary_market_state().1;
+    assert_eq!(before_withdraw.c_tot, 0);
+    assert_eq!(before_withdraw.materialized_portfolio_count, 0);
+    assert_eq!(before_withdraw.insurance, INSURANCE_ATOMS);
+    assert_eq!(before_withdraw.vault, INSURANCE_ATOMS);
+    let withdraw = env
+        .withdraw_terminal_insurance_as_admin(INSURANCE_ATOMS)
+        .expect("terminal insurance authority must be able to drain prior insurance");
+    max_compute_units = max_compute_units.max(withdraw.compute_units);
+    assert_eq!(
+        env.token_amount(env.provider_destination_token),
+        provider_destination_before + INSURANCE_ATOMS as u64,
+        "terminal insurance must reach only the configured authority"
+    );
+    let drained = env.primary_market_state().1;
+    assert_eq!(drained.insurance, 0);
+    assert_eq!(drained.vault, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_public_stock_census("INV-070 after terminal insurance drain", &env)
+        .expect("terminal insurance drain must satisfy the complete stock census");
+    assert_public_encumbrance_census("INV-070 after terminal insurance drain", &env)
+        .expect("terminal insurance drain must leave no hidden encumbrance");
+    assert_eq!(env.token_supply_observed(), supply_before);
+
+    let slab_close = env
+        .close_primary_slab()
+        .expect("zero-residue market must reach CloseSlab after insurance drain");
+    max_compute_units = max_compute_units.max(slab_close.compute_units);
+    let closed_market = env
+        .svm
+        .get_account(&env.market)
+        .expect("closed market account remains observable");
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|byte| *byte == 0));
+    assert_eq!(env.market_data(true), foreign_market_before);
+    assert!(max_compute_units < TX_CU_LIMIT);
+}
