@@ -4313,6 +4313,30 @@ pub mod matcher_abi {
         }
         Ok(())
     }
+
+    pub fn validate_atomic_batch_matcher_return(
+        ret: &MatcherReturn,
+        lp_account_id: u64,
+        asset_index: u16,
+        oracle_price_e6: u64,
+        req_size: i128,
+        req_id: u64,
+    ) -> Result<(), ProgramError> {
+        validate_matcher_return(
+            ret,
+            lp_account_id,
+            asset_index,
+            oracle_price_e6,
+            req_size,
+            req_id,
+        )?;
+        // Batch requests have no signed minimum-fill vector or residual strategy budget. A
+        // matcher-selected partial would let the LP change the relationship between legs.
+        if ret.exec_size != req_size {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(())
+    }
 }
 
 pub mod oracle_v16 {
@@ -9153,7 +9177,7 @@ pub mod processor {
             let chunk = &ret_data[i * matcher_abi::MATCHER_RETURN_BYTES
                 ..(i + 1) * matcher_abi::MATCHER_RETURN_BYTES];
             let ret = matcher_abi::read_matcher_return(chunk)?;
-            matcher_abi::validate_matcher_return(
+            matcher_abi::validate_atomic_batch_matcher_return(
                 &ret,
                 lp_account_id,
                 leg.asset_index,
@@ -9161,10 +9185,6 @@ pub mod processor {
                 leg.size_q,
                 req_id,
             )?;
-            // Atomic strategy semantics: every leg must fill (no zero/skip fills in a batch).
-            if ret.exec_size == 0 {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
             if leg.limit_price != 0 {
                 let limit_ok = if leg.size_q > 0 {
                     ret.exec_price_e6 <= leg.limit_price

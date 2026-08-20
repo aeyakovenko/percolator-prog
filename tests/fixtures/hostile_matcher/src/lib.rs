@@ -17,6 +17,7 @@ entrypoint!(process);
 
 const ABI: u32 = 3;
 const FLAG_VALID: u32 = 1;
+const FLAG_PARTIAL_OK: u32 = 2;
 
 // Build one crafted 64-byte MatcherReturn; `mode` perturbs exactly one field (default = honest fill).
 fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> [u8; 64] {
@@ -39,6 +40,10 @@ fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> 
             flags = FLAG_VALID;
             size = req / 2
         } // unflagged partial (no PARTIAL_OK)
+        15 => {
+            flags = FLAG_VALID | FLAG_PARTIAL_OK;
+            size = req / 2
+        } // matcher-authorized partial
         _ => {}                            // honest full fill -> wrapper accepts
     }
     let mut b = [0u8; 64];
@@ -84,7 +89,11 @@ fn maybe_drain_tail_signer(mode: u8, accounts: &[AccountInfo]) -> ProgramResult 
     if accounts.len() >= 5 {
         invoke(
             &ix,
-            &[accounts[2].clone(), accounts[3].clone(), accounts[4].clone()],
+            &[
+                accounts[2].clone(),
+                accounts[3].clone(),
+                accounts[4].clone(),
+            ],
         )
     } else {
         invoke(&ix, &[accounts[2].clone(), accounts[3].clone()])
@@ -133,8 +142,20 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
                 let asset = u16::from_le_bytes(data[base..base + 2].try_into().unwrap()) as u64;
                 let oracle = u64::from_le_bytes(data[base + 2..base + 10].try_into().unwrap());
                 let req = i128::from_le_bytes(data[base + 10..base + 26].try_into().unwrap());
+                // Mode 16 models a hostile strategy matcher that fills the first leg in full but
+                // cuts every later leg in half. Each return is locally valid; the wrapper must
+                // preserve the batch-level quantity relationship.
+                let leg_mode = if mode == 16 {
+                    if i == 0 {
+                        9
+                    } else {
+                        15
+                    }
+                } else {
+                    mode
+                };
                 out[i * 64..i * 64 + 64]
-                    .copy_from_slice(&craft(mode, req_id, lp, asset, oracle, req));
+                    .copy_from_slice(&craft(leg_mode, req_id, lp, asset, oracle, req));
             }
             set_return_data(&out[..emit * 64]);
             Ok(())

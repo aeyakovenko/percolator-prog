@@ -4,8 +4,9 @@ extern crate kani;
 
 use percolator_prog::ix::{CrankObservationHint, Instruction};
 use percolator_prog::matcher_abi::{
-    validate_matcher_return, MatcherReturn, FLAG_BACKING_FEE_CAP_MASK, FLAG_BACKING_FEE_CAP_SHIFT,
-    FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
+    validate_atomic_batch_matcher_return, validate_matcher_return, MatcherReturn,
+    FLAG_BACKING_FEE_CAP_MASK, FLAG_BACKING_FEE_CAP_SHIFT, FLAG_PARTIAL_OK, FLAG_REJECTED,
+    FLAG_VALID,
 };
 use percolator_prog::policy_v16;
 
@@ -20,6 +21,9 @@ mod inv_004_position_episode_binding;
 
 #[path = "invariants/kani/inv_008_intent_uniqueness_and_bounded_replay.rs"]
 mod inv_008_intent_uniqueness_and_bounded_replay;
+
+#[path = "invariants/kani/inv_009_partial_fill_and_retry_accounting.rs"]
+mod inv_009_partial_fill_and_retry_accounting;
 
 #[path = "invariants/kani/inv_010_out_of_order_safety.rs"]
 mod inv_010_out_of_order_safety;
