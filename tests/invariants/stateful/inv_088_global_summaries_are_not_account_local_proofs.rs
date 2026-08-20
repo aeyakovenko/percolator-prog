@@ -10,13 +10,16 @@
 //! cure route. The shared stateful oracle scans every portfolio immediately after the cure while a
 //! real zero-basis obligation is present, and after every cleanup crank. It requires exact
 //! per-side stored/stale/pending counts, exact loss-weight sums, and exact market-wide
-//! stale-certificate, B-stale, and negative-PnL account counts. The test separately requires the
-//! intermediate obligation and weight to be nonzero so the census cannot pass vacuously.
+//! stale-certificate, B-stale, and negative-PnL account counts. It also derives the exact positive
+//! PnL atom and bound-number totals from raw portfolios, and proves the public transition system
+//! cannot create a nonzero matured-PnL summary. The test separately requires the intermediate
+//! obligation, weight, and positive PnL to be nonzero so the census cannot pass vacuously.
 //!
-//! Guarantee boundary: this closes the pending-obligation/loss-weight summary writer family in a
-//! one-asset public topology. Materialized-account and resolved-payout blocker counts, larger
-//! asset/account touch-order cross-products, and a complete independent model for every remaining
-//! aggregate still require coverage.
+//! Guarantee boundary: the shared oracle now independently rebuilds every persisted stock/count
+//! aggregate with an account, asset, domain, or bucket census. This focused route closes the
+//! positive-PnL and pending-obligation/loss-weight families in a one-asset topology. Complete
+//! public-writer route coverage and larger adversarial asset/account touch-order cross-products
+//! remain.
 
 use crate::support::fuzz_model::run_cure_pending_obligation_dos_probe;
 
@@ -24,6 +27,23 @@ use crate::support::fuzz_model::run_cure_pending_obligation_dos_probe;
 fn v16_program_pending_obligation_summaries_match_the_complete_portfolio_census() {
     let evidence = run_cure_pending_obligation_dos_probe()
         .expect("public cure and cleanup must satisfy the complete summary census");
+    assert!(
+        evidence.intermediate_positive_pnl_total > 0,
+        "the aggregate census must observe real positive PnL: {evidence:?}"
+    );
+    assert_eq!(
+        evidence.intermediate_positive_pnl_bound_num,
+        evidence.intermediate_positive_pnl_total * percolator::BOUND_SCALE,
+        "the bound-number aggregate must equal the complete positive-PnL census"
+    );
+    assert_eq!(
+        evidence.intermediate_positive_pnl_atom_bound, evidence.intermediate_positive_pnl_total,
+        "the atom-bound aggregate must equal the complete positive-PnL census"
+    );
+    assert_eq!(
+        evidence.intermediate_matured_positive_pnl, 0,
+        "no public wrapper route may synthesize matured positive PnL"
+    );
     assert!(
         evidence.intermediate_pending_obligation_count > 0,
         "the summary census must observe a real pending obligation: {evidence:?}"

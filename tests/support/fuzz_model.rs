@@ -2208,6 +2208,9 @@ fn assert_market_stock_census(
 
     let materialized_count = u64::try_from(portfolios.len())
         .map_err(|_| format!("{label}: materialized portfolio count does not fit u64"))?;
+    let positive_pnl_bound_num = positive_pnl_total
+        .checked_mul(BOUND_SCALE)
+        .ok_or_else(|| format!("{label}: independent positive-PnL bound overflow"))?;
     let aggregate_checks = [
         ("capital", capital_total, group.c_tot, header.c_tot.get()),
         (
@@ -2215,6 +2218,24 @@ fn assert_market_stock_census(
             positive_pnl_total,
             group.pnl_pos_tot,
             header.pnl_pos_tot.get(),
+        ),
+        (
+            "positive-PnL bound numerator",
+            positive_pnl_bound_num,
+            group.pnl_pos_bound_tot_num,
+            header.pnl_pos_bound_tot_num.get(),
+        ),
+        (
+            "positive-PnL atom bound",
+            positive_pnl_total,
+            group.pnl_pos_bound_tot,
+            header.pnl_pos_bound_tot.get(),
+        ),
+        (
+            "matured positive PnL",
+            0,
+            group.pnl_matured_pos_tot,
+            header.pnl_matured_pos_tot.get(),
         ),
         (
             "backing earnings",
@@ -6599,6 +6620,10 @@ pub struct PendingCloseRankEvidence {
 pub struct CurePendingObligationDosEvidence {
     pub cure_deposit: u128,
     pub close_canceled: bool,
+    pub intermediate_positive_pnl_total: u128,
+    pub intermediate_positive_pnl_bound_num: u128,
+    pub intermediate_positive_pnl_atom_bound: u128,
+    pub intermediate_matured_positive_pnl: u128,
     pub intermediate_pending_obligation_count: u64,
     pub intermediate_leg_loss_weight: u128,
     pub intermediate_market_loss_weight: u128,
@@ -6869,6 +6894,10 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
     Ok(CurePendingObligationDosEvidence {
         cure_deposit,
         close_canceled: canceled_close.canceled,
+        intermediate_positive_pnl_total: group.pnl_pos_tot,
+        intermediate_positive_pnl_bound_num: group.pnl_pos_bound_tot_num,
+        intermediate_positive_pnl_atom_bound: group.pnl_pos_bound_tot,
+        intermediate_matured_positive_pnl: group.pnl_matured_pos_tot,
         intermediate_pending_obligation_count: pending_obligation_count,
         intermediate_leg_loss_weight: retained_leg.loss_weight,
         intermediate_market_loss_weight,
