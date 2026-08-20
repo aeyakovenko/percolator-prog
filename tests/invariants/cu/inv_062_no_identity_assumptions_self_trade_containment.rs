@@ -4,7 +4,11 @@
 //! signer. These public no-CPI tests use one owner for both portfolios and assert
 //! that self-trading creates no free value: zero-fee round trips preserve capital,
 //! and fee-bearing self-trades only move value from the trader pair into protocol
-//! insurance while keeping custody exactly reconciled.
+//! insurance while keeping custody exactly reconciled. The route/mode matrix below
+//! repeats that terminal ledger check for single and batch CPI/no-CPI trades in
+//! AuthMark, EwmaMark, and stale-hybrid operation. Paid off-mark coalition attacks
+//! are independently exercised by INV-045's fee-reserve and liquidation-reward
+//! models; this file owns the identity-independence and terminal-custody assertion.
 
 use super::*;
 
@@ -15,6 +19,263 @@ fn active_leg_count(account: &PortfolioAccountV16) -> usize {
         .filter_map(|leg| leg.try_to_runtime().ok())
         .filter(|leg| leg.active)
         .count()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CommonControlRoute {
+    NoCpi,
+    BatchNoCpi,
+    Cpi,
+    BatchCpi,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CommonControlMarkMode {
+    Auth,
+    Ewma,
+    HybridAfterHours,
+}
+
+#[derive(Clone, Copy)]
+struct CommonControlMatcher {
+    program: Pubkey,
+    context: Pubkey,
+    delegate: Pubkey,
+}
+
+fn configure_common_control_mark(env: &mut V16CuEnv, mode: CommonControlMarkMode, mark: u64) {
+    match mode {
+        CommonControlMarkMode::Auth => {
+            env.svm.warp_to_slot(1);
+            env.configure_auth_mark_with_cu(1, mark);
+        }
+        CommonControlMarkMode::Ewma => {
+            env.svm.warp_to_slot(1);
+            env.configure_ewma_mark_with_cu(1, mark, 1, 0);
+            env.svm.warp_to_slot(2);
+        }
+        CommonControlMarkMode::HybridAfterHours => {
+            set_test_clock(env, 1, 100);
+            let feed = [0x62; 32];
+            let pyth = env.set_pyth_price(&feed, mark as i64, -6, 100);
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                1,
+                0,
+                [feed, [0; 32], [0; 32]],
+                &[pyth],
+                1,
+                100,
+                0,
+                0,
+                1,
+                0,
+            )
+            .expect("configure hybrid mark for common-control matrix");
+            set_test_clock(env, 3, 1_000);
+        }
+    }
+}
+
+fn execute_common_control_trade(
+    env: &mut V16CuEnv,
+    route: CommonControlRoute,
+    owner: &Keypair,
+    account_a: Pubkey,
+    account_b: Pubkey,
+    matcher: Option<CommonControlMatcher>,
+    size_q: i128,
+    exec_price: u64,
+    fee_bps: u64,
+) -> u64 {
+    match route {
+        CommonControlRoute::NoCpi => env
+            .try_trade_asset_with_cu(
+                0, owner, account_a, owner, account_b, size_q, exec_price, fee_bps,
+            )
+            .expect("same-owner TradeNoCpi must execute"),
+        CommonControlRoute::BatchNoCpi => env
+            .send(
+                env.batch_trade_no_cpi_ix(
+                    account_a,
+                    account_b,
+                    vec![BatchTradeLeg {
+                        asset_index: 0,
+                        market_id: env.asset_market_id(0),
+                        size_q,
+                        exec_price,
+                        fee_bps,
+                    }],
+                ),
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(account_a, false),
+                    AccountMeta::new(account_b, false),
+                ],
+                &[owner],
+            )
+            .expect("same-owner BatchTradeNoCpi must execute"),
+        CommonControlRoute::Cpi => {
+            let matcher = matcher.expect("CPI route matcher");
+            env.try_trade_cpi_with_cu_on_asset(
+                owner,
+                account_a,
+                owner,
+                account_b,
+                matcher.program,
+                matcher.context,
+                matcher.delegate,
+                0,
+                size_q,
+                fee_bps,
+            )
+            .expect("same-owner TradeCpi must execute")
+        }
+        CommonControlRoute::BatchCpi => {
+            let matcher = matcher.expect("batch CPI route matcher");
+            env.send(
+                env.batch_trade_cpi_ix(
+                    account_a,
+                    account_b,
+                    vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        market_id: env.asset_market_id(0),
+                        size_q,
+                        fee_bps,
+                        limit_price: 0,
+                    }],
+                ),
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(account_a, false),
+                    AccountMeta::new(account_b, false),
+                    AccountMeta::new_readonly(matcher.program, false),
+                    AccountMeta::new(matcher.context, false),
+                    AccountMeta::new_readonly(matcher.delegate, false),
+                ],
+                &[owner],
+            )
+            .expect("same-owner BatchTradeCpi must execute")
+        }
+    }
+}
+
+#[test]
+fn v16_program_common_control_round_trip_is_conserved_across_routes_and_mark_modes() {
+    const MARK: u64 = 1_000_000;
+    const DEPOSIT: u128 = 100_000_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const FEE_BPS: u64 = 100;
+
+    for mode in [
+        CommonControlMarkMode::Auth,
+        CommonControlMarkMode::Ewma,
+        CommonControlMarkMode::HybridAfterHours,
+    ] {
+        for route in [
+            CommonControlRoute::NoCpi,
+            CommonControlRoute::BatchNoCpi,
+            CommonControlRoute::Cpi,
+            CommonControlRoute::BatchCpi,
+        ] {
+            let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+                initial_price: MARK,
+                trade_fee_base_bps: FEE_BPS,
+                ..V16CuMarketParams::default()
+            });
+            configure_common_control_mark(&mut env, mode, MARK);
+
+            let owner = Keypair::new();
+            let account_a = env.create_portfolio(&owner);
+            let account_b = env.create_portfolio(&owner);
+            env.deposit(&owner, account_a, DEPOSIT);
+            env.deposit(&owner, account_b, DEPOSIT);
+
+            let matcher = if matches!(
+                route,
+                CommonControlRoute::Cpi | CommonControlRoute::BatchCpi
+            ) {
+                let program = Pubkey::new_unique();
+                let matcher_bytes =
+                    std::fs::read(matcher_program_path()).expect("read matcher BPF");
+                env.svm.add_program(program, &matcher_bytes);
+                let (context, delegate, _) = env
+                    .init_matcher_context_with_passive_spread_authorized(
+                        program, &owner, account_b, 0, 0,
+                    );
+                Some(CommonControlMatcher {
+                    program,
+                    context,
+                    delegate,
+                })
+            } else {
+                None
+            };
+
+            let vault_before = env.token_amount(env.vault);
+            assert_eq!(u128::from(vault_before), 2 * DEPOSIT);
+            execute_common_control_trade(
+                &mut env, route, &owner, account_a, account_b, matcher, SIZE_Q, MARK, FEE_BPS,
+            );
+            execute_common_control_trade(
+                &mut env, route, &owner, account_a, account_b, matcher, -SIZE_Q, MARK, FEE_BPS,
+            );
+
+            let account_a_state = env.portfolio_state(account_a);
+            let account_b_state = env.portfolio_state(account_b);
+            let (_, group) = env.market_state();
+            let coalition_capital = account_a_state
+                .capital
+                .get()
+                .checked_add(account_b_state.capital.get())
+                .expect("coalition capital sum");
+
+            assert_eq!(account_a_state.pnl.get(), 0, "{mode:?} {route:?}");
+            assert_eq!(account_b_state.pnl.get(), 0, "{mode:?} {route:?}");
+            assert_eq!(active_leg_count(&account_a_state), 0, "{mode:?} {route:?}");
+            assert_eq!(active_leg_count(&account_b_state), 0, "{mode:?} {route:?}");
+            assert_eq!(group.assets[0].oi_eff_long_q, 0, "{mode:?} {route:?}");
+            assert_eq!(group.assets[0].oi_eff_short_q, 0, "{mode:?} {route:?}");
+            assert!(
+                group.insurance > 0,
+                "{mode:?} {route:?} must charge real fees"
+            );
+            assert_eq!(group.c_tot, coalition_capital, "{mode:?} {route:?}");
+            assert_eq!(
+                coalition_capital + group.insurance,
+                2 * DEPOSIT,
+                "{mode:?} {route:?} common control cannot create or redirect value",
+            );
+            assert_eq!(group.vault, 2 * DEPOSIT, "{mode:?} {route:?}");
+            assert_eq!(
+                u128::from(env.token_amount(env.vault)),
+                group.vault,
+                "{mode:?} {route:?} internal custody must equal real SPL custody",
+            );
+
+            let (destination_a, _) =
+                env.withdraw_with_cu(&owner, account_a, account_a_state.capital.get());
+            let (destination_b, _) =
+                env.withdraw_with_cu(&owner, account_b, account_b_state.capital.get());
+            assert_eq!(
+                u128::from(env.token_amount(destination_a))
+                    + u128::from(env.token_amount(destination_b)),
+                coalition_capital,
+                "{mode:?} {route:?} owner can recover every remaining capital atom",
+            );
+            let (_, terminal) = env.market_state();
+            assert_eq!(terminal.c_tot, 0, "{mode:?} {route:?}");
+            assert_eq!(terminal.vault, terminal.insurance, "{mode:?} {route:?}");
+            assert_eq!(
+                u128::from(env.token_amount(env.vault)),
+                terminal.insurance,
+                "{mode:?} {route:?} only the conserved protocol fee remains",
+            );
+        }
+    }
 }
 
 #[test]
