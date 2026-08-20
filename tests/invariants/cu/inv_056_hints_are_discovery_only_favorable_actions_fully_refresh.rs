@@ -13,6 +13,9 @@
 //! refresh that stale leg before admitting the new favorable leg. Pending-close and Recovery
 //! selector traces prove hostile hints roll back before an honest retry progresses; once Resolved,
 //! duplicate hints are economically inert and produce the same payout as an empty-hint close.
+//! A public two-atom bankruptcy/forfeit trace proves B settlement budgets are collateral atoms,
+//! not B-index ticks: one owner step exposes the SettleB selector, duplicate hints roll back, and
+//! one empty-hint crank consumes the remaining atom at bounded CU.
 //! INV-053 owns the single-leg TradeNoCpi/TradeCpi variants and every single-omitted max-shape
 //! refresh case.
 
@@ -370,6 +373,116 @@ fn v16_program_pending_close_bad_hints_roll_back_then_canonical_crank_progresses
         vault_before,
         "pending-close bookkeeping must not move SPL custody"
     );
+}
+
+#[test]
+fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
+    let PublicActiveCloseFixture {
+        mut env,
+        loss,
+        asset1_counterparty_owner,
+        asset1_counterparty,
+        ..
+    } = public_asset1_bankrupt_close_fixture();
+
+    // The fixture's owner forfeit books the first loss atom. A permissionless
+    // close continuation books the second, entirely through public routes.
+    let close_before = close_progress(&env.portfolio_state(loss));
+    assert!(close_before.active && close_before.residual_remaining > 0);
+    env.svm.expire_blockhash();
+    let booking_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loss, false),
+            ],
+            &[],
+        )
+        .expect("public close continuation must book the second B loss atom");
+    assert_cu_within("INV-056 public B booking", booking_cu, CRANK_CU_LIMIT);
+    let target_b = env.market_state().1.assets[1].b_long_num;
+    let before_discovery = active_leg_for_asset(&env.portfolio_state(asset1_counterparty), 1);
+    assert!(target_b > before_discovery.b_snap);
+    assert!(
+        target_b > 2,
+        "the B-index representation must make an index-tick budget observably wrong"
+    );
+    assert!(!before_discovery.b_stale);
+
+    // The owner route discovers the committed gap and may consume only one
+    // loss atom. Exactly one atom therefore remains for permissionless SettleB.
+    let discovery_cu =
+        env.forfeit_recovery_leg_with_cu(&asset1_counterparty_owner, asset1_counterparty, 1, 1);
+    assert_cu_within("INV-056 public B discovery", discovery_cu, CUSTODY_CU_LIMIT);
+    let discovered = active_leg_for_asset(&env.portfolio_state(asset1_counterparty), 1);
+    assert!(
+        discovered.b_snap > before_discovery.b_snap.saturating_add(1),
+        "one collateral-atom budget must not be interpreted as one B-index tick"
+    );
+    assert!(discovered.b_snap < target_b && discovered.b_stale);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&asset1_counterparty).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let hostile = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                },
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new_readonly(env.payer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(asset1_counterparty, false),
+        ],
+        &[],
+    );
+    assert!(hostile.is_err(), "duplicate hints must reject atomically");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&asset1_counterparty).unwrap(),
+        portfolio_before
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.expire_blockhash();
+    let settle_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(asset1_counterparty, false),
+            ],
+            &[],
+        )
+        .expect("SettleB must be dispatchable from committed state without hints");
+    assert_cu_within("INV-056 public SettleB retry", settle_cu, CRANK_CU_LIMIT);
+    let settled_account = env.portfolio_state(asset1_counterparty);
+    let settled = active_leg_for_asset(&settled_account, 1);
+    assert_eq!(
+        settled.b_snap, target_b,
+        "the second atom must settle in one call"
+    );
+    assert!(!settled.b_stale);
+    assert_eq!(settled_account.b_stale_state, 0);
 }
 
 #[test]

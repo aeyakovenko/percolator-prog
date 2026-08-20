@@ -2293,12 +2293,12 @@ fn v16_program_permissionless_settle_b_is_bounded_and_live() {
     let after_first = env.portfolio_state(long);
     let after_first_leg = active_leg_for_asset(&after_first, 0);
     assert_eq!(
-        after_first_leg.b_snap, 1,
-        "auto-crank refreshes if needed, then advances one configured B chunk"
+        after_first_leg.b_snap, 3,
+        "the configured loss-atom budget must consume the complete tiny index gap"
     );
     assert!(
-        after_first_leg.b_stale && after_first.b_stale_state != 0,
-        "remaining B gap stays explicitly marked stale"
+        !after_first_leg.b_stale && after_first.b_stale_state == 0,
+        "the completed B gap must clear B-stale state in the same call"
     );
     assert_eq!(
         env.market_state().1.assets[0].b_long_num,
@@ -2319,38 +2319,8 @@ fn v16_program_permissionless_settle_b_is_bounded_and_live() {
         "SettleB does not debit insurance"
     );
 
-    settle_b_once(&mut env).expect("second permissionless SettleB chunk");
-    let after_second = env.portfolio_state(long);
-    assert_eq!(
-        active_leg_for_asset(&after_second, 0).b_snap,
-        2,
-        "second SettleB call advances exactly one more chunk"
-    );
     assert!(
-        after_second.b_stale_state != 0,
-        "one chunk remains after second call"
-    );
-
-    settle_b_once(&mut env).expect("final permissionless SettleB chunk");
-    let after_final = env.portfolio_state(long);
-    let final_leg = active_leg_for_asset(&after_final, 0);
-    assert_eq!(final_leg.b_snap, 3, "all B debt settled after three chunks");
-    assert!(
-        !final_leg.b_stale && after_final.b_stale_state == 0,
-        "final chunk clears B-stale state"
-    );
-    let (_, g_end) = env.market_state();
-    assert_eq!(
-        g_end.vault, vault_before,
-        "no custody change after all chunks"
-    );
-    assert_eq!(g_end.c_tot, c_tot_before, "capital invariant preserved");
-    assert_eq!(
-        g_end.insurance, insurance_before,
-        "insurance invariant preserved"
-    );
-    assert!(
-        g_end.vault >= g_end.c_tot + g_end.insurance,
+        g_after_first.vault >= g_after_first.c_tot + g_after_first.insurance,
         "senior conservation after permissionless B settlement"
     );
 }

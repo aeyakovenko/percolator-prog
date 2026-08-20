@@ -167,12 +167,13 @@ fn canonical_prefix_snapshot(env: &V16Svm) -> Result<CanonicalPrefixSnapshot, St
     // A capital-backed loss starts its configured freshness lifetime when that
     // loss is actually crystallized. Eager and delayed permissionless settlement
     // can therefore choose different, bounded start slots without changing the
-    // amount, status, source attribution, or custody. Raw expiries are retained
-    // and verified separately by `backing_expiry_partition_envelope`.
+    // amount, status, source attribution, or custody. Live Fresh deadlines are
+    // verified separately by `backing_expiry_partition_envelope`.
     for bucket in &mut group.source_backing_buckets {
-        if bucket.status == percolator::BackingBucketStatusV16::Fresh {
-            bucket.expiry_slot = 0;
-        }
+        // The exact start slot is cadence metadata both while the bucket is Fresh and after its
+        // terminal status has made the deadline inert. Amount, status, and attribution remain
+        // exact; `backing_expiry_partition_envelope` checks every live Fresh deadline separately.
+        bucket.expiry_slot = 0;
     }
 
     let mut long_portfolio = env.primary_portfolio(0);
@@ -295,8 +296,20 @@ fn prefix_difference(
     else {
         return format!("prefix lengths differ: {} != {}", left.len(), right.len());
     };
+    format!("prefix {index}: {}", snapshot_difference(left, right))
+}
+
+fn snapshot_difference(left: &CanonicalPrefixSnapshot, right: &CanonicalPrefixSnapshot) -> String {
+    let backing_bucket_differences: Vec<_> = left
+        .group
+        .source_backing_buckets
+        .iter()
+        .zip(right.group.source_backing_buckets.iter())
+        .enumerate()
+        .filter_map(|(index, (left, right))| (left != right).then_some((index, *left, *right)))
+        .collect();
     format!(
-        "prefix {index}: wrapper_equal={}; group_differences={:?}; profiles_equal={}; controls_equal={}; long_equal={}; short_equal={}; tokens_equal={}",
+        "wrapper_equal={}; group_differences={:?}; backing_bucket_differences={backing_bucket_differences:?}; profiles_equal={}; controls_equal={}; long_equal={}; short_equal={}; tokens_equal={}",
         left.wrapper_config == right.wrapper_config,
         group_differences(&left.group, &right.group),
         left.profiles == right.profiles,
@@ -1009,8 +1022,16 @@ proptest! {
         prop_assert_eq!(net_funding_prefixes(&eager), net_funding_prefixes(&delayed));
         backing_expiry_partition_envelope(&episodes, &eager, &irregular, &delayed)
             .map_err(TestCaseError::fail)?;
-        prop_assert_eq!(&eager.post_suffix, &irregular.post_suffix);
-        prop_assert_eq!(&eager.post_suffix, &delayed.post_suffix);
+        prop_assert!(
+            eager.post_suffix == irregular.post_suffix,
+            "eager/irregular post-live-close divergence: {}",
+            snapshot_difference(&eager.post_suffix, &irregular.post_suffix),
+        );
+        prop_assert!(
+            eager.post_suffix == delayed.post_suffix,
+            "eager/delayed post-live-close divergence: {}",
+            snapshot_difference(&eager.post_suffix, &delayed.post_suffix),
+        );
         prop_assert_eq!(eager.destination_payouts, irregular.destination_payouts);
         prop_assert_eq!(eager.destination_payouts, delayed.destination_payouts);
         prop_assert_eq!(eager.prefixes.len(), episodes.len());
@@ -1056,8 +1077,16 @@ proptest! {
         );
         backing_expiry_partition_envelope(&episodes, &eager, &irregular, &delayed)
             .map_err(TestCaseError::fail)?;
-        prop_assert_eq!(&eager.post_suffix, &irregular.post_suffix);
-        prop_assert_eq!(&eager.post_suffix, &delayed.post_suffix);
+        prop_assert!(
+            eager.post_suffix == irregular.post_suffix,
+            "eager/irregular post-resolve divergence: {}",
+            snapshot_difference(&eager.post_suffix, &irregular.post_suffix),
+        );
+        prop_assert!(
+            eager.post_suffix == delayed.post_suffix,
+            "eager/delayed post-resolve divergence: {}",
+            snapshot_difference(&eager.post_suffix, &delayed.post_suffix),
+        );
         prop_assert_eq!(eager.destination_payouts, irregular.destination_payouts);
         prop_assert_eq!(eager.destination_payouts, delayed.destination_payouts);
         prop_assert!(eager.destination_payouts.iter().all(|payout| *payout != 0));

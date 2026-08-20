@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Charged fees reach only the authorized destination under the bound policy version.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_signed_direction_route_matrix_discovers_terminal_side_fee_loss`, `v16_attack_mixed_direction_batch_fees_conserve_by_asset`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_signed_direction_route_matrix_discovers_side_attribution_mismatch`, `v16_attack_mixed_direction_batch_fees_conserve_by_asset`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -162,16 +162,16 @@ fn run_directional_fee_terminal_world(
 }
 
 #[test]
-fn v16_program_signed_direction_route_matrix_discovers_terminal_side_fee_loss() {
+fn v16_program_signed_direction_route_matrix_discovers_side_attribution_mismatch() {
     let single = run_directional_fee_terminal_world(NoCpiReportedPricePath::Single);
     let batch = run_directional_fee_terminal_world(NoCpiReportedPricePath::Batch);
     assert_eq!(single.winner_payout, 1_000_000);
+    assert_eq!(batch.winner_payout, single.winner_payout);
     assert!(single.long_budget > single.short_budget);
-    assert_eq!(batch.winner_payout, 0);
     assert!(batch.short_budget > batch.long_budget);
     assert_eq!(single.long_budget, batch.short_budget);
     assert_eq!(single.short_budget, batch.long_budget);
-    assert!(batch.terminal_vault > single.terminal_vault);
+    assert_eq!(batch.terminal_vault, single.terminal_vault);
 }
 
 #[test]

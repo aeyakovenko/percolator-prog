@@ -941,11 +941,12 @@ fn v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail() {
     let (_, group_after) = env.market_state();
     let after = env.portfolio_state(short_account);
     let leg_after = active_leg_for_asset(&after, 0);
+    let selected_target = group_before.assets[0].b_short_num;
     assert_eq!(
-        leg_after.b_snap,
-        leg_before.b_snap + 1,
-        "overlap selector takes the higher-priority B-settlement step"
+        leg_after.b_snap, selected_target,
+        "the higher-priority B-settlement step consumes the bounded loss-atom gap"
     );
+    assert!(!leg_after.b_stale && after.b_stale_state == 0);
     assert_eq!(
         leg_after.basis_pos_q, leg_before.basis_pos_q,
         "hostile close_q must not liquidate while B settlement has priority"
