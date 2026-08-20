@@ -2,15 +2,178 @@
 //!
 //! Normative obligation: Splitting an execution or liquidation cannot multiply minimum or episode fees.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_attack_min_liquidation_fee_falls_back_to_full_close_progress`. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Evidence in this file (I/C plus invariant-specific M assertions):
+//! `v16_attack_min_liquidation_fee_falls_back_to_full_close_progress` and
+//! `v16_program_healthy_partial_liquidation_retries_cannot_multiply_fees`. The first proves an
+//! inadmissible sub-minimum chunk becomes one full-close fee, while the second charges a real fee
+//! on an engine-selected partial close and proves repeated public submissions against the same
+//! healthy state cannot charge again or change custody.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_healthy_partial_liquidation_retries_cannot_multiply_fees() {
+    const PRICE: u64 = 100;
+    const LIQUIDATION_FEE_BPS: u64 = 100;
+    const RETRIES: usize = 16;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        liquidation_fee_bps: LIQUIDATION_FEE_BPS,
+        liquidation_fee_cap: 10,
+        min_nonzero_mm_req: 10,
+        min_nonzero_im_req: 20,
+        max_price_move_bps_per_slot: 5_000,
+        ..V16CuMarketParams::default()
+    });
+    env.top_up_insurance(1_000_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000);
+    env.deposit(&short_owner, short, 3_000);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (10 * POS_SCALE) as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, PRICE * 3);
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(4);
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(0),
+        },
+    );
+
+    let group_before = env.market_state().1;
+    let position_before = active_leg_for_asset(&env.portfolio_state(short), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    assert!(
+        health_cert(&env.portfolio_state(short)).certified_liq_deficit > 0,
+        "the public setup must be liquidatable before the fee-bearing step"
+    );
+
+    env.svm.expire_blockhash();
+    let liquidation_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        )
+        .expect("the current liquidatable account must take one engine-selected step");
+    assert_cu_within(
+        "INV-059 nonzero-fee partial liquidation",
+        liquidation_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let group_after = env.market_state().1;
+    let short_after = env.portfolio_state(short);
+    let position_after = active_leg_for_asset(&short_after, 0)
+        .basis_pos_q
+        .unsigned_abs();
+    let charged_fee = group_after.insurance - group_before.insurance;
+    let closed_q = position_before - position_after;
+    let fee_notional = closed_q
+        .checked_mul(group_before.assets[0].effective_price as u128)
+        .and_then(|value| value.checked_add(POS_SCALE as u128 - 1))
+        .unwrap()
+        / POS_SCALE as u128;
+    let expected_fee = fee_notional
+        .checked_mul(LIQUIDATION_FEE_BPS as u128)
+        .and_then(|value| value.checked_add(9_999))
+        .unwrap()
+        / 10_000;
+    let expected_fee = expected_fee.min(10);
+    assert!(expected_fee > 0, "the control must derive a real fee");
+    assert_eq!(
+        charged_fee, expected_fee,
+        "the selected close is charged exactly once by the independent fee oracle"
+    );
+    assert!(
+        position_after > 0 && position_after < position_before,
+        "the control must be a partial, not terminal, liquidation"
+    );
+    assert_eq!(
+        health_cert(&short_after).certified_liq_deficit,
+        0,
+        "the engine-selected close must restore maintenance health"
+    );
+    assert_eq!(group_after.vault as u64, env.token_amount(env.vault));
+
+    let market_fixed_point = env.svm.get_account(&env.market).unwrap();
+    let portfolio_fixed_point = env.svm.get_account(&short).unwrap();
+    let vault_fixed_point = env.svm.get_account(&env.vault).unwrap();
+    for retry in 0..RETRIES {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        )
+        .unwrap_or_else(|error| panic!("healthy retry {retry} must be harmless: {error}"));
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_fixed_point,
+            "retry {retry} must not charge or redistribute another fee"
+        );
+        assert_eq!(
+            env.svm.get_account(&short).unwrap(),
+            portfolio_fixed_point,
+            "retry {retry} must not fragment the selected close"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_fixed_point,
+            "retry {retry} must not move custody"
+        );
+    }
+}
 
 #[test]
 fn v16_attack_min_liquidation_fee_falls_back_to_full_close_progress() {
