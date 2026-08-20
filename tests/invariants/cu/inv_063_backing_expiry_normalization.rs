@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Expired backing is normalized before every consumer and cannot remain economically fresh.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capitalization`, `v16_program_post_snapshot_expiry_rejects_stale_trade_then_owner_progresses`, `v16_probe_post_expiry_trade_cannot_charge_backing_fee`, `v16_attack_lapsed_live_source_backing_expires_bounded_and_owner_can_reduce`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capitalization`, `v16_program_post_snapshot_expiry_rejects_stale_trade_then_owner_progresses`, `v16_probe_post_expiry_trade_cannot_charge_backing_fee`, `v16_attack_lapsed_live_source_backing_expires_bounded_and_owner_can_reduce`, `v16_program_retire_normalizes_unreferenced_lapsed_backing`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -13,6 +13,10 @@
 //! The lapsed-Live test is also whole-route SVM/CU evidence for INV-030, INV-071, and INV-073: it
 //! proves one bounded expiry step, one bounded certification step, custody preservation, and a
 //! subsequent owner reduction.
+//! The retirement boundary uses only public activation, backing top-up, and lifecycle instructions.
+//! It proves a funded bucket blocks retirement while fresh, but an unreferenced lapsed bucket is
+//! normalized at the authenticated expiry boundary without moving custody and cannot permanently
+//! consume the asset slot merely because no portfolio carries its source domain.
 
 use super::*;
 
@@ -741,4 +745,98 @@ fn v16_attack_backing_expiry_no_overpay() {
         env.token_amount(env.vault),
         "accounting == real vault"
     );
+}
+
+#[test]
+fn v16_program_retire_normalizes_unreferenced_lapsed_backing() {
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = ASSET * 2;
+    const BACKING: u128 = 700;
+    const EXPIRY_SLOT: u64 = 5;
+
+    let mut env = V16CuEnv::new();
+    env.activate_asset(ASSET, 1, 100);
+    env.top_up_backing_bucket(DOMAIN, BACKING, EXPIRY_SLOT);
+    let admin = env.admin.insecure_clone();
+    let market_id = env.asset_market_id(ASSET);
+    let retire = |env: &mut V16CuEnv, now_slot: u64| {
+        env.svm.warp_to_slot(now_slot);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_RETIRE,
+                asset_index: ASSET,
+                market_id,
+                now_slot,
+                initial_price: 0,
+                max_init_fee: u128::MAX,
+                insurance_authority: admin.pubkey().to_bytes(),
+                insurance_operator: admin.pubkey().to_bytes(),
+                backing_bucket_authority: admin.pubkey().to_bytes(),
+                oracle_authority: admin.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    let funded = env.market_state().1;
+    assert_eq!(
+        funded.source_backing_buckets[DOMAIN as usize].status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert_eq!(
+        funded.source_backing_buckets[DOMAIN as usize].fresh_unliened_backing_num,
+        BACKING * BOUND_SCALE
+    );
+    assert_eq!(
+        funded.source_credit[DOMAIN as usize].fresh_reserved_backing_num,
+        BACKING * BOUND_SCALE
+    );
+    let vault_tokens = env.token_amount(env.vault);
+    let accounting_vault = funded.vault;
+
+    let before_fresh_retire = env.svm.get_account(&env.market).unwrap();
+    retire(&mut env, EXPIRY_SLOT - 1)
+        .expect_err("fresh provider principal must block asset retirement");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_fresh_retire,
+        "pre-expiry retirement must roll back exactly"
+    );
+    assert_eq!(env.token_amount(env.vault), vault_tokens);
+
+    let retire_cu = retire(&mut env, EXPIRY_SLOT)
+        .expect("retirement must normalize an unreferenced lapsed bucket in bounded work");
+    assert_cu_within(
+        "lapsed-backing retirement normalization",
+        retire_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let retired = env.market_state().1;
+    assert_eq!(
+        retired.assets[ASSET as usize].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    assert_eq!(
+        retired.source_backing_buckets[DOMAIN as usize].status,
+        BackingBucketStatusV16::Empty
+    );
+    assert_eq!(
+        retired.source_backing_buckets[DOMAIN as usize].expiry_slot,
+        0
+    );
+    assert_eq!(
+        retired.source_backing_buckets[DOMAIN as usize].fresh_unliened_backing_num,
+        0
+    );
+    assert_eq!(
+        retired.source_credit[DOMAIN as usize].fresh_reserved_backing_num,
+        0
+    );
+    assert_eq!(retired.vault, accounting_vault);
+    assert_eq!(env.token_amount(env.vault), vault_tokens);
 }
