@@ -10,8 +10,11 @@
 //! reverse two-asset Pyth hint/account-tail orders normalize identically; mismatched tails reject
 //! with exact rollback and a live canonical retry. BatchTradeNoCpi and BatchTradeCpi open a new
 //! asset-0 leg for an account that already has a stale active asset-1 leg, and must discover and
-//! refresh that stale leg before admitting the new favorable leg. INV-053 owns the single-leg
-//! TradeNoCpi/TradeCpi variants and every single-omitted max-shape refresh case.
+//! refresh that stale leg before admitting the new favorable leg. Pending-close and Recovery
+//! selector traces prove hostile hints roll back before an honest retry progresses; once Resolved,
+//! duplicate hints are economically inert and produce the same payout as an empty-hint close.
+//! INV-053 owns the single-leg TradeNoCpi/TradeCpi variants and every single-omitted max-shape
+//! refresh case.
 
 use super::*;
 
@@ -265,6 +268,291 @@ fn v16_program_external_oracle_hint_and_account_order_is_normalized_or_atomic() 
         inv056_external_order_snapshot(&env),
         forward,
         "retry after hostile ordering must reach the canonical normalized state"
+    );
+}
+
+#[test]
+fn v16_program_pending_close_bad_hints_roll_back_then_canonical_crank_progresses() {
+    let PublicActiveCloseFixture {
+        mut env,
+        loss,
+        live_counterparty,
+        live_peer,
+        ..
+    } = public_asset1_bankrupt_close_fixture();
+    let close_before = close_progress(&env.portfolio_state(loss));
+    assert!(close_before.active && close_before.residual_remaining > 0);
+    assert!(
+        env.svm.get_sysvar::<Clock>().slot <= close_before.max_close_slot,
+        "fixture must exercise live close advancement rather than expiry recovery"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let loss_before = env.svm.get_account(&loss).unwrap();
+    let counterparty_before = env.svm.get_account(&live_counterparty).unwrap();
+    let peer_before = env.svm.get_account(&live_peer).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let hostile = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                },
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new_readonly(env.payer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(loss, false),
+        ],
+        &[],
+    );
+    assert!(
+        hostile.is_err(),
+        "a duplicate late hint must reject before close advancement commits"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&loss).unwrap(), loss_before);
+    assert_eq!(
+        env.svm.get_account(&live_counterparty).unwrap(),
+        counterparty_before
+    );
+    assert_eq!(env.svm.get_account(&live_peer).unwrap(), peer_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.expire_blockhash();
+    let progress_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loss, false),
+            ],
+            &[],
+        )
+        .expect("canonical empty-hint crank must advance the pending close");
+    assert_cu_within(
+        "INV-056 pending-close canonical retry",
+        progress_cu,
+        CRANK_CU_LIMIT,
+    );
+    let mode_after = env.market_state().1.mode;
+    let close_after = close_progress(&env.portfolio_state(loss));
+    assert!(
+        mode_after != MarketModeV16::Live
+            || close_after.residual_remaining < close_before.residual_remaining
+            || close_after.finalized,
+        "canonical retry must lower close rank or enter a terminal mode"
+    );
+    assert_eq!(
+        env.svm.get_account(&live_counterparty).unwrap(),
+        counterparty_before,
+        "pending-close progress must not rewrite an unrelated portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&live_peer).unwrap(),
+        peer_before,
+        "pending-close progress must not rewrite an unrelated peer"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "pending-close bookkeeping must not move SPL custody"
+    );
+}
+
+#[test]
+fn v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only() {
+    let PublicActiveCloseFixture {
+        mut env,
+        loss,
+        live_counterparty_owner,
+        live_counterparty,
+        live_peer_owner,
+        live_peer,
+        ..
+    } = public_asset1_bankrupt_close_fixture();
+    let close = close_progress(&env.portfolio_state(loss));
+    env.svm.warp_to_slot(close.max_close_slot + 1);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new_readonly(env.payer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(loss, false),
+        ],
+        &[],
+    )
+    .expect("expired close must enter permissionless Recovery");
+    assert_eq!(
+        env.market_state().1.mode,
+        MarketModeV16::Recovery,
+        "fixture must expose the distinct FinalizeRecovery selector class"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let loss_before = env.svm.get_account(&loss).unwrap();
+    let counterparty_before = env.svm.get_account(&live_counterparty).unwrap();
+    let peer_before = env.svm.get_account(&live_peer).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let hostile = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                },
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new_readonly(env.payer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(loss, false),
+        ],
+        &[],
+    );
+    assert!(
+        hostile.is_err(),
+        "duplicate Recovery hints must reject atomically"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&loss).unwrap(), loss_before);
+    assert_eq!(
+        env.svm.get_account(&live_counterparty).unwrap(),
+        counterparty_before
+    );
+    assert_eq!(env.svm.get_account(&live_peer).unwrap(), peer_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.expire_blockhash();
+    let finalize_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loss, false),
+            ],
+            &[],
+        )
+        .expect("empty-hint Recovery crank must finalize to Resolved");
+    assert_cu_within(
+        "INV-056 Recovery finalization retry",
+        finalize_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    assert_eq!(
+        env.svm.get_account(&live_counterparty).unwrap(),
+        counterparty_before,
+        "Recovery finalization must not rewrite a claimant portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&live_peer).unwrap(),
+        peer_before,
+        "Recovery finalization must not rewrite a claimant peer"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "Recovery finalization snapshots accounting without moving SPL custody"
+    );
+
+    let duplicate_hint_dest = env.token_account(live_counterparty_owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let duplicate_hint_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![
+                    CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: 0,
+                    },
+                    CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: 0,
+                    },
+                ],
+            },
+            vec![
+                AccountMeta::new(live_counterparty_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(live_counterparty, false),
+                AccountMeta::new(duplicate_hint_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&live_counterparty_owner],
+        )
+        .expect("Resolved dispatch must ignore economically irrelevant duplicate hints");
+    assert_cu_within(
+        "INV-056 Resolved duplicate-hint close",
+        duplicate_hint_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let empty_hint_dest = env.token_account(live_peer_owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let empty_hint_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(live_peer_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(live_peer, false),
+                AccountMeta::new(empty_hint_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&live_peer_owner],
+        )
+        .expect("Resolved empty-hint close must remain live");
+    assert_cu_within(
+        "INV-056 Resolved empty-hint close",
+        empty_hint_cu,
+        CRANK_CU_LIMIT,
+    );
+    let duplicate_hint_payout = env.token_amount(duplicate_hint_dest);
+    let empty_hint_payout = env.token_amount(empty_hint_dest);
+    assert!(duplicate_hint_payout > 0);
+    assert_eq!(
+        duplicate_hint_payout, empty_hint_payout,
+        "Resolved hints must not alter symmetric claimant economics"
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "Resolved hint-insensitive closes preserve engine/SPL vault parity"
     );
 }
 
