@@ -11,18 +11,20 @@
 //! every rejection must roll back all tracked program bytes, SPL data, and
 //! economic-account lamports. Generated scenarios also place ordinary public
 //! actions before and after these lifecycle actions.
-//! `v16_program_unilateral_zero_oi_reset_detaches_then_finalizes_permissionlessly`
-//! reaches `ResetPending` without state injection: one owner fully reduces a matched leg,
-//! an early global finalizer rejects atomically while the prior-epoch counterparty leg remains,
-//! bounded public auto-cranks detach that leg, and the permissionless finalizer restores Normal.
-//! A fresh matched open/close and full owner withdrawals prove the reset does not orphan funds or
-//! permanently disable the asset.
+//! `v16_program_unilateral_zero_oi_reset_route_side_matrix_finalizes_permissionlessly`
+//! reaches `ResetPending` without state injection in all eight trade-route/reducer-side worlds: one
+//! owner fully reduces a matched leg, an early global finalizer rejects atomically while the
+//! prior-epoch counterparty leg remains, bounded public auto-cranks detach that leg, and the
+//! permissionless finalizer restores Normal. A fresh matched open/close through the same route and
+//! full owner withdrawals prove the reset does not orphan funds or permanently disable the asset.
 //!
 //! This is bounded generated coverage, not exhaustive reset/recovery/retirement
 //! reachability.
 
 use super::*;
-use crate::support::fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census};
+use crate::support::fuzz_model::{
+    assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
+};
 use crate::support::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, TX_CU_LIMIT};
 use percolator::{SideModeV16, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
@@ -65,32 +67,40 @@ fn v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit() {
     );
 }
 
-#[test]
-fn v16_program_unilateral_zero_oi_reset_detaches_then_finalizes_permissionlessly() {
+fn assert_public_reset_lifecycle(route: TradeRoute, reducer_long: bool, seed: [u8; 32]) {
     const REDUCER: usize = 0;
     const STALE_COUNTERPARTY: usize = 1;
     const FRESH_LONG: usize = 2;
     const FRESH_SHORT: usize = 3;
     const ASSET: u16 = 0;
-    const SHORT_SIDE: u8 = 1;
     const SIZE_Q: u128 = POS_SCALE;
 
-    let mut env = V16Svm::new([0x45; 32], MarketConfig::default());
+    let signed_size_q = if reducer_long {
+        SIZE_Q as i128
+    } else {
+        -(SIZE_Q as i128)
+    };
+    let reset_side = u8::from(reducer_long);
+    let case = format!("{route:?}/reducer_long={reducer_long}");
+    let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
     let reducer_destination_before = env.token_amount(env.actors[REDUCER].destination_token);
     let counterparty_destination_before =
         env.token_amount(env.actors[STALE_COUNTERPARTY].destination_token);
-    let mut max_compute_units = env
-        .trade_no_cpi(
-            REDUCER,
-            STALE_COUNTERPARTY,
-            ASSET,
-            SIZE_Q as i128,
-            INITIAL_PRICE,
-            0,
-        )
-        .expect("public matched open must establish both side episodes")
-        .compute_units;
+    let mut max_compute_units = execute_trade_route(
+        &mut env,
+        route,
+        REDUCER,
+        STALE_COUNTERPARTY,
+        ASSET,
+        signed_size_q,
+        INITIAL_PRICE,
+        0,
+    )
+    .unwrap_or_else(|error| {
+        panic!("{case}: public matched open must establish both side episodes: {error}")
+    })
+    .compute_units;
     assert_public_stock_census("INV-065 before unilateral reset", &env)
         .expect("matched open stock census");
     assert_public_encumbrance_census("INV-065 before unilateral reset", &env)
@@ -103,8 +113,13 @@ fn v16_program_unilateral_zero_oi_reset_detaches_then_finalizes_permissionlessly
     let reset = env.primary_market_state().1.assets[ASSET as usize];
     assert_eq!(reset.oi_eff_long_q, 0);
     assert_eq!(reset.oi_eff_short_q, 0);
-    assert_eq!(reset.mode_short, SideModeV16::ResetPending);
-    assert_eq!(reset.stored_pos_count_short, 1);
+    let (reset_mode, reset_stored_count) = if reducer_long {
+        (reset.mode_short, reset.stored_pos_count_short)
+    } else {
+        (reset.mode_long, reset.stored_pos_count_long)
+    };
+    assert_eq!(reset_mode, SideModeV16::ResetPending, "{case}");
+    assert_eq!(reset_stored_count, 1, "{case}");
     assert_public_stock_census("INV-065 after unilateral reset begins", &env)
         .expect("reset-begin stock census");
     assert_public_encumbrance_census("INV-065 after unilateral reset begins", &env)
@@ -115,7 +130,7 @@ fn v16_program_unilateral_zero_oi_reset_detaches_then_finalizes_permissionlessly
         .map(|actor| env.primary_portfolio_data(actor))
         .collect::<Vec<_>>();
     let tokens_before_early_finalize = env.all_token_account_data();
-    env.finalize_reset_side(ASSET, SHORT_SIDE)
+    env.finalize_reset_side(ASSET, reset_side)
         .expect_err("the old counterparty leg must block premature reset finalization");
     assert_eq!(env.market_data(false), market_before_early_finalize);
     assert_eq!(
@@ -132,7 +147,13 @@ fn v16_program_unilateral_zero_oi_reset_detaches_then_finalizes_permissionlessly
     }];
     let mut crank_calls = 0usize;
     for _ in 0..8 {
-        if env.primary_market_state().1.assets[ASSET as usize].stored_pos_count_short == 0 {
+        let asset = env.primary_market_state().1.assets[ASSET as usize];
+        let stored_count = if reducer_long {
+            asset.stored_pos_count_short
+        } else {
+            asset.stored_pos_count_long
+        };
+        if stored_count == 0 {
             break;
         }
         let crank = env
@@ -150,9 +171,22 @@ fn v16_program_unilateral_zero_oi_reset_detaches_then_finalizes_permissionlessly
         "reset cleanup must execute real public work"
     );
     let ready = env.primary_market_state().1.assets[ASSET as usize];
-    assert_eq!(ready.stored_pos_count_short, 0);
-    assert_eq!(ready.stale_account_count_short, 0);
-    assert_eq!(ready.pending_obligation_count_short, 0);
+    let (stored_count, stale_count, pending_count) = if reducer_long {
+        (
+            ready.stored_pos_count_short,
+            ready.stale_account_count_short,
+            ready.pending_obligation_count_short,
+        )
+    } else {
+        (
+            ready.stored_pos_count_long,
+            ready.stale_account_count_long,
+            ready.pending_obligation_count_long,
+        )
+    };
+    assert_eq!(stored_count, 0, "{case}");
+    assert_eq!(stale_count, 0, "{case}");
+    assert_eq!(pending_count, 0, "{case}");
     assert!(
         env.primary_portfolio(STALE_COUNTERPARTY)
             .active_bitmap
@@ -163,41 +197,49 @@ fn v16_program_unilateral_zero_oi_reset_detaches_then_finalizes_permissionlessly
 
     let risk_epoch_before = env.primary_market_state().1.risk_epoch;
     let finalize = env
-        .finalize_reset_side(ASSET, SHORT_SIDE)
+        .finalize_reset_side(ASSET, reset_side)
         .expect("a clean ResetPending side must finalize permissionlessly");
     max_compute_units = max_compute_units.max(finalize.compute_units);
     let finalized = env.primary_market_state().1;
-    assert_eq!(
-        finalized.assets[ASSET as usize].mode_short,
-        SideModeV16::Normal
-    );
+    let finalized_mode = if reducer_long {
+        finalized.assets[ASSET as usize].mode_short
+    } else {
+        finalized.assets[ASSET as usize].mode_long
+    };
+    assert_eq!(finalized_mode, SideModeV16::Normal, "{case}");
     assert!(finalized.risk_epoch > risk_epoch_before);
     assert_public_stock_census("INV-065 after reset finalization", &env)
         .expect("finalized reset stock census");
     assert_public_encumbrance_census("INV-065 after reset finalization", &env)
         .expect("finalized reset encumbrance census");
 
-    let reopen = env
-        .trade_no_cpi(
-            FRESH_LONG,
-            FRESH_SHORT,
-            ASSET,
-            SIZE_Q as i128,
-            INITIAL_PRICE,
-            0,
-        )
-        .expect("finalized side must admit fresh matched risk");
+    let reopen = execute_trade_route(
+        &mut env,
+        route,
+        FRESH_LONG,
+        FRESH_SHORT,
+        ASSET,
+        signed_size_q,
+        INITIAL_PRICE,
+        0,
+    )
+    .unwrap_or_else(|error| {
+        panic!("{case}: finalized side must admit fresh matched risk: {error}")
+    });
     max_compute_units = max_compute_units.max(reopen.compute_units);
-    let reclose = env
-        .trade_no_cpi(
-            FRESH_LONG,
-            FRESH_SHORT,
-            ASSET,
-            -(SIZE_Q as i128),
-            INITIAL_PRICE,
-            0,
-        )
-        .expect("fresh matched risk must retain a bounded bilateral exit");
+    let reclose = execute_trade_route(
+        &mut env,
+        route,
+        FRESH_LONG,
+        FRESH_SHORT,
+        ASSET,
+        -signed_size_q,
+        INITIAL_PRICE,
+        0,
+    )
+    .unwrap_or_else(|error| {
+        panic!("{case}: fresh matched risk must retain a bounded bilateral exit: {error}")
+    });
     max_compute_units = max_compute_units.max(reclose.compute_units);
     let after_fresh_close = env.primary_market_state().1.assets[ASSET as usize];
     assert_eq!(after_fresh_close.oi_eff_long_q, 0);
@@ -230,5 +272,28 @@ fn v16_program_unilateral_zero_oi_reset_detaches_then_finalizes_permissionlessly
         .expect("owner-exit stock census");
     assert_public_encumbrance_census("INV-065 after reset owner exits", &env)
         .expect("owner-exit encumbrance census");
-    assert!(max_compute_units < TX_CU_LIMIT);
+    assert!(
+        max_compute_units < TX_CU_LIMIT,
+        "{case}: {max_compute_units}"
+    );
+}
+
+#[test]
+fn v16_program_unilateral_zero_oi_reset_route_side_matrix_finalizes_permissionlessly() {
+    for (route_index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for reducer_long in [false, true] {
+            let mut seed = [0x45; 32];
+            seed[0] ^= route_index as u8;
+            seed[1] ^= u8::from(reducer_long);
+            assert_public_reset_lifecycle(route, reducer_long, seed);
+        }
+    }
 }
