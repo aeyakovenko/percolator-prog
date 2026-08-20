@@ -38,6 +38,12 @@
 //! writable and lamport rollback. The three schedules converge byte-for-byte across wrapper/engine
 //! state, every portfolio, all SPL accounts, token supply, and the foreign instance while each call
 //! remains below the CU ceiling.
+//! `v16_program_backed_claim_conversion_is_atomic_under_split_caps` creates a real half-backed
+//! user claim through each of the four trade routes. The public conversion API is intentionally
+//! all-or-nothing: generated strict sub-caps reject with exact rollback rather than partially
+//! consuming claim or backing atoms. Aggregate, split-attempt, and reversed-attempt schedules then
+//! execute one complete conversion and converge byte-for-byte; a final retry proves the consumed
+//! claim and lien cannot be reused.
 //!
 //! Guarantee boundary: target publication order and target lifetime are identical across the
 //! compared executions. Reordering authenticated observations is a different economic history,
@@ -48,8 +54,11 @@
 //! staleness boundaries and other operation families listed in the coverage matrix remain open.
 
 use super::*;
-use crate::support::v16_svm::{MarketConfig, V16Svm, TX_CU_LIMIT};
-use percolator::{ADL_ONE, CREDIT_RATE_SCALE, POS_SCALE};
+use crate::support::{
+    fuzz_model::execute_trade_route,
+    v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
+};
+use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
 use percolator_prog::state;
 
@@ -125,6 +134,23 @@ struct InsuranceWithdrawalFrame {
 #[derive(Debug)]
 struct InsuranceWithdrawalPartitionOutcome {
     frame: InsuranceWithdrawalFrame,
+    max_compute_units: u64,
+    public_steps: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BackingConversionFrame {
+    markets: [Vec<u8>; 2],
+    backing_ledger: Vec<u8>,
+    portfolios: Vec<Vec<u8>>,
+    foreign_portfolio: Vec<u8>,
+    tokens: Vec<(solana_sdk::pubkey::Pubkey, Vec<u8>)>,
+    matcher_contexts: Vec<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct BackingConversionPartitionOutcome {
+    frame: BackingConversionFrame,
     max_compute_units: u64,
     public_steps: usize,
 }
@@ -434,6 +460,188 @@ fn run_insurance_withdrawal_partition(
 
     Ok(InsuranceWithdrawalPartitionOutcome {
         frame,
+        max_compute_units,
+        public_steps: trace.steps.len(),
+    })
+}
+
+fn backing_conversion_frame(env: &V16Svm) -> BackingConversionFrame {
+    BackingConversionFrame {
+        markets: [env.market_data(false), env.market_data(true)],
+        backing_ledger: env.backing_domain_ledger_data(),
+        portfolios: env.all_primary_portfolio_data(),
+        foreign_portfolio: env.foreign_portfolio_data(),
+        tokens: env.all_token_account_data(),
+        matcher_contexts: env.all_matcher_context_data(),
+    }
+}
+
+fn run_backing_conversion_partition(
+    seed: [u8; 32],
+    route: TradeRoute,
+    rejected_caps: &[u128],
+) -> Result<BackingConversionPartitionOutcome, String> {
+    const WINNER: usize = 0;
+    const OPEN_COUNTERPARTY: usize = 1;
+    const CLOSE_COUNTERPARTY: usize = 2;
+    const ASSET: u16 = 0;
+    const SOURCE_DOMAIN: usize = 1;
+    const START_PRICE: u64 = 100;
+    const SETTLED_PRICE: u64 = 105;
+    const POSITION_Q: i128 = 40 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000;
+    const CLAIM_ATOMS: u128 = 200;
+    const BACKING_ATOMS: u128 = 100;
+
+    if rejected_caps
+        .iter()
+        .any(|cap| *cap == 0 || *cap >= BACKING_ATOMS)
+    {
+        return Err(
+            "fragmented conversion caps must be strict nonzero sub-conversion amounts".to_string(),
+        );
+    }
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: START_PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT; PRIMARY_ACTOR_COUNT],
+            ..MarketConfig::default()
+        },
+    );
+    env.begin_public_trace();
+    let top_up = env
+        .top_up_backing_bucket(SOURCE_DOMAIN as u16, BACKING_ATOMS, 100)
+        .map_err(|error| format!("fund backing conversion source: {error}"))?;
+    let open = execute_trade_route(
+        &mut env,
+        route,
+        WINNER,
+        OPEN_COUNTERPARTY,
+        ASSET,
+        POSITION_Q,
+        START_PRICE,
+        0,
+    )
+    .map_err(|error| format!("open backing conversion claim: {error}"))?;
+    env.warp_to_slot(2);
+    let mark = env
+        .push_auth_mark(ASSET, 2, SETTLED_PRICE)
+        .map_err(|error| format!("publish backing conversion mark: {error}"))?;
+    let crank = env
+        .crank(
+            WINNER,
+            2,
+            vec![CrankObservationHint {
+                asset_index: ASSET,
+                oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
+            }],
+        )
+        .map_err(|error| format!("settle backing conversion claim: {error}"))?;
+    let close = execute_trade_route(
+        &mut env,
+        route,
+        WINNER,
+        CLOSE_COUNTERPARTY,
+        ASSET,
+        -POSITION_Q,
+        SETTLED_PRICE,
+        0,
+    )
+    .map_err(|error| format!("flatten backing conversion winner: {error}"))?;
+    let mut max_compute_units = [
+        top_up.compute_units,
+        open.compute_units,
+        mark.compute_units,
+        crank.compute_units,
+        close.compute_units,
+    ]
+    .into_iter()
+    .max()
+    .expect("nonempty setup CU set");
+
+    let before_conversion = env.primary_market_state().1;
+    let winner_before = env.primary_portfolio(WINNER);
+    if winner_before.pnl.get() != CLAIM_ATOMS as i128
+        || before_conversion.source_credit[SOURCE_DOMAIN].positive_claim_bound_num
+            != CLAIM_ATOMS * BOUND_SCALE
+        || before_conversion.source_credit[SOURCE_DOMAIN].fresh_reserved_backing_num
+            != BACKING_ATOMS * BOUND_SCALE
+    {
+        return Err(format!(
+            "public conversion fixture did not create the exact half-backed claim: pnl={}, source={:?}",
+            winner_before.pnl.get(),
+            before_conversion.source_credit[SOURCE_DOMAIN],
+        ));
+    }
+    let tokens_before_conversion = env.all_token_account_data();
+
+    for (index, cap) in rejected_caps.iter().copied().enumerate() {
+        let before = backing_conversion_frame(&env);
+        if env.convert_released_pnl(WINNER, cap).is_ok() || backing_conversion_frame(&env) != before
+        {
+            return Err(format!(
+                "fragmented conversion cap {index} ({cap}) partially consumed an atomic claim"
+            ));
+        }
+    }
+
+    let conversion = env
+        .convert_released_pnl(WINNER, BACKING_ATOMS)
+        .map_err(|error| format!("land complete atomic backing conversion: {error}"))?;
+    max_compute_units = max_compute_units.max(conversion.compute_units);
+    let after_conversion = env.primary_market_state().1;
+    let winner_after = env.primary_portfolio(WINNER);
+    if winner_after.capital.get() - winner_before.capital.get() != BACKING_ATOMS
+        || winner_before.pnl.get() - winner_after.pnl.get() != CLAIM_ATOMS as i128
+        || winner_after.pnl.get() != 0
+        || after_conversion.source_credit[SOURCE_DOMAIN].positive_claim_bound_num != 0
+        || after_conversion.source_credit[SOURCE_DOMAIN].fresh_reserved_backing_num != 0
+        || after_conversion.source_backing_buckets[SOURCE_DOMAIN].consumed_liened_backing_num
+            != BACKING_ATOMS * BOUND_SCALE
+        || env.all_token_account_data() != tokens_before_conversion
+    {
+        return Err(format!(
+            "atomic backing conversion did not consume one claim/backing lifecycle exactly: before={:?}, after={:?}, winner_before={winner_before:?}, winner_after={winner_after:?}",
+            before_conversion.source_credit[SOURCE_DOMAIN],
+            after_conversion.source_credit[SOURCE_DOMAIN],
+        ));
+    }
+
+    let before_retry = backing_conversion_frame(&env);
+    if env.convert_released_pnl(WINNER, BACKING_ATOMS).is_ok()
+        || backing_conversion_frame(&env) != before_retry
+    {
+        return Err("completed conversion remained reusable".to_string());
+    }
+
+    let trace = env.finish_public_trace();
+    let failed_steps: Vec<_> = trace.steps.iter().filter(|step| !step.succeeded).collect();
+    if trace.out_of_band_economic_mutations != 0
+        || failed_steps.len() != rejected_caps.len() + 1
+        || failed_steps.iter().any(|step| {
+            step.program_id != env.program_id
+                || step.rejected_exact_writable_rollback != Some(true)
+                || step.rejected_no_program_lamport_delta != Some(true)
+                || step.token_deltas.iter().any(|(_, delta)| *delta != 0)
+        })
+        || trace
+            .steps
+            .iter()
+            .filter_map(|step| step.compute_units)
+            .any(|compute_units| compute_units >= TX_CU_LIMIT)
+    {
+        return Err("backing conversion trace was not public, atomic, and CU-bounded".to_string());
+    }
+
+    Ok(BackingConversionPartitionOutcome {
+        frame: backing_conversion_frame(&env),
         max_compute_units,
         public_steps: trace.steps.len(),
     })
@@ -1326,6 +1534,58 @@ proptest! {
         prop_assert!(eager.max_compute_units < TX_CU_LIMIT);
         prop_assert!(irregular.max_compute_units < TX_CU_LIMIT);
         prop_assert!(delayed.max_compute_units < TX_CU_LIMIT);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_052_backing_conversion_partition.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_backed_claim_conversion_is_atomic_under_split_caps(
+        seed in any::<[u8; 32]>(),
+        first_cap_raw in any::<u64>(),
+    ) {
+        const BACKING_ATOMS: u128 = 100;
+        let first_cap = 1 + u128::from(first_cap_raw) % (BACKING_ATOMS - 1);
+        let second_cap = BACKING_ATOMS - first_cap;
+        for route in [
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ] {
+            let aggregate = run_backing_conversion_partition(seed, route, &[])
+                .map_err(TestCaseError::fail)?;
+            let split = run_backing_conversion_partition(
+                seed,
+                route,
+                &[first_cap, second_cap],
+            )
+            .map_err(TestCaseError::fail)?;
+            let reversed = run_backing_conversion_partition(
+                seed,
+                route,
+                &[second_cap, first_cap],
+            )
+            .map_err(TestCaseError::fail)?;
+
+            prop_assert_eq!(&aggregate.frame, &split.frame);
+            prop_assert_eq!(&aggregate.frame, &reversed.frame);
+            prop_assert_eq!(split.public_steps, aggregate.public_steps + 2);
+            prop_assert_eq!(reversed.public_steps, aggregate.public_steps + 2);
+            prop_assert!(aggregate.max_compute_units < TX_CU_LIMIT);
+            prop_assert!(split.max_compute_units < TX_CU_LIMIT);
+            prop_assert!(reversed.max_compute_units < TX_CU_LIMIT);
+        }
     }
 }
 
