@@ -13117,9 +13117,12 @@ pub mod processor {
             if group.header.mode != 1 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            let authenticated_slot = authenticated_market_slot_or_fallback_view(&group);
+            group
+                .advance_resolved_slot_not_atomic(authenticated_slot)
+                .map_err(map_v16_error)?;
             if cfg.force_close_delay_slots != 0
-                && authenticated_market_slot_or_fallback_view(&group)
-                    .saturating_sub(group.header.resolved_slot.get())
+                && authenticated_slot.saturating_sub(group.header.resolved_slot.get())
                     < cfg.force_close_delay_slots
             {
                 expect_signer(owner)?;
@@ -13203,6 +13206,10 @@ pub mod processor {
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
             expect_portfolio_view_owner(&portfolio, owner.key)?;
+            let authenticated_slot = authenticated_market_slot_or_fallback_view(&group);
+            group
+                .advance_resolved_slot_not_atomic(authenticated_slot)
+                .map_err(map_v16_error)?;
             let payout = group
                 .claim_resolved_payout_topup_not_atomic(&mut portfolio)
                 .map_err(map_v16_error)?;

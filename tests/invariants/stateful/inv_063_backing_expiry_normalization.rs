@@ -25,14 +25,26 @@
 //! withdrawal while the bucket is fresh and lands it at all three authenticated boundaries. Only
 //! the pre-expiry request may recover principal; equal/late requests must roll back rather than
 //! bypass expiry forfeiture.
+//! `v16_program_resolved_close_normalizes_backing_at_expiry` creates the source-backed claim through
+//! public trades, resolves at all three boundaries, and permutes claimant plus terminal-route
+//! order. Every rejected step rolls back exactly, every successful payout reconciles against both
+//! engine and SPL custody, and equal/late resolution removes lapsed backing from the fresh-credit
+//! classes before terminal disposition.
+//! `v16_program_post_snapshot_expiry_topup_is_public_and_order_independent` then captures a genuinely
+//! partial payout receipt before a second source domain expires. It advances authenticated Clock
+//! through both terminal routes, requires a value-moving payout top-up, and proves that exact/late
+//! expiry removes the lapsed backing without changing claimant-order or route-order economics.
 //!
 //! Guarantee boundary: the trade, conversion, and retained-top-up consumers have fixed-pin bounded
 //! evidence over the generated route and expiry boundaries represented here.
 
 use super::*;
-use crate::support::v16_svm::{MarketConfig, V16Svm};
-use percolator::{BOUND_SCALE, POS_SCALE};
+use crate::support::v16_svm::{MarketConfig, V16Svm, TX_CU_LIMIT};
+use percolator::{
+    active_bitmap_is_empty, BackingBucketStatusV16, MarketModeV16, BOUND_SCALE, POS_SCALE,
+};
 use percolator_prog::ix::CrankObservationHint;
+use percolator_prog::state;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EconomicSnapshot {
@@ -111,6 +123,721 @@ fn assert_retained_maturity_boundary(discovery: &RetainedMaturityDiscovery) {
             discovery.landing
         ),
     }
+}
+
+fn inv063_resolved_portfolio_is_terminal(env: &V16Svm, actor: usize) -> bool {
+    let group = env.primary_market_state().1;
+    let account = env.primary_portfolio(actor);
+    let Ok(receipt) = account.resolved_payout_receipt.try_to_runtime() else {
+        return false;
+    };
+    let Ok(close) = account.close_progress.try_to_runtime() else {
+        return false;
+    };
+    group.mode == MarketModeV16::Resolved
+        && account.capital.get() == 0
+        && account.pnl.get() == 0
+        && account.reserved_pnl.get() == 0
+        && account.fee_credits.get() == 0
+        && account.cancel_deposit_escrow.get() == 0
+        && active_bitmap_is_empty(state::portfolio_active_bitmap(&account))
+        && account.stale_state == 0
+        && account.b_stale_state == 0
+        && account.rebalance_lock == 0
+        && account.liquidation_lock == 0
+        && account.last_fee_slot.get() == group.resolved_slot
+        && account.health_cert.valid == 0
+        && account
+            .source_domains
+            .iter()
+            .all(|source| !source.is_occupied())
+        && (!receipt.present || receipt.finalized)
+        && (!close.active || (close.finalized && close.residual_remaining == 0))
+}
+
+fn drain_inv063_resolved_accounts(
+    env: &mut V16Svm,
+    actor_order: &[usize],
+    claim_first: bool,
+    label: &str,
+) -> Result<u64, String> {
+    const TERMINAL_SWEEP_BOUND: usize = 32;
+    let route_order = if claim_first {
+        [true, false]
+    } else {
+        [false, true]
+    };
+    let mut claim_route_payout = 0u64;
+
+    for sweep in 0..TERMINAL_SWEEP_BOUND {
+        if actor_order
+            .iter()
+            .copied()
+            .all(|actor| inv063_resolved_portfolio_is_terminal(env, actor))
+        {
+            break;
+        }
+        let mut sweep_mutated = false;
+        for actor in actor_order.iter().copied() {
+            if inv063_resolved_portfolio_is_terminal(env, actor) {
+                continue;
+            }
+            for is_claim in route_order {
+                let before = snapshot(env);
+                let engine_vault_before = env.primary_market_state().1.vault;
+                let spl_vault_before = env.token_amount(env.vault);
+                let destination = env.actors[actor].destination_token;
+                let destination_before = env.token_amount(destination);
+                let result = if is_claim {
+                    env.claim_resolved_payout_topup_primary(actor)
+                } else {
+                    env.close_resolved_primary_signed(actor)
+                };
+                let Ok(success) = result else {
+                    if snapshot(env) != before {
+                        return Err(format!(
+                            "{label} actor {actor} rejected terminal route mutated state"
+                        ));
+                    }
+                    continue;
+                };
+                if success.compute_units >= TX_CU_LIMIT {
+                    return Err(format!(
+                        "{label} actor {actor} terminal route consumed {} CU",
+                        success.compute_units
+                    ));
+                }
+                let payout = env
+                    .token_amount(destination)
+                    .checked_sub(destination_before)
+                    .ok_or_else(|| format!("{label} actor {actor} destination decreased"))?;
+                let spl_debit = spl_vault_before
+                    .checked_sub(env.token_amount(env.vault))
+                    .ok_or_else(|| format!("{label} terminal route increased SPL vault"))?;
+                let engine_debit = engine_vault_before
+                    .checked_sub(env.primary_market_state().1.vault)
+                    .ok_or_else(|| format!("{label} terminal route increased engine vault"))?;
+                if payout != spl_debit || u128::from(payout) != engine_debit {
+                    return Err(format!(
+                        "{label} actor {actor} payout mismatch: destination={payout}, SPL={spl_debit}, engine={engine_debit}"
+                    ));
+                }
+                if is_claim {
+                    claim_route_payout = claim_route_payout
+                        .checked_add(payout)
+                        .ok_or_else(|| "claim-route payout overflow".to_string())?;
+                }
+                sweep_mutated |= snapshot(env) != before;
+                if inv063_resolved_portfolio_is_terminal(env, actor) {
+                    break;
+                }
+            }
+        }
+        if !sweep_mutated
+            && !actor_order
+                .iter()
+                .copied()
+                .all(|actor| inv063_resolved_portfolio_is_terminal(env, actor))
+        {
+            return Err(format!(
+                "{label} terminal routes reached a nonterminal fixed point at sweep {sweep}"
+            ));
+        }
+    }
+
+    if !actor_order
+        .iter()
+        .copied()
+        .all(|actor| inv063_resolved_portfolio_is_terminal(env, actor))
+    {
+        return Err(format!(
+            "{label} terminal routes did not converge in {TERMINAL_SWEEP_BOUND} sweeps"
+        ));
+    }
+    Ok(claim_route_payout)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedExpiryOutcome {
+    payouts: [u64; 2],
+    claim_route_payout: u64,
+    bucket_status: BackingBucketStatusV16,
+    fresh_unliened_backing_num: u128,
+    valid_liened_backing_num: u128,
+    consumed_liened_backing_num: u128,
+    impaired_liened_backing_num: u128,
+    fresh_reserved_backing_num: u128,
+    valid_source_liened_backing_num: u128,
+    impaired_source_liened_backing_num: u128,
+    final_engine_vault: u128,
+    final_spl_vault: u64,
+}
+
+fn run_resolved_expiry_world(
+    landing: BackingExpiryLanding,
+    winner_first: bool,
+    claim_first: bool,
+) -> Result<ResolvedExpiryOutcome, String> {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const PROVIDER: usize = 2;
+    const ASSET: u16 = 0;
+    const WINNING_DOMAIN: u16 = 1;
+    const INITIAL_PRICE: u64 = 100;
+    const WINNING_MARK: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const BACKING: u128 = 150;
+    const EXPIRY_SLOT: u64 = 5;
+
+    let mut seed = [0x67; 32];
+    seed[0] ^= match landing {
+        BackingExpiryLanding::Before => 1,
+        BackingExpiryLanding::At => 2,
+        BackingExpiryLanding::After => 3,
+    };
+    seed[1] ^= u8::from(winner_first);
+    seed[2] ^= u8::from(claim_first);
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: INITIAL_PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1_000, 1_000, 0, 0, 0],
+            ..MarketConfig::default()
+        },
+    );
+    let token_supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+    )
+    .map_err(|error| format!("install backing provider: {error}"))?;
+    env.top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, BACKING, EXPIRY_SLOT)
+        .map_err(|error| format!("fund expiring backing: {error}"))?;
+    env.trade_no_cpi(WINNER, LOSER, ASSET, SIZE_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("open source-backed position: {error}"))?;
+    env.warp_to_slot(2);
+    env.push_auth_mark(ASSET, 2, WINNING_MARK)
+        .map_err(|error| format!("publish winning mark: {error}"))?;
+    let oracle_accounts = env.primary_profile(ASSET as usize).oracle_leg_count;
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts,
+        }]
+    };
+    for actor in [LOSER, WINNER] {
+        env.crank(actor, 2, observations())
+            .map_err(|error| format!("refresh source-backed actor {actor}: {error}"))?;
+    }
+    env.trade_no_cpi(WINNER, LOSER, ASSET, -SIZE_Q, WINNING_MARK, 0)
+        .map_err(|error| format!("flatten source-backed position: {error}"))?;
+
+    let before_resolution = env.primary_market_state().1;
+    let claim_before =
+        before_resolution.source_credit[WINNING_DOMAIN as usize].positive_claim_bound_num;
+    let bucket_before = before_resolution.source_backing_buckets[WINNING_DOMAIN as usize];
+    if claim_before == 0
+        || bucket_before.status != BackingBucketStatusV16::Fresh
+        || bucket_before.fresh_unliened_backing_num < claim_before
+    {
+        return Err(format!(
+            "fixture did not create a fresh source-backed terminal claim: claim={claim_before}, bucket={bucket_before:?}"
+        ));
+    }
+
+    let authenticated_slot = match landing {
+        BackingExpiryLanding::Before => EXPIRY_SLOT - 1,
+        BackingExpiryLanding::At => EXPIRY_SLOT,
+        BackingExpiryLanding::After => EXPIRY_SLOT + 1,
+    };
+    env.warp_to_slot(authenticated_slot);
+    env.resolve_market()
+        .map_err(|error| format!("resolve at {landing:?}: {error}"))?;
+    if env.primary_market_state().1.mode != MarketModeV16::Resolved {
+        return Err(format!(
+            "{landing:?} resolution did not enter Resolved mode"
+        ));
+    }
+    let engine_vault_at_resolution = env.primary_market_state().1.vault;
+    let spl_vault_at_resolution = env.token_amount(env.vault);
+    let destinations_before = [
+        env.token_amount(env.actors[WINNER].destination_token),
+        env.token_amount(env.actors[LOSER].destination_token),
+    ];
+    let actor_order = if winner_first {
+        [WINNER, LOSER]
+    } else {
+        [LOSER, WINNER]
+    };
+    let claim_route_payout = drain_inv063_resolved_accounts(
+        &mut env,
+        &actor_order,
+        claim_first,
+        &format!("{landing:?}"),
+    )?;
+    let group = env.primary_market_state().1;
+    let bucket = group.source_backing_buckets[WINNING_DOMAIN as usize];
+    let source = group.source_credit[WINNING_DOMAIN as usize];
+    let payouts = [
+        env.token_amount(env.actors[WINNER].destination_token)
+            .checked_sub(destinations_before[0])
+            .ok_or_else(|| "winner destination decreased".to_string())?,
+        env.token_amount(env.actors[LOSER].destination_token)
+            .checked_sub(destinations_before[1])
+            .ok_or_else(|| "loser destination decreased".to_string())?,
+    ];
+    let payout_total = u128::from(payouts[0])
+        .checked_add(u128::from(payouts[1]))
+        .ok_or_else(|| "terminal payout total overflow".to_string())?;
+    if engine_vault_at_resolution
+        .checked_sub(group.vault)
+        .ok_or_else(|| "terminal settlement increased engine vault".to_string())?
+        != payout_total
+        || spl_vault_at_resolution
+            .checked_sub(env.token_amount(env.vault))
+            .ok_or_else(|| "terminal settlement increased SPL vault".to_string())?
+            != u64::try_from(payout_total).map_err(|_| "payout total exceeds u64".to_string())?
+        || u128::from(env.token_amount(env.vault)) != group.vault
+        || env.token_supply_observed() != token_supply_before
+    {
+        return Err(format!(
+            "{landing:?} terminal custody did not reconcile: payouts={payouts:?}, engine={engine_vault_at_resolution}->{}, SPL={spl_vault_at_resolution}->{}, supply={token_supply_before}->{}",
+            group.vault,
+            env.token_amount(env.vault),
+            env.token_supply_observed()
+        ));
+    }
+
+    Ok(ResolvedExpiryOutcome {
+        payouts,
+        claim_route_payout,
+        bucket_status: bucket.status,
+        fresh_unliened_backing_num: bucket.fresh_unliened_backing_num,
+        valid_liened_backing_num: bucket.valid_liened_backing_num,
+        consumed_liened_backing_num: bucket.consumed_liened_backing_num,
+        impaired_liened_backing_num: bucket.impaired_liened_backing_num,
+        fresh_reserved_backing_num: source.fresh_reserved_backing_num,
+        valid_source_liened_backing_num: source.valid_liened_backing_num,
+        impaired_source_liened_backing_num: source.impaired_liened_backing_num,
+        final_engine_vault: group.vault,
+        final_spl_vault: env.token_amount(env.vault),
+    })
+}
+
+#[test]
+fn v16_program_resolved_close_normalizes_backing_at_expiry() {
+    let mut canonical = Vec::new();
+    for landing in BackingExpiryLanding::ALL {
+        let mut outcomes = Vec::new();
+        for winner_first in [false, true] {
+            for claim_first in [false, true] {
+                let outcome = run_resolved_expiry_world(landing, winner_first, claim_first)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{landing:?}/winner_first={winner_first}/claim_first={claim_first}: {error}"
+                        )
+                    });
+                outcomes.push(outcome);
+            }
+        }
+        assert!(
+            outcomes.windows(2).all(|pair| pair[0] == pair[1]),
+            "{landing:?} terminal economics depend on claimant or payout-route order: {outcomes:?}"
+        );
+        let outcome = outcomes.remove(0);
+        match landing {
+            BackingExpiryLanding::Before => {
+                assert!(
+                    outcome.consumed_liened_backing_num != 0,
+                    "fresh resolved close must consume source backing nonvacuously: {outcome:?}"
+                );
+            }
+            BackingExpiryLanding::At | BackingExpiryLanding::After => {
+                assert_ne!(outcome.bucket_status, BackingBucketStatusV16::Fresh);
+                assert_eq!(outcome.fresh_unliened_backing_num, 0);
+                assert_eq!(outcome.valid_liened_backing_num, 0);
+                assert_eq!(outcome.consumed_liened_backing_num, 0);
+                assert_eq!(outcome.fresh_reserved_backing_num, 0);
+                assert_eq!(outcome.valid_source_liened_backing_num, 0);
+            }
+        }
+        canonical.push(outcome);
+    }
+    assert_eq!(
+        canonical[1], canonical[2],
+        "exact and late expiry must have identical terminal economics"
+    );
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PostSnapshotExpiryEconomicOutcome {
+    payouts: [u64; 5],
+    bucket_status: BackingBucketStatusV16,
+    fresh_unliened_backing_num: u128,
+    valid_liened_backing_num: u128,
+    consumed_liened_backing_num: u128,
+    fresh_reserved_backing_num: u128,
+    valid_source_liened_backing_num: u128,
+    final_engine_vault: u128,
+    final_spl_vault: u64,
+}
+
+fn run_post_snapshot_expiry_claim_world(
+    landing: BackingExpiryLanding,
+    reverse_tail: bool,
+    claim_first: bool,
+) -> Result<(PostSnapshotExpiryEconomicOutcome, u64), String> {
+    const JUNIOR_WINNER: usize = 0;
+    const JUNIOR_LOSER: usize = 1;
+    const BACKED_WINNER: usize = 2;
+    const BACKED_LOSER: usize = 3;
+    const PROVIDER: usize = 4;
+    const BACKED_ASSET: u16 = 1;
+    const JUNIOR_DOMAIN: u16 = 1;
+    const BACKED_DOMAIN: u16 = 3;
+    const INITIAL_PRICE: u64 = 100;
+    const WINNING_MARK: u64 = 150;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const JUNIOR_BACKING: u128 = 1;
+    const BACKING: u128 = 1_500;
+    const SNAPSHOT_SLOT: u64 = 12;
+    const EXPIRY_SLOT: u64 = 13;
+
+    let mut seed = [0x68; 32];
+    seed[0] ^= match landing {
+        BackingExpiryLanding::Before => 1,
+        BackingExpiryLanding::At => 2,
+        BackingExpiryLanding::After => 3,
+    };
+    seed[1] ^= u8::from(reverse_tail);
+    seed[2] ^= u8::from(claim_first);
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: INITIAL_PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1_000, 250, 1_000, 250, 0],
+            ..MarketConfig::default()
+        },
+    );
+    let token_supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        0,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+    )
+    .map_err(|error| format!("install junior backing provider: {error}"))?;
+    env.update_asset_authority_from_admin(
+        BACKED_ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+    )
+    .map_err(|error| format!("install post-snapshot backing provider: {error}"))?;
+    env.top_up_backing_bucket_for_actor(PROVIDER, JUNIOR_DOMAIN, JUNIOR_BACKING, SNAPSHOT_SLOT)
+        .map_err(|error| format!("fund expiring junior backing: {error}"))?;
+    let backed_topup = env.build_retained_backing_bucket_top_up_for_actor(
+        PROVIDER,
+        BACKED_DOMAIN,
+        BACKING,
+        EXPIRY_SLOT,
+    );
+    env.land_retained(backed_topup)
+        .map_err(|error| format!("fund post-snapshot backing: {error}"))?;
+    env.trade_no_cpi(JUNIOR_WINNER, JUNIOR_LOSER, 0, SIZE_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("open junior claim: {error}"))?;
+    env.trade_no_cpi(
+        BACKED_WINNER,
+        BACKED_LOSER,
+        BACKED_ASSET,
+        SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    )
+    .map_err(|error| format!("open backed claim: {error}"))?;
+    for (offset, mark) in (105..=WINNING_MARK).step_by(5).enumerate() {
+        let slot = 2 + u64::try_from(offset).expect("bounded mark sequence");
+        env.warp_to_slot(slot);
+        for asset in [0, BACKED_ASSET] {
+            env.push_auth_mark(asset, slot, mark)
+                .map_err(|error| format!("publish asset {asset} mark {mark}: {error}"))?;
+        }
+        for (actor, asset) in [
+            (JUNIOR_LOSER, 0),
+            (JUNIOR_WINNER, 0),
+            (BACKED_LOSER, BACKED_ASSET),
+            (BACKED_WINNER, BACKED_ASSET),
+        ] {
+            let oracle_accounts = env.primary_profile(asset as usize).oracle_leg_count;
+            env.crank(
+                actor,
+                slot,
+                vec![CrankObservationHint {
+                    asset_index: asset,
+                    oracle_accounts,
+                }],
+            )
+            .map_err(|error| {
+                format!("refresh actor {actor} on asset {asset} at mark {mark}: {error}")
+            })?;
+        }
+    }
+    env.trade_no_cpi(JUNIOR_WINNER, JUNIOR_LOSER, 0, -SIZE_Q, WINNING_MARK, 0)
+        .map_err(|error| format!("flatten junior claim: {error}"))?;
+    env.trade_no_cpi(
+        BACKED_WINNER,
+        BACKED_LOSER,
+        BACKED_ASSET,
+        -SIZE_Q,
+        WINNING_MARK,
+        0,
+    )
+    .map_err(|error| format!("flatten backed claim: {error}"))?;
+    let before_resolution = env.primary_market_state().1;
+    if before_resolution.source_credit[JUNIOR_DOMAIN as usize].positive_claim_bound_num == 0
+        || before_resolution.source_credit[BACKED_DOMAIN as usize].positive_claim_bound_num == 0
+        || before_resolution.source_backing_buckets[JUNIOR_DOMAIN as usize].status
+            != BackingBucketStatusV16::Fresh
+        || before_resolution.source_backing_buckets[BACKED_DOMAIN as usize].status
+            != BackingBucketStatusV16::Fresh
+    {
+        return Err(format!(
+            "post-snapshot fixture did not create both junior and backed claims: junior={:?}, backed={:?}, bucket={:?}",
+            before_resolution.source_credit[JUNIOR_DOMAIN as usize],
+            before_resolution.source_credit[BACKED_DOMAIN as usize],
+            before_resolution.source_backing_buckets[BACKED_DOMAIN as usize]
+        ));
+    }
+
+    env.warp_to_slot(SNAPSHOT_SLOT);
+    env.resolve_market()
+        .map_err(|error| format!("resolve before backing expiry: {error}"))?;
+    let engine_vault_at_resolution = env.primary_market_state().1.vault;
+    let spl_vault_at_resolution = env.token_amount(env.vault);
+    let destinations_before: [u64; 5] =
+        std::array::from_fn(|actor| env.token_amount(env.actors[actor].destination_token));
+
+    let premature_claim_payout = drain_inv063_resolved_accounts(
+        &mut env,
+        &[JUNIOR_LOSER, BACKED_LOSER, PROVIDER],
+        true,
+        "pre-snapshot blockers",
+    )?;
+    if premature_claim_payout != 0 || env.primary_market_state().1.payout_snapshot_captured {
+        return Err(format!(
+            "closing only nonclaimants unexpectedly paid a receipt or captured the payout snapshot: payout={premature_claim_payout}, ledger={:?}",
+            env.primary_market_state().1.resolved_payout_ledger
+        ));
+    }
+
+    let first_destination = env.actors[JUNIOR_WINNER].destination_token;
+    let mut first_receipt = env
+        .primary_portfolio(JUNIOR_WINNER)
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .map_err(|error| format!("decode initial claimant receipt: {error:?}"))?;
+    for step in 0..8 {
+        if first_receipt.present {
+            break;
+        }
+        let first_before = snapshot(&env);
+        let first_engine_vault = env.primary_market_state().1.vault;
+        let first_spl_vault = env.token_amount(env.vault);
+        let first_destination_before = env.token_amount(first_destination);
+        let first = env
+            .close_resolved_primary_signed(JUNIOR_WINNER)
+            .map_err(|error| {
+                format!("capture pre-expiry payout snapshot at step {step}: {error}")
+            })?;
+        if first.compute_units >= TX_CU_LIMIT {
+            return Err(format!(
+                "snapshot-capturing CloseResolved consumed {} CU",
+                first.compute_units
+            ));
+        }
+        let first_payout = env
+            .token_amount(first_destination)
+            .checked_sub(first_destination_before)
+            .ok_or_else(|| "snapshot claimant destination decreased".to_string())?;
+        let first_spl_debit = first_spl_vault
+            .checked_sub(env.token_amount(env.vault))
+            .ok_or_else(|| "snapshot close increased SPL vault".to_string())?;
+        let first_engine_debit = first_engine_vault
+            .checked_sub(env.primary_market_state().1.vault)
+            .ok_or_else(|| "snapshot close increased engine vault".to_string())?;
+        if first_payout != first_spl_debit || u128::from(first_payout) != first_engine_debit {
+            return Err(format!(
+                "snapshot payout mismatch: destination={first_payout}, SPL={first_spl_debit}, engine={first_engine_debit}"
+            ));
+        }
+        if snapshot(&env) == first_before {
+            let group = env.primary_market_state().1;
+            let account = env.primary_portfolio(JUNIOR_WINNER);
+            return Err(format!(
+                "snapshot-capturing CloseResolved was a successful no-op at step {step}: snapshot={}, stale={}, b_stale={}, negative={}, blockers={}, capital={}, pnl={}, active={:?}, receipt={first_receipt:?}, ledger={:?}",
+                group.payout_snapshot_captured,
+                group.stale_certificate_count,
+                group.b_stale_account_count,
+                group.negative_pnl_account_count,
+                group.resolved_payout_blocker_count,
+                account.capital.get(),
+                account.pnl.get(),
+                state::portfolio_active_bitmap(&account),
+                group.resolved_payout_ledger,
+            ));
+        }
+        first_receipt = env
+            .primary_portfolio(JUNIOR_WINNER)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("decode claimant receipt at step {step}: {error:?}"))?;
+    }
+    if !env.primary_market_state().1.payout_snapshot_captured
+        || !first_receipt.present
+        || first_receipt.finalized
+    {
+        return Err(format!(
+            "first public close did not leave a genuinely partial receipt: receipt={first_receipt:?}, ledger={:?}",
+            env.primary_market_state().1.resolved_payout_ledger
+        ));
+    }
+
+    let landing_slot = match landing {
+        BackingExpiryLanding::Before => EXPIRY_SLOT - 1,
+        BackingExpiryLanding::At => EXPIRY_SLOT,
+        BackingExpiryLanding::After => EXPIRY_SLOT + 1,
+    };
+    env.warp_to_slot(landing_slot);
+    let tail_order = if reverse_tail {
+        [
+            BACKED_LOSER,
+            JUNIOR_LOSER,
+            BACKED_WINNER,
+            PROVIDER,
+            JUNIOR_WINNER,
+        ]
+    } else {
+        [
+            BACKED_WINNER,
+            JUNIOR_LOSER,
+            BACKED_LOSER,
+            PROVIDER,
+            JUNIOR_WINNER,
+        ]
+    };
+    let claim_route_payout = drain_inv063_resolved_accounts(
+        &mut env,
+        &tail_order,
+        claim_first,
+        &format!("post-snapshot {landing:?}"),
+    )?;
+    let group = env.primary_market_state().1;
+    let bucket = group.source_backing_buckets[BACKED_DOMAIN as usize];
+    let source = group.source_credit[BACKED_DOMAIN as usize];
+    let payouts: [u64; 5] = std::array::from_fn(|actor| {
+        env.token_amount(env.actors[actor].destination_token)
+            .checked_sub(destinations_before[actor])
+            .expect("terminal destination cannot decrease")
+    });
+    let payout_total = payouts
+        .iter()
+        .try_fold(0u128, |sum, payout| sum.checked_add(u128::from(*payout)));
+    let Some(payout_total) = payout_total else {
+        return Err("post-snapshot payout total overflow".to_string());
+    };
+    if engine_vault_at_resolution
+        .checked_sub(group.vault)
+        .ok_or_else(|| "post-snapshot settlement increased engine vault".to_string())?
+        != payout_total
+        || spl_vault_at_resolution
+            .checked_sub(env.token_amount(env.vault))
+            .ok_or_else(|| "post-snapshot settlement increased SPL vault".to_string())?
+            != u64::try_from(payout_total).map_err(|_| "payout total exceeds u64".to_string())?
+        || u128::from(env.token_amount(env.vault)) != group.vault
+        || env.token_supply_observed() != token_supply_before
+    {
+        return Err(format!(
+            "post-snapshot {landing:?} custody mismatch: payouts={payouts:?}, engine={engine_vault_at_resolution}->{}, SPL={spl_vault_at_resolution}->{}, supply={token_supply_before}->{}",
+            group.vault,
+            env.token_amount(env.vault),
+            env.token_supply_observed()
+        ));
+    }
+    Ok((
+        PostSnapshotExpiryEconomicOutcome {
+            payouts,
+            bucket_status: bucket.status,
+            fresh_unliened_backing_num: bucket.fresh_unliened_backing_num,
+            valid_liened_backing_num: bucket.valid_liened_backing_num,
+            consumed_liened_backing_num: bucket.consumed_liened_backing_num,
+            fresh_reserved_backing_num: source.fresh_reserved_backing_num,
+            valid_source_liened_backing_num: source.valid_liened_backing_num,
+            final_engine_vault: group.vault,
+            final_spl_vault: env.token_amount(env.vault),
+        },
+        claim_route_payout,
+    ))
+}
+
+#[test]
+fn v16_program_post_snapshot_expiry_topup_is_public_and_order_independent() {
+    let mut canonical = Vec::new();
+    for landing in BackingExpiryLanding::ALL {
+        let mut outcomes = Vec::new();
+        let mut claim_first_payouts = Vec::new();
+        for reverse_tail in [false, true] {
+            for claim_first in [false, true] {
+                let (outcome, claim_route_payout) =
+                    run_post_snapshot_expiry_claim_world(landing, reverse_tail, claim_first)
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "{landing:?}/reverse_tail={reverse_tail}/claim_first={claim_first}: {error}"
+                            )
+                        });
+                if claim_first {
+                    claim_first_payouts.push(claim_route_payout);
+                }
+                outcomes.push(outcome);
+            }
+        }
+        assert!(
+            outcomes.windows(2).all(|pair| pair[0] == pair[1]),
+            "post-snapshot {landing:?} economics depend on tail or route order: {outcomes:?}"
+        );
+        assert!(
+            claim_first_payouts.iter().all(|payout| *payout != 0),
+            "post-snapshot {landing:?} must exercise a value-moving ClaimResolvedPayoutTopup: {claim_first_payouts:?}"
+        );
+        let outcome = outcomes.remove(0);
+        match landing {
+            BackingExpiryLanding::Before => assert!(
+                outcome.consumed_liened_backing_num != 0,
+                "fresh post-snapshot support must be consumed: {outcome:?}"
+            ),
+            BackingExpiryLanding::At | BackingExpiryLanding::After => {
+                assert_ne!(outcome.bucket_status, BackingBucketStatusV16::Fresh);
+                assert_eq!(outcome.fresh_unliened_backing_num, 0);
+                assert_eq!(outcome.valid_liened_backing_num, 0);
+                assert_eq!(outcome.consumed_liened_backing_num, 0);
+                assert_eq!(outcome.fresh_reserved_backing_num, 0);
+                assert_eq!(outcome.valid_source_liened_backing_num, 0);
+            }
+        }
+        canonical.push(outcome);
+    }
+    assert_eq!(
+        canonical[1], canonical[2],
+        "post-snapshot exact and late expiry must have identical terminal economics"
+    );
 }
 
 #[test]
