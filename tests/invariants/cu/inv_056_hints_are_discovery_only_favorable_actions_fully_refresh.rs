@@ -14,8 +14,10 @@
 //! selector traces prove hostile hints roll back before an honest retry progresses; once Resolved,
 //! duplicate hints are economically inert and produce the same payout as an empty-hint close.
 //! A public two-atom bankruptcy/forfeit trace proves B settlement budgets are collateral atoms,
-//! not B-index ticks: one owner step exposes the SettleB selector, duplicate hints roll back, and
-//! one empty-hint crank consumes the remaining atom at bounded CU.
+//! not B-index ticks: one owner step exposes the SettleB selector, duplicate external hints roll
+//! back, and one authenticated-tail crank consumes the remaining atom at bounded CU. INV-077
+//! composes a three-feed tail with selected max-shape liquidation after exact duplicate/order
+//! rollback.
 //! INV-053 owns the single-leg TradeNoCpi/TradeCpi variants and every single-omitted max-shape
 //! refresh case.
 
@@ -377,13 +379,16 @@ fn v16_program_pending_close_bad_hints_roll_back_then_canonical_crank_progresses
 
 #[test]
 fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
+    let (fixture, settle_b_oracle) =
+        public_asset1_bankrupt_close_fixture_with_asset0_external_oracle();
     let PublicActiveCloseFixture {
         mut env,
         loss,
         asset1_counterparty_owner,
         asset1_counterparty,
+        live_peer,
         ..
-    } = public_asset1_bankrupt_close_fixture();
+    } = fixture;
 
     // The fixture's owner forfeit books the first loss atom. A permissionless
     // close continuation books the second, entirely through public routes.
@@ -426,6 +431,31 @@ fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
     );
     assert!(discovered.b_snap < target_b && discovered.b_stale);
 
+    // Compose the selected SettleB step with a real external-oracle tail for
+    // the unrelated live asset. The observation may update authenticated
+    // market state, but it must not suppress or replace higher-priority B
+    // progress on the target account.
+    for _ in 0..3 {
+        let catchup_cu = env.crank_with_oracle_tail(
+            live_peer,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: crank_observations(0),
+            },
+            &[settle_b_oracle],
+        );
+        assert_cu_within(
+            "INV-056 external-tail bounded market catch-up",
+            catchup_cu,
+            CRANK_CU_LIMIT,
+        );
+    }
+    assert_eq!(
+        env.market_state().1.assets[0].slot_last,
+        4,
+        "the external asset must be current before measuring composed account progress"
+    );
+
     let market_before = env.svm.get_account(&env.market).unwrap();
     let portfolio_before = env.svm.get_account(&asset1_counterparty).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
@@ -436,11 +466,11 @@ fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
             observations: vec![
                 CrankObservationHint {
                     asset_index: 0,
-                    oracle_accounts: 0,
+                    oracle_accounts: 1,
                 },
                 CrankObservationHint {
                     asset_index: 0,
-                    oracle_accounts: 0,
+                    oracle_accounts: 1,
                 },
             ],
         },
@@ -448,6 +478,8 @@ fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
             AccountMeta::new_readonly(env.payer.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(asset1_counterparty, false),
+            AccountMeta::new_readonly(settle_b_oracle, false),
+            AccountMeta::new_readonly(settle_b_oracle, false),
         ],
         &[],
     );
@@ -464,17 +496,25 @@ fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
         .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 0,
-                observations: vec![],
+                observations: vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                }],
             },
             vec![
                 AccountMeta::new_readonly(env.payer.pubkey(), false),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(asset1_counterparty, false),
+                AccountMeta::new_readonly(settle_b_oracle, false),
             ],
             &[],
         )
-        .expect("SettleB must be dispatchable from committed state without hints");
-    assert_cu_within("INV-056 public SettleB retry", settle_cu, CRANK_CU_LIMIT);
+        .expect("SettleB must compose with an authenticated unrelated oracle tail");
+    assert_cu_within(
+        "INV-056 external-tail plus public SettleB",
+        settle_cu,
+        CRANK_CU_LIMIT,
+    );
     let settled_account = env.portfolio_state(asset1_counterparty);
     let settled = active_leg_for_asset(&settled_account, 1);
     assert_eq!(

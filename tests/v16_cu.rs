@@ -87,12 +87,48 @@ struct PublicActiveCloseFixture {
 }
 
 fn public_asset1_bankrupt_close_fixture() -> PublicActiveCloseFixture {
+    public_asset1_bankrupt_close_fixture_impl(None).0
+}
+
+fn public_asset1_bankrupt_close_fixture_with_asset0_external_oracle(
+) -> (PublicActiveCloseFixture, Pubkey) {
+    let (fixture, oracle) = public_asset1_bankrupt_close_fixture_impl(Some([0x58; 32]));
+    (
+        fixture,
+        oracle.expect("external-oracle fixture must return its feed account"),
+    )
+}
+
+fn public_asset1_bankrupt_close_fixture_impl(
+    asset0_external_feed: Option<[u8; 32]>,
+) -> (PublicActiveCloseFixture, Option<Pubkey>) {
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         max_bankrupt_close_lifetime_slots: 2,
         public_b_chunk_atoms: 1,
         ..V16CuMarketParams::default()
     });
-    env.configure_auth_mark_with_cu(0, 100);
+    let asset0_oracle = if let Some(feed) = asset0_external_feed {
+        set_test_clock(&mut env, 1, 100);
+        let oracle = env.set_pyth_price_with_conf(&feed, 100, -6, 0, 100);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0; 32], [0; 32]],
+            &[oracle],
+            1,
+            100,
+            0,
+            0,
+            10,
+            0,
+        )
+        .expect("configure fixture asset-0 external oracle");
+        Some(oracle)
+    } else {
+        env.configure_auth_mark_with_cu(0, 100);
+        None
+    };
     env.configure_permissionless_resolve_with_cu(100, 5);
     env.update_market_init_fee_policy_with_cu(1);
 
@@ -173,17 +209,20 @@ fn public_asset1_bankrupt_close_fixture() -> PublicActiveCloseFixture {
     assert_eq!(ledger.asset_index, 1);
     assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
 
-    PublicActiveCloseFixture {
-        env,
-        loss_owner,
-        loss,
-        asset1_counterparty_owner: counterparty_owner,
-        asset1_counterparty: counterparty,
-        live_counterparty_owner: base_long_owner,
-        live_counterparty: base_long,
-        live_peer_owner: base_short_owner,
-        live_peer: base_short,
-    }
+    (
+        PublicActiveCloseFixture {
+            env,
+            loss_owner,
+            loss,
+            asset1_counterparty_owner: counterparty_owner,
+            asset1_counterparty: counterparty,
+            live_counterparty_owner: base_long_owner,
+            live_counterparty: base_long,
+            live_peer_owner: base_short_owner,
+            live_peer: base_short,
+        },
+        asset0_oracle,
+    )
 }
 
 fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {

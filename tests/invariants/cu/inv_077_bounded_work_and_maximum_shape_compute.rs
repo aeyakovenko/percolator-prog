@@ -912,12 +912,97 @@ fn v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded()
         "all fourteen public 5% mark moves must make the minimally collateralized account actionable"
     );
 
-    let liquidation_cu = env.crank(
+    let market_before_rejections = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before_rejections = env.svm.get_account(&long_account).unwrap();
+    let vault_before_rejections = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let duplicate_hint_rejection = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 3,
+                },
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 3,
+                },
+            ],
+        },
+        std::iter::once(AccountMeta::new(env.payer.pubkey(), true))
+            .chain(std::iter::once(AccountMeta::new(env.market, false)))
+            .chain(std::iter::once(AccountMeta::new(long_account, false)))
+            .chain(
+                moved_oracles
+                    .iter()
+                    .chain(moved_oracles.iter())
+                    .copied()
+                    .map(|key| AccountMeta::new_readonly(key, false)),
+            )
+            .collect(),
+        &[],
+    );
+    assert!(
+        duplicate_hint_rejection.is_err(),
+        "duplicate external-oracle hints must reject before liquidation"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_rejections
+    );
+    assert_eq!(
+        env.svm.get_account(&long_account).unwrap(),
+        portfolio_before_rejections
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_rejections
+    );
+
+    env.svm.expire_blockhash();
+    let permuted_tail_rejection = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 3,
+            }],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+            AccountMeta::new_readonly(moved_oracles[1], false),
+            AccountMeta::new_readonly(moved_oracles[0], false),
+            AccountMeta::new_readonly(moved_oracles[2], false),
+        ],
+        &[],
+    );
+    assert!(
+        permuted_tail_rejection.is_err(),
+        "a permuted three-feed tail must reject before liquidation"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_rejections
+    );
+    assert_eq!(
+        env.svm.get_account(&long_account).unwrap(),
+        portfolio_before_rejections
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_rejections
+    );
+
+    let liquidation_cu = env.crank_with_oracle_tail(
         long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            observations: vec![],
+            observations: crank_observations(0),
         },
+        &moved_oracles,
     );
     let after_liquidation =
         state::read_portfolio(&env.svm.get_account(&long_account).unwrap().data).unwrap();
@@ -927,10 +1012,13 @@ fn v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded()
         .map(|asset| asset.oi_eff_long_q)
         .sum();
     println!(
-        "public 14-leg composite second_crank={liquidation_cu} active={}",
+        "public 14-leg composite observation+liquidation={liquidation_cu} active={}",
         percolator::active_bitmap_count_ones(active_bitmap(&after_liquidation))
     );
-    assert!(liquidation_cu < 1_400_000, "max-shape liquidation must fit");
+    assert!(
+        liquidation_cu < 1_400_000,
+        "max-shape same-slot observation plus liquidation must fit"
+    );
     assert!(
         oi_after_liquidation < oi_before_liquidation,
         "selector continuation must strictly reduce aggregate long open interest"
