@@ -12,11 +12,15 @@
 //! primary and foreign source domain after every generated public action with overflow-free u128
 //! long division independent of the engine's U256 routine. The persisted minimized seed is the
 //! public trace that exposed the pre-fix lapsed-Fresh crank loop.
-//! `v16_program_liened_backing_expiry_impairs_credit_and_rejects_new_risk_atomically` creates a
-//! real counterparty lien through public trades, expires that live lien through the public crank,
-//! and proves the resulting impaired backing contributes zero credit. Repeating the formerly
-//! accepted risk increase must reject with exact account, token, and lamport rollback while the
-//! persisted rate continues to match the independent oracle.
+//! `v16_program_liened_backing_expiry_route_matrix_preserves_owner_reduction` crosses all four
+//! public trade families with both source sides. Every world creates a real counterparty lien,
+//! expires that live lien through the public crank, and proves the resulting impaired backing
+//! contributes zero credit. Independent stock and encumbrance censuses run after every successful
+//! transition, including each expiry-normalization step. Account refresh and a bilateral trade are
+//! stale-gated with exact rollback, but the owner-only `RebalanceReduce` route must remove the exact
+//! requested exposure within one bounded transaction. This distinguishes a temporarily unavailable
+//! matched route from a persistent funded lock; PR214's larger terminal counterexample remains owned
+//! by INV-028.
 //!
 //! Guarantee boundary: this covers deployed serialization and the generated lifecycle. The engine
 //! owns the full-width pure arithmetic proof; broader reachability still requires the charter's
@@ -24,7 +28,10 @@
 
 use super::*;
 use crate::support::{
-    fuzz_model::assert_source_credit_rates,
+    fuzz_model::{
+        assert_public_encumbrance_census, assert_public_stock_census, assert_source_credit_rates,
+        execute_trade_route,
+    },
     v16_svm::{MarketConfig, V16Svm},
 };
 use percolator::{BackingBucketStatusV16, CREDIT_RATE_SCALE, POS_SCALE};
@@ -40,12 +47,28 @@ fn inv_030_observations(env: &V16Svm, assets: &[u16]) -> Vec<CrankObservationHin
         .collect()
 }
 
-fn inv_030_crank_actor_steps(env: &mut V16Svm, actor: usize, slot: u64, assets: &[u16]) {
+fn assert_inv_030_census(label: &str, env: &V16Svm) {
+    assert_public_stock_census(label, env)
+        .unwrap_or_else(|error| panic!("{label} stock census failed: {error}"));
+    assert_public_encumbrance_census(label, env)
+        .unwrap_or_else(|error| panic!("{label} encumbrance census failed: {error}"));
+}
+
+fn inv_030_crank_actor_steps(
+    env: &mut V16Svm,
+    actor: usize,
+    slot: u64,
+    assets: &[u16],
+    label: &str,
+) {
     let observations = inv_030_observations(env, assets);
     let mut progressed = false;
-    for _ in 0..32 {
+    for step in 0..32 {
         match env.crank(actor, slot, observations.clone()) {
-            Ok(_) => progressed = true,
+            Ok(_) => {
+                progressed = true;
+                assert_inv_030_census(&format!("{label} crank step {step}"), env);
+            }
             Err(error) if progressed && error.contains("Custom(22)") => return,
             Err(error) => panic!("INV-030 actor {actor} crank failed before progress: {error}"),
         }
@@ -53,14 +76,22 @@ fn inv_030_crank_actor_steps(env: &mut V16Svm, actor: usize, slot: u64, assets: 
     assert!(progressed, "INV-030 actor {actor} crank made no progress");
 }
 
-#[test]
-fn v16_program_liened_backing_expiry_impairs_credit_and_rejects_new_risk_atomically() {
+fn inv_030_position_for_asset(env: &V16Svm, actor: usize, asset: u16) -> i128 {
+    env.primary_portfolio(actor)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| leg.active && leg.asset_index == u32::from(asset))
+        .map(|leg| leg.basis_pos_q)
+        .sum()
+}
+
+fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
     const WINNER: usize = 0;
     const COUNTERPARTY: usize = 1;
     const MARKET_CRANKER: usize = 4;
     const WINNING_ASSET: u16 = 0;
     const ADVERSE_ASSET: u16 = 1;
-    const SOURCE_DOMAIN: usize = 1;
     const START_PRICE: u64 = 100;
     const WINNING_MARK: u64 = 105;
     const EXPIRY_WINNING_MARK: u64 = 106;
@@ -71,8 +102,21 @@ fn v16_program_liened_backing_expiry_impairs_credit_and_rejects_new_risk_atomica
     const BACKING_ATOMS: u128 = 150;
     const EXPIRY_SLOT: u64 = 3;
 
+    let route_index = match route {
+        TradeRoute::NoCpi => 0,
+        TradeRoute::Cpi => 1,
+        TradeRoute::BatchNoCpi => 2,
+        TradeRoute::BatchCpi => 3,
+    };
+    let direction = if winner_long { 1i128 } else { -1i128 };
+    let source_domain = if winner_long { 1usize } else { 0usize };
+    let winning_mark = if winner_long { WINNING_MARK } else { 95 };
+    let expiry_winning_mark = if winner_long { EXPIRY_WINNING_MARK } else { 94 };
+    let adverse_mark = if winner_long { ADVERSE_MARK } else { 105 };
+    let label = format!("INV-030 {route:?} winner_long={winner_long}");
+
     let mut env = V16Svm::new(
-        [0x30; 32],
+        [0x30 ^ (route_index << 1) ^ u8::from(winner_long); 32],
         MarketConfig {
             initial_price: START_PRICE,
             h_max: 4,
@@ -88,52 +132,75 @@ fn v16_program_liened_backing_expiry_impairs_credit_and_rejects_new_risk_atomica
             ..MarketConfig::default()
         },
     );
+    assert_inv_030_census(&format!("{label} initialized"), &env);
 
-    env.top_up_backing_bucket(SOURCE_DOMAIN as u16, BACKING_ATOMS, EXPIRY_SLOT)
-        .expect("INV-030 fresh backing top-up");
-    env.trade_no_cpi(
+    env.top_up_backing_bucket(source_domain as u16, BACKING_ATOMS, EXPIRY_SLOT)
+        .unwrap_or_else(|error| panic!("{label} fresh backing top-up: {error}"));
+    assert_inv_030_census(&format!("{label} backing funded"), &env);
+    execute_trade_route(
+        &mut env,
+        route,
         WINNER,
         COUNTERPARTY,
         WINNING_ASSET,
-        WINNING_SIZE_Q,
+        direction * WINNING_SIZE_Q,
         START_PRICE,
         0,
     )
-    .expect("INV-030 winning-leg open");
-    env.trade_no_cpi(
+    .unwrap_or_else(|error| panic!("{label} winning-leg open: {error}"));
+    assert_inv_030_census(&format!("{label} winning leg opened"), &env);
+    execute_trade_route(
+        &mut env,
+        route,
         WINNER,
         COUNTERPARTY,
         ADVERSE_ASSET,
-        ADVERSE_SIZE_Q,
+        direction * ADVERSE_SIZE_Q,
         START_PRICE,
         0,
     )
-    .expect("INV-030 adverse-leg open");
+    .unwrap_or_else(|error| panic!("{label} adverse-leg open: {error}"));
+    assert_inv_030_census(&format!("{label} adverse leg opened"), &env);
 
     env.warp_to_slot(2);
-    env.push_auth_mark(WINNING_ASSET, 2, WINNING_MARK)
-        .expect("INV-030 winning mark");
-    env.push_auth_mark(ADVERSE_ASSET, 2, ADVERSE_MARK)
-        .expect("INV-030 adverse mark");
+    env.push_auth_mark(WINNING_ASSET, 2, winning_mark)
+        .unwrap_or_else(|error| panic!("{label} winning mark: {error}"));
+    assert_inv_030_census(&format!("{label} winning mark published"), &env);
+    env.push_auth_mark(ADVERSE_ASSET, 2, adverse_mark)
+        .unwrap_or_else(|error| panic!("{label} adverse mark: {error}"));
+    assert_inv_030_census(&format!("{label} adverse mark published"), &env);
     for actor in [MARKET_CRANKER, COUNTERPARTY, WINNER] {
-        inv_030_crank_actor_steps(&mut env, actor, 2, &[WINNING_ASSET, ADVERSE_ASSET]);
+        inv_030_crank_actor_steps(
+            &mut env,
+            actor,
+            2,
+            &[WINNING_ASSET, ADVERSE_ASSET],
+            &format!("{label} settle actor {actor}"),
+        );
     }
-    assert_eq!(env.primary_portfolio(WINNER).pnl.get(), 50);
+    assert_eq!(
+        env.primary_portfolio(WINNER).pnl.get(),
+        50,
+        "{label} paired marks must produce a real source-backed claim"
+    );
 
-    env.trade_no_cpi(
+    execute_trade_route(
+        &mut env,
+        route,
         WINNER,
         COUNTERPARTY,
         ADVERSE_ASSET,
-        RISK_INCREASE_Q,
-        ADVERSE_MARK,
+        direction * RISK_INCREASE_Q,
+        adverse_mark,
         0,
     )
-    .expect("INV-030 fresh source credit admits the control risk increase");
+    .unwrap_or_else(|error| panic!("{label} fresh source-credit risk increase: {error}"));
+    assert_inv_030_census(&format!("{label} lien created"), &env);
     let (_, liened_group) = env.primary_market_state();
-    assert_source_credit_rates("INV-030 before impairment", &liened_group)
+    assert_source_credit_rates(&format!("{label} before impairment"), &liened_group)
         .expect("independent pre-impairment rate oracle");
-    let liened_source = liened_group.source_credit[SOURCE_DOMAIN];
-    let liened_bucket = liened_group.source_backing_buckets[SOURCE_DOMAIN];
+    let liened_source = liened_group.source_credit[source_domain];
+    let liened_bucket = liened_group.source_backing_buckets[source_domain];
     assert_eq!(liened_bucket.status, BackingBucketStatusV16::Fresh);
     assert!(liened_source.positive_claim_bound_num > 0);
     assert!(liened_source.valid_liened_backing_num > 0);
@@ -144,7 +211,7 @@ fn v16_program_liened_backing_expiry_impairs_credit_and_rejects_new_risk_atomica
     let account_lien = winner_with_lien
         .source_domains
         .iter()
-        .find(|source| source.is_occupied() && source.domain.get() as usize == SOURCE_DOMAIN)
+        .find(|source| source.is_occupied() && source.domain.get() as usize == source_domain)
         .expect("INV-030 winner owns the source domain created by public settlement");
     assert_eq!(
         account_lien.source_lien_counterparty_backing_num.get(),
@@ -153,26 +220,31 @@ fn v16_program_liened_backing_expiry_impairs_credit_and_rejects_new_risk_atomica
     let custody_before_impairment = env.token_amount(env.vault);
 
     env.warp_to_slot(EXPIRY_SLOT);
-    env.push_auth_mark(WINNING_ASSET, EXPIRY_SLOT, EXPIRY_WINNING_MARK)
-        .expect("INV-030 expiry-slot winning mark");
-    env.push_auth_mark(ADVERSE_ASSET, EXPIRY_SLOT, ADVERSE_MARK)
-        .expect("INV-030 expiry-slot adverse mark");
+    env.push_auth_mark(WINNING_ASSET, EXPIRY_SLOT, expiry_winning_mark)
+        .unwrap_or_else(|error| panic!("{label} expiry-slot winning mark: {error}"));
+    assert_inv_030_census(&format!("{label} expiry winning mark published"), &env);
+    env.push_auth_mark(ADVERSE_ASSET, EXPIRY_SLOT, adverse_mark)
+        .unwrap_or_else(|error| panic!("{label} expiry-slot adverse mark: {error}"));
+    assert_inv_030_census(&format!("{label} expiry adverse mark published"), &env);
     let observations = inv_030_observations(&env, &[WINNING_ASSET, ADVERSE_ASSET]);
-    for _ in 0..16 {
-        if env.primary_market_state().1.source_backing_buckets[SOURCE_DOMAIN].status
+    for step in 0..16 {
+        if env.primary_market_state().1.source_backing_buckets[source_domain].status
             == BackingBucketStatusV16::Impaired
         {
             break;
         }
         env.crank(WINNER, EXPIRY_SLOT, observations.clone())
-            .expect("INV-030 permissionless expiry normalization must progress");
+            .unwrap_or_else(|error| {
+                panic!("{label} permissionless expiry normalization step {step}: {error}")
+            });
+        assert_inv_030_census(&format!("{label} expiry crank step {step}"), &env);
     }
 
     let (_, impaired_group) = env.primary_market_state();
-    assert_source_credit_rates("INV-030 after impairment", &impaired_group)
+    assert_source_credit_rates(&format!("{label} after impairment"), &impaired_group)
         .expect("independent post-impairment rate oracle");
-    let impaired_source = impaired_group.source_credit[SOURCE_DOMAIN];
-    let impaired_bucket = impaired_group.source_backing_buckets[SOURCE_DOMAIN];
+    let impaired_source = impaired_group.source_credit[source_domain];
+    let impaired_bucket = impaired_group.source_backing_buckets[source_domain];
     assert_eq!(
         impaired_bucket.status,
         BackingBucketStatusV16::Impaired,
@@ -191,17 +263,43 @@ fn v16_program_liened_backing_expiry_impairs_credit_and_rejects_new_risk_atomica
     assert_eq!(impaired_source.credit_rate_num, 0);
     assert_eq!(env.token_amount(env.vault), custody_before_impairment);
 
+    let market_before_refresh = env.market_data(false);
+    let portfolios_before_refresh = env.all_primary_portfolio_data();
+    let tokens_before_refresh = env.all_token_account_data();
+    env.begin_public_trace();
+    let refresh = env.crank(COUNTERPARTY, EXPIRY_SLOT, observations.clone());
+    let refresh_error = refresh.expect_err("impaired-state account refresh unexpectedly landed");
+    assert!(
+        refresh_error.contains("Custom(21)")
+            || refresh_error.contains("custom program error: 0x15"),
+        "{label} account refresh failed for an unrelated reason: {refresh_error}"
+    );
+    assert_eq!(env.market_data(false), market_before_refresh);
+    assert_eq!(env.all_primary_portfolio_data(), portfolios_before_refresh);
+    assert_eq!(env.all_token_account_data(), tokens_before_refresh);
+    let refresh_trace = env.finish_public_trace();
+    assert_eq!(refresh_trace.out_of_band_economic_mutations, 0);
+    assert_eq!(refresh_trace.steps.len(), 1);
+    assert!(!refresh_trace.steps[0].succeeded);
+    assert_eq!(
+        refresh_trace.steps[0].rejected_exact_writable_rollback,
+        Some(true)
+    );
+
     let market_before_rejection = env.market_data(false);
     let portfolios_before_rejection = env.all_primary_portfolio_data();
     let ledger_before_rejection = env.backing_domain_ledger_data();
     let tokens_before_rejection = env.all_token_account_data();
+    let matcher_before_rejection = env.all_matcher_context_data();
     env.begin_public_trace();
-    let rejected = env.trade_no_cpi(
+    let rejected = execute_trade_route(
+        &mut env,
+        route,
         WINNER,
         COUNTERPARTY,
         ADVERSE_ASSET,
-        RISK_INCREASE_Q,
-        ADVERSE_MARK,
+        direction * RISK_INCREASE_Q,
+        adverse_mark,
         0,
     );
     assert!(
@@ -215,13 +313,17 @@ fn v16_program_liened_backing_expiry_impairs_credit_and_rejects_new_risk_atomica
     );
     assert_eq!(env.backing_domain_ledger_data(), ledger_before_rejection);
     assert_eq!(env.all_token_account_data(), tokens_before_rejection);
+    assert_eq!(env.all_matcher_context_data(), matcher_before_rejection);
     let (_, after_rejection) = env.primary_market_state();
     assert_eq!(
-        after_rejection.source_credit[SOURCE_DOMAIN],
+        after_rejection.source_credit[source_domain],
         impaired_source
     );
-    assert_source_credit_rates("INV-030 after rejected risk increase", &after_rejection)
-        .expect("independent rejected-route rate oracle");
+    assert_source_credit_rates(
+        &format!("{label} after rejected risk increase"),
+        &after_rejection,
+    )
+    .expect("independent rejected-route rate oracle");
 
     let trace = env.finish_public_trace();
     assert_eq!(trace.out_of_band_economic_mutations, 0);
@@ -234,6 +336,89 @@ fn v16_program_liened_backing_expiry_impairs_credit_and_rejects_new_risk_atomica
         .token_deltas
         .iter()
         .all(|(_, delta)| *delta == 0));
+
+    let position_before_owner_reduction = inv_030_position_for_asset(&env, WINNER, ADVERSE_ASSET);
+    let funded_capital = env.primary_portfolio(WINNER).capital.get();
+    assert_ne!(
+        position_before_owner_reduction, 0,
+        "{label} stale-route control has no funded exposure"
+    );
+    assert!(
+        funded_capital > 0,
+        "{label} stale-route control has no funded capital"
+    );
+
+    let market_before_reduction = env.market_data(false);
+    let portfolios_before_reduction = env.all_primary_portfolio_data();
+    let ledger_before_reduction = env.backing_domain_ledger_data();
+    let tokens_before_reduction = env.all_token_account_data();
+    let matcher_before_reduction = env.all_matcher_context_data();
+    env.begin_public_trace();
+    let matched_reduction = execute_trade_route(
+        &mut env,
+        route,
+        WINNER,
+        COUNTERPARTY,
+        ADVERSE_ASSET,
+        -direction * RISK_INCREASE_Q,
+        adverse_mark,
+        0,
+    );
+    let matched_reduction_error = matched_reduction
+        .expect_err("impaired-state matched reduction unexpectedly bypassed the stale gate");
+    assert!(
+        matched_reduction_error.contains("Custom(21)")
+            || matched_reduction_error.contains("custom program error: 0x15"),
+        "{label} matched reduction failed for an unrelated reason: {matched_reduction_error}"
+    );
+    assert_eq!(env.market_data(false), market_before_reduction);
+    assert_eq!(
+        env.all_primary_portfolio_data(),
+        portfolios_before_reduction
+    );
+    assert_eq!(env.backing_domain_ledger_data(), ledger_before_reduction);
+    assert_eq!(env.all_token_account_data(), tokens_before_reduction);
+    assert_eq!(env.all_matcher_context_data(), matcher_before_reduction);
+    let matched_trace = env.finish_public_trace();
+    assert_eq!(matched_trace.out_of_band_economic_mutations, 0);
+    assert_eq!(matched_trace.steps.len(), 1);
+    assert!(!matched_trace.steps[0].succeeded);
+    assert_eq!(
+        matched_trace.steps[0].rejected_exact_writable_rollback,
+        Some(true)
+    );
+
+    let owner_reduction = env
+        .rebalance_reduce(
+            WINNER,
+            ADVERSE_ASSET,
+            u128::try_from(RISK_INCREASE_Q).expect("positive reduction size"),
+        )
+        .unwrap_or_else(|error| panic!("{label} impaired-state owner reduction: {error}"));
+    assert!(
+        owner_reduction.compute_units < crate::support::v16_svm::TX_CU_LIMIT,
+        "{label} owner reduction exceeded the transaction CU limit"
+    );
+    assert_eq!(
+        inv_030_position_for_asset(&env, WINNER, ADVERSE_ASSET),
+        position_before_owner_reduction - direction * RISK_INCREASE_Q,
+        "{label} owner reduction did not remove the exact requested exposure"
+    );
+    assert_inv_030_census(&format!("{label} owner risk reduced"), &env);
+}
+
+#[test]
+fn v16_program_liened_backing_expiry_route_matrix_preserves_owner_reduction() {
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        for winner_long in [false, true] {
+            run_liened_backing_expiry_world(route, winner_long);
+        }
+    }
 }
 
 proptest! {
