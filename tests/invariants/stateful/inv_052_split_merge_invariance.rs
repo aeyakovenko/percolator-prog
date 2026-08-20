@@ -31,6 +31,13 @@
 //! exact; repeated floor can lower split `A` by at most one unit per extra partition, which is
 //! checked against an independent recurrence together with the resulting one-atom effective-OI
 //! scan envelope.
+//! `v16_program_live_insurance_withdrawal_is_split_merge_invariant` independently funds both live
+//! insurance domains through public top-ups, then crosses the domain boundary with one aggregate
+//! withdrawal, a generated two-part split, and its reverse. Every successful part moves the exact
+//! requested SPL and engine atoms; one atom beyond the remaining asset budget rejects with exact
+//! writable and lamport rollback. The three schedules converge byte-for-byte across wrapper/engine
+//! state, every portfolio, all SPL accounts, token supply, and the foreign instance while each call
+//! remains below the CU ceiling.
 //!
 //! Guarantee boundary: target publication order and target lifetime are identical across the
 //! compared executions. Reordering authenticated observations is a different economic history,
@@ -99,6 +106,25 @@ struct RebalancePartitionOutcome {
     snapshot: CanonicalPrefixSnapshot,
     final_basis_q: i128,
     final_oi_q: [u128; 2],
+    max_compute_units: u64,
+    public_steps: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InsuranceWithdrawalFrame {
+    wrapper_config: state::WrapperConfigV16,
+    group: state::MarketGroupV16,
+    primary_portfolios: Vec<Vec<u8>>,
+    foreign_market: Vec<u8>,
+    foreign_portfolio: Vec<u8>,
+    tokens: Vec<(solana_sdk::pubkey::Pubkey, Vec<u8>)>,
+    provider_destination_amount: u64,
+    token_supply: u128,
+}
+
+#[derive(Debug)]
+struct InsuranceWithdrawalPartitionOutcome {
+    frame: InsuranceWithdrawalFrame,
     max_compute_units: u64,
     public_steps: usize,
 }
@@ -247,6 +273,167 @@ fn run_rebalance_partition(
             group.assets[0].oi_eff_long_q,
             group.assets[0].oi_eff_short_q,
         ],
+        max_compute_units,
+        public_steps: trace.steps.len(),
+    })
+}
+
+fn insurance_withdrawal_frame(env: &V16Svm) -> InsuranceWithdrawalFrame {
+    let (wrapper_config, group) = env.primary_market_state();
+    InsuranceWithdrawalFrame {
+        wrapper_config,
+        group,
+        primary_portfolios: env.all_primary_portfolio_data(),
+        foreign_market: env.market_data(true),
+        foreign_portfolio: env.foreign_portfolio_data(),
+        tokens: env.all_token_account_data(),
+        provider_destination_amount: env.token_amount(env.provider_destination_token),
+        token_supply: env.token_supply_observed(),
+    }
+}
+
+fn run_insurance_withdrawal_partition(
+    seed: [u8; 32],
+    long_budget: u128,
+    short_budget: u128,
+    parts: &[u128],
+) -> Result<InsuranceWithdrawalPartitionOutcome, String> {
+    let total = parts.iter().try_fold(0u128, |sum, part| {
+        sum.checked_add(*part)
+            .ok_or_else(|| "insurance partition total overflow".to_string())
+    })?;
+    if parts.is_empty()
+        || parts.iter().any(|part| *part == 0)
+        || total <= long_budget
+        || total > long_budget + short_budget
+    {
+        return Err("insurance partition must cross the long/short domain boundary".to_string());
+    }
+
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let initial = insurance_withdrawal_frame(&env);
+    if initial.group.insurance_domain_budget[0] != 0
+        || initial.group.insurance_domain_budget[1] != 0
+    {
+        return Err(
+            "insurance partition fixture started with live asset-domain budgets".to_string(),
+        );
+    }
+
+    env.begin_public_trace();
+    let first_top_up = env
+        .top_up_insurance_domain(0, long_budget)
+        .map_err(|error| format!("top up long insurance domain: {error}"))?;
+    let second_top_up = env
+        .top_up_insurance_domain(1, short_budget)
+        .map_err(|error| format!("top up short insurance domain: {error}"))?;
+    let mut max_compute_units = first_top_up.compute_units.max(second_top_up.compute_units);
+    let funded = env.primary_market_state().1;
+    if funded.insurance_domain_budget[0] != long_budget
+        || funded.insurance_domain_budget[1] != short_budget
+        || funded.insurance != initial.group.insurance + long_budget + short_budget
+        || funded.vault != initial.group.vault + long_budget + short_budget
+        || env.token_amount(env.vault) as u128 != funded.vault
+    {
+        return Err(
+            "public insurance top-ups did not create the exact two-domain stock".to_string(),
+        );
+    }
+
+    let mut cumulative = 0u128;
+    for (index, part) in parts.iter().copied().enumerate() {
+        let destination_before = env.token_amount(env.provider_destination_token);
+        let vault_before = env.token_amount(env.vault);
+        let group_before = env.primary_market_state().1;
+        let success = env
+            .withdraw_insurance_asset_as_admin(0, part)
+            .map_err(|error| format!("insurance withdrawal partition {index}: {error}"))?;
+        max_compute_units = max_compute_units.max(success.compute_units);
+        cumulative = cumulative
+            .checked_add(part)
+            .ok_or_else(|| "insurance withdrawal cumulative overflow".to_string())?;
+        let part_u64 = u64::try_from(part)
+            .map_err(|_| "insurance withdrawal part does not fit SPL amount".to_string())?;
+        let destination_delta = env
+            .token_amount(env.provider_destination_token)
+            .checked_sub(destination_before)
+            .ok_or_else(|| "insurance withdrawal reduced its destination".to_string())?;
+        let vault_delta = vault_before
+            .checked_sub(env.token_amount(env.vault))
+            .ok_or_else(|| "insurance withdrawal increased its vault".to_string())?;
+        let group_after = env.primary_market_state().1;
+        if destination_delta != part_u64
+            || vault_delta != part_u64
+            || group_before.insurance - group_after.insurance != part
+            || group_before.vault - group_after.vault != part
+        {
+            return Err(format!(
+                "insurance partition {index} did not debit and credit exactly {part} atoms"
+            ));
+        }
+    }
+
+    if cumulative != total {
+        return Err("insurance withdrawal parts did not sum to the authorized total".to_string());
+    }
+    let remaining = long_budget + short_budget - total;
+    let before_overspend = insurance_withdrawal_frame(&env);
+    let oversized = remaining
+        .checked_add(1)
+        .ok_or_else(|| "insurance overspend control overflow".to_string())?;
+    if env.withdraw_insurance_asset_as_admin(0, oversized).is_ok()
+        || insurance_withdrawal_frame(&env) != before_overspend
+    {
+        return Err(
+            "over-budget insurance withdrawal did not reject with exact economic rollback"
+                .to_string(),
+        );
+    }
+
+    let trace = env.finish_public_trace();
+    let successful_steps = 2 + parts.len();
+    if trace.out_of_band_economic_mutations != 0
+        || trace.steps.len() != successful_steps + 1
+        || trace.steps[..successful_steps]
+            .iter()
+            .any(|step| !step.succeeded)
+        || trace.steps[successful_steps].succeeded
+        || trace.steps[successful_steps].rejected_exact_writable_rollback != Some(true)
+        || trace.steps[successful_steps].rejected_no_program_lamport_delta != Some(true)
+    {
+        return Err(
+            "insurance partition trace was not public, successful, then exactly atomic".to_string(),
+        );
+    }
+    if trace
+        .steps
+        .iter()
+        .filter_map(|step| step.compute_units)
+        .any(|compute_units| compute_units >= TX_CU_LIMIT)
+    {
+        return Err("insurance partition exceeded the transaction CU limit".to_string());
+    }
+
+    let frame = insurance_withdrawal_frame(&env);
+    let expected_short_remaining = short_budget - (total - long_budget);
+    if frame.group.insurance_domain_budget[0] != 0
+        || frame.group.insurance_domain_budget[1] != expected_short_remaining
+        || frame.group.insurance != initial.group.insurance + remaining
+        || frame.group.vault != initial.group.vault + remaining
+        || frame.group.c_tot != initial.group.c_tot
+        || frame.provider_destination_amount as u128 != total
+        || frame.token_supply != initial.token_supply
+        || frame.foreign_market != initial.foreign_market
+        || frame.foreign_portfolio != initial.foreign_portfolio
+        || frame.primary_portfolios != initial.primary_portfolios
+    {
+        return Err(
+            "insurance partition escaped its exact stock, custody, or frame oracle".to_string(),
+        );
+    }
+
+    Ok(InsuranceWithdrawalPartitionOutcome {
+        frame,
         max_compute_units,
         public_steps: trace.steps.len(),
     })
@@ -1139,6 +1326,66 @@ proptest! {
         prop_assert!(eager.max_compute_units < TX_CU_LIMIT);
         prop_assert!(irregular.max_compute_units < TX_CU_LIMIT);
         prop_assert!(delayed.max_compute_units < TX_CU_LIMIT);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_052_insurance_withdrawal_partition.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_live_insurance_withdrawal_is_split_merge_invariant(
+        seed in any::<[u8; 32]>(),
+        long_budget_raw in 2u64..=500_000,
+        short_budget_raw in 2u64..=500_000,
+        crossing_raw in any::<u64>(),
+        first_part_raw in any::<u64>(),
+    ) {
+        let long_budget = u128::from(long_budget_raw);
+        let short_budget = u128::from(short_budget_raw);
+        let crossing = 1 + u128::from(crossing_raw) % short_budget;
+        let total = long_budget + crossing;
+        let first_part = 1 + u128::from(first_part_raw) % (total - 1);
+        let second_part = total - first_part;
+
+        let aggregate = run_insurance_withdrawal_partition(
+            seed,
+            long_budget,
+            short_budget,
+            &[total],
+        )
+        .map_err(TestCaseError::fail)?;
+        let split = run_insurance_withdrawal_partition(
+            seed,
+            long_budget,
+            short_budget,
+            &[first_part, second_part],
+        )
+        .map_err(TestCaseError::fail)?;
+        let reversed = run_insurance_withdrawal_partition(
+            seed,
+            long_budget,
+            short_budget,
+            &[second_part, first_part],
+        )
+        .map_err(TestCaseError::fail)?;
+
+        prop_assert_eq!(&aggregate.frame, &split.frame);
+        prop_assert_eq!(&aggregate.frame, &reversed.frame);
+        prop_assert_eq!(aggregate.public_steps, 4);
+        prop_assert_eq!(split.public_steps, 5);
+        prop_assert_eq!(reversed.public_steps, 5);
+        prop_assert!(aggregate.max_compute_units < TX_CU_LIMIT);
+        prop_assert!(split.max_compute_units < TX_CU_LIMIT);
+        prop_assert!(reversed.max_compute_units < TX_CU_LIMIT);
     }
 }
 
