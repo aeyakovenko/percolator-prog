@@ -21,7 +21,28 @@
 //! public-writer route coverage and larger adversarial asset/account touch-order cross-products
 //! remain.
 
-use crate::support::fuzz_model::run_cure_pending_obligation_dos_probe;
+use crate::support::fuzz_model::{
+    run_cure_pending_obligation_dos_probe, run_materialized_portfolio_lifecycle_census,
+};
+
+#[test]
+fn v16_program_materialized_portfolio_summary_tracks_close_and_recreate() {
+    let evidence = run_materialized_portfolio_lifecycle_census()
+        .expect("public portfolio generations must satisfy the complete aggregate census");
+    assert_eq!(
+        evidence.after_close_count + 1,
+        evidence.initial_count,
+        "closing one empty portfolio must remove exactly one materialized account"
+    );
+    assert_eq!(
+        evidence.after_reinitialize_count, evidence.initial_count,
+        "reinitializing the same address must add exactly one materialized account"
+    );
+    assert!(
+        evidence.new_portfolio_id > evidence.old_portfolio_id,
+        "the replacement portfolio must be a new program-assigned incarnation"
+    );
+}
 
 #[test]
 fn v16_program_pending_obligation_summaries_match_the_complete_portfolio_census() {

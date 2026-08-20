@@ -2344,9 +2344,19 @@ fn assert_market_stock_census(
 
 pub fn assert_public_stock_census(label: &str, env: &V16Svm) -> Result<(), String> {
     let (_, primary) = env.primary_market_state();
-    let primary_portfolios = (0..env.actors.len())
-        .map(|actor| env.primary_portfolio(actor))
-        .collect::<Vec<_>>();
+    let mut primary_portfolios = Vec::with_capacity(env.actors.len());
+    for (actor, fixture) in env.actors.iter().enumerate() {
+        let account = env
+            .svm
+            .get_account(&fixture.portfolio)
+            .ok_or_else(|| format!("{label}: tracked primary portfolio {actor} disappeared"))?;
+        if account.owner != env.program_id || account.data.iter().all(|byte| *byte == 0) {
+            continue;
+        }
+        primary_portfolios.push(state::read_portfolio(&account.data).map_err(|error| {
+            format!("{label}: materialized primary portfolio {actor} is invalid: {error:?}")
+        })?);
+    }
     assert_market_stock_census(
         &format!("{label} primary"),
         &primary,
@@ -2356,7 +2366,21 @@ pub fn assert_public_stock_census(label: &str, env: &V16Svm) -> Result<(), Strin
     )?;
 
     let (_, foreign) = env.foreign_market_state();
-    let foreign_portfolios = [env.foreign_portfolio()];
+    let foreign_account = env
+        .svm
+        .get_account(&env.foreign_actor.portfolio)
+        .ok_or_else(|| format!("{label}: tracked foreign portfolio disappeared"))?;
+    let foreign_portfolios = if foreign_account.owner == env.program_id
+        && foreign_account.data.iter().any(|byte| *byte != 0)
+    {
+        vec![
+            state::read_portfolio(&foreign_account.data).map_err(|error| {
+                format!("{label}: materialized foreign portfolio is invalid: {error:?}")
+            })?,
+        ]
+    } else {
+        Vec::new()
+    };
     assert_market_stock_census(
         &format!("{label} foreign"),
         &foreign,
@@ -6638,6 +6662,15 @@ pub struct CurePendingObligationDosEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaterializedPortfolioCensusEvidence {
+    pub initial_count: u64,
+    pub after_close_count: u64,
+    pub after_reinitialize_count: u64,
+    pub old_portfolio_id: u64,
+    pub new_portfolio_id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurePortfolioIncarnationReplayEvidence {
     pub old_portfolio_id: u64,
     pub intermediate_portfolio_id: u64,
@@ -6909,6 +6942,42 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
         successful_noop_cranks,
         unrelated_trade_rejected,
         owner_withdraw_rejected,
+    })
+}
+
+pub fn run_materialized_portfolio_lifecycle_census(
+) -> Result<MaterializedPortfolioCensusEvidence, String> {
+    const OWNER: usize = 0;
+    let mut env = V16Svm::new(
+        [0x88; 32],
+        MarketConfig {
+            actor_deposits: [0, 1, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    assert_public_stock_census("INV-088 initialized portfolio generation", &env)?;
+    let initial_count = env.primary_market_state().1.materialized_portfolio_count;
+    let old_portfolio_id = env.primary_portfolio_id(OWNER);
+
+    env.close_primary_portfolio(OWNER)
+        .map_err(|error| format!("INV-088 close empty portfolio: {error}"))?;
+    assert_public_stock_census("INV-088 closed portfolio generation", &env)?;
+    let after_close_count = env.primary_market_state().1.materialized_portfolio_count;
+
+    env.fund_closed_primary_portfolio(OWNER, 1_000_000_000)
+        .map_err(|error| format!("INV-088 refund closed portfolio account: {error}"))?;
+    env.reinitialize_primary_portfolio(OWNER)
+        .map_err(|error| format!("INV-088 reinitialize portfolio generation: {error}"))?;
+    assert_public_stock_census("INV-088 replacement portfolio generation", &env)?;
+    let after_reinitialize_count = env.primary_market_state().1.materialized_portfolio_count;
+    let new_portfolio_id = env.primary_portfolio_id(OWNER);
+
+    Ok(MaterializedPortfolioCensusEvidence {
+        initial_count,
+        after_close_count,
+        after_reinitialize_count,
+        old_portfolio_id,
+        new_portfolio_id,
     })
 }
 

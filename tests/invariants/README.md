@@ -305,7 +305,7 @@ Verification at this checkpoint:
 | Focused INV-059 liquidation-fee retry fixed point | 1/1 plus 16 harmless retries | a real engine-selected partial close charges the independently recomputed fee once, restores health, and repeated same-state keeper submissions preserve market, portfolio, vault, and insurance exactly |
 | Focused INV-045 mark staging, fee isolation, liquidation, exit, and terminal-retirement matrix | 7/7 public, 15/15 stateful, 18/18 CU, and 4/4 wrapper Kani | the new 80-cell public boundary matrix joins the fixed-pin route/mode corpus; same-slot movement is zero, valid movement is fee-supported, invalid prices roll back exactly, reductions/catch-up remain live, and paid movement cannot be reclaimed by the controlling coalition |
 | Focused INV-071 pending-close rank, cured-obligation release, and terminal schedule matrix | 3/3 | old-pin red and fixed-pin green rerun on 2026-08-18 |
-| Focused INV-088 complete portfolio-summary census | 1/1 dedicated plus every shared stateful transition | a public cure exposes nonzero positive PnL plus a zero-basis obligation and social-loss weight; all persisted stock/count aggregates, exact side pending/weight summaries, and global stale/B-stale/negative-PnL counts are independently rebuilt before and after every cleanup crank |
+| Focused INV-088 complete portfolio-summary census | 2/2 dedicated plus every shared stateful transition | a public cure exposes nonzero positive PnL plus a zero-basis obligation and social-loss weight; a same-address portfolio close/recreate proves the materialized count falls and rises exactly while the portfolio ID advances; all persisted stock/count aggregates are independently rebuilt at every checkpoint |
 | Focused INV-087 complete wrapper-owned persisted-field roster | 8/8 | rerun on the 2026-08-18 PR135 test head |
 | Focused INV-015 canonical-length and malformed-account matrix | 8/8 CU; 12 market/portfolio, 14 auxiliary-ledger, and 2 oracle-profile corruption classes | rerun on the 2026-08-18 PR135 test head |
 | Focused INV-016 canonical PDA matrices and source roster | 5/5; 57 custody substitutions plus 9 matcher seed substitutions | rerun on the 2026-08-18 PR135 test head |
@@ -320,7 +320,7 @@ Verification at this checkpoint:
 | Focused INV-002 generation replay, frontier, roster, and contracts | 20-family stateful replay matrix plus authority/lifecycle and activation-frontier public controls; focused host/Kani checks pass | rerun on the 2026-08-18 PR135 production head |
 | `cargo check --tests` | pass | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --lib` | 7/7 | rerun on the 2026-08-18 PR135 test head |
-| `cargo test --test v16_program_stateful_fuzz` | 161/161 | rerun on the 2026-08-18 PR135 production head |
+| `cargo test --test v16_program_stateful_fuzz` | 162/162 | rerun on the 2026-08-18 PR135 production head |
 | Registry/manifest checks in the INV-079 module | 8/8 | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --test v16_program_fuzz_regressions` | 92/92 | rerun on the 2026-08-18 PR135 production head |
 | `cargo test --test v16_cu` | 774/774 | rerun on the 2026-08-18 PR135 production head, including hinted exact-expiry and no-hint late-expiry owner-exit worlds plus public exact-expiry retirement normalization |
