@@ -5,14 +5,268 @@
 //! favorable new position, it must fully discover the bounded active portfolio
 //! state or use a proven-equivalent exact certificate.
 //!
-//! Evidence in this file (I/C plus invariant-specific route assertions):
-//! BatchTradeNoCpi and BatchTradeCpi open a new asset-0 leg for an account that
-//! already has a stale active asset-1 leg. The only safe success is to discover
-//! and refresh the stale asset-1 leg before admitting the new favorable leg.
-//! INV-053 owns the single-leg TradeNoCpi/TradeCpi variants; this file covers the
-//! previously separate batch route surface.
+//! Evidence in this file (I/C plus invariant-specific route assertions): a source-complete caller
+//! input roster guard proves only PermissionlessCrank exposes discovery hints. Matched forward and
+//! reverse two-asset Pyth hint/account-tail orders normalize identically; mismatched tails reject
+//! with exact rollback and a live canonical retry. BatchTradeNoCpi and BatchTradeCpi open a new
+//! asset-0 leg for an account that already has a stale active asset-1 leg, and must discover and
+//! refresh that stale leg before admitting the new favorable leg. INV-053 owns the single-leg
+//! TradeNoCpi/TradeCpi variants and every single-omitted max-shape refresh case.
 
 use super::*;
+
+#[test]
+fn v16_program_discovery_hint_surface_is_permissionless_crank_only() {
+    const CALLER_INPUT_ROSTER: &str = include_str!("../inv_023_caller_input_roster.tsv");
+    let mut hint_fields = std::collections::BTreeSet::new();
+
+    for line in CALLER_INPUT_ROSTER.lines() {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("type\t") {
+            continue;
+        }
+        let columns: Vec<_> = line.split('\t').collect();
+        assert_eq!(
+            columns.len(),
+            4,
+            "malformed caller-input roster row: {line}"
+        );
+        if columns[2] == "DISCOVERY_HINT" {
+            for field in columns[1].split(',') {
+                assert!(
+                    hint_fields.insert((columns[0].to_owned(), field.to_owned())),
+                    "duplicate discovery-hint field {}.{field}",
+                    columns[0]
+                );
+            }
+        }
+    }
+
+    let expected = [
+        ("CrankObservationHint".to_owned(), "asset_index".to_owned()),
+        (
+            "CrankObservationHint".to_owned(),
+            "oracle_accounts".to_owned(),
+        ),
+        ("PermissionlessCrank".to_owned(), "observations".to_owned()),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        hint_fields, expected,
+        "a new caller-controlled discovery hint requires an INV-056 public omission/order matrix"
+    );
+}
+
+const INV056_EXTERNAL_SLOT: u64 = 2;
+const INV056_EXTERNAL_TIME: i64 = 101;
+const INV056_EXTERNAL_FEEDS: [[u8; 32]; 2] = [[0x56; 32], [0x57; 32]];
+const INV056_EXTERNAL_PRICES: [u64; 2] = [1_100_000, 900_000];
+
+#[derive(Debug, PartialEq, Eq)]
+struct Inv056ExternalOrderSnapshot {
+    current_slot: u64,
+    oracle_epoch: u64,
+    funding_epoch: u64,
+    effective_prices: [u64; 2],
+    raw_targets: [u64; 2],
+    asset_slots: [u64; 2],
+    profile_prices: [u64; 2],
+    profile_publish_times: [i64; 2],
+    vault: u128,
+    c_tot: u128,
+    insurance: u128,
+}
+
+fn inv056_external_oracle_world() -> (V16CuEnv, Pubkey, [Pubkey; 2]) {
+    const INITIAL_SLOT: u64 = 1;
+    const INITIAL_TIME: i64 = 100;
+    const INITIAL_PRICE: i64 = 1_000_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    set_test_clock(&mut env, INITIAL_SLOT, INITIAL_TIME);
+    for (asset_index, feed) in INV056_EXTERNAL_FEEDS.iter().enumerate() {
+        let initial = env.set_pyth_price_with_conf(feed, INITIAL_PRICE, -6, 0, INITIAL_TIME);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            asset_index as u16,
+            1,
+            0,
+            [*feed, [0; 32], [0; 32]],
+            &[initial],
+            INITIAL_SLOT,
+            INITIAL_TIME,
+            0,
+            0,
+            10,
+            0,
+        )
+        .unwrap_or_else(|error| panic!("configure external asset {asset_index}: {error}"));
+    }
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    set_test_clock(&mut env, INV056_EXTERNAL_SLOT, INV056_EXTERNAL_TIME);
+    let fresh = std::array::from_fn(|asset_index| {
+        env.set_pyth_price_with_conf(
+            &INV056_EXTERNAL_FEEDS[asset_index],
+            INV056_EXTERNAL_PRICES[asset_index] as i64,
+            -6,
+            0,
+            INV056_EXTERNAL_TIME,
+        )
+    });
+    (env, portfolio, fresh)
+}
+
+fn inv056_external_order_snapshot(env: &V16CuEnv) -> Inv056ExternalOrderSnapshot {
+    let market = env.svm.get_account(&env.market).unwrap();
+    let (_, group) = env.market_state();
+    let profiles = [
+        state::read_asset_oracle_profile(&market.data, 0).unwrap(),
+        state::read_asset_oracle_profile(&market.data, 1).unwrap(),
+    ];
+    Inv056ExternalOrderSnapshot {
+        current_slot: group.current_slot,
+        oracle_epoch: group.oracle_epoch,
+        funding_epoch: group.funding_epoch,
+        effective_prices: [
+            group.assets[0].effective_price,
+            group.assets[1].effective_price,
+        ],
+        raw_targets: [
+            group.assets[0].raw_oracle_target_price,
+            group.assets[1].raw_oracle_target_price,
+        ],
+        asset_slots: [group.assets[0].slot_last, group.assets[1].slot_last],
+        profile_prices: [
+            profiles[0].oracle_leg_prices_e6[0],
+            profiles[1].oracle_leg_prices_e6[0],
+        ],
+        profile_publish_times: [
+            profiles[0].oracle_leg_publish_times[0],
+            profiles[1].oracle_leg_publish_times[0],
+        ],
+        vault: group.vault,
+        c_tot: group.c_tot,
+        insurance: group.insurance,
+    }
+}
+
+fn inv056_run_external_hint_order(order: [usize; 2]) -> Inv056ExternalOrderSnapshot {
+    let (mut env, portfolio, fresh) = inv056_external_oracle_world();
+    let observations = order
+        .iter()
+        .map(|asset_index| CrankObservationHint {
+            asset_index: *asset_index as u16,
+            oracle_accounts: 1,
+        })
+        .collect();
+    let accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+        AccountMeta::new_readonly(fresh[order[0]], false),
+        AccountMeta::new_readonly(fresh[order[1]], false),
+    ];
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations,
+            },
+            accounts,
+            &[],
+        )
+        .expect("matched external-oracle hint order must progress");
+    assert_cu_within("INV-056 external-oracle hint order", cu, CRANK_CU_LIMIT);
+
+    let snapshot = inv056_external_order_snapshot(&env);
+    assert_eq!(snapshot.effective_prices, INV056_EXTERNAL_PRICES);
+    assert_eq!(snapshot.raw_targets, INV056_EXTERNAL_PRICES);
+    assert_eq!(snapshot.profile_prices, INV056_EXTERNAL_PRICES);
+    assert_eq!(snapshot.profile_publish_times, [INV056_EXTERNAL_TIME; 2]);
+    snapshot
+}
+
+#[test]
+fn v16_program_external_oracle_hint_and_account_order_is_normalized_or_atomic() {
+    let forward = inv056_run_external_hint_order([0, 1]);
+    let reverse = inv056_run_external_hint_order([1, 0]);
+    assert_eq!(
+        forward, reverse,
+        "matching hint/account permutations must produce one normalized market result"
+    );
+
+    let (mut env, portfolio, fresh) = inv056_external_oracle_world();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let mismatched = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 1,
+                    oracle_accounts: 1,
+                },
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new_readonly(fresh[0], false),
+            AccountMeta::new_readonly(fresh[1], false),
+        ],
+        &[],
+    );
+    assert!(
+        mismatched.is_err(),
+        "a feed tail that does not match hint order must reject"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.expire_blockhash();
+    let retry = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+                CrankObservationHint {
+                    asset_index: 1,
+                    oracle_accounts: 1,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new_readonly(fresh[0], false),
+            AccountMeta::new_readonly(fresh[1], false),
+        ],
+        &[],
+    );
+    assert!(
+        retry.is_ok(),
+        "a canonical retry must remain live after mismatched-tail rollback: {retry:?}"
+    );
+    assert_eq!(
+        inv056_external_order_snapshot(&env),
+        forward,
+        "retry after hostile ordering must reach the canonical normalized state"
+    );
+}
 
 #[derive(Clone, Copy, Debug)]
 enum Inv056BatchRoute {
