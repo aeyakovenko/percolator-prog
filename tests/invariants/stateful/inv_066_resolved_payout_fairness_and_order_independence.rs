@@ -10,8 +10,12 @@
 //! The oracle checks exact SPL-vault reconciliation for every payout,
 //! claimant-order-independent outcomes, no second payment on retry, zero
 //! terminal accounting, successful slab closure, and complete isolation of the
-//! separately initialized foreign market.
+//! separately initialized foreign market. After every trade, resolution, and
+//! claimant transition, an independent census recomputes stock and encumbrance
+//! totals from all portfolios, decoded state, the raw zero-copy header, and SPL
+//! custody.
 
+use crate::support::fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census};
 use crate::support::v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT};
 use percolator::{MarketModeV16, POS_SCALE};
 
@@ -35,10 +39,14 @@ fn run_terminal_lifecycle(order: [usize; PRIMARY_ACTOR_COUNT]) -> Result<Termina
         .trade_no_cpi(0, 1, 0, POS_SCALE as i128, config.initial_price, 0)
         .map_err(|error| format!("open asset-0 matched position: {error}"))?;
     max_compute_units = max_compute_units.max(first_trade.compute_units);
+    assert_public_stock_census("INV-066 after first matched trade", &env)?;
+    assert_public_encumbrance_census("INV-066 after first matched trade", &env)?;
     let second_trade = env
         .trade_no_cpi(2, 3, 1, 2 * POS_SCALE as i128, config.initial_price, 0)
         .map_err(|error| format!("open asset-1 matched position: {error}"))?;
     max_compute_units = max_compute_units.max(second_trade.compute_units);
+    assert_public_stock_census("INV-066 after second matched trade", &env)?;
+    assert_public_encumbrance_census("INV-066 after second matched trade", &env)?;
 
     let resolve = env
         .resolve_market()
@@ -47,6 +55,8 @@ fn run_terminal_lifecycle(order: [usize; PRIMARY_ACTOR_COUNT]) -> Result<Termina
     if env.primary_market_state().1.mode != MarketModeV16::Resolved {
         return Err("ResolveMarket did not enter Resolved mode".to_string());
     }
+    assert_public_stock_census("INV-066 after market resolution", &env)?;
+    assert_public_encumbrance_census("INV-066 after market resolution", &env)?;
 
     let mut payouts = [0u64; PRIMARY_ACTOR_COUNT];
     for actor in order {
@@ -87,7 +97,14 @@ fn run_terminal_lifecycle(order: [usize; PRIMARY_ACTOR_COUNT]) -> Result<Termina
                 "actor {actor} terminal payout retry mutated state or paid twice"
             ));
         }
+        assert_public_stock_census(&format!("INV-066 after resolved claimant {actor}"), &env)?;
+        assert_public_encumbrance_census(
+            &format!("INV-066 after resolved claimant {actor}"),
+            &env,
+        )?;
+    }
 
+    for actor in order {
         let close_portfolio = env
             .close_primary_portfolio(actor)
             .map_err(|error| format!("close terminal portfolio {actor}: {error}"))?;
