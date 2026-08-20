@@ -10,11 +10,12 @@
 //! already-reserved domains remain tradable, and then attempts to admit a new asset whose long/short
 //! source domains are not reserved. The public route must reject before admitting a funded leg and
 //! roll back market, portfolios, and SPL custody exactly.
-//! `v16_program_expired_source_lien_route_matrix_discovers_funded_residue_lock` creates a source lien by
-//! ordinary risk increase, crosses its authenticated expiry at two boundaries, and judges crank
-//! progress from the source-lien rank rather than the return code. It records repeated successful
-//! no-op cranks, permits any genuine partial reductions, and requires every remaining owner route
-//! to roll back exactly once the reduction sequence reaches a funded nonzero fixed point.
+//! `v16_program_expired_source_lien_route_matrix_preserves_bounded_owner_exit` creates a source
+//! lien by ordinary risk increase and crosses its authenticated expiry at both equal and late
+//! boundaries. One permissionless crank must normalize the global bucket without moving custody;
+//! one full owner reduction must then clear the exposure and preserve withdrawal of all remaining
+//! senior capital. This is the fixed-pin certification for the funded lock originally discovered
+//! by this route family.
 //! `v16_program_shared_expiry_progress_matrix_preserves_terminal_progress` constructs one public
 //! four-portfolio world containing a live source lien and a prospective adverse K/F delta. A
 //! lien-free winner expires their shared bucket, after which the prospective loser is tested
@@ -599,13 +600,14 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
     env.svm.warp_to_slot(now_slot);
     env.push_auth_mark_for_asset_as_admin(0, now_slot, WINNING_MARK);
 
-    let mut reconciled = false;
-    let mut successful_noops = 0usize;
-    for step in 0..=3 {
+    let mut expiry_steps = 0usize;
+    while env.market_state().1.source_backing_buckets[1].status == BackingBucketStatusV16::Fresh
+        && expiry_steps < 4
+    {
         env.svm.expire_blockhash();
         let market_before_crank = env.svm.get_account(&env.market).unwrap();
         let portfolio_before_crank = env.svm.get_account(&portfolio).unwrap();
-        let observations = if step == 0 && hinted_first {
+        let observations = if expiry_steps == 0 && hinted_first {
             crank_observations(0)
         } else {
             vec![]
@@ -622,61 +624,40 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
             ],
             &[],
         );
-        if let Ok(cu) = crank {
-            assert!(cu < 1_400_000);
-            if env.svm.get_account(&env.market).unwrap() == market_before_crank
-                && env.svm.get_account(&portfolio).unwrap() == portfolio_before_crank
-            {
-                successful_noops += 1;
-            }
-        } else {
-            assert_eq!(
-                env.svm.get_account(&env.market).unwrap(),
-                market_before_crank
-            );
-            assert_eq!(
-                env.svm.get_account(&portfolio).unwrap(),
-                portfolio_before_crank
-            );
-        }
-        let source = env.portfolio_state(portfolio).source_domains[0];
-        if source.source_claim_counterparty_liened_num.get() == 0
-            && source.source_lien_counterparty_backing_num.get() == 0
-        {
-            assert!(source.source_claim_impaired_num.get() > 0);
-            reconciled = true;
-            break;
-        }
+        let cu = crank.expect("an honest crank must normalize lapsed backing");
+        assert!(cu < 1_400_000);
+        let status_after = env.market_state().1.source_backing_buckets[1].status;
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before_crank
+                || env.svm.get_account(&portfolio).unwrap() != portfolio_before_crank,
+            "a successful expiry crank must mutate the liveness state: slot={now_slot}, \
+             hinted_first={hinted_first}, step={expiry_steps}, status_after={status_after:?}"
+        );
+        expiry_steps += 1;
     }
-    assert!(
-        !reconciled,
-        "the vulnerable pin unexpectedly reconciled the lien"
+    assert!(expiry_steps != 0 && expiry_steps <= 4);
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Impaired,
+        "liened expiry must become an impaired bucket"
     );
-    assert!(
-        successful_noops > 0,
-        "the matrix must expose at least one false-success crank"
-    );
+    let impaired_source = env.portfolio_state(portfolio).source_domains[0];
+    assert!(impaired_source.source_claim_counterparty_liened_num.get() > 0);
+    assert!(impaired_source.source_lien_counterparty_backing_num.get() > 0);
     assert_eq!(env.token_amount(env.vault), vault_before);
 
     let initial_exposure = active_leg_for_asset(&env.portfolio_state(portfolio), 0)
         .basis_pos_q
         .unsigned_abs();
-    let mut reduction_steps = 0usize;
-    let mut terminal_error = None;
-    while has_active_leg_for_asset(&env.portfolio_state(portfolio), 0) {
-        let remaining = active_leg_for_asset(&env.portfolio_state(portfolio), 0)
-            .basis_pos_q
-            .unsigned_abs();
-        let reduce_q = remaining.min(POS_SCALE);
-        env.svm.expire_blockhash();
-        let market_before = env.svm.get_account(&env.market).unwrap();
-        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
-        let reduction = env.send(
+    assert!(initial_exposure > 0);
+    env.svm.expire_blockhash();
+    let reduction_cu = env
+        .send(
             ProgInstruction::RebalanceReduce {
                 portfolio_id: env.portfolio_id(portfolio),
                 position_epoch: env.portfolio_position_epoch(portfolio),
                 asset_index: 0,
-                reduce_q,
+                reduce_q: initial_exposure,
             },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
@@ -684,132 +665,35 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
                 AccountMeta::new(portfolio, false),
             ],
             &[&owner],
-        );
-        match reduction {
-            Ok(cu) => {
-                assert!(cu < 1_400_000);
-                reduction_steps += 1;
-                assert!(reduction_steps <= 1_100);
-            }
-            Err(error) => {
-                assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-                assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
-                assert_eq!(env.token_amount(env.vault), vault_before);
-                terminal_error = Some(error);
-                break;
-            }
-        }
-    }
+        )
+        .expect("one bounded owner reduction must clear the expired-backed leg");
+    assert!(reduction_cu < 1_400_000);
     assert!(
-        terminal_error.is_some(),
-        "tiny reductions unexpectedly reached zero"
+        !has_active_leg_for_asset(&env.portfolio_state(portfolio), 0),
+        "the owner must reach zero exposure"
     );
-    let trapped = env.portfolio_state(portfolio);
-    let remaining_exposure = active_leg_for_asset(&trapped, 0).basis_pos_q.unsigned_abs();
-    assert!(remaining_exposure > 0 && remaining_exposure <= initial_exposure);
-    assert!(trapped.capital.get() > 0);
-
-    let matcher_program = Pubkey::new_unique();
-    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
-    env.svm.add_program(matcher_program, &matcher_bytes);
-    let (matcher_context, matcher_delegate, _) =
-        env.init_auth_matcher_context(matcher_program, &counterparty_owner, counterparty);
-
-    macro_rules! assert_exit_locked {
-        ($label:literal, $attempt:expr) => {{
-            env.svm.expire_blockhash();
-            let market_before = env.svm.get_account(&env.market).unwrap();
-            let portfolio_before = env.svm.get_account(&portfolio).unwrap();
-            let counterparty_before = env.svm.get_account(&counterparty).unwrap();
-            let matcher_before = env.svm.get_account(&matcher_context).unwrap();
-            let result = $attempt;
-            assert!(
-                result.is_err(),
-                "{} unexpectedly cleared the residue",
-                $label
-            );
-            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-            assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
-            assert_eq!(
-                env.svm.get_account(&counterparty).unwrap(),
-                counterparty_before
-            );
-            assert_eq!(
-                env.svm.get_account(&matcher_context).unwrap(),
-                matcher_before
-            );
-            assert_eq!(env.token_amount(env.vault), vault_before);
-        }};
-    }
-    assert_exit_locked!(
-        "signed bilateral reduction",
-        env.try_trade_asset_with_cu(
-            0,
-            &owner,
-            portfolio,
-            &counterparty_owner,
-            counterparty,
-            -(POS_SCALE as i128),
-            WINNING_MARK,
-            0,
-        )
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    let exited = env.portfolio_state(portfolio);
+    let remaining_capital = exited.capital.get();
+    assert!(
+        remaining_capital > 0,
+        "the liveness witness must remain funded"
     );
-    assert_exit_locked!(
-        "signed batch reduction",
-        env.send(
-            env.batch_trade_no_cpi_ix(
-                portfolio,
-                counterparty,
-                vec![BatchTradeLeg {
-                    asset_index: 0,
-                    market_id: env.asset_market_id(0),
-                    size_q: -(POS_SCALE as i128),
-                    exec_price: WINNING_MARK,
-                    fee_bps: 0,
-                }],
-            ),
-            vec![
-                AccountMeta::new(owner.pubkey(), true),
-                AccountMeta::new(counterparty_owner.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(portfolio, false),
-                AccountMeta::new(counterparty, false),
-            ],
-            &[&owner, &counterparty_owner],
-        )
+    let vault_before_withdrawal = env.token_amount(env.vault);
+    let (destination, withdrawal_cu) = env.withdraw_with_cu(&owner, portfolio, remaining_capital);
+    assert!(withdrawal_cu < 1_400_000);
+    assert_eq!(env.token_amount(destination), remaining_capital as u64);
+    assert_eq!(
+        vault_before_withdrawal - env.token_amount(env.vault),
+        remaining_capital as u64
     );
-    assert_exit_locked!(
-        "authenticated CPI reduction",
-        env.try_trade_cpi_with_cu_on_asset(
-            &owner,
-            portfolio,
-            &counterparty_owner,
-            counterparty,
-            matcher_program,
-            matcher_context,
-            matcher_delegate,
-            0,
-            -(POS_SCALE as i128),
-            0,
-        )
-    );
-    assert_exit_locked!(
-        "released PnL conversion",
-        env.send(
-            env.convert_released_pnl_ix(portfolio, 1),
-            vec![
-                AccountMeta::new(owner.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(portfolio, false),
-            ],
-            &[&owner],
-        )
-    );
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
 }
 
 #[test]
-fn v16_program_expired_source_lien_route_matrix_discovers_funded_residue_lock() {
+fn v16_program_expired_source_lien_route_matrix_preserves_bounded_owner_exit() {
     run_expired_source_lien_route_matrix(2, true);
+    run_expired_source_lien_route_matrix(3, false);
 }
 
 // security.md sweep - last-principal backing withdrawal must not strand provider earnings (#22/#48):

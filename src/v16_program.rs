@@ -4958,6 +4958,13 @@ pub mod oracle_v16 {
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
 
+    pub fn backing_principal_withdrawal_is_fresh(
+        expiry_slot: u64,
+        authenticated_slot: u64,
+    ) -> bool {
+        authenticated_slot < expiry_slot
+    }
+
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
             return Some(0);
@@ -9961,6 +9968,12 @@ pub mod processor {
             };
 
             let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
+            if !policy_v16::backing_principal_withdrawal_is_fresh(
+                bucket.expiry_slot,
+                authenticated_market_slot_or_fallback_view(&group),
+            ) {
+                return Err(PercolatorError::EngineStale.into());
+            }
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
                 Some(ledger_ai.try_borrow_mut_data()?)
             } else {
@@ -13280,7 +13293,7 @@ pub mod processor {
                     group.header.current_slot = percolator::V16PodU64::new(authenticated_now_slot);
                 }
                 let summary = group
-                    .build_actionable_summary(&portfolio.as_view())
+                    .build_actionable_summary_at_slot(&portfolio.as_view(), authenticated_now_slot)
                     .map_err(map_v16_error)?;
                 if summary.expired_close {
                     let result = group
@@ -13528,7 +13541,7 @@ pub mod processor {
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
             let mut summary = group
-                .build_actionable_summary(&portfolio.as_view())
+                .build_actionable_summary_at_slot(&portfolio.as_view(), authenticated_now_slot)
                 .map_err(map_v16_error)?;
             let active_bitmap = portfolio
                 .header
@@ -13543,7 +13556,7 @@ pub mod processor {
             {
                 collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut portfolio)?;
                 summary = group
-                    .build_actionable_summary(&portfolio.as_view())
+                    .build_actionable_summary_at_slot(&portfolio.as_view(), authenticated_now_slot)
                     .map_err(map_v16_error)?;
             }
             // Refresh and liquidation both recertify the complete bounded portfolio. A pending

@@ -21,11 +21,41 @@
 //! at all three expiry boundaries. The pre-expiry control must consume backing, credit capital, and
 //! withdraw real SPL value; both expired boundaries reject with exact rollback and zero
 //! provider-principal movement while preserving withdrawal of all senior capital.
+//! `v16_program_backing_principal_release_respects_authenticated_expiry` retains a provider
+//! withdrawal while the bucket is fresh and lands it at all three authenticated boundaries. Only
+//! the pre-expiry request may recover principal; equal/late requests must roll back rather than
+//! bypass expiry forfeiture.
 //!
 //! Guarantee boundary: the trade, conversion, and retained-top-up consumers have fixed-pin bounded
 //! evidence over the generated route and expiry boundaries represented here.
 
 use super::*;
+use crate::support::v16_svm::{MarketConfig, V16Svm};
+use percolator::{BOUND_SCALE, POS_SCALE};
+use percolator_prog::ix::CrankObservationHint;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EconomicSnapshot {
+    markets: [Vec<u8>; 2],
+    portfolios: Vec<Vec<u8>>,
+    foreign_portfolio: Vec<u8>,
+    backing_ledger: Vec<u8>,
+    matcher_contexts: Vec<Vec<u8>>,
+    tokens: Vec<(solana_sdk::pubkey::Pubkey, Vec<u8>)>,
+    lamports: Vec<(solana_sdk::pubkey::Pubkey, u64)>,
+}
+
+fn snapshot(env: &V16Svm) -> EconomicSnapshot {
+    EconomicSnapshot {
+        markets: [env.market_data(false), env.market_data(true)],
+        portfolios: env.all_primary_portfolio_data(),
+        foreign_portfolio: env.foreign_portfolio_data(),
+        backing_ledger: env.backing_domain_ledger_data(),
+        matcher_contexts: env.all_matcher_context_data(),
+        tokens: env.all_token_account_data(),
+        lamports: env.all_economic_account_lamports(),
+    }
+}
 
 fn assert_backing_expiry_trade_route_boundary(discovery: &ExpiredBackingTradeRouteDiscovery) {
     match discovery.landing {
@@ -119,6 +149,169 @@ fn v16_program_retained_backing_topup_boundary_matrix() {
     );
     for discovery in &discoveries {
         assert_retained_maturity_boundary(discovery);
+    }
+}
+
+#[test]
+fn v16_program_backing_principal_release_respects_authenticated_expiry() {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const PROVIDER: usize = 2;
+    const ASSET: u16 = 0;
+    const DOMAIN: u16 = 1;
+    const BACKING: u128 = 150;
+    const WITHDRAWAL: u128 = 25;
+    const EXPIRY_SLOT: u64 = 5;
+    const INITIAL_PRICE: u64 = 100;
+    const WINNING_PRICE: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+
+    for landing in BackingExpiryLanding::ALL {
+        let mut seed = [0x66; 32];
+        seed[0] ^= match landing {
+            BackingExpiryLanding::Before => 1,
+            BackingExpiryLanding::At => 2,
+            BackingExpiryLanding::After => 3,
+        };
+        let mut env = V16Svm::new(
+            seed,
+            MarketConfig {
+                initial_price: INITIAL_PRICE,
+                maintenance_margin_bps: 1_000,
+                initial_margin_bps: 1_000,
+                max_price_move_bps_per_slot: 500,
+                max_accrual_dt_slots: 1,
+                min_funding_lifetime_slots: 1,
+                actor_deposits: [1_000, 1_000, 0, 0, 0],
+                ..MarketConfig::default()
+            },
+        );
+        let supply_before = env.token_supply_observed();
+        env.update_asset_authority_from_admin(
+            ASSET,
+            percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+            PROVIDER,
+        )
+        .expect("install the independent backing provider");
+        env.top_up_backing_bucket_for_actor(PROVIDER, DOMAIN, BACKING, EXPIRY_SLOT)
+            .expect("fund the expiring backing bucket");
+        env.trade_no_cpi(WINNER, LOSER, ASSET, SIZE_Q, INITIAL_PRICE, 0)
+            .expect("open a position whose favorable PnL uses the source domain");
+        env.warp_to_slot(2);
+        env.push_auth_mark(ASSET, 2, WINNING_PRICE)
+            .expect("publish the favorable authenticated mark");
+        let oracle_accounts = env.primary_profile(ASSET as usize).oracle_leg_count;
+        let observations = || {
+            vec![CrankObservationHint {
+                asset_index: ASSET,
+                oracle_accounts,
+            }]
+        };
+        for actor in [LOSER, WINNER] {
+            env.crank(actor, 2, observations())
+                .expect("refresh both sides at the favorable mark");
+        }
+        env.trade_no_cpi(WINNER, LOSER, ASSET, -SIZE_Q, WINNING_PRICE, 0)
+            .expect("flatten and retain a real source-backed winner claim");
+        let winner_claim =
+            env.primary_market_state().1.source_credit[DOMAIN as usize].positive_claim_bound_num;
+        assert!(
+            winner_claim != 0,
+            "fixture must create an independent claim"
+        );
+        let fresh_backing_before = env.primary_market_state().1.source_backing_buckets
+            [DOMAIN as usize]
+            .fresh_unliened_backing_num;
+        assert!(
+            fresh_backing_before
+                .checked_sub(WITHDRAWAL * BOUND_SCALE)
+                .is_some_and(|remaining| remaining >= winner_claim),
+            "fresh control withdrawal must remove only backing excess above the live claim"
+        );
+        let retained =
+            env.build_retained_backing_bucket_withdrawal_for_actor(PROVIDER, DOMAIN, WITHDRAWAL);
+        let destination = env.actors[PROVIDER].destination_token;
+        let destination_before = env.token_amount(destination);
+        let vault_before = env.token_amount(env.vault);
+        let internal_vault_before = env.primary_market_state().1.vault;
+        let before_landing = snapshot(&env);
+        let landing_slot = match landing {
+            BackingExpiryLanding::Before => EXPIRY_SLOT - 1,
+            BackingExpiryLanding::At => EXPIRY_SLOT,
+            BackingExpiryLanding::After => EXPIRY_SLOT + 1,
+        };
+        env.warp_to_slot(landing_slot);
+        let result = env.land_retained(retained);
+
+        match landing {
+            BackingExpiryLanding::Before => {
+                result.expect("fresh retained backing withdrawal must land");
+                assert_eq!(
+                    env.token_amount(destination) - destination_before,
+                    WITHDRAWAL as u64
+                );
+                assert_eq!(
+                    vault_before - env.token_amount(env.vault),
+                    WITHDRAWAL as u64
+                );
+                assert_eq!(
+                    internal_vault_before - env.primary_market_state().1.vault,
+                    WITHDRAWAL
+                );
+                assert_eq!(
+                    env.primary_market_state().1.source_backing_buckets[DOMAIN as usize]
+                        .fresh_unliened_backing_num,
+                    fresh_backing_before - WITHDRAWAL * BOUND_SCALE
+                );
+            }
+            BackingExpiryLanding::At | BackingExpiryLanding::After => {
+                let error = result.expect_err("expired retained backing withdrawal must reject");
+                assert!(
+                    error.contains("Custom(19)") || error.contains("custom program error: 0x13"),
+                    "expired withdrawal must reject as EngineStale: {error}"
+                );
+                assert_eq!(
+                    snapshot(&env),
+                    before_landing,
+                    "expired provider withdrawal must roll back exactly at {landing:?}"
+                );
+                assert_eq!(env.token_amount(destination), destination_before);
+                assert_eq!(env.token_amount(env.vault), vault_before);
+                assert_eq!(env.primary_market_state().1.vault, internal_vault_before);
+
+                let mut expiry_steps = 0usize;
+                while env.primary_market_state().1.source_backing_buckets[DOMAIN as usize].status
+                    == percolator::BackingBucketStatusV16::Fresh
+                    && expiry_steps < 8
+                {
+                    env.crank(WINNER, landing_slot, observations())
+                        .expect("a bounded claimant crank must progress expiry");
+                    expiry_steps += 1;
+                }
+                let expired = env.primary_market_state().1.source_backing_buckets[DOMAIN as usize];
+                assert_ne!(
+                    expired.status,
+                    percolator::BackingBucketStatusV16::Fresh,
+                    "the canonical expiry continuation must remove freshness"
+                );
+                assert_eq!(expired.fresh_unliened_backing_num, 0);
+                assert!(expiry_steps != 0 && expiry_steps <= 8);
+                assert_eq!(
+                    env.primary_market_state().1.source_credit[DOMAIN as usize]
+                        .fresh_reserved_backing_num,
+                    0
+                );
+                assert_eq!(env.token_amount(destination), destination_before);
+                assert_eq!(env.token_amount(env.vault), vault_before);
+                assert_eq!(env.primary_market_state().1.vault, internal_vault_before);
+
+                env.withdraw_backing_bucket_for_actor(PROVIDER, DOMAIN, WITHDRAWAL)
+                    .expect_err("expired provider principal must remain non-withdrawable");
+                assert_eq!(env.token_amount(destination), destination_before);
+                assert_eq!(env.token_amount(env.vault), vault_before);
+            }
+        }
+        assert_eq!(env.token_supply_observed(), supply_before);
     }
 }
 
