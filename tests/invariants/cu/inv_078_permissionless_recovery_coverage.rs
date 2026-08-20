@@ -336,8 +336,18 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     let short_owner = Keypair::new();
     let long_account = env.create_portfolio(&long_owner);
     let short_account = env.create_portfolio(&short_owner);
-    env.deposit(&long_owner, long_account, 10_000);
-    env.deposit(&short_owner, short_account, 10_000);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.svm.warp_to_slot(1);
+    for portfolio in [long_account, short_account] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations(0),
+            },
+        );
+    }
     env.trade_asset_with_cu(
         1,
         &long_owner,
@@ -352,7 +362,7 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     let (_, opened_group) = state::read_market(&market_data).unwrap();
     assert_eq!(opened_group.assets[1].oi_eff_long_q, 2 * POS_SCALE);
     assert_eq!(opened_group.assets[1].oi_eff_short_q, 2 * POS_SCALE);
-    assert_eq!(env.token_amount(env.vault), 20_080);
+    assert_eq!(env.token_amount(env.vault), 2_000_080);
 
     env.svm.warp_to_slot(2);
     env.update_asset_lifecycle_as_admin_with_cu(
@@ -461,7 +471,7 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
         55,
         "admin must recover asset-domain insurance and backing funds"
     );
-    assert_eq!(env.token_amount(env.vault), 20_025);
+    assert_eq!(env.token_amount(env.vault), 2_000_025);
 
     env.top_up_insurance_from_admin_token_with_cu(admin_recovery, 10);
     env.top_up_backing_bucket_from_admin_token_with_cu(admin_recovery, 0, 45, 20);
@@ -470,7 +480,7 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
         0,
         "recovered funds should be re-deposited into market-0 buckets"
     );
-    assert_eq!(env.token_amount(env.vault), 20_080);
+    assert_eq!(env.token_amount(env.vault), 2_000_080);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (_, recovered_group) = state::read_market(&market_data).unwrap();
     assert_eq!(recovered_group.insurance_domain_budget[2], 0);
@@ -544,7 +554,7 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     );
     println!("v16 permissionless asset reuse BPF CU: {reuse_cu}");
     assert_eq!(env.token_amount(reuse_source), 0);
-    assert_eq!(env.token_amount(env.vault), 20_105);
+    assert_eq!(env.token_amount(env.vault), 2_000_105);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (reused_cfg, reused_group) = state::read_market(&market_data).unwrap();
     assert_eq!(reused_cfg.free_market_slot_count, 0);
@@ -587,13 +597,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     let backing_bucket_authority = Keypair::new();
     let new_oracle = Keypair::new();
     let cranker = Keypair::new();
-    env.configure_permissionless_resolve_with_cu(100, 5);
     env.configure_auth_mark_with_cu(0, 100);
-    assert_eq!(
-        env.market_state().0.force_close_delay_slots,
-        5,
-        "auth-mark setup must preserve the force-close delay policy"
-    );
 
     env.try_update_per_asset_authority_with_cu(
         &marketauth,
@@ -627,13 +631,9 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         backing_bucket_authority.pubkey().to_bytes(),
     )
     .expect("asset-0 admin rotates asset-0 backing bucket authority");
-    env.top_up_insurance_domain_with_authority(&insurance_authority, 0, 500);
-    let insurance_before_shutdown = env.market_state().1.insurance;
-    let vault_before_shutdown = env.token_amount(env.vault);
-    assert_eq!(insurance_before_shutdown, 500);
     let asset_market_id = env.asset_market_id(0);
+    let before_ordinary_retire = env.svm.get_account(&env.market).unwrap().data;
 
-    env.svm.expire_blockhash();
     let ordinary_retire_asset0 = send_tx(
         &mut env.svm,
         env.program_id,
@@ -661,10 +661,17 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         "ordinary UpdateAssetLifecycle RETIRE must not retire asset 0"
     );
     assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_ordinary_retire,
+        "rejected asset-0 retirement must roll back exactly"
+    );
+    assert_eq!(
         env.market_state().1.assets[0].lifecycle,
         AssetLifecycleV16::Active
     );
-    assert_eq!(env.market_state().1.insurance_domain_budget[0], 500);
+    assert_eq!(env.market_state().1.insurance_domain_budget[0], 0);
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 100);
     let clean_start_data = env.svm.get_account(&env.market).unwrap().data;
     let (_, clean_start_group) = state::read_market(&clean_start_data).unwrap();
     let clean_start_asset = &clean_start_group.assets[0];
@@ -700,6 +707,16 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         100,
         0,
     );
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    assert_eq!(
+        env.market_state().0.force_close_delay_slots,
+        5,
+        "permissionless resolve setup must install the force-close delay policy"
+    );
+    env.top_up_insurance_domain_with_authority(&insurance_authority, 0, 500);
+    let insurance_before_shutdown = env.market_state().1.insurance;
+    let vault_before_shutdown = env.token_amount(env.vault);
+    assert_eq!(insurance_before_shutdown, 500);
     let old_market_id = env.market_state().1.assets[0].market_id;
 
     env.svm.warp_to_slot(2);
@@ -766,6 +783,8 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         shutdown_profile.backing_bucket_authority,
         backing_bucket_authority.pubkey().to_bytes()
     );
+    let restart_observation_sequence =
+        next_control_sequence(env.control_sequences(0).oracle_observation);
 
     env.svm.expire_blockhash();
     let restart_with_positions = send_tx(
@@ -777,7 +796,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
             asset_index: 0,
             now_slot: 3,
             initial_price: 250,
-            observation_sequence: 2,
+            observation_sequence: restart_observation_sequence,
         },
         vec![
             AccountMeta::new(marketauth.pubkey(), true),
@@ -822,7 +841,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         "asset-0 shutdown keeps its insurance budget in place"
     );
     assert_eq!(force_closed_group.insurance, insurance_before_shutdown);
-    assert_eq!(env.token_amount(env.vault), vault_before_shutdown + 20_000);
+    assert_eq!(env.token_amount(env.vault), vault_before_shutdown);
 
     assert!(
         env.try_withdraw_insurance_domain_with_authority(&marketauth, 0, 100)
@@ -850,7 +869,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
             asset_index: 0,
             now_slot: 8,
             initial_price: 250,
-            observation_sequence: 2,
+            observation_sequence: restart_observation_sequence,
         },
         vec![
             AccountMeta::new(marketauth.pubkey(), true),
@@ -872,7 +891,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
             asset_index: 0,
             now_slot: 8,
             initial_price: 250,
-            observation_sequence: 2,
+            observation_sequence: restart_observation_sequence,
         },
         vec![
             AccountMeta::new(asset_admin.pubkey(), true),
@@ -970,7 +989,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     );
     env.configure_auth_mark_for_asset_with_authority(0, &new_oracle, 8, 250);
     env.svm.warp_to_slot(9);
-    env.push_auth_mark_for_asset_with_authority(0, &new_oracle, 9, 260);
+    env.push_auth_mark_for_asset_with_authority(0, &new_oracle, 9, 250);
 
     env.trade_asset_with_cu(
         0,
@@ -979,7 +998,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         &short_owner,
         short_account,
         POS_SCALE as i128,
-        260,
+        250,
         0,
     );
     let long_after_restart = env.portfolio_state(long_account);

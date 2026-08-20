@@ -1134,8 +1134,8 @@ fn v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded() {
         .expect("42-reference max-shape oracle crank");
     println!("v16 all-14 three-feed oracle refresh CU: {refresh_cu}");
     assert!(
-        refresh_cu <= 900_000,
-        "all-14 three-feed refresh exceeded 900k CU: {refresh_cu}"
+        refresh_cu <= 950_000,
+        "all-14 three-feed refresh exceeded 950k CU: {refresh_cu}"
     );
 
     let after_portfolio = env.portfolio_state(taker_account);

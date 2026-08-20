@@ -685,7 +685,7 @@ fn v16_attack_asset_append_invalidates_public_released_pnl_cert() {
 }
 
 #[test]
-fn v16_attack_funding_only_epoch_invalidates_public_released_pnl_cert() {
+fn v16_attack_target_and_funding_epochs_invalidate_public_released_pnl_cert() {
     const PREMIUM_MARK: u64 = 2_000_000;
     const FUNDING_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     let (mut env, claim_owner, claimant) = setup_public_released_pnl_certificate();
@@ -729,17 +729,20 @@ fn v16_attack_funding_only_epoch_invalidates_public_released_pnl_cert() {
     );
     assert!(cert_is_current(&env, claimant));
 
-    let current_effective_price = env.market_state().1.assets[0].effective_price;
-    env.svm.warp_to_slot(4);
-    env.push_auth_mark_for_asset_as_admin(0, 4, current_effective_price);
     let before = env.market_state().1;
     let cert_before = health_cert(&env.portfolio_state(claimant));
     assert_eq!(cert_before.cert_funding_epoch, before.funding_epoch);
     assert_eq!(cert_before.cert_oracle_epoch, before.oracle_epoch);
 
-    // A risk-reducing public trade first books deterministic zero-move funding.
-    // Unlike an observation-bearing crank, this route does not synchronize the
-    // engine raw target, so a passing assertion below isolates funding_epoch.
+    let current_effective_price = before.assets[0].effective_price;
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_as_admin(0, 4, current_effective_price);
+
+    // Target publication invalidates the oracle certificate immediately. The next slot's
+    // risk-reducing trade commits the premium interval and independently advances funding_epoch.
+    // The engine's kernel_cert_is_current contract proves each key is individually necessary;
+    // this public route demonstrates the reachable composition without manufacturing state.
+    env.svm.warp_to_slot(5);
     env.trade_asset_with_cu(
         0,
         &long_owner,
@@ -757,10 +760,7 @@ fn v16_attack_funding_only_epoch_invalidates_public_released_pnl_cert() {
         after.assets[0].effective_price, current_effective_price,
         "the funding interval must have zero effective-price movement"
     );
-    assert_eq!(
-        after.oracle_epoch, before.oracle_epoch,
-        "oracle_epoch must remain fixed so it cannot mask the funding key"
-    );
+    assert_eq!(after.oracle_epoch, before.oracle_epoch + 1);
     assert_eq!(
         after.funding_epoch,
         before.funding_epoch + 1,
@@ -768,7 +768,7 @@ fn v16_attack_funding_only_epoch_invalidates_public_released_pnl_cert() {
     );
     assert_ne!(
         after.assets[0].f_long_num, before.assets[0].f_long_num,
-        "the isolated epoch bump must correspond to a real funding-ledger change"
+        "the funding epoch bump must correspond to a real funding-ledger change"
     );
     assert_eq!(
         stale, cert_before,
@@ -776,7 +776,11 @@ fn v16_attack_funding_only_epoch_invalidates_public_released_pnl_cert() {
     );
     assert!(
         stale.cert_funding_epoch < after.funding_epoch,
-        "the old claim certificate must be stale solely on the funding key"
+        "the old claim certificate must be stale on the funding key"
+    );
+    assert!(
+        stale.cert_oracle_epoch < after.oracle_epoch,
+        "the old claim certificate must also be stale on the published-target key"
     );
 
     assert_stale_conversion_rolls_back(&mut env, &claim_owner, claimant);

@@ -63,7 +63,16 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
 
     for slot in 2..=20u64 {
         env.svm.warp_to_slot(slot);
-        let size_q = if slot % 2 == 0 { WASH_Q } else { -WASH_Q };
+        if slot > 2 {
+            env.svm.expire_blockhash();
+            env.crank(
+                wash_long_account,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
         env.svm.expire_blockhash();
         env.try_trade_asset_with_cu(
             0,
@@ -71,23 +80,41 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
             wash_long_account,
             &wash_short,
             wash_short_account,
-            size_q,
+            WASH_Q,
             MARK.checked_mul(slot).unwrap(),
             0,
         )
         .unwrap_or_else(|err| panic!("small wash trade at slot {slot} failed: {err}"));
+        // Target staging may block another risk increase, but cannot strand either side. Both
+        // accounts can return to zero immediately while the just-published target is pending.
+        env.svm.expire_blockhash();
+        env.try_trade_asset_with_cu(
+            0,
+            &wash_long,
+            wash_long_account,
+            &wash_short,
+            wash_short_account,
+            -WASH_Q,
+            MARK.checked_mul(slot).unwrap(),
+            0,
+        )
+        .unwrap_or_else(|err| panic!("wash exit at slot {slot} failed: {err}"));
     }
 
     let (cfg_before_crank, group_before_crank) = env.market_state();
     let fees_paid = group_before_crank.insurance - insurance_before;
-    assert_eq!(group_before_crank.assets[0].effective_price, MARK);
-    assert!(cfg_before_crank.mark_ewma_e6 > MARK);
+    assert!(group_before_crank.assets[0].effective_price > MARK);
+    assert_eq!(
+        cfg_before_crank.mark_ewma_e6, group_before_crank.assets[0].effective_price,
+        "same-slot risk reduction must not leave a second uncommitted mark segment"
+    );
+    env.svm.warp_to_slot(21);
     for portfolio in [attacker_account, victim_account] {
         env.svm.expire_blockhash();
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
-                now_slot: 20,
+                now_slot: 21,
                 observations: crank_observations(0),
             },
         );
@@ -105,7 +132,7 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
 }
 
 #[test]
-fn v16_attack_accumulated_ewma_lag_remains_fee_covered_after_crank() {
+fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
     const MARK: u64 = 100;
     const BASE_Q: i128 = POS_SCALE as i128;
 
@@ -152,7 +179,16 @@ fn v16_attack_accumulated_ewma_lag_remains_fee_covered_after_crank() {
 
     for slot in 2..=20u64 {
         env.svm.warp_to_slot(slot);
-        let size_q = if slot % 2 == 0 { BASE_Q } else { -BASE_Q };
+        if slot > 2 {
+            env.svm.expire_blockhash();
+            env.crank(
+                wash_long_account,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
         env.svm.expire_blockhash();
         env.try_trade_asset_with_cu(
             0,
@@ -160,25 +196,41 @@ fn v16_attack_accumulated_ewma_lag_remains_fee_covered_after_crank() {
             wash_long_account,
             &wash_short,
             wash_short_account,
-            size_q,
+            BASE_Q,
             MARK.checked_mul(slot).unwrap(),
             0,
         )
         .unwrap_or_else(|err| panic!("wash trade at slot {slot} failed: {err}"));
+        env.svm.expire_blockhash();
+        env.try_trade_asset_with_cu(
+            0,
+            &wash_long,
+            wash_long_account,
+            &wash_short,
+            wash_short_account,
+            -BASE_Q,
+            MARK.checked_mul(slot).unwrap(),
+            0,
+        )
+        .unwrap_or_else(|err| panic!("wash exit at slot {slot} failed: {err}"));
     }
 
     let (cfg_before_crank, group_before_crank) = env.market_state();
     let fees_paid = group_before_crank.insurance - insurance_before;
     let victim_capital_before = env.portfolio_state(victim_account).capital.get();
-    assert_eq!(group_before_crank.assets[0].effective_price, MARK);
-    assert!(cfg_before_crank.mark_ewma_e6 > MARK);
+    assert!(group_before_crank.assets[0].effective_price > MARK);
+    assert_eq!(
+        cfg_before_crank.mark_ewma_e6,
+        group_before_crank.assets[0].effective_price
+    );
 
+    env.svm.warp_to_slot(21);
     for portfolio in [attacker_account, victim_account] {
         env.svm.expire_blockhash();
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
-                now_slot: 20,
+                now_slot: 21,
                 observations: crank_observations(0),
             },
         );

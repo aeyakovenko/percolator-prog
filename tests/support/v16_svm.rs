@@ -1148,6 +1148,7 @@ impl V16Svm {
                 AccountMeta::new_readonly(self.vault_authority, false),
                 AccountMeta::new(self.market_admin_destination_token, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(self.mint, false),
             ],
             &[admin],
         )
@@ -4435,6 +4436,11 @@ impl V16Svm {
         TokenAccount::unpack(&account.data)
             .expect("decode token account")
             .amount
+    }
+
+    pub fn mint_supply(&self) -> u64 {
+        let account = self.svm.get_account(&self.mint).expect("mint account");
+        Mint::unpack(&account.data).expect("decode mint").supply
     }
 
     pub fn account_lamports(&self, key: Pubkey) -> u64 {

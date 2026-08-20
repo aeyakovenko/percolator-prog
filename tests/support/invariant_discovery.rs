@@ -966,8 +966,11 @@ pub struct ProspectiveAccrualDiscovery {
 pub struct PendingMarkAdmissionDiscovery {
     pub source: PendingMarkSource,
     pub published_target: u64,
-    pub stale_engine_target: u64,
+    pub staged_engine_target: u64,
     pub committed_mark: u64,
+    pub stale_risk_rejected_lock: bool,
+    pub rejected_exact_rollback: bool,
+    pub post_commit_round_trip_landed: bool,
     pub attacker_profit: u128,
     pub victim_loss: u128,
     pub extracted_tokens: u64,
@@ -979,6 +982,9 @@ pub struct PendingMarkInheritanceDiscovery {
     pub movement_cost: u128,
     pub pending_mark: u64,
     pub committed_mark: u64,
+    pub retained_rejected_lock: bool,
+    pub retained_exact_rollback: bool,
+    pub post_commit_round_trip_landed: bool,
     pub victim_loss: u128,
     pub attacker_gain: u128,
     pub extracted_profit: u64,
@@ -989,6 +995,8 @@ pub struct PendingTargetOverrideDiscovery {
     pub route: DiscoveryTradeRoute,
     pub control_target: u64,
     pub reordered_target: u64,
+    pub override_rejected_lock: bool,
+    pub rejected_exact_rollback: bool,
     pub movement_fee: u128,
     pub victim_payout_loss: u128,
     pub coalition_profit: u128,
@@ -1013,9 +1021,14 @@ pub struct PendingMarkFeeOrderingDiscovery {
 pub struct MarkMovementReserveDiscovery {
     pub route: DiscoveryTradeRoute,
     pub movement_fee: u128,
+    pub pending_withdraw_rejected: bool,
+    pub pending_exact_rollback: bool,
+    pub committed_withdraw_rejected: bool,
+    pub committed_exact_rollback: bool,
     pub withdrawn_reserve: u128,
     pub victim_loss: u128,
     pub coalition_gain: u128,
+    pub coalition_loss: u128,
     pub committed_mark: u64,
 }
 
@@ -1025,10 +1038,14 @@ pub struct TradeDrivenLiquidationDiscovery {
     pub route: ProspectiveAccrualRoute,
     pub movement_fee: u128,
     pub liquidation_reward: u128,
+    pub retained_penalty: u128,
+    pub budgeted_penalty: u128,
     pub victim_capital_loss: u128,
     pub oi_reduction_q: u128,
-    pub coalition_profit: u128,
+    pub coalition_gain: u128,
+    pub coalition_loss: u128,
     pub extracted_tokens: u128,
+    pub max_crank_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1735,23 +1752,38 @@ impl BilateralMarkFeeDiscovery {
 
 impl TradeDrivenLiquidationDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.movement_fee != 0
-            && self.liquidation_reward > self.movement_fee
-            && self.victim_capital_loss != 0
-            && self.oi_reduction_q != 0
-            && self.coalition_profit != 0
-            && self.extracted_tokens != 0
+        self.movement_fee == 0
+            || self.liquidation_reward != 0
+            || self.retained_penalty == 0
+            || self.budgeted_penalty != 0
+            || self.victim_capital_loss == 0
+            || self.oi_reduction_q == 0
+            || self.coalition_gain != 0
+            || self.coalition_loss == 0
+            || self.max_crank_cu >= crate::support::v16_svm::TX_CU_LIMIT
+    }
+
+    pub fn certifies_nonreclaimable_liquidation_penalty(&self) -> bool {
+        !self.is_violation()
     }
 }
 
 impl MarkMovementReserveDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.movement_fee != 0
-            && self.withdrawn_reserve == self.movement_fee
+        !self.pending_withdraw_rejected
+            || !self.pending_exact_rollback
+            || !self.committed_withdraw_rejected
+            || !self.committed_exact_rollback
+            || self.withdrawn_reserve != 0
+            || self.coalition_gain != 0
+            || self.victim_loss > self.movement_fee
+    }
+
+    pub fn certifies_nonwithdrawable_reserve(&self) -> bool {
+        !self.is_violation()
+            && self.movement_fee != 0
             && self.victim_loss != 0
-            && self.coalition_gain != 0
-            && self.coalition_gain < self.victim_loss
-            && self.coalition_gain.checked_add(1) == Some(self.victim_loss)
+            && self.coalition_loss != 0
     }
 }
 
@@ -1768,32 +1800,50 @@ impl PendingMarkFeeOrderingDiscovery {
 
 impl PendingTargetOverrideDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.reordered_target < self.control_target
-            && self.movement_fee != 0
-            && self.victim_payout_loss != 0
-            && self.coalition_profit != 0
-            && self.movement_fee < self.victim_payout_loss
-            && self.control_supply == self.reordered_supply
+        !self.override_rejected_lock
+            || !self.rejected_exact_rollback
+            || self.reordered_target != self.control_target
+            || self.victim_payout_loss != 0
+            || self.coalition_profit != 0
+            || self.control_supply != self.reordered_supply
+    }
+
+    pub fn certifies_guard_and_terminal_value(&self) -> bool {
+        !self.is_violation() && self.movement_fee == 0
     }
 }
 
 impl PendingMarkInheritanceDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.pending_mark == self.committed_mark
+        !self.retained_rejected_lock
+            || !self.retained_exact_rollback
+            || self.attacker_gain != 0
+            || self.victim_loss != 0
+            || self.extracted_profit != 0
+    }
+
+    pub fn certifies_guard_and_liveness(&self) -> bool {
+        !self.is_violation()
             && self.movement_cost != 0
-            && self.attacker_gain == self.victim_loss
-            && self.attacker_gain > self.movement_cost
-            && u128::from(self.extracted_profit) == self.attacker_gain - self.movement_cost
+            && self.pending_mark == self.committed_mark
+            && self.post_commit_round_trip_landed
     }
 }
 
 impl PendingMarkAdmissionDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.published_target > self.stale_engine_target
+        self.staged_engine_target != self.published_target
+            || !self.stale_risk_rejected_lock
+            || !self.rejected_exact_rollback
+            || self.attacker_profit != 0
+            || self.victim_loss != 0
+            || self.extracted_tokens != 0
+    }
+
+    pub fn certifies_guard_and_liveness(&self) -> bool {
+        !self.is_violation()
             && self.committed_mark == self.published_target
-            && self.attacker_profit != 0
-            && self.attacker_profit == self.victim_loss
-            && self.attacker_profit == u128::from(self.extracted_tokens)
+            && self.post_commit_round_trip_landed
     }
 }
 
@@ -5186,9 +5236,8 @@ fn is_engine_stale_error(error: &str) -> bool {
 
 fn zero_move_funding_discovery_world(seed: [u8; 32]) -> Result<V16Svm, String> {
     const PRICE: u64 = 2;
-    const TARGET: u64 = 1;
     const DEPOSIT: u128 = 1_000_000;
-    let mut env = V16Svm::new(
+    Ok(V16Svm::new(
         seed,
         MarketConfig {
             initial_price: PRICE,
@@ -5199,11 +5248,7 @@ fn zero_move_funding_discovery_world(seed: [u8; 32]) -> Result<V16Svm, String> {
             actor_deposits: [DEPOSIT, DEPOSIT, DEPOSIT, DEPOSIT, USER_DEPOSIT],
             ..MarketConfig::default()
         },
-    );
-    env.warp_to_slot(2);
-    env.push_auth_mark(0, 2, TARGET)
-        .map_err(|error| format!("stage zero-move funding target: {error}"))?;
-    Ok(env)
+    ))
 }
 
 fn zero_move_observation_discovery(env: &V16Svm) -> Vec<CrankObservationHint> {
@@ -5214,6 +5259,13 @@ fn zero_move_observation_discovery(env: &V16Svm) -> Vec<CrankObservationHint> {
 }
 
 fn prime_zero_move_funding_discovery(env: &mut V16Svm, settlement_slot: u64) -> Result<(), String> {
+    const TARGET: u64 = 1;
+
+    // Keep the pending-target boundary after the opening fill. Publishing it before the fill now
+    // correctly rejects fresh risk and would make this discovery topology vacuous.
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, TARGET)
+        .map_err(|error| format!("stage zero-move funding target: {error}"))?;
     for actor in [0, 1] {
         env.crank(actor, 2, zero_move_observation_discovery(env))
             .map_err(|error| format!("prime zero-move actor {actor}: {error}"))?;
@@ -6565,12 +6617,12 @@ fn discover_one_pending_mark_admission(
     const OLD_MARK: u64 = 100;
     const AUTH_TARGET: u64 = 200;
     const EWMA_TARGET: u64 = 150;
-    const ATTACK_SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+    const CONTROL_SIZE_Q: i128 = 100 * POS_SCALE as i128;
     const EXISTING_SIZE_Q: i128 = POS_SCALE as i128;
 
     seed[0] ^= 0xc7;
     seed[1] ^= source.discriminator();
-    let (mut env, attacker, victim, attack_size_q, published_target) =
+    let (mut env, attacker, victim, lagging_position_q, published_target) =
         match source {
             PendingMarkSource::AuthenticatedPush | PendingMarkSource::EwmaPush => {
                 let mut env = V16Svm::new(
@@ -6610,10 +6662,7 @@ fn discover_one_pending_mark_admission(
                     PendingMarkSource::ReportedPriceTrade
                     | PendingMarkSource::ReportedPriceBatch => unreachable!(),
                 };
-                let attack_size_q = ATTACK_SIZE_Q
-                    .checked_add(EXISTING_SIZE_Q)
-                    .ok_or_else(|| "pending-mark attack size overflow".to_string())?;
-                (env, 0usize, 1usize, attack_size_q, published_target)
+                (env, 0usize, 1usize, EXISTING_SIZE_Q, published_target)
             }
             PendingMarkSource::ReportedPriceTrade | PendingMarkSource::ReportedPriceBatch => {
                 let mut env = V16Svm::new(
@@ -6638,28 +6687,45 @@ fn discover_one_pending_mark_admission(
                 };
                 execute_reported_price_route(&mut env, route, 0, 1, EXISTING_SIZE_Q, AUTH_TARGET)?;
                 execute_reported_price_route(&mut env, route, 0, 1, -EXISTING_SIZE_Q, OLD_MARK)?;
-                (env, 2usize, 3usize, ATTACK_SIZE_Q, EWMA_TARGET)
+                (env, 2usize, 3usize, 0, EWMA_TARGET)
             }
         };
 
     let supply_before = env.token_supply_observed();
     let (pending_profile, pending_group) = env.primary_market_state();
-    let stale_engine_target = pending_group.assets[0].raw_oracle_target_price;
+    let staged_engine_target = pending_group.assets[0].raw_oracle_target_price;
     if pending_profile.mark_ewma_e6 != published_target
         || pending_group.assets[0].effective_price != OLD_MARK
-        || stale_engine_target != OLD_MARK
+        || staged_engine_target != published_target
     {
         return Err(format!(
-            "{source:?} did not create wrapper/engine mark lag: profile={}, raw={}, effective={}",
+            "{source:?} did not stage wrapper target into the engine: profile={}, raw={}, effective={}",
             pending_profile.mark_ewma_e6,
-            stale_engine_target,
+            staged_engine_target,
             pending_group.assets[0].effective_price
         ));
     }
 
-    let victim_capital_before = env.primary_portfolio(victim).capital.get();
-    env.trade_cpi(attacker, victim, 0, ATTACK_SIZE_Q, 0, 0)
-        .map_err(|error| format!("{source:?} stale-price risk increase rejected: {error}"))?;
+    let before_rejection = fingerprint(&env);
+    let stale_error = env
+        .trade_cpi(attacker, victim, 0, CONTROL_SIZE_Q, 0, 0)
+        .expect_err("pending-target risk increase must reject");
+    let stale_risk_rejected_lock =
+        stale_error.contains("Custom(21)") || stale_error.contains("custom program error: 0x15");
+    let rejected_exact_rollback = fingerprint(&env) == before_rejection;
+    if !stale_risk_rejected_lock || !rejected_exact_rollback {
+        return Err(format!(
+            "{source:?} stale risk increase was not an exact lock rollback: \
+             rejected={stale_risk_rejected_lock}, rollback={rejected_exact_rollback}, \
+             error={stale_error}"
+        ));
+    }
+
+    if lagging_position_q != 0 {
+        env.trade_cpi(attacker, victim, 0, -lagging_position_q, 0, 0)
+            .map_err(|error| format!("{source:?} lagging risk reduction rejected: {error}"))?;
+    }
+
     env.warp_to_slot(3);
     for _ in 0..8 {
         for actor in [attacker, victim] {
@@ -6683,35 +6749,44 @@ fn discover_one_pending_mark_admission(
         ));
     }
 
-    env.trade_cpi(attacker, victim, 0, -attack_size_q, 0, 0)
-        .map_err(|error| format!("{source:?} close stale-price exposure: {error}"))?;
-    let attacker_profit = u128::try_from(env.primary_portfolio(attacker).pnl.get())
-        .map_err(|_| format!("{source:?} attacker did not realize positive PnL"))?;
-    let victim_loss = victim_capital_before
-        .checked_sub(env.primary_portfolio(victim).capital.get())
-        .ok_or_else(|| format!("{source:?} victim capital increased"))?;
-    if attacker_profit == 0 || attacker_profit != victim_loss {
-        return Err(format!(
-            "{source:?} stale-mark transfer mismatch: attacker={attacker_profit}, victim={victim_loss}"
-        ));
-    }
-    env.convert_released_pnl(attacker, attacker_profit)
-        .map_err(|error| format!("{source:?} convert stale-mark PnL: {error}"))?;
-    env.withdraw_primary(attacker, attacker_profit)
-        .map_err(|error| format!("{source:?} withdraw stale-mark PnL: {error}"))?;
+    let attacker_capital_before = env.primary_portfolio(attacker).capital.get();
+    let victim_capital_before = env.primary_portfolio(victim).capital.get();
+    env.trade_cpi(attacker, victim, 0, CONTROL_SIZE_Q, 0, 0)
+        .map_err(|error| format!("{source:?} post-commit control trade rejected: {error}"))?;
+    env.trade_cpi(attacker, victim, 0, -CONTROL_SIZE_Q, 0, 0)
+        .map_err(|error| format!("{source:?} post-commit control exit rejected: {error}"))?;
+    let attacker_after = env.primary_portfolio(attacker);
+    let victim_after = env.primary_portfolio(victim);
+    let attacker_profit = attacker_after
+        .capital
+        .get()
+        .saturating_sub(attacker_capital_before);
+    let victim_loss = victim_capital_before.saturating_sub(victim_after.capital.get());
     let extracted_tokens = env.token_amount(env.actors[attacker].destination_token);
-    if u128::from(extracted_tokens) != attacker_profit
+    if attacker_profit != 0
+        || victim_loss != 0
+        || attacker_after.pnl.get() != 0
+        || victim_after.pnl.get() != 0
+        || extracted_tokens != 0
         || env.token_supply_observed() != supply_before
     {
         return Err(format!(
-            "{source:?} stale-mark value was not externally extractable: tokens={extracted_tokens}, profit={attacker_profit}"
+            "{source:?} guarded round trip transferred value: attacker={attacker_profit}, \
+             victim={victim_loss}, extracted={extracted_tokens}, pnl={}/{}, supply={}/{}",
+            attacker_after.pnl.get(),
+            victim_after.pnl.get(),
+            env.token_supply_observed(),
+            supply_before
         ));
     }
     Ok(PendingMarkAdmissionDiscovery {
         source,
         published_target,
-        stale_engine_target,
+        staged_engine_target,
         committed_mark,
+        stale_risk_rejected_lock,
+        rejected_exact_rollback,
+        post_commit_round_trip_landed: true,
         attacker_profit,
         victim_loss,
         extracted_tokens,
@@ -6784,8 +6859,21 @@ fn discover_one_pending_mark_inheritance(
         ));
     }
 
-    env.land_retained(retained)
-        .map_err(|error| format!("{route:?} retained trade no longer lands: {error}"))?;
+    let before_retained = fingerprint(&env);
+    let retained_error = env
+        .land_retained(retained)
+        .expect_err("retained pre-target trade must reject while the target is pending");
+    let retained_rejected_lock = retained_error.contains("Custom(21)")
+        || retained_error.contains("custom program error: 0x15");
+    let retained_exact_rollback = fingerprint(&env) == before_retained;
+    if !retained_rejected_lock || !retained_exact_rollback {
+        return Err(format!(
+            "{route:?} retained trade was not an exact lock rollback: \
+             rejected={retained_rejected_lock}, rollback={retained_exact_rollback}, \
+             error={retained_error}"
+        ));
+    }
+
     env.warp_to_slot(3);
     let oracle_accounts = env.primary_profile(0).oracle_leg_count;
     let observations = || {
@@ -6805,34 +6893,34 @@ fn discover_one_pending_mark_inheritance(
         ));
     }
 
+    let attacker_capital_before = env.primary_portfolio(2).capital.get();
+    let victim_capital_before = env.primary_portfolio(3).capital.get();
+    execute_discovery_trade_route(&mut env, route, 2, 3, 0, LARGE_Q, committed_mark)
+        .map_err(|error| format!("{route:?} post-commit trade rejected: {error}"))?;
     execute_discovery_trade_route(&mut env, route, 2, 3, 0, -LARGE_Q, committed_mark)
-        .map_err(|error| format!("{route:?} close inherited exposure: {error}"))?;
-    let victim_loss = LARGE_DEPOSIT
-        .checked_sub(env.primary_portfolio(3).capital.get())
-        .ok_or_else(|| "pending-mark victim capital increased".to_string())?;
-    let attacker_pnl = env.primary_portfolio(2).pnl.get();
-    if attacker_pnl != victim_loss as i128 {
-        return Err(format!(
-            "{route:?} inherited PnL mismatch: pnl={attacker_pnl}, loss={victim_loss}"
-        ));
-    }
-    env.convert_released_pnl(2, victim_loss)
-        .map_err(|error| format!("{route:?} convert inherited PnL: {error}"))?;
-    let attacker_gain = env
-        .primary_portfolio(2)
+        .map_err(|error| format!("{route:?} post-commit exit rejected: {error}"))?;
+    let attacker_after = env.primary_portfolio(2);
+    let victim_after = env.primary_portfolio(3);
+    let victim_loss = victim_capital_before.saturating_sub(victim_after.capital.get());
+    let attacker_gain = attacker_after
         .capital
         .get()
-        .checked_sub(LARGE_DEPOSIT)
-        .ok_or_else(|| "attacker remained below principal".to_string())?;
-    let net_profit = attacker_gain
-        .checked_sub(movement_cost)
-        .ok_or_else(|| "mark movement cost exceeded attacker gain".to_string())?;
-    env.withdraw_primary(2, net_profit)
-        .map_err(|error| format!("{route:?} withdraw net inherited profit: {error}"))?;
+        .saturating_sub(attacker_capital_before);
     let extracted_profit = env.token_amount(env.actors[2].destination_token);
-    if u128::from(extracted_profit) != net_profit || env.token_supply_observed() != supply_before {
+    if victim_loss != 0
+        || attacker_gain != 0
+        || attacker_after.pnl.get() != 0
+        || victim_after.pnl.get() != 0
+        || extracted_profit != 0
+        || env.token_supply_observed() != supply_before
+    {
         return Err(format!(
-            "{route:?} inherited profit was not externally extractable: {extracted_profit}/{net_profit}"
+            "{route:?} guarded post-commit round trip transferred value: attacker={attacker_gain}, \
+             victim={victim_loss}, extracted={extracted_profit}, pnl={}/{}, supply={}/{}",
+            attacker_after.pnl.get(),
+            victim_after.pnl.get(),
+            env.token_supply_observed(),
+            supply_before
         ));
     }
     Ok(PendingMarkInheritanceDiscovery {
@@ -6840,6 +6928,9 @@ fn discover_one_pending_mark_inheritance(
         movement_cost,
         pending_mark,
         committed_mark,
+        retained_rejected_lock,
+        retained_exact_rollback,
+        post_commit_round_trip_landed: true,
         victim_loss,
         attacker_gain,
         extracted_profit,
@@ -6858,6 +6949,8 @@ pub fn discover_pending_mark_inheritance_violations(
 #[derive(Clone, Copy, Debug)]
 struct PendingTargetWorld {
     target: u64,
+    override_rejected_lock: bool,
+    rejected_exact_rollback: bool,
     movement_fee: u128,
     victim_payout: u128,
     coalition_payout: u128,
@@ -6943,11 +7036,23 @@ fn run_pending_target_world(
 
     env.warp_to_slot(7);
     let insurance_before = env.primary_market_state().1.insurance;
+    let mut override_rejected_lock = false;
+    let mut rejected_exact_rollback = false;
     if insert_reported_price_round_trip {
-        execute_discovery_trade_route(&mut env, route, 2, 3, 0, ROUND_TRIP_Q, 1)
-            .map_err(|error| format!("{route:?} open target-mutating round trip: {error}"))?;
-        execute_discovery_trade_route(&mut env, route, 2, 3, 0, -ROUND_TRIP_Q, low_price)
-            .map_err(|error| format!("{route:?} close target-mutating round trip: {error}"))?;
+        let before_override = fingerprint(&env);
+        let override_error =
+            execute_discovery_trade_route(&mut env, route, 2, 3, 0, ROUND_TRIP_Q, 1)
+                .expect_err("pending target override must reject");
+        override_rejected_lock = override_error.contains("Custom(21)")
+            || override_error.contains("custom program error: 0x15");
+        rejected_exact_rollback = fingerprint(&env) == before_override;
+        if !override_rejected_lock || !rejected_exact_rollback {
+            return Err(format!(
+                "{route:?} target override was not an exact lock rollback: \
+                 rejected={override_rejected_lock}, rollback={rejected_exact_rollback}, \
+                 error={override_error}"
+            ));
+        }
     }
     let movement_fee = env
         .primary_market_state()
@@ -6996,6 +7101,8 @@ fn run_pending_target_world(
     })?;
     Ok(PendingTargetWorld {
         target,
+        override_rejected_lock,
+        rejected_exact_rollback,
         movement_fee,
         victim_payout,
         coalition_payout,
@@ -7024,6 +7131,8 @@ fn discover_one_pending_target_override(
         route,
         control_target: control.target,
         reordered_target: reordered.target,
+        override_rejected_lock: reordered.override_rejected_lock,
+        rejected_exact_rollback: reordered.rejected_exact_rollback,
         movement_fee: reordered.movement_fee,
         victim_payout_loss,
         coalition_profit,
@@ -7309,14 +7418,20 @@ fn discover_one_mark_movement_reserve_violation(
         ));
     }
 
-    let destination_before = env.token_amount(env.actors[0].destination_token);
-    env.withdraw_insurance_asset(0, ASSET, movement_fee)
-        .map_err(|error| format!("{route:?} withdraw movement reserve: {error}"))?;
-    let withdrawn_reserve = u128::from(
-        env.token_amount(env.actors[0].destination_token)
-            .checked_sub(destination_before)
-            .ok_or_else(|| "reserve destination decreased".to_string())?,
-    );
+    let before_pending = fingerprint(&env);
+    let pending_error = env
+        .withdraw_insurance_asset(0, ASSET, movement_fee)
+        .expect_err("pending movement reserve must not be withdrawable");
+    let pending_withdraw_rejected = pending_error.contains("Custom(21)")
+        || pending_error.contains("custom program error: 0x15");
+    let pending_exact_rollback = fingerprint(&env) == before_pending;
+    if !pending_withdraw_rejected || !pending_exact_rollback {
+        return Err(format!(
+            "{route:?} pending reserve withdrawal was not an exact rejection: \
+             rejected={pending_withdraw_rejected}, rollback={pending_exact_rollback}, \
+             error={pending_error}"
+        ));
+    }
 
     let oracle_accounts = env.primary_profile(ASSET as usize).oracle_leg_count;
     let observations = || {
@@ -7333,6 +7448,28 @@ fn discover_one_mark_movement_reserve_violation(
     if committed_mark >= MARK {
         return Err(format!("{route:?} downward mark did not commit"));
     }
+
+    let destination_before = env.token_amount(env.actors[0].destination_token);
+    let before_committed = fingerprint(&env);
+    let committed_error = env
+        .withdraw_insurance_asset(0, ASSET, movement_fee)
+        .expect_err("committed movement reserve must not be withdrawable");
+    let committed_withdraw_rejected = committed_error.contains("Custom(21)")
+        || committed_error.contains("custom program error: 0x15");
+    let committed_exact_rollback = fingerprint(&env) == before_committed;
+    let withdrawn_reserve = u128::from(
+        env.token_amount(env.actors[0].destination_token)
+            .checked_sub(destination_before)
+            .ok_or_else(|| "reserve destination decreased".to_string())?,
+    );
+    if !committed_withdraw_rejected || !committed_exact_rollback || withdrawn_reserve != 0 {
+        return Err(format!(
+            "{route:?} committed reserve withdrawal was not an exact rejection: \
+             rejected={committed_withdraw_rejected}, rollback={committed_exact_rollback}, \
+             withdrawn={withdrawn_reserve}, error={committed_error}"
+        ));
+    }
+
     execute_discovery_trade_route(&mut env, route, 0, 3, ASSET, POSITION_Q, committed_mark)
         .map_err(|error| format!("{route:?} close independent exposure: {error}"))?;
     env.crank(0, 4, Vec::new())
@@ -7366,18 +7503,22 @@ fn discover_one_mark_movement_reserve_violation(
     let victim_loss = DEPOSIT
         .checked_sub(victim_payout)
         .ok_or_else(|| "movement-reserve victim payout exceeded deposit".to_string())?;
-    let coalition_gain = coalition_payout
-        .checked_sub(coalition_committed)
-        .ok_or_else(|| "movement-reserve coalition did not recover deposits".to_string())?;
+    let coalition_gain = coalition_payout.saturating_sub(coalition_committed);
+    let coalition_loss = coalition_committed.saturating_sub(coalition_payout);
     if env.token_supply_observed() != supply_before {
         return Err("movement-reserve world changed SPL supply".into());
     }
     Ok(MarkMovementReserveDiscovery {
         route,
         movement_fee,
+        pending_withdraw_rejected,
+        pending_exact_rollback,
+        committed_withdraw_rejected,
+        committed_exact_rollback,
         withdrawn_reserve,
         victim_loss,
         coalition_gain,
+        coalition_loss,
         committed_mark,
     })
 }
@@ -7458,7 +7599,10 @@ fn discover_one_trade_driven_liquidation(
                 0,
             )
             .map_err(|error| format!("{route:?} configure hybrid fallback: {error}"))?;
-            oracle_accounts.push(env.set_pyth_price(&feed, 999_850, -6, 0, 1_000));
+            // Keep the authenticated feed stale so liquidation remains attributable to the
+            // after-hours trade-driven mark. A fresh feed at the same price changes provenance:
+            // that liquidation is oracle-driven and belongs to the oracle/liquidation matrix.
+            oracle_accounts.push(initial_oracle);
             env.set_clock(3, 1_000);
             (3, 999_850)
         }
@@ -7495,22 +7639,25 @@ fn discover_one_trade_driven_liquidation(
     }
 
     let cranker_before = env.primary_portfolio(4).capital.get();
+    let mut max_crank_cu = 0;
     for attempt in 0..8 {
-        env.crank_with_reward(
-            4,
-            0,
-            trade_slot,
-            if attempt == 0 {
-                vec![CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: oracle_accounts.len() as u8,
-                }]
-            } else {
-                Vec::new()
-            },
-            if attempt == 0 { &oracle_accounts } else { &[] },
-        )
-        .map_err(|error| format!("{mode:?} {route:?} liquidation crank {attempt}: {error}"))?;
+        let success = env
+            .crank_with_reward(
+                4,
+                0,
+                trade_slot,
+                if attempt == 0 {
+                    vec![CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: oracle_accounts.len() as u8,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                if attempt == 0 { &oracle_accounts } else { &[] },
+            )
+            .map_err(|error| format!("{mode:?} {route:?} liquidation crank {attempt}: {error}"))?;
+        max_crank_cu = max_crank_cu.max(success.compute_units);
         if env.primary_market_state().1.assets[0].oi_eff_long_q < victim_oi_before {
             break;
         }
@@ -7525,6 +7672,15 @@ fn discover_one_trade_driven_liquidation(
         .get()
         .checked_sub(cranker_before)
         .ok_or_else(|| "liquidation reduced cranker capital".to_string())?;
+    let group_after_liquidation = env.primary_market_state().1;
+    let retained_penalty = group_after_liquidation
+        .insurance
+        .checked_sub(group_after_move.insurance)
+        .ok_or_else(|| "liquidation reduced insurance".to_string())?;
+    let budgeted_penalty = group_after_liquidation
+        .insurance_domain_budget_remaining_total
+        .checked_sub(group_after_move.insurance_domain_budget_remaining_total)
+        .ok_or_else(|| "liquidation reduced domain budgets".to_string())?;
     let victim_capital_loss = victim_capital_before
         .checked_sub(env.primary_portfolio(0).capital.get())
         .ok_or_else(|| "liquidation increased victim capital".to_string())?;
@@ -7559,9 +7715,8 @@ fn discover_one_trade_driven_liquidation(
         .checked_mul(2)
         .and_then(|value| value.checked_add(CRANKER_DEPOSIT))
         .ok_or_else(|| "trade-driven coalition commitment overflow".to_string())?;
-    let coalition_profit = extracted_tokens
-        .checked_sub(coalition_committed)
-        .ok_or_else(|| "trade-driven coalition did not recover deposits".to_string())?;
+    let coalition_gain = extracted_tokens.saturating_sub(coalition_committed);
+    let coalition_loss = coalition_committed.saturating_sub(extracted_tokens);
     if env.token_supply_observed() != supply_before {
         return Err("trade-driven liquidation changed SPL supply".into());
     }
@@ -7570,10 +7725,14 @@ fn discover_one_trade_driven_liquidation(
         route,
         movement_fee,
         liquidation_reward,
+        retained_penalty,
+        budgeted_penalty,
         victim_capital_loss,
         oi_reduction_q,
-        coalition_profit,
+        coalition_gain,
+        coalition_loss,
         extracted_tokens,
+        max_crank_cu,
     })
 }
 

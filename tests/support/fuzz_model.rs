@@ -413,9 +413,13 @@ pub struct PendingEwmaInheritanceReproduction {
     pub blocker: KnownBlocker,
     pub route: TradeRoute,
     pub seed_cost: u128,
+    pub pending_admission_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub post_commit_trade_landed: bool,
+    pub post_commit_exit_landed: bool,
     pub victim_loss: u128,
     pub attacker_gain: u128,
-    pub net_extracted_tokens: u64,
+    pub attacker_principal_withdrawn: u64,
     pub pending_mark: u64,
     pub applied_mark: u64,
 }
@@ -425,10 +429,18 @@ pub struct ReclaimableEwmaFeeReproduction {
     pub blocker: KnownBlocker,
     pub route: TradeRoute,
     pub fee_paid: u128,
+    pub pending_withdraw_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub committed_withdraw_rejected: bool,
+    pub committed_rejected_exact_rollback: bool,
     pub fee_reclaimed: u128,
     pub victim_loss: u128,
     pub attacker_gain: u128,
+    pub attacker_loss: u128,
     pub effective_mark: u64,
+    pub terminal_close_landed: bool,
+    pub terminal_fee_burned: u128,
+    pub close_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -473,9 +485,14 @@ pub struct TradeDrivenLiquidationRewardReproduction {
     pub movement_fee: u128,
     pub victim_penalty: u128,
     pub cranker_reward: u128,
+    pub retained_penalty: u128,
+    pub budgeted_penalty: u128,
     pub victim_capital_loss: u128,
     pub attacker_extracted: u128,
-    pub attacker_profit: u128,
+    pub attacker_gain: u128,
+    pub attacker_loss: u128,
+    pub liquidation_landed: bool,
+    pub max_crank_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -537,6 +554,8 @@ pub struct PendingEwmaTargetOverrideReproduction {
     pub low_price: u64,
     pub control_target: u64,
     pub attack_target: u64,
+    pub override_rejected: bool,
+    pub rejected_exact_rollback: bool,
     pub movement_fee: u128,
     pub displaced_victim_pnl: u128,
     pub attacker_profit: u128,
@@ -585,12 +604,17 @@ pub struct TargetStagingReproduction {
     pub blocker: KnownBlocker,
     pub case: TargetStagingCase,
     pub wrapper_target: u64,
-    pub stale_engine_target: u64,
+    pub engine_target: u64,
+    pub engine_epoch_advanced: bool,
+    pub stale_increase_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub lagging_risk_reduction_landed: bool,
+    pub post_commit_trade_landed: bool,
+    pub post_commit_exit_landed: bool,
     pub moved_engine_mark: u64,
     pub attacker_profit: u128,
     pub victim_capital_loss: u128,
-    pub attacker_withdrawn: u64,
-    pub attack_cu: u64,
+    pub max_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7754,7 +7778,7 @@ pub fn verify_positive_claim_bound_attribution_lifecycle(
             .map_err(|error| format!("INV-029 publish winning mark at {slot}: {error}"))?;
         crank_adapter_steps(&mut env, MARKET_CRANKER, slot, ASSET, 8)?;
     }
-    for actor in 0..4 {
+    for actor in 0..PRIMARY_ACTOR_COUNT {
         crank_adapter_steps(&mut env, actor, 3, ASSET, 16)?;
         assert_primary_source_claim_bound_attribution("INV-029 after account crank", &env)?;
     }
@@ -9818,161 +9842,175 @@ pub fn reproduce_unstaged_mark_target(
     const OLD_MARK: u64 = 100;
     const AUTH_TARGET: u64 = 200;
     const EWMA_TARGET: u64 = 150;
-    const ATTACK_SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+    // Keep the post-catch-up control trade comfortably inside initial margin after the mark
+    // doubles. The stale-target rejection is state based, so it does not depend on maxing size.
+    const ATTACK_SIZE_Q: i128 = 100 * POS_SCALE as i128;
     const EXISTING_SIZE_Q: i128 = POS_SCALE as i128;
 
-    let (mut env, attacker, lp, attack_size_q, wrapper_target, engine_epoch_before) = match case {
-        TargetStagingCase::AuthMarkPush | TargetStagingCase::EwmaMarkPush => {
-            let mut env = V16Svm::new(
-                seed,
-                MarketConfig {
-                    initial_price: OLD_MARK,
-                    max_price_move_bps_per_slot: 10_000,
-                    max_accrual_dt_slots: 1,
-                    actor_deposits: [
-                        1_000_100,
-                        4_000_000,
-                        super::v16_svm::USER_DEPOSIT,
-                        super::v16_svm::USER_DEPOSIT,
-                        super::v16_svm::EXIT_MAKER_DEPOSIT,
-                    ],
-                    ..MarketConfig::default()
-                },
-            );
-            match case {
-                TargetStagingCase::AuthMarkPush => {
-                    env.configure_auth_mark(false, 0, 0, OLD_MARK)
-                        .map_err(|error| format!("PR 264/332 configure AuthMark: {error}"))?
-                }
-                TargetStagingCase::EwmaMarkPush => env
-                    .configure_ewma_mark(0, 0, OLD_MARK, 1, 0)
-                    .map_err(|error| format!("PR 265/332 configure EWMA mark: {error}"))?,
-                TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => {
-                    unreachable!()
-                }
-            };
-            env.trade_cpi(0, 1, 0, EXISTING_SIZE_Q, 0, 0)
-                .map_err(|error| format!("PR 332 open liveness-control position: {error}"))?;
-            let epoch_before = env.primary_market_state().1.oracle_epoch;
-            env.warp_to_slot(2);
-            let wrapper_target = match case {
-                TargetStagingCase::AuthMarkPush => {
-                    env.push_auth_mark(0, 2, AUTH_TARGET)
-                        .map_err(|error| format!("PR 264/332 push honest AuthMark: {error}"))?;
-                    AUTH_TARGET
-                }
-                TargetStagingCase::EwmaMarkPush => {
-                    env.push_ewma_mark(0, 2, AUTH_TARGET)
-                        .map_err(|error| format!("PR 265/332 push honest EWMA mark: {error}"))?;
-                    EWMA_TARGET
-                }
-                TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => {
-                    unreachable!()
-                }
-            };
-            (
-                env,
-                0usize,
-                1usize,
-                ATTACK_SIZE_Q
-                    .checked_add(EXISTING_SIZE_Q)
-                    .ok_or("PR 332 total attack size overflow")?,
-                wrapper_target,
-                epoch_before,
-            )
-        }
-        TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => {
-            let mut env = V16Svm::new(
-                seed,
-                MarketConfig {
-                    initial_price: OLD_MARK,
-                    max_price_move_bps_per_slot: 10_000,
-                    max_accrual_dt_slots: 1,
-                    actor_deposits: [
-                        1_000,
-                        1_000,
-                        1_000_000,
-                        4_000_000,
-                        super::v16_svm::EXIT_MAKER_DEPOSIT,
-                    ],
-                    ..MarketConfig::default()
-                },
-            );
-            env.configure_ewma_mark(0, 0, OLD_MARK, 1, 0)
-                .map_err(|error| format!("PR 333 configure EWMA mark: {error}"))?;
-            env.warp_to_slot(2);
-            let epoch_before = env.primary_market_state().1.oracle_epoch;
-            let route = match case {
-                TargetStagingCase::EwmaSingleTrade => TradeRoute::NoCpi,
-                TargetStagingCase::EwmaBatchTrade => TradeRoute::BatchNoCpi,
-                TargetStagingCase::AuthMarkPush | TargetStagingCase::EwmaMarkPush => unreachable!(),
-            };
-            execute_trade_route(&mut env, route, 0, 1, 0, EXISTING_SIZE_Q, 200, 0)
-                .map_err(|error| format!("PR 333 publish trade-driven EWMA target: {error}"))?;
-            let discovery_profile = env.primary_profile(0);
-            if discovery_profile.mark_ewma_e6 != EWMA_TARGET {
-                return Err(format!(
+    let (mut env, attacker, lp, lagging_position_q, wrapper_target, engine_epoch_before) =
+        match case {
+            TargetStagingCase::AuthMarkPush | TargetStagingCase::EwmaMarkPush => {
+                let mut env = V16Svm::new(
+                    seed,
+                    MarketConfig {
+                        initial_price: OLD_MARK,
+                        max_price_move_bps_per_slot: 10_000,
+                        max_accrual_dt_slots: 1,
+                        actor_deposits: [
+                            1_000_100,
+                            4_000_000,
+                            super::v16_svm::USER_DEPOSIT,
+                            super::v16_svm::USER_DEPOSIT,
+                            super::v16_svm::EXIT_MAKER_DEPOSIT,
+                        ],
+                        ..MarketConfig::default()
+                    },
+                );
+                match case {
+                    TargetStagingCase::AuthMarkPush => env
+                        .configure_auth_mark(false, 0, 0, OLD_MARK)
+                        .map_err(|error| format!("PR 264/332 configure AuthMark: {error}"))?,
+                    TargetStagingCase::EwmaMarkPush => env
+                        .configure_ewma_mark(0, 0, OLD_MARK, 1, 0)
+                        .map_err(|error| format!("PR 265/332 configure EWMA mark: {error}"))?,
+                    TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => {
+                        unreachable!()
+                    }
+                };
+                env.trade_cpi(0, 1, 0, EXISTING_SIZE_Q, 0, 0)
+                    .map_err(|error| format!("PR 332 open liveness-control position: {error}"))?;
+                let epoch_before = env.primary_market_state().1.oracle_epoch;
+                env.warp_to_slot(2);
+                let wrapper_target = match case {
+                    TargetStagingCase::AuthMarkPush => {
+                        env.push_auth_mark(0, 2, AUTH_TARGET)
+                            .map_err(|error| format!("PR 264/332 push honest AuthMark: {error}"))?;
+                        AUTH_TARGET
+                    }
+                    TargetStagingCase::EwmaMarkPush => {
+                        env.push_ewma_mark(0, 2, AUTH_TARGET).map_err(|error| {
+                            format!("PR 265/332 push honest EWMA mark: {error}")
+                        })?;
+                        EWMA_TARGET
+                    }
+                    TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => {
+                        unreachable!()
+                    }
+                };
+                (
+                    env,
+                    0usize,
+                    1usize,
+                    EXISTING_SIZE_Q,
+                    wrapper_target,
+                    epoch_before,
+                )
+            }
+            TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => {
+                let mut env = V16Svm::new(
+                    seed,
+                    MarketConfig {
+                        initial_price: OLD_MARK,
+                        max_price_move_bps_per_slot: 10_000,
+                        max_accrual_dt_slots: 1,
+                        actor_deposits: [
+                            1_000,
+                            1_000,
+                            1_000_000,
+                            4_000_000,
+                            super::v16_svm::EXIT_MAKER_DEPOSIT,
+                        ],
+                        ..MarketConfig::default()
+                    },
+                );
+                env.configure_ewma_mark(0, 0, OLD_MARK, 1, 0)
+                    .map_err(|error| format!("PR 333 configure EWMA mark: {error}"))?;
+                env.warp_to_slot(2);
+                let epoch_before = env.primary_market_state().1.oracle_epoch;
+                let route = match case {
+                    TargetStagingCase::EwmaSingleTrade => TradeRoute::NoCpi,
+                    TargetStagingCase::EwmaBatchTrade => TradeRoute::BatchNoCpi,
+                    TargetStagingCase::AuthMarkPush | TargetStagingCase::EwmaMarkPush => {
+                        unreachable!()
+                    }
+                };
+                execute_trade_route(&mut env, route, 0, 1, 0, EXISTING_SIZE_Q, 200, 0)
+                    .map_err(|error| format!("PR 333 publish trade-driven EWMA target: {error}"))?;
+                let discovery_profile = env.primary_profile(0);
+                if discovery_profile.mark_ewma_e6 != EWMA_TARGET {
+                    return Err(format!(
                     "PR 333 discovery trade did not move EWMA: mark={}, target={}, insurance={}",
                     discovery_profile.mark_ewma_e6,
                     discovery_profile.oracle_target_price_e6,
                     env.primary_market_state().1.insurance
                 ));
+                }
+                execute_trade_route(&mut env, route, 0, 1, 0, -EXISTING_SIZE_Q, OLD_MARK, 0)
+                    .map_err(|error| format!("PR 333 flatten discovery portfolios: {error}"))?;
+                if portfolio_has_active_asset(&env.primary_portfolio(0), 0)
+                    || portfolio_has_active_asset(&env.primary_portfolio(1), 0)
+                {
+                    return Err("PR 333 discovery positions did not flatten".into());
+                }
+                (env, 2usize, 3usize, 0, EWMA_TARGET, epoch_before)
             }
-            execute_trade_route(&mut env, route, 0, 1, 0, -EXISTING_SIZE_Q, OLD_MARK, 0)
-                .map_err(|error| format!("PR 333 flatten discovery portfolios: {error}"))?;
-            if portfolio_has_active_asset(&env.primary_portfolio(0), 0)
-                || portfolio_has_active_asset(&env.primary_portfolio(1), 0)
-            {
-                return Err("PR 333 discovery positions did not flatten".into());
-            }
-            (
-                env,
-                2usize,
-                3usize,
-                ATTACK_SIZE_Q,
-                EWMA_TARGET,
-                epoch_before,
-            )
-        }
-    };
+        };
 
     let supply_before = env.token_supply_observed();
     let profile = env.primary_profile(0);
     let (_, staged_group) = env.primary_market_state();
-    let stale_engine_target = staged_group.assets[0].raw_oracle_target_price;
-    let expected_profile_target = match case {
-        TargetStagingCase::AuthMarkPush | TargetStagingCase::EwmaMarkPush => wrapper_target,
-        TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => OLD_MARK,
-    };
+    let engine_target = staged_group.assets[0].raw_oracle_target_price;
+    let expected_profile_target = wrapper_target;
+    let engine_epoch_advanced = staged_group.oracle_epoch > engine_epoch_before;
     if profile.mark_ewma_e6 != wrapper_target
         || profile.oracle_target_price_e6 != expected_profile_target
         || staged_group.assets[0].effective_price != OLD_MARK
-        || stale_engine_target != OLD_MARK
-        || staged_group.oracle_epoch != engine_epoch_before
+        || engine_target != wrapper_target
+        || !engine_epoch_advanced
     {
         return Err(format!(
-            "{case:?} no longer exposes an unstaged target: profile={}/{}, raw={}, effective={}, \
+            "{case:?} did not atomically stage its target: profile={}/{}, raw={}, effective={}, \
              epoch={}/{}",
             profile.mark_ewma_e6,
             profile.oracle_target_price_e6,
-            stale_engine_target,
+            engine_target,
             staged_group.assets[0].effective_price,
             staged_group.oracle_epoch,
             engine_epoch_before
         ));
     }
 
-    let attacker_capital_before = env.primary_portfolio(attacker).capital.get();
-    let victim_capital_before = env.primary_portfolio(lp).capital.get();
-    let stale_increase = env
+    let before_rejection = tracked_economic_accounts(&env);
+    let stale_increase_error = env
         .trade_cpi(attacker, lp, 0, ATTACK_SIZE_Q, 0, 0)
-        .map_err(|error| format!("{case:?} stale-price CPI risk increase rejected: {error}"))?;
-    if stale_increase.compute_units >= TX_CU_LIMIT {
+        .expect_err("stale-price CPI risk increase must reject");
+    let stale_increase_rejected = stale_increase_error.contains("Custom(21)")
+        || stale_increase_error.contains("custom program error: 0x15");
+    let rejected_exact_rollback = tracked_economic_accounts(&env) == before_rejection;
+    if !stale_increase_rejected || !rejected_exact_rollback {
         return Err(format!(
-            "{case:?} stale-price risk increase consumed {} CU",
-            stale_increase.compute_units
+            "{case:?} stale-price risk increase was not an exact lock rollback: \
+             rejected={stale_increase_rejected}, rollback={rejected_exact_rollback}, \
+             error={stale_increase_error}"
         ));
     }
+
+    let lagging_risk_reduction_landed = if lagging_position_q == 0 {
+        true
+    } else {
+        env.trade_cpi(attacker, lp, 0, -lagging_position_q, 0, 0)
+            .map_err(|error| format!("{case:?} lagging risk reduction rejected: {error}"))?;
+        !portfolio_has_active_asset(&env.primary_portfolio(attacker), 0)
+            && !portfolio_has_active_asset(&env.primary_portfolio(lp), 0)
+    };
+    if !lagging_risk_reduction_landed {
+        return Err(format!(
+            "{case:?} lagging risk reduction did not flatten both portfolios"
+        ));
+    }
+
+    let victim_capital_before = env.primary_portfolio(lp).capital.get();
+    let attacker_capital_before = env.primary_portfolio(attacker).capital.get();
 
     env.warp_to_slot(3);
     let mut moved_engine_mark = OLD_MARK;
@@ -10003,45 +10041,34 @@ pub fn reproduce_unstaged_mark_target(
         ));
     }
 
-    env.trade_cpi(attacker, lp, 0, -attack_size_q, 0, 0)
-        .map_err(|error| format!("{case:?} close stale-price exposure: {error}"))?;
+    let post_commit_trade = env
+        .trade_cpi(attacker, lp, 0, ATTACK_SIZE_Q, 0, 0)
+        .map_err(|error| format!("{case:?} post-commit CPI trade rejected: {error}"))?;
+    let post_commit_exit = env
+        .trade_cpi(attacker, lp, 0, -ATTACK_SIZE_Q, 0, 0)
+        .map_err(|error| format!("{case:?} post-commit CPI exit rejected: {error}"))?;
     let attacker_flat = env.primary_portfolio(attacker);
     let victim_flat = env.primary_portfolio(lp);
     if portfolio_has_active_asset(&attacker_flat, 0) || portfolio_has_active_asset(&victim_flat, 0)
     {
-        return Err(format!("{case:?} stale-price positions did not flatten"));
+        return Err(format!("{case:?} post-commit positions did not flatten"));
     }
-    let attacker_profit = u128::try_from(attacker_flat.pnl.get())
-        .map_err(|_| format!("{case:?} attacker did not realize positive PnL"))?;
-    let victim_capital_loss = victim_capital_before
-        .checked_sub(victim_flat.capital.get())
-        .ok_or_else(|| format!("{case:?} LP capital increased"))?;
-    let expected_profit = u128::from(wrapper_target - OLD_MARK)
-        .checked_mul(attack_size_q.unsigned_abs())
-        .and_then(|value| value.checked_div(POS_SCALE))
-        .ok_or_else(|| format!("{case:?} expected profit overflow"))?;
-    if attacker_profit != expected_profit || victim_capital_loss != expected_profit {
-        return Err(format!(
-            "{case:?} stale-window value transfer mismatch: attacker={attacker_profit}, \
-             victim={victim_capital_loss}, expected={expected_profit}"
-        ));
-    }
-
-    env.convert_released_pnl(attacker, attacker_profit)
-        .map_err(|error| format!("{case:?} convert stale-window PnL: {error}"))?;
-    let attacker_capital_after = env.primary_portfolio(attacker).capital.get();
-    env.withdraw_primary(attacker, attacker_capital_after)
-        .map_err(|error| format!("{case:?} withdraw stale-window proceeds: {error}"))?;
-    let attacker_withdrawn = env.token_amount(env.actors[attacker].destination_token);
-    let expected_withdrawal = attacker_capital_before
-        .checked_add(attacker_profit)
-        .ok_or_else(|| format!("{case:?} expected withdrawal overflow"))?;
-    if u128::from(attacker_withdrawn) != expected_withdrawal
+    let attacker_profit = attacker_flat
+        .capital
+        .get()
+        .saturating_sub(attacker_capital_before);
+    let victim_capital_loss = victim_capital_before.saturating_sub(victim_flat.capital.get());
+    if attacker_profit != 0
+        || victim_capital_loss != 0
+        || attacker_flat.pnl.get() != 0
+        || victim_flat.pnl.get() != 0
         || env.token_supply_observed() != supply_before
     {
         return Err(format!(
-            "{case:?} stale-window profit was not publicly extractable: withdrew \
-             {attacker_withdrawn}/{expected_withdrawal}, supply={}/{}",
+            "{case:?} post-commit round trip transferred value: attacker={attacker_profit}, \
+             victim={victim_capital_loss}, pnl={}/{}, supply={}/{}",
+            attacker_flat.pnl.get(),
+            victim_flat.pnl.get(),
             env.token_supply_observed(),
             supply_before
         ));
@@ -10050,12 +10077,19 @@ pub fn reproduce_unstaged_mark_target(
         blocker: KnownBlocker::UnstagedMarkTarget,
         case,
         wrapper_target,
-        stale_engine_target,
+        engine_target,
+        engine_epoch_advanced,
+        stale_increase_rejected,
+        rejected_exact_rollback,
+        lagging_risk_reduction_landed,
+        post_commit_trade_landed: true,
+        post_commit_exit_landed: true,
         moved_engine_mark,
         attacker_profit,
         victim_capital_loss,
-        attacker_withdrawn,
-        attack_cu: stale_increase.compute_units,
+        max_cu: post_commit_trade
+            .compute_units
+            .max(post_commit_exit.compute_units),
     })
 }
 
@@ -10163,10 +10197,10 @@ fn run_pending_mark_fee_reward_world(
         .map_err(|error| format!("PR 356 publish adverse mark: {error}"))?;
     let (pending_profile, pending_group) = env.primary_market_state();
     if pending_profile.oracle_target_price_e6 != ADVERSE_PRICE
-        || pending_group.assets[0].raw_oracle_target_price != OPEN_PRICE
+        || pending_group.assets[0].raw_oracle_target_price != ADVERSE_PRICE
         || pending_group.assets[0].effective_price != OPEN_PRICE
     {
-        return Err("PR 356 fixture did not create wrapper/engine target lag".into());
+        return Err("PR 356 fixture did not stage the pending engine target".into());
     }
 
     let mut pending_sync_rejected_lock = false;
@@ -18443,8 +18477,21 @@ pub fn reproduce_pending_ewma_inheritance(
         ));
     }
 
-    env.land_retained(retained)
-        .map_err(|error| format!("{route:?} pre-signed large trade no longer lands: {error}"))?;
+    let before_rejection = tracked_economic_accounts(&env);
+    let stale_error = env
+        .land_retained(retained)
+        .expect_err("pre-signed stale-price risk increase must reject");
+    let pending_admission_rejected =
+        stale_error.contains("Custom(21)") || stale_error.contains("custom program error: 0x15");
+    let rejected_exact_rollback = tracked_economic_accounts(&env) == before_rejection;
+    if !pending_admission_rejected || !rejected_exact_rollback {
+        return Err(format!(
+            "{route:?} pending-mark admission was not an exact lock rollback: \
+             rejected={pending_admission_rejected}, rollback={rejected_exact_rollback}, \
+             error={stale_error}"
+        ));
+    }
+
     env.warp_to_slot(3);
     let oracle_accounts = env.primary_profile(0).oracle_leg_count;
     let observations = || {
@@ -18453,10 +18500,10 @@ pub fn reproduce_pending_ewma_inheritance(
             oracle_accounts,
         }]
     };
-    env.crank(2, 3, observations())
-        .map_err(|error| format!("{route:?} apply pending EWMA to attacker: {error}"))?;
-    env.crank(3, 3, observations())
-        .map_err(|error| format!("{route:?} apply pending EWMA to victim: {error}"))?;
+    for actor in [0usize, 1] {
+        env.crank(actor, 3, observations())
+            .map_err(|error| format!("{route:?} apply pending EWMA with actor {actor}: {error}"))?;
+    }
     let applied_mark = env.primary_market_state().1.assets[0].effective_price;
     if applied_mark <= MARK {
         return Err(format!(
@@ -18464,51 +18511,43 @@ pub fn reproduce_pending_ewma_inheritance(
         ));
     }
 
+    execute_trade_route(&mut env, route, 2, 3, 0, LARGE_Q, applied_mark, 0)
+        .map_err(|error| format!("{route:?} post-commit trade rejected: {error}"))?;
+    let post_commit_trade_landed = true;
     execute_trade_route(&mut env, route, 2, 3, 0, -LARGE_Q, applied_mark, 0)
-        .map_err(|error| format!("{route:?} close inherited EWMA exposure: {error}"))?;
+        .map_err(|error| format!("{route:?} post-commit exit rejected: {error}"))?;
+    let post_commit_exit_landed = true;
     let victim_capital = env.primary_portfolio(3).capital.get();
-    let victim_loss = LARGE_DEPOSIT
-        .checked_sub(victim_capital)
-        .ok_or("pending EWMA victim capital increased")?;
+    let victim_loss = LARGE_DEPOSIT.saturating_sub(victim_capital);
+    let attacker_capital = env.primary_portfolio(2).capital.get();
+    let attacker_gain = attacker_capital.saturating_sub(LARGE_DEPOSIT);
     let attacker_pnl = env.primary_portfolio(2).pnl.get();
-    if attacker_pnl != victim_loss as i128 {
+    if attacker_pnl != 0 || attacker_gain != 0 || victim_loss != 0 {
         return Err(format!(
-            "{route:?} inherited EWMA PnL does not match victim loss: pnl {attacker_pnl}, loss {victim_loss}"
+            "{route:?} post-commit round trip transferred value: pnl={attacker_pnl}, \
+             gain={attacker_gain}, victim loss={victim_loss}"
         ));
     }
-    if victim_loss != 0 {
-        env.convert_released_pnl(2, victim_loss)
-            .map_err(|error| format!("{route:?} convert inherited EWMA PnL: {error}"))?;
-    }
-    let attacker_gain = env
-        .primary_portfolio(2)
-        .capital
-        .get()
-        .checked_sub(LARGE_DEPOSIT)
-        .ok_or("pending EWMA attacker remained below principal")?;
-    if attacker_gain != victim_loss || attacker_gain <= seed_cost {
+    env.withdraw_primary(2, attacker_capital)
+        .map_err(|error| format!("{route:?} withdraw post-commit principal: {error}"))?;
+    let attacker_principal_withdrawn = env.token_amount(env.actors[2].destination_token);
+    if u128::from(attacker_principal_withdrawn) != LARGE_DEPOSIT {
         return Err(format!(
-            "{route:?} pending EWMA inheritance is no longer profitable: gain {attacker_gain}, victim loss {victim_loss}, seed cost {seed_cost}"
-        ));
-    }
-    let net_extracted = attacker_gain
-        .checked_sub(seed_cost)
-        .ok_or("pending EWMA net extraction underflow")?;
-    env.withdraw_primary(2, net_extracted)
-        .map_err(|error| format!("{route:?} withdraw inherited EWMA profit: {error}"))?;
-    let net_extracted_tokens = env.token_amount(env.actors[2].destination_token);
-    if u128::from(net_extracted_tokens) != net_extracted {
-        return Err(format!(
-            "{route:?} inherited EWMA SPL extraction mismatch: {net_extracted} vs {net_extracted_tokens}"
+            "{route:?} post-commit principal withdrawal mismatch: \
+             {attacker_principal_withdrawn}/{LARGE_DEPOSIT}"
         ));
     }
     Ok(PendingEwmaInheritanceReproduction {
         blocker: KnownBlocker::PendingEwmaInheritance,
         route,
         seed_cost,
+        pending_admission_rejected,
+        rejected_exact_rollback,
+        post_commit_trade_landed,
+        post_commit_exit_landed,
         victim_loss,
         attacker_gain,
-        net_extracted_tokens,
+        attacker_principal_withdrawn,
         pending_mark,
         applied_mark,
     })
@@ -18585,18 +18624,18 @@ pub fn reproduce_reclaimable_ewma_fee(
         ));
     }
 
-    let destination_before = env.token_amount(env.actors[0].destination_token);
-    env.withdraw_insurance_asset(0, ASSET, fee_paid)
-        .map_err(|error| format!("{route:?} EWMA movement fee no longer reclaimable: {error}"))?;
-    let destination_after = env.token_amount(env.actors[0].destination_token);
-    let fee_reclaimed = u128::from(
-        destination_after
-            .checked_sub(destination_before)
-            .ok_or("EWMA reclaim destination decreased")?,
-    );
-    if fee_reclaimed != fee_paid {
+    let before_pending_withdraw = tracked_economic_accounts(&env);
+    let pending_withdraw_error = env
+        .withdraw_insurance_asset(0, ASSET, fee_paid)
+        .expect_err("pending-target insurance withdrawal must reject");
+    let pending_withdraw_rejected = pending_withdraw_error.contains("Custom(21)")
+        || pending_withdraw_error.contains("custom program error: 0x15");
+    let rejected_exact_rollback = tracked_economic_accounts(&env) == before_pending_withdraw;
+    if !pending_withdraw_rejected || !rejected_exact_rollback {
         return Err(format!(
-            "{route:?} EWMA fee reclaim mismatch: paid {fee_paid}, reclaimed {fee_reclaimed}"
+            "{route:?} pending reserve withdrawal was not an exact lock rollback: \
+             rejected={pending_withdraw_rejected}, rollback={rejected_exact_rollback}, \
+             error={pending_withdraw_error}"
         ));
     }
 
@@ -18617,6 +18656,29 @@ pub fn reproduce_reclaimable_ewma_fee(
             "{route:?} paid downward EWMA did not apply: {effective_mark}"
         ));
     }
+
+    let destination_before = env.token_amount(env.actors[0].destination_token);
+    let before_committed_withdraw = tracked_economic_accounts(&env);
+    let committed_withdraw_error = env
+        .withdraw_insurance_asset(0, ASSET, fee_paid)
+        .expect_err("committed mark-movement reserve must remain non-withdrawable");
+    let committed_withdraw_rejected = committed_withdraw_error.contains("Custom(21)")
+        || committed_withdraw_error.contains("custom program error: 0x15");
+    let committed_rejected_exact_rollback =
+        tracked_economic_accounts(&env) == before_committed_withdraw;
+    let fee_reclaimed = u128::from(
+        env.token_amount(env.actors[0].destination_token)
+            .checked_sub(destination_before)
+            .ok_or("EWMA reserve destination decreased")?,
+    );
+    if !committed_withdraw_rejected || !committed_rejected_exact_rollback || fee_reclaimed != 0 {
+        return Err(format!(
+            "{route:?} committed reserve withdrawal was not an exact rejection: \
+             rejected={committed_withdraw_rejected}, rollback={committed_rejected_exact_rollback}, \
+             reclaimed={fee_reclaimed}, error={committed_withdraw_error}"
+        ));
+    }
+
     execute_trade_route(&mut env, route, 0, 3, ASSET, POSITION_Q, effective_mark, 0)
         .map_err(|error| format!("{route:?} close against independent LP: {error}"))?;
     env.crank(0, 4, Vec::new())
@@ -18624,7 +18686,7 @@ pub fn reproduce_reclaimable_ewma_fee(
     env.crank(3, 4, Vec::new())
         .map_err(|error| format!("{route:?} settle victim close: {error}"))?;
 
-    for actor in 0..4 {
+    for actor in 0..PRIMARY_ACTOR_COUNT {
         let pnl = env.primary_portfolio(actor).pnl.get();
         if pnl > 0 {
             env.convert_released_pnl(actor, pnl as u128)
@@ -18649,28 +18711,77 @@ pub fn reproduce_reclaimable_ewma_fee(
         .ok_or("EWMA attacker committed-value overflow")?;
     let victim_loss = DEPOSIT.saturating_sub(victim_payout);
     let attacker_gain = attacker_payout.saturating_sub(attacker_committed);
-    if victim_loss == 0
-        || attacker_gain == 0
-        || attacker_gain
-            .checked_add(INIT_FEE)
-            .ok_or("EWMA attacker gain overflow")?
-            != victim_loss
-    {
+    let attacker_loss = attacker_committed.saturating_sub(attacker_payout);
+    if victim_loss == 0 || attacker_gain != 0 || attacker_loss == 0 || victim_loss > fee_paid {
         return Err(format!(
-            "{route:?} reclaimed EWMA fee did not extract independent LP value: gain {attacker_gain}, victim loss {victim_loss}, paid {fee_paid}, reclaimed {fee_reclaimed}"
+            "{route:?} mark movement was not attacker-neutral-or-negative: gain={attacker_gain}, \
+             loss={attacker_loss}, victim loss={victim_loss}, fee={fee_paid}, reclaimed={fee_reclaimed}"
         ));
     }
     if env.token_supply_observed() != supply_before {
-        return Err(format!("{route:?} EWMA reclaim changed total SPL supply"));
+        return Err(format!(
+            "{route:?} EWMA protection changed SPL supply before retirement"
+        ));
     }
+
+    env.withdraw_insurance_asset_as_admin(0, INIT_FEE)
+        .map_err(|error| format!("{route:?} withdraw ordinary init fee: {error}"))?;
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("{route:?} close actor {actor} portfolio: {error}"))?;
+    }
+    env.resolve_market()
+        .map_err(|error| format!("{route:?} resolve terminal reserve world: {error}"))?;
+    let terminal = env.primary_market_state().1;
+    if terminal.insurance != fee_paid
+        || terminal.insurance_domain_budget_remaining_total != 0
+        || terminal.vault != fee_paid
+        || u128::from(env.token_amount(env.vault)) != fee_paid
+    {
+        return Err(format!(
+            "{route:?} terminal reserve classification mismatch: insurance={}, budget={}, \
+             vault={}/{fee_paid}",
+            terminal.insurance, terminal.insurance_domain_budget_remaining_total, terminal.vault
+        ));
+    }
+    let mint_supply_before = env.mint_supply();
+    let admin_destination_before = env.token_amount(env.market_admin_destination_token);
+    let close = env
+        .close_primary_slab()
+        .map_err(|error| format!("{route:?} terminal reserve CloseSlab: {error}"))?;
+    let terminal_fee_burned = u128::from(
+        mint_supply_before
+            .checked_sub(env.mint_supply())
+            .ok_or("terminal mint supply increased")?,
+    );
+    if terminal_fee_burned != fee_paid
+        || env.token_amount(env.market_admin_destination_token) != admin_destination_before
+        || env.market_data(false).iter().any(|byte| *byte != 0)
+    {
+        return Err(format!(
+            "{route:?} terminal reserve was not burned exactly: burned={terminal_fee_burned}, \
+             expected={fee_paid}, admin destination={}/{}",
+            env.token_amount(env.market_admin_destination_token),
+            admin_destination_before
+        ));
+    }
+
     Ok(ReclaimableEwmaFeeReproduction {
         blocker: KnownBlocker::ReclaimableEwmaFee,
         route,
         fee_paid,
+        pending_withdraw_rejected,
+        rejected_exact_rollback,
+        committed_withdraw_rejected,
+        committed_rejected_exact_rollback,
         fee_reclaimed,
         victim_loss,
         attacker_gain,
+        attacker_loss,
         effective_mark,
+        terminal_close_landed: true,
+        terminal_fee_burned,
+        close_cu: close.compute_units,
     })
 }
 
@@ -18769,6 +18880,7 @@ pub fn reproduce_trade_driven_liquidation_reward(
         oracle_accounts: oracle_accounts.len() as u8,
     }];
     let mut liquidated = false;
+    let mut max_crank_cu = 0;
     for attempt in 0..8 {
         let result = env.crank_with_reward(
             4,
@@ -18781,9 +18893,10 @@ pub fn reproduce_trade_driven_liquidation_reward(
             },
             if attempt == 0 { &oracle_accounts } else { &[] },
         );
-        result.map_err(|error| {
+        let success = result.map_err(|error| {
             format!("{mode:?} {route:?} honest liquidation crank {attempt}: {error}")
         })?;
+        max_crank_cu = max_crank_cu.max(success.compute_units);
         let victim_q = decoded_legs(&env.primary_portfolio(0))
             .into_iter()
             .find(|leg| leg.active && leg.asset_index == 0)
@@ -18810,6 +18923,10 @@ pub fn reproduce_trade_driven_liquidation_reward(
         .insurance
         .checked_sub(group_after_move.insurance)
         .ok_or("PR 280 liquidation reduced insurance")?;
+    let budgeted_penalty = after_liquidation
+        .insurance_domain_budget_remaining_total
+        .checked_sub(group_after_move.insurance_domain_budget_remaining_total)
+        .ok_or("PR 280 liquidation reduced domain budgets")?;
     let victim_penalty = cranker_reward
         .checked_add(retained_penalty)
         .ok_or("PR 280 victim penalty overflow")?;
@@ -18817,12 +18934,14 @@ pub fn reproduce_trade_driven_liquidation_reward(
         .checked_sub(env.primary_portfolio(0).capital.get())
         .ok_or("PR 280 liquidation increased victim capital")?;
     if victim_penalty == 0
-        || cranker_reward == 0
-        || cranker_reward <= movement_fee
+        || cranker_reward != 0
+        || retained_penalty == 0
+        || budgeted_penalty != 0
         || victim_capital_loss == 0
+        || max_crank_cu >= crate::support::v16_svm::TX_CU_LIMIT
     {
         return Err(format!(
-            "{mode:?} {route:?} liquidation reward is not a profitable victim transfer: movement {movement_fee}, penalty {victim_penalty}, reward {cranker_reward}, victim loss {victim_capital_loss}"
+            "{mode:?} {route:?} trade-driven penalty was not retained safely: movement {movement_fee}, penalty {victim_penalty}, reward {cranker_reward}, retained {retained_penalty}, budgeted {budgeted_penalty}, victim loss {victim_capital_loss}, max CU {max_crank_cu}"
         ));
     }
 
@@ -18854,12 +18973,11 @@ pub fn reproduce_trade_driven_liquidation_reward(
         .checked_mul(2)
         .and_then(|value| value.checked_add(CRANKER_DEPOSIT))
         .ok_or("PR 280 attacker commitment overflow")?;
-    let attacker_profit = attacker_extracted
-        .checked_sub(attacker_committed)
-        .ok_or("PR 280 attack remained unprofitable")?;
-    if attacker_profit == 0 || env.token_supply_observed() != supply_before {
+    let attacker_gain = attacker_extracted.saturating_sub(attacker_committed);
+    let attacker_loss = attacker_committed.saturating_sub(attacker_extracted);
+    if attacker_gain != 0 || attacker_loss == 0 || env.token_supply_observed() != supply_before {
         return Err(format!(
-            "{mode:?} {route:?} did not finish as conserved extractable profit: extracted {attacker_extracted}, committed {attacker_committed}, supply {}/{}",
+            "{mode:?} {route:?} coalition was not conserved and economically negative: extracted {attacker_extracted}, committed {attacker_committed}, gain {attacker_gain}, loss {attacker_loss}, supply {}/{}",
             env.token_supply_observed(),
             supply_before
         ));
@@ -18871,9 +18989,14 @@ pub fn reproduce_trade_driven_liquidation_reward(
         movement_fee,
         victim_penalty,
         cranker_reward,
+        retained_penalty,
+        budgeted_penalty,
         victim_capital_loss,
         attacker_extracted,
-        attacker_profit,
+        attacker_gain,
+        attacker_loss,
+        liquidation_landed: liquidated,
+        max_crank_cu,
     })
 }
 
@@ -19278,6 +19401,8 @@ pub fn reproduce_cross_domain_b_settlement(
 struct PendingEwmaTargetWorld {
     low_price: u64,
     target: u64,
+    override_rejected: bool,
+    rejected_exact_rollback: bool,
     movement_fee: u128,
     victim_withdrawn: u64,
     attacker_withdrawn: u128,
@@ -19295,28 +19420,30 @@ pub fn reproduce_pending_ewma_target_override(
     let attack = run_pending_ewma_target_world(seed, route, true)?;
     if control.low_price != attack.low_price
         || control.target != 10_000_000
-        || attack.target >= control.target
+        || attack.target != control.target
+        || !attack.override_rejected
+        || !attack.rejected_exact_rollback
         || control.movement_fee != 0
-        || attack.movement_fee == 0
+        || attack.movement_fee != 0
         || control.observed_token_supply != attack.observed_token_supply
     {
         return Err(format!(
-            "{route:?} PR 282 setup did not isolate a paid pending-target override: control={control:?}, attack={attack:?}"
+            "{route:?} PR 282 did not reject the pending-target override exactly: \
+             control={control:?}, attack={attack:?}"
         ));
     }
-    let displaced_victim_pnl = u128::from(control.victim_withdrawn)
-        .checked_sub(u128::from(attack.victim_withdrawn))
-        .ok_or("PR 282 wash increased independent-victim payout")?;
-    let attacker_profit = attack
-        .attacker_withdrawn
-        .checked_sub(ATTACKER_DEPOSITS)
-        .ok_or("PR 282 coalition did not recover its public deposits")?;
-    if displaced_victim_pnl == 0
-        || attacker_profit == 0
-        || attack.movement_fee >= displaced_victim_pnl
+    let displaced_victim_pnl =
+        u128::from(control.victim_withdrawn.abs_diff(attack.victim_withdrawn));
+    let attacker_profit = attack.attacker_withdrawn.saturating_sub(ATTACKER_DEPOSITS);
+    if displaced_victim_pnl != 0
+        || attacker_profit != 0
+        || attack.attacker_withdrawn != control.attacker_withdrawn
+        || attack.victim_withdrawn != control.victim_withdrawn
     {
         return Err(format!(
-            "{route:?} PR 282 did not expose underpriced independent-victim PnL displacement: control={control:?}, attack={attack:?}, victim displacement={displaced_victim_pnl}, attacker profit={attacker_profit}"
+            "{route:?} PR 282 rejection changed terminal value: control={control:?}, \
+             attack={attack:?}, victim displacement={displaced_victim_pnl}, \
+             attacker profit={attacker_profit}"
         ));
     }
     Ok(PendingEwmaTargetOverrideReproduction {
@@ -19325,6 +19452,8 @@ pub fn reproduce_pending_ewma_target_override(
         low_price: attack.low_price,
         control_target: control.target,
         attack_target: attack.target,
+        override_rejected: attack.override_rejected,
+        rejected_exact_rollback: attack.rejected_exact_rollback,
         movement_fee: attack.movement_fee,
         displaced_victim_pnl,
         attacker_profit,
@@ -19420,11 +19549,21 @@ fn run_pending_ewma_target_world(
 
     env.warp_to_slot(7);
     let insurance_before = env.primary_market_state().1.insurance;
+    let mut override_rejected = false;
+    let mut rejected_exact_rollback = false;
     if with_wash {
-        execute_trade_route(&mut env, route, 2, 3, 0, WASH_Q, 1, 0)
-            .map_err(|error| format!("{route:?} open target-override wash: {error}"))?;
-        execute_trade_route(&mut env, route, 2, 3, 0, -WASH_Q, low_price, 0)
-            .map_err(|error| format!("{route:?} close target-override wash: {error}"))?;
+        let before_rejection = tracked_economic_accounts(&env);
+        let error = execute_trade_route(&mut env, route, 2, 3, 0, WASH_Q, 1, 0)
+            .expect_err("pending-target override risk increase must reject");
+        override_rejected =
+            error.contains("Custom(21)") || error.contains("custom program error: 0x15");
+        rejected_exact_rollback = tracked_economic_accounts(&env) == before_rejection;
+        if !override_rejected || !rejected_exact_rollback {
+            return Err(format!(
+                "{route:?} target override was not an exact lock rollback: \
+                 rejected={override_rejected}, rollback={rejected_exact_rollback}, error={error}"
+            ));
+        }
     }
     let movement_fee = env
         .primary_market_state()
@@ -19473,6 +19612,8 @@ fn run_pending_ewma_target_world(
     Ok(PendingEwmaTargetWorld {
         low_price,
         target,
+        override_rejected,
+        rejected_exact_rollback,
         movement_fee,
         victim_withdrawn,
         attacker_withdrawn,
@@ -20722,10 +20863,9 @@ pub fn verify_counterparty_encumbrance_route_matrix(mut seed: [u8; 32]) -> Resul
 
 fn zero_move_funding_world(seed: [u8; 32]) -> Result<V16Svm, String> {
     const PRICE: u64 = 2;
-    const TARGET: u64 = 1;
     const DEPOSIT: u128 = 1_000_000;
 
-    let mut env = V16Svm::new(
+    Ok(V16Svm::new(
         seed,
         MarketConfig {
             initial_price: PRICE,
@@ -20742,11 +20882,7 @@ fn zero_move_funding_world(seed: [u8; 32]) -> Result<V16Svm, String> {
             ],
             ..MarketConfig::default()
         },
-    );
-    env.warp_to_slot(2);
-    env.push_auth_mark(0, 2, TARGET)
-        .map_err(|error| format!("stage zero-move funding mark: {error}"))?;
-    Ok(env)
+    ))
 }
 
 fn zero_move_observation(env: &V16Svm) -> Vec<CrankObservationHint> {
@@ -20757,6 +20893,14 @@ fn zero_move_observation(env: &V16Svm) -> Vec<CrankObservationHint> {
 }
 
 fn prime_zero_move_funding(env: &mut V16Svm) -> Result<(), String> {
+    const TARGET: u64 = 1;
+
+    // Exposure must predate the pending target. Staging first correctly blocks a fresh open under
+    // the target/effective lag and would make this a stale-admission test instead of a funding-order
+    // test.
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, TARGET)
+        .map_err(|error| format!("stage zero-move funding mark: {error}"))?;
     for actor in [0, 1] {
         env.crank(actor, 2, zero_move_observation(env))
             .map_err(|error| format!("prime zero-move funding actor {actor}: {error}"))?;

@@ -759,6 +759,15 @@ fn v16_program_non_base_trade_rejects_after_base_resolve_matured() {
 
     env.svm.warp_to_slot(7);
     env.push_auth_mark_for_asset_with_authority(1, &creator, 7, 101);
+    for portfolio in [taker_portfolio, lp_portfolio] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 7,
+                observations: crank_observations(1),
+            },
+        );
+    }
     let fresh_trade = env.try_trade_asset_with_cu(
         1,
         &taker,

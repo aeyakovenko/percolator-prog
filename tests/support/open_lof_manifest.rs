@@ -180,6 +180,7 @@ impl BlockerAdapter {
 pub enum LofEvidence {
     Missing,
     Quarantined(BlockerAdapter),
+    Certified(BlockerAdapter),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,6 +214,20 @@ impl OpenLof {
             evidence: LofEvidence::Quarantined(adapter),
         }
     }
+
+    const fn certified(
+        pr: u16,
+        severity: LofSeverity,
+        family: LofFamily,
+        adapter: BlockerAdapter,
+    ) -> Self {
+        Self {
+            pr,
+            severity,
+            family,
+            evidence: LofEvidence::Certified(adapter),
+        }
+    }
 }
 
 use LofFamily::{
@@ -223,7 +238,8 @@ use LofSeverity::{Blocker, Hardening, Privileged};
 
 // Snapshot of every open [BLOCKER|PRIVILEGED|HARDENING LoF] PR on 2026-07-30.
 // Assignment to a family is routing, not coverage. Only executable adapters may
-// use Quarantined; a fixed-pin invariant will replace that state after merge.
+// use Quarantined. Certified means the same public adapter now asserts the fixed-pin safety
+// postcondition; it does not imply exhaustive proof outside that adapter's stated boundary.
 pub const OPEN_LOFS: &[OpenLof] = &[
     OpenLof::quarantined(
         220,
@@ -243,7 +259,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         FeeConsent,
         BlockerAdapter::Pr224CpiCallerFeeSiphon,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         225,
         Blocker,
         OracleAccrual,
@@ -278,14 +294,14 @@ pub const OPEN_LOFS: &[OpenLof] = &[
     OpenLof::missing(256, Hardening, FeeConsent),
     OpenLof::missing(258, Privileged, PrivilegedLifecycle),
     OpenLof::missing(259, Privileged, FeeConsent),
-    OpenLof::quarantined(
+    OpenLof::certified(
         260,
         Blocker,
         OracleAccrual,
         BlockerAdapter::Pr260PendingEwmaInheritance,
     ),
-    OpenLof::quarantined(264, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
-    OpenLof::quarantined(265, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
+    OpenLof::certified(264, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
+    OpenLof::certified(265, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
     OpenLof::quarantined(
         267,
         Blocker,
@@ -346,7 +362,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr279CollateralTopUpGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         280,
         Blocker,
         OracleAccrual,
@@ -358,7 +374,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         DomainValue,
         BlockerAdapter::Pr281CrossDomainBSettlement,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         282,
         Blocker,
         OracleAccrual,
@@ -535,8 +551,8 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr331CompositeOracleTimeSkew,
     ),
-    OpenLof::quarantined(332, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
-    OpenLof::quarantined(333, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
+    OpenLof::certified(332, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
+    OpenLof::certified(333, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
     OpenLof::quarantined(
         334,
         Blocker,
@@ -639,7 +655,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr355WithdrawalRetryLiquidation,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         356,
         Blocker,
         OracleAccrual,
@@ -671,7 +687,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         DomainValue,
         BlockerAdapter::Pr367PostExpiryBacking,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         369,
         Blocker,
         FeeConsent,
@@ -712,7 +728,8 @@ pub fn validate_manifest() -> Result<(), String> {
         }
     }
     for entry in OPEN_LOFS {
-        if let LofEvidence::Quarantined(adapter) = entry.evidence {
+        if let LofEvidence::Quarantined(adapter) | LofEvidence::Certified(adapter) = entry.evidence
+        {
             if !adapter.supports(entry.pr) {
                 return Err(format!(
                     "PR {} claims incompatible adapter {:?} (canonical PR {})",
@@ -745,7 +762,7 @@ pub fn missing_prs() -> Vec<u16> {
         .iter()
         .filter_map(|entry| match entry.evidence {
             LofEvidence::Missing => Some(entry.pr),
-            LofEvidence::Quarantined(_) => None,
+            LofEvidence::Quarantined(_) | LofEvidence::Certified(_) => None,
         })
         .collect()
 }
@@ -756,6 +773,17 @@ pub fn quarantined_prs() -> Vec<u16> {
         .filter_map(|entry| match entry.evidence {
             LofEvidence::Missing => None,
             LofEvidence::Quarantined(_) => Some(entry.pr),
+            LofEvidence::Certified(_) => None,
+        })
+        .collect()
+}
+
+pub fn certified_prs() -> Vec<u16> {
+    OPEN_LOFS
+        .iter()
+        .filter_map(|entry| match entry.evidence {
+            LofEvidence::Certified(_) => Some(entry.pr),
+            LofEvidence::Missing | LofEvidence::Quarantined(_) => None,
         })
         .collect()
 }
