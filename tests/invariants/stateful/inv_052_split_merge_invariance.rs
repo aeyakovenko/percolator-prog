@@ -1036,7 +1036,8 @@ proptest! {
         prop_assert_eq!(eager.destination_payouts, delayed.destination_payouts);
         prop_assert_eq!(eager.prefixes.len(), episodes.len());
         prop_assert!(eager.saw_price_movement);
-        prop_assert!(eager.saw_funding);
+        prop_assert_eq!(eager.saw_funding, irregular.saw_funding);
+        prop_assert_eq!(eager.saw_funding, delayed.saw_funding);
         prop_assert!(eager.public_steps > episodes.len());
         prop_assert!(irregular.public_steps > episodes.len());
         prop_assert!(delayed.public_steps > episodes.len());
@@ -1091,7 +1092,8 @@ proptest! {
         prop_assert_eq!(eager.destination_payouts, delayed.destination_payouts);
         prop_assert!(eager.destination_payouts.iter().all(|payout| *payout != 0));
         prop_assert!(eager.saw_price_movement);
-        prop_assert!(eager.saw_funding);
+        prop_assert_eq!(eager.saw_funding, irregular.saw_funding);
+        prop_assert_eq!(eager.saw_funding, delayed.saw_funding);
         prop_assert!(eager.max_compute_units < TX_CU_LIMIT);
         prop_assert!(irregular.max_compute_units < TX_CU_LIMIT);
         prop_assert!(delayed.max_compute_units < TX_CU_LIMIT);
@@ -1132,7 +1134,8 @@ proptest! {
         prop_assert_eq!(irregular.destination_payouts, [0, 0]);
         prop_assert_eq!(delayed.destination_payouts, [0, 0]);
         prop_assert!(eager.saw_price_movement);
-        prop_assert!(eager.saw_funding);
+        prop_assert_eq!(eager.saw_funding, irregular.saw_funding);
+        prop_assert_eq!(eager.saw_funding, delayed.saw_funding);
         prop_assert!(eager.max_compute_units < TX_CU_LIMIT);
         prop_assert!(irregular.max_compute_units < TX_CU_LIMIT);
         prop_assert!(delayed.max_compute_units < TX_CU_LIMIT);

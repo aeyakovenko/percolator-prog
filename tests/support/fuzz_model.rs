@@ -2410,7 +2410,13 @@ impl ScenarioRunner {
     }
 
     fn new_unprefixed(scenario: &Scenario) -> Result<Self, String> {
-        Self::new_unprefixed_with_market_config(scenario.seed, scenario.config.into())
+        let mut out =
+            Self::new_unprefixed_with_market_config(scenario.seed, scenario.config.into())?;
+        // The terminal campaign runs after the generated action history. Its bound must include
+        // every authenticated mark/clock move that history introduced, not only the baseline
+        // market configuration used by lower-level fixture constructors.
+        out.liveness_limit = scenario_liveness_limit(scenario)?;
+        Ok(out)
     }
 
     fn new_unprefixed_with_market_config(
@@ -8182,6 +8188,14 @@ fn scenario_liveness_limit(scenario: &Scenario) -> Result<usize, String> {
                 authenticated_dt = authenticated_dt
                     .checked_add(u64::from((*dt).min(4)))
                     .ok_or("liveness shutdown-clock bound overflow")?;
+            }
+            Action::ForceCloseAbandoned { dt, .. }
+            | Action::RetireAsset { dt, .. }
+            | Action::RestartAssetOracle { dt, .. }
+            | Action::ResolveStalePermissionless { dt } => {
+                authenticated_dt = authenticated_dt
+                    .checked_add(u64::from((*dt).clamp(1, 4)))
+                    .ok_or("liveness action-clock bound overflow")?;
             }
             _ => {}
         }
