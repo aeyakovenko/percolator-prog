@@ -10,10 +10,13 @@
 //! and uses the public owner dead-leg forfeit route. The close ledger proves
 //! expired backing contributes no support, tiny insurance is spent exactly,
 //! and the remaining residual is booked to B before both legs clear. The test
-//! also reconciles engine custody to SPL balances and proves the route does not
-//! mint supply. Domain-lock, payout-conflict, and other lifecycle failure
-//! classes remain outside this bounded topology.
+//! also runs the independent stock and encumbrance census after every public
+//! setup, mark, crank, lifecycle, and forfeit transition, reconciles engine
+//! custody to SPL balances, and proves the route does not mint supply.
+//! Domain-lock, payout-conflict, and other lifecycle failure classes remain
+//! outside this bounded topology.
 
+use crate::support::fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census};
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{BOUND_SCALE, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
@@ -31,16 +34,27 @@ fn has_active_leg(env: &V16Svm, actor: usize) -> bool {
         .any(|leg| leg.active && leg.asset_index == u32::from(ASSET))
 }
 
+fn assert_resource_census(label: &str, env: &V16Svm) {
+    assert_public_stock_census(label, env)
+        .unwrap_or_else(|error| panic!("{label} stock census failed: {error}"));
+    assert_public_encumbrance_census(label, env)
+        .unwrap_or_else(|error| panic!("{label} encumbrance census failed: {error}"));
+}
+
 fn crank_to_fixed_point(
     env: &mut V16Svm,
     actor: usize,
     slot: u64,
     observations: &[CrankObservationHint],
+    label: &str,
 ) {
     let mut progressed = false;
-    for _ in 0..16 {
+    for step in 0..16 {
         match env.crank(actor, slot, observations.to_vec()) {
-            Ok(_) => progressed = true,
+            Ok(_) => {
+                progressed = true;
+                assert_resource_census(&format!("{label} crank step {step}"), env);
+            }
             Err(error) if progressed && error.contains("Custom(22)") => break,
             Err(error) => panic!("actor {actor} crank failed before fixed point: {error}"),
         }
@@ -67,13 +81,25 @@ fn v16_program_recovery_resource_failure_lattice_preserves_public_exit() {
         let mut env = V16Svm::new([0x78; 32], config);
         env.configure_permissionless_resolve(100, 1)
             .expect("configure public Recovery timing");
+        assert_resource_census(
+            &format!("INV-078 resource cell {resource_mask} configured"),
+            &env,
+        );
         if has_expired_backing {
             env.top_up_backing_bucket(SOURCE_DOMAIN as u16, 1, 26)
                 .expect("fund backing that will expire before recovery");
+            assert_resource_census(
+                &format!("INV-078 resource cell {resource_mask} backing funded"),
+                &env,
+            );
         }
         if has_tiny_insurance {
             env.top_up_insurance_domain(SOURCE_DOMAIN as u16, 1)
                 .expect("fund deliberately insufficient insurance");
+            assert_resource_census(
+                &format!("INV-078 resource cell {resource_mask} insurance funded"),
+                &env,
+            );
         }
         let (_, funded) = env.primary_market_state();
         assert_eq!(
@@ -89,6 +115,10 @@ fn v16_program_recovery_resource_failure_lattice_preserves_public_exit() {
 
         env.trade_no_cpi(0, 1, ASSET, SIZE_Q as i128, OPEN_PRICE, 0)
             .expect("open public claim-producing position pair");
+        assert_resource_census(
+            &format!("INV-078 resource cell {resource_mask} position opened"),
+            &env,
+        );
         let supply_before = env.token_supply_observed();
         let observations = vec![CrankObservationHint {
             asset_index: ASSET,
@@ -98,15 +128,35 @@ fn v16_program_recovery_resource_failure_lattice_preserves_public_exit() {
             env.warp_to_slot(slot);
             env.push_auth_mark(ASSET, slot, 300)
                 .expect("publish authenticated adverse mark");
-            crank_to_fixed_point(&mut env, 0, slot, &observations);
+            assert_resource_census(
+                &format!("INV-078 resource cell {resource_mask} mark slot {slot}"),
+                &env,
+            );
+            crank_to_fixed_point(
+                &mut env,
+                0,
+                slot,
+                &observations,
+                &format!("INV-078 resource cell {resource_mask} actor 0 slot {slot}"),
+            );
         }
         env.crank(1, 41, observations)
             .expect("settle bankrupt counterparty once before Recovery");
+        assert_resource_census(
+            &format!("INV-078 resource cell {resource_mask} loser settled"),
+            &env,
+        );
         let terminal_observations = vec![CrankObservationHint {
             asset_index: ASSET,
             oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
         }];
-        crank_to_fixed_point(&mut env, 0, 41, &terminal_observations);
+        crank_to_fixed_point(
+            &mut env,
+            0,
+            41,
+            &terminal_observations,
+            &format!("INV-078 resource cell {resource_mask} winner settled"),
+        );
         let loser_before_recovery = env.primary_portfolio(1);
         let effective_price = env.primary_market_state().1.assets[ASSET as usize].effective_price;
         assert_eq!(effective_price, 300);
@@ -125,11 +175,23 @@ fn v16_program_recovery_resource_failure_lattice_preserves_public_exit() {
         env.warp_to_slot(42);
         env.shutdown_asset(ASSET, 42)
             .expect("enter public Recovery lifecycle");
+        assert_resource_census(
+            &format!("INV-078 resource cell {resource_mask} Recovery entered"),
+            &env,
+        );
         env.warp_to_slot(44);
         env.forfeit_recovery_leg(1, ASSET, u128::MAX)
             .expect("bankrupt owner forfeits its Recovery leg");
+        assert_resource_census(
+            &format!("INV-078 resource cell {resource_mask} loser forfeited"),
+            &env,
+        );
         env.forfeit_recovery_leg(0, ASSET, u128::MAX)
             .expect("counterparty owner forfeits its Recovery leg");
+        assert_resource_census(
+            &format!("INV-078 resource cell {resource_mask} winner forfeited"),
+            &env,
+        );
 
         let (_, after) = env.primary_market_state();
         let loser_close = env
