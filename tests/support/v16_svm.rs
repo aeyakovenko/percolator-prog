@@ -3772,6 +3772,55 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_insurance_top_up_pair_for_actor(
+        &mut self,
+        actor_index: usize,
+        domain: u16,
+        amount: u128,
+        direct_first: bool,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        let asset_index = domain as usize / 2;
+        let market_id = self.primary_market_state().1.assets[asset_index].market_id;
+        let intent_id =
+            next_control_sequence(self.primary_control_sequences(asset_index).insurance_top_up);
+        let direct = (
+            ProgInstruction::TopUpInsurance {
+                market_id,
+                intent_id,
+                amount,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+        );
+        let domain = (
+            ProgInstruction::TopUpInsuranceDomain {
+                domain,
+                market_id,
+                intent_id,
+                amount,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+        );
+        let instructions = if direct_first {
+            vec![direct, domain]
+        } else {
+            vec![domain, direct]
+        };
+        self.build_program_instructions_transaction(instructions, &[authority])
+    }
+
     pub fn build_retained_backing_bucket_top_up_for_actor(
         &mut self,
         actor_index: usize,
@@ -4529,12 +4578,23 @@ impl V16Svm {
         accounts: Vec<AccountMeta>,
         extra_signers: &[Keypair],
     ) -> Transaction {
-        self.build_transaction(
-            Instruction {
-                program_id: self.program_id,
-                accounts,
-                data: instruction.encode(),
-            },
+        self.build_program_instructions_transaction(vec![(instruction, accounts)], extra_signers)
+    }
+
+    fn build_program_instructions_transaction(
+        &mut self,
+        instructions: Vec<(ProgInstruction, Vec<AccountMeta>)>,
+        extra_signers: &[Keypair],
+    ) -> Transaction {
+        self.build_transaction_instructions(
+            instructions
+                .into_iter()
+                .map(|(instruction, accounts)| Instruction {
+                    program_id: self.program_id,
+                    accounts,
+                    data: instruction.encode(),
+                })
+                .collect(),
             extra_signers,
         )
     }
@@ -4553,18 +4613,28 @@ impl V16Svm {
         instruction: Instruction,
         extra_signers: &[Keypair],
     ) -> Transaction {
+        self.build_transaction_instructions(vec![instruction], extra_signers)
+    }
+
+    fn build_transaction_instructions(
+        &mut self,
+        instructions: Vec<Instruction>,
+        extra_signers: &[Keypair],
+    ) -> Transaction {
         self.tx_sequence = self.tx_sequence.checked_add(1).expect("tx sequence");
         let payer = copy_keypair(&self.payer);
         let mut signer_refs: Vec<&Keypair> = Vec::with_capacity(extra_signers.len() + 1);
         signer_refs.push(&payer);
         signer_refs.extend(extra_signers.iter());
+        let mut transaction_instructions = Vec::with_capacity(instructions.len() + 3);
+        transaction_instructions.extend([
+            ComputeBudgetInstruction::request_heap_frame(256 * 1024),
+            ComputeBudgetInstruction::set_compute_unit_limit(TX_CU_LIMIT as u32),
+            ComputeBudgetInstruction::set_compute_unit_price(self.tx_sequence),
+        ]);
+        transaction_instructions.extend(instructions);
         Transaction::new_signed_with_payer(
-            &[
-                ComputeBudgetInstruction::request_heap_frame(256 * 1024),
-                ComputeBudgetInstruction::set_compute_unit_limit(TX_CU_LIMIT as u32),
-                ComputeBudgetInstruction::set_compute_unit_price(self.tx_sequence),
-                instruction,
-            ],
+            &transaction_instructions,
             Some(&payer.pubkey()),
             &signer_refs,
             self.svm.latest_blockhash(),

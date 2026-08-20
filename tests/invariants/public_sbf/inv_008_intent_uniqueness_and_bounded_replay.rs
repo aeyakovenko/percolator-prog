@@ -5,7 +5,9 @@
 //! Evidence in this file (I plus invariant-specific F/M assertions): the PR343/350/355
 //! fixed-pin tests reject stale trade/deposit/withdraw retries exactly and land a newly bound
 //! operation; the PR344/351 tests require both authority-top-up routes to reject stale retries;
-//! PR362 and the
+//! `v16_program_same_transaction_cross_route_retry_is_atomic_and_exact_once` bundles the direct
+//! and domain insurance variants in both orders, proves whole-transaction rollback, then proves
+//! exactly one standalone variant can land; PR362 and the
 //! issue387/389 tests cover generation/position-bound activation, conversion, and reduction.
 //! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
@@ -13,9 +15,11 @@
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! plus every additional verification method required by the charter. The bundled test covers the
+//! shared insurance lane, not every retained family or successful partial-fill partition.
 
 use super::*;
+use crate::support::v16_svm::{MarketConfig, V16Svm};
 
 #[test]
 fn v16_program_pr343_trade_retry_variants_reject_stale_and_land_fresh() {
@@ -57,6 +61,98 @@ fn v16_program_insurance_top_up_routes_share_one_replay_watermark() {
         assert!(!protection.duplicated_economic_effect);
         assert_eq!(protection.retry_compute_units, None);
         assert!(protection.fresh_compute_units.is_some());
+    }
+}
+
+#[test]
+fn v16_program_same_transaction_cross_route_retry_is_atomic_and_exact_once() {
+    const AUTHORITY: usize = 2;
+    const AMOUNT: u128 = 1_000;
+
+    for direct_first in [false, true] {
+        let mut env = V16Svm::new([0x58 ^ u8::from(direct_first); 32], MarketConfig::default());
+        env.update_asset_authority_from_admin(
+            0,
+            percolator_prog::processor::ASSET_AUTH_INSURANCE,
+            AUTHORITY,
+        )
+        .expect("install independent insurance authority");
+
+        let direct = env.build_retained_insurance_top_up_for_actor(AUTHORITY, AMOUNT);
+        let domain = env.build_retained_insurance_domain_top_up_for_actor(AUTHORITY, 0, AMOUNT);
+        let bundled =
+            env.build_retained_insurance_top_up_pair_for_actor(AUTHORITY, 0, AMOUNT, direct_first);
+        let (first, retry) = if direct_first {
+            (direct, domain)
+        } else {
+            (domain, direct)
+        };
+
+        let market_before = env.market_data(false);
+        let tokens_before = env.all_token_account_data();
+        let supply_before = env.token_supply_observed();
+        let source_before = env.token_amount(env.actors[AUTHORITY].source_token);
+        let vault_before = env.token_amount(env.vault);
+        let accounting_vault_before = env.primary_market_state().1.vault;
+        let sequence_before = env.primary_control_sequences(0).insurance_top_up;
+        env.begin_public_trace();
+
+        let bundled_error = env
+            .land_retained(bundled)
+            .expect_err("the second same-watermark instruction must abort the bundle");
+        assert!(
+            bundled_error.contains("Custom(19)")
+                || bundled_error.contains("custom program error: 0x13"),
+            "bundle must reject at the stale replay guard: {bundled_error}"
+        );
+        assert_eq!(env.market_data(false), market_before);
+        assert_eq!(env.all_token_account_data(), tokens_before);
+        assert_eq!(env.token_supply_observed(), supply_before);
+        assert_eq!(
+            env.primary_control_sequences(0).insurance_top_up,
+            sequence_before,
+            "the aborted bundle must not consume the intent watermark"
+        );
+
+        env.land_retained(first)
+            .expect("one standalone variant must remain executable after bundle rollback");
+        assert_eq!(
+            env.token_amount(env.actors[AUTHORITY].source_token),
+            source_before - AMOUNT as u64
+        );
+        assert_eq!(env.token_amount(env.vault), vault_before + AMOUNT as u64);
+        assert_eq!(
+            env.primary_market_state().1.vault,
+            accounting_vault_before + AMOUNT
+        );
+        assert_eq!(
+            env.primary_control_sequences(0).insurance_top_up,
+            sequence_before + 1
+        );
+        assert_eq!(env.token_supply_observed(), supply_before);
+
+        let market_after_first = env.market_data(false);
+        let tokens_after_first = env.all_token_account_data();
+        let retry_error = env
+            .land_retained(retry)
+            .expect_err("the alternate route must reject after the shared intent lands");
+        assert!(
+            retry_error.contains("Custom(19)")
+                || retry_error.contains("custom program error: 0x13"),
+            "cross-route retry must reject at the stale replay guard: {retry_error}"
+        );
+        assert_eq!(env.market_data(false), market_after_first);
+        assert_eq!(env.all_token_account_data(), tokens_after_first);
+        assert_eq!(env.token_supply_observed(), supply_before);
+
+        let trace = env.finish_public_trace();
+        assert_eq!(trace.out_of_band_economic_mutations, 0);
+        assert_eq!(trace.steps.len(), 3);
+        assert!(!trace.steps[0].succeeded);
+        assert!(trace.steps[1].succeeded);
+        assert!(!trace.steps[2].succeeded);
+        assert_eq!(trace.steps[0].rejected_exact_writable_rollback, Some(true));
+        assert_eq!(trace.steps[2].rejected_exact_writable_rollback, Some(true));
     }
 }
 
