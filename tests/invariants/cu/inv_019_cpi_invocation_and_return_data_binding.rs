@@ -484,6 +484,112 @@ fn v16_program_hostile_matcher_batch_returns_all_rejected() {
 }
 
 #[test]
+fn v16_program_batch_tradecpi_uses_only_current_configured_matcher_return_data() {
+    for (mode, nested_after_matcher) in [(17u8, false), (18u8, true)] {
+        let (mut env, taker, _lp, taker_account, lp_account, hostile, ctx, delegate) =
+            setup_hostile_matcher_cpi_env(2);
+        let fixture = std::fs::read(hostile_matcher_program_path()).unwrap();
+        let nested_program = Pubkey::new_unique();
+        env.svm.add_program(nested_program, &fixture);
+        let nested_ctx = Pubkey::new_unique();
+        let mut nested_ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+        nested_ctx_data[0] = 9;
+        env.svm
+            .set_account(
+                nested_ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: nested_ctx_data,
+                    owner: nested_program,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let mut outer_ctx = vec![0u8; MATCHER_CONTEXT_LEN];
+        outer_ctx[0] = mode;
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: outer_ctx,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+
+        let size_q = (5 * POS_SCALE) as i128;
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker_account).unwrap();
+        let lp_before = env.svm.get_account(&lp_account).unwrap();
+        let ctx_before = env.svm.get_account(&ctx).unwrap();
+        let nested_ctx_before = env.svm.get_account(&nested_ctx).unwrap();
+        env.svm.expire_blockhash();
+        let result = env.send(
+            env.batch_trade_cpi_ix(
+                taker_account,
+                lp_account,
+                vec![
+                    BatchTradeCpiLeg {
+                        asset_index: 0,
+                        market_id: first_generation_market_id(0),
+                        size_q,
+                        fee_bps: 100,
+                        limit_price: 0,
+                    },
+                    BatchTradeCpiLeg {
+                        asset_index: 1,
+                        market_id: first_generation_market_id(1),
+                        size_q: -size_q,
+                        fee_bps: 100,
+                        limit_price: 0,
+                    },
+                ],
+            ),
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+                AccountMeta::new_readonly(nested_program, false),
+                AccountMeta::new(nested_ctx, false),
+            ],
+            &[&taker],
+        );
+
+        if nested_after_matcher {
+            assert!(
+                result.is_err(),
+                "return data replaced after the configured matcher must reject"
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+            assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+            assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+            assert_eq!(env.svm.get_account(&nested_ctx).unwrap(), nested_ctx_before);
+        } else {
+            let cu = result.expect(
+                "the configured matcher's later response must supersede unrelated nested return data",
+            );
+            assert_cu_within(
+                "BatchTradeCpi nested return before configured matcher",
+                cu,
+                TRADE_CU_LIMIT,
+            );
+            let taker_after = env.portfolio_state(taker_account);
+            assert_eq!(active_leg_for_asset(&taker_after, 0).basis_pos_q, size_q);
+            assert_eq!(active_leg_for_asset(&taker_after, 1).basis_pos_q, -size_q);
+        }
+    }
+}
+
+#[test]
 fn v16_program_hostile_matcher_single_tradecpi_returns_all_rejected() {
     let (mut env, taker, _lp, taker_account, lp_account, hostile, ctx, delegate) =
         setup_hostile_matcher_cpi_env(2);

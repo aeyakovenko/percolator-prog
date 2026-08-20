@@ -7,6 +7,7 @@ use solana_program::{
     account_info::AccountInfo,
     entrypoint,
     entrypoint::ProgramResult,
+    instruction::{AccountMeta, Instruction},
     program::{invoke, set_return_data},
     program_error::ProgramError,
     pubkey::Pubkey,
@@ -100,6 +101,33 @@ fn maybe_drain_tail_signer(mode: u8, accounts: &[AccountInfo]) -> ProgramResult 
     }
 }
 
+fn invoke_nested_return_writer(accounts: &[AccountInfo]) -> ProgramResult {
+    if accounts.len() < 4 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    // Invoke this fixture under a second program id. Its response is unrelated to the outer
+    // request; the test only needs a distinct program to become the latest return-data producer.
+    let mut data = vec![0u8; 44];
+    data[0] = 3;
+    data[1] = 1;
+    let ix = Instruction {
+        program_id: *accounts[2].key,
+        accounts: vec![
+            AccountMeta::new_readonly(*accounts[0].key, false),
+            AccountMeta::new(*accounts[3].key, false),
+        ],
+        data,
+    };
+    invoke(
+        &ix,
+        &[
+            accounts[0].clone(),
+            accounts[3].clone(),
+            accounts[2].clone(),
+        ],
+    )
+}
+
 fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     match data.first() {
         // Tag 0: single matcher call (67 bytes); write the crafted return into ctx[0..64].
@@ -135,6 +163,9 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
                 return Ok(());
             }
             maybe_drain_tail_signer(mode, accounts)?;
+            if mode == 17 {
+                invoke_nested_return_writer(accounts)?;
+            }
             let mut out = [0u8; 16 * 64];
             let emit = if mode == 8 { n.saturating_sub(1) } else { n }; // mode 8 = short return length
             for i in 0..n {
@@ -158,6 +189,9 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
                     .copy_from_slice(&craft(leg_mode, req_id, lp, asset, oracle, req));
             }
             set_return_data(&out[..emit * 64]);
+            if mode == 18 {
+                invoke_nested_return_writer(accounts)?;
+            }
             Ok(())
         }
         _ => Err(ProgramError::InvalidInstructionData),
