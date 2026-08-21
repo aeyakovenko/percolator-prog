@@ -4425,6 +4425,123 @@ impl V16CuEnv {
     }
 }
 
+struct PublicBackingEarningsFixture {
+    env: V16CuEnv,
+    ledger: Pubkey,
+    domain: u16,
+    earnings: u128,
+}
+
+fn public_backing_earnings_fixture() -> PublicBackingEarningsFixture {
+    const INITIAL_PRICE: u64 = 100;
+    const SOURCE_POSITION_Q: i128 = 200 * POS_SCALE as i128;
+    const HEDGE_POSITION_Q: i128 = 100 * POS_SCALE as i128;
+    const LIEN_GROWTH_Q: i128 = 20 * POS_SCALE as i128;
+    const INITIAL_CAPITAL: u128 = 3_130;
+    const MAINTENANCE_FEE: u128 = 530;
+    const DOMAIN: u16 = 1;
+
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        4,
+        1_000,
+        1_000,
+        500,
+        MAINTENANCE_FEE,
+    );
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.update_backing_fee_policy_with_cu(DOMAIN, 5_000, 2_500);
+    env.svm.expire_blockhash();
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_portfolio = env.create_portfolio(&cross_owner);
+    let counterparty_portfolio = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_portfolio, INITIAL_CAPITAL);
+    env.deposit(&counterparty_owner, counterparty_portfolio, 10_000);
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, DOMAIN, 1_500, 10);
+
+    env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_portfolio,
+        &counterparty_owner,
+        counterparty_portfolio,
+        SOURCE_POSITION_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_portfolio,
+        &counterparty_owner,
+        counterparty_portfolio,
+        HEDGE_POSITION_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset_index) in [
+        (counterparty_portfolio, 0),
+        (cross_portfolio, 0),
+        (counterparty_portfolio, 1),
+    ] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations_for_assets(&[asset_index, 1 - asset_index]),
+            },
+        );
+    }
+    assert_eq!(
+        env.portfolio_state(cross_portfolio).capital.get(),
+        INITIAL_CAPITAL - MAINTENANCE_FEE,
+        "the public maintenance transition must create the intended margin boundary"
+    );
+    assert!(
+        env.market_state().1.source_credit[DOMAIN as usize].positive_claim_bound_num > 0,
+        "the public mark route must create a source claim"
+    );
+
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, DOMAIN, 50_000, 10);
+    env.deposit(&cross_owner, cross_portfolio, 500);
+    env.deposit(&counterparty_owner, counterparty_portfolio, 500);
+    let earnings_before =
+        env.market_state().1.source_backing_buckets[DOMAIN as usize].utilization_fee_earnings;
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_portfolio,
+        &counterparty_owner,
+        counterparty_portfolio,
+        LIEN_GROWTH_Q,
+        95,
+        0,
+    );
+    let earnings = env.market_state().1.source_backing_buckets[DOMAIN as usize]
+        .utilization_fee_earnings
+        .checked_sub(earnings_before)
+        .expect("public risk increase must not reduce provider earnings");
+    assert!(
+        earnings > 0,
+        "the public route must generate provider earnings"
+    );
+
+    PublicBackingEarningsFixture {
+        env,
+        ledger,
+        domain: DOMAIN,
+        earnings,
+    }
+}
+
 fn send_tx(
     svm: &mut LiteSVM,
     program_id: Pubkey,
