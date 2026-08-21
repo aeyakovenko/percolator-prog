@@ -15,6 +15,108 @@
 use super::*;
 
 #[test]
+fn v16_engine_error_aborts_before_later_valid_instruction_can_commit() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let withdrawing_owner = Keypair::new();
+    let depositing_owner = Keypair::new();
+    let withdrawing_portfolio = env.create_portfolio(&withdrawing_owner);
+    let depositing_portfolio = env.create_portfolio(&depositing_owner);
+    env.deposit(&withdrawing_owner, withdrawing_portfolio, 10);
+
+    let withdraw_destination = env.token_account(withdrawing_owner.pubkey(), 0);
+    let deposit_source = env.token_account(depositing_owner.pubkey(), 7);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let withdrawing_before = env.svm.get_account(&withdrawing_portfolio).unwrap();
+    let depositing_before = env.svm.get_account(&depositing_portfolio).unwrap();
+    let withdraw_destination_before = env.svm.get_account(&withdraw_destination).unwrap();
+    let deposit_source_before = env.svm.get_account(&deposit_source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let over_withdraw = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(withdrawing_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(withdrawing_portfolio, false),
+            AccountMeta::new(withdraw_destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: env.withdraw_ix(withdrawing_portfolio, 11).encode(),
+    };
+    let valid_later_deposit = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(depositing_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(depositing_portfolio, false),
+            AccountMeta::new(deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: env.deposit_ix(depositing_portfolio, 7).encode(),
+    };
+    env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), over_withdraw, valid_later_deposit],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &withdrawing_owner, &depositing_owner],
+        env.svm.latest_blockhash(),
+    );
+    let error = env
+        .svm
+        .send_transaction(tx)
+        .expect_err("the engine over-withdraw error must abort the transaction");
+    match error.err {
+        TransactionError::InstructionError(2, InstructionError::Custom(code)) => {
+            assert_ne!(code, 0, "engine error must map to a nonzero program error")
+        }
+        other => {
+            panic!("engine rejection must propagate from the first program instruction: {other:?}")
+        }
+    }
+
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&withdrawing_portfolio).unwrap(),
+        withdrawing_before
+    );
+    assert_eq!(
+        env.svm.get_account(&depositing_portfolio).unwrap(),
+        depositing_before
+    );
+    assert_eq!(
+        env.svm.get_account(&withdraw_destination).unwrap(),
+        withdraw_destination_before
+    );
+    assert_eq!(
+        env.svm.get_account(&deposit_source).unwrap(),
+        deposit_source_before
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.expire_blockhash();
+    env.send(
+        env.deposit_ix(depositing_portfolio, 7),
+        vec![
+            AccountMeta::new(depositing_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(depositing_portfolio, false),
+            AccountMeta::new(deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&depositing_owner],
+    )
+    .expect("the later deposit is independently valid after the aborted transaction");
+    assert_eq!(env.portfolio_state(depositing_portfolio).capital.get(), 7);
+    assert_eq!(env.token_amount(deposit_source), 0);
+}
+
+#[test]
 fn v16_attack_hybrid_soft_stale_partial_oracle_error_does_not_poison_retry() {
     let mut env = V16CuEnv::new();
     set_test_clock(&mut env, 1, 100);
