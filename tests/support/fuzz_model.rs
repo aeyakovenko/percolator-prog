@@ -318,6 +318,8 @@ pub struct CpiBackingFeeProtection {
     pub lp_capital_loss: u128,
     pub provider_earnings: u128,
     pub extracted_tokens: u64,
+    pub earnings_spl_vault_debit: u128,
+    pub earnings_accounted_vault_debit: u128,
     pub attacker_capital_delta: i128,
     pub zero_cap_risk_reduction_landed: bool,
     pub max_route_cu: u64,
@@ -6651,6 +6653,10 @@ pub struct PendingCloseRankEvidence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurePendingObligationDosEvidence {
     pub cure_deposit: u128,
+    pub cure_source_debit: u128,
+    pub cure_spl_vault_credit: u128,
+    pub cure_accounted_vault_credit: u128,
+    pub cure_capital_credit: u128,
     pub close_canceled: bool,
     pub intermediate_positive_pnl_total: u128,
     pub intermediate_positive_pnl_bound_num: u128,
@@ -6814,6 +6820,13 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
         EXIT_MAKER_INDEX as u8,
     )?;
 
+    let cure_source_before = runner
+        .env
+        .token_amount(runner.env.actors[LOSER].source_token);
+    let cure_spl_vault_before = runner.env.token_amount(runner.env.vault);
+    let cure_accounted_vault_before = runner.env.primary_market_state().1.vault;
+    let cure_capital_before = runner.env.primary_portfolio(LOSER).capital.get();
+
     let mut cure_deposit = 1_000_000u128;
     loop {
         match runner
@@ -6832,6 +6845,36 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
             Err(error) => return Err(format!("old-episode cure control: {error}")),
         }
     }
+    let cure_source_debit = u128::from(
+        cure_source_before
+            .checked_sub(
+                runner
+                    .env
+                    .token_amount(runner.env.actors[LOSER].source_token),
+            )
+            .ok_or("successful cure increased its source-token balance")?,
+    );
+    let cure_spl_vault_credit = u128::from(
+        runner
+            .env
+            .token_amount(runner.env.vault)
+            .checked_sub(cure_spl_vault_before)
+            .ok_or("successful cure decreased SPL vault custody")?,
+    );
+    let cure_accounted_vault_credit = runner
+        .env
+        .primary_market_state()
+        .1
+        .vault
+        .checked_sub(cure_accounted_vault_before)
+        .ok_or("successful cure decreased accounted vault custody")?;
+    let cure_capital_credit = runner
+        .env
+        .primary_portfolio(LOSER)
+        .capital
+        .get()
+        .checked_sub(cure_capital_before)
+        .ok_or("successful cure decreased owner capital")?;
     runner.assert_global_invariants()?;
 
     let canceled_close = runner
@@ -6934,6 +6977,10 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
 
     Ok(CurePendingObligationDosEvidence {
         cure_deposit,
+        cure_source_debit,
+        cure_spl_vault_credit,
+        cure_accounted_vault_credit,
+        cure_capital_credit,
         close_canceled: canceled_close.canceled,
         intermediate_positive_pnl_total: group.pnl_pos_tot,
         intermediate_positive_pnl_bound_num: group.pnl_pos_bound_tot_num,
@@ -7908,7 +7955,16 @@ struct UnderfundedTerminalWorld {
     transition_count: usize,
     partial_receipt_seeded: bool,
     value_moving_claim: bool,
+    claim_payout_atoms: u128,
     expiry_normalized_on_edge: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedClaimQuoteDeltaEvidence {
+    pub partial_receipt_seeded: bool,
+    pub claim_payout_atoms: u128,
+    pub final_engine_vault: u128,
+    pub final_spl_vault: u128,
 }
 
 struct UnderfundedTerminalGraphEvidence {
@@ -8369,10 +8425,35 @@ fn run_underfunded_terminal_world(
             transition_count,
             partial_receipt_seeded,
             value_moving_claim: claim_payout != 0,
+            claim_payout_atoms: claim_payout,
             expiry_normalized_on_edge,
         },
         coverage,
     ))
+}
+
+pub fn verify_resolved_claim_quote_delta() -> Result<ResolvedClaimQuoteDeltaEvidence, String> {
+    let mut nodes = BTreeSet::new();
+    let mut edges = BTreeSet::new();
+    let (world, _) = run_underfunded_terminal_world(
+        BoundedExpiryLanding::Before,
+        false,
+        true,
+        &mut nodes,
+        &mut edges,
+    )?;
+    if !world.partial_receipt_seeded || !world.value_moving_claim {
+        return Err(format!(
+            "resolved-claim quote-delta probe was vacuous: partial={}, claim={}",
+            world.partial_receipt_seeded, world.claim_payout_atoms
+        ));
+    }
+    Ok(ResolvedClaimQuoteDeltaEvidence {
+        partial_receipt_seeded: world.partial_receipt_seeded,
+        claim_payout_atoms: world.claim_payout_atoms,
+        final_engine_vault: world.outcome.final_engine_vault,
+        final_spl_vault: world.outcome.final_spl_vault,
+    })
 }
 
 fn run_underfunded_terminal_reference_subgraph() -> Result<UnderfundedTerminalGraphEvidence, String>
@@ -10340,6 +10421,8 @@ pub fn verify_cpi_backing_fee_consent(
         ));
     }
 
+    let earnings_spl_vault_before = u128::from(env.token_amount(env.vault));
+    let earnings_accounted_vault_before = env.primary_market_state().1.vault;
     env.withdraw_backing_bucket_earnings_for_actor(0, WINNING_DOMAIN, provider_earnings)
         .map_err(|error| format!("withdraw LP-funded provider earnings: {error}"))?;
     assert_public_stock_census("INV-088 after backing-provider earnings withdrawal", &env)?;
@@ -10348,6 +10431,12 @@ pub fn verify_cpi_backing_fee_consent(
     let extracted_tokens = provider_destination_after
         .checked_sub(provider_destination_before)
         .ok_or("provider destination balance decreased")?;
+    let earnings_spl_vault_debit = earnings_spl_vault_before
+        .checked_sub(u128::from(env.token_amount(env.vault)))
+        .ok_or("provider earnings withdrawal increased SPL vault custody")?;
+    let earnings_accounted_vault_debit = earnings_accounted_vault_before
+        .checked_sub(env.primary_market_state().1.vault)
+        .ok_or("provider earnings withdrawal increased accounted vault custody")?;
     if u128::from(extracted_tokens) != provider_earnings {
         return Err(format!(
             "CPI backing fee ledger/SPL extraction mismatch: {provider_earnings} vs {extracted_tokens}"
@@ -10371,6 +10460,8 @@ pub fn verify_cpi_backing_fee_consent(
         lp_capital_loss,
         provider_earnings,
         extracted_tokens,
+        earnings_spl_vault_debit,
+        earnings_accounted_vault_debit,
         attacker_capital_delta,
         zero_cap_risk_reduction_landed,
         max_route_cu,

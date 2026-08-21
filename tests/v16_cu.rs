@@ -437,6 +437,25 @@ fn spl_token_program_path() -> PathBuf {
     panic!("could not find LiteSVM SPL Token BPF under {registry_src:?}");
 }
 
+fn spl_token_2022_program_path() -> PathBuf {
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+            home.push(".cargo");
+            home
+        });
+    let registry_src = cargo_home.join("registry/src");
+    for registry in std::fs::read_dir(&registry_src).expect("registry/src") {
+        let registry = registry.expect("registry entry").path();
+        let candidate = registry.join("litesvm-0.1.0/src/spl/programs/spl_token_2022-1.0.0.so");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    panic!("could not find LiteSVM SPL Token-2022 BPF under {registry_src:?}");
+}
+
 fn associated_token_program_path() -> PathBuf {
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
@@ -869,6 +888,14 @@ impl V16CuEnv {
         params: V16CuMarketParams,
         market_capacity: usize,
     ) -> Self {
+        Self::new_with_init_params_market_capacity_and_mint_decimals(params, market_capacity, 0)
+    }
+
+    fn new_with_init_params_market_capacity_and_mint_decimals(
+        params: V16CuMarketParams,
+        market_capacity: usize,
+        mint_decimals: u8,
+    ) -> Self {
         let mut svm = LiteSVM::new();
         let program_id = percolator_prog::id();
         let program_bytes = std::fs::read(program_path()).expect("read BPF");
@@ -890,7 +917,7 @@ impl V16CuEnv {
             mint,
             Account {
                 lamports: 1_000_000_000,
-                data: make_mint_data(),
+                data: make_mint_data_with_decimals(mint_decimals),
                 owner: spl_token::ID,
                 executable: false,
                 rent_epoch: 0,

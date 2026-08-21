@@ -61,6 +61,7 @@ percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "7387e7a
 bincode = "1"
 solana-sdk = "1.18"
 solana-client = "1.18"
+spl-token-2022 = "1.0"
 rand = "0.8"
 rand_xorshift = "0.3"
 proptest = "1.4"

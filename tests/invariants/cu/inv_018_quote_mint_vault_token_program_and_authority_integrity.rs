@@ -2,13 +2,19 @@
 //!
 //! Normative obligation: External token movement stays bound to canonical custody and token identities.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_attack_base_unit_mints_reject_post_resolve_with_user_value`. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Evidence in this file (I/C plus invariant-specific M assertions): the primary quote-flow matrix
+//! compares actual SPL source/vault/destination movement with independent internal-vault deltas
+//! across fourteen of the fifteen token-moving handlers, including all-public cure and partial-
+//! receipt claim worlds. The decimal matrix proves quote amounts remain exact raw atoms for six
+//! primary-mint decimal choices. A real Token-2022 mint carrying transfer-fee and transfer-hook
+//! extensions rejects at both mint-admission routes, and the executable Token-2022 program rejects
+//! on a live value route with exact rollback. Existing tests in this file exhaust canonical-vault,
+//! mint, owner, delegate, close-authority, frozen-account, and token-program substitutions.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: the generic delta matrix does not independently generate backing-provider
+//! earnings; that fifteenth route retains direct regression coverage and remains an explicit audit
+//! gap until a finding-blind generator reaches it. These tests do not prove arbitrary future token
+//! programs safe; production deliberately accepts classic SPL Token only.
 
 use super::*;
 
@@ -4154,6 +4160,504 @@ fn v16_attack_permissionless_create_rejects_vault_as_fee_source() {
     assert_eq!(env.token_amount(env.vault), (FEE * 11) as u64);
     assert_eq!(group.vault, FEE * 11);
     assert_eq!(group.insurance, FEE);
+}
+
+#[derive(Clone, Copy)]
+struct PrimaryQuoteSnapshot {
+    vault_token_atoms: u64,
+    accounted_vault_atoms: u128,
+}
+
+fn primary_quote_snapshot(env: &V16CuEnv) -> PrimaryQuoteSnapshot {
+    PrimaryQuoteSnapshot {
+        vault_token_atoms: env.token_amount(env.vault),
+        accounted_vault_atoms: env.market_state().1.vault,
+    }
+}
+
+fn assert_primary_quote_delta(
+    label: &str,
+    before: PrimaryQuoteSnapshot,
+    after: PrimaryQuoteSnapshot,
+    expected_delta: i128,
+) {
+    let token_delta = i128::from(after.vault_token_atoms) - i128::from(before.vault_token_atoms);
+    let accounting_delta =
+        after.accounted_vault_atoms as i128 - before.accounted_vault_atoms as i128;
+    assert_eq!(token_delta, expected_delta, "{label}: canonical SPL delta");
+    assert_eq!(
+        accounting_delta, expected_delta,
+        "{label}: internal quote-accounting delta"
+    );
+    assert_eq!(
+        accounting_delta, token_delta,
+        "{label}: internal accounting must equal actual SPL movement"
+    );
+}
+
+#[test]
+fn v16_primary_quote_routes_match_actual_spl_and_internal_accounting_deltas() {
+    const AMOUNT: u128 = 137;
+
+    let mut deposit_env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = deposit_env.create_portfolio(&owner);
+    let before = primary_quote_snapshot(&deposit_env);
+    let source = deposit_env.deposit(&owner, portfolio, AMOUNT);
+    assert_eq!(deposit_env.token_amount(source), 0);
+    assert_primary_quote_delta(
+        "Deposit",
+        before,
+        primary_quote_snapshot(&deposit_env),
+        AMOUNT as i128,
+    );
+    let before = primary_quote_snapshot(&deposit_env);
+    let destination = deposit_env.withdraw(&owner, portfolio, 41);
+    assert_eq!(deposit_env.token_amount(destination), 41);
+    assert_primary_quote_delta(
+        "Withdraw",
+        before,
+        primary_quote_snapshot(&deposit_env),
+        -41,
+    );
+
+    let mut insurance_env = V16CuEnv::new();
+    let before = primary_quote_snapshot(&insurance_env);
+    let source = insurance_env.top_up_insurance(AMOUNT);
+    assert_eq!(insurance_env.token_amount(source), 0);
+    assert_primary_quote_delta(
+        "TopUpInsurance",
+        before,
+        primary_quote_snapshot(&insurance_env),
+        AMOUNT as i128,
+    );
+    insurance_env.resolve();
+    let before = primary_quote_snapshot(&insurance_env);
+    let admin = insurance_env.admin.insecure_clone();
+    let (destination, _) = insurance_env.withdraw_terminal_insurance_with_authority(&admin, 41);
+    assert_eq!(insurance_env.token_amount(destination), 41);
+    assert_primary_quote_delta(
+        "WithdrawInsurance",
+        before,
+        primary_quote_snapshot(&insurance_env),
+        -41,
+    );
+
+    let mut domain_insurance_env = V16CuEnv::new();
+    let authority = domain_insurance_env.admin.insecure_clone();
+    let before = primary_quote_snapshot(&domain_insurance_env);
+    let source = domain_insurance_env.top_up_insurance_domain_with_authority(&authority, 0, AMOUNT);
+    assert_eq!(domain_insurance_env.token_amount(source), 0);
+    assert_primary_quote_delta(
+        "TopUpInsuranceDomain",
+        before,
+        primary_quote_snapshot(&domain_insurance_env),
+        AMOUNT as i128,
+    );
+    let before = primary_quote_snapshot(&domain_insurance_env);
+    let (destination, _) = domain_insurance_env.withdraw_insurance_with_cu(41);
+    assert_eq!(domain_insurance_env.token_amount(destination), 41);
+    assert_primary_quote_delta(
+        "WithdrawInsuranceAsset",
+        before,
+        primary_quote_snapshot(&domain_insurance_env),
+        -41,
+    );
+
+    let mut backing_env = V16CuEnv::new();
+    let before = primary_quote_snapshot(&backing_env);
+    let source = backing_env.top_up_backing_bucket(0, AMOUNT, 100);
+    assert_eq!(backing_env.token_amount(source), 0);
+    assert_primary_quote_delta(
+        "TopUpBackingBucket",
+        before,
+        primary_quote_snapshot(&backing_env),
+        AMOUNT as i128,
+    );
+    let destination = backing_env.token_account(backing_env.admin.pubkey(), 0);
+    let before = primary_quote_snapshot(&backing_env);
+    backing_env.withdraw_backing_bucket_to_admin_token_with_cu(destination, 0, 41);
+    assert_eq!(backing_env.token_amount(destination), 41);
+    assert_primary_quote_delta(
+        "WithdrawBackingBucket",
+        before,
+        primary_quote_snapshot(&backing_env),
+        -41,
+    );
+
+    let params = V16CuMarketParams::default();
+    let mut activation_env = V16CuEnv::new_with_init_params_and_market_capacity(params, 2);
+    activation_env.update_market_init_fee_policy_with_cu(AMOUNT);
+    activation_env.svm.warp_to_slot(1);
+    let creator = Keypair::new();
+    activation_env.ensure_signer_account(creator.pubkey());
+    let authority = creator.pubkey();
+    let before = primary_quote_snapshot(&activation_env);
+    let (source, _) = activation_env.activate_permissionless_asset_with_fee(
+        &creator, 1, 1, 100, authority, authority, authority, authority, AMOUNT,
+    );
+    assert_eq!(activation_env.token_amount(source), 0);
+    assert_primary_quote_delta(
+        "UpdateAssetLifecycle activation fee",
+        before,
+        primary_quote_snapshot(&activation_env),
+        AMOUNT as i128,
+    );
+
+    let mut resolved_env = V16CuEnv::new();
+    let resolved_owner = Keypair::new();
+    let resolved_portfolio = resolved_env.create_portfolio(&resolved_owner);
+    resolved_env.deposit(&resolved_owner, resolved_portfolio, AMOUNT);
+    resolved_env.resolve();
+    let before = primary_quote_snapshot(&resolved_env);
+    let destination = resolved_env.close_resolved(&resolved_owner, resolved_portfolio);
+    assert_eq!(resolved_env.token_amount(destination), AMOUNT as u64);
+    assert_primary_quote_delta(
+        "CloseResolved",
+        before,
+        primary_quote_snapshot(&resolved_env),
+        -(AMOUNT as i128),
+    );
+
+    let mut swap_env = V16CuEnv::new();
+    let admin = swap_env.admin.insecure_clone();
+    let secondary_mint = swap_env.create_mint();
+    swap_env.update_base_unit_mints_with_cu(swap_env.mint, secondary_mint);
+    let primary_source =
+        swap_env.token_account_for_mint(swap_env.mint, admin.pubkey(), AMOUNT as u64);
+    let secondary_destination = swap_env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let secondary_vault = canonical_vault_ata(swap_env.vault_authority, secondary_mint);
+    swap_env
+        .svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, swap_env.vault_authority, AMOUNT as u64),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let group_before = swap_env.market_state().1.vault;
+    swap_env.swap_secondary_for_primary_with_cu(
+        primary_source,
+        swap_env.vault,
+        secondary_destination,
+        secondary_vault,
+        AMOUNT,
+    );
+    assert_eq!(swap_env.token_amount(primary_source), 0);
+    assert_eq!(swap_env.token_amount(swap_env.vault), AMOUNT as u64);
+    assert_eq!(swap_env.token_amount(secondary_destination), AMOUNT as u64);
+    assert_eq!(swap_env.token_amount(secondary_vault), 0);
+    assert_eq!(
+        swap_env.market_state().1.vault,
+        group_before,
+        "SwapSecondaryForPrimary exchanges equal raw atoms without changing internal quote stock"
+    );
+
+    let cure = crate::support::fuzz_model::run_cure_pending_obligation_dos_probe()
+        .expect("all-public cancellable close and cure route");
+    assert_eq!(cure.cure_source_debit, cure.cure_deposit);
+    assert_eq!(cure.cure_spl_vault_credit, cure.cure_deposit);
+    assert_eq!(cure.cure_accounted_vault_credit, cure.cure_deposit);
+    assert_eq!(cure.cure_capital_credit, cure.cure_deposit);
+
+    let claim = crate::support::fuzz_model::verify_resolved_claim_quote_delta()
+        .expect("public partial-receipt ClaimResolvedPayoutTopup quote delta");
+    assert!(claim.partial_receipt_seeded);
+    assert!(claim.claim_payout_atoms > 0);
+    assert_eq!(claim.final_engine_vault, claim.final_spl_vault);
+
+    let mut close_slab_env = V16CuEnv::new();
+    let admin = close_slab_env.admin.insecure_clone();
+    let source = close_slab_env.token_account(admin.pubkey(), 59);
+    let payer = close_slab_env.payer.insecure_clone();
+    send_raw_tx(
+        &mut close_slab_env.svm,
+        &payer,
+        spl_token::instruction::transfer(
+            &spl_token::ID,
+            &source,
+            &close_slab_env.vault,
+            &admin.pubkey(),
+            &[],
+            59,
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .expect("donate explicit terminal surplus through SPL Token");
+    assert_eq!(close_slab_env.token_amount(source), 0);
+    assert_eq!(close_slab_env.token_amount(close_slab_env.vault), 59);
+    assert_eq!(
+        close_slab_env.market_state().1.vault,
+        0,
+        "raw donation remains explicit unaccounted terminal surplus"
+    );
+    close_slab_env.resolve();
+    let destination = close_slab_env.token_account(admin.pubkey(), 0);
+    close_slab_env.svm.expire_blockhash();
+    close_slab_env
+        .send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(close_slab_env.market, false),
+                AccountMeta::new(close_slab_env.vault, false),
+                AccountMeta::new_readonly(close_slab_env.vault_authority, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("CloseSlab sweeps explicit terminal surplus");
+    assert_eq!(close_slab_env.token_amount(destination), 59);
+    if let Some(closed_vault) = close_slab_env.svm.get_account(&close_slab_env.vault) {
+        assert_eq!(
+            closed_vault.lamports, 0,
+            "a retained LiteSVM tombstone has no lamports"
+        );
+        assert!(
+            closed_vault.data.is_empty() || closed_vault.data.iter().all(|byte| *byte == 0),
+            "a retained LiteSVM tombstone has no live token-account state"
+        );
+    }
+}
+
+fn make_token_2022_fee_hook_mint(env: &mut V16CuEnv, decimals: u8) -> Pubkey {
+    use spl_token_2022::extension::ExtensionType;
+
+    env.svm.add_program(
+        spl_token_2022::ID,
+        &std::fs::read(spl_token_2022_program_path()).expect("read Token-2022 BPF"),
+    );
+    let mint = Keypair::new();
+    let mint_len = ExtensionType::try_calculate_account_len::<spl_token_2022::state::Mint>(&[
+        ExtensionType::TransferFeeConfig,
+        ExtensionType::TransferHook,
+    ])
+    .expect("Token-2022 fee/hook mint length");
+    let payer = env.payer.insecure_clone();
+    let authority = env.admin.pubkey();
+    send_raw_ixs(
+        &mut env.svm,
+        &payer,
+        vec![
+            system_instruction::create_account(
+                &payer.pubkey(),
+                &mint.pubkey(),
+                1_000_000_000,
+                mint_len as u64,
+                &spl_token_2022::ID,
+            ),
+            spl_token_2022::extension::transfer_fee::instruction::initialize_transfer_fee_config(
+                &spl_token_2022::ID,
+                &mint.pubkey(),
+                Some(&authority),
+                Some(&authority),
+                250,
+                1_000,
+            )
+            .expect("initialize transfer-fee extension"),
+            spl_token_2022::extension::transfer_hook::instruction::initialize(
+                &spl_token_2022::ID,
+                &mint.pubkey(),
+                Some(authority),
+                Some(Pubkey::new_unique()),
+            )
+            .expect("initialize transfer-hook extension"),
+            spl_token_2022::instruction::initialize_mint2(
+                &spl_token_2022::ID,
+                &mint.pubkey(),
+                &authority,
+                None,
+                decimals,
+            )
+            .expect("initialize Token-2022 mint"),
+        ],
+        &[&mint],
+    )
+    .expect("create valid Token-2022 transfer-fee/transfer-hook mint");
+    mint.pubkey()
+}
+
+#[test]
+fn v16_token_2022_fee_and_hook_mints_are_fail_closed_at_every_mint_admission() {
+    use spl_token_2022::extension::{
+        transfer_fee::TransferFeeConfig, transfer_hook::TransferHook, BaseStateWithExtensions,
+        StateWithExtensions,
+    };
+
+    let mut env = V16CuEnv::new();
+    let token_2022_mint = make_token_2022_fee_hook_mint(&mut env, 6);
+    let mint_account = env.svm.get_account(&token_2022_mint).unwrap();
+    let mint = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_account.data)
+        .expect("valid Token-2022 mint");
+    mint.get_extension::<TransferFeeConfig>()
+        .expect("transfer-fee extension is live");
+    mint.get_extension::<TransferHook>()
+        .expect("transfer-hook extension is live");
+
+    let params = V16CuMarketParams::default();
+    let fresh_market = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            fresh_market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let fresh_before = env.svm.get_account(&fresh_market).unwrap();
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    let init = env.send(
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(fresh_market, false),
+            AccountMeta::new_readonly(token_2022_mint, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        init.is_err(),
+        "Token-2022 transfer-fee/hook mint must not initialize a market"
+    );
+    assert_eq!(
+        env.svm.get_account(&fresh_market).unwrap(),
+        fresh_before,
+        "rejected Token-2022 market initialization is byte-stable"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let rotate = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: token_2022_mint.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(token_2022_mint, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rotate.is_err(),
+        "Token-2022 transfer-fee/hook mint must not enter through base-unit rotation"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected Token-2022 rotation leaves the live market byte-stable"
+    );
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let source = env.token_account_for_mint(env.mint, owner.pubkey(), 91);
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let alternate_program = env.send(
+        env.deposit_ix(portfolio, 91),
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token_2022::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        alternate_program.is_err(),
+        "even an executable Token-2022 program cannot service a value route"
+    );
+    assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+
+    let deposited_source = env.deposit(&owner, portfolio, 91);
+    assert_eq!(env.token_amount(deposited_source), 0);
+    assert_eq!(env.token_amount(env.vault), 91);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 91);
+    assert_eq!(env.market_state().1.vault, 91);
+}
+
+#[test]
+fn v16_primary_mint_decimals_preserve_exact_raw_atom_accounting() {
+    const DEPOSIT: u128 = 1_000_003;
+    const WITHDRAW: u128 = 333_337;
+
+    for decimals in [0, 1, 6, 9, 18, u8::MAX] {
+        let params = V16CuMarketParams::default();
+        let mut env = V16CuEnv::new_with_init_params_market_capacity_and_mint_decimals(
+            params,
+            params.max_portfolio_assets as usize,
+            decimals,
+        );
+        let mint = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data).unwrap();
+        assert_eq!(mint.decimals, decimals);
+
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        let source = env.deposit(&owner, portfolio, DEPOSIT);
+        assert_eq!(env.token_amount(source), 0, "decimal={decimals}");
+        assert_eq!(
+            env.token_amount(env.vault),
+            DEPOSIT as u64,
+            "decimal={decimals}"
+        );
+        assert_eq!(
+            env.portfolio_state(portfolio).capital.get(),
+            DEPOSIT,
+            "decimal={decimals}"
+        );
+        let (_, deposited_group) = env.market_state();
+        assert_eq!(deposited_group.vault, DEPOSIT, "decimal={decimals}");
+        assert_eq!(deposited_group.c_tot, DEPOSIT, "decimal={decimals}");
+
+        let destination = env.withdraw(&owner, portfolio, WITHDRAW);
+        let remaining = DEPOSIT - WITHDRAW;
+        assert_eq!(
+            env.token_amount(destination),
+            WITHDRAW as u64,
+            "decimal={decimals}"
+        );
+        assert_eq!(
+            env.token_amount(env.vault),
+            remaining as u64,
+            "decimal={decimals}"
+        );
+        assert_eq!(
+            env.portfolio_state(portfolio).capital.get(),
+            remaining,
+            "decimal={decimals}"
+        );
+        let (_, withdrawn_group) = env.market_state();
+        assert_eq!(withdrawn_group.vault, remaining, "decimal={decimals}");
+        assert_eq!(withdrawn_group.c_tot, remaining, "decimal={decimals}");
+    }
 }
 
 #[test]

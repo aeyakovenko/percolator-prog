@@ -107,4 +107,12 @@ fn v16_program_backing_earnings_summary_tracks_public_accrual_and_withdrawal() {
         u128::from(evidence.extracted_tokens),
         "the aggregate decrement must equal the provider's SPL credit"
     );
+    assert_eq!(
+        evidence.provider_earnings, evidence.earnings_spl_vault_debit,
+        "provider earnings must debit canonical SPL custody exactly"
+    );
+    assert_eq!(
+        evidence.provider_earnings, evidence.earnings_accounted_vault_debit,
+        "provider earnings must debit internal quote accounting exactly"
+    );
 }

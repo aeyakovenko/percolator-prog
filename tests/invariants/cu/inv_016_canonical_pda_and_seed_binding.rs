@@ -961,6 +961,10 @@ fn v16_program_pda_and_token_move_callsite_roster_is_source_complete() {
             segment.contains("transfer_tokens(") || segment.contains("transfer_tokens_signed(");
         if moves_tokens {
             assert!(
+                segment.contains("verify_token_program(token_program)?;"),
+                "token-moving handler {name} has no exact token-program gate"
+            );
+            assert!(
                 segment.contains("verify_vault_token_account(")
                     || segment.contains("verify_withdrawable_token_accounts(")
                     || segment.contains("verify_domain_withdrawal_preflight("),
