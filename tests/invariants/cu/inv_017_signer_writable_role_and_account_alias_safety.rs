@@ -9,7 +9,9 @@
 //! exhaust their 15- and 21-pair SPL custody account spaces and required privileges. Backing
 //! top-up, live insurance withdrawal, and backing-principal withdrawal, including optional
 //! insurance/backing ledger tails, add 105 pairwise reserve-custody cases plus 35 required
-//! privilege downgrades from value-moving controls.
+//! privilege downgrades from value-moving controls. Flat close, unilateral reduction, maintenance
+//! sync, and permissionless crank add 13 core-account pairs and 13 required downgrades; accepted
+//! self-cranker and unsigned no-reward-crank cases have explicit economic-equivalence controls.
 //!
 //! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
 //! it is not an exhaustive pairwise account-meta proof for every instruction.
@@ -825,6 +827,372 @@ fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaust
             );
         }
     }
+}
+
+struct CoreAccountAliasFixture {
+    env: V16CuEnv,
+    signer: Option<Keypair>,
+    instruction: ProgInstruction,
+    accounts: Vec<AccountMeta>,
+    tracked_accounts: Vec<Pubkey>,
+}
+
+fn core_account_alias_snapshot(fixture: &CoreAccountAliasFixture) -> Vec<Option<Account>> {
+    fixture
+        .tracked_accounts
+        .iter()
+        .map(|key| fixture.env.svm.get_account(key))
+        .collect()
+}
+
+fn send_core_account_alias_fixture(
+    fixture: &mut CoreAccountAliasFixture,
+    expire_blockhash: bool,
+) -> Result<u64, String> {
+    let signer = fixture
+        .signer
+        .as_ref()
+        .filter(|signer| {
+            fixture
+                .accounts
+                .iter()
+                .any(|account| account.is_signer && account.pubkey == signer.pubkey())
+        })
+        .map(Keypair::insecure_clone);
+    let signers = signer.as_ref().into_iter().collect::<Vec<_>>();
+    let instruction = fixture.instruction.clone();
+    let accounts = fixture.accounts.clone();
+    if expire_blockhash {
+        fixture.env.svm.expire_blockhash();
+    }
+    fixture.env.send(instruction, accounts, &signers)
+}
+
+fn assert_core_account_alias_matrix(
+    label: &str,
+    role_names: &[&str],
+    required_signer_roles: &[usize],
+    required_writable_roles: &[usize],
+    allowed_aliases: &[(usize, usize)],
+    build: impl Fn() -> CoreAccountAliasFixture,
+) {
+    let mut control = build();
+    assert_eq!(control.accounts.len(), role_names.len());
+    let before = core_account_alias_snapshot(&control);
+    let accepted = send_core_account_alias_fixture(&mut control, false);
+    assert!(
+        accepted.is_ok(),
+        "{label}: canonical control must execute: {accepted:?}"
+    );
+    assert_ne!(
+        core_account_alias_snapshot(&control),
+        before,
+        "{label}: canonical control must mutate tracked state"
+    );
+
+    let mut pair_count = 0usize;
+    for first in 0..role_names.len() {
+        for second in (first + 1)..role_names.len() {
+            pair_count += 1;
+            if allowed_aliases.contains(&(first, second)) {
+                continue;
+            }
+            let mut fixture = build();
+            fixture.accounts[second].pubkey = fixture.accounts[first].pubkey;
+            let before = core_account_alias_snapshot(&fixture);
+            let rejected = send_core_account_alias_fixture(&mut fixture, true);
+            assert!(
+                rejected.is_err(),
+                "{label}: alias {} with {} unexpectedly succeeded",
+                role_names[first],
+                role_names[second]
+            );
+            assert_eq!(
+                core_account_alias_snapshot(&fixture),
+                before,
+                "{label}: alias {} with {} did not roll back exactly",
+                role_names[first],
+                role_names[second]
+            );
+        }
+    }
+    assert_eq!(
+        pair_count,
+        role_names.len() * (role_names.len() - 1) / 2,
+        "{label}: pair matrix must be complete"
+    );
+
+    for &role in required_signer_roles {
+        let mut fixture = build();
+        fixture.accounts[role].is_signer = false;
+        let before = core_account_alias_snapshot(&fixture);
+        let rejected = send_core_account_alias_fixture(&mut fixture, true);
+        assert!(
+            rejected.is_err(),
+            "{label}: {} signer downgrade unexpectedly succeeded",
+            role_names[role]
+        );
+        assert_eq!(core_account_alias_snapshot(&fixture), before);
+    }
+    for &role in required_writable_roles {
+        let mut fixture = build();
+        fixture.accounts[role].is_writable = false;
+        let before = core_account_alias_snapshot(&fixture);
+        let rejected = send_core_account_alias_fixture(&mut fixture, true);
+        assert!(
+            rejected.is_err(),
+            "{label}: {} writable downgrade unexpectedly succeeded",
+            role_names[role]
+        );
+        assert_eq!(core_account_alias_snapshot(&fixture), before);
+    }
+}
+
+fn close_portfolio_alias_fixture() -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let instruction = env.close_portfolio_ix(portfolio);
+    let accounts = vec![
+        AccountMeta::new(owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+    ];
+    let tracked_accounts = vec![env.market, portfolio];
+    CoreAccountAliasFixture {
+        env,
+        signer: Some(owner),
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+fn rebalance_reduce_alias_fixture() -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+    env.trade_with_cu(
+        &owner,
+        portfolio,
+        &counterparty_owner,
+        counterparty,
+        2 * POS_SCALE as i128,
+        100,
+        0,
+    );
+    let instruction = ProgInstruction::RebalanceReduce {
+        portfolio_id: env.portfolio_id(portfolio),
+        position_epoch: env.portfolio_position_epoch(portfolio),
+        asset_index: 0,
+        reduce_q: POS_SCALE,
+    };
+    let accounts = vec![
+        AccountMeta::new(owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+    ];
+    let tracked_accounts = vec![env.market, portfolio, counterparty, env.vault];
+    CoreAccountAliasFixture {
+        env,
+        signer: Some(owner),
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+fn sync_maintenance_alias_fixture(with_cranker: bool) -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 25,
+    );
+    env.update_maintenance_fee_policy_with_cu(4_000);
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    let cranker = with_cranker.then(|| {
+        let cranker_owner = Keypair::new();
+        env.create_portfolio(&cranker_owner)
+    });
+    env.svm.warp_to_slot(10);
+    let mut accounts = vec![
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+    ];
+    let mut tracked_accounts = vec![env.market, portfolio, env.vault];
+    if let Some(cranker) = cranker {
+        accounts.push(AccountMeta::new(cranker, false));
+        tracked_accounts.push(cranker);
+    }
+    CoreAccountAliasFixture {
+        env,
+        signer: None,
+        instruction: ProgInstruction::SyncMaintenanceFee { now_slot: 10 },
+        accounts,
+        tracked_accounts,
+    }
+}
+
+fn permissionless_crank_alias_fixture() -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+    let owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+    env.trade_with_cu(
+        &owner,
+        portfolio,
+        &counterparty_owner,
+        counterparty,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 110);
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    let accounts = vec![
+        AccountMeta::new(cranker.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+    ];
+    let tracked_accounts = vec![env.market, portfolio, counterparty, env.vault];
+    CoreAccountAliasFixture {
+        env,
+        signer: Some(cranker),
+        instruction: ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+        accounts,
+        tracked_accounts,
+    }
+}
+
+#[test]
+fn v16_program_exit_and_maintenance_core_account_pairs_are_exhaustive() {
+    assert_core_account_alias_matrix(
+        "ClosePortfolio",
+        &["owner", "market", "portfolio"],
+        &[0],
+        &[1, 2],
+        &[],
+        close_portfolio_alias_fixture,
+    );
+    assert_core_account_alias_matrix(
+        "RebalanceReduce",
+        &["owner", "market", "portfolio"],
+        &[0],
+        &[1, 2],
+        &[],
+        rebalance_reduce_alias_fixture,
+    );
+    assert_core_account_alias_matrix(
+        "SyncMaintenanceFee",
+        &["market", "portfolio"],
+        &[],
+        &[0, 1],
+        &[],
+        || sync_maintenance_alias_fixture(false),
+    );
+    assert_core_account_alias_matrix(
+        "SyncMaintenanceFee with cranker",
+        &["market", "portfolio", "cranker_portfolio"],
+        &[],
+        &[0, 1, 2],
+        &[(1, 2)],
+        || sync_maintenance_alias_fixture(true),
+    );
+    assert_core_account_alias_matrix(
+        "PermissionlessCrank",
+        &["cranker", "market", "portfolio"],
+        &[],
+        &[1, 2],
+        &[],
+        permissionless_crank_alias_fixture,
+    );
+}
+
+#[test]
+fn v16_program_crank_without_reward_tail_is_signature_independent() {
+    let mut signed = permissionless_crank_alias_fixture();
+    send_core_account_alias_fixture(&mut signed, false).expect("signed crank control succeeds");
+    let signed_group = signed.env.market_state().1;
+    let signed_portfolio = signed.env.portfolio_state(signed.accounts[2].pubkey);
+
+    let mut unsigned = permissionless_crank_alias_fixture();
+    unsigned.accounts[0].is_signer = false;
+    send_core_account_alias_fixture(&mut unsigned, false)
+        .expect("permissionless crank without a reward tail needs no caller signature");
+    let unsigned_group = unsigned.env.market_state().1;
+    let unsigned_portfolio = unsigned.env.portfolio_state(unsigned.accounts[2].pubkey);
+
+    assert_eq!(
+        unsigned_group.assets[0].effective_price,
+        signed_group.assets[0].effective_price
+    );
+    assert_eq!(unsigned_group.oracle_epoch, signed_group.oracle_epoch);
+    assert_eq!(unsigned_group.funding_epoch, signed_group.funding_epoch);
+    assert_eq!(
+        unsigned_portfolio.capital.get(),
+        signed_portfolio.capital.get()
+    );
+    assert_eq!(unsigned_portfolio.pnl.get(), signed_portfolio.pnl.get());
+    assert_eq!(unsigned_portfolio.health_cert, signed_portfolio.health_cert);
+    assert_eq!(unsigned_portfolio.legs, signed_portfolio.legs);
+    assert_eq!(
+        unsigned.env.token_amount(unsigned.env.vault),
+        signed.env.token_amount(signed.env.vault)
+    );
+}
+
+#[test]
+fn v16_program_self_cranker_alias_matches_distinct_cranker_aggregate() {
+    let mut distinct = sync_maintenance_alias_fixture(true);
+    let distinct_charged = distinct.accounts[1].pubkey;
+    let distinct_cranker = distinct.accounts[2].pubkey;
+    send_core_account_alias_fixture(&mut distinct, false)
+        .expect("distinct maintenance cranker control succeeds");
+    let distinct_total_capital = distinct.env.portfolio_state(distinct_charged).capital.get()
+        + distinct.env.portfolio_state(distinct_cranker).capital.get();
+    let distinct_group = distinct.env.market_state().1;
+
+    let mut aliased = sync_maintenance_alias_fixture(true);
+    let aliased_charged = aliased.accounts[1].pubkey;
+    let unused_cranker = aliased.accounts[2].pubkey;
+    aliased.accounts[2].pubkey = aliased_charged;
+    send_core_account_alias_fixture(&mut aliased, false)
+        .expect("the charged portfolio may collect its permissionless cranker share");
+    let aliased_total_capital = aliased.env.portfolio_state(aliased_charged).capital.get()
+        + aliased.env.portfolio_state(unused_cranker).capital.get();
+    let aliased_group = aliased.env.market_state().1;
+
+    assert_eq!(aliased_total_capital, distinct_total_capital);
+    assert_eq!(aliased_group.c_tot, distinct_group.c_tot);
+    assert_eq!(aliased_group.insurance, distinct_group.insurance);
+    assert_eq!(
+        aliased_group.insurance_domain_budget,
+        distinct_group.insurance_domain_budget
+    );
+    assert_eq!(aliased_group.vault, distinct_group.vault);
+    assert_eq!(
+        aliased.env.token_amount(aliased.env.vault),
+        distinct.env.token_amount(distinct.env.vault)
+    );
+    assert_eq!(
+        aliased.env.portfolio_state(unused_cranker).capital.get(),
+        0,
+        "the omitted second portfolio receives no hidden credit"
+    );
 }
 
 #[test]
