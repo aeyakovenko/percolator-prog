@@ -4,17 +4,16 @@
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): the primary quote-flow matrix
 //! compares actual SPL source/vault/destination movement with independent internal-vault deltas
-//! across fourteen of the fifteen token-moving handlers, including all-public cure and partial-
-//! receipt claim worlds. The decimal matrix proves quote amounts remain exact raw atoms for six
-//! primary-mint decimal choices. A real Token-2022 mint carrying transfer-fee and transfer-hook
+//! across all fifteen token-moving handlers, including all-public backing-earnings, cure, and
+//! partial-receipt claim worlds. The decimal matrix proves quote amounts remain exact raw atoms for
+//! six primary-mint decimal choices. A real Token-2022 mint carrying transfer-fee and transfer-hook
 //! extensions rejects at both mint-admission routes, and the executable Token-2022 program rejects
 //! on a live value route with exact rollback. Existing tests in this file exhaust canonical-vault,
 //! mint, owner, delegate, close-authority, frozen-account, and token-program substitutions.
 //!
-//! Guarantee boundary: the generic delta matrix does not independently generate backing-provider
-//! earnings; that fifteenth route retains direct regression coverage and remains an explicit audit
-//! gap until a finding-blind generator reaches it. These tests do not prove arbitrary future token
-//! programs safe; production deliberately accepts classic SPL Token only.
+//! Guarantee boundary: these tests do not formally compose the private `AccountInfo` parsers and
+//! downstream SPL CPI semantics into one theorem, and do not prove arbitrary future token programs
+//! safe; production deliberately accepts classic SPL Token only.
 
 use super::*;
 
@@ -4192,6 +4191,161 @@ fn assert_primary_quote_delta(
     assert_eq!(
         accounting_delta, token_delta,
         "{label}: internal accounting must equal actual SPL movement"
+    );
+}
+
+#[test]
+fn v16_public_backing_earnings_withdrawal_matches_spl_and_internal_quote_deltas() {
+    const INITIAL_PRICE: u64 = 100;
+    const SOURCE_POSITION_Q: i128 = 200 * POS_SCALE as i128;
+    const HEDGE_POSITION_Q: i128 = 100 * POS_SCALE as i128;
+    const LIEN_GROWTH_Q: i128 = 20 * POS_SCALE as i128;
+    const INITIAL_CAPITAL: u128 = 3_130;
+    const MAINTENANCE_FEE: u128 = 530;
+    const WINNING_DOMAIN: usize = 1;
+
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        4,
+        1_000,
+        1_000,
+        500,
+        MAINTENANCE_FEE,
+    );
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.update_backing_fee_policy_with_cu(WINNING_DOMAIN as u16, 5_000, 2_500);
+    env.svm.expire_blockhash();
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_portfolio = env.create_portfolio(&cross_owner);
+    let counterparty_portfolio = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_portfolio, INITIAL_CAPITAL);
+    env.deposit(&counterparty_owner, counterparty_portfolio, 10_000);
+    let backing_ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(backing_ledger, WINNING_DOMAIN as u16, 1_500, 10);
+
+    env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_portfolio,
+        &counterparty_owner,
+        counterparty_portfolio,
+        SOURCE_POSITION_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_portfolio,
+        &counterparty_owner,
+        counterparty_portfolio,
+        HEDGE_POSITION_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset_index) in [
+        (counterparty_portfolio, 0),
+        (cross_portfolio, 0),
+        (counterparty_portfolio, 1),
+    ] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations_for_assets(&[asset_index, 1 - asset_index]),
+            },
+        );
+    }
+
+    assert_eq!(
+        env.portfolio_state(cross_portfolio).capital.get(),
+        INITIAL_CAPITAL - MAINTENANCE_FEE,
+        "the lien-generating world must lower capital through public maintenance collection"
+    );
+
+    let (_, claim_group) = env.market_state();
+    let claim_bound = claim_group.source_credit[WINNING_DOMAIN].positive_claim_bound_num;
+    assert!(
+        claim_bound > 0,
+        "the public mark route must create a source claim"
+    );
+    env.top_up_backing_bucket_with_ledger_with_cu(
+        backing_ledger,
+        WINNING_DOMAIN as u16,
+        50_000,
+        10,
+    );
+    env.deposit(&cross_owner, cross_portfolio, 500);
+    env.deposit(&counterparty_owner, counterparty_portfolio, 500);
+
+    let (_, before_trade) = env.market_state();
+    let earnings_before =
+        before_trade.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings;
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_portfolio,
+        &counterparty_owner,
+        counterparty_portfolio,
+        LIEN_GROWTH_Q,
+        95,
+        0,
+    );
+    let (_, after_trade) = env.market_state();
+    let earned = after_trade.source_backing_buckets[WINNING_DOMAIN]
+        .utilization_fee_earnings
+        .checked_sub(earnings_before)
+        .expect("public risk increase must not reduce provider earnings");
+    assert!(
+        earned > 0,
+        "the public route must generate provider earnings"
+    );
+
+    let destination = env.token_account(env.admin.pubkey(), 0);
+    let destination_before = env.token_amount(destination);
+    let quote_before = primary_quote_snapshot(&env);
+    let ledger_before =
+        state::read_backing_domain_ledger(&env.svm.get_account(&backing_ledger).unwrap().data)
+            .unwrap();
+    env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(
+        backing_ledger,
+        destination,
+        WINNING_DOMAIN as u16,
+        earned,
+    );
+    let quote_after = primary_quote_snapshot(&env);
+    let (_, withdrawn_group) = env.market_state();
+    let ledger_after =
+        state::read_backing_domain_ledger(&env.svm.get_account(&backing_ledger).unwrap().data)
+            .unwrap();
+
+    assert_eq!(
+        env.token_amount(destination) - destination_before,
+        earned as u64,
+        "provider receives exactly the generated earnings"
+    );
+    assert_primary_quote_delta(
+        "WithdrawBackingBucketEarnings",
+        quote_before,
+        quote_after,
+        -(earned as i128),
+    );
+    assert_eq!(
+        withdrawn_group.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings,
+        earnings_before,
+        "withdrawal removes exactly the newly generated provider earnings"
+    );
+    assert_eq!(
+        ledger_after.total_earnings_withdrawn_atoms - ledger_before.total_earnings_withdrawn_atoms,
+        earned,
+        "the provider ledger records the same exact withdrawal"
     );
 }
 
