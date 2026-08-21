@@ -17,7 +17,9 @@ use percolator_prog::{
 };
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
-use solana_sdk::{pubkey::Pubkey, signature::Signer, transaction::Transaction};
+use solana_sdk::{
+    instruction::AccountMeta, pubkey::Pubkey, signature::Signer, transaction::Transaction,
+};
 use std::collections::{BTreeSet, VecDeque};
 
 const MIN_LIVENESS_DRAIN_LIMIT: usize = 256;
@@ -7967,6 +7969,13 @@ pub struct ResolvedClaimQuoteDeltaEvidence {
     pub final_spl_vault: u128,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedClaimAliasEvidence {
+    pub control_payout_atoms: u128,
+    pub rejected_pair_count: usize,
+    pub rejected_writable_downgrade_count: usize,
+}
+
 struct UnderfundedTerminalGraphEvidence {
     world_count: usize,
     transition_count: usize,
@@ -8453,6 +8462,102 @@ pub fn verify_resolved_claim_quote_delta() -> Result<ResolvedClaimQuoteDeltaEvid
         claim_payout_atoms: world.claim_payout_atoms,
         final_engine_vault: world.outcome.final_engine_vault,
         final_spl_vault: world.outcome.final_spl_vault,
+    })
+}
+
+fn build_value_moving_resolved_claim_runner() -> Result<ScenarioRunner, String> {
+    const BACKED_WINNER: usize = 2;
+
+    let UnderfundedResolvedSeed { mut runner, .. } =
+        build_underfunded_resolved_reference_seed(BoundedExpiryLanding::Before, false, true)?;
+    drain_bounded_terminal_subset(
+        &mut runner,
+        &[BACKED_WINNER],
+        "INV-017 resolved-claim alias prerequisite",
+    )?;
+    runner.assert_global_invariants()?;
+    Ok(runner)
+}
+
+fn resolved_claim_alias_accounts(runner: &ScenarioRunner, actor: usize) -> Vec<AccountMeta> {
+    let account = &runner.env.actors[actor];
+    vec![
+        AccountMeta::new_readonly(account.signer.pubkey(), false),
+        AccountMeta::new(runner.env.market, false),
+        AccountMeta::new(account.portfolio, false),
+        AccountMeta::new(account.destination_token, false),
+        AccountMeta::new(runner.env.vault, false),
+        AccountMeta::new_readonly(runner.env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ]
+}
+
+pub fn verify_resolved_claim_account_alias_matrix() -> Result<ResolvedClaimAliasEvidence, String> {
+    const CLAIMANT: usize = 0;
+    const ROLE_NAMES: [&str; 7] = [
+        "owner",
+        "market",
+        "portfolio",
+        "destination_token",
+        "vault",
+        "vault_authority",
+        "token_program",
+    ];
+    const REQUIRED_WRITABLE_ROLES: [usize; 4] = [1, 2, 3, 4];
+
+    let mut control = build_value_moving_resolved_claim_runner()?;
+    let control_result = control.execute_terminal_route(CLAIMANT, TerminalRoute::Claim)?;
+    if !control_result.landed || !control_result.mutated || control_result.payout == 0 {
+        return Err(format!(
+            "INV-017 resolved-claim control was vacuous: {control_result:?}"
+        ));
+    }
+    control.assert_global_invariants()?;
+
+    let mut rejected_pair_count = 0usize;
+    for first in 0..ROLE_NAMES.len() {
+        for second in (first + 1)..ROLE_NAMES.len() {
+            let mut runner = build_value_moving_resolved_claim_runner()?;
+            let before = runner.snapshot();
+            let mut accounts = resolved_claim_alias_accounts(&runner, CLAIMANT);
+            accounts[second].pubkey = accounts[first].pubkey;
+            let result = runner
+                .env
+                .claim_resolved_payout_topup_primary_with_accounts(accounts);
+            if result.is_ok() {
+                return Err(format!(
+                    "INV-017 ClaimResolvedPayoutTopup alias {} with {} unexpectedly succeeded",
+                    ROLE_NAMES[first], ROLE_NAMES[second]
+                ));
+            }
+            runner.assert_snapshot_unchanged(&before)?;
+            rejected_pair_count += 1;
+        }
+    }
+
+    let mut rejected_writable_downgrade_count = 0usize;
+    for role in REQUIRED_WRITABLE_ROLES {
+        let mut runner = build_value_moving_resolved_claim_runner()?;
+        let before = runner.snapshot();
+        let mut accounts = resolved_claim_alias_accounts(&runner, CLAIMANT);
+        accounts[role].is_writable = false;
+        let result = runner
+            .env
+            .claim_resolved_payout_topup_primary_with_accounts(accounts);
+        if result.is_ok() {
+            return Err(format!(
+                "INV-017 ClaimResolvedPayoutTopup {} writable downgrade unexpectedly succeeded",
+                ROLE_NAMES[role]
+            ));
+        }
+        runner.assert_snapshot_unchanged(&before)?;
+        rejected_writable_downgrade_count += 1;
+    }
+
+    Ok(ResolvedClaimAliasEvidence {
+        control_payout_atoms: control_result.payout,
+        rejected_pair_count,
+        rejected_writable_downgrade_count,
     })
 }
 

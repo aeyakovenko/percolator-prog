@@ -123,6 +123,9 @@ mod inv_013_destructive_consent_scope;
 #[path = "invariants/stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"]
 mod inv_014_delayed_policy_and_policy_epoch_safety;
 
+#[path = "invariants/stateful/inv_017_signer_writable_role_and_account_alias_safety.rs"]
+mod inv_017_signer_writable_role_and_account_alias_safety;
+
 #[path = "invariants/stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"]
 mod inv_020_authenticated_clock_slot_and_oracle_provenance;
 

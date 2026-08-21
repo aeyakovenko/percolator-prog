@@ -1315,6 +1315,13 @@ impl V16Svm {
         )
     }
 
+    pub fn claim_resolved_payout_topup_primary_with_accounts(
+        &mut self,
+        accounts: Vec<AccountMeta>,
+    ) -> Result<TxSuccess, String> {
+        self.send_program(ProgInstruction::ClaimResolvedPayoutTopup, accounts, &[])
+    }
+
     pub fn convert_released_pnl(
         &mut self,
         actor_index: usize,
