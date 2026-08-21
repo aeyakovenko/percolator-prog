@@ -7,8 +7,9 @@
 //! and all 21 CPI semantic account pairs, plus every required signer/writable downgrade, for both
 //! single and batch routes from otherwise-valid public fixtures. Deposit and withdraw separately
 //! exhaust their 15- and 21-pair SPL custody account spaces and required privileges. Backing
-//! top-up, live insurance withdrawal, and backing-principal withdrawal add 40 pairwise reserve-
-//! custody cases plus every required privilege downgrade from value-moving controls.
+//! top-up, live insurance withdrawal, and backing-principal withdrawal, including optional
+//! insurance/backing ledger tails, add 105 pairwise reserve-custody cases plus 35 required
+//! privilege downgrades from value-moving controls.
 //!
 //! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
 //! it is not an exhaustive pairwise account-meta proof for every instruction.
@@ -537,7 +538,12 @@ fn v16_program_custody_account_pairs_and_required_privileges_are_exhaustive() {
 
 #[derive(Clone, Copy, Debug)]
 enum ReserveCustodyAliasRoute {
+    TopUpInsurance,
+    TopUpInsuranceWithLedger,
+    TopUpInsuranceDomain,
+    TopUpInsuranceDomainWithLedger,
     TopUpBacking,
+    TopUpBackingWithLedger,
     WithdrawInsurance,
     WithdrawBacking,
 }
@@ -546,6 +552,7 @@ struct ReserveCustodyAliasFixture {
     env: V16CuEnv,
     authority: Keypair,
     user_token: Pubkey,
+    ledger: Option<Pubkey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -553,6 +560,7 @@ struct ReserveCustodyAliasSnapshot {
     market: Account,
     user_token: Account,
     vault: Account,
+    ledger: Option<Account>,
     user_atoms: u64,
     vault_atoms: u64,
 }
@@ -560,8 +568,25 @@ struct ReserveCustodyAliasSnapshot {
 fn reserve_custody_alias_fixture(route: ReserveCustodyAliasRoute) -> ReserveCustodyAliasFixture {
     let mut env = V16CuEnv::new();
     let authority = env.admin.insecure_clone();
+    let ledger = match route {
+        ReserveCustodyAliasRoute::TopUpInsuranceWithLedger
+        | ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger => {
+            Some(env.insurance_ledger_account())
+        }
+        ReserveCustodyAliasRoute::TopUpBackingWithLedger => {
+            Some(env.backing_domain_ledger_account())
+        }
+        _ => None,
+    };
     let user_token = match route {
-        ReserveCustodyAliasRoute::TopUpBacking => env.token_account(authority.pubkey(), 100),
+        ReserveCustodyAliasRoute::TopUpInsurance
+        | ReserveCustodyAliasRoute::TopUpInsuranceWithLedger
+        | ReserveCustodyAliasRoute::TopUpInsuranceDomain
+        | ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger
+        | ReserveCustodyAliasRoute::TopUpBacking
+        | ReserveCustodyAliasRoute::TopUpBackingWithLedger => {
+            env.token_account(authority.pubkey(), 100)
+        }
         ReserveCustodyAliasRoute::WithdrawInsurance => {
             env.enable_live_insurance_withdrawal();
             env.top_up_insurance(100);
@@ -576,6 +601,7 @@ fn reserve_custody_alias_fixture(route: ReserveCustodyAliasRoute) -> ReserveCust
         env,
         authority,
         user_token,
+        ledger,
     }
 }
 
@@ -586,6 +612,9 @@ fn reserve_custody_alias_snapshot(
         market: fixture.env.svm.get_account(&fixture.env.market).unwrap(),
         user_token: fixture.env.svm.get_account(&fixture.user_token).unwrap(),
         vault: fixture.env.svm.get_account(&fixture.env.vault).unwrap(),
+        ledger: fixture
+            .ledger
+            .map(|ledger| fixture.env.svm.get_account(&ledger).unwrap()),
         user_atoms: fixture.env.token_amount(fixture.user_token),
         vault_atoms: fixture.env.token_amount(fixture.env.vault),
     }
@@ -596,7 +625,23 @@ fn reserve_custody_alias_instruction(
     route: ReserveCustodyAliasRoute,
 ) -> ProgInstruction {
     match route {
-        ReserveCustodyAliasRoute::TopUpBacking => ProgInstruction::TopUpBackingBucket {
+        ReserveCustodyAliasRoute::TopUpInsurance
+        | ReserveCustodyAliasRoute::TopUpInsuranceWithLedger => ProgInstruction::TopUpInsurance {
+            intent_id: 0,
+            market_id: fixture.env.asset_market_id(0),
+            amount: 10,
+        },
+        ReserveCustodyAliasRoute::TopUpInsuranceDomain
+        | ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger => {
+            ProgInstruction::TopUpInsuranceDomain {
+                intent_id: 0,
+                market_id: fixture.env.asset_market_id(0),
+                domain: 0,
+                amount: 10,
+            }
+        }
+        ReserveCustodyAliasRoute::TopUpBacking
+        | ReserveCustodyAliasRoute::TopUpBackingWithLedger => ProgInstruction::TopUpBackingBucket {
             intent_id: 0,
             market_id: fixture.env.asset_market_id(0),
             domain: 0,
@@ -626,13 +671,25 @@ fn reserve_custody_alias_accounts(
         AccountMeta::new(fixture.user_token, false),
         AccountMeta::new(fixture.env.vault, false),
     ];
-    if !matches!(route, ReserveCustodyAliasRoute::TopUpBacking) {
+    let top_up = matches!(
+        route,
+        ReserveCustodyAliasRoute::TopUpInsurance
+            | ReserveCustodyAliasRoute::TopUpInsuranceWithLedger
+            | ReserveCustodyAliasRoute::TopUpInsuranceDomain
+            | ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger
+            | ReserveCustodyAliasRoute::TopUpBacking
+            | ReserveCustodyAliasRoute::TopUpBackingWithLedger
+    );
+    if !top_up {
         accounts.push(AccountMeta::new_readonly(
             fixture.env.vault_authority,
             false,
         ));
     }
     accounts.push(AccountMeta::new_readonly(spl_token::ID, false));
+    if let Some(ledger) = fixture.ledger {
+        accounts.push(AccountMeta::new(ledger, false));
+    }
     accounts
 }
 
@@ -670,17 +727,34 @@ fn assert_reserve_custody_alias_rejects_atomically(
 #[test]
 fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaustive() {
     for route in [
+        ReserveCustodyAliasRoute::TopUpInsurance,
+        ReserveCustodyAliasRoute::TopUpInsuranceWithLedger,
+        ReserveCustodyAliasRoute::TopUpInsuranceDomain,
+        ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger,
         ReserveCustodyAliasRoute::TopUpBacking,
+        ReserveCustodyAliasRoute::TopUpBackingWithLedger,
         ReserveCustodyAliasRoute::WithdrawInsurance,
         ReserveCustodyAliasRoute::WithdrawBacking,
     ] {
         let role_names: &[&str] = match route {
-            ReserveCustodyAliasRoute::TopUpBacking => &[
+            ReserveCustodyAliasRoute::TopUpInsurance
+            | ReserveCustodyAliasRoute::TopUpInsuranceDomain
+            | ReserveCustodyAliasRoute::TopUpBacking => &[
                 "authority",
                 "market",
                 "source_token",
                 "vault",
                 "token_program",
+            ],
+            ReserveCustodyAliasRoute::TopUpInsuranceWithLedger
+            | ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger
+            | ReserveCustodyAliasRoute::TopUpBackingWithLedger => &[
+                "authority",
+                "market",
+                "source_token",
+                "vault",
+                "token_program",
+                "ledger",
             ],
             ReserveCustodyAliasRoute::WithdrawInsurance
             | ReserveCustodyAliasRoute::WithdrawBacking => &[
@@ -733,7 +807,17 @@ fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaust
             "authority signer downgrade",
             |accounts| accounts[0].is_signer = false,
         );
-        for role in 1..=3 {
+        let required_writable_roles: &[usize] = if matches!(
+            route,
+            ReserveCustodyAliasRoute::TopUpInsuranceWithLedger
+                | ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger
+                | ReserveCustodyAliasRoute::TopUpBackingWithLedger
+        ) {
+            &[1, 2, 3, 5]
+        } else {
+            &[1, 2, 3]
+        };
+        for &role in required_writable_roles {
             assert_reserve_custody_alias_rejects_atomically(
                 route,
                 &format!("{} writable downgrade", role_names[role]),
