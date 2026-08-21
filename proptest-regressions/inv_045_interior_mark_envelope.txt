@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f352e3290c1f98674ddf17eef30614dbcfae6b3fbf7893fa725890bd7369defd # shrinks to seed = [0, 0, 0, 0, 0, 0, 0, 0, 0, 26, 104, 64, 52, 231, 159, 9, 241, 214, 180, 34, 157, 213, 7, 208, 95, 22, 245, 151, 55, 114, 213, 140], mode_index = 3, route_index = 1, anchor_units = 388, target_move_bps = 1059, rises = true, cap_bps = 9, max_dt = 6

@@ -31,6 +31,11 @@
 //! bounded by both the accepted-price envelope and collected fee. Raw zero and `u64::MAX` no-CPI
 //! inputs, plus equivalent zero/above-maximum CPI quotes, reject with exact economic rollback
 //! before a control reduction proves the owner exit remains live. Direct impact tests remain below.
+//! `v16_program_generated_interior_mark_envelopes_are_paid_and_exit_live` reuses that whole-route
+//! oracle over generated non-boundary anchors, up/down target spreads, per-slot caps, elapsed slots,
+//! modes, and routes. Every accepted movement remains inside the independent elapsed-time clamp,
+//! is covered by retained insurance, cannot compound on the second same-slot partial reduction,
+//! and ends with zero OI and exact coalition/custody conservation.
 //! These tests exercise the deployed public wrapper with real SBF/LiteSVM account construction and
 //! assert economic state, token, rollback, liveness, or compute outcomes appropriate to the
 //! invariant.
@@ -208,6 +213,29 @@ fn configure_accepted_mark_quote(
     Ok(quoted_price)
 }
 
+fn configure_accepted_mark_target_quote(
+    env: &mut V16Svm,
+    route: DiscoveryTradeRoute,
+    anchor: u64,
+    target: u64,
+) -> Result<(), String> {
+    if !accepted_mark_route_is_cpi(route) {
+        return Ok(());
+    }
+    let (bid_spread_bps, ask_spread_bps) = if target < anchor {
+        let spread = u64::try_from((anchor - target) as u128 * 10_000 / anchor as u128)
+            .map_err(|_| "generated bid spread exceeds u64".to_string())?;
+        (spread, 0)
+    } else {
+        let spread = u64::try_from((target - anchor) as u128 * 10_000 / anchor as u128)
+            .map_err(|_| "generated ask spread exceeds u64".to_string())?;
+        (0, spread)
+    };
+    env.set_matcher_spreads(1, bid_spread_bps, ask_spread_bps)
+        .map(|_| ())
+        .map_err(|error| format!("configure {route:?} target matcher: {error}"))
+}
+
 fn submit_accepted_mark_trade(
     env: &mut V16Svm,
     route: DiscoveryTradeRoute,
@@ -287,40 +315,41 @@ fn configure_accepted_mark_mode(
     Ok(oracle)
 }
 
-fn prepare_accepted_mark_landing(
+fn prepare_accepted_mark_landing_dt(
     env: &mut V16Svm,
     mode: AcceptedMarkMode,
-    dt: AcceptedMarkDt,
+    dt: u64,
     oracle: Option<solana_sdk::pubkey::Pubkey>,
 ) -> Result<u64, String> {
-    const MAX_DT: u64 = 4;
-    let landing_slot = match (mode, dt) {
-        (AcceptedMarkMode::HybridAfterHours, AcceptedMarkDt::SameSlot) => {
-            // Mature the fallback, then advance the live asset through the canonical public crank.
-            // The tested boundary trade lands in that same asset slot while stale-hybrid mode is active.
-            env.set_clock(3, 1_000);
-            let oracle = oracle.ok_or_else(|| "stale-hybrid oracle missing".to_string())?;
-            env.crank_with_oracles(
-                0,
-                3,
-                vec![CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: 1,
-                }],
-                &[oracle],
-            )
-            .map_err(|error| format!("prime stale-hybrid same-slot crank: {error}"))?;
-            let slot_last = env.primary_market_state().1.assets[0].slot_last;
-            if slot_last != 3 {
-                return Err(format!(
-                    "stale-hybrid primer did not advance the asset to slot 3: {slot_last}"
-                ));
-            }
-            3
+    let base_slot = if mode == AcceptedMarkMode::HybridAfterHours {
+        // Enter the after-hours regime through an authenticated public crank first. Measuring the
+        // generated dt from this committed state prevents a small dt from accidentally testing the
+        // still-fresh hybrid branch while claiming trade-driven fallback semantics.
+        env.set_clock(3, 1_000);
+        let oracle = oracle.ok_or_else(|| "stale-hybrid oracle missing".to_string())?;
+        env.crank_with_oracles(
+            0,
+            3,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 1,
+            }],
+            &[oracle],
+        )
+        .map_err(|error| format!("prime stale-hybrid crank: {error}"))?;
+        let slot_last = env.primary_market_state().1.assets[0].slot_last;
+        if slot_last != 3 {
+            return Err(format!(
+                "stale-hybrid primer did not advance the asset to slot 3: {slot_last}"
+            ));
         }
-        (_, AcceptedMarkDt::SameSlot) => 1,
-        (_, AcceptedMarkDt::Maximum) => 1 + MAX_DT,
+        slot_last
+    } else {
+        1
     };
+    let landing_slot = base_slot
+        .checked_add(dt)
+        .ok_or_else(|| "accepted-mark landing slot overflow".to_string())?;
     match mode {
         AcceptedMarkMode::HybridFresh => env.set_clock(landing_slot, 100 + landing_slot as i64),
         AcceptedMarkMode::HybridAfterHours => env.set_clock(landing_slot, 1_000),
@@ -329,53 +358,69 @@ fn prepare_accepted_mark_landing(
     Ok(landing_slot)
 }
 
-fn run_valid_accepted_mark_boundary(
+fn prepare_accepted_mark_landing(
+    env: &mut V16Svm,
+    mode: AcceptedMarkMode,
+    dt: AcceptedMarkDt,
+    oracle: Option<solana_sdk::pubkey::Pubkey>,
+) -> Result<u64, String> {
+    let dt = match dt {
+        AcceptedMarkDt::SameSlot => 0,
+        AcceptedMarkDt::Maximum => 4,
+    };
+    prepare_accepted_mark_landing_dt(env, mode, dt, oracle)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AcceptedMarkCase {
+    seed: [u8; 32],
+    anchor: u64,
+    target: u64,
+    total_size: i128,
+    cap_bps: u64,
+    max_dt: u64,
+    landing_dt: u64,
+}
+
+fn run_valid_accepted_mark_case(
     mode: AcceptedMarkMode,
     route: DiscoveryTradeRoute,
-    dt: AcceptedMarkDt,
-    boundary: AcceptedMarkBoundary,
+    case: AcceptedMarkCase,
 ) -> Result<u64, String> {
-    const CAP_BPS: u64 = 50;
-    const MAX_DT: u64 = 4;
-    let anchor = boundary.anchor();
-    let mut seed = [0x45; 32];
-    seed[0] = mode as u8;
-    seed[1] = route as u8;
-    seed[2] = dt as u8;
-    seed[3] = boundary as u8;
+    let context = format!(
+        "{mode:?}/{route:?}/anchor={}/target={}/cap={}/max_dt={}/dt={}",
+        case.anchor, case.target, case.cap_bps, case.max_dt, case.landing_dt
+    );
     let mut env = V16Svm::new(
-        seed,
+        case.seed,
         MarketConfig {
-            initial_price: anchor,
+            initial_price: case.anchor,
             max_trading_fee_bps: 100,
-            max_price_move_bps_per_slot: CAP_BPS,
-            max_accrual_dt_slots: MAX_DT,
-            min_funding_lifetime_slots: MAX_DT,
+            max_price_move_bps_per_slot: case.cap_bps,
+            max_accrual_dt_slots: case.max_dt,
+            min_funding_lifetime_slots: case.max_dt,
             ..MarketConfig::default()
         },
     );
-    let oracle = configure_accepted_mark_mode(&mut env, mode, anchor)?;
-    let total_size = boundary.signed_size();
-    let half_size = total_size / 2;
-    if half_size == 0 || half_size.checked_mul(2) != Some(total_size) {
-        return Err(format!("{boundary:?}: split-fill size is not exact"));
+    let oracle = configure_accepted_mark_mode(&mut env, mode, case.anchor)?;
+    let half_size = case.total_size / 2;
+    if half_size == 0 || half_size.checked_mul(2) != Some(case.total_size) {
+        return Err(format!("{context}: split-fill size is not exact"));
     }
     if accepted_mark_route_is_cpi(route) {
         env.set_matcher_spreads(1, 0, 0)
             .map_err(|error| format!("configure {route:?} setup matcher: {error}"))?;
     }
-    let setup = submit_accepted_mark_trade(&mut env, route, -total_size, anchor)
-        .map_err(|error| format!("{mode:?}/{route:?}/{dt:?}/{boundary:?} setup open: {error}"))?;
+    let setup = submit_accepted_mark_trade(&mut env, route, -case.total_size, case.anchor)
+        .map_err(|error| format!("{context} setup open: {error}"))?;
     let setup_group = env.primary_market_state().1;
-    if setup_group.assets[0].oi_eff_long_q != total_size.unsigned_abs()
-        || setup_group.assets[0].oi_eff_short_q != total_size.unsigned_abs()
+    if setup_group.assets[0].oi_eff_long_q != case.total_size.unsigned_abs()
+        || setup_group.assets[0].oi_eff_short_q != case.total_size.unsigned_abs()
     {
-        return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: setup did not create exact matched OI"
-        ));
+        return Err(format!("{context}: setup did not create exact matched OI"));
     }
-    let landing_slot = prepare_accepted_mark_landing(&mut env, mode, dt, oracle)?;
-    let quoted_price = configure_accepted_mark_quote(&mut env, route, boundary)?;
+    let landing_slot = prepare_accepted_mark_landing_dt(&mut env, mode, case.landing_dt, oracle)?;
+    configure_accepted_mark_target_quote(&mut env, route, case.anchor, case.target)?;
 
     let before_profile = env.primary_profile(0);
     let before_group = env.primary_market_state().1;
@@ -385,22 +430,19 @@ fn run_valid_accepted_mark_boundary(
     let asset_dt = landing_slot
         .checked_sub(before_group.assets[0].slot_last)
         .ok_or_else(|| "accepted-mark landing preceded asset slot".to_string())?;
-    let expected_dt = match dt {
-        AcceptedMarkDt::SameSlot => 0,
-        AcceptedMarkDt::Maximum => MAX_DT,
-    };
-    if asset_dt != expected_dt {
+    if asset_dt != case.landing_dt {
         return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: expected asset dt {expected_dt}, got {asset_dt}"
+            "{context}: expected asset dt {}, got {asset_dt}",
+            case.landing_dt
         ));
     }
 
-    let first = submit_accepted_mark_trade(&mut env, route, half_size, boundary.no_cpi_price())
-        .map_err(|error| format!("{mode:?}/{route:?}/{dt:?}/{boundary:?} first fill: {error}"))?;
+    let first = submit_accepted_mark_trade(&mut env, route, half_size, case.target)
+        .map_err(|error| format!("{context} first fill: {error}"))?;
     let first_profile = env.primary_profile(0);
     let first_group = env.primary_market_state().1;
     let expected_accepted = if mode.updates_from_trade() {
-        accepted_mark_reference_clamp(anchor, quoted_price, CAP_BPS, asset_dt)
+        accepted_mark_reference_clamp(case.anchor, case.target, case.cap_bps, asset_dt)
     } else {
         before_group.assets[0].effective_price
     };
@@ -408,7 +450,7 @@ fn run_valid_accepted_mark_boundary(
     let high = before_profile.mark_ewma_e6.max(expected_accepted);
     if first_profile.mark_ewma_e6 < low || first_profile.mark_ewma_e6 > high {
         return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: mark {} escaped accepted interval [{low}, {high}]",
+            "{context}: mark {} escaped accepted interval [{low}, {high}]",
             first_profile.mark_ewma_e6
         ));
     }
@@ -416,16 +458,15 @@ fn run_valid_accepted_mark_boundary(
         && first_profile.mark_ewma_e6 != before_profile.mark_ewma_e6
     {
         return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: non-updating/same-slot trade moved mark"
+            "{context}: non-updating/same-slot trade moved mark"
         ));
     }
     if mode.updates_from_trade()
-        && asset_dt == MAX_DT
+        && asset_dt != 0
+        && case.target != case.anchor
         && first_profile.mark_ewma_e6 == before_profile.mark_ewma_e6
     {
-        return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: maximum-dt paid boundary was vacuous"
-        ));
+        return Err(format!("{context}: paid mark-movement case was vacuous"));
     }
     let move_bps =
         accepted_mark_reference_move_bps(before_profile.mark_ewma_e6, first_profile.mark_ewma_e6);
@@ -460,43 +501,39 @@ fn run_valid_accepted_mark_boundary(
         / 10_000;
     if insurance_gain < required_movement_fee || (move_bps != 0 && insurance_gain == 0) {
         return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: {move_bps} bps movement required {required_movement_fee}, collected {insurance_gain}"
+            "{context}: {move_bps} bps movement required {required_movement_fee}, collected {insurance_gain}"
         ));
     }
     if mode.updates_from_trade() {
         if first_group.assets[0].raw_oracle_target_price != first_profile.mark_ewma_e6 {
-            return Err(format!(
-                "{mode:?}/{route:?}/{dt:?}/{boundary:?}: wrapper/engine target staging diverged"
-            ));
+            return Err(format!("{context}: wrapper/engine target staging diverged"));
         }
     } else if first_group.assets[0].raw_oracle_target_price
         != before_group.assets[0].raw_oracle_target_price
     {
         return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: trade rewrote a non-trade-driven target"
+            "{context}: trade rewrote a non-trade-driven target"
         ));
     }
 
-    let second = submit_accepted_mark_trade(&mut env, route, half_size, boundary.no_cpi_price())
-        .map_err(|error| format!("{mode:?}/{route:?}/{dt:?}/{boundary:?} second fill: {error}"))?;
+    let second = submit_accepted_mark_trade(&mut env, route, half_size, case.target)
+        .map_err(|error| format!("{context} second fill: {error}"))?;
     let second_profile = env.primary_profile(0);
     if second_profile.mark_ewma_e6 != first_profile.mark_ewma_e6 {
         return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: repeated same-slot partial fill compounded mark movement"
+            "{context}: repeated same-slot partial fill compounded mark movement"
         ));
     }
     let exited = env.primary_market_state().1;
     if exited.assets[0].oi_eff_long_q != 0 || exited.assets[0].oi_eff_short_q != 0 {
-        return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: bounded exit left OI"
-        ));
+        return Err(format!("{context}: bounded exit left OI"));
     }
     if accepted_mark_pair_value_and_insurance(&env) != before_pair_value
         || env.token_supply_observed() != before_supply
         || env.market_data(true) != before_foreign
     {
         return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: partial-reduction sequence changed attributed pair value, token supply, or foreign state"
+            "{context}: partial-reduction sequence changed attributed pair value, token supply, or foreign state"
         ));
     }
     let max_cu = first
@@ -504,11 +541,39 @@ fn run_valid_accepted_mark_boundary(
         .max(second.compute_units)
         .max(setup.compute_units);
     if max_cu >= crate::support::v16_svm::TX_CU_LIMIT {
-        return Err(format!(
-            "{mode:?}/{route:?}/{dt:?}/{boundary:?}: boundary route consumed {max_cu} CU"
-        ));
+        return Err(format!("{context}: route consumed {max_cu} CU"));
     }
     Ok(max_cu)
+}
+
+fn run_valid_accepted_mark_boundary(
+    mode: AcceptedMarkMode,
+    route: DiscoveryTradeRoute,
+    dt: AcceptedMarkDt,
+    boundary: AcceptedMarkBoundary,
+) -> Result<u64, String> {
+    let landing_dt = match dt {
+        AcceptedMarkDt::SameSlot => 0,
+        AcceptedMarkDt::Maximum => 4,
+    };
+    let mut seed = [0x45; 32];
+    seed[0] = mode as u8;
+    seed[1] = route as u8;
+    seed[2] = dt as u8;
+    seed[3] = boundary as u8;
+    run_valid_accepted_mark_case(
+        mode,
+        route,
+        AcceptedMarkCase {
+            seed,
+            anchor: boundary.anchor(),
+            target: boundary.no_cpi_price(),
+            total_size: boundary.signed_size(),
+            cap_bps: 50,
+            max_dt: 4,
+            landing_dt,
+        },
+    )
 }
 
 fn run_invalid_accepted_mark_boundary(
@@ -615,6 +680,62 @@ fn v16_program_accepted_mark_boundary_matrix_is_paid_atomic_and_exit_live() {
     assert_eq!(valid_cells, 64, "complete valid mode/route/dt matrix");
     assert_eq!(invalid_cells, 16, "complete invalid route/dt matrix");
     assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_045_interior_mark_envelope.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_generated_interior_mark_envelopes_are_paid_and_exit_live(
+        seed in any::<[u8; 32]>(),
+        mode_index in 0u8..4,
+        route_index in 0u8..4,
+        anchor_units in 1u64..=1_000,
+        target_move_bps in 1u64..=9_000,
+        rises in any::<bool>(),
+        cap_bps in 1u64..=10,
+        max_dt in 3u64..=10,
+    ) {
+        let mode = AcceptedMarkMode::ALL[mode_index as usize];
+        let route = DiscoveryTradeRoute::ALL[route_index as usize];
+        let anchor = anchor_units * 10_000;
+        let target_factor_bps = if rises {
+            10_000 + target_move_bps
+        } else {
+            10_000 - target_move_bps
+        };
+        let target = anchor * target_factor_bps / 10_000;
+        let landing_dt = 1 + u64::from(seed[31]) % (max_dt - 1);
+        let total_size = if rises {
+            POS_SCALE as i128
+        } else {
+            -(POS_SCALE as i128)
+        };
+        let max_cu = run_valid_accepted_mark_case(
+            mode,
+            route,
+            AcceptedMarkCase {
+                seed,
+                anchor,
+                target,
+                total_size,
+                cap_bps,
+                max_dt,
+                landing_dt,
+            },
+        )
+        .map_err(TestCaseError::fail)?;
+        prop_assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
+    }
 }
 
 proptest! {
