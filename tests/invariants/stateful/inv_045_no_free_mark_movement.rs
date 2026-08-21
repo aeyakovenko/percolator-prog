@@ -42,6 +42,12 @@
 //! insurance, capital, vault, and token-supply outcome. A CPI route following an out-of-matcher
 //! fill must first reject with exact rollback; the LP then refreshes its matcher capability through
 //! the public config route and the identical reduction must succeed.
+//! `v16_program_repeated_trade_driven_mark_steps_are_paid_and_exit_live` chains four differently
+//! spaced paid movements and all four trade routes in each EWMA/fallback direction. Every staged
+//! target is caught up before the next move, every movement is independently fee-backed, and both
+//! owners convert and withdraw fully. A flat stale winner's no-observation crank is required to
+//! reject with exact rollback before one authenticated asset observation recertifies it, making the
+//! public liveness precondition explicit instead of mistaking `NonProgress` for a funded lock.
 //! These tests exercise the deployed public wrapper with real SBF/LiteSVM account construction and
 //! assert economic state, token, rollback, liveness, or compute outcomes appropriate to the
 //! invariant.
@@ -382,6 +388,96 @@ fn prepare_accepted_mark_landing(
         AcceptedMarkDt::Maximum => 4,
     };
     prepare_accepted_mark_landing_dt(env, mode, dt, oracle)
+}
+
+fn advance_accepted_mark_landing_from_current(
+    env: &mut V16Svm,
+    mode: AcceptedMarkMode,
+    dt: u64,
+) -> Result<u64, String> {
+    let asset_slot = env.primary_market_state().1.assets[0].slot_last;
+    let landing_slot = asset_slot
+        .checked_add(dt)
+        .ok_or_else(|| "accepted-mark repeated landing slot overflow".to_string())?;
+    match mode {
+        AcceptedMarkMode::HybridAfterHours => {
+            let unix_timestamp = i64::try_from(1_000u64.saturating_add(landing_slot))
+                .map_err(|_| "accepted-mark repeated timestamp overflow".to_string())?;
+            env.set_clock(landing_slot, unix_timestamp);
+        }
+        AcceptedMarkMode::EwmaMark => env.warp_to_slot(landing_slot),
+        AcceptedMarkMode::AuthMark | AcceptedMarkMode::HybridFresh => {
+            return Err(format!(
+                "{mode:?} does not admit repeated trade-driven mark landings"
+            ));
+        }
+    }
+    Ok(landing_slot)
+}
+
+fn crank_accepted_mark_target(
+    env: &mut V16Svm,
+    mode: AcceptedMarkMode,
+    dt: u64,
+    oracle: Option<solana_sdk::pubkey::Pubkey>,
+    context: &str,
+) -> Result<TxSuccess, String> {
+    let before_profile = env.primary_profile(0);
+    let before_group = env.primary_market_state().1;
+    let before_supply = env.token_supply_observed();
+    let before_foreign = env.market_data(true);
+    let landing_slot = advance_accepted_mark_landing_from_current(env, mode, dt)?;
+    let observations = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: u8::from(mode == AcceptedMarkMode::HybridAfterHours),
+    }];
+    let crank = if mode == AcceptedMarkMode::HybridAfterHours {
+        let oracle = oracle.ok_or_else(|| format!("{context}: hybrid oracle missing"))?;
+        env.crank_with_oracles(0, landing_slot, observations, &[oracle])
+    } else {
+        env.crank(0, landing_slot, observations)
+    }
+    .map_err(|error| format!("{context}: permissionless mark catch-up: {error}"))?;
+    let after_profile = env.primary_profile(0);
+    let after_group = env.primary_market_state().1;
+    if after_group.assets[0].slot_last != landing_slot
+        || after_group.assets[0].effective_price != before_profile.mark_ewma_e6
+        || after_group.assets[0].raw_oracle_target_price != before_profile.mark_ewma_e6
+        || after_profile.mark_ewma_e6 != before_profile.mark_ewma_e6
+        || after_group.assets[0].oi_eff_long_q != before_group.assets[0].oi_eff_long_q
+        || after_group.assets[0].oi_eff_short_q != before_group.assets[0].oi_eff_short_q
+        || after_group.vault != before_group.vault
+        || after_group.insurance != before_group.insurance
+        || env.token_supply_observed() != before_supply
+        || env.market_data(true) != before_foreign
+    {
+        return Err(format!(
+            "{context}: bounded catch-up mismatch: slot {}->{}/want {landing_slot}, effective {}->{}/want {}, raw {}->{}, mark {}->{}, oi ({},{})->({},{}), vault {}->{}, insurance {}->{}, supply {}->{}, foreign_equal={}",
+            before_group.assets[0].slot_last,
+            after_group.assets[0].slot_last,
+            before_group.assets[0].effective_price,
+            after_group.assets[0].effective_price,
+            before_profile.mark_ewma_e6,
+            before_group.assets[0].raw_oracle_target_price,
+            after_group.assets[0].raw_oracle_target_price,
+            before_profile.mark_ewma_e6,
+            after_profile.mark_ewma_e6,
+            before_group.assets[0].oi_eff_long_q,
+            before_group.assets[0].oi_eff_short_q,
+            after_group.assets[0].oi_eff_long_q,
+            after_group.assets[0].oi_eff_short_q,
+            before_group.vault,
+            after_group.vault,
+            before_group.insurance,
+            after_group.insurance,
+            before_supply,
+            env.token_supply_observed(),
+            env.market_data(true) == before_foreign,
+        ));
+    }
+    crate::support::fuzz_model::assert_public_stock_census(context, env)?;
+    crate::support::fuzz_model::assert_public_encumbrance_census(context, env)?;
+    Ok(crank)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -889,6 +985,418 @@ fn v16_program_trade_driven_mark_route_orders_converge_economically() {
         stale_cpi_rejections, 32,
         "every no-CPI-to-CPI transition rejects atomically before public refresh"
     );
+    assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
+}
+
+#[test]
+fn v16_program_repeated_trade_driven_mark_steps_are_paid_and_exit_live() {
+    const STEP_COUNT: usize = 4;
+    const CAP_BPS: u64 = 25;
+    const MAX_DT: u64 = STEP_COUNT as u64;
+
+    let mut world_count = 0usize;
+    let mut movement_count = 0usize;
+    let mut catch_up_count = 0usize;
+    let mut missing_hint_rejection_count = 0usize;
+    let mut terminal_refresh_count = 0usize;
+    let mut stale_cpi_rejections = 0usize;
+    let mut withdrawal_count = 0usize;
+    let mut max_cu = 0u64;
+
+    for mode in [
+        AcceptedMarkMode::EwmaMark,
+        AcceptedMarkMode::HybridAfterHours,
+    ] {
+        for rises in [false, true] {
+            for route_offset in 0..DiscoveryTradeRoute::ALL.len() {
+                let mut seed = [0x6d; 32];
+                seed[0] = mode as u8;
+                seed[1] = rises as u8;
+                seed[2] = route_offset as u8;
+                let anchor = 1_000_000u64;
+                let target = if rises { 1_400_000 } else { 600_000 };
+                let total_size = if rises {
+                    (STEP_COUNT as i128) * POS_SCALE as i128
+                } else {
+                    -((STEP_COUNT as i128) * POS_SCALE as i128)
+                };
+                let chunk_size = total_size / STEP_COUNT as i128;
+                let setup_route =
+                    DiscoveryTradeRoute::ALL[(route_offset + DiscoveryTradeRoute::ALL.len() - 1)
+                        % DiscoveryTradeRoute::ALL.len()];
+                let context =
+                    format!("{mode:?}/{rises:?}/offset={route_offset}/setup={setup_route:?}");
+                let mut env = V16Svm::new(
+                    seed,
+                    MarketConfig {
+                        initial_price: anchor,
+                        max_trading_fee_bps: 100,
+                        max_price_move_bps_per_slot: CAP_BPS,
+                        max_accrual_dt_slots: MAX_DT,
+                        min_funding_lifetime_slots: MAX_DT,
+                        ..MarketConfig::default()
+                    },
+                );
+                let oracle = configure_accepted_mark_mode(&mut env, mode, anchor)
+                    .unwrap_or_else(|error| panic!("{context}: configure mode: {error}"));
+                if accepted_mark_route_is_cpi(setup_route) {
+                    env.set_matcher_spreads(1, 0, 0)
+                        .unwrap_or_else(|error| panic!("{context}: setup matcher: {error}"));
+                }
+                let setup = submit_accepted_mark_trade(&mut env, setup_route, -total_size, anchor)
+                    .unwrap_or_else(|error| panic!("{context}: setup trade: {error}"));
+                max_cu = max_cu.max(setup.compute_units);
+                crate::support::fuzz_model::assert_public_stock_census(
+                    &format!("{context}/setup"),
+                    &env,
+                )
+                .unwrap_or_else(|error| panic!("repeated mark setup stock: {error}"));
+                crate::support::fuzz_model::assert_public_encumbrance_census(
+                    &format!("{context}/setup"),
+                    &env,
+                )
+                .unwrap_or_else(|error| panic!("repeated mark setup encumbrance: {error}"));
+
+                let baseline_supply = env.token_supply_observed();
+                let baseline_foreign = env.market_data(true);
+                let mut previous_route = setup_route;
+
+                for step_index in 0..STEP_COUNT {
+                    if step_index != 0 {
+                        let catch_up = crank_accepted_mark_target(
+                            &mut env,
+                            mode,
+                            MAX_DT,
+                            oracle,
+                            &format!("{context}/before-step={step_index}"),
+                        )
+                        .unwrap_or_else(|error| panic!("repeated mark catch-up: {error}"));
+                        max_cu = max_cu.max(catch_up.compute_units);
+                        catch_up_count += 1;
+                    }
+                    let dt = (step_index + 1) as u64;
+                    let landing_slot = if step_index == 0 {
+                        prepare_accepted_mark_landing_dt(&mut env, mode, dt, oracle)
+                    } else {
+                        advance_accepted_mark_landing_from_current(&mut env, mode, dt)
+                    }
+                    .unwrap_or_else(|error| {
+                        panic!("{context}/step={step_index}: advance landing: {error}")
+                    });
+                    let route = DiscoveryTradeRoute::ALL
+                        [(route_offset + step_index) % DiscoveryTradeRoute::ALL.len()];
+                    let before_profile = env.primary_profile(0);
+                    let before_group = env.primary_market_state().1;
+                    let before_insurance = before_group.insurance;
+                    let before_asset = before_group.assets[0];
+                    assert_eq!(
+                        before_asset.raw_oracle_target_price, before_asset.effective_price,
+                        "{context}/step={step_index}: prior target was not caught up"
+                    );
+                    let asset_dt = landing_slot
+                        .checked_sub(before_asset.slot_last)
+                        .unwrap_or_else(|| {
+                            panic!("{context}/step={step_index}: landing preceded asset state")
+                        });
+                    assert_eq!(asset_dt, dt, "{context}/step={step_index}: exact dt");
+                    configure_accepted_mark_target_quote(
+                        &mut env,
+                        route,
+                        before_asset.effective_price,
+                        target,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{context}/step={step_index}: configure quote: {error}")
+                    });
+                    let submission = submit_accepted_mark_trade_after_route(
+                        &mut env,
+                        previous_route,
+                        route,
+                        chunk_size,
+                        target,
+                        &format!("{context}/step={step_index}"),
+                    )
+                    .unwrap_or_else(|error| panic!("repeated accepted-mark step: {error}"));
+                    max_cu = max_cu.max(submission.trade.compute_units).max(
+                        submission
+                            .refresh
+                            .as_ref()
+                            .map_or(0, |success| success.compute_units),
+                    );
+                    stale_cpi_rejections += usize::from(submission.stale_cpi_rejected);
+
+                    let after_profile = env.primary_profile(0);
+                    let after_group = env.primary_market_state().1;
+                    let after_asset = after_group.assets[0];
+                    assert_eq!(
+                        after_asset.slot_last, before_asset.slot_last,
+                        "{context}/step={step_index}: a caught-up target created phantom engine accrual"
+                    );
+                    assert_eq!(
+                        after_asset.effective_price, before_profile.mark_ewma_e6,
+                        "{context}/step={step_index}: bounded accrual did not catch the prior staged mark"
+                    );
+                    let accepted = accepted_mark_reference_clamp(
+                        before_asset.effective_price,
+                        target,
+                        CAP_BPS,
+                        dt,
+                    );
+                    let low = before_profile.mark_ewma_e6.min(accepted);
+                    let high = before_profile.mark_ewma_e6.max(accepted);
+                    assert!(
+                        (low..=high).contains(&after_profile.mark_ewma_e6),
+                        "{context}/step={step_index}: mark {} escaped [{low}, {high}]",
+                        after_profile.mark_ewma_e6
+                    );
+                    if rises {
+                        assert!(
+                            after_profile.mark_ewma_e6 > before_profile.mark_ewma_e6,
+                            "{context}/step={step_index}: upward movement was vacuous"
+                        );
+                    } else {
+                        assert!(
+                            after_profile.mark_ewma_e6 < before_profile.mark_ewma_e6,
+                            "{context}/step={step_index}: downward movement was vacuous"
+                        );
+                    }
+                    assert_eq!(
+                        after_profile.mark_ewma_last_slot, landing_slot,
+                        "{context}/step={step_index}: movement slot"
+                    );
+                    assert_eq!(
+                        after_asset.raw_oracle_target_price, after_profile.mark_ewma_e6,
+                        "{context}/step={step_index}: staged target"
+                    );
+
+                    let move_bps = accepted_mark_reference_move_bps(
+                        before_profile.mark_ewma_e6,
+                        after_profile.mark_ewma_e6,
+                    );
+                    let insurance_gain = after_group
+                        .insurance
+                        .checked_sub(before_insurance)
+                        .unwrap_or_else(|| {
+                            panic!("{context}/step={step_index}: insurance decreased")
+                        });
+                    let trade_notional = chunk_size
+                        .unsigned_abs()
+                        .checked_mul(accepted as u128)
+                        .and_then(|value| value.checked_add(POS_SCALE - 1))
+                        .expect("repeated accepted-mark trade notional")
+                        / POS_SCALE;
+                    let externality_price = before_asset
+                        .effective_price
+                        .max(before_profile.mark_ewma_e6);
+                    let max_side_notional = before_asset
+                        .oi_eff_long_q
+                        .max(before_asset.oi_eff_short_q)
+                        .checked_mul(externality_price as u128)
+                        .and_then(|value| value.checked_add(POS_SCALE - 1))
+                        .expect("repeated accepted-mark side notional")
+                        / POS_SCALE;
+                    let externality_notional = max_side_notional
+                        .max(trade_notional)
+                        .checked_mul(2)
+                        .expect("repeated accepted-mark externality");
+                    let required_fee = externality_notional
+                        .checked_mul(move_bps as u128)
+                        .and_then(|value| value.checked_add(9_999))
+                        .expect("repeated accepted-mark required fee")
+                        / 10_000;
+                    assert!(
+                        move_bps != 0 && insurance_gain >= required_fee,
+                        "{context}/step={step_index}: {move_bps} bps movement collected {insurance_gain}, required {required_fee}"
+                    );
+
+                    let remaining_q = total_size
+                        .unsigned_abs()
+                        .checked_sub(
+                            chunk_size
+                                .unsigned_abs()
+                                .checked_mul((step_index + 1) as u128)
+                                .expect("repeated accepted-mark reduced quantity"),
+                        )
+                        .expect("repeated accepted-mark remaining quantity");
+                    assert_eq!(
+                        after_asset.oi_eff_long_q, remaining_q,
+                        "{context}/step={step_index}: long OI"
+                    );
+                    assert_eq!(
+                        after_asset.oi_eff_short_q, remaining_q,
+                        "{context}/step={step_index}: short OI"
+                    );
+                    assert_eq!(
+                        after_group.vault, before_group.vault,
+                        "{context}/step={step_index}: trade changed custody stock"
+                    );
+                    assert_eq!(
+                        env.token_supply_observed(),
+                        baseline_supply,
+                        "{context}/step={step_index}: token supply"
+                    );
+                    assert_eq!(
+                        env.market_data(true),
+                        baseline_foreign,
+                        "{context}/step={step_index}: foreign market frame"
+                    );
+                    crate::support::fuzz_model::assert_public_stock_census(
+                        &format!("{context}/step={step_index}"),
+                        &env,
+                    )
+                    .unwrap_or_else(|error| panic!("repeated mark stock census: {error}"));
+                    crate::support::fuzz_model::assert_public_encumbrance_census(
+                        &format!("{context}/step={step_index}"),
+                        &env,
+                    )
+                    .unwrap_or_else(|error| panic!("repeated mark encumbrance census: {error}"));
+                    movement_count += 1;
+                    previous_route = route;
+                }
+
+                let final_catch_up = crank_accepted_mark_target(
+                    &mut env,
+                    mode,
+                    MAX_DT,
+                    oracle,
+                    &format!("{context}/final"),
+                )
+                .unwrap_or_else(|error| panic!("final repeated mark catch-up: {error}"));
+                max_cu = max_cu.max(final_catch_up.compute_units);
+                catch_up_count += 1;
+
+                let before_missing_hint = accepted_mark_snapshot(&env);
+                assert!(
+                    env.crank(1, env.current_slot(), Vec::new()).is_err(),
+                    "{context}: a flat stale account unexpectedly refreshed without an asset observation"
+                );
+                assert_eq!(
+                    accepted_mark_snapshot(&env),
+                    before_missing_hint,
+                    "{context}: missing-observation rejection did not roll back exactly"
+                );
+                missing_hint_rejection_count += 1;
+
+                let terminal_observations = vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: u8::from(mode == AcceptedMarkMode::HybridAfterHours),
+                }];
+                let terminal_refresh = if mode == AcceptedMarkMode::HybridAfterHours {
+                    env.crank_with_oracles(
+                        1,
+                        env.current_slot(),
+                        terminal_observations,
+                        &[oracle.expect("hybrid oracle")],
+                    )
+                } else {
+                    env.crank(1, env.current_slot(), terminal_observations)
+                }
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{context}: hinted refresh second owner before terminal conversion: {error}"
+                    )
+                });
+                max_cu = max_cu.max(terminal_refresh.compute_units);
+                terminal_refresh_count += 1;
+                crate::support::fuzz_model::assert_public_stock_census(
+                    &format!("{context}/terminal-refresh"),
+                    &env,
+                )
+                .unwrap_or_else(|error| panic!("repeated mark terminal refresh stock: {error}"));
+                crate::support::fuzz_model::assert_public_encumbrance_census(
+                    &format!("{context}/terminal-refresh"),
+                    &env,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("repeated mark terminal refresh encumbrance: {error}")
+                });
+
+                for actor in [0usize, 1] {
+                    let released = env.primary_portfolio(actor).pnl.get().max(0) as u128;
+                    if released != 0 {
+                        let conversion =
+                            env.convert_released_pnl(actor, released)
+                                .unwrap_or_else(|error| {
+                                    panic!("{context}/actor={actor}: convert PnL: {error}")
+                                });
+                        max_cu = max_cu.max(conversion.compute_units);
+                    }
+                }
+                let destination_before =
+                    [0usize, 1].map(|actor| env.token_amount(env.actors[actor].destination_token));
+                for actor in [0usize, 1] {
+                    let portfolio = env.primary_portfolio(actor);
+                    assert_eq!(
+                        portfolio.pnl.get(),
+                        0,
+                        "{context}/actor={actor}: terminal PnL"
+                    );
+                    let capital = portfolio.capital.get();
+                    assert_ne!(capital, 0, "{context}/actor={actor}: exit was vacuous");
+                    let withdrawal = env
+                        .withdraw_primary(actor, capital)
+                        .unwrap_or_else(|error| {
+                            panic!("{context}/actor={actor}: withdraw all capital: {error}")
+                        });
+                    max_cu = max_cu.max(withdrawal.compute_units);
+                    let destination_after = env.token_amount(env.actors[actor].destination_token);
+                    assert_eq!(
+                        u128::from(destination_after - destination_before[actor]),
+                        capital,
+                        "{context}/actor={actor}: exact owner payout"
+                    );
+                    assert_eq!(
+                        env.primary_portfolio(actor).capital.get(),
+                        0,
+                        "{context}/actor={actor}: capital did not exit"
+                    );
+                    crate::support::fuzz_model::assert_public_stock_census(
+                        &format!("{context}/actor={actor}/withdrawn"),
+                        &env,
+                    )
+                    .unwrap_or_else(|error| panic!("repeated mark exit stock census: {error}"));
+                    crate::support::fuzz_model::assert_public_encumbrance_census(
+                        &format!("{context}/actor={actor}/withdrawn"),
+                        &env,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("repeated mark exit encumbrance census: {error}")
+                    });
+                    withdrawal_count += 1;
+                }
+                assert_eq!(
+                    env.token_supply_observed(),
+                    baseline_supply,
+                    "{context}: supply"
+                );
+                assert_eq!(env.market_data(true), baseline_foreign, "{context}: frame");
+                world_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        world_count, 16,
+        "two modes x two directions x four route cycles"
+    );
+    assert_eq!(movement_count, 64, "four paid mark movements per world");
+    assert_eq!(
+        catch_up_count, 64,
+        "every staged mark receives one bounded crank"
+    );
+    assert_eq!(
+        missing_hint_rejection_count, 16,
+        "every flat stale account rejects an omitted observation with exact rollback"
+    );
+    assert_eq!(
+        terminal_refresh_count, 16,
+        "the second owner receives one bounded hinted terminal refresh per world"
+    );
+    assert_eq!(
+        stale_cpi_rejections, 16,
+        "each full route cycle crosses one stale no-CPI-to-CPI capability"
+    );
+    assert_eq!(withdrawal_count, 32, "both owners exit every world");
     assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
 }
 
