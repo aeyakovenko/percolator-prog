@@ -36,6 +36,12 @@
 //! modes, and routes. Every accepted movement remains inside the independent elapsed-time clamp,
 //! is covered by retained insurance, cannot compound on the second same-slot partial reduction,
 //! and ends with zero OI and exact coalition/custody conservation.
+//! `v16_program_trade_driven_mark_route_orders_converge_economically` exhausts every ordered pair
+//! of partial-reduction routes in both trade-driven mark modes and both price directions. Reversing
+//! the two routes from an identical public setup must produce the same per-user value, mark/target,
+//! insurance, capital, vault, and token-supply outcome. A CPI route following an out-of-matcher
+//! fill must first reject with exact rollback; the LP then refreshes its matcher capability through
+//! the public config route and the identical reduction must succeed.
 //! These tests exercise the deployed public wrapper with real SBF/LiteSVM account construction and
 //! assert economic state, token, rollback, liveness, or compute outcomes appropriate to the
 //! invariant.
@@ -179,6 +185,13 @@ fn accepted_mark_pair_value_and_insurance(env: &V16Svm) -> i128 {
         })
         .sum::<i128>();
     account_value + i128::try_from(group.insurance).expect("test insurance fits i128")
+}
+
+fn accepted_mark_actor_values(env: &V16Svm) -> [i128; 2] {
+    [0usize, 1].map(|actor| {
+        let account = env.primary_portfolio(actor);
+        i128::try_from(account.capital.get()).expect("test capital fits i128") + account.pnl.get()
+    })
 }
 
 fn accepted_mark_route_is_cpi(route: DiscoveryTradeRoute) -> bool {
@@ -382,13 +395,82 @@ struct AcceptedMarkCase {
     landing_dt: u64,
 }
 
-fn run_valid_accepted_mark_case(
-    mode: AcceptedMarkMode,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AcceptedMarkEconomicOutcome {
+    actor_values: [i128; 2],
+    mark: u64,
+    raw_target: u64,
+    effective_price: u64,
+    insurance: u128,
+    capital_total: u128,
+    vault: u128,
+    token_supply: u128,
+}
+
+#[derive(Clone, Debug)]
+struct AcceptedMarkRun {
+    outcome: AcceptedMarkEconomicOutcome,
+    max_cu: u64,
+    stale_cpi_rejections: usize,
+}
+
+#[derive(Debug)]
+struct AcceptedMarkSubmission {
+    trade: TxSuccess,
+    refresh: Option<TxSuccess>,
+    stale_cpi_rejected: bool,
+}
+
+fn submit_accepted_mark_trade_after_route(
+    env: &mut V16Svm,
+    previous_route: DiscoveryTradeRoute,
     route: DiscoveryTradeRoute,
+    size_q: i128,
+    no_cpi_price: u64,
+    context: &str,
+) -> Result<AcceptedMarkSubmission, String> {
+    if accepted_mark_route_is_cpi(route) && !accepted_mark_route_is_cpi(previous_route) {
+        let before = accepted_mark_snapshot(env);
+        if submit_accepted_mark_trade(env, route, size_q, no_cpi_price).is_ok() {
+            return Err(format!(
+                "{context}: stale matcher capability survived an out-of-matcher position mutation"
+            ));
+        }
+        if accepted_mark_snapshot(env) != before {
+            return Err(format!(
+                "{context}: stale matcher-capability rejection did not roll back exactly"
+            ));
+        }
+        let refresh = env
+            .set_matcher_config(1, 1)
+            .map_err(|error| format!("{context}: refresh matcher capability: {error}"))?;
+        let trade = submit_accepted_mark_trade(env, route, size_q, no_cpi_price)
+            .map_err(|error| format!("{context}: refreshed matcher fill: {error}"))?;
+        return Ok(AcceptedMarkSubmission {
+            trade,
+            refresh: Some(refresh),
+            stale_cpi_rejected: true,
+        });
+    }
+
+    submit_accepted_mark_trade(env, route, size_q, no_cpi_price)
+        .map(|trade| AcceptedMarkSubmission {
+            trade,
+            refresh: None,
+            stale_cpi_rejected: false,
+        })
+        .map_err(|error| format!("{context}: route fill: {error}"))
+}
+
+fn run_valid_accepted_mark_route_sequence(
+    mode: AcceptedMarkMode,
+    setup_route: DiscoveryTradeRoute,
+    first_route: DiscoveryTradeRoute,
+    second_route: DiscoveryTradeRoute,
     case: AcceptedMarkCase,
-) -> Result<u64, String> {
+) -> Result<AcceptedMarkRun, String> {
     let context = format!(
-        "{mode:?}/{route:?}/anchor={}/target={}/cap={}/max_dt={}/dt={}",
+        "{mode:?}/{setup_route:?}->{first_route:?}->{second_route:?}/anchor={}/target={}/cap={}/max_dt={}/dt={}",
         case.anchor, case.target, case.cap_bps, case.max_dt, case.landing_dt
     );
     let mut env = V16Svm::new(
@@ -407,11 +489,11 @@ fn run_valid_accepted_mark_case(
     if half_size == 0 || half_size.checked_mul(2) != Some(case.total_size) {
         return Err(format!("{context}: split-fill size is not exact"));
     }
-    if accepted_mark_route_is_cpi(route) {
+    if accepted_mark_route_is_cpi(setup_route) {
         env.set_matcher_spreads(1, 0, 0)
-            .map_err(|error| format!("configure {route:?} setup matcher: {error}"))?;
+            .map_err(|error| format!("configure {setup_route:?} setup matcher: {error}"))?;
     }
-    let setup = submit_accepted_mark_trade(&mut env, route, -case.total_size, case.anchor)
+    let setup = submit_accepted_mark_trade(&mut env, setup_route, -case.total_size, case.anchor)
         .map_err(|error| format!("{context} setup open: {error}"))?;
     let setup_group = env.primary_market_state().1;
     if setup_group.assets[0].oi_eff_long_q != case.total_size.unsigned_abs()
@@ -420,7 +502,7 @@ fn run_valid_accepted_mark_case(
         return Err(format!("{context}: setup did not create exact matched OI"));
     }
     let landing_slot = prepare_accepted_mark_landing_dt(&mut env, mode, case.landing_dt, oracle)?;
-    configure_accepted_mark_target_quote(&mut env, route, case.anchor, case.target)?;
+    configure_accepted_mark_target_quote(&mut env, first_route, case.anchor, case.target)?;
 
     let before_profile = env.primary_profile(0);
     let before_group = env.primary_market_state().1;
@@ -437,8 +519,14 @@ fn run_valid_accepted_mark_case(
         ));
     }
 
-    let first = submit_accepted_mark_trade(&mut env, route, half_size, case.target)
-        .map_err(|error| format!("{context} first fill: {error}"))?;
+    let first = submit_accepted_mark_trade_after_route(
+        &mut env,
+        setup_route,
+        first_route,
+        half_size,
+        case.target,
+        &format!("{context} first fill"),
+    )?;
     let first_profile = env.primary_profile(0);
     let first_group = env.primary_market_state().1;
     let expected_accepted = if mode.updates_from_trade() {
@@ -516,8 +604,15 @@ fn run_valid_accepted_mark_case(
         ));
     }
 
-    let second = submit_accepted_mark_trade(&mut env, route, half_size, case.target)
-        .map_err(|error| format!("{context} second fill: {error}"))?;
+    configure_accepted_mark_target_quote(&mut env, second_route, case.anchor, case.target)?;
+    let second = submit_accepted_mark_trade_after_route(
+        &mut env,
+        first_route,
+        second_route,
+        half_size,
+        case.target,
+        &format!("{context} second fill"),
+    )?;
     let second_profile = env.primary_profile(0);
     if second_profile.mark_ewma_e6 != first_profile.mark_ewma_e6 {
         return Err(format!(
@@ -537,13 +632,48 @@ fn run_valid_accepted_mark_case(
         ));
     }
     let max_cu = first
+        .trade
         .compute_units
-        .max(second.compute_units)
-        .max(setup.compute_units);
+        .max(second.trade.compute_units)
+        .max(setup.compute_units)
+        .max(
+            first
+                .refresh
+                .as_ref()
+                .map_or(0, |success| success.compute_units),
+        )
+        .max(
+            second
+                .refresh
+                .as_ref()
+                .map_or(0, |success| success.compute_units),
+        );
     if max_cu >= crate::support::v16_svm::TX_CU_LIMIT {
         return Err(format!("{context}: route consumed {max_cu} CU"));
     }
-    Ok(max_cu)
+    Ok(AcceptedMarkRun {
+        outcome: AcceptedMarkEconomicOutcome {
+            actor_values: accepted_mark_actor_values(&env),
+            mark: second_profile.mark_ewma_e6,
+            raw_target: exited.assets[0].raw_oracle_target_price,
+            effective_price: exited.assets[0].effective_price,
+            insurance: exited.insurance,
+            capital_total: exited.c_tot,
+            vault: exited.vault,
+            token_supply: env.token_supply_observed(),
+        },
+        max_cu,
+        stale_cpi_rejections: usize::from(first.stale_cpi_rejected)
+            + usize::from(second.stale_cpi_rejected),
+    })
+}
+
+fn run_valid_accepted_mark_case(
+    mode: AcceptedMarkMode,
+    route: DiscoveryTradeRoute,
+    case: AcceptedMarkCase,
+) -> Result<u64, String> {
+    run_valid_accepted_mark_route_sequence(mode, route, route, route, case).map(|run| run.max_cu)
 }
 
 fn run_valid_accepted_mark_boundary(
@@ -679,6 +809,86 @@ fn v16_program_accepted_mark_boundary_matrix_is_paid_atomic_and_exit_live() {
     }
     assert_eq!(valid_cells, 64, "complete valid mode/route/dt matrix");
     assert_eq!(invalid_cells, 16, "complete invalid route/dt matrix");
+    assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
+}
+
+#[test]
+fn v16_program_trade_driven_mark_route_orders_converge_economically() {
+    let mut world_count = 0usize;
+    let mut reversal_count = 0usize;
+    let mut stale_cpi_rejections = 0usize;
+    let mut max_cu = 0u64;
+
+    for mode in [
+        AcceptedMarkMode::EwmaMark,
+        AcceptedMarkMode::HybridAfterHours,
+    ] {
+        for rises in [false, true] {
+            for first_index in 0..DiscoveryTradeRoute::ALL.len() {
+                for second_index in first_index..DiscoveryTradeRoute::ALL.len() {
+                    let setup_index = (first_index + second_index) % DiscoveryTradeRoute::ALL.len();
+                    let setup_route = DiscoveryTradeRoute::ALL[setup_index];
+                    let first_route = DiscoveryTradeRoute::ALL[first_index];
+                    let second_route = DiscoveryTradeRoute::ALL[second_index];
+                    let mut seed = [0x4f; 32];
+                    seed[0] = mode as u8;
+                    seed[1] = rises as u8;
+                    seed[2] = first_index as u8;
+                    seed[3] = second_index as u8;
+                    let case = AcceptedMarkCase {
+                        seed,
+                        anchor: 1_000_000,
+                        target: if rises { 1_250_000 } else { 750_000 },
+                        total_size: if rises {
+                            POS_SCALE as i128
+                        } else {
+                            -(POS_SCALE as i128)
+                        },
+                        cap_bps: 25,
+                        max_dt: 6,
+                        landing_dt: 3,
+                    };
+                    let forward = run_valid_accepted_mark_route_sequence(
+                        mode,
+                        setup_route,
+                        first_route,
+                        second_route,
+                        case,
+                    )
+                    .unwrap_or_else(|error| panic!("forward route-order cell failed: {error}"));
+                    max_cu = max_cu.max(forward.max_cu);
+                    stale_cpi_rejections += forward.stale_cpi_rejections;
+                    world_count += 1;
+
+                    if first_index != second_index {
+                        let reverse = run_valid_accepted_mark_route_sequence(
+                            mode,
+                            setup_route,
+                            second_route,
+                            first_route,
+                            case,
+                        )
+                        .unwrap_or_else(|error| panic!("reverse route-order cell failed: {error}"));
+                        assert_eq!(
+                            reverse.outcome, forward.outcome,
+                            "{mode:?}/{rises:?}/{first_route:?}<->{second_route:?}: route landing order changed the normalized economic outcome"
+                        );
+                        max_cu = max_cu.max(reverse.max_cu);
+                        stale_cpi_rejections += reverse.stale_cpi_rejections;
+                        reversal_count += 1;
+                        world_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    assert_eq!(reversal_count, 24, "two modes/directions x six route pairs");
+    assert_eq!(world_count, 64, "complete ordered route-pair world count");
+    assert_eq!(
+        stale_cpi_rejections, 32,
+        "every no-CPI-to-CPI transition rejects atomically before public refresh"
+    );
     assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
 }
 
