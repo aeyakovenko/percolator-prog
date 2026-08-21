@@ -5,9 +5,11 @@
 //! Evidence in this file (I/C plus invariant-specific M assertions): wash-trade fee coverage,
 //! no-CPI zero/epsilon/extreme reported-price normalization, CPI matcher quote pinning, same-slot
 //! and per-slot EWMA circuit breakers, and underfunded exits that cannot move EWMA with an
-//! uncollectible fee. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! uncollectible fee. A public 14-asset composition additionally pays the maximum elapsed-time
+//! movement, refreshes both portfolios, enters DrainOnly, closes every leg at raw price one within
+//! the SVM ceiling, converts the exact released PnL, and reconciles terminal custody. These tests
+//! exercise the deployed public wrapper with real SBF/LiteSVM account construction and assert
+//! economic state, token, rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -1048,4 +1050,292 @@ fn v16_attack_crank_dt_clamp_blocks_retroactive_settle() {
         g2.vault >= g2.c_tot + g2.insurance,
         "senior conservation after second crank"
     );
+}
+
+fn configure_max_shape_ewma_asset(
+    env: &mut V16CuEnv,
+    asset_index: u16,
+    now_slot: u64,
+    mark_e6: u64,
+) {
+    let observation_sequence = next_control_sequence(
+        env.control_sequences(asset_index as usize)
+            .oracle_observation,
+    );
+    let market_id = env.asset_market_id(asset_index);
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureEwmaMark {
+            market_id,
+            asset_index,
+            now_slot,
+            initial_mark_e6: mark_e6,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            observation_sequence,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("configure maximum-shape EWMA asset");
+}
+
+#[test]
+fn v16_program_max_shape_ewma_movement_is_paid_and_drain_only_exit_stays_bounded() {
+    const ASSET_COUNT: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const MARK: u64 = 1_000_000;
+    const RAW_UP: u64 = 2_000_000;
+    const DEPOSIT: u128 = 25_000_000;
+    const EXPECTED_MARK: u64 = 1_005_000;
+    const EXPECTED_FEE_PER_ASSET: u128 = 10_100;
+    const EXPECTED_RELEASED_PNL_PER_ASSET: u128 = 5_000;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: ASSET_COUNT,
+        initial_price: MARK,
+        max_trading_fee_bps: 100,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    for asset_index in 0..ASSET_COUNT {
+        configure_max_shape_ewma_asset(&mut env, asset_index, 0, MARK);
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    let vault_before = env.token_amount(env.vault);
+
+    env.svm.warp_to_slot(1);
+    let open_legs = (0..ASSET_COUNT)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            market_id: env.asset_market_id(asset_index),
+            size_q: POS_SCALE as i128,
+            exec_price: RAW_UP,
+            fee_bps: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let open_cu = env
+        .send(
+            env.batch_trade_no_cpi_ix(long, short, open_legs),
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new(short, false),
+            ],
+            &[&long_owner, &short_owner],
+        )
+        .expect("maximum-shape paid EWMA batch");
+
+    let after_open = env.market_state().1;
+    assert_eq!(after_open.vault as u64, vault_before);
+    assert_eq!(
+        after_open.insurance,
+        EXPECTED_FEE_PER_ASSET * u128::from(ASSET_COUNT)
+    );
+    assert_eq!(
+        after_open.insurance_domain_budget.iter().sum::<u128>(),
+        0,
+        "trade-driven mark fees remain nonwithdrawable"
+    );
+    assert_eq!(after_open.c_tot + after_open.insurance, after_open.vault);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(long))),
+        u32::from(ASSET_COUNT)
+    );
+    for asset_index in 0..ASSET_COUNT {
+        let profile = state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            asset_index as usize,
+        )
+        .unwrap();
+        assert_eq!(profile.mark_ewma_e6, EXPECTED_MARK);
+        assert_eq!(profile.oracle_target_price_e6, EXPECTED_MARK);
+        assert_eq!(
+            after_open.assets[asset_index as usize].raw_oracle_target_price,
+            EXPECTED_MARK
+        );
+        assert_eq!(
+            after_open.assets[asset_index as usize].effective_price,
+            MARK
+        );
+    }
+
+    let asset_indices = (0..ASSET_COUNT).collect::<Vec<_>>();
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations_for_assets(&asset_indices),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("maximum-shape paid EWMA refresh");
+    let after_refresh = env.market_state().1;
+    for asset_index in 0..ASSET_COUNT as usize {
+        assert_eq!(
+            after_refresh.assets[asset_index].effective_price,
+            EXPECTED_MARK
+        );
+        assert_eq!(
+            after_refresh.assets[asset_index].raw_oracle_target_price,
+            EXPECTED_MARK
+        );
+    }
+
+    for asset_index in 0..ASSET_COUNT {
+        env.update_asset_lifecycle_as_admin_with_cu(
+            processor::ASSET_ACTION_DRAIN_ONLY,
+            asset_index,
+            0,
+            0,
+        );
+    }
+    let cert_current = |env: &V16CuEnv, portfolio: Pubkey| {
+        let group = env.market_state().1;
+        let account = env.portfolio_state(portfolio);
+        let cert = health_cert(&account);
+        cert.valid
+            && cert.cert_oracle_epoch == group.oracle_epoch
+            && cert.cert_funding_epoch == group.funding_epoch
+            && cert.cert_risk_epoch == group.risk_epoch
+            && cert.cert_asset_set_epoch == group.asset_set_epoch
+            && cert.active_bitmap_at_cert == active_bitmap(&account)
+    };
+    let mut drain_refresh_cu = 0;
+    for _ in 0..(u32::from(ASSET_COUNT) * 2 + 4) {
+        for portfolio in [long, short] {
+            if !cert_current(&env, portfolio) {
+                drain_refresh_cu = drain_refresh_cu.max(env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 1,
+                        observations: vec![],
+                    },
+                ));
+            }
+        }
+        if cert_current(&env, long) && cert_current(&env, short) {
+            break;
+        }
+    }
+    assert!(
+        cert_current(&env, long) && cert_current(&env, short),
+        "permissionless refresh must reach a two-account certificate fixed point"
+    );
+    let fee_stock_before_exit = env.market_state().1.insurance;
+    let long_capital_before_exit = env.portfolio_state(long).capital.get();
+    let short_capital_before_exit = env.portfolio_state(short).capital.get();
+    let close_legs = (0..ASSET_COUNT)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            market_id: env.asset_market_id(asset_index),
+            size_q: -(POS_SCALE as i128),
+            exec_price: 1,
+            fee_bps: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            env.batch_trade_no_cpi_ix(long, short, close_legs),
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new(short, false),
+            ],
+            &[&long_owner, &short_owner],
+        )
+        .expect("maximum-shape DrainOnly extreme-price reduction");
+
+    let after_close = env.market_state().1;
+    assert_eq!(after_close.insurance, fee_stock_before_exit);
+    assert_eq!(
+        env.portfolio_state(long).capital.get(),
+        long_capital_before_exit
+    );
+    assert_eq!(
+        env.portfolio_state(short).capital.get(),
+        short_capital_before_exit
+    );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(long))),
+        0
+    );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(short))),
+        0
+    );
+    for asset_index in 0..ASSET_COUNT as usize {
+        assert_eq!(after_close.assets[asset_index].oi_eff_long_q, 0);
+        assert_eq!(after_close.assets[asset_index].oi_eff_short_q, 0);
+        let profile = state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            asset_index,
+        )
+        .unwrap();
+        assert_eq!(profile.mark_ewma_e6, EXPECTED_MARK);
+    }
+
+    let released_pnl = EXPECTED_RELEASED_PNL_PER_ASSET * u128::from(ASSET_COUNT);
+    assert_eq!(env.portfolio_state(long).pnl.get(), released_pnl as i128);
+    assert_eq!(env.portfolio_state(short).pnl.get(), 0);
+    let convert_cu = env.convert_released_pnl_with_cu(&long_owner, long, released_pnl);
+    let long_after_convert = env.portfolio_state(long);
+    let short_after_convert = env.portfolio_state(short);
+    assert_eq!(long_after_convert.pnl.get(), 0);
+    assert_eq!(short_after_convert.pnl.get(), 0);
+    assert_eq!(
+        long_after_convert.capital.get() + short_after_convert.capital.get(),
+        2 * DEPOSIT - fee_stock_before_exit
+    );
+
+    let long_dest = env.withdraw(&long_owner, long, long_after_convert.capital.get());
+    let short_dest = env.withdraw(&short_owner, short, short_after_convert.capital.get());
+    assert_eq!(
+        u128::from(env.token_amount(long_dest)) + u128::from(env.token_amount(short_dest)),
+        2 * DEPOSIT - fee_stock_before_exit
+    );
+    env.close_portfolio_with_cu(&long_owner, long);
+    env.close_portfolio_with_cu(&short_owner, short);
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.vault, terminal.insurance);
+    assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+    assert_eq!(terminal.vault, fee_stock_before_exit);
+
+    println!(
+        "INV-045 max-shape paid EWMA open={open_cu} movement-refresh={refresh_cu} \
+         drain-refresh={drain_refresh_cu} \
+         DrainOnly-close={close_cu} convert={convert_cu}"
+    );
+    for (label, cu) in [
+        ("paid EWMA open", open_cu),
+        ("paid EWMA refresh", refresh_cu),
+        ("DrainOnly refresh", drain_refresh_cu),
+        ("DrainOnly extreme-price close", close_cu),
+        ("released PnL conversion", convert_cu),
+    ] {
+        assert!(cu < 1_400_000, "{label} consumed {cu} CU");
+    }
 }

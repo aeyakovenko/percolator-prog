@@ -3,9 +3,10 @@
 //! Normative obligation: Economically equivalent public routes have equivalent normalized state deltas.
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): empty-target crank
-//! equivalence and batch end-state margin protection. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! equivalence, batch end-state margin protection, and exact normalized sequential/batch position
+//! semantics across clear, lower-slot flip reuse, attach, and resize in one route. These tests
+//! exercise the deployed public wrapper with real SBF/LiteSVM account construction and assert
+//! economic state, token, rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -26,6 +27,135 @@ struct OneLegRouteSnapshot {
     account_b_basis_q: i128,
     account_a_pnl: i128,
     account_b_pnl: i128,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MixedPositionRouteSnapshot {
+    vault: u128,
+    c_tot: u128,
+    insurance: u128,
+    oi: [(u128, u128); 4],
+    account_a_capital: u128,
+    account_b_capital: u128,
+    account_a_pnl: i128,
+    account_b_pnl: i128,
+    account_a_legs: Vec<(usize, u32, i128)>,
+    account_b_legs: Vec<(usize, u32, i128)>,
+}
+
+fn active_route_legs(account: &PortfolioAccountV16) -> Vec<(usize, u32, i128)> {
+    account
+        .legs
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, leg)| {
+            let leg = leg.try_to_runtime().ok()?;
+            leg.active
+                .then_some((slot, leg.asset_index, leg.basis_pos_q))
+        })
+        .collect()
+}
+
+fn mixed_position_route_snapshot(batch: bool) -> MixedPositionRouteSnapshot {
+    const ASSET_COUNT: u16 = 4;
+    const PRICE: u64 = 1_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: ASSET_COUNT,
+        initial_price: PRICE,
+        ..V16CuMarketParams::default()
+    });
+    for asset_index in 0..ASSET_COUNT {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, PRICE);
+    }
+
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, account_a, 100_000_000);
+    env.deposit(&owner_b, account_b, 100_000_000);
+    for (asset_index, size_q) in [
+        (0, 2 * POS_SCALE as i128),
+        (1, POS_SCALE as i128),
+        (2, POS_SCALE as i128),
+    ] {
+        env.trade_asset_with_cu(
+            asset_index,
+            &owner_a,
+            account_a,
+            &owner_b,
+            account_b,
+            size_q,
+            PRICE,
+            0,
+        );
+    }
+
+    let route_legs = [
+        (1, -(POS_SCALE as i128)),
+        (2, -(2 * POS_SCALE as i128)),
+        (3, POS_SCALE as i128),
+        (0, -(POS_SCALE as i128)),
+    ];
+    if batch {
+        let legs = route_legs
+            .iter()
+            .map(|(asset_index, size_q)| BatchTradeLeg {
+                asset_index: *asset_index,
+                market_id: first_generation_market_id(*asset_index),
+                size_q: *size_q,
+                exec_price: PRICE,
+                fee_bps: 0,
+            })
+            .collect();
+        env.svm.expire_blockhash();
+        env.send(
+            env.batch_trade_no_cpi_ix(account_a, account_b, legs),
+            vec![
+                AccountMeta::new(owner_a.pubkey(), true),
+                AccountMeta::new(owner_b.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+            ],
+            &[&owner_a, &owner_b],
+        )
+        .expect("mixed clear/flip/attach/resize batch");
+    } else {
+        for (asset_index, size_q) in route_legs {
+            env.trade_asset_with_cu(
+                asset_index,
+                &owner_a,
+                account_a,
+                &owner_b,
+                account_b,
+                size_q,
+                PRICE,
+                0,
+            );
+        }
+    }
+
+    let group = env.market_state().1;
+    let account_a = env.portfolio_state(account_a);
+    let account_b = env.portfolio_state(account_b);
+    MixedPositionRouteSnapshot {
+        vault: group.vault,
+        c_tot: group.c_tot,
+        insurance: group.insurance,
+        oi: core::array::from_fn(|asset_index| {
+            (
+                group.assets[asset_index].oi_eff_long_q,
+                group.assets[asset_index].oi_eff_short_q,
+            )
+        }),
+        account_a_capital: account_a.capital.get(),
+        account_b_capital: account_b.capital.get(),
+        account_a_pnl: account_a.pnl.get(),
+        account_b_pnl: account_b.pnl.get(),
+        account_a_legs: active_route_legs(&account_a),
+        account_b_legs: active_route_legs(&account_b),
+    }
 }
 
 fn route_basis_for_asset(account: &PortfolioAccountV16, asset_index: usize) -> i128 {
@@ -107,6 +237,22 @@ fn v16_program_one_leg_batch_nocpi_matches_single_nocpi_fee_trade() {
     assert_eq!(
         batch, single,
         "a one-leg BatchTradeNoCpi must preserve the exact economic delta of TradeNoCpi, including fees",
+    );
+}
+
+#[test]
+fn v16_program_unique_batch_position_plan_matches_sequential_route_and_slot_semantics() {
+    let sequential = mixed_position_route_snapshot(false);
+    let batch = mixed_position_route_snapshot(true);
+    assert_eq!(batch, sequential);
+    assert_eq!(
+        batch.account_a_legs,
+        vec![
+            (0, 0, POS_SCALE as i128),
+            (1, 2, -(POS_SCALE as i128)),
+            (2, 3, POS_SCALE as i128)
+        ],
+        "clear frees slot 1, flip reuses the lowest slot, and attach takes slot 2"
     );
 }
 
