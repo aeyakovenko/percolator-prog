@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Charged fees reach only the authorized destination under the bound policy version.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value`, `v16_attack_mixed_direction_batch_fees_conserve_by_asset`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value`, `v16_program_mixed_direction_fee_allocation_matches_independent_side_ledger`, `v16_attack_mixed_direction_batch_fees_conserve_by_asset`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -299,6 +299,263 @@ fn v16_program_signed_direction_route_matrix_preserves_side_attribution_and_term
             assert_eq!(
                 actual, expected,
                 "{path:?} must equal single no-CPI for opening size {opening_size_q}"
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MixedDirectionFeePath {
+    SequentialNoCpi,
+    BatchNoCpi,
+    SequentialCpi,
+    BatchCpi,
+}
+
+impl MixedDirectionFeePath {
+    const ALL: [Self; 4] = [
+        Self::SequentialNoCpi,
+        Self::BatchNoCpi,
+        Self::SequentialCpi,
+        Self::BatchCpi,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MixedDirectionFeeOutcome {
+    domain_budgets: [u128; 4],
+    insurance: u128,
+    terminal_vault: u128,
+}
+
+fn run_mixed_direction_fee_world(
+    path: MixedDirectionFeePath,
+    reverse_leg_order: bool,
+) -> MixedDirectionFeeOutcome {
+    const MARK: u64 = 1_000_000;
+    const FEE: u128 = MARK as u128;
+    const LOW_CAPITAL: u128 = 250_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: MARK,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_for_asset_as_admin(0, 1, MARK);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, MARK);
+
+    let low_owner = Keypair::new();
+    let funded_owner = Keypair::new();
+    let low = env.create_portfolio(&low_owner);
+    let funded = env.create_portfolio(&funded_owner);
+    env.deposit(&low_owner, low, LOW_CAPITAL);
+    env.deposit(&funded_owner, funded, 4 * FEE);
+
+    // Account A starts long asset 0 and short asset 1. Its two closing requests therefore have
+    // opposite signs while the physical fee payer remains the same account in both legs.
+    env.send(
+        env.batch_trade_no_cpi_ix(
+            low,
+            funded,
+            vec![
+                BatchTradeLeg {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    size_q: POS_SCALE as i128,
+                    exec_price: MARK,
+                    fee_bps: 0,
+                },
+                BatchTradeLeg {
+                    asset_index: 1,
+                    market_id: env.asset_market_id(1),
+                    size_q: -(POS_SCALE as i128),
+                    exec_price: MARK,
+                    fee_bps: 0,
+                },
+            ],
+        ),
+        vec![
+            AccountMeta::new(low_owner.pubkey(), true),
+            AccountMeta::new(funded_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(low, false),
+            AccountMeta::new(funded, false),
+        ],
+        &[&low_owner, &funded_owner],
+    )
+    .expect("route-neutral mixed-direction opening batch");
+
+    env.update_trade_fee_policy_with_cu(10_000);
+    let mut close_legs = [(0u16, -(POS_SCALE as i128)), (1u16, POS_SCALE as i128)];
+    if reverse_leg_order {
+        close_legs.reverse();
+    }
+    match path {
+        MixedDirectionFeePath::SequentialNoCpi => {
+            for (asset_index, size_q) in close_legs {
+                env.svm.expire_blockhash();
+                env.trade_asset_with_cu(
+                    asset_index,
+                    &low_owner,
+                    low,
+                    &funded_owner,
+                    funded,
+                    size_q,
+                    MARK,
+                    10_000,
+                );
+            }
+        }
+        MixedDirectionFeePath::BatchNoCpi => {
+            env.svm.expire_blockhash();
+            env.send(
+                env.batch_trade_no_cpi_ix(
+                    low,
+                    funded,
+                    close_legs
+                        .into_iter()
+                        .map(|(asset_index, size_q)| BatchTradeLeg {
+                            asset_index,
+                            market_id: env.asset_market_id(asset_index),
+                            size_q,
+                            exec_price: MARK,
+                            fee_bps: 10_000,
+                        })
+                        .collect(),
+                ),
+                vec![
+                    AccountMeta::new(low_owner.pubkey(), true),
+                    AccountMeta::new(funded_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(low, false),
+                    AccountMeta::new(funded, false),
+                ],
+                &[&low_owner, &funded_owner],
+            )
+            .expect("mixed-direction BatchTradeNoCpi close");
+        }
+        MixedDirectionFeePath::SequentialCpi | MixedDirectionFeePath::BatchCpi => {
+            let (matcher_program, ctx, delegate) =
+                auth_matcher_for_lp_via_system_create(&mut env, &funded_owner, funded);
+            match path {
+                MixedDirectionFeePath::SequentialCpi => {
+                    for (asset_index, size_q) in close_legs {
+                        env.svm.expire_blockhash();
+                        env.trade_cpi_with_cu_on_asset(
+                            &low_owner,
+                            low,
+                            &funded_owner,
+                            funded,
+                            matcher_program,
+                            ctx,
+                            delegate,
+                            asset_index,
+                            size_q,
+                            10_000,
+                        );
+                    }
+                }
+                MixedDirectionFeePath::BatchCpi => {
+                    env.svm.expire_blockhash();
+                    env.send(
+                        env.batch_trade_cpi_ix(
+                            low,
+                            funded,
+                            close_legs
+                                .into_iter()
+                                .map(|(asset_index, size_q)| BatchTradeCpiLeg {
+                                    asset_index,
+                                    market_id: env.asset_market_id(asset_index),
+                                    size_q,
+                                    fee_bps: 10_000,
+                                    limit_price: 0,
+                                })
+                                .collect(),
+                        ),
+                        vec![
+                            AccountMeta::new(low_owner.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(low, false),
+                            AccountMeta::new(funded, false),
+                            AccountMeta::new_readonly(matcher_program, false),
+                            AccountMeta::new(ctx, false),
+                            AccountMeta::new_readonly(delegate, false),
+                        ],
+                        &[&low_owner],
+                    )
+                    .expect("mixed-direction BatchTradeCpi close");
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    let low_after = env.portfolio_state(low);
+    let funded_after = env.portfolio_state(funded);
+    for asset_index in 0..2 {
+        assert!(!has_active_leg_for_asset(&low_after, asset_index));
+        assert!(!has_active_leg_for_asset(&funded_after, asset_index));
+    }
+    assert_eq!(low_after.capital.get(), 0);
+    assert_eq!(funded_after.capital.get(), 2 * FEE);
+
+    let after_fee = env.market_state().1;
+    let domain_budgets = [
+        after_fee.insurance_domain_budget[0],
+        after_fee.insurance_domain_budget[1],
+        after_fee.insurance_domain_budget[2],
+        after_fee.insurance_domain_budget[3],
+    ];
+    // Independent account-to-side ledger. B pays one full fee on each leg. A's finite capital is
+    // consumed by the first leg and must follow that leg's signed economic side, not account A's
+    // physical index in the engine result.
+    let expected_budgets = if reverse_leg_order {
+        [FEE, 0, LOW_CAPITAL, FEE]
+    } else {
+        [FEE, LOW_CAPITAL, 0, FEE]
+    };
+    assert_eq!(domain_budgets, expected_budgets);
+    assert_eq!(after_fee.insurance, 2 * FEE + LOW_CAPITAL);
+    assert_eq!(
+        domain_budgets.into_iter().sum::<u128>(),
+        after_fee.insurance
+    );
+    assert_eq!(after_fee.vault, 4 * FEE + LOW_CAPITAL);
+    assert_eq!(after_fee.c_tot + after_fee.insurance, after_fee.vault);
+    assert_domain_budget_remaining_total_consistent(&after_fee, "mixed side fee budgets");
+
+    env.update_trade_fee_policy_with_cu(0);
+    let funded_dest = env.withdraw(&funded_owner, funded, 2 * FEE);
+    assert_eq!(env.token_amount(funded_dest) as u128, 2 * FEE);
+    env.close_portfolio_with_cu(&low_owner, low);
+    env.close_portfolio_with_cu(&funded_owner, funded);
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.vault, terminal.insurance);
+    assert_eq!(terminal.vault, 2 * FEE + LOW_CAPITAL);
+    assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+
+    MixedDirectionFeeOutcome {
+        domain_budgets,
+        insurance: terminal.insurance,
+        terminal_vault: terminal.vault,
+    }
+}
+
+#[test]
+fn v16_program_mixed_direction_fee_allocation_matches_independent_side_ledger() {
+    for reverse_leg_order in [false, true] {
+        let expected = run_mixed_direction_fee_world(
+            MixedDirectionFeePath::SequentialNoCpi,
+            reverse_leg_order,
+        );
+        for path in MixedDirectionFeePath::ALL.into_iter().skip(1) {
+            assert_eq!(
+                run_mixed_direction_fee_world(path, reverse_leg_order),
+                expected,
+                "{path:?} must preserve the same per-side fee attribution and terminal custody; \
+                 reverse_leg_order={reverse_leg_order}"
             );
         }
     }
