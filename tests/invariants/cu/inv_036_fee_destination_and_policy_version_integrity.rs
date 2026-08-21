@@ -2,17 +2,17 @@
 //!
 //! Normative obligation: Charged fees reach only the authorized destination under the bound policy version.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_signed_direction_route_matrix_discovers_side_attribution_mismatch`, `v16_attack_mixed_direction_batch_fees_conserve_by_asset`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value`, `v16_attack_mixed_direction_batch_fees_conserve_by_asset`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: the route matrix certifies the independently discovered negative-size
+//! account-ordering case through terminal payout. Broader fee-policy and route cross-products
+//! remain tracked in the invariant roadmap.
 
 use super::*;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DirectionalFeeTerminalOutcome {
     winner_payout: u128,
     long_budget: u128,
@@ -20,8 +20,117 @@ struct DirectionalFeeTerminalOutcome {
     terminal_vault: u128,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum DirectionalFeePath {
+    SingleNoCpi,
+    BatchNoCpi,
+    SingleCpi,
+    BatchCpi,
+}
+
+impl DirectionalFeePath {
+    const ALL: [Self; 4] = [
+        Self::SingleNoCpi,
+        Self::BatchNoCpi,
+        Self::SingleCpi,
+        Self::BatchCpi,
+    ];
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_directional_fee_trade(
+    env: &mut V16CuEnv,
+    path: DirectionalFeePath,
+    owner_a: &Keypair,
+    account_a: Pubkey,
+    owner_b: &Keypair,
+    account_b: Pubkey,
+    size_q: i128,
+    exec_price: u64,
+    fee_bps: u64,
+) {
+    env.svm.expire_blockhash();
+    match path {
+        DirectionalFeePath::SingleNoCpi => env
+            .try_trade_asset_with_cu(
+                0, owner_a, account_a, owner_b, account_b, size_q, exec_price, fee_bps,
+            )
+            .expect("directional TradeNoCpi"),
+        DirectionalFeePath::BatchNoCpi => env
+            .send(
+                env.batch_trade_no_cpi_ix(
+                    account_a,
+                    account_b,
+                    vec![BatchTradeLeg {
+                        asset_index: 0,
+                        market_id: env.asset_market_id(0),
+                        size_q,
+                        exec_price,
+                        fee_bps,
+                    }],
+                ),
+                vec![
+                    AccountMeta::new(owner_a.pubkey(), true),
+                    AccountMeta::new(owner_b.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(account_a, false),
+                    AccountMeta::new(account_b, false),
+                ],
+                &[owner_a, owner_b],
+            )
+            .expect("directional BatchTradeNoCpi"),
+        DirectionalFeePath::SingleCpi | DirectionalFeePath::BatchCpi => {
+            let (matcher_program, ctx, delegate) =
+                auth_matcher_for_lp_via_system_create(env, owner_b, account_b);
+            match path {
+                DirectionalFeePath::SingleCpi => env
+                    .try_trade_cpi_with_cu_on_asset(
+                        owner_a,
+                        account_a,
+                        owner_b,
+                        account_b,
+                        matcher_program,
+                        ctx,
+                        delegate,
+                        0,
+                        size_q,
+                        fee_bps,
+                    )
+                    .expect("directional TradeCpi"),
+                DirectionalFeePath::BatchCpi => env
+                    .send(
+                        env.batch_trade_cpi_ix(
+                            account_a,
+                            account_b,
+                            vec![BatchTradeCpiLeg {
+                                asset_index: 0,
+                                market_id: env.asset_market_id(0),
+                                size_q,
+                                fee_bps,
+                                limit_price: 0,
+                            }],
+                        ),
+                        vec![
+                            AccountMeta::new(owner_a.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(account_a, false),
+                            AccountMeta::new(account_b, false),
+                            AccountMeta::new_readonly(matcher_program, false),
+                            AccountMeta::new(ctx, false),
+                            AccountMeta::new_readonly(delegate, false),
+                        ],
+                        &[owner_a],
+                    )
+                    .expect("directional BatchTradeCpi"),
+                _ => unreachable!(),
+            }
+        }
+    };
+}
+
 fn run_directional_fee_terminal_world(
-    path: NoCpiReportedPricePath,
+    path: DirectionalFeePath,
+    opening_size_q: i128,
 ) -> DirectionalFeeTerminalOutcome {
     const MARK: u64 = 1_000_000;
     const FEE: u128 = MARK as u128;
@@ -49,7 +158,7 @@ fn run_directional_fee_terminal_world(
         low,
         &victim_owner,
         victim,
-        POS_SCALE as i128,
+        opening_size_q,
         MARK,
         0,
     );
@@ -71,24 +180,27 @@ fn run_directional_fee_terminal_world(
     env.sync_maintenance_fee_with_cu(low, Some(reward), 1);
     assert_eq!(env.portfolio_state(low).capital.get(), 1);
 
-    env.svm.expire_blockhash();
-    try_no_cpi_reported_price_trade_with_cu(
+    // CPI routes can debit the unsigned LP only under the authenticated market base-fee policy.
+    // Install the same fee as the two owners' no-CPI ceiling so all four routes execute one
+    // economically identical fee intent.
+    env.update_trade_fee_policy_with_cu(10_000);
+    execute_directional_fee_trade(
         &mut env,
         path,
         &low_owner,
         low,
         &victim_owner,
         victim,
-        -(POS_SCALE as i128),
+        -opening_size_q,
         MARK,
         10_000,
-    )
-    .expect("risk-reducing directional-fee trade");
+    );
     let after_fee = env.market_state().1;
     let long_budget = after_fee.insurance_domain_budget[0];
     let short_budget = after_fee.insurance_domain_budget[1];
     assert_eq!(env.portfolio_state(low).capital.get(), 0);
     assert_eq!(env.portfolio_state(victim).capital.get(), FEE);
+    env.update_trade_fee_policy_with_cu(0);
 
     // The reward account was created one slot earlier. Advance its own fee cursor through a
     // self-rewarded sync so its withdrawal cannot reintroduce maintenance ordering into this test.
@@ -162,16 +274,34 @@ fn run_directional_fee_terminal_world(
 }
 
 #[test]
-fn v16_program_signed_direction_route_matrix_discovers_side_attribution_mismatch() {
-    let single = run_directional_fee_terminal_world(NoCpiReportedPricePath::Single);
-    let batch = run_directional_fee_terminal_world(NoCpiReportedPricePath::Batch);
-    assert_eq!(single.winner_payout, 1_000_000);
-    assert_eq!(batch.winner_payout, single.winner_payout);
-    assert!(single.long_budget > single.short_budget);
-    assert!(batch.short_budget > batch.long_budget);
-    assert_eq!(single.long_budget, batch.short_budget);
-    assert_eq!(single.short_budget, batch.long_budget);
-    assert_eq!(batch.terminal_vault, single.terminal_vault);
+fn v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value() {
+    for opening_size_q in [POS_SCALE as i128, -(POS_SCALE as i128)] {
+        let expected =
+            run_directional_fee_terminal_world(DirectionalFeePath::SingleNoCpi, opening_size_q);
+        if opening_size_q > 0 {
+            assert_eq!(expected.winner_payout, 2_000_000);
+            assert_eq!(expected.terminal_vault, 1_000_001);
+            assert_eq!(
+                (expected.long_budget, expected.short_budget),
+                (1_000_000, 1)
+            );
+        } else {
+            assert_eq!(expected.winner_payout, 1_000_000);
+            assert_eq!(expected.terminal_vault, 2_000_001);
+            assert_eq!(
+                (expected.long_budget, expected.short_budget),
+                (1, 1_000_000)
+            );
+        }
+
+        for path in DirectionalFeePath::ALL.into_iter().skip(1) {
+            let actual = run_directional_fee_terminal_world(path, opening_size_q);
+            assert_eq!(
+                actual, expected,
+                "{path:?} must equal single no-CPI for opening size {opening_size_q}"
+            );
+        }
+    }
 }
 
 #[test]

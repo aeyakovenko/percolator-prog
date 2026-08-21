@@ -55,6 +55,15 @@ full claim, conserve SPL supply, and leave only the coalition's own one-atom rou
 face partition is also proven over full-width inputs by plain Kani and a production-kernel function
 contract.
 
+The wrapper now canonicalizes collected trade fees from the engine's physical account ordering
+into economic long/short ordering before crediting side-domain insurance. The finding-blind
+negative-size single/batch terminal trace previously produced different side budgets, winner
+payouts, and terminal vault stock. Its fixed-pin matrix now crosses both signed directions and all
+four single/batch CPI/no-CPI routes under one authenticated base-fee policy; each direction has
+identical per-side budgets, terminal payout, and custody across routes. Three full-width Kani
+harnesses prove the account-to-side permutation, positive/negative route equivalence, and rejection
+of zero-size attribution.
+
 The parent engine commit keeps a prior-generation reset
 obligation selectable after the asset enters Recovery and returns immediately when refresh detaches
 that selected leg, instead of falling into lifecycle-invalid post-refresh accrual. The wrapper now
@@ -594,7 +603,7 @@ charter.
 | INV-033 | SVM/CU + API gap | `cu/inv_033_insurance_backed_lien_single_classification.rs` proves the deployed public route creates counterparty-backed source liens without double-classifying them as insurance-backed, and that unreserved domain insurance cannot be silently consumed as source-credit backing; direct insurance-backed lien creation remains engine fuzz/Kani-only until a wrapper reservation route exists |
 | INV-034 | Independent + Direct + SVM/CU | `public_sbf/inv_034_domain_and_instance_isolation.rs`, `stateful/inv_034_domain_and_instance_isolation.rs`, `cu/inv_034_domain_and_instance_isolation.rs` |
 | INV-035 | Independent + Direct + SVM/CU + M | `public_sbf/inv_035_no_global_b_pool_residuals_remain_local.rs`, `stateful/inv_035_no_global_b_pool_residuals_remain_local.rs`, and `cu/inv_074_scope_locality.rs` cover exact two-asset B attribution plus a 32-cell ambiguous-domain matrix spanning all four trade routes, both loss-asset identities, both close orders, and both position directions. A final reduction with a uniquely attributable residual preserves an asset-local close ledger until a permissionless crank books the loss; an ambiguous account deficit cannot charge the last touched asset or force unrelated live markets into Recovery, and instead reaches terminal settlement through the configured permissionless stale-market policy. |
-| INV-036 | Independent + Direct + SVM/CU | `public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs`, `stateful/inv_036_fee_destination_and_policy_version_integrity.rs`, `cu/inv_036_fee_destination_and_policy_version_integrity.rs`; issue 408 adds exact canonical-insurance attribution before matcher/liquidation value transfer, and the withdrawal reference independently partitions owner payout from maintenance credit. The signed-direction single/batch counterexample still swaps the destination side budgets, but engine `0976a303` removes its former terminal payout loss: both routes now pay the same winner and retain the same terminal vault. |
+| INV-036 | Independent + Direct + P + SVM/CU + M | `public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs`, `stateful/inv_036_fee_destination_and_policy_version_integrity.rs`, `kani/inv_036_fee_destination_and_policy_version_integrity.rs`, and `cu/inv_036_fee_destination_and_policy_version_integrity.rs`; issue 408 adds exact canonical-insurance attribution before matcher/liquidation value transfer, and the withdrawal reference independently partitions owner payout from maintenance credit. The finding-blind signed-direction counterexample is fixed by one account-order-to-economic-side mapping shared by single and batch bookkeeping. An eight-world public matrix crosses both signed directions with single/batch CPI/no-CPI, deliberately creates asymmetric fee collection, and proves exact side budgets, winner payout, terminal custody, and route equivalence. Kani exhausts all full-width fee pairs and every signed direction for the pure mapping. |
 | INV-037 | SVM/CU | `cu/inv_037_exact_residual_partition.rs` |
 | INV-038 | Independent + Direct + SVM/CU | `public_sbf/inv_038_rounding_and_ratio_conservation.rs`, `stateful/inv_038_rounding_and_ratio_conservation.rs`, `cu/inv_038_rounding_and_ratio_conservation.rs` |
 | INV-039 | Independent + Direct | `public_sbf/inv_039_pending_loss_obligation_durability.rs`, `stateful/inv_039_pending_loss_obligation_durability.rs`; INV-027 owns the terminal owner-attribution assertion for the cross-cutting stale-cohort novation counterexample. |
@@ -673,7 +682,7 @@ Verdicts used below:
 - **N/A** - the feature is not exposed by this wrapper. It must remain absent or be re-opened when
   the API is introduced.
 
-The current ledger is 2 **CLOSED**, 53 **OPEN-T**, 15 **OPEN-D**, 6 **PARTIAL**, 12 **FRONTIER**,
+The current ledger is 2 **CLOSED**, 54 **OPEN-T**, 14 **OPEN-D**, 6 **PARTIAL**, 12 **FRONTIER**,
 and 1 **N/A**. A closed row is scoped to the current public API and named assumptions, not a claim
 that the whole program is LoF/DoS-free.
 
@@ -774,7 +783,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-033 | OPEN-D | The wrapper exposes counterparty-backed liens but no direct insurance-backed lien creation/consume route. Add the API or rely on a named engine contract, then prove consume/release/impair/recovery classification is disjoint. |
 | AUDIT-034 | OPEN-T | Cross-market/domain substitutions are broad but manually selected and often malformed through account injection. Generate every public instruction/account-domain substitution and require public controls plus normalized rollback. |
 | AUDIT-035 | FRONTIER | Domain-local B settlement has fixed and generated evidence. A public 32-cell matrix now exhausts four trade routes, both loss-asset identities, both close orders, and both position directions for the bounded two-asset ambiguous-deficit topology, with exact terminal payout and SPL conservation. A pure whole-transition proof that residuals cannot touch unrelated `(asset, side)` domains and larger multi-asset topologies remain. |
-| AUDIT-036 | OPEN-T | Major fee routes are covered. The signed-direction single/batch matrix still proves side-domain attribution differs for the same economic close, while the corrected B settlement now proves equal terminal payout and vault stock, so this is no longer evidence of terminal LoF on the current pin. The parasitic zero-activity asset, every policy epoch, and all single/batch/CPI/no-CPI fee-destination pairs are not one complete matrix; no whole-route fee-flow proof exists. |
+| AUDIT-036 | OPEN-T | Major fee routes are covered, and the account-order/side-order mismatch is closed by an eight-world public route/direction matrix plus three full-width Kani proofs. The parasitic zero-activity asset, every policy epoch, multi-leg mixed-direction attribution under asymmetric collection, and all nontrade fee destinations are not one complete matrix; no whole-route fee-flow proof exists. |
 | AUDIT-037 | OPEN-D | Current state does not expose every term in the normative residual partition, and tests cover selected liquidation counters. Add explicit drift/obligation/lien categories, then recompute the disjoint equality after continuation, preemption, cancel, recovery, and finalize. |
 | AUDIT-038 | OPEN-T | Fractional price movement now carries exact sub-basis-point residue, reaches the target in finite public cranks, and preserves exact terminal payout; the denominator boundary and reserved bytes fail closed. Add independent exact rational/residue oracles for resolved claims, B booking, social-loss clearing, and the remaining composite rounding routes. |
 | AUDIT-039 | OPEN-D | Many accrual-before-weight-removal routes are covered, while stale-cohort novation remains an expected cross-cutting violation whose terminal principal-attribution owner is INV-027. Transfer, reset, account close, and partial liquidation also need the common obligation-before-removal state machine. |

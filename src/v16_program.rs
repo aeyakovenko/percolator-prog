@@ -4958,6 +4958,22 @@ pub mod oracle_v16 {
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
 
+    /// Convert engine fee results, which are reported in physical account order, into the
+    /// economic long/short ordering used by the per-side insurance domains.
+    pub fn account_fees_to_trade_sides(
+        size_q: i128,
+        fee_a: u128,
+        fee_b: u128,
+    ) -> Option<(u128, u128)> {
+        if size_q > 0 {
+            Some((fee_a, fee_b))
+        } else if size_q < 0 {
+            Some((fee_b, fee_a))
+        } else {
+            None
+        }
+    }
+
     pub fn backing_principal_withdrawal_is_fresh(
         expiry_slot: u64,
         authenticated_slot: u64,
@@ -7513,12 +7529,15 @@ pub mod processor {
                     account_b_backing_fee_cap_bps,
                 )?;
             }
+            let (fee_long, fee_short) =
+                policy_v16::account_fees_to_trade_sides(req.size_q, outcome.fee_a, outcome.fee_b)
+                    .ok_or(PercolatorError::InvalidInstruction)?;
             credit_trade_fees_with_mark_externality_view(
                 &cfg,
                 &mut group,
                 asset_index as usize,
-                outcome.fee_a,
-                outcome.fee_b,
+                fee_long,
+                fee_short,
                 fee_quote,
             )?;
             let collected_post_trade_mark = collected_fee_supported_mark_view(
@@ -7900,15 +7919,21 @@ pub mod processor {
             let mut domain_fee_credits = Vec::with_capacity(legs.len().saturating_mul(2) + 2);
             let batch_now_slot = authenticated_market_slot_or_fallback_view(&group);
             for (
-                asset_index,
-                oracle_profile,
-                fee_basis_price,
-                fee_quote,
-                abs_size,
-                _account_a_position,
-                _account_b_position,
-            ) in leg_ctx.iter_mut()
+                leg_index,
+                (
+                    asset_index,
+                    oracle_profile,
+                    fee_basis_price,
+                    fee_quote,
+                    abs_size,
+                    _account_a_position,
+                    _account_b_position,
+                ),
+            ) in leg_ctx.iter_mut().enumerate()
             {
+                let request = requests
+                    .get(leg_index)
+                    .ok_or(PercolatorError::InvalidInstruction)?;
                 let requested_fee_leg =
                     batch_leg_fee(*abs_size, *fee_basis_price, fee_quote.fee_bps)?;
                 let fee_a = requested_fee_leg.min(remaining_fee_a);
@@ -7920,23 +7945,26 @@ pub mod processor {
                     .checked_sub(fee_b)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                 if fee_a != 0 || fee_b != 0 {
-                    let (budgeted_a, budgeted_b) =
+                    let (fee_long, fee_short) =
+                        policy_v16::account_fees_to_trade_sides(request.size_q, fee_a, fee_b)
+                            .ok_or(PercolatorError::InvalidInstruction)?;
+                    let (budgeted_long, budgeted_short) =
                         trade_fee_budgeted_amounts_with_mark_externality_view(
-                            fee_a, fee_b, *fee_quote,
+                            fee_long, fee_short, *fee_quote,
                         )?;
                     accumulate_fee_to_domain_budget_credits(
                         &cfg,
                         &mut domain_fee_credits,
                         domain_count,
                         *asset_index * 2,
-                        budgeted_a,
+                        budgeted_long,
                     )?;
                     accumulate_fee_to_domain_budget_credits(
                         &cfg,
                         &mut domain_fee_credits,
                         domain_count,
                         *asset_index * 2 + 1,
-                        budgeted_b,
+                        budgeted_short,
                     )?;
                 }
                 if !profile_updates_mark_from_trade_view(oracle_profile, batch_now_slot) {

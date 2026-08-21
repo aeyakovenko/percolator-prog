@@ -46,6 +46,9 @@ mod inv_019_cpi_invocation_and_return_data_binding;
 #[path = "invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs"]
 mod inv_022_instruction_decoding_and_schema_upgrade_safety;
 
+#[path = "invariants/kani/inv_036_fee_destination_and_policy_version_integrity.rs"]
+mod inv_036_fee_destination_and_policy_version_integrity;
+
 #[path = "invariants/kani/inv_045_no_free_mark_movement.rs"]
 mod inv_045_no_free_mark_movement;
 
