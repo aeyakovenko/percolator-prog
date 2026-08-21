@@ -16,8 +16,8 @@
 use super::*;
 
 #[test]
-fn v16_program_max_source_conversion_amount_matrix_discovers_claim_lock() {
-    let (mut env, taker_owner, lp_owner, taker, lp, slot) = setup_max_source_live_pair(0, 1);
+fn v16_program_max_source_conversion_and_owner_exit_are_bounded() {
+    let (mut env, taker_owner, lp_owner, taker, lp, _slot) = setup_max_source_live_pair(0, 1);
     env.svm.expire_blockhash();
     env.trade_asset_with_cu(
         MAX_SOURCE_LIVE_ASSETS - 1,
@@ -45,14 +45,15 @@ fn v16_program_max_source_conversion_amount_matrix_discovers_claim_lock() {
     );
     let positive_pnl = flat.pnl.get();
     assert!(positive_pnl > 0, "the flat LP must retain a backed claim");
+    let positive_pnl = positive_pnl as u128;
     let vault_before = env.token_amount(env.vault);
-    assert!(u128::from(vault_before) >= positive_pnl as u128);
+    assert!(u128::from(vault_before) >= positive_pnl);
 
-    for amount in [1, MAX_SOURCE_LIVE_SIZE_Q as u128, positive_pnl as u128] {
+    for amount in [1, positive_pnl - 1] {
         env.svm.expire_blockhash();
         let market_before = env.svm.get_account(&env.market).unwrap();
         let lp_before = env.svm.get_account(&lp).unwrap();
-        let result = env.send(
+        let rejected = env.send(
             env.convert_released_pnl_ix(lp, amount),
             vec![
                 AccountMeta::new(lp_owner.pubkey(), true),
@@ -61,69 +62,75 @@ fn v16_program_max_source_conversion_amount_matrix_discovers_claim_lock() {
             ],
             &[&lp_owner],
         );
+        let error = rejected.expect_err("strict conversion sub-cap must reject atomically");
         assert!(
-            result.is_err(),
-            "max-source conversion amount {amount} unexpectedly escaped the CU lock"
+            !error.contains("exceeded CUs meter")
+                && !error.contains("ComputationalBudgetExceeded")
+                && !error.contains("ProgramFailedToComplete"),
+            "sub-cap {amount} must reach the economic rejection before the CU ceiling: {error}"
         );
-        let error = format!("{:?}", result.as_ref().unwrap_err());
-        assert!(
-            (error.contains("ComputationalBudgetExceeded")
-                || error.contains("ProgramFailedToComplete"))
-                && error.contains("exceeded CUs meter"),
-            "amount {amount} failed for a non-CU reason: {error}"
-        );
-        assert_eq!(
-            env.svm.get_account(&env.market).unwrap(),
-            market_before,
-            "failed amount {amount} conversion mutated the market"
-        );
-        assert_eq!(
-            env.svm.get_account(&lp).unwrap(),
-            lp_before,
-            "failed amount {amount} conversion mutated the LP"
-        );
-        assert_eq!(
-            env.token_amount(env.vault),
-            vault_before,
-            "failed amount {amount} conversion moved SPL custody"
-        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+        assert_eq!(env.token_amount(env.vault), vault_before);
     }
 
-    env.svm.warp_to_slot(slot + 1);
-    let retained_asset = MAX_SOURCE_LIVE_ASSETS - 1;
-    env.push_auth_mark_for_asset_as_admin(retained_asset, slot + 1, 100);
-    env.crank(
-        lp,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: slot + 1,
-            observations: crank_observations(retained_asset),
-        },
-    );
+    let capital_before = flat.capital.get();
+    let group_before = env.market_state().1;
     env.svm.expire_blockhash();
-    let market_before_crank = env.svm.get_account(&env.market).unwrap();
-    let lp_before_crank = env.svm.get_account(&lp).unwrap();
-    let _ = env.crank(
-        lp,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: slot + 1,
-            observations: vec![],
-        },
-    );
-    let after_crank = env.portfolio_state(lp);
-    assert_eq!(after_crank.pnl.get(), positive_pnl);
+    let convert_cu = env
+        .send(
+            env.convert_released_pnl_ix(lp, positive_pnl),
+            vec![
+                AccountMeta::new(lp_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lp, false),
+            ],
+            &[&lp_owner],
+        )
+        .expect("full max-source conversion must fit");
+    assert_cu_within("28-source-domain ConvertReleasedPnl", convert_cu, 1_375_000);
+    let converted = env.portfolio_state(lp);
+    let group_after_convert = env.market_state().1;
+    assert_eq!(converted.pnl.get(), 0);
+    assert_eq!(converted.reserved_pnl.get(), 0);
+    assert_eq!(converted.capital.get(), capital_before + positive_pnl);
     assert_eq!(
-        after_crank
+        converted
             .source_domains
             .iter()
             .filter(|source| source.is_occupied())
             .count(),
-        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS,
-        "a later honest crank must not be mistaken for source-claim progress"
+        0,
+        "the atomic conversion must consume every source-attribution atom exactly once"
     );
-    assert!(
-        env.svm.get_account(&env.market).unwrap() == market_before_crank
-            && env.svm.get_account(&lp).unwrap() == lp_before_crank,
-        "the no-action crank unexpectedly changed the terminal claim rank"
+    assert_eq!(group_after_convert.c_tot, group_before.c_tot + positive_pnl);
+    assert_eq!(group_after_convert.vault, group_before.vault);
+    assert_eq!(env.token_amount(env.vault), vault_before);
+
+    env.svm.expire_blockhash();
+    let (destination, withdraw_cu) = env.withdraw_with_cu(&lp_owner, lp, converted.capital.get());
+    assert_cu_within(
+        "post-conversion max-source withdrawal",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(destination),
+        converted.capital.get() as u64
+    );
+    env.svm.expire_blockhash();
+    let close_cu = env.close_portfolio_with_cu(&lp_owner, lp);
+    assert_cu_within(
+        "post-conversion max-source portfolio close",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.materialized_portfolio_count, 1);
+    assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+    assert!(terminal.vault >= terminal.c_tot + terminal.insurance);
+    println!(
+        "INV-077 28-source exit CU: convert={convert_cu}, withdraw={withdraw_cu}, close={close_cu}"
     );
 }
 
