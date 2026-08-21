@@ -10,9 +10,9 @@
 //! top-up, live insurance withdrawal, and backing-principal withdrawal, including optional
 //! insurance/backing ledger tails, plus publicly generated backing-earnings withdrawal, add 126
 //! pairwise reserve-custody cases plus 40 required privilege downgrades from value-moving controls.
-//! Flat close, unilateral reduction, maintenance
-//! sync, and permissionless crank add 13 core-account pairs and 13 required downgrades; accepted
-//! self-cranker and unsigned no-reward-crank cases have explicit economic-equivalence controls.
+//! Flat close, unilateral reduction, maintenance sync, and both permissionless-crank account shapes
+//! add 19 core-account pairs and 17 required downgrades. Accepted self-cranker, unsigned
+//! no-reward-crank, and readonly reward-cranker cases have explicit economic controls.
 //!
 //! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
 //! it is not an exhaustive pairwise account-meta proof for every instruction.
@@ -919,12 +919,15 @@ struct CoreAccountAliasFixture {
     tracked_accounts: Vec<Pubkey>,
 }
 
-fn core_account_alias_snapshot(fixture: &CoreAccountAliasFixture) -> Vec<Option<Account>> {
-    fixture
-        .tracked_accounts
+fn account_alias_snapshot(env: &V16CuEnv, tracked_accounts: &[Pubkey]) -> Vec<Option<Account>> {
+    tracked_accounts
         .iter()
-        .map(|key| fixture.env.svm.get_account(key))
+        .map(|key| env.svm.get_account(key))
         .collect()
+}
+
+fn core_account_alias_snapshot(fixture: &CoreAccountAliasFixture) -> Vec<Option<Account>> {
+    account_alias_snapshot(&fixture.env, &fixture.tracked_accounts)
 }
 
 fn send_core_account_alias_fixture(
@@ -2568,11 +2571,20 @@ fn v16_attack_rebalance_reduce_owner_gated() {
 // both the liquidated account AND the cranker) to net-profit, i.e. cranker reward > fee paid. Protection:
 // reward == cranker_share% of the fee (≤ fee), the fee is internal (vault unminted), and the remainder
 // goes to insurance — so a self-liquidator nets ≤ 0 (here −fee + 50%·fee < 0). First BPF test to drive a
-// security.md sweep — liquidation cranker reward account aliasing (#3/#44): when cranker rewards are
-// enabled, the optional reward portfolio must be distinct from the portfolio being liquidated. Otherwise
-// a liquidated account could receive part of its own liquidation fee back in the same crank.
+// INV-017 whole-route reward-tail matrix: a nonzero liquidation reward makes all four roles
+// semantically distinct. Exhaust every pair and every required signer/writable bit from one publicly
+// reached liquidatable state. Each malformed call must reject without changing the market, either
+// trading portfolio, the reward portfolio, or SPL custody. A readonly cranker signer remains the
+// positive control because the signer account itself is authenticated but never mutated.
 #[test]
-fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
+fn v16_program_liquidation_reward_tail_account_pairs_and_privileges_are_exhaustive() {
+    const ROLE_NAMES: [&str; 4] = [
+        "cranker",
+        "market",
+        "liquidated_portfolio",
+        "reward_portfolio",
+    ];
+
     let mut env = V16CuEnv::new_with_init_params(production_risk_params());
     env.update_liquidation_fee_policy_with_cu(5_000);
     env.configure_auth_mark_with_cu(0, 1_000_000);
@@ -2604,87 +2616,82 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
         );
     }
 
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let short_before = env.svm.get_account(&s).unwrap();
-    let short_cap_before = env.portfolio_state(s).capital.get();
-    env.svm.expire_blockhash();
-    let rejected = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 30,
-            observations: crank_observations(0),
-        },
-        vec![
-            AccountMeta::new(so.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(s, false),
-            AccountMeta::new(s, false),
-        ],
-        &[&so],
-    );
     assert!(
-        rejected.is_err(),
-        "liquidation reward portfolio must not alias the liquidated account"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "alias rejection leaves market byte-identical"
-    );
-    assert_eq!(
-        env.svm.get_account(&s).unwrap(),
-        short_before,
-        "alias rejection leaves liquidated account byte-identical"
-    );
-    assert_eq!(
-        env.portfolio_state(s).capital.get(),
-        short_cap_before,
-        "no self-reward paid into the victim account"
+        health_cert(&env.portfolio_state(s)).certified_liq_deficit != 0,
+        "short is liquidatable before probing the reward-tail account matrix"
     );
 
-    env.svm.expire_blockhash();
-    let rejected_market_reward = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 30,
-            observations: crank_observations(0),
-        },
+    let market = env.market;
+    let canonical_accounts = || {
         vec![
-            AccountMeta::new(so.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(s, false),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&so],
-    );
-    assert!(
-        rejected_market_reward.is_err(),
-        "liquidation reward portfolio must not alias the market slab"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "market-slab reward alias rejection leaves market byte-identical"
-    );
-    assert_eq!(
-        env.svm.get_account(&s).unwrap(),
-        short_before,
-        "market-slab reward alias rejection leaves liquidated account byte-identical"
-    );
-
-    let cranker_cap_before = env.portfolio_state(c).capital.get();
-    env.svm.expire_blockhash();
-    let accepted = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 30,
-            observations: crank_observations(0),
-        },
-        vec![
-            AccountMeta::new(co.pubkey(), true),
-            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(co.pubkey(), true),
+            AccountMeta::new(market, false),
             AccountMeta::new(s, false),
             AccountMeta::new(c, false),
-        ],
-        &[&co],
-    );
+        ]
+    };
+    let tracked_accounts = [market, l, s, c, env.vault];
+    let instruction = ProgInstruction::PermissionlessCrank {
+        now_slot: 30,
+        observations: crank_observations(0),
+    };
+
+    let assert_rejects_atomically =
+        |env: &mut V16CuEnv, accounts: Vec<AccountMeta>, label: &str| {
+            let before = account_alias_snapshot(env, &tracked_accounts);
+            let cranker_signer_required = accounts
+                .iter()
+                .any(|account| account.is_signer && account.pubkey == co.pubkey());
+            let signers = cranker_signer_required
+                .then_some(&co)
+                .into_iter()
+                .collect::<Vec<_>>();
+            env.svm.expire_blockhash();
+            let rejected = env.send(instruction.clone(), accounts, &signers);
+            assert!(
+                rejected.is_err(),
+                "PermissionlessCrank reward tail {label} unexpectedly succeeded"
+            );
+            assert_eq!(
+                account_alias_snapshot(env, &tracked_accounts),
+                before,
+                "PermissionlessCrank reward tail {label} must roll back all economic state"
+            );
+        };
+
+    let mut pair_count = 0usize;
+    for first in 0..ROLE_NAMES.len() {
+        for second in (first + 1)..ROLE_NAMES.len() {
+            pair_count += 1;
+            let mut accounts = canonical_accounts();
+            accounts[second].pubkey = accounts[first].pubkey;
+            assert_rejects_atomically(
+                &mut env,
+                accounts,
+                &format!("alias {} with {}", ROLE_NAMES[first], ROLE_NAMES[second]),
+            );
+        }
+    }
+    assert_eq!(pair_count, 6, "four reward-tail roles have six pairs");
+
+    let mut accounts = canonical_accounts();
+    accounts[0].is_signer = false;
+    assert_rejects_atomically(&mut env, accounts, "cranker signer downgrade");
+
+    for role in 1..ROLE_NAMES.len() {
+        let mut accounts = canonical_accounts();
+        accounts[role].is_writable = false;
+        assert_rejects_atomically(
+            &mut env,
+            accounts,
+            &format!("{} writable downgrade", ROLE_NAMES[role]),
+        );
+    }
+
+    let cranker_cap_before = env.portfolio_state(c).capital.get();
+    let before = account_alias_snapshot(&env, &tracked_accounts);
+    env.svm.expire_blockhash();
+    let accepted = env.send(instruction, canonical_accounts(), &[&co]);
     assert!(
         accepted.is_ok(),
         "distinct reward portfolio liquidation succeeds: {:?}",
@@ -2693,6 +2700,11 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
     assert!(
         env.portfolio_state(c).capital.get() > cranker_cap_before,
         "positive control: distinct cranker received a real reward"
+    );
+    assert_ne!(
+        account_alias_snapshot(&env, &tracked_accounts),
+        before,
+        "canonical reward-tail control must mutate economic state"
     );
     let (_, group) = env.market_state();
     assert_eq!(
