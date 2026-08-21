@@ -568,8 +568,7 @@ pub struct PendingEwmaTargetOverrideReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TerminalDustPayoutErasureReproduction {
-    pub blocker: KnownBlocker,
+pub struct TerminalDustPayoutProtection {
     pub route: TradeRoute,
     pub attacker_loss: u128,
     pub victim_loss: u128,
@@ -20755,40 +20754,39 @@ struct TerminalDustPayoutWorld {
     observed_token_supply: u128,
 }
 
-pub fn reproduce_terminal_dust_payout_erasure(
+pub fn verify_terminal_dust_payout_protection(
     mut seed: [u8; 32],
     route: TradeRoute,
-) -> Result<TerminalDustPayoutErasureReproduction, String> {
+) -> Result<TerminalDustPayoutProtection, String> {
     seed[0] ^= 0x83;
     const ATTACKER_DEPOSITS: u128 = 20_000_002_000;
     const VICTIM_DEPOSIT: u128 = 20_000_000_000;
 
     if !matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
-        return Err(format!("PR 283 unsupported trade route {route:?}"));
+        return Err(format!("unsupported terminal-dust trade route {route:?}"));
     }
     let control = run_terminal_dust_payout_world(seed, route, false)?;
     let attack = run_terminal_dust_payout_world(seed, route, true)?;
     let attacker_loss = ATTACKER_DEPOSITS
         .checked_sub(attack.attacker_withdrawn)
-        .ok_or("PR 283 dust attack increased coalition payout")?;
+        .ok_or("terminal-dust round trip increased coalition payout")?;
     let victim_loss = VICTIM_DEPOSIT
         .checked_sub(attack.victim_withdrawn)
-        .ok_or("PR 283 dust attack increased victim payout")?;
+        .ok_or("terminal-dust round trip increased victim payout")?;
     if control.low_price != attack.low_price
         || control.attacker_withdrawn != ATTACKER_DEPOSITS
         || control.victim_withdrawn != VICTIM_DEPOSIT
         || control.vault_remaining != 0
         || attacker_loss != 1
-        || victim_loss == 0
-        || attack.vault_remaining != victim_loss + attacker_loss
+        || victim_loss != 0
+        || attack.vault_remaining != attacker_loss
         || control.observed_token_supply != attack.observed_token_supply
     {
         return Err(format!(
-            "{route:?} PR 283 did not turn one atom into claimless terminal victim loss: control={control:?}, attack={attack:?}, attacker loss={attacker_loss}, victim loss={victim_loss}"
+            "{route:?} terminal source haircut did not preserve the fixed value partition: control={control:?}, attack={attack:?}, attacker loss={attacker_loss}, victim loss={victim_loss}"
         ));
     }
-    Ok(TerminalDustPayoutErasureReproduction {
-        blocker: KnownBlocker::TerminalDustPayoutErasure,
+    Ok(TerminalDustPayoutProtection {
         route,
         attacker_loss,
         victim_loss,
@@ -20875,7 +20873,7 @@ fn run_terminal_dust_payout_world(
     let rebound_input = BASIS
         .checked_mul(2)
         .and_then(|value| value.checked_sub(low_price))
-        .ok_or("PR 283 rebound input overflow")?;
+        .ok_or("terminal-dust rebound input overflow")?;
     env.push_ewma_mark(0, 6, rebound_input)
         .map_err(|error| format!("{route:?} publish terminal-dust rebound: {error}"))?;
     if env.primary_profile(0).mark_ewma_e6 != BASIS {
@@ -20898,7 +20896,7 @@ fn run_terminal_dust_payout_world(
         }
         slot = slot
             .checked_add(1)
-            .ok_or("PR 283 convergence slot overflow")?;
+            .ok_or("terminal-dust convergence slot overflow")?;
         if slot >= 72 {
             return Err(format!(
                 "{route:?} terminal-dust rebound did not converge within 65 bounded one-slot cranks"
@@ -23628,7 +23626,7 @@ pub fn pending_ewma_target_override_strategy() -> impl Strategy<Value = ([u8; 32
 }
 
 #[allow(dead_code)]
-pub fn terminal_dust_payout_erasure_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+pub fn terminal_dust_payout_protection_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
     (
         any::<[u8; 32]>(),
         prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),

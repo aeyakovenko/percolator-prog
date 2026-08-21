@@ -3,16 +3,16 @@
 //! Normative obligation: Each valid claim is paid, forfeited, or receipted exactly once without silent loss.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_reported_route_matrix_discovers_terminal_dust_erasure` compares terminal worlds
+//! `v16_program_reported_route_matrix_preserves_terminal_value_partition` compares terminal worlds
 //! with and without a one-atom round trip through both reported-price routes. It drains every
-//! public close/claim continuation to quiescence and requires unchanged claimant payouts and zero
-//! residual vault value. Direct impact tests remain below. These tests exercise the deployed public
+//! public close/claim continuation to quiescence and requires unchanged victim payout while the
+//! sole residual equals the coalition's one-atom rounding loss. Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: this certifies one source-haircut composition across all deployed trade
+//! routes. It does not replace the broader claim-episode and bounded-reachability work in the
+//! invariant roadmap.
 
 use super::*;
 
@@ -29,7 +29,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_reported_route_matrix_discovers_terminal_dust_erasure(
+    fn v16_program_reported_route_matrix_preserves_terminal_value_partition(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_terminal_dust_violations(seed)
@@ -37,18 +37,18 @@ proptest! {
         prop_assert_eq!(discoveries.len(), ProspectiveAccrualRoute::ALL.len());
         for (expected, discovery) in ProspectiveAccrualRoute::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.route, expected);
+            prop_assert_eq!(discovery.attacker_loss, 1);
+            prop_assert_eq!(discovery.victim_loss, 0);
+            prop_assert_eq!(discovery.control_vault_remaining, 0);
+            prop_assert_eq!(discovery.vault_remaining, discovery.attacker_loss);
+            prop_assert_eq!(discovery.control_supply, discovery.dust_supply);
         }
         let violations: Vec<_> = discoveries
             .iter()
             .filter(|discovery| discovery.is_violation())
             .map(|discovery| discovery.route)
             .collect();
-        eprintln!("independent terminal-dust discoveries: {violations:?}");
-        prop_assert_eq!(
-            violations,
-            ProspectiveAccrualRoute::ALL.to_vec(),
-            "vulnerable-pin terminal-dust corpus changed"
-        );
+        prop_assert!(violations.is_empty(), "terminal claim erasure returned: {violations:?}");
     }
 }
 
@@ -65,13 +65,13 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_pr283_terminal_dust_payout_erasure_fuzz(
-        (seed, route) in terminal_dust_payout_erasure_strategy()
+    fn v16_program_terminal_source_haircut_preserves_victim_claim_fuzz(
+        (seed, route) in terminal_dust_payout_protection_strategy()
     ) {
-        let result = reproduce_terminal_dust_payout_erasure(seed, route);
+        let result = verify_terminal_dust_payout_protection(seed, route);
         prop_assert!(
             result.is_ok(),
-            "PR 283 {:?} no longer reproduces for seed {:?}: {}",
+            "terminal source-haircut protection failed for {:?}, seed {:?}: {}",
             route,
             seed,
             result.unwrap_err()
