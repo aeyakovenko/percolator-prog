@@ -3,9 +3,48 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## Current goal
+
+Close every tractable gap in INV-001 through INV-089 with the strongest computationally feasible
+combination of proof, public-route stateful fuzzing, metamorphic testing, bounded reachability, and
+maximum-shape SBF measurement. Work starts from the invariant charter and deployed public
+interface, not from known findings. For each invariant, identify and exhaust its route, lifecycle,
+ordering, boundary, account-shape, and environmental partitions; a passing example, leaf proof, or
+file bearing the invariant number is not completion.
+
+Open security PRs are a sealed holdout dataset. During invariant development, do not inspect or
+cherry-pick their branches, diffs, fixes, tests, titles, or issue-specific reproductions. Freeze the
+finding-blind invariant suite first, then evaluate it against the holdout roster. A holdout finding
+counts as independently covered only when a generic invariant-owned generator and oracle discover
+the same public-interface violation without consuming finding metadata. PR- or issue-named tests
+remain useful direct regressions, but they cannot satisfy independent-discovery or invariant-
+closure claims. Any holdout miss is evidence of a missing normative oracle or a missing route,
+state, ordering, boundary, account-shape, or environmental partition and must reopen the owning
+invariant.
+
+Production fixes derived from an independent counterexample should simplify the implementation:
+remove inconsistent branches, centralize duplicated policy, or route composition through one
+canonical transition. Do not grow parallel state, mirror fields, or compensating checks. Persisted
+identity or ledger state may be added only when the invariant fundamentally cannot be represented
+without it and the specification is updated at the same time. Test and proof code may grow as
+needed; deployed state and control flow should become smaller or more canonical.
+
+Completion requires all of the following:
+
+1. Every invariant is `CLOSED` or rigorously `N/A`; no `OPEN-T`, `OPEN-D`, `PARTIAL`, or
+   `FRONTIER` row remains without a discharged proof-equivalence decomposition.
+2. Every public instruction has whole-route success-postcondition and exact-error-rollback evidence,
+   with all required verification methods from the charter accounted for.
+3. The frozen finding-blind suite independently rediscovers every qualifying holdout LoF, persistent
+   DoS, and required-exit CU failure; no direct regression is promoted to independent evidence.
+4. Every independently discovered violation is fixed on the pinned production code, and the same
+   invariant suite certifies the fix without weakening its oracle or assumptions.
+5. Maximum supported shapes keep every required exit and recovery route below the SVM compute
+   ceiling, and the complete runtime, Kani, stateful, regression, and CU gates pass together.
+
 ## Current checkpoint
 
-Updated 2026-08-18. The current PR135 production checkpoint pins engine commit
+Updated 2026-08-21. The current PR135 production checkpoint pins engine commit
 `7387e7a9c1aa1dbd337dc91e50ccfc11ce5109b2` (engine PR180, based on
 `44847fd5ccf76a97dd31bb2c9dbd49ec94093d35`). The new engine commit keeps a prior-generation reset
 obligation selectable after the asset enters Recovery and returns immediately when refresh detaches
@@ -337,8 +376,8 @@ Verification at this checkpoint:
 | `cargo test --lib` | 7/7 | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --test v16_program_stateful_fuzz` | 168/168 | rerun on the 2026-08-18 PR135 production head |
 | Registry/manifest checks in the INV-079 module | 8/8 | rerun on the 2026-08-18 PR135 test head |
-| `cargo test --test v16_program_fuzz_regressions` | 92/92 | rerun on the 2026-08-18 PR135 production head |
-| `cargo test --test v16_cu` | 774/774 | rerun on the 2026-08-18 PR135 production head, including hinted exact-expiry and no-hint late-expiry owner-exit worlds plus public exact-expiry retirement normalization |
+| `cargo test --test v16_program_fuzz_regressions` | 93/93 | rerun on the 2026-08-21 PR135 production head, including the machine-checked 89-row invariant-audit verdict census |
+| `cargo test --test v16_cu` | 775/775 | rerun on the 2026-08-21 PR135 production head, including the complete canonical single-byte decoder edit census, hinted exact-expiry and no-hint late-expiry owner-exit worlds, and public exact-expiry retirement normalization |
 | `cargo kani --tests --default-unwind 18` | 133/133 | full rerun on the current PR135 production head; the full-width INV-063 boundary harness passes, and 32-byte comparisons have explicit complete unwind overrides |
 | Engine runtime suites and focused INV-063 Kani proofs | 164/164 runtime; 3/3 focused Kani | rerun on engine commit `44847fd5`; the proofs cover production expiry deltas, retirement normalization, and exact monotonic resolved-time admission without changing value-bearing state |
 | Engine reset/Recovery auto-crank regression and contracts | 1/1 runtime; 2/2 focused Kani | engine `7387e7a9` proves reset-obligation refresh fallback and detached-leg post-refresh termination; full engine runtime suites pass 165/165 |
@@ -498,7 +537,7 @@ charter.
 | INV-019 | P + SVM/CU | `kani/inv_019_cpi_invocation_and_return_data_binding.rs` and `cu/inv_019_cpi_invocation_and_return_data_binding.rs` prove full-width matcher field/flag binding, request freshness, single-context and batch return replay rejection, tail isolation, and current-producer provenance. A distinct nested program's return is harmless before the configured matcher overwrites it but rejects with exact rollback when emitted afterward. Oracle routes consume authenticated account data rather than CPI return data. Public matcher-context close/recreate remains. |
 | INV-020 | Independent + Direct + SVM/CU | `public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, and `cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`; issue 405 is closed by reading the timestamp at `CurrentResult.submission_idx`, with public stale-selected-result rejection/rollback, valid index boundaries, exact age boundaries, a fresh control, and a crank proof that account-write churn cannot refresh `last_good_oracle_slot` |
 | INV-021 | SVM/CU | `cu/inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs` publicly reproduces and closes issue 404 without program-state injection: zero-lamport System creation and atomic close/reinit reject with the wrapper rent error and exact rollback, an initially rent-exempt undersized account rejects after underfunded canonical realloc, and exact-final-rent init/close remains live |
-| INV-022 | P + SVM/CU + Prover gap | `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs`, `public_sbf/inv_022_instruction_decoding_and_schema_upgrade_safety.rs`, and `cu/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` cover symbolic field preservation, Kani trailing/truncation witnesses, raw public decoder rollback, a deterministic arbitrary-byte corpus, canonical round trips for all 50 tags, curated prior schemas, vector-length edges, exhaustive one-byte unknown/truncated tag rejection, and at least 1,200 deployed-SBF single-bit mutations spanning every tag plus each encoding's first, midpoint, and final payload positions with exact state rollback; the fully symbolic unknown-tag Kani query, generationless hybrid legacy Kani query, asset-lifecycle/base-unit all-fields Kani queries, tag-60 base-unit trailing-byte Kani query, and monolithic all-payload trailing-byte Kani shape remain solver cliffs and are backstopped by exhaustive host/SVM rosters |
+| INV-022 | P + SVM/CU + Prover gap | `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs`, `public_sbf/inv_022_instruction_decoding_and_schema_upgrade_safety.rs`, and `cu/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` cover symbolic field preservation, Kani trailing/truncation witnesses, raw public decoder rollback, a deterministic arbitrary-byte corpus, canonical round trips for all 50 tags, curated prior schemas, vector-length edges, and exhaustive one-byte unknown/truncated tag rejection. Over all 1,897 canonical schema bytes, a host census now exhausts every proper prefix plus every single-byte deletion, every insertion of all 256 values at every position, and every substitution by the other 255 values; every accepted edit must re-encode byte-identically. At least 1,200 deployed-SBF mutations spanning every tag plus each encoding's first, midpoint, and final payload positions compose canonical decode-or-reject with exact rollback. The fully symbolic unknown-tag Kani query, generationless hybrid legacy Kani query, asset-lifecycle/base-unit all-fields Kani queries, tag-60 base-unit trailing-byte Kani query, and monolithic all-payload trailing-byte Kani shape remain solver cliffs and are backstopped by exhaustive host/SVM rosters. |
 | INV-023 | SVM/CU + Source-bound roster | `cu/inv_023_caller_input_confinement_for_derived_safety_state.rs` and `inv_023_caller_input_roster.tsv` classify every field in all 50 production instruction variants and the three nested public input structs as signed configuration/economics, identity/scope, authenticated time, replay/bounded-work control, discovery-only input, no caller data, or an explicitly ignored legacy field, and bind every row to an executable witness; late malformed crank hints also prove exact rollback and nonvacuous progress. Per-field dynamic boundary mutation, a complete account-input roster, and alternate-entrypoint substitution remain. |
 | INV-024 | F + SVM/CU + Partial | `cu/inv_024_attributed_quote_value_conservation.rs`, `stateful/inv_024_attributed_quote_value_conservation.rs`, and `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` cover external SPL frames, exact custody flows, aggregate conservation, live insurance/backing withdrawal attribution, and all 32 combinations of four public open routes, four public close routes, and both account-A sides with exact winner/loser PnL, conversion, payout, claim cleanup, token supply, and unrelated-account frames. A general per-transition owner/domain `TokenValueFlow` ledger and formal whole-route composition remain open. |
 | INV-025 | F + SVM/CU + Partial | `stateful/inv_025_exact_stock_reconciliation.rs`, `cu/inv_025_exact_stock_reconciliation.rs`, and the shared post-transition census independently sum every materialized portfolio's capital/positive-PnL/escrow/status counts and every source domain's claims/backing/reservations/budgets/earnings/blockers, compare those sums with decoded state and the raw zero-copy header, reconcile engine custody exactly with SPL custody, and require explicit senior stocks plus a nonnegative derived junior residual after every generated action. The public owner lifecycle crosses insurance, backing, trade settlement, route-switched close, PnL conversion, exact live insurance/backing withdrawals, and user withdrawals. Rounding residue and protocol surplus remain a derived residual because the deployed layout has no independent persisted stock-class ledgers for them. |
@@ -591,8 +630,8 @@ Verdicts used below:
 - **N/A** - the feature is not exposed by this wrapper. It must remain absent or be re-opened when
   the API is introduced.
 
-The current ledger is 2 **CLOSED**, 53 **OPEN-T**, 17 **OPEN-D**, 5 **PARTIAL**, 11 **FRONTIER**,
-and one **N/A**. A closed row is scoped to the current public API and named assumptions, not a claim
+The current ledger is 2 **CLOSED**, 54 **OPEN-T**, 15 **OPEN-D**, 5 **PARTIAL**, 12 **FRONTIER**,
+and 1 **N/A**. A closed row is scoped to the current public API and named assumptions, not a claim
 that the whole program is LoF/DoS-free.
 
 ### Cross-cutting coverage bugs
@@ -677,7 +716,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-019 | OPEN-T | Matcher return fields, stale data, req_id, tails, local validation, and nested-CPI producer ordering are covered. A second program's return before the configured matcher is superseded and live; replacement after the matcher rejects with exact writable-state rollback. Oracle paths read authenticated accounts rather than CPI return data. Replace the injected matcher-context ABA setup with an external program's public close/recreate lifecycle before closure. |
 | AUDIT-020 | OPEN-T | Issue 405's account-write/selected-result timestamp split is closed on both configuration and permissionless-crank routes: freshness and monotonic profile provenance use the selected submission timestamp, malformed selection rejects, exact age boundaries are covered, stale reads cannot refresh liveness, and a current selected result remains live. Stored-slot rewind and expiry `-1/0/+1` are not yet crossed with every oracle mode and public consumer; no whole-parser wrapper proof or complete clock/observation matrix exists. |
 | AUDIT-021 | OPEN-T | Issue 404's two public transient-account roots are closed: zero-lamport System create/init and atomic close/reinit reject before registration, underfunded final-size realloc rejects, exact rent remains live, and every failure rolls back market/account/custody state. Residual claim/lien/recovery classes still need a close/recreate matrix; impossible shrink and caller-selected close-destination cases should be proven N/A from the API. |
-| AUDIT-022 | FRONTIER | Split Kani and exhaustive host/SVM decoder rosters backstop several solver cliffs. A deterministic 4,096-payload host corpus checks totality/canonicality, a canonical corpus locks all 50 tags, curated prior schemas plus vector-length boundaries reject, and a deployed-SBF matrix flips every bit at the tag and three boundary-sensitive payload positions for all schemas while requiring canonical decode-or-reject behavior and exact rollback. Duplicate-field N/A documentation, deeper interior-byte mutation, and per-tag proof decomposition for the remaining solver-cliff payloads remain. |
+| AUDIT-022 | FRONTIER | Split Kani and exhaustive host/SVM decoder rosters backstop several solver cliffs. A deterministic 4,096-payload host corpus checks totality/canonicality; a canonical corpus locks all 50 tags; curated prior schemas plus vector-length boundaries reject. The complete canonical single-byte edit neighborhood covers deletion at every byte, insertion of every byte value at every position, and substitution by every alternate byte value across all schemas, requiring canonical re-encoding for each accepted alternate; every proper prefix rejects separately. A deployed-SBF matrix composes selected mutations from every schema with canonical decode-or-reject behavior and exact rollback. Duplicate-field N/A documentation, higher-distance structured mutation, public dispatch of every accepted alternate, and per-tag proof decomposition for the remaining solver-cliff payloads remain. |
 | AUDIT-023 | PARTIAL | A production-source-bound roster now owns every scalar/container field in all 50 instruction variants and three nested public input structs, enforces semantic classes, and requires a live evidence function for every row; late malformed crank hints prove exact rollback. Dynamic one-field boundary mutation, a complete account-role roster, and systematic alternate-entrypoint substitution remain. |
 | AUDIT-024 | PARTIAL | Aggregate conservation is now supplemented by a 32-world public route-pair matrix that proves exact realized-PnL ownership through settlement, route-switched close, conversion, and SPL withdrawal for both sides. The stateful runner still needs a general per-transition `TokenValueFlow` owner/domain ledger for every value-bearing action; exact rejected-route snapshots already exist. |
 | AUDIT-025 | PARTIAL | Every generated public step now runs an independent portfolio/domain census against both decoded state and the raw zero-copy header, exact SPL custody, and a nonnegative explicit-stock partition; a dedicated public lifecycle crosses insurance, backing, realized PnL, route-switched close, conversion, backing withdrawal, and terminal user withdrawals. The complete 5! resolved claimant-order campaign and four-state Recovery resource-failure lattice invoke the same stock and encumbrance census after every public transition, including each successful crank step. Rounding residue/protocol surplus still cannot be independently recomputed until the deployed state exposes persisted stock-class ledgers instead of only a derived junior residual. |

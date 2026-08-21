@@ -1047,6 +1047,39 @@ fn invariant_ids(markdown: &str, prefix: &str) -> Vec<u16> {
         .collect()
 }
 
+fn audit_verdict_counts(markdown: &str) -> std::collections::BTreeMap<&str, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    for line in markdown.lines().filter(|line| line.starts_with("| AUDIT-")) {
+        let verdict = line
+            .split('|')
+            .nth(2)
+            .map(str::trim)
+            .expect("every audit row has a verdict column");
+        assert!(
+            matches!(
+                verdict,
+                "CLOSED" | "OPEN-T" | "OPEN-D" | "PARTIAL" | "FRONTIER" | "N/A"
+            ),
+            "unknown audit verdict {verdict}"
+        );
+        *counts.entry(verdict).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn stated_audit_count(summary: &str, verdict: &str) -> usize {
+    let marker = format!(" **{verdict}**");
+    let marker_index = summary
+        .find(&marker)
+        .unwrap_or_else(|| panic!("audit summary omits {verdict}"));
+    summary[..marker_index]
+        .split_whitespace()
+        .last()
+        .unwrap_or_else(|| panic!("audit summary omits the {verdict} count"))
+        .parse()
+        .unwrap_or_else(|_| panic!("audit summary has a nonnumeric {verdict} count"))
+}
+
 #[test]
 fn v16_invariant_charter_and_index_are_complete() {
     let expected: Vec<u16> = (1..=89).collect();
@@ -1065,6 +1098,31 @@ fn v16_invariant_charter_and_index_are_complete() {
         expected,
         "the exhaustiveness audit must classify every normative invariant exactly once"
     );
+}
+
+#[test]
+fn v16_invariant_audit_summary_matches_every_verdict_row() {
+    let markdown = include_str!("../README.md");
+    let counts = audit_verdict_counts(markdown);
+    assert_eq!(counts.values().sum::<usize>(), 89);
+
+    let summary = markdown
+        .lines()
+        .skip_while(|line| !line.starts_with("The current ledger is "))
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        summary.starts_with("The current ledger is "),
+        "the invariant audit must publish its current verdict totals"
+    );
+    for verdict in ["CLOSED", "OPEN-T", "OPEN-D", "PARTIAL", "FRONTIER", "N/A"] {
+        assert_eq!(
+            stated_audit_count(&summary, verdict),
+            counts.get(verdict).copied().unwrap_or(0),
+            "stale invariant audit summary for {verdict}"
+        );
+    }
 }
 
 #[test]

@@ -510,6 +510,120 @@ fn v16_program_encoded_public_instruction_roster_rejects_trailing_bytes() {
 }
 
 #[test]
+fn v16_host_decoder_exhausts_single_edit_neighborhood_for_every_schema() {
+    let representatives = inv_022_representative_public_instructions();
+    assert_eq!(representatives.len(), 50, "every public schema is owned");
+
+    let mut proper_prefixes = 0usize;
+    let mut byte_deletions = 0usize;
+    let mut byte_insertions = 0usize;
+    let mut byte_substitutions = 0usize;
+    let mut accepted_canonical_mutations = 0usize;
+    let mut rejected_mutations = 0usize;
+    let mut canonical_bytes = 0usize;
+
+    for instruction in representatives {
+        let canonical = instruction.encode();
+        canonical_bytes += canonical.len();
+        let source_tag = canonical[0];
+        assert_eq!(
+            ProgInstruction::decode(&canonical).expect("canonical schema seed decodes"),
+            instruction,
+            "tag {source_tag}: canonical seed round-trips"
+        );
+
+        for prefix_len in 0..canonical.len() {
+            proper_prefixes += 1;
+            assert!(
+                ProgInstruction::decode(&canonical[..prefix_len]).is_err(),
+                "tag {source_tag}: proper prefix length {prefix_len} must not decode"
+            );
+        }
+
+        for position in 0..canonical.len() {
+            byte_deletions += 1;
+            let mut mutated = canonical.clone();
+            mutated.remove(position);
+            match ProgInstruction::decode(&mutated) {
+                Ok(decoded) => {
+                    accepted_canonical_mutations += 1;
+                    assert_eq!(
+                        decoded.encode(),
+                        mutated,
+                        "tag {source_tag}: accepted deletion at byte {position} is not canonical"
+                    );
+                }
+                Err(_) => rejected_mutations += 1,
+            }
+        }
+
+        for position in 0..=canonical.len() {
+            for inserted in u8::MIN..=u8::MAX {
+                byte_insertions += 1;
+                let mut mutated = canonical.clone();
+                mutated.insert(position, inserted);
+                match ProgInstruction::decode(&mutated) {
+                    Ok(decoded) => {
+                        accepted_canonical_mutations += 1;
+                        assert_eq!(
+                            decoded.encode(),
+                            mutated,
+                            "tag {source_tag}: accepted insertion of {inserted} at byte {position} is not canonical"
+                        );
+                    }
+                    Err(_) => rejected_mutations += 1,
+                }
+            }
+        }
+
+        for position in 0..canonical.len() {
+            for replacement in u8::MIN..=u8::MAX {
+                if replacement == canonical[position] {
+                    continue;
+                }
+                byte_substitutions += 1;
+                let mut mutated = canonical.clone();
+                mutated[position] = replacement;
+                match ProgInstruction::decode(&mutated) {
+                    Ok(decoded) => {
+                        accepted_canonical_mutations += 1;
+                        assert_eq!(
+                            decoded.encode(),
+                            mutated,
+                            "tag {source_tag}: accepted replacement {replacement} at byte {position} is not canonical"
+                        );
+                        if position != 0 {
+                            assert_eq!(
+                                mutated[0], source_tag,
+                                "payload mutation cannot change instruction kind"
+                            );
+                        }
+                    }
+                    Err(_) => rejected_mutations += 1,
+                }
+            }
+        }
+    }
+
+    assert!(
+        canonical_bytes >= 1_800,
+        "canonical schema corpus unexpectedly small: {canonical_bytes} bytes"
+    );
+    assert_eq!(proper_prefixes, canonical_bytes);
+    assert_eq!(byte_deletions, canonical_bytes);
+    assert_eq!(byte_insertions, (canonical_bytes + 50) * 256);
+    assert_eq!(byte_substitutions, canonical_bytes * 255);
+    assert!(
+        accepted_canonical_mutations > 0,
+        "field mutations must exercise valid alternate canonical values"
+    );
+    assert!(
+        rejected_mutations > 0,
+        "tag, enum, length, and reserved-field mutations must exercise rejection"
+    );
+}
+
+#[test]
 fn v16_program_deployed_decoder_bit_mutation_matrix_is_total_canonical_and_atomic() {
     let representatives = inv_022_representative_public_instructions();
     let canonical_tags: std::collections::BTreeSet<u8> = representatives
