@@ -6655,6 +6655,15 @@ pub struct SameAssetCloseLocalityEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConcurrentCloseLocalityEvidence {
+    pub first_residual_before: u128,
+    pub first_residual_after: u128,
+    pub second_residual_before: u128,
+    pub second_residual_after: u128,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurePendingObligationDosEvidence {
     pub cure_deposit: u128,
     pub cure_source_debit: u128,
@@ -6927,6 +6936,129 @@ pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvi
         oi_long_after: group_after.assets[ASSET].oi_eff_long_q,
         oi_short_before: group_before.assets[ASSET].oi_eff_short_q,
         oi_short_after: group_after.assets[ASSET].oi_eff_short_q,
+        coverage: runner.coverage,
+    })
+}
+
+pub fn run_concurrent_close_locality_probe() -> Result<ConcurrentCloseLocalityEvidence, String> {
+    const FIRST_WINNER: usize = 0;
+    const FIRST_LOSER: usize = 1;
+    const SECOND_WINNER: usize = 2;
+    const SECOND_LOSER: usize = 3;
+    const KEEPER: usize = EXIT_MAKER_INDEX;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 161_600, 1],
+        actor_token_balances: [1_000_000, 161_600, 1_000_000, 161_600, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([0x75; 32], config)?;
+    create_public_cancellable_close(
+        &mut runner,
+        FIRST_WINNER as u8,
+        FIRST_LOSER as u8,
+        0,
+        KEEPER as u8,
+    )?;
+    let first_before_second = runner
+        .env
+        .primary_portfolio(FIRST_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-074 first close decode: {error:?}"))?;
+    create_public_cancellable_close(
+        &mut runner,
+        SECOND_WINNER as u8,
+        SECOND_LOSER as u8,
+        1,
+        KEEPER as u8,
+    )?;
+    let first_before = runner
+        .env
+        .primary_portfolio(FIRST_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-074 first concurrent close decode: {error:?}"))?;
+    let second_before = runner
+        .env
+        .primary_portfolio(SECOND_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-074 second concurrent close decode: {error:?}"))?;
+    if first_before != first_before_second
+        || !first_before.active
+        || first_before.residual_remaining == 0
+        || !second_before.active
+        || second_before.residual_remaining == 0
+    {
+        return Err(format!(
+            "INV-074 could not compose two independent active closes: first={first_before_second:?}->{first_before:?}, second={second_before:?}"
+        ));
+    }
+
+    let spl_vault_before = runner.env.token_amount(runner.env.vault);
+    let accounted_vault_before = runner.env.primary_market_state().1.vault;
+    runner
+        .execute_crank(FIRST_LOSER, HintMode::Empty, true)
+        .map_err(CrankFailure::into_message)?;
+    let first_mid = runner
+        .env
+        .primary_portfolio(FIRST_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-074 first advanced close decode: {error:?}"))?;
+    let second_mid = runner
+        .env
+        .primary_portfolio(SECOND_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-074 framed second close decode: {error:?}"))?;
+    if first_mid.residual_remaining >= first_before.residual_remaining
+        || second_mid != second_before
+    {
+        return Err(format!(
+            "INV-074 advancing first close crossed close scope: first={first_before:?}->{first_mid:?}, second={second_before:?}->{second_mid:?}"
+        ));
+    }
+
+    runner
+        .execute_crank(SECOND_LOSER, HintMode::Empty, true)
+        .map_err(CrankFailure::into_message)?;
+    let first_after = runner
+        .env
+        .primary_portfolio(FIRST_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-074 framed first close decode: {error:?}"))?;
+    let second_after = runner
+        .env
+        .primary_portfolio(SECOND_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-074 second advanced close decode: {error:?}"))?;
+    if first_after != first_mid
+        || second_after.residual_remaining >= second_mid.residual_remaining
+        || runner.env.primary_market_state().1.vault != accounted_vault_before
+        || runner.env.token_amount(runner.env.vault) != spl_vault_before
+    {
+        return Err(format!(
+            "INV-074 advancing second close crossed close/custody scope: first={first_mid:?}->{first_after:?}, second={second_mid:?}->{second_after:?}"
+        ));
+    }
+    runner.assert_global_invariants()?;
+
+    Ok(ConcurrentCloseLocalityEvidence {
+        first_residual_before: first_before.residual_remaining,
+        first_residual_after: first_after.residual_remaining,
+        second_residual_before: second_before.residual_remaining,
+        second_residual_after: second_after.residual_remaining,
         coverage: runner.coverage,
     })
 }

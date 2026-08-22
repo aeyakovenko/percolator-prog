@@ -10,11 +10,17 @@
 //! effective OI, preserve both close participants and the complete close ledger byte-for-byte,
 //! and move no internal or SPL custody.
 //!
-//! Guarantee boundary: this is the same-asset risk-reduction cell. Risk increase while a domain
-//! loss barrier is active is intentionally outside the guarantee; other side/domain/lifecycle and
-//! concurrent-close combinations remain in the audit matrix.
+//! A second probe creates active closes on two different assets and advances each independently;
+//! each crank must strictly reduce only its selected ledger while framing the other close and all
+//! custody.
+//!
+//! Guarantee boundary: these are the same-asset risk-reduction and two-asset/two-account close
+//! cells. Risk increase while a domain loss barrier is active is intentionally outside the
+//! guarantee; same-domain competing closes and broader lifecycle combinations remain open.
 
-use crate::support::fuzz_model::run_same_asset_close_locality_probe;
+use crate::support::fuzz_model::{
+    run_concurrent_close_locality_probe, run_same_asset_close_locality_probe,
+};
 
 #[test]
 fn v16_program_active_close_preserves_unrelated_same_asset_reduction() {
@@ -43,5 +49,22 @@ fn v16_program_active_close_preserves_unrelated_same_asset_reduction() {
         0,
         "{evidence:?}"
     );
+    assert_ne!(evidence.coverage.token_frame_checks, 0, "{evidence:?}");
+}
+
+#[test]
+fn v16_program_two_asset_closes_advance_without_crossing_scope() {
+    let evidence = run_concurrent_close_locality_probe()
+        .expect("INV-074 public concurrent-close locality probe");
+
+    assert!(
+        evidence.first_residual_after < evidence.first_residual_before,
+        "{evidence:?}"
+    );
+    assert!(
+        evidence.second_residual_after < evidence.second_residual_before,
+        "{evidence:?}"
+    );
+    assert!(evidence.coverage.crank_progress >= 2, "{evidence:?}");
     assert_ne!(evidence.coverage.token_frame_checks, 0, "{evidence:?}");
 }
