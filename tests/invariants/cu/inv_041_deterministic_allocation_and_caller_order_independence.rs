@@ -2,15 +2,18 @@
 //!
 //! Normative obligation: Caller ordering cannot change allocation, loss attribution, or economic outcome.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_attack_force_close_dust_chunking_is_value_path_independent`, `v16_attack_multi_observation_crank_order_cannot_change_economics`. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Evidence in this file (I/C plus invariant-specific M assertions): force-close chunking,
+//! multi-observation crank ordering, and all `4!` Recovery exit orders for two positions per side.
+//! These tests exercise the deployed public wrapper with real SBF/LiteSVM accounts and assert
+//! economic state, token custody, side counters, liveness, and compute outcomes.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: the Recovery matrix exhausts equal-sized, zero-drift four-party landing
+//! orders and independently reconstructs its side state after every instruction. Liquidation,
+//! insurance, lien, payout, claim, and close-preemption ordering remain separate open partitions.
 
 use super::*;
+
+const FOUR_PARTY_RECOVERY_ASSET: usize = 1;
 
 #[test]
 fn v16_attack_force_close_dust_chunking_is_value_path_independent() {
@@ -241,4 +244,232 @@ fn v16_attack_multi_observation_crank_order_cannot_change_economics() {
         forward, reverse,
         "caller-chosen observation order must not change market or user economics"
     );
+}
+
+fn assert_recovery_order_census(env: &V16CuEnv, portfolios: &[Pubkey; 4]) -> usize {
+    let asset = env.market_state().1.assets[FOUR_PARTY_RECOVERY_ASSET];
+    let mut oi_long = 0u128;
+    let mut oi_short = 0u128;
+    let mut stored_long = 0u64;
+    let mut stored_short = 0u64;
+    let mut pending_long = 0u64;
+    let mut pending_short = 0u64;
+    let mut weight_long = 0u128;
+    let mut weight_short = 0u128;
+
+    for portfolio in portfolios {
+        let account = env.portfolio_state(*portfolio);
+        if !has_active_leg_for_asset(&account, FOUR_PARTY_RECOVERY_ASSET) {
+            continue;
+        }
+        let leg = active_leg_for_asset(&account, FOUR_PARTY_RECOVERY_ASSET);
+        match leg.side {
+            SideV16::Long => {
+                stored_long += 1;
+                weight_long = weight_long.checked_add(leg.loss_weight).unwrap();
+                if leg.basis_pos_q == 0 {
+                    pending_long += 1;
+                } else {
+                    oi_long = oi_long.checked_add(leg.basis_pos_q.unsigned_abs()).unwrap();
+                }
+            }
+            SideV16::Short => {
+                stored_short += 1;
+                weight_short = weight_short.checked_add(leg.loss_weight).unwrap();
+                if leg.basis_pos_q == 0 {
+                    pending_short += 1;
+                } else {
+                    oi_short = oi_short
+                        .checked_add(leg.basis_pos_q.unsigned_abs())
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    assert_eq!(asset.oi_eff_long_q, oi_long);
+    assert_eq!(asset.oi_eff_short_q, oi_short);
+    assert_eq!(asset.stored_pos_count_long, stored_long);
+    assert_eq!(asset.stored_pos_count_short, stored_short);
+    assert_eq!(asset.pending_obligation_count_long, pending_long);
+    assert_eq!(asset.pending_obligation_count_short, pending_short);
+    assert_eq!(asset.loss_weight_sum_long, weight_long);
+    assert_eq!(asset.loss_weight_sum_short, weight_short);
+    assert!(pending_long <= stored_long);
+    assert!(pending_short <= stored_short);
+    (pending_long + pending_short) as usize
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FourPartyRecoveryOutcome {
+    payouts: [u64; 4],
+    terminal_vault: u64,
+    terminal_c_tot: u128,
+}
+
+fn run_four_party_recovery_order(order: [usize; 4]) -> FourPartyRecoveryOutcome {
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.configure_auth_mark_for_asset_as_admin(FOUR_PARTY_RECOVERY_ASSET as u16, 0, PRICE);
+    let owners: [Keypair; 4] = std::array::from_fn(|_| Keypair::new());
+    let portfolios: [Pubkey; 4] = std::array::from_fn(|index| {
+        let portfolio = env.create_portfolio(&owners[index]);
+        env.deposit(&owners[index], portfolio, DEPOSIT);
+        portfolio
+    });
+
+    for (long_index, short_index) in [(0usize, 1usize), (2, 3)] {
+        env.trade_asset_with_cu(
+            FOUR_PARTY_RECOVERY_ASSET as u16,
+            &owners[long_index],
+            portfolios[long_index],
+            &owners[short_index],
+            portfolios[short_index],
+            POS_SCALE as i128,
+            PRICE,
+            0,
+        );
+    }
+    assert_eq!(assert_recovery_order_census(&env, &portfolios), 0);
+
+    env.svm.warp_to_slot(1);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_SHUTDOWN,
+        FOUR_PARTY_RECOVERY_ASSET as u16,
+        1,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[FOUR_PARTY_RECOVERY_ASSET].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    let label = format!("four-party Recovery order {order:?}");
+    for index in order {
+        let before = env.portfolio_state(portfolios[index]);
+        assert!(has_active_leg_for_asset(&before, FOUR_PARTY_RECOVERY_ASSET));
+        assert_ne!(
+            active_leg_for_asset(&before, FOUR_PARTY_RECOVERY_ASSET).basis_pos_q,
+            0
+        );
+        let cu = env.forfeit_recovery_leg_with_cu(
+            &owners[index],
+            portfolios[index],
+            FOUR_PARTY_RECOVERY_ASSET as u16,
+            u128::MAX,
+        );
+        assert_cu_within(&label, cu, CRANK_CU_LIMIT);
+        let after = env.portfolio_state(portfolios[index]);
+        assert!(
+            !has_active_leg_for_asset(&after, FOUR_PARTY_RECOVERY_ASSET)
+                || active_leg_for_asset(&after, FOUR_PARTY_RECOVERY_ASSET).basis_pos_q == 0,
+            "{label}: an accepted owner forfeit retained real exposure"
+        );
+        assert_recovery_order_census(&env, &portfolios);
+    }
+
+    let retained = assert_recovery_order_census(&env, &portfolios);
+    assert!(
+        (2..=3).contains(&retained),
+        "{label}: the four-party frontier must retain two or three obligations, got {retained}"
+    );
+    let after_forfeits = env.market_state().1.assets[FOUR_PARTY_RECOVERY_ASSET];
+    assert_eq!(after_forfeits.oi_eff_long_q, 0);
+    assert_eq!(after_forfeits.oi_eff_short_q, 0);
+
+    for index in order.into_iter().rev() {
+        if !has_active_leg_for_asset(
+            &env.portfolio_state(portfolios[index]),
+            FOUR_PARTY_RECOVERY_ASSET,
+        ) {
+            continue;
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let account_before = env.svm.get_account(&portfolios[index]).unwrap();
+        let cu = env.crank(
+            portfolios[index],
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations(FOUR_PARTY_RECOVERY_ASSET as u16),
+            },
+        );
+        assert_cu_within(&label, cu, CRANK_CU_LIMIT);
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&portfolios[index]).unwrap() != account_before,
+            "{label}: an accepted cleanup crank was a no-op"
+        );
+        assert!(
+            !has_active_leg_for_asset(
+                &env.portfolio_state(portfolios[index]),
+                FOUR_PARTY_RECOVERY_ASSET,
+            ),
+            "{label}: a released zero-basis obligation did not clear in one bounded crank"
+        );
+        assert_recovery_order_census(&env, &portfolios);
+    }
+
+    assert_eq!(assert_recovery_order_census(&env, &portfolios), 0);
+    let terminal_asset = env.market_state().1.assets[FOUR_PARTY_RECOVERY_ASSET];
+    assert_eq!(terminal_asset.oi_eff_long_q, 0);
+    assert_eq!(terminal_asset.oi_eff_short_q, 0);
+    assert_eq!(terminal_asset.stored_pos_count_long, 0);
+    assert_eq!(terminal_asset.stored_pos_count_short, 0);
+    assert_eq!(terminal_asset.pending_obligation_count_long, 0);
+    assert_eq!(terminal_asset.pending_obligation_count_short, 0);
+    assert_eq!(terminal_asset.loss_weight_sum_long, 0);
+    assert_eq!(terminal_asset.loss_weight_sum_short, 0);
+
+    let mut payouts = [0u64; 4];
+    for index in 0..4 {
+        let account = env.portfolio_state(portfolios[index]);
+        assert_eq!(account.capital.get(), DEPOSIT);
+        assert_eq!(account.pnl.get(), 0);
+        let destination = env.withdraw(&owners[index], portfolios[index], DEPOSIT);
+        payouts[index] = env.token_amount(destination);
+        env.close_portfolio_with_cu(&owners[index], portfolios[index]);
+    }
+    let terminal = env.market_state().1;
+    assert_eq!(payouts.iter().copied().sum::<u64>(), 4 * DEPOSIT as u64);
+    assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+    FourPartyRecoveryOutcome {
+        payouts,
+        terminal_vault: env.token_amount(env.vault),
+        terminal_c_tot: terminal.c_tot,
+    }
+}
+
+#[test]
+fn v16_program_four_party_recovery_exit_orders_are_economically_identical() {
+    let mut baseline = None;
+    let mut permutations = 0usize;
+    for a in 0..4 {
+        for b in 0..4 {
+            for c in 0..4 {
+                for d in 0..4 {
+                    let order = [a, b, c, d];
+                    if a == b || a == c || a == d || b == c || b == d || c == d {
+                        continue;
+                    }
+                    let outcome = run_four_party_recovery_order(order);
+                    assert_eq!(outcome.payouts, [1_000; 4]);
+                    assert_eq!(outcome.terminal_vault, 0);
+                    assert_eq!(outcome.terminal_c_tot, 0);
+                    if let Some(expected) = &baseline {
+                        assert_eq!(
+                            &outcome, expected,
+                            "Recovery landing order {order:?} changed terminal economics"
+                        );
+                    } else {
+                        baseline = Some(outcome);
+                    }
+                    permutations += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(permutations, 24);
 }
