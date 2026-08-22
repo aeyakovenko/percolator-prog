@@ -18,8 +18,10 @@
 //! expiry/impairment and terminal disposition for all funded portfolios, while
 //! `stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs` builds genuine
 //! underfunded partial receipts and crosses claimant order with close/top-up route priority.
-//! True B-headroom exhaustion and the remaining lifecycle failure compositions remain outside the
-//! computationally reachable topology.
+//! B-headroom exhaustion is covered at the engine boundary by deployed-U256 saturation execution,
+//! a generic residual-partition contract, and a fully-declared-Recovery proof. Its direct universal
+//! U256-division composition and the remaining lifecycle failure compositions remain outside this
+//! publicly reachable topology.
 
 use crate::support::fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census};
 use crate::support::v16_svm::{MarketConfig, V16Svm};
