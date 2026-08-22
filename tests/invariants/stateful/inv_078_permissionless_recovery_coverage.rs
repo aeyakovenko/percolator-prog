@@ -57,6 +57,9 @@ fn crank_to_fixed_point(
 ) {
     let mut progressed = false;
     for step in 0..16 {
+        if progressed && !has_active_leg(env, actor) {
+            break;
+        }
         match env.crank(actor, slot, observations.to_vec()) {
             Ok(_) => {
                 progressed = true;
@@ -199,6 +202,19 @@ fn v16_program_recovery_resource_failure_lattice_preserves_public_exit() {
             &format!("INV-078 resource cell {resource_mask} winner forfeited"),
             &env,
         );
+        for actor in [1usize, 0usize] {
+            if has_active_leg(&env, actor) {
+                crank_to_fixed_point(
+                    &mut env,
+                    actor,
+                    44,
+                    &terminal_observations,
+                    &format!(
+                        "INV-078 resource cell {resource_mask} actor {actor} retained obligation"
+                    ),
+                );
+            }
+        }
 
         let (_, after) = env.primary_market_state();
         let loser_close = env

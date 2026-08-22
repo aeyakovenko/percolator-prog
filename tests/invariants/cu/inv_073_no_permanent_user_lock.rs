@@ -4,7 +4,7 @@
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): recovery and terminal-exit
 //! matrices (`v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_progress`,
-//! `v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock`,
+//! `v16_program_recovery_forfeit_orders_preserve_loss_and_terminal_exit`,
 //! `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`,
 //! `v16_program_fragmented_recovery_pair_matrix_clears_every_fragment`,
 //! `v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit`,
@@ -16,6 +16,13 @@
 //! helpers are executed and owned by INV-051. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
+//!
+//! The Recovery-order matrix reaches the same shutdown state entirely through public instructions,
+//! executes both winner-first and loser-first forfeiture schedules, and proves that zero-basis loss
+//! weight remains durable until its counterparty settles. Both orders must produce the same 8,424
+//! atom social loss, payouts, provider loss partition, bounded continuation, and terminal exits.
+//! This is shared whole-route evidence for INV-039 (pending-loss durability), INV-041
+//! (caller-order independence), and INV-073 (no permanent user lock).
 //!
 //! The fractional-carry matrix forks from the same publicly reached state and proves both the
 //! owner-signed reduction and bilateral trade routes clear the leg, normalize the carry, remain
@@ -332,8 +339,85 @@ fn v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_pr
     assert_eq!(env.token_amount(fresh_short_destination), 600);
 }
 
-#[test]
-fn v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock() {
+#[derive(Debug, PartialEq, Eq)]
+struct RecoveryForfeitOrderOutcome {
+    winner_payout: u128,
+    loser_payout: u128,
+    base_peer_payout: u128,
+    provider_withdrawal: u128,
+    vault_remaining: u128,
+    loser_crystallized_loss: u128,
+    provider_receivable_num: u128,
+    spent_backing_num: u128,
+    b_long_num: u128,
+    b_short_num: u128,
+}
+
+fn drive_recovery_owner_to_pending_or_detached(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    asset_index: u16,
+    label: &str,
+) {
+    for _ in 0..8 {
+        let account = env.portfolio_state(portfolio);
+        if !has_active_leg_for_asset(&account, asset_index as usize)
+            || active_leg_for_asset(&account, asset_index as usize).basis_pos_q == 0
+        {
+            return;
+        }
+
+        let forfeit_cu = env.forfeit_recovery_leg_with_cu(owner, portfolio, asset_index, u128::MAX);
+        assert_cu_within(label, forfeit_cu, CRANK_CU_LIMIT);
+        let account = env.portfolio_state(portfolio);
+        if !has_active_leg_for_asset(&account, asset_index as usize)
+            || active_leg_for_asset(&account, asset_index as usize).basis_pos_q == 0
+        {
+            return;
+        }
+
+        let crank_cu = env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 30,
+                observations: crank_observations(asset_index),
+            },
+        );
+        assert_cu_within(label, crank_cu, CRANK_CU_LIMIT);
+    }
+    panic!("{label}: owner route did not reach a pending obligation or detach");
+}
+
+fn drain_recovery_pending_obligation(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    asset_index: u16,
+    label: &str,
+) {
+    for _ in 0..8 {
+        let account = env.portfolio_state(portfolio);
+        if !has_active_leg_for_asset(&account, asset_index as usize) {
+            return;
+        }
+        assert_eq!(
+            active_leg_for_asset(&account, asset_index as usize).basis_pos_q,
+            0,
+            "{label}: only a zero-basis retained obligation may remain"
+        );
+        let crank_cu = env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 30,
+                observations: crank_observations(asset_index),
+            },
+        );
+        assert_cu_within(label, crank_cu, CRANK_CU_LIMIT);
+    }
+    panic!("{label}: retained obligation did not clear in bounded public cranks");
+}
+
+fn run_recovery_forfeit_order(winner_first: bool) -> RecoveryForfeitOrderOutcome {
     const PRICE: u64 = 1_000_000;
     const ASSET: u16 = 1;
     const SOURCE_DOMAIN: u16 = ASSET * 2;
@@ -356,7 +440,7 @@ fn v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock() {
     env.deposit(&loser_owner, loser, 51_000);
     env.deposit(&winner_owner, winner, 100_000);
     env.deposit(&base_peer_owner, base_peer, 100_000);
-    env.top_up_backing_bucket(SOURCE_DOMAIN, BACKING, 10_000);
+    let backing_source = env.top_up_backing_bucket(SOURCE_DOMAIN, BACKING, 10_000);
     env.trade_asset_with_cu(
         ASSET,
         &loser_owner,
@@ -403,47 +487,197 @@ fn v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock() {
         );
     }
     env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 30, 0);
-    env.forfeit_recovery_leg_with_cu(&winner_owner, winner, ASSET, u128::MAX);
-    assert!(!has_active_leg_for_asset(
-        &env.portfolio_state(winner),
-        ASSET as usize
-    ));
+    let (first_owner, first, second_owner, second, label) = if winner_first {
+        (
+            &winner_owner,
+            winner,
+            &loser_owner,
+            loser,
+            "winner-first Recovery order",
+        )
+    } else {
+        (
+            &loser_owner,
+            loser,
+            &winner_owner,
+            winner,
+            "loser-first Recovery order",
+        )
+    };
+    let first_weight =
+        active_leg_for_asset(&env.portfolio_state(first), ASSET as usize).loss_weight;
+    drive_recovery_owner_to_pending_or_detached(&mut env, first_owner, first, ASSET, label);
 
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let loser_before = env.svm.get_account(&loser).unwrap();
-    let vault_before = env.svm.get_account(&env.vault).unwrap();
-    for _ in 0..16 {
-        env.svm.expire_blockhash();
-        let forfeit = env.send(
-            ProgInstruction::ForfeitRecoveryLeg {
-                portfolio_id: env.portfolio_id(loser),
-                position_epoch: env.portfolio_position_epoch(loser),
-                asset_index: ASSET,
-                b_delta_budget: u128::MAX,
-            },
-            vec![
-                AccountMeta::new(loser_owner.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(loser, false),
-            ],
-            &[&loser_owner],
-        );
-        assert!(
-            forfeit.is_err(),
-            "the loser unexpectedly escaped the fixed point"
-        );
-        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-        assert_eq!(env.svm.get_account(&loser).unwrap(), loser_before);
-        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let retained = active_leg_for_asset(&env.portfolio_state(first), ASSET as usize);
+    assert_eq!(
+        retained.basis_pos_q, 0,
+        "{label}: first exit must retain no exposure"
+    );
+    assert_eq!(
+        retained.loss_weight, first_weight,
+        "{label}: first exit erased loss weight"
+    );
+    let retained_asset = env.market_state().1.assets[ASSET as usize];
+    match retained.side {
+        percolator::SideV16::Long => {
+            assert_eq!(retained_asset.stored_pos_count_long, 1);
+            assert_eq!(retained_asset.pending_obligation_count_long, 1);
+            assert!(
+                retained_asset.stored_pos_count_short
+                    > retained_asset.pending_obligation_count_short
+            );
+        }
+        percolator::SideV16::Short => {
+            assert_eq!(retained_asset.stored_pos_count_short, 1);
+            assert_eq!(retained_asset.pending_obligation_count_short, 1);
+            assert!(
+                retained_asset.stored_pos_count_long > retained_asset.pending_obligation_count_long
+            );
+        }
     }
 
-    let loser_after = env.portfolio_state(loser);
-    assert!(has_active_leg_for_asset(&loser_after, ASSET as usize));
-    let market_after = env.market_state().1;
-    let bucket = &market_after.source_backing_buckets[SOURCE_DOMAIN as usize];
+    drive_recovery_owner_to_pending_or_detached(&mut env, second_owner, second, ASSET, label);
     assert!(
-        bucket.valid_liened_backing_num != 0 || bucket.impaired_liened_backing_num != 0,
-        "the failed loser continuation retained no provider encumbrance"
+        !has_active_leg_for_asset(&env.portfolio_state(second), ASSET as usize),
+        "{label}: the final real position must detach once only an opposite obligation remains"
+    );
+    drain_recovery_pending_obligation(&mut env, first, ASSET, label);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(first), ASSET as usize),
+        "{label}: the retained obligation must settle and release"
+    );
+
+    let settled_asset = env.market_state().1.assets[ASSET as usize];
+    assert_eq!(settled_asset.oi_eff_long_q, 0);
+    assert_eq!(settled_asset.oi_eff_short_q, 0);
+    assert_eq!(settled_asset.stored_pos_count_long, 0);
+    assert_eq!(settled_asset.stored_pos_count_short, 0);
+    assert_eq!(settled_asset.pending_obligation_count_long, 0);
+    assert_eq!(settled_asset.pending_obligation_count_short, 0);
+    assert_eq!(settled_asset.loss_weight_sum_long, 0);
+    assert_eq!(settled_asset.loss_weight_sum_short, 0);
+
+    let loser_state = env.portfolio_state(loser);
+    let loser_crystallized_loss = loser_state.residual_crystallized_loss_atoms_total.get();
+    assert_eq!(loser_state.capital.get(), 0);
+    assert_eq!(loser_state.pnl.get(), 0);
+    assert_eq!(loser_crystallized_loss, 51_000);
+    assert_eq!(env.portfolio_state(winner).pnl.get(), 51_000);
+
+    let close_base_cu = env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &base_peer_owner,
+        base_peer,
+        -(POS_SCALE as i128 * 3 / 2),
+        PRICE,
+        0,
+    );
+    assert_cu_within(label, close_base_cu, TRADE_CU_LIMIT);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(winner), 0));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(base_peer),
+        0
+    ));
+
+    let resolve_cu = env.resolve_stale_permissionless_with_cu(131);
+    assert_cu_within(label, resolve_cu, CRANK_CU_LIMIT);
+    env.svm.warp_to_slot(136);
+    let payouts = drain_resolved_cohort(
+        &mut env,
+        &[
+            (&winner_owner, winner),
+            (&loser_owner, loser),
+            (&base_peer_owner, base_peer),
+        ],
+        label,
+    );
+    assert_eq!(payouts, vec![151_000, 0, 100_000]);
+
+    for (owner, portfolio) in [
+        (&winner_owner, winner),
+        (&loser_owner, loser),
+        (&base_peer_owner, base_peer),
+    ] {
+        let close_cu = env.close_portfolio_with_cu(owner, portfolio);
+        assert_cu_within(label, close_cu, CUSTODY_CU_LIMIT);
+    }
+
+    let before_provider = env.market_state().1;
+    let provider_withdrawal = before_provider.source_backing_buckets[SOURCE_DOMAIN as usize]
+        .fresh_unliened_backing_num
+        / BOUND_SCALE;
+    let provider_cu = env.withdraw_backing_bucket_to_admin_token_with_cu(
+        backing_source,
+        SOURCE_DOMAIN,
+        provider_withdrawal,
+    );
+    assert_cu_within(label, provider_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        env.token_amount(backing_source) as u128,
+        provider_withdrawal
+    );
+
+    let terminal = env.market_state().1;
+    let source = terminal.source_credit[SOURCE_DOMAIN as usize];
+    let bucket = terminal.source_backing_buckets[SOURCE_DOMAIN as usize];
+    assert_eq!(terminal.materialized_portfolio_count, 0);
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.pnl_pos_tot, 0);
+    assert_eq!(source.positive_claim_bound_num, 0);
+    assert_eq!(source.exact_positive_claim_num, 0);
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(bucket.fresh_unliened_backing_num, 0);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(source.provider_receivable_num, 51_000 * BOUND_SCALE);
+    assert_eq!(source.spent_backing_num, source.provider_receivable_num);
+    assert_eq!(
+        bucket.consumed_liened_backing_num,
+        source.provider_receivable_num
+    );
+    assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+    assert_eq!(
+        payouts.iter().sum::<u128>() + provider_withdrawal + terminal.vault,
+        351_000,
+        "{label}: public payouts, returned backing, and retained custody must conserve every atom"
+    );
+
+    RecoveryForfeitOrderOutcome {
+        winner_payout: payouts[0],
+        loser_payout: payouts[1],
+        base_peer_payout: payouts[2],
+        provider_withdrawal,
+        vault_remaining: terminal.vault,
+        loser_crystallized_loss,
+        provider_receivable_num: source.provider_receivable_num,
+        spent_backing_num: source.spent_backing_num,
+        b_long_num: settled_asset.b_long_num,
+        b_short_num: settled_asset.b_short_num,
+    }
+}
+
+#[test]
+fn v16_program_recovery_forfeit_orders_preserve_loss_and_terminal_exit() {
+    let winner_first = run_recovery_forfeit_order(true);
+    let loser_first = run_recovery_forfeit_order(false);
+
+    assert_eq!(
+        winner_first, loser_first,
+        "public Recovery exit order changed payouts, loss attribution, or terminal custody"
+    );
+    assert_eq!(winner_first.winner_payout, 151_000);
+    assert_eq!(winner_first.loser_payout, 0);
+    assert_eq!(winner_first.base_peer_payout, 100_000);
+    assert_eq!(winner_first.provider_withdrawal, 49_000);
+    assert_eq!(winner_first.vault_remaining, 51_000);
+    assert_eq!(winner_first.loser_crystallized_loss, 51_000);
+    assert_eq!(winner_first.provider_receivable_num, 51_000 * BOUND_SCALE);
+    assert_eq!(winner_first.spent_backing_num, 51_000 * BOUND_SCALE);
+    assert_eq!(
+        winner_first.b_long_num + winner_first.b_short_num,
+        8_424 * percolator::SOCIAL_LOSS_DEN / POS_SCALE,
+        "the 8,424-atom residual must be booked exactly once regardless of exit order"
     );
 }
 
@@ -2979,9 +3213,12 @@ fn v16_program_forfeit_recovery_leg_rejects_when_resolve_matured() {
         fresh_cu,
         CUSTODY_CU_LIMIT,
     );
+    let fresh_long_after_forfeit = env.portfolio_state(fresh_long);
+    let retained_obligation = active_leg_for_asset(&fresh_long_after_forfeit, 0);
+    assert_eq!(retained_obligation.basis_pos_q, 0);
     assert!(
-        !has_active_leg_for_asset(&env.portfolio_state(fresh_long), 0),
-        "fresh asset-recovery forfeit proves the live path is reachable before stale maturity"
+        retained_obligation.loss_weight > 0,
+        "the first recovery exit retains attribution while the opposite position is live"
     );
     assert!(
         has_active_leg_for_asset(&env.portfolio_state(stale_long), 0),

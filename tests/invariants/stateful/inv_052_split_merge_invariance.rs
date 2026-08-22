@@ -1199,10 +1199,22 @@ fn run_target_history(
                 ));
             }
             for actor in 0..2 {
-                let account = env.primary_portfolio(actor);
-                if !percolator::active_bitmap_is_empty(state::portfolio_active_bitmap(&account)) {
+                for _ in 0..8 {
+                    let account = env.primary_portfolio(actor);
+                    if percolator::active_bitmap_is_empty(state::portfolio_active_bitmap(&account))
+                    {
+                        break;
+                    }
+                    let crank = env.crank(actor, shutdown_slot, vec![]).map_err(|error| {
+                        format!("settle retained Recovery obligation for actor {actor}: {error}")
+                    })?;
+                    max_compute_units = max_compute_units.max(crank.compute_units);
+                }
+                if !percolator::active_bitmap_is_empty(state::portfolio_active_bitmap(
+                    &env.primary_portfolio(actor),
+                )) {
                     return Err(format!(
-                        "Recovery forfeit retained actor {actor} active exposure"
+                        "Recovery forfeit retained actor {actor} obligation after bounded public cranks"
                     ));
                 }
             }

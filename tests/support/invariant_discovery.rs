@@ -2401,10 +2401,7 @@ fn discover_forfeit_portfolio_incarnation_replay(
         .map_err(|error| format!("shutdown old asset generation: {error}"))?;
     let old_portfolio_id = env.primary_portfolio_id(SUBJECT);
     let retained = env.build_retained_forfeit_recovery_leg(SUBJECT, 0, 1);
-    for actor in [SUBJECT, COUNTERPARTY] {
-        env.forfeit_recovery_leg(actor, 0, 1)
-            .map_err(|error| format!("clear old recovery leg for actor {actor}: {error}"))?;
-    }
+    settle_recovery_pair_for_recreation(&mut env, SUBJECT, COUNTERPARTY, 0, 2)?;
     env.withdraw_primary(SUBJECT, DEPOSIT)
         .map_err(|error| format!("empty old recovery portfolio: {error}"))?;
     env.close_primary_portfolio(SUBJECT)
@@ -2433,6 +2430,51 @@ fn discover_forfeit_portfolio_incarnation_replay(
         retained,
         supply_before,
     )
+}
+
+fn has_active_recovery_leg(env: &V16Svm, actor: usize, asset_index: u16) -> Result<bool, String> {
+    env.primary_portfolio(actor)
+        .legs
+        .iter()
+        .try_fold(false, |active, leg| {
+            let decoded = leg
+                .try_to_runtime()
+                .map_err(|error| format!("decode Recovery leg: {error:?}"))?;
+            Ok(active || (decoded.active && decoded.asset_index == u32::from(asset_index)))
+        })
+}
+
+fn settle_recovery_pair_for_recreation(
+    env: &mut V16Svm,
+    first: usize,
+    second: usize,
+    asset_index: u16,
+    now_slot: u64,
+) -> Result<(), String> {
+    for actor in [first, second] {
+        env.forfeit_recovery_leg(actor, asset_index, 1)
+            .map_err(|error| format!("clear old Recovery leg for actor {actor}: {error}"))?;
+    }
+
+    // The first exit now retains its loss weight as a zero-basis obligation while the opposite
+    // real position exists. Once the second position is gone, the public crank must release that
+    // obligation before the fixture can withdraw and close the old portfolio.
+    for actor in [first, second] {
+        for _ in 0..8 {
+            if !has_active_recovery_leg(env, actor, asset_index)? {
+                break;
+            }
+            env.crank(actor, now_slot, vec![]).map_err(|error| {
+                format!("settle retained Recovery obligation for actor {actor}: {error}")
+            })?;
+        }
+        if has_active_recovery_leg(env, actor, asset_index)? {
+            return Err(format!(
+                "actor {actor} retained a Recovery obligation after eight public cranks"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn discover_one_portfolio_incarnation_replay(
@@ -2690,10 +2732,7 @@ fn discover_forfeit_market_incarnation_replay(
     env.shutdown_asset(0, 2)
         .map_err(|error| format!("shutdown old market asset: {error}"))?;
     let retained = env.build_retained_forfeit_recovery_leg(SUBJECT, 0, 1);
-    for actor in [SUBJECT, COUNTERPARTY] {
-        env.forfeit_recovery_leg(actor, 0, 1)
-            .map_err(|error| format!("clear old-market recovery actor {actor}: {error}"))?;
-    }
+    settle_recovery_pair_for_recreation(&mut env, SUBJECT, COUNTERPARTY, 0, 2)?;
     publicly_recreate_market(&mut env, config, REINIT_SLOT)?;
     env.configure_permissionless_resolve(100, 1)
         .map_err(|error| format!("configure replacement recovery lifecycle: {error}"))?;

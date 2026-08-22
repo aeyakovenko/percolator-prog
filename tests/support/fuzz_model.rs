@@ -3779,9 +3779,7 @@ impl ScenarioRunner {
         }
 
         for asset in 0..ASSET_COUNT {
-            let before_leg = Self::account_leg_for_asset(account_before, asset)?;
-            let after_leg = Self::account_leg_for_asset(account_after, asset)?;
-            for (side, side_index) in [(SideV16::Long, 0usize), (SideV16::Short, 1usize)] {
+            for side in [SideV16::Long, SideV16::Short] {
                 let before_oi = match side {
                     SideV16::Long => group_before.assets[asset].oi_eff_long_q,
                     SideV16::Short => group_before.assets[asset].oi_eff_short_q,
@@ -3790,34 +3788,30 @@ impl ScenarioRunner {
                     SideV16::Long => group_after.assets[asset].oi_eff_long_q,
                     SideV16::Short => group_after.assets[asset].oi_eff_short_q,
                 };
-                let removed_leg = before_leg.filter(|leg| leg.side == side && after_leg.is_none());
                 if after_oi > before_oi {
                     return Err(format!(
-                        "actor {actor} {route:?} increased {:?} OI for asset {asset}: {before_oi}->{after_oi}",
-                        side
+                        "actor {actor} {route:?} increased {side:?} OI for asset {asset}: {before_oi}->{after_oi}"
                     ));
                 }
-                let deployed_debit = before_oi - after_oi;
-                if let Some(leg) = removed_leg {
-                    let prior_reset =
-                        Self::leg_oi_was_removed_by_reset(group_before, asset, leg, true);
-                    let expected_debit = if prior_reset {
-                        0
-                    } else {
-                        leg.basis_pos_q.unsigned_abs()
-                    };
-                    if deployed_debit != expected_debit {
-                        return Err(format!(
-                            "actor {actor} {route:?} {side:?} asset {asset} OI debit {deployed_debit} != removed current leg {expected_debit}"
-                        ));
-                    }
-                } else if deployed_debit != 0 {
-                    return Err(format!(
-                        "actor {actor} {route:?} changed {:?} asset {asset} OI without clearing that side's leg: {before_oi}->{after_oi}",
-                        side
-                    ));
-                }
-                self.expected_effective_oi[asset][side_index] = after_oi;
+            }
+        }
+        self.apply_account_oi_transition(
+            account_before,
+            account_after,
+            group_before,
+            true,
+            &format!("actor {actor} {route:?} terminal transition"),
+        )?;
+        for asset in 0..ASSET_COUNT {
+            let deployed = [
+                group_after.assets[asset].oi_eff_long_q,
+                group_after.assets[asset].oi_eff_short_q,
+            ];
+            if deployed != self.expected_effective_oi[asset] {
+                return Err(format!(
+                    "actor {actor} {route:?} asset {asset} OI diverged from the canonical leg transition: deployed={deployed:?}, expected={:?}",
+                    self.expected_effective_oi[asset]
+                ));
             }
         }
         self.assert_positions_match()
@@ -6484,6 +6478,10 @@ pub fn run_recovery_restart_trade_route_oracle() -> Result<Coverage, String> {
             actor: 1,
             asset: 0,
             budget_units: u8::MAX,
+        },
+        Action::Crank {
+            actor: 0,
+            hints: HintMode::Complete,
         },
         Action::RestartAssetOracle {
             asset: 0,
@@ -17019,6 +17017,41 @@ struct ForfeitReplayTerminalOutcome {
     max_cu: u64,
 }
 
+fn settle_recovery_forfeit_pair(
+    env: &mut V16Svm,
+    first: usize,
+    second: usize,
+    asset_index: u16,
+    now_slot: u64,
+    context: &str,
+) -> Result<u64, String> {
+    let mut max_cu = 0;
+    for actor in [first, second] {
+        let forfeit = env
+            .forfeit_recovery_leg(actor, asset_index, 1)
+            .map_err(|error| format!("{context} forfeit actor {actor}: {error}"))?;
+        max_cu = max_cu.max(forfeit.compute_units);
+    }
+
+    for actor in [first, second] {
+        for _ in 0..8 {
+            if !portfolio_has_active_asset(&env.primary_portfolio(actor), asset_index as usize) {
+                break;
+            }
+            let crank = env.crank(actor, now_slot, vec![]).map_err(|error| {
+                format!("{context} settle retained obligation for actor {actor}: {error}")
+            })?;
+            max_cu = max_cu.max(crank.compute_units);
+        }
+        if portfolio_has_active_asset(&env.primary_portfolio(actor), asset_index as usize) {
+            return Err(format!(
+                "{context} actor {actor} retained a Recovery obligation after eight public cranks"
+            ));
+        }
+    }
+    Ok(max_cu)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_forfeit_replay_terminal(
     env: &mut V16Svm,
@@ -17232,10 +17265,8 @@ fn run_forfeit_portfolio_incarnation_world(
     env.shutdown_asset(0, 2)
         .map_err(|error| format!("PR 278 shutdown generation A: {error}"))?;
     let retained = env.build_retained_forfeit_recovery_leg(VICTIM, 0, 1);
-    env.forfeit_recovery_leg(VICTIM, 0, 1)
-        .map_err(|error| format!("PR 278 forfeit victim generation-A leg: {error}"))?;
-    env.forfeit_recovery_leg(ATTACKER, 0, 1)
-        .map_err(|error| format!("PR 278 forfeit counterparty generation-A leg: {error}"))?;
+    let cleanup_max_cu =
+        settle_recovery_forfeit_pair(&mut env, VICTIM, ATTACKER, 0, 2, "PR 278 generation A")?;
     env.withdraw_primary(VICTIM, DEPOSIT)
         .map_err(|error| format!("PR 278 withdraw incarnation A: {error}"))?;
     env.close_primary_portfolio(VICTIM)
@@ -17280,7 +17311,7 @@ fn run_forfeit_portfolio_incarnation_world(
         slab_closed: outcome.slab_closed,
         stale_replay_rejected: outcome.stale_replay_rejected,
         rejected_exact_rollback: outcome.rejected_exact_rollback,
-        max_cu: outcome.max_cu,
+        max_cu: outcome.max_cu.max(cleanup_max_cu),
     })
 }
 
@@ -17367,9 +17398,9 @@ fn run_forfeit_market_generation_world(
     env.shutdown_asset(0, 2)
         .map_err(|error| format!("PR 295 shutdown generation A: {error}"))?;
     let retained = env.build_retained_forfeit_recovery_leg(VICTIM, 0, 1);
+    let cleanup_max_cu =
+        settle_recovery_forfeit_pair(&mut env, VICTIM, ATTACKER, 0, 2, "PR 295 generation A")?;
     for actor in [VICTIM, ATTACKER] {
-        env.forfeit_recovery_leg(actor, 0, 1)
-            .map_err(|error| format!("PR 295 forfeit generation-A actor {actor}: {error}"))?;
         env.withdraw_primary(actor, DEPOSIT)
             .map_err(|error| format!("PR 295 withdraw generation-A actor {actor}: {error}"))?;
         env.close_primary_portfolio(actor)
@@ -17428,7 +17459,7 @@ fn run_forfeit_market_generation_world(
         vault_remaining: outcome.vault_remaining,
         slab_closed: outcome.slab_closed,
         replay_cu: outcome.replay_cu,
-        max_cu: outcome.max_cu,
+        max_cu: outcome.max_cu.max(cleanup_max_cu),
     })
 }
 

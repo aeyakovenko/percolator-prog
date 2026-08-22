@@ -2360,7 +2360,10 @@ fn v16_attack_public_14_leg_28_source_recovery_forfeit_stays_bounded() {
     slot += 5;
     env.svm.warp_to_slot(slot);
 
-    for (owner, portfolio) in [(&taker_owner, taker), (&lp_owner, lp)] {
+    for (index, (owner, portfolio)) in [(&taker_owner, taker), (&lp_owner, lp)]
+        .into_iter()
+        .enumerate()
+    {
         env.svm.expire_blockhash();
         let cu = env
             .send(
@@ -2381,15 +2384,46 @@ fn v16_attack_public_14_leg_28_source_recovery_forfeit_stays_bounded() {
         eprintln!("14-leg/28-source owner forfeit CU: {cu}");
         assert_cu_within("14-leg/28-source ForfeitRecoveryLeg", cu, 1_375_000);
         let state = env.portfolio_state(portfolio);
-        assert_eq!(
-            percolator::active_bitmap_count_ones(active_bitmap(&state)),
-            active_before - 1
-        );
-        assert!(!has_active_leg_for_asset(
-            &state,
-            usize::from(MAX_SOURCE_LIVE_ASSETS - 1)
-        ));
+        if index == 0 {
+            assert_eq!(
+                percolator::active_bitmap_count_ones(active_bitmap(&state)),
+                active_before
+            );
+            let obligation = active_leg_for_asset(&state, usize::from(MAX_SOURCE_LIVE_ASSETS - 1));
+            assert_eq!(obligation.basis_pos_q, 0);
+            assert!(obligation.loss_weight > 0);
+        } else {
+            assert_eq!(
+                percolator::active_bitmap_count_ones(active_bitmap(&state)),
+                active_before - 1
+            );
+            assert!(!has_active_leg_for_asset(
+                &state,
+                usize::from(MAX_SOURCE_LIVE_ASSETS - 1)
+            ));
+        }
     }
+    let release_cu = env.crank(
+        taker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations(MAX_SOURCE_LIVE_ASSETS - 1),
+        },
+    );
+    eprintln!("14-leg/28-source released-obligation crank CU: {release_cu}");
+    assert_cu_within(
+        "14-leg/28-source released-obligation PermissionlessCrank",
+        release_cu,
+        1_375_000,
+    );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(taker))),
+        active_before - 1
+    );
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(taker),
+        usize::from(MAX_SOURCE_LIVE_ASSETS - 1)
+    ));
     let group_after = env.market_state().1;
     assert_eq!(
         group_after.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_long_q,

@@ -137,6 +137,13 @@ fn v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_f
     );
 
     env.forfeit_recovery_leg_with_cu(&attacker_owner, attacker, ASSET, u128::MAX);
+    let attacker_after = env.portfolio_state(attacker);
+    let retained_obligation = active_leg_for_asset(&attacker_after, ASSET as usize);
+    assert_eq!(retained_obligation.basis_pos_q, 0);
+    assert!(
+        retained_obligation.loss_weight > 0,
+        "counterparty-first exit must retain its loss obligation until the opposing position exits"
+    );
     let before_forfeit = env.portfolio_state(victim);
     assert!(
         active_leg_for_asset(&before_forfeit, ASSET as usize).b_snap
@@ -160,6 +167,17 @@ fn v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_f
             .get()
             >= historical_claim,
         "the pinned predecessor consumed the older closed claim"
+    );
+    env.crank(
+        attacker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 50,
+            observations: crank_observations(ASSET),
+        },
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(attacker), ASSET as usize),
+        "permissionless progress must clear the released zero-basis obligation"
     );
 
     env.resolve();
@@ -262,10 +280,13 @@ fn v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_va
     );
     env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 20, 0);
     env.forfeit_recovery_leg_with_cu(&attacker_owner, attacker, ASSET, u128::MAX);
-    assert!(!has_active_leg_for_asset(
-        &env.portfolio_state(attacker),
-        ASSET as usize
-    ));
+    let attacker_after = env.portfolio_state(attacker);
+    let retained_obligation = active_leg_for_asset(&attacker_after, ASSET as usize);
+    assert_eq!(retained_obligation.basis_pos_q, 0);
+    assert!(
+        retained_obligation.loss_weight > 0,
+        "counterparty-first exit must remain attributable until the opposing position exits"
+    );
 
     env.svm.expire_blockhash();
     env.send(
@@ -291,6 +312,17 @@ fn v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_va
             .source_claim_bound_num
             .get(),
         historical_claim
+    );
+    env.crank(
+        attacker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(ASSET),
+        },
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(attacker), ASSET as usize),
+        "permissionless progress must clear the released zero-basis obligation"
     );
 
     env.svm.warp_to_slot(1_000);
