@@ -6,9 +6,10 @@
 //!
 //! Evidence (F over public I routes): the probe opens a small healthy pair, then independently
 //! creates a real active bankruptcy close for another pair on the same asset. The healthy pair's
-//! full bilateral reduction must land through the deployed no-CPI route, remove exactly its own
-//! effective OI, preserve both close participants and the complete close ledger byte-for-byte,
-//! and move no internal or SPL custody.
+//! full bilateral reduction must land through all four deployed trade routes in both long/short
+//! orientations, remove exactly its own effective OI, preserve both close participants and the
+//! complete close ledger byte-for-byte, and move no internal or SPL custody. The eight fresh
+//! worlds must also converge to identical normalized economics.
 //!
 //! A second probe creates active closes on two different assets and advances each independently;
 //! each crank must strictly reduce only its selected ledger while framing the other close and all
@@ -27,6 +28,9 @@ fn v16_program_active_close_preserves_unrelated_same_asset_reduction() {
     let evidence = run_same_asset_close_locality_probe()
         .expect("INV-074 public same-asset close locality probe");
 
+    assert_eq!(evidence.world_count, 8, "{evidence:?}");
+    assert_eq!(evidence.route_worlds, [2; 4], "{evidence:?}");
+    assert_eq!(evidence.orientation_worlds, [4; 2], "{evidence:?}");
     assert_ne!(evidence.close_residual_before, 0, "{evidence:?}");
     assert_eq!(
         evidence.close_residual_after, evidence.close_residual_before,
@@ -44,9 +48,12 @@ fn v16_program_active_close_preserves_unrelated_same_asset_reduction() {
         evidence.unrelated_position_q_before,
         "{evidence:?}"
     );
-    assert_ne!(
-        evidence.coverage.route_success.iter().sum::<u64>(),
-        0,
+    assert!(
+        evidence
+            .coverage
+            .route_success
+            .iter()
+            .all(|count| *count > 0),
         "{evidence:?}"
     );
     assert_ne!(evidence.coverage.token_frame_checks, 0, "{evidence:?}");

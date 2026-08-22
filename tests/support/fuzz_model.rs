@@ -6643,6 +6643,9 @@ pub struct PendingCloseRankEvidence {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SameAssetCloseLocalityEvidence {
+    pub world_count: u64,
+    pub route_worlds: [u64; 4],
+    pub orientation_worlds: [u64; 2],
     pub close_residual_before: u128,
     pub close_residual_after: u128,
     pub unrelated_position_q_before: u128,
@@ -6805,14 +6808,21 @@ fn create_public_cancellable_close(
     Ok(())
 }
 
-pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvidence, String> {
+fn run_same_asset_close_locality_world(
+    route: TradeRoute,
+    unrelated_size_q: i128,
+    seed_byte: u8,
+) -> Result<SameAssetCloseLocalityEvidence, String> {
     const CLOSE_WINNER: usize = 0;
     const CLOSE_LOSER: usize = 1;
     const UNRELATED_LONG: usize = 2;
     const UNRELATED_SHORT: usize = 3;
     const KEEPER: usize = EXIT_MAKER_INDEX;
     const ASSET: usize = 0;
-    const UNRELATED_Q: u128 = POS_SCALE / 100;
+    let unrelated_q = unrelated_size_q.unsigned_abs();
+    if unrelated_q == 0 {
+        return Err("INV-074 locality world requires a nonzero position".into());
+    }
 
     let config = MarketConfig {
         max_price_move_bps_per_slot: 500,
@@ -6826,12 +6836,12 @@ pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvi
         actor_token_balances: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
         ..MarketConfig::default()
     };
-    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([0x74; 32], config)?;
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
     if !runner.execute_trade(
-        TradeRoute::NoCpi,
+        route,
         UNRELATED_LONG,
         UNRELATED_SHORT,
-        vec![(ASSET, UNRELATED_Q as i128)],
+        vec![(ASSET, unrelated_size_q)],
         0,
         0,
         true,
@@ -6857,8 +6867,8 @@ pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvi
             "INV-074 prerequisite did not retain an active close: {close_before:?}"
         ));
     }
-    if runner.positions[UNRELATED_LONG][ASSET] != UNRELATED_Q as i128
-        || runner.positions[UNRELATED_SHORT][ASSET] != -(UNRELATED_Q as i128)
+    if runner.positions[UNRELATED_LONG][ASSET] != unrelated_size_q
+        || runner.positions[UNRELATED_SHORT][ASSET] != -unrelated_size_q
     {
         return Err(format!(
             "INV-074 unrelated pair was not live before reduction: {:?}",
@@ -6872,10 +6882,15 @@ pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvi
     let spl_vault_before = runner.env.token_amount(runner.env.vault);
     let accounted_vault_before = group_before.vault;
     if !runner.execute_trade(
-        TradeRoute::NoCpi,
+        route,
         UNRELATED_LONG,
         UNRELATED_SHORT,
-        vec![(ASSET, -(UNRELATED_Q as i128))],
+        vec![(
+            ASSET,
+            unrelated_size_q
+                .checked_neg()
+                .ok_or("INV-074 position negation overflow")?,
+        )],
         0,
         0,
         true,
@@ -6904,12 +6919,12 @@ pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvi
         || group_after.assets[ASSET].oi_eff_long_q
             != group_before.assets[ASSET]
                 .oi_eff_long_q
-                .checked_sub(UNRELATED_Q)
+                .checked_sub(unrelated_q)
                 .ok_or("INV-074 long OI prerequisite below unrelated quantity")?
         || group_after.assets[ASSET].oi_eff_short_q
             != group_before.assets[ASSET]
                 .oi_eff_short_q
-                .checked_sub(UNRELATED_Q)
+                .checked_sub(unrelated_q)
                 .ok_or("INV-074 short OI prerequisite below unrelated quantity")?
     {
         return Err(format!(
@@ -6927,10 +6942,17 @@ pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvi
         return Err("INV-074 same-asset position reduction moved custody".into());
     }
 
+    let mut route_worlds = [0; 4];
+    route_worlds[route.index()] = 1;
+    let mut orientation_worlds = [0; 2];
+    orientation_worlds[usize::from(unrelated_size_q.is_negative())] = 1;
     Ok(SameAssetCloseLocalityEvidence {
+        world_count: 1,
+        route_worlds,
+        orientation_worlds,
         close_residual_before: close_before.residual_remaining,
         close_residual_after: close_after.residual_remaining,
-        unrelated_position_q_before: UNRELATED_Q,
+        unrelated_position_q_before: unrelated_q,
         unrelated_position_q_after: runner.positions[UNRELATED_LONG][ASSET].unsigned_abs(),
         oi_long_before: group_before.assets[ASSET].oi_eff_long_q,
         oi_long_after: group_after.assets[ASSET].oi_eff_long_q,
@@ -6938,6 +6960,65 @@ pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvi
         oi_short_after: group_after.assets[ASSET].oi_eff_short_q,
         coverage: runner.coverage,
     })
+}
+
+pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvidence, String> {
+    const UNRELATED_Q: i128 = (POS_SCALE / 100) as i128;
+
+    let mut aggregate: Option<SameAssetCloseLocalityEvidence> = None;
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        for unrelated_size_q in [UNRELATED_Q, -UNRELATED_Q] {
+            let seed_byte = 0x74 + (route.index() as u8 * 2) + u8::from(unrelated_size_q < 0);
+            let evidence = run_same_asset_close_locality_world(route, unrelated_size_q, seed_byte)?;
+            if let Some(existing) = aggregate.as_mut() {
+                let existing_economics = (
+                    existing.close_residual_before,
+                    existing.close_residual_after,
+                    existing.unrelated_position_q_before,
+                    existing.unrelated_position_q_after,
+                    existing.oi_long_before,
+                    existing.oi_long_after,
+                    existing.oi_short_before,
+                    existing.oi_short_after,
+                );
+                let world_economics = (
+                    evidence.close_residual_before,
+                    evidence.close_residual_after,
+                    evidence.unrelated_position_q_before,
+                    evidence.unrelated_position_q_after,
+                    evidence.oi_long_before,
+                    evidence.oi_long_after,
+                    evidence.oi_short_before,
+                    evidence.oi_short_after,
+                );
+                if world_economics != existing_economics {
+                    return Err(format!(
+                        "INV-074 route/orientation worlds diverged: baseline={existing_economics:?}, {route:?}/{unrelated_size_q}={world_economics:?}"
+                    ));
+                }
+                existing.world_count += evidence.world_count;
+                for (total, count) in existing.route_worlds.iter_mut().zip(evidence.route_worlds) {
+                    *total += count;
+                }
+                for (total, count) in existing
+                    .orientation_worlds
+                    .iter_mut()
+                    .zip(evidence.orientation_worlds)
+                {
+                    *total += count;
+                }
+                existing.coverage.merge(evidence.coverage);
+            } else {
+                aggregate = Some(evidence);
+            }
+        }
+    }
+    aggregate.ok_or_else(|| "INV-074 locality matrix produced no worlds".into())
 }
 
 pub fn run_concurrent_close_locality_probe() -> Result<ConcurrentCloseLocalityEvidence, String> {
