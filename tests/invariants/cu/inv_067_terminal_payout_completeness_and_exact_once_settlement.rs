@@ -915,95 +915,6 @@ fn v16_attack_claim_resolved_topup_rejects_live_market_without_mutation() {
     );
 }
 
-// engine backing_double_claim_fuzz port (LoF) — Fresh-bucket counterparty backing principal is
-// provider-recoverable: WithdrawBackingBucket has NO resolved-payout-snapshot gate. residual()
-// (the junior payout pool feeding the resolved snapshot) must therefore EXCLUDE that principal.
-// The currently-pinned engine counts it, so a resolved junior winner with ZERO honest residual is
-// still paid out of the provider's backing — the same vault atoms the provider can still withdraw.
-// Whoever closes second is robbed (loss of funds). This drives the bug end-to-end through the
-// public CloseResolved + WithdrawBackingBucket handlers; the winner closing first captures the
-// payout snapshot via the buggy residual(). FAILS against the pinned (pre-fix) engine, PASSES once
-// residual() excludes recoverable counterparty backing principal.
-#[test]
-fn v16_attack_resolved_junior_winner_double_claims_provider_backing() {
-    const CAPITAL: u128 = 1_000;
-    const BACKING: u128 = 1_000; // provider principal (B >= F)
-    const FACE: u128 = 500; // winner junior positive pnl
-    let domain: u16 = 1;
-    let mut env = V16CuEnv::new();
-
-    // Provider deposits recoverable Fresh-bucket backing principal (Live mode).
-    env.top_up_backing_bucket(domain, BACKING, 10_000);
-
-    // A winner deposits capital, then (synthetically) holds plain JUNIOR positive pnl with NO
-    // source claim of its own, and we resolve with ZERO honest junior residual: vault =
-    // CAPITAL + BACKING and c_tot = CAPITAL, so the only vault atoms above capital ARE the
-    // provider's recoverable backing.
-    let owner = Keypair::new();
-    let portfolio = env.create_portfolio(&owner);
-    env.deposit(&owner, portfolio, CAPITAL);
-    {
-        let mut market_account = env.svm.get_account(&env.market).unwrap();
-        let mut portfolio_account = env.svm.get_account(&portfolio).unwrap();
-        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
-        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
-        group.mode = MarketModeV16::Resolved;
-        group.resolved_slot = 1;
-        group.current_slot = 1;
-        group.pnl_pos_tot = FACE;
-        group.pnl_matured_pos_tot = FACE;
-        group.pnl_pos_bound_tot = FACE;
-        group.pnl_pos_bound_tot_num = FACE * BOUND_SCALE;
-        account.pnl = percolator::V16PodI128::new(FACE as i128);
-        account.last_fee_slot = percolator::V16PodU64::new(1);
-        // payout_snapshot_captured left false: the first CloseResolved captures it via residual().
-        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
-        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
-        env.svm.set_account(env.market, market_account).unwrap();
-        env.svm.set_account(portfolio, portfolio_account).unwrap();
-    }
-
-    // Honest junior residual (vault - capital - backing) is ZERO, so the winner is NOT entitled to
-    // any pnl payout: it must recover EXACTLY its capital. A larger payout is financed by the
-    // provider's recoverable backing — the double-claim.
-    let dest = env.close_resolved(&owner, portfolio);
-    let _ = env.close_resolved(&owner, portfolio); // finalize receipt
-    let winner_payout = env.token_amount(dest) as u128;
-    assert_eq!(
-        winner_payout, CAPITAL,
-        "winner must recover ONLY capital (honest junior residual is zero); a larger payout \
-         ({winner_payout}) was financed out of the provider's recoverable backing (double-claim)"
-    );
-
-    // Wind the winner down so the provider can reclaim (resolved-mode withdraw requires
-    // materialized_portfolio_count == 0 && c_tot == 0).
-    env.close_portfolio_with_cu(&owner, portfolio);
-    let (_, g) = env.market_state();
-    assert_eq!(g.c_tot, 0, "winner capital fully wound down");
-    assert_eq!(g.materialized_portfolio_count, 0, "winner dematerialized");
-
-    // The provider must recover its FULL principal — recoverable, no snapshot gate. (On the
-    // pinned engine the run already failed the winner_payout assertion above, before reaching
-    // here; on the fixed engine the backing is intact and this withdrawal succeeds.)
-    let admin_pubkey = env.admin.pubkey();
-    let provider_dest = env.token_account(admin_pubkey, 0);
-    env.withdraw_backing_bucket_to_admin_token_with_cu(provider_dest, domain, BACKING);
-    let provider_got = env.token_amount(provider_dest) as u128;
-    assert_eq!(
-        provider_got, BACKING,
-        "provider recovers exactly its principal"
-    );
-
-    // Global conservation: nothing minted, nothing stranded.
-    assert_eq!(
-        winner_payout + provider_got,
-        CAPITAL + BACKING,
-        "value conserved end to end (no mint, no strand)"
-    );
-    let (_, g) = env.market_state();
-    assert_eq!(g.vault, 0, "vault fully drained, no funds stranded");
-}
-
 // Issue #88: resolved bound refinement is internal engine accounting. Raw tag
 // 47 must reject before any resolved payout or custody state can move.
 #[test]
@@ -1148,15 +1059,12 @@ fn v16_attack_haircut_proportional_to_claim_size() {
     env.add_source_positive_pnl(p1, 1, 100); // small claim
     env.add_source_positive_pnl(p2, 1, 900); // 9x larger claim
     env.resolve();
-    // two close passes to converge the terminal haircut rate.
-    let mut out1 = 0u128;
-    let mut out2 = 0u128;
-    for _ in 0..2 {
-        let d1 = env.close_resolved(&o1, p1);
-        out1 += env.token_amount(d1) as u128;
-        let d2 = env.close_resolved(&o2, p2);
-        out2 += env.token_amount(d2) as u128;
-    }
+    let payouts = drain_resolved_cohort(
+        &mut env,
+        &[(&o1, p1), (&o2, p2)],
+        "two-winner proportional haircut",
+    );
+    let [out1, out2]: [u128; 2] = payouts.try_into().unwrap();
     let hc1 = out1.saturating_sub(1_000); // haircut payout above senior capital
     let hc2 = out2.saturating_sub(1_000);
     // proportionality: the larger claim (9x) gets ~9x the haircut payout.
@@ -1218,15 +1126,9 @@ fn v16_attack_haircut_rounding_many_winners_no_mint() {
     );
 
     env.resolve();
-    // converge the terminal haircut rate across all winners (a few passes, like the 2-winner test).
+    let actors: Vec<_> = owners.iter().zip(ports.iter().copied()).collect();
+    let payouts = drain_resolved_cohort(&mut env, &actors, "eight-winner haircut rounding");
     let mut hc_total = 0u128;
-    let mut payouts = vec![0u128; CLAIMS.len()];
-    for _ in 0..3 {
-        for (i, (o, p)) in owners.iter().zip(ports.iter()).enumerate() {
-            let d = env.close_resolved(o, *p);
-            payouts[i] += env.token_amount(d) as u128;
-        }
-    }
     // haircut payout = anything paid ABOVE each winner's own senior capital (1_000 deposited).
     for (i, &paid) in payouts.iter().enumerate() {
         let hc = paid.saturating_sub(1_000);

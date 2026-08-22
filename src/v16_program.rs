@@ -13150,11 +13150,6 @@ pub mod processor {
                 || authenticated_market_slot_or_fallback_view(&group),
                 authenticated_slot_or_fallback,
             );
-            if auto_crank_now_slot.is_none() {
-                group
-                    .advance_resolved_slot_not_atomic(authenticated_slot)
-                    .map_err(map_v16_error)?;
-            }
             if cfg.force_close_delay_slots != 0
                 && authenticated_slot.saturating_sub(group.header.resolved_slot.get())
                     < cfg.force_close_delay_slots
@@ -13162,28 +13157,25 @@ pub mod processor {
                 expect_signer(owner)?;
             }
             let insurance_before = group.header.insurance.get();
-            let outcome = if auto_crank_now_slot.is_some() {
-                let result = group
-                    .permissionless_auto_crank_not_atomic(
-                        &mut portfolio,
-                        AutoCrankWorkV16 {
-                            now_slot: authenticated_slot,
-                            observations: &[],
-                            resolved_close_fee_rate_per_slot: cfg.maintenance_fee_per_slot,
-                        },
-                    )
-                    .map_err(map_v16_error)?;
-                match (result.selected, result.outcome) {
-                    (
-                        AutoCrankPlanV16::CloseResolved,
-                        AutoCrankOutcomeV16::ResolvedClose(outcome),
-                    ) => outcome,
-                    _ => return Err(PercolatorError::EngineNonProgress.into()),
+            // CloseResolved is a compatibility alias for the sole public engine crank. Routing
+            // both tags through the selector keeps stale/out-of-order calls atomic: a waiting
+            // winner selects NoAction and returns EngineNonProgress instead of landing as a
+            // successful CU-burning no-op.
+            let result = group
+                .permissionless_auto_crank_not_atomic(
+                    &mut portfolio,
+                    AutoCrankWorkV16 {
+                        now_slot: authenticated_slot,
+                        observations: &[],
+                        resolved_close_fee_rate_per_slot: cfg.maintenance_fee_per_slot,
+                    },
+                )
+                .map_err(map_v16_error)?;
+            let outcome = match (result.selected, result.outcome) {
+                (AutoCrankPlanV16::CloseResolved, AutoCrankOutcomeV16::ResolvedClose(outcome)) => {
+                    outcome
                 }
-            } else {
-                group
-                    .close_resolved_account_not_atomic(&mut portfolio, cfg.maintenance_fee_per_slot)
-                    .map_err(map_v16_error)?
+                _ => return Err(PercolatorError::EngineNonProgress.into()),
             };
             // close_resolved can charge an accrued maintenance fee into header.insurance.
             // Domain-credit it (mirroring SyncMaintenanceFee) so it stays withdrawable via

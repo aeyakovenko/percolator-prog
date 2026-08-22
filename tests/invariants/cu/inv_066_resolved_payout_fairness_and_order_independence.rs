@@ -20,18 +20,15 @@ fn close_resolved_until_terminal(
 ) -> u64 {
     let mut paid = 0u64;
     for _ in 0..32 {
+        if resolved_portfolio_is_terminal(env, portfolio) {
+            return paid;
+        }
         let (destination, cu) = env.close_resolved_with_cu(owner, portfolio);
         assert_cu_within(label, cu, CUSTODY_CU_LIMIT);
         paid = paid
             .checked_add(env.token_amount(destination))
             .expect("resolved payout total overflow");
-        let state = env.portfolio_state(portfolio);
-        let receipt = resolved_receipt(&state);
-        if state.capital.get() == 0
-            && state.pnl.get() == 0
-            && percolator::active_bitmap_is_empty(active_bitmap(&state))
-            && (!receipt.present || receipt.finalized)
-        {
+        if resolved_portfolio_is_terminal(env, portfolio) {
             return paid;
         }
     }
@@ -443,41 +440,29 @@ fn v16_attack_resolved_two_public_winners_are_close_order_independent() {
         }
         env.resolve();
 
-        let close_once = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey| -> u128 {
-            let (dest, cu) = env.close_resolved_with_cu(owner, portfolio);
-            assert_cu_within("three-party CloseResolved", cu, CUSTODY_CU_LIMIT);
-            env.token_amount(dest) as u128
-        };
-        let drive = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey| -> u128 {
-            let mut paid = 0u128;
-            for _ in 0..8 {
-                paid += close_once(env, owner, portfolio);
-                let state = env.portfolio_state(portfolio);
-                if state.capital.get() == 0
-                    && state.pnl.get() == 0
-                    && percolator::active_bitmap_is_empty(active_bitmap(&state))
-                    && (!resolved_receipt(&state).present || resolved_receipt(&state).finalized)
-                {
-                    return paid;
-                }
-            }
-            panic!("resolved close did not terminate within eight bounded calls");
-        };
-
-        let mut winner_a_paid = 0;
-        let mut winner_b_paid = 0;
-        if winner_attempts_first {
-            winner_a_paid += close_once(&mut env, &winner_a_owner, winner_a);
-        }
-        let loser_paid = drive(&mut env, &loser_owner, loser);
-        if winner_attempts_first {
-            winner_b_paid += drive(&mut env, &winner_b_owner, winner_b);
-            winner_a_paid += drive(&mut env, &winner_a_owner, winner_a);
+        let (winner_a_paid, winner_b_paid, loser_paid) = if winner_attempts_first {
+            let paid = drain_resolved_cohort(
+                &mut env,
+                &[
+                    (&winner_a_owner, winner_a),
+                    (&winner_b_owner, winner_b),
+                    (&loser_owner, loser),
+                ],
+                "winner-first three-party settlement",
+            );
+            (paid[0], paid[1], paid[2])
         } else {
-            winner_b_paid += close_once(&mut env, &winner_b_owner, winner_b);
-            winner_a_paid += drive(&mut env, &winner_a_owner, winner_a);
-            winner_b_paid += drive(&mut env, &winner_b_owner, winner_b);
-        }
+            let paid = drain_resolved_cohort(
+                &mut env,
+                &[
+                    (&loser_owner, loser),
+                    (&winner_b_owner, winner_b),
+                    (&winner_a_owner, winner_a),
+                ],
+                "loser-first three-party settlement",
+            );
+            (paid[2], paid[1], paid[0])
+        };
 
         for (owner, portfolio) in [
             (&winner_a_owner, winner_a),
@@ -687,8 +672,8 @@ fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
         let d = env.svm.get_account(k).unwrap().data;
         u64::from_le_bytes(d[64..72].try_into().unwrap()) as u128
     };
-    // Winner (long) closes FIRST, before the loser has funded the vault. This must be a SAFE NO-OP:
-    // it pays 0 and leaves the winner's capital fully intact (no destructive partial close / no LoF).
+    // Winner (long) closes FIRST, before the loser has funded the vault. This may perform bounded
+    // terminal cleanup, but it must defer payout and preserve the winner's capital and PnL exactly.
     let (dest_lo1, _) = env.close_resolved_with_cu(&lo_owner, lo);
     assert_eq!(
         bal(&env, &dest_lo1),
@@ -699,7 +684,7 @@ fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
     assert_eq!(
         mid.capital.get(),
         1_000_000,
-        "premature winner close is a no-op: capital fully preserved"
+        "premature winner close preserves capital while payout is deferred"
     );
     assert_eq!(
         mid.pnl.get(),
@@ -763,18 +748,14 @@ fn v16_regression_resolved_multiwinner_haircut_no_overpay_no_strand() {
         ports.push(p);
     }
     env.resolve();
-    // Two close passes: early winners get a present-but-unfinalized receipt (terminal haircut rate
-    // not settled while other claims pend); a RETRY close after all are processed clears them.
-    let mut total_pnl_paid: u128 = 0;
-    let mut total_out: u128 = 0;
-    for _pass in 0..2 {
-        for (o, p) in owners.iter().zip(ports.iter()) {
-            let dest = env.close_resolved(o, *p);
-            let got = env.token_amount(dest) as u128;
-            total_out += got;
-            total_pnl_paid += got.saturating_sub(if got >= 1_000 { 1_000 } else { got });
-        }
-    }
+    let actors: Vec<_> = owners.iter().zip(ports.iter().copied()).collect();
+    let payouts = drain_resolved_cohort(
+        &mut env,
+        &actors,
+        "three-winner nondivisible haircut settlement",
+    );
+    let total_out: u128 = payouts.iter().sum();
+    let total_pnl_paid: u128 = payouts.iter().map(|paid| paid.saturating_sub(1_000)).sum();
     // CRUX 1: summed haircut pnl never exceeds the shared backing (no rounding-up over-pay).
     assert!(
         total_pnl_paid <= BACKING,

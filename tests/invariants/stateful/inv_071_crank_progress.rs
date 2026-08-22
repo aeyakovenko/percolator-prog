@@ -253,7 +253,8 @@ fn drain_terminal_order(
             for route in route_order {
                 let (landed, mutated, payout) =
                     attempt_terminal_route(env, actor, route, max_compute_units)?;
-                every_route_quiescent &= landed && !mutated && payout == 0;
+                every_route_quiescent &=
+                    !mutated && payout == 0 && (!matches!(route, TerminalRoute::Close) || !landed);
                 match (route, landed && mutated) {
                     (TerminalRoute::Close, true) => close_calls += 1,
                     (TerminalRoute::Claim, true) => {
@@ -268,7 +269,7 @@ fn drain_terminal_order(
         if terminal_snapshot(env) == before_round {
             if !every_route_quiescent {
                 return Err(format!(
-                    "terminal sweep {round} was snapshot-stable only because at least one payout route rejected or was not individually quiescent; order={claimant_order:?}, claim_first={claim_first}"
+                    "terminal sweep {round} contained a mutating, paying, or successful no-op close route; order={claimant_order:?}, claim_first={claim_first}"
                 ));
             }
             if !(0..PRIMARY_ACTOR_COUNT).all(|actor| portfolio_is_economically_terminal(env, actor))
@@ -300,9 +301,9 @@ fn drain_terminal_order(
         for route in [TerminalRoute::Close, TerminalRoute::Claim] {
             let (landed, mutated, payout) =
                 attempt_terminal_route(env, actor, route, max_compute_units)?;
-            if !landed || mutated || payout != 0 {
+            if mutated || payout != 0 || (matches!(route, TerminalRoute::Close) && landed) {
                 return Err(format!(
-                    "actor {actor} {route:?} was not callable and quiescent at the asserted terminal fixed point"
+                    "actor {actor} {route:?} was not quiescent at the asserted terminal fixed point"
                 ));
             }
         }

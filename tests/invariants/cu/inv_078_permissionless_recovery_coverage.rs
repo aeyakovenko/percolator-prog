@@ -1332,6 +1332,69 @@ fn v16_program_unavailable_pyth_feed_has_bounded_terminal_fallback() {
     set_test_clock(&mut env, RESOLVE_SLOT + 1, 106);
     let long_destination = env.token_account(long_owner.pubkey(), 0);
     let short_destination = env.token_account(short_owner.pubkey(), 0);
+    let market = env.market;
+    let vault = env.vault;
+    let vault_authority = env.vault_authority;
+    let resolved_accounts = move |owner: &Keypair, portfolio: Pubkey, destination: Pubkey| {
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ]
+    };
+
+    // INV-071 cross-check: the explicit custody alias must share auto-crank's nonprogress
+    // semantics. The first call clears the winner's leg; a retry while the counterparty still
+    // blocks the payout must reject rather than landing as a successful CU-burning no-op.
+    let market_before_first = env.svm.get_account(&env.market).unwrap();
+    let long_before_first = env.svm.get_account(&long).unwrap();
+    env.svm.expire_blockhash();
+    let first_direct_cu = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            resolved_accounts(&long_owner, long, long_destination),
+            &[],
+        )
+        .expect("first explicit resolved close must clear the winner's leg");
+    assert_cu_within(
+        "oracle-free explicit resolved progress",
+        first_direct_cu,
+        CRANK_CU_LIMIT,
+    );
+    max_cu = max_cu.max(first_direct_cu);
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before_first
+            || env.svm.get_account(&long).unwrap() != long_before_first,
+        "first explicit resolved close must perform real progress"
+    );
+
+    let market_waiting = env.svm.get_account(&env.market).unwrap();
+    let long_waiting = env.svm.get_account(&long).unwrap();
+    let vault_waiting = env.svm.get_account(&env.vault).unwrap();
+    let destination_waiting = env.svm.get_account(&long_destination).unwrap();
+    env.svm.expire_blockhash();
+    let waiting_retry = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        resolved_accounts(&long_owner, long, long_destination),
+        &[],
+    );
+    waiting_retry.expect_err("explicit resolved close must reject a nonprogressing retry");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_waiting);
+    assert_eq!(env.svm.get_account(&long).unwrap(), long_waiting);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_waiting);
+    assert_eq!(
+        env.svm.get_account(&long_destination).unwrap(),
+        destination_waiting
+    );
+
     let terminal = |account: &PortfolioAccountV16| {
         let receipt = resolved_receipt(account);
         account.capital.get() == 0
@@ -1340,8 +1403,8 @@ fn v16_program_unavailable_pyth_feed_has_bounded_terminal_fallback() {
             && (!receipt.present || receipt.finalized)
     };
     let actors = [
-        (&long_owner, long, long_destination),
         (&short_owner, short, short_destination),
+        (&long_owner, long, long_destination),
     ];
     let mut close_progress = 0usize;
     let mut close_rejections = 0usize;
@@ -1367,15 +1430,7 @@ fn v16_program_unavailable_pyth_feed_has_bounded_terminal_fallback() {
                 now_slot: RESOLVE_SLOT + 1,
                 observations: vec![],
             },
-            vec![
-                AccountMeta::new_readonly(owner.pubkey(), false),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(portfolio, false),
-                AccountMeta::new(destination, false),
-                AccountMeta::new(env.vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
+            resolved_accounts(owner, portfolio, destination),
             &[],
         );
         match result {

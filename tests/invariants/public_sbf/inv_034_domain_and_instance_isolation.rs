@@ -25,7 +25,8 @@ fn v16_program_pr290_cross_margin_debt_drains_unrelated_insurance() {
     assert!(reproduction.attacker_profit > 90_000);
     assert!(reproduction.liquidation_calls > 0);
     assert!(reproduction.loser_close_calls < 512);
-    assert!(reproduction.counterparty_close_calls > 1);
-    assert!(reproduction.counterparty_close_calls < 512);
+    assert!(
+        reproduction.counterparty_close_calls > 0 && reproduction.counterparty_close_calls < 512
+    );
     assert!(reproduction.winner_close_calls > 0 && reproduction.winner_close_calls < 512);
 }

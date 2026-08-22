@@ -4693,6 +4693,84 @@ fn is_engine_stale_error(error: &str) -> bool {
     error.contains("Custom(19)") || error.contains("custom program error: 0x13")
 }
 
+fn is_engine_non_progress_error(error: &str) -> bool {
+    error.contains("Custom(22)") || error.contains("custom program error: 0x16")
+}
+
+fn resolved_portfolio_is_terminal(env: &V16CuEnv, portfolio: Pubkey) -> bool {
+    let account = env.portfolio_state(portfolio);
+    let receipt = resolved_receipt(&account);
+    let (_, group) = env.market_state();
+    account.capital.get() == 0
+        && account.pnl.get() == 0
+        && account.reserved_pnl.get() == 0
+        && account.fee_credits.get() == 0
+        && account.cancel_deposit_escrow.get() == 0
+        && percolator::active_bitmap_is_empty(active_bitmap(&account))
+        && account
+            .source_domains
+            .iter()
+            .all(|source| !source.is_occupied())
+        && (!receipt.present || receipt.finalized)
+        && account.last_fee_slot.get() == group.resolved_slot
+}
+
+fn drain_resolved_cohort(
+    env: &mut V16CuEnv,
+    actors: &[(&Keypair, Pubkey)],
+    label: &str,
+) -> Vec<u128> {
+    let mut payouts = vec![0u128; actors.len()];
+    for round in 0..64 {
+        if actors
+            .iter()
+            .all(|(_, portfolio)| resolved_portfolio_is_terminal(env, *portfolio))
+        {
+            return payouts;
+        }
+
+        let mut progressed = false;
+        for (index, (owner, portfolio)) in actors.iter().enumerate() {
+            if resolved_portfolio_is_terminal(env, *portfolio) {
+                continue;
+            }
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before = env.svm.get_account(portfolio).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let (destination, result) = env.try_close_resolved_with_cu(owner, *portfolio);
+            match result {
+                Ok(cu) => {
+                    assert_cu_within(label, cu, CUSTODY_CU_LIMIT);
+                    let paid = env.token_amount(destination) as u128;
+                    payouts[index] = payouts[index]
+                        .checked_add(paid)
+                        .expect("resolved cohort payout overflow");
+                    assert!(
+                        env.svm.get_account(&env.market).unwrap() != market_before
+                            || env.svm.get_account(portfolio).unwrap() != portfolio_before
+                            || env.svm.get_account(&env.vault).unwrap() != vault_before
+                            || paid != 0,
+                        "{label}: successful call made no progress in round {round}"
+                    );
+                    progressed = true;
+                }
+                Err(error) if is_engine_non_progress_error(&error) => {
+                    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                    assert_eq!(env.svm.get_account(portfolio).unwrap(), portfolio_before);
+                    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+                    assert_eq!(env.token_amount(destination), 0);
+                }
+                Err(error) => panic!("{label}: unexpected resolved crank error: {error}"),
+            }
+        }
+        assert!(
+            progressed,
+            "{label}: nonterminal cohort reached a fixed point in round {round}"
+        );
+    }
+    panic!("{label}: cohort did not terminate in 64 bounded rounds");
+}
+
 fn send_raw_tx(
     svm: &mut LiteSVM,
     payer: &Keypair,

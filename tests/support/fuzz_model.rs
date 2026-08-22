@@ -3867,18 +3867,14 @@ impl ScenarioRunner {
         for round in 0..self.liveness_limit {
             let before_round = self.snapshot();
             let mut all_terminal = true;
-            let mut terminal_routes_callable = true;
             let mut terminal_routes_quiescent = true;
             for actor in 0..PRIMARY_ACTOR_COUNT {
                 for route in routes {
                     let result = self.execute_terminal_route(actor, route)?;
                     if self.portfolio_is_economically_terminal(actor)? {
-                        let payout_snapshot_captured =
-                            self.env.primary_market_state().1.payout_snapshot_captured;
-                        terminal_routes_callable &= result.landed
-                            || matches!(route, TerminalRoute::Crank)
-                            || (matches!(route, TerminalRoute::Claim) && !payout_snapshot_captured);
-                        terminal_routes_quiescent &= !result.mutated && result.payout == 0;
+                        terminal_routes_quiescent &= !result.mutated
+                            && result.payout == 0
+                            && (matches!(route, TerminalRoute::Claim) || !result.landed);
                     }
                     self.assert_global_invariants()?;
                 }
@@ -3898,14 +3894,9 @@ impl ScenarioRunner {
                         "terminal public routes reached a fixed point with funded/nonterminal actors {blocked:?} on sweep {round}"
                     ));
                 }
-                if !terminal_routes_callable {
-                    return Err(format!(
-                        "terminal fixed point on sweep {round} depended on a rejected required crank/close/claim route"
-                    ));
-                }
                 if !terminal_routes_quiescent {
                     return Err(format!(
-                        "terminal fixed point on sweep {round} contained a mutating or paying route"
+                        "terminal fixed point on sweep {round} contained a mutating, paying, or successful no-op crank/close route"
                     ));
                 }
                 return Ok(());

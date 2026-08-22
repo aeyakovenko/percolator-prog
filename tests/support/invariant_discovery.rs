@@ -9529,11 +9529,44 @@ fn discover_one_stale_cohort_novation(
     }
     env.resolve_market()
         .map_err(|error| format!("resolve stale-cohort market: {error}"))?;
-    for _ in 0..24 {
+    for round in 0..24 {
+        let before_round = fingerprint(&env);
         for actor in [LOSER, ENTRANT, WINNER] {
-            env.close_resolved_primary_signed(actor)
-                .map_err(|error| format!("close stale-cohort actor {actor}: {error}"))?;
+            if discovery_portfolio_is_terminal(&env.primary_portfolio(actor))? {
+                continue;
+            }
+            let before = fingerprint(&env);
+            if let Err(error) = env.close_resolved_primary_signed(actor) {
+                if fingerprint(&env) != before {
+                    return Err(format!(
+                        "rejected stale-cohort close mutated actor {actor}: {error}"
+                    ));
+                }
+            }
         }
+        if [LOSER, ENTRANT, WINNER]
+            .into_iter()
+            .try_fold(true, |terminal, actor| {
+                discovery_portfolio_is_terminal(&env.primary_portfolio(actor))
+                    .map(|actor_terminal| terminal && actor_terminal)
+            })?
+        {
+            break;
+        }
+        if fingerprint(&env) == before_round {
+            return Err(format!(
+                "stale-cohort terminal campaign reached a nonterminal fixed point on round {round}"
+            ));
+        }
+    }
+    if ![LOSER, ENTRANT, WINNER]
+        .into_iter()
+        .try_fold(true, |terminal, actor| {
+            discovery_portfolio_is_terminal(&env.primary_portfolio(actor))
+                .map(|actor_terminal| terminal && actor_terminal)
+        })?
+    {
+        return Err("stale-cohort terminal campaign did not finish in 24 rounds".into());
     }
     let winner_extracted = env.token_amount(env.actors[WINNER].destination_token);
     let entrant_extracted = env.token_amount(env.actors[ENTRANT].destination_token);
