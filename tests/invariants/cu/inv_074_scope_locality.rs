@@ -8,9 +8,9 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: these bounded public worlds certify the covered scope
+//! relationships, not every possible cross-domain composition. The audit matrix
+//! records the remaining side, receipt, and lifecycle cross-products.
 
 use super::*;
 
@@ -91,7 +91,7 @@ fn trigger_scope_probe_bankruptcy(
 }
 
 #[test]
-fn v16_program_unrelated_bankruptcy_scope_matrix_discovers_backed_claim_lock() {
+fn v16_program_unrelated_bankruptcy_preserves_backed_claim_and_owner_exit() {
     const DEPOSIT: u128 = 1_000_000;
     const CLAIM: u128 = 100;
 
@@ -169,47 +169,87 @@ fn v16_program_unrelated_bankruptcy_scope_matrix_discovers_backed_claim_lock() {
         );
         assert_eq!(env.portfolio_state(target).pnl.get(), CLAIM as i128);
 
-        for slot in 6..=8u64 {
-            env.svm.warp_to_slot(slot);
-            for portfolio in [failed_short, failed_long, target] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: slot,
-                        observations: crank_observations(1),
-                    },
-                    vec![
-                        AccountMeta::new(env.payer.pubkey(), true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(portfolio, false),
-                    ],
-                    &[],
-                );
-            }
-
-            let market_before = env.svm.get_account(&env.market).unwrap();
-            let target_before = env.svm.get_account(&target).unwrap();
-            let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm.warp_to_slot(6);
+        for portfolio in [failed_short, failed_long, target] {
             env.svm.expire_blockhash();
-            let conversion = env.send(
-                env.convert_released_pnl_ix(target, CLAIM),
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 6,
+                    observations: crank_observations(1),
+                },
                 vec![
-                    AccountMeta::new(target_owner.pubkey(), true),
+                    AccountMeta::new(env.payer.pubkey(), true),
                     AccountMeta::new(env.market, false),
-                    AccountMeta::new(target, false),
+                    AccountMeta::new(portfolio, false),
                 ],
-                &[target_owner],
+                &[],
             );
-            assert!(
-                conversion.is_err(),
-                "an asset-local bankruptcy unexpectedly released an unrelated backed claim"
-            );
-            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-            assert_eq!(env.svm.get_account(&target).unwrap(), target_before);
-            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
-            assert_eq!(env.portfolio_state(target).pnl.get(), CLAIM as i128);
-            assert!(env.market_state().1.bankruptcy_hlock_active);
         }
+
+        let before_conversion = env.market_state().1;
+        let failed_short_before = env.svm.get_account(&failed_short).unwrap();
+        let failed_long_before = env.svm.get_account(&failed_long).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        assert!(before_conversion.bankruptcy_hlock_active);
+
+        let conversion_cu = env.convert_released_pnl_with_cu(target_owner, target, CLAIM);
+        assert_cu_within(
+            "INV-074 unrelated source-backed conversion",
+            conversion_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        let converted = env.portfolio_state(target);
+        let after_conversion = env.market_state().1;
+        assert_eq!(after_conversion.mode, MarketModeV16::Live);
+        assert!(
+            after_conversion.bankruptcy_hlock_active,
+            "conversion must not erase the unrelated bankruptcy history"
+        );
+        assert_eq!(converted.pnl.get(), 0);
+        assert_eq!(converted.capital.get(), DEPOSIT + CLAIM);
+        assert!(
+            converted
+                .source_domains
+                .iter()
+                .all(|source| source.source_claim_bound_num.get() == 0),
+            "the realized claim must not remain reusable"
+        );
+        assert_eq!(after_conversion.c_tot, before_conversion.c_tot + CLAIM);
+        assert_eq!(after_conversion.vault, before_conversion.vault);
+        assert_eq!(
+            env.svm.get_account(&failed_short).unwrap(),
+            failed_short_before
+        );
+        assert_eq!(
+            env.svm.get_account(&failed_long).unwrap(),
+            failed_long_before
+        );
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+        let vault_atoms_before_exit = env.token_amount(env.vault);
+        let (destination, withdraw_cu) =
+            env.withdraw_with_cu(target_owner, target, DEPOSIT + CLAIM);
+        assert_cu_within(
+            "INV-074 unrelated backed claimant full exit",
+            withdraw_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(env.token_amount(destination), (DEPOSIT + CLAIM) as u64);
+        assert_eq!(
+            env.token_amount(env.vault),
+            vault_atoms_before_exit - (DEPOSIT + CLAIM) as u64
+        );
+        let materialized_before_close = env.market_state().1.materialized_portfolio_count;
+        env.close_portfolio_with_cu(target_owner, target);
+        assert_eq!(
+            env.market_state().1.materialized_portfolio_count,
+            materialized_before_close - 1
+        );
+        if let Some(closed) = env.svm.get_account(&target) {
+            assert_eq!(closed.lamports, 0);
+            assert!(closed.data.is_empty() || !state::is_initialized(&closed.data));
+        }
+        assert!(env.market_state().1.bankruptcy_hlock_active);
     }
 }
 

@@ -110,7 +110,7 @@ INV-073	recovery-mode/explicit-terminal-routes	v16_program_expired_partial_close
 INV-071	micro-price/eager-crank-schedule	v16_program_micro_price_schedule_is_partition_invariant_and_eventually_progresses	canonical-price-remainder-makes-eager-and-delayed-cranks-equivalent	246
 INV-071	bankruptcy-escalation/funded-survivor	v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves	recovery-required-transition-must-not-rollback-funded-survivor-progress	190
 INV-071	prospective-loss/lapsed-source	v16_program_prospective_loss_expiry_matrix_keeps_resolved_exit_live	prospective-loss-in-lapsed-domain-must-have-bounded-terminal-continuation	298
-INV-074	bankruptcy-scope/unrelated-backed-claim	v16_program_unrelated_bankruptcy_scope_matrix_discovers_backed_claim_lock	asset-local-bankruptcy-cannot-lock-unrelated-backed-claim	229
+INV-074	bankruptcy-scope/unrelated-backed-claim	v16_program_unrelated_bankruptcy_preserves_backed_claim_and_owner_exit	asset-local-bankruptcy-cannot-lock-unrelated-backed-claim	229
 INV-063	backing-expiry/authenticated-clock	v16_program_backing_expiry_boundary_rejects_stale_fee_and_preserves_exit	expired-backing-cannot-create-withdrawable-provider-value	367
 INV-063	backing-expiry/favorable-consumers	v16_program_backing_expiry_conversion_boundary_matrix	expired-backing-cannot-capitalize-and-extract-independent-principal	363
 INV-063	retained-maturity/terminal-progress	v16_program_retained_backing_topup_boundary_matrix	expired-retained-operation-cannot-consume-principal-and-lock-terminal-users	361
