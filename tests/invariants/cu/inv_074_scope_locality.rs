@@ -2,15 +2,15 @@
 //!
 //! Normative obligation: Scoped state affects only its own asset, side, portfolio, domain, close, or receipt.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): public
-//! bankruptcy-scope, permissionless-oracle, base-stale, and non-base-route
-//! regressions exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Evidence in this file (I/C plus invariant-specific M assertions): public bankruptcy-scope,
+//! permissionless-oracle, base-stale, and non-base-route regressions exercise the deployed public
+//! wrapper with real SBF/LiteSVM accounts. The stateful INV-086 terminal graph additionally keeps
+//! an unrelated 777-atom flat portfolio live in all twelve genuine partial-receipt worlds.
 //!
 //! Guarantee boundary: these bounded public worlds certify the covered scope
-//! relationships, not every possible cross-domain composition. The audit matrix
-//! records the remaining side, receipt, and lifecycle cross-products.
+//! relationships, not every possible cross-domain composition. Partial-receipt-to-flat-principal
+//! locality is covered; receipt substitution, multiple concurrent receipts, and the remaining
+//! side/domain/lifecycle cross-products stay open in the audit matrix.
 
 use super::*;
 

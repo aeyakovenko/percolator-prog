@@ -7934,6 +7934,9 @@ struct BoundedTerminalEconomicOutcome {
 
 type BoundedTerminalEdge = (BoundedReferenceNode, u8, BoundedReferenceNode);
 
+const UNDERFUNDED_TERMINAL_UNRELATED_ACTOR: usize = 4;
+const UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL: u128 = 777;
+
 struct UnderfundedResolvedSeed {
     runner: ScenarioRunner,
     engine_vault_at_resolution: u128,
@@ -8091,7 +8094,7 @@ fn build_underfunded_resolved_reference_seed(
     const JUNIOR_LOSER: usize = 1;
     const BACKED_WINNER: usize = 2;
     const BACKED_LOSER: usize = 3;
-    const PROVIDER: usize = 4;
+    const PROVIDER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
     const BACKED_ASSET: usize = 1;
     const JUNIOR_DOMAIN: u16 = 1;
     const BACKED_DOMAIN: u16 = 3;
@@ -8114,7 +8117,13 @@ fn build_underfunded_resolved_reference_seed(
             max_price_move_bps_per_slot: 500,
             max_accrual_dt_slots: 1,
             min_funding_lifetime_slots: 1,
-            actor_deposits: [1_000, 250, 1_000, 250, 0],
+            actor_deposits: [
+                1_000,
+                250,
+                1_000,
+                250,
+                UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL,
+            ],
             ..MarketConfig::default()
         },
     )?;
@@ -8204,9 +8213,12 @@ fn build_underfunded_resolved_reference_seed(
         &[JUNIOR_LOSER, BACKED_LOSER, PROVIDER],
         "INV-086 pre-snapshot blockers",
     )?;
-    if premature_payout != 0 || runner.env.primary_market_state().1.payout_snapshot_captured {
+    if premature_payout != UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL
+        || runner.env.primary_market_state().1.payout_snapshot_captured
+    {
         return Err(format!(
-            "INV-086 nonclaimant prefix unexpectedly paid {premature_payout} or captured snapshot"
+            "INV-074 flat principal payout was {premature_payout}, expected {}, or the nonclaimant prefix captured a snapshot",
+            UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL
         ));
     }
 
@@ -8573,6 +8585,14 @@ fn run_underfunded_terminal_reference_subgraph() -> Result<UnderfundedTerminalGr
                     &mut nodes,
                     &mut edges,
                 )?;
+                if world.outcome.payouts[UNDERFUNDED_TERMINAL_UNRELATED_ACTOR]
+                    != UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL
+                {
+                    return Err(format!(
+                        "INV-074 partial receipt changed unrelated flat principal: {:?}",
+                        world.outcome
+                    ));
+                }
                 if claim_first && !world.value_moving_claim {
                     return Err(format!(
                         "INV-086 {landing:?}/reverse={reverse_tail} claim-priority path moved no value"

@@ -30,6 +30,9 @@
 //! that create a genuinely partial underfunded receipt. It crosses all expiry boundaries,
 //! two claimant orders, and both close/claim priorities; claim-priority paths must move
 //! real SPL value and every terminal edge remains subject to the same reference oracles.
+//! The fifth portfolio carries 777 atoms of unrelated flat principal and must receive all of it
+//! before claim-snapshot capture in every world, making the same graph an INV-074 receipt-locality
+//! witness rather than merely a terminal accounting exercise.
 //! This is finite reachability evidence, not equivalence over unbounded sequences.
 
 use super::*;
