@@ -781,14 +781,18 @@ pub struct ResolvedAdlCloseDiscovery {
     pub winner_basis_q: u128,
     pub effective_long_oi_q: u128,
     pub winner_funded_value: u128,
+    pub loser_funded_value: u128,
     pub canonical_vault_liquidity: u128,
-    pub loser_close_landed: bool,
-    pub winner_close_failures: u8,
-    pub all_counter_underflow: bool,
-    pub exact_rollback: bool,
-    pub withdraw_rejected: bool,
-    pub portfolio_close_rejected: bool,
+    pub close_steps: u8,
+    pub every_close_step_mutated: bool,
+    pub nonprogress_rejections: u8,
+    pub exact_rejection_rollback: bool,
+    pub users_terminal: bool,
+    pub portfolios_closed: bool,
     pub winner_external_payout: u64,
+    pub loser_external_payout: u64,
+    pub canonical_vault_after: u128,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -826,18 +830,26 @@ impl StaleCohortNovationDiscovery {
 }
 
 impl ResolvedAdlCloseDiscovery {
-    pub fn is_violation(&self) -> bool {
+    pub fn satisfies_invariant(&self) -> bool {
         self.winner_basis_q > self.effective_long_oi_q
             && self.effective_long_oi_q != 0
             && self.winner_funded_value != 0
-            && self.canonical_vault_liquidity >= self.winner_funded_value
-            && self.loser_close_landed
-            && self.winner_close_failures >= 8
-            && self.all_counter_underflow
-            && self.exact_rollback
-            && self.withdraw_rejected
-            && self.portfolio_close_rejected
-            && self.winner_external_payout == 0
+            && self.loser_funded_value != 0
+            && self.canonical_vault_liquidity
+                == self
+                    .winner_funded_value
+                    .checked_add(self.loser_funded_value)
+                    .unwrap_or(u128::MAX)
+            && self.close_steps != 0
+            && self.close_steps <= 16
+            && self.every_close_step_mutated
+            && self.exact_rejection_rollback
+            && self.users_terminal
+            && self.portfolios_closed
+            && u128::from(self.winner_external_payout) == self.winner_funded_value
+            && u128::from(self.loser_external_payout) == self.loser_funded_value
+            && self.canonical_vault_after == 0
+            && self.token_supply_conserved
     }
 }
 
@@ -9227,7 +9239,7 @@ pub fn discover_cross_domain_backing_violation(
     })
 }
 
-fn discover_one_resolved_adl_close_lock(
+fn verify_one_resolved_adl_close_order(
     mut seed: [u8; 32],
     order: ResolvedAdlCloseOrder,
 ) -> Result<ResolvedAdlCloseDiscovery, String> {
@@ -9289,76 +9301,120 @@ fn discover_one_resolved_adl_close_lock(
     env.resolve_market()
         .map_err(|error| format!("resolve ADL market: {error}"))?;
     let winner_at_resolve = env.primary_portfolio(WINNER);
+    let loser_at_resolve = env.primary_portfolio(LOSER);
     let winner_funded_value = winner_at_resolve
         .capital
         .get()
         .checked_add(winner_at_resolve.pnl.get().max(0) as u128)
         .ok_or_else(|| "resolved-ADL winner value overflow".to_string())?;
+    let loser_funded_value = loser_at_resolve
+        .capital
+        .get()
+        .checked_add(loser_at_resolve.pnl.get().max(0) as u128)
+        .ok_or_else(|| "resolved-ADL loser value overflow".to_string())?;
     let winner_destination = env.actors[WINNER].destination_token;
+    let loser_destination = env.actors[LOSER].destination_token;
     let winner_destination_before = env.token_amount(winner_destination);
-
-    let mut winner_close_failures = 0u8;
-    let mut all_counter_underflow = true;
-    let mut exact_rollback = true;
-    let mut loser_close_landed = false;
-    if order == ResolvedAdlCloseOrder::LoserThenWinner {
-        loser_close_landed = env.close_resolved_primary_signed(LOSER).is_ok();
-    }
-    for attempt in 0..ATTEMPTS {
-        let before = fingerprint(&env);
-        match env.close_resolved_primary_signed(WINNER) {
-            Ok(_) => break,
-            Err(error) => {
-                winner_close_failures = winner_close_failures.saturating_add(1);
-                all_counter_underflow &= error.contains("Custom(25)");
-                exact_rollback &= fingerprint(&env) == before;
-            }
-        }
-        if attempt == 0 && order == ResolvedAdlCloseOrder::WinnerThenLoser {
-            loser_close_landed = env.close_resolved_primary_signed(LOSER).is_ok();
-        }
-    }
+    let loser_destination_before = env.token_amount(loser_destination);
     let canonical_vault_liquidity = u128::from(env.token_amount(env.vault));
     if env.primary_market_state().1.vault != canonical_vault_liquidity {
         return Err("resolved-ADL internal vault diverged from SPL custody".into());
     }
 
-    let before_withdraw = fingerprint(&env);
-    let withdraw_rejected = env.withdraw_primary(WINNER, 1).is_err();
-    exact_rollback &= fingerprint(&env) == before_withdraw;
-    let before_portfolio_close = fingerprint(&env);
-    let portfolio_close_rejected = env.close_primary_portfolio(WINNER).is_err();
-    exact_rollback &= fingerprint(&env) == before_portfolio_close;
-    if env.token_supply_observed() != supply_before {
-        return Err("resolved-ADL close attempts changed SPL supply".into());
+    let close_order = match order {
+        ResolvedAdlCloseOrder::WinnerThenLoser => [WINNER, LOSER],
+        ResolvedAdlCloseOrder::LoserThenWinner => [LOSER, WINNER],
+    };
+    let mut close_steps = 0u8;
+    let mut every_close_step_mutated = true;
+    let mut nonprogress_rejections = 0u8;
+    let mut exact_rejection_rollback = true;
+    for round in 0..ATTEMPTS {
+        let before_round = fingerprint(&env);
+        for actor in close_order {
+            if discovery_portfolio_is_terminal(&env.primary_portfolio(actor))? {
+                continue;
+            }
+            let before = fingerprint(&env);
+            match env.crank_resolved_primary_signed(actor, 6, Vec::new()) {
+                Ok(_) => {
+                    close_steps = close_steps
+                        .checked_add(1)
+                        .ok_or_else(|| "resolved-ADL close-step overflow".to_string())?;
+                    every_close_step_mutated &= fingerprint(&env) != before;
+                }
+                Err(error) if error.contains("Custom(22)") => {
+                    nonprogress_rejections = nonprogress_rejections
+                        .checked_add(1)
+                        .ok_or_else(|| "resolved-ADL rejection-count overflow".to_string())?;
+                    exact_rejection_rollback &= fingerprint(&env) == before;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "resolved-ADL auto-crank failed for actor {actor}: {error}"
+                    ));
+                }
+            }
+        }
+        if [WINNER, LOSER]
+            .into_iter()
+            .try_fold(true, |terminal, actor| {
+                discovery_portfolio_is_terminal(&env.primary_portfolio(actor))
+                    .map(|actor_terminal| terminal && actor_terminal)
+            })?
+        {
+            break;
+        }
+        if fingerprint(&env) == before_round {
+            return Err(format!(
+                "resolved-ADL close order reached a nonterminal fixed point on round {round}"
+            ));
+        }
     }
+    let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(WINNER))?
+        && discovery_portfolio_is_terminal(&env.primary_portfolio(LOSER))?;
     let winner_external_payout = env
         .token_amount(winner_destination)
         .checked_sub(winner_destination_before)
         .ok_or_else(|| "resolved-ADL winner destination decreased".to_string())?;
+    let loser_external_payout = env
+        .token_amount(loser_destination)
+        .checked_sub(loser_destination_before)
+        .ok_or_else(|| "resolved-ADL loser destination decreased".to_string())?;
+    let canonical_vault_after = u128::from(env.token_amount(env.vault));
+    if env.primary_market_state().1.vault != canonical_vault_after {
+        return Err("resolved-ADL terminal internal vault diverged from SPL custody".into());
+    }
+    let portfolios_closed =
+        env.close_primary_portfolio(WINNER).is_ok() && env.close_primary_portfolio(LOSER).is_ok();
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
 
     Ok(ResolvedAdlCloseDiscovery {
         order,
         winner_basis_q,
         effective_long_oi_q,
         winner_funded_value,
+        loser_funded_value,
         canonical_vault_liquidity,
-        loser_close_landed,
-        winner_close_failures,
-        all_counter_underflow,
-        exact_rollback,
-        withdraw_rejected,
-        portfolio_close_rejected,
+        close_steps,
+        every_close_step_mutated,
+        nonprogress_rejections,
+        exact_rejection_rollback,
+        users_terminal,
+        portfolios_closed,
         winner_external_payout,
+        loser_external_payout,
+        canonical_vault_after,
+        token_supply_conserved,
     })
 }
 
-pub fn discover_resolved_adl_close_locks(
+pub fn verify_resolved_adl_close_orders(
     seed: [u8; 32],
 ) -> Result<Vec<ResolvedAdlCloseDiscovery>, String> {
     ResolvedAdlCloseOrder::ALL
         .into_iter()
-        .map(|order| discover_one_resolved_adl_close_lock(seed, order))
+        .map(|order| verify_one_resolved_adl_close_order(seed, order))
         .collect()
 }
 
