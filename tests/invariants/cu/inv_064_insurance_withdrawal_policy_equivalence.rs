@@ -437,18 +437,14 @@ fn v16_attack_removed_limited_insurance_tags_reject_without_mutation() {
     assert_eq!(env.token_amount(dest), 0);
 }
 
-// security.md sweep — live insurance withdrawal must reject while insurance is still protecting
-// unresolved loss (SOL-021/SOL-022 terminal/encumbered gating). live_domain_withdraw_health_or_shutdown
-// _view (v16_program 4812) blocks WithdrawInsuranceAsset on a live market whenever bankruptcy_hlock_active
-// / threshold_stress_active / loss_stale_active / recovery_reason is set — exactly the states where the
-// fund is the users' backstop for in-flight loss/bankruptcy work. If an operator could drain insurance
-// then, users lose their protection (LOF). The exposed target/effective lag branch is covered by
-// INV-060's `v16_program_live_insurance_withdraw_rejects_exposed_target_effective_lag`; the DISTINCT stress/h-lock/
-// loss-stale OR-branch (4822-4831) was untested. This sets each flag on an otherwise-healthy FLAT market
-// (where the same withdrawal demonstrably succeeds) and asserts the withdrawal rejects with insurance +
-// domain budget byte-unchanged — proving the stress flag is the sole blocker (non-vacuous).
+// Live insurance withdrawal must reject while insurance protects unresolved loss, but a sticky
+// record that an earlier bankruptcy completed cannot permanently strand the remaining domain
+// budget or prevent an empty Recovery asset from restarting. The public INV-073 Recovery route
+// establishes reachability of that history-only state; this focused policy matrix isolates the
+// wrapper discriminants. Threshold stress and stale loss state reject with exact ledger frames,
+// while history alone admits one exact withdrawal and remains set for audit.
 #[test]
-fn v16_attack_live_insurance_withdraw_rejects_while_stressed_or_hlocked() {
+fn v16_live_insurance_withdraw_uses_active_loss_not_bankruptcy_history() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 24);
     env.svm.warp_to_slot(1);
     env.configure_auth_mark_with_cu(1, 100_000_000);
@@ -463,11 +459,8 @@ fn v16_attack_live_insurance_withdraw_rejects_while_stressed_or_hlocked() {
     env.try_withdraw_insurance_asset_with_authority(&admin, 0, 100)
         .expect("flat healthy live insurance withdrawal must succeed");
 
-    // Each engine "insurance still protecting loss" flag must independently block the withdrawal.
-    let cases: [(&str, fn(&mut MarketGroupV16, bool)); 3] = [
-        ("bankruptcy_hlock_active", |g, v| {
-            g.bankruptcy_hlock_active = v
-        }),
+    // Each active "insurance still protecting loss" flag independently blocks the withdrawal.
+    let cases: [(&str, fn(&mut MarketGroupV16, bool)); 2] = [
         ("threshold_stress_active", |g, v| {
             g.threshold_stress_active = v
         }),
@@ -494,6 +487,31 @@ fn v16_attack_live_insurance_withdraw_rejects_while_stressed_or_hlocked() {
         // clear the flag so the next iteration tests its flag in isolation.
         env.mutate_market(|_cfg, group| set(group, false));
     }
+
+    env.mutate_market(|_cfg, group| group.bankruptcy_hlock_active = true);
+    let history_only = env.market_state().1;
+    assert_eq!(history_only.negative_pnl_account_count, 0);
+    assert_eq!(history_only.pending_domain_loss_barriers[0], 0);
+    env.svm.expire_blockhash();
+    let (destination, cu) = env
+        .try_withdraw_insurance_asset_with_authority(&admin, 0, 100)
+        .expect("settled bankruptcy history alone must not strand insurance-domain value");
+    assert_cu_within(
+        "history-only live insurance withdrawal",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let after_history_withdraw = env.market_state().1;
+    assert!(after_history_withdraw.bankruptcy_hlock_active);
+    assert_eq!(
+        after_history_withdraw.insurance,
+        history_only.insurance - 100
+    );
+    assert_eq!(
+        after_history_withdraw.insurance_domain_budget[0],
+        history_only.insurance_domain_budget[0] - 100
+    );
+    assert_eq!(env.token_amount(destination), 100);
 }
 
 #[test]

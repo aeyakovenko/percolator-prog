@@ -9,9 +9,12 @@
 //! SBF/LiteSVM account construction and assert economic state, token, rollback, liveness, or
 //! compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: the fixed-pin regressions close the known post-ADL fresh-basis transfer
-//! prefixes. Equal-risk liquidation permutations, arbitrary close partitions, complete loss
-//! attribution, and every lifecycle boundary remain.
+//! The reset-carry matrix creates a denominator-crossing social-loss carry through public
+//! bankruptcies and owner reduction, then requires the sole public crank to liquidate the next
+//! unhealthy account below the CU ceiling, normalize the carry, reduce both effective-OI sides to
+//! zero, detach every prior-epoch leg, finalize both side resets, and retire the empty dynamic
+//! asset without changing SPL custody. Equal-risk liquidation permutations, arbitrary close
+//! partitions, and complete loss attribution remain.
 
 use super::*;
 
@@ -334,12 +337,15 @@ fn v16_program_post_adl_transfer_rejects_phantom_value_and_preserves_owner_progr
 }
 
 #[test]
-fn v16_program_reset_carry_liquidation_matrix_discovers_crank_lock() {
+fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
+    const ASSET: u16 = 1;
+
     let mut params = V16CuMarketParams::default();
+    params.max_portfolio_assets = 2;
     params.initial_price = 1;
     params.max_price_move_bps_per_slot = 10_000;
     let mut env = V16CuEnv::new_with_init_params(params);
-    env.configure_auth_mark_with_cu(0, 1);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 0, 1);
 
     let l1o = Keypair::new();
     let l2o = Keypair::new();
@@ -381,84 +387,100 @@ fn v16_program_reset_carry_liquidation_matrix_discovers_crank_lock() {
         (&l4o, l4, &s3o, s3, 1_130_061),
         (&l5o, l5, &s3o, s3, 767_244),
     ] {
-        env.trade_asset_with_cu(0, long_owner, long, short_owner, short, quantity, 1, 0);
+        env.trade_asset_with_cu(ASSET, long_owner, long, short_owner, short, quantity, 1, 0);
     }
 
     for (slot, mark) in [(1u64, 2u64), (2, 3), (3, 4), (4, 5), (5, 6)] {
         env.svm.warp_to_slot(slot);
-        env.push_auth_mark_with_cu(slot, mark);
+        env.push_auth_mark_for_asset_as_admin(ASSET, slot, mark);
         env.crank(
             s3,
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                observations: crank_observations(0),
+                observations: crank_observations(ASSET),
             },
         );
     }
     for _ in 0..4 {
-        if !has_active_leg_for_asset(&env.portfolio_state(s1), 0) {
+        if !has_active_leg_for_asset(&env.portfolio_state(s1), ASSET as usize) {
             break;
         }
         env.crank(
             s1,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 5,
-                observations: crank_observations(0),
+                observations: crank_observations(ASSET),
             },
         );
     }
     let first = env.market_state().1;
-    assert!(!has_active_leg_for_asset(&env.portfolio_state(s1), 0));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(s1),
+        ASSET as usize
+    ));
     assert_eq!(first.mode, MarketModeV16::Live);
-    assert_eq!(first.assets[0].social_loss_remainder_long_num, 322_760);
-    assert_ne!(first.assets[0].b_long_num, 0);
+    assert_eq!(
+        first.assets[ASSET as usize].social_loss_remainder_long_num,
+        322_760
+    );
+    assert_ne!(first.assets[ASSET as usize].b_long_num, 0);
 
     for _ in 0..8 {
-        let leg = active_leg_for_asset(&env.portfolio_state(l1), 0);
-        if !leg.b_stale && leg.b_snap == env.market_state().1.assets[0].b_long_num {
+        let leg = active_leg_for_asset(&env.portfolio_state(l1), ASSET as usize);
+        if !leg.b_stale && leg.b_snap == env.market_state().1.assets[ASSET as usize].b_long_num {
             break;
         }
         env.crank(
             l1,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 5,
-                observations: crank_observations(0),
+                observations: crank_observations(ASSET),
             },
         );
     }
     assert_eq!(
-        active_leg_for_asset(&env.portfolio_state(l1), 0).b_rem,
+        active_leg_for_asset(&env.portfolio_state(l1), ASSET as usize).b_rem,
         percolator::SOCIAL_LOSS_DEN - 121_035
     );
-    env.rebalance_reduce_with_cu(&l1o, l1, 0, 1_897_305);
-    assert!(!has_active_leg_for_asset(&env.portfolio_state(l1), 0));
+    env.rebalance_reduce_with_cu(&l1o, l1, ASSET, 1_897_305);
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(l1),
+        ASSET as usize
+    ));
     let carry_state = env.market_state().1;
-    assert_eq!(carry_state.assets[0].oi_eff_long_q, 1_162_175);
-    assert_eq!(carry_state.assets[0].oi_eff_short_q, 1_162_175);
+    assert_eq!(carry_state.assets[ASSET as usize].oi_eff_long_q, 1_162_175);
+    assert_eq!(carry_state.assets[ASSET as usize].oi_eff_short_q, 1_162_175);
     assert_eq!(
-        carry_state.assets[0].social_loss_dust_long_num,
+        carry_state.assets[ASSET as usize].social_loss_dust_long_num,
         percolator::SOCIAL_LOSS_DEN - 121_035
     );
 
     env.svm.warp_to_slot(6);
-    env.push_auth_mark_with_cu(6, 7);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 6, 7);
     env.crank(
         s2,
         ProgInstruction::PermissionlessCrank {
             now_slot: 6,
-            observations: crank_observations(0),
+            observations: crank_observations(ASSET),
         },
     );
-    assert!(has_active_leg_for_asset(&env.portfolio_state(s2), 0));
+    assert!(has_active_leg_for_asset(
+        &env.portfolio_state(s2),
+        ASSET as usize
+    ));
     assert!(health_cert(&env.portfolio_state(s2)).certified_liq_deficit != 0);
 
+    let mut successful_steps = 0usize;
     for slot in 6..=8u64 {
+        if !has_active_leg_for_asset(&env.portfolio_state(s2), ASSET as usize) {
+            break;
+        }
         env.svm.warp_to_slot(slot);
         env.crank_steps_after_market_catchup(
             neutral,
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                observations: crank_observations(0),
+                observations: crank_observations(ASSET),
             },
             1,
         );
@@ -466,27 +488,271 @@ fn v16_program_reset_carry_liquidation_matrix_discovers_crank_lock() {
         let fixed_loser = env.svm.get_account(&s2).unwrap();
         let fixed_vault = env.svm.get_account(&env.vault).unwrap();
         env.svm.expire_blockhash();
-        let liquidation = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: slot,
-                observations: crank_observations(0),
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(s2, false),
-            ],
-            &[],
+        let before = env.market_state().1;
+        let before_basis = active_leg_for_asset(&env.portfolio_state(s2), ASSET as usize)
+            .basis_pos_q
+            .unsigned_abs();
+        let liquidation_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(ASSET),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(s2, false),
+                ],
+                &[],
+            )
+            .expect("fractional reset carry must not abort permissionless liquidation");
+        assert_cu_within(
+            "fractional reset-carry liquidation",
+            liquidation_cu,
+            CRANK_CU_LIMIT,
         );
-        assert!(liquidation.is_err(), "reset carry unexpectedly progressed");
-        assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
-        assert_eq!(env.svm.get_account(&s2).unwrap(), fixed_loser);
+        successful_steps += 1;
+        let after = env.market_state().1;
+        let after_basis = if has_active_leg_for_asset(&env.portfolio_state(s2), ASSET as usize) {
+            active_leg_for_asset(&env.portfolio_state(s2), ASSET as usize)
+                .basis_pos_q
+                .unsigned_abs()
+        } else {
+            0
+        };
+        assert!(
+            after.assets[ASSET as usize].oi_eff_long_q
+                < before.assets[ASSET as usize].oi_eff_long_q
+                || after.assets[ASSET as usize].oi_eff_short_q
+                    < before.assets[ASSET as usize].oi_eff_short_q
+                || after_basis < before_basis,
+            "every accepted target crank must strictly reduce liquidation risk"
+        );
+        assert_ne!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+        assert_ne!(env.svm.get_account(&s2).unwrap(), fixed_loser);
         assert_eq!(env.svm.get_account(&env.vault).unwrap(), fixed_vault);
     }
+    assert!(successful_steps > 0);
     assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
-    assert!(has_active_leg_for_asset(&env.portfolio_state(s2), 0));
-    assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 1_162_175);
-    assert_eq!(env.market_state().1.assets[0].oi_eff_short_q, 1_162_175);
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(s2),
+        ASSET as usize
+    ));
+    let progressed = env.market_state().1;
+    assert_eq!(progressed.assets[ASSET as usize].oi_eff_long_q, 0);
+    assert_eq!(progressed.assets[ASSET as usize].oi_eff_short_q, 0);
+    assert_eq!(
+        progressed.assets[ASSET as usize].social_loss_remainder_long_num,
+        0
+    );
+    assert!(
+        progressed.assets[ASSET as usize].social_loss_dust_long_num < percolator::SOCIAL_LOSS_DEN
+    );
+    assert_ne!(
+        progressed.assets[ASSET as usize].explicit_unallocated_loss_long,
+        0
+    );
+    assert_eq!(progressed.vault as u64, env.token_amount(env.vault));
+
+    for portfolio in [l1, l2, l3, l4, l5, s1, s2, s3] {
+        for _ in 0..8 {
+            if !has_active_leg_for_asset(&env.portfolio_state(portfolio), ASSET as usize) {
+                break;
+            }
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 8,
+                    observations: crank_observations(ASSET),
+                },
+            );
+        }
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(portfolio), ASSET as usize),
+            "every prior-epoch residue must detach in bounded public cranks"
+        );
+    }
+    let reset = env.market_state().1;
+    if reset.assets[ASSET as usize].mode_long == SideModeV16::ResetPending {
+        let cu = env.finalize_reset_side_with_cu(ASSET, 0);
+        assert_cu_within(
+            "fractional carry long reset finalization",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+    }
+    if env.market_state().1.assets[ASSET as usize].mode_short == SideModeV16::ResetPending {
+        let cu = env.finalize_reset_side_with_cu(ASSET, 1);
+        assert_cu_within(
+            "fractional carry short reset finalization",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+    }
+    let terminal_ready = env.market_state().1;
+    assert_eq!(terminal_ready.mode, MarketModeV16::Live);
+    assert_eq!(
+        terminal_ready.assets[ASSET as usize].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(
+        terminal_ready.assets[ASSET as usize].mode_long,
+        SideModeV16::Normal
+    );
+    assert_eq!(
+        terminal_ready.assets[ASSET as usize].mode_short,
+        SideModeV16::Normal
+    );
+    assert_eq!(terminal_ready.assets[ASSET as usize].k_epoch_start_long, 0);
+    assert_eq!(terminal_ready.assets[ASSET as usize].k_epoch_start_short, 0);
+    assert_eq!(
+        terminal_ready.assets[ASSET as usize].f_epoch_start_long_num,
+        0
+    );
+    assert_eq!(
+        terminal_ready.assets[ASSET as usize].f_epoch_start_short_num,
+        0
+    );
+    assert_eq!(
+        terminal_ready.assets[ASSET as usize].b_epoch_start_long_num,
+        0
+    );
+    assert_eq!(
+        terminal_ready.assets[ASSET as usize].b_epoch_start_short_num,
+        0
+    );
+
+    for (owner, portfolio) in [
+        (&l1o, l1),
+        (&l2o, l2),
+        (&l3o, l3),
+        (&l4o, l4),
+        (&l5o, l5),
+        (&s1o, s1),
+        (&s2o, s2),
+        (&s3o, s3),
+    ] {
+        let pnl = env.portfolio_state(portfolio).pnl.get();
+        if pnl > 0 {
+            let refresh_cu = env.crank_steps(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 8,
+                    observations: crank_observations(ASSET),
+                },
+                2,
+            );
+            assert_cu_within(
+                "fractional carry terminal claim refresh",
+                refresh_cu,
+                CRANK_CU_LIMIT,
+            );
+            let cu = env.convert_released_pnl_with_cu(owner, portfolio, pnl as u128);
+            assert_cu_within(
+                "fractional carry terminal PnL conversion",
+                cu,
+                CUSTODY_CU_LIMIT,
+            );
+            assert_eq!(env.portfolio_state(portfolio).pnl.get(), 0);
+        }
+    }
+    assert_eq!(env.market_state().1.pnl_pos_tot, 0);
+
+    let source_domain = ASSET * 2 + 1;
+    let provider_receivable_num =
+        env.market_state().1.source_credit[source_domain as usize].provider_receivable_num;
+    assert_ne!(provider_receivable_num, 0);
+    assert_eq!(provider_receivable_num % BOUND_SCALE, 0);
+    let provider_receivable = provider_receivable_num / BOUND_SCALE;
+    let provider_token = env.top_up_backing_bucket(source_domain, provider_receivable, 101);
+    assert_eq!(env.token_amount(provider_token), 0);
+    let provider_ready = env.market_state().1;
+    assert!(
+        provider_ready.bankruptcy_hlock_active,
+        "the regression must retain the global bankruptcy history bit"
+    );
+    assert_eq!(
+        provider_ready.negative_pnl_account_count, 0,
+        "all active negative accounts must settle before backing withdrawal"
+    );
+    assert_eq!(
+        provider_ready.pending_domain_loss_barriers[source_domain as usize], 0,
+        "the selected source domain must have no live loss barrier"
+    );
+    let provider_withdraw_cu = env.withdraw_backing_bucket_to_admin_token_with_cu(
+        provider_token,
+        source_domain,
+        provider_receivable,
+    );
+    assert_cu_within(
+        "fractional carry terminal provider settlement",
+        provider_withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(provider_token), provider_receivable as u64);
+    let provider_settled = env.market_state().1;
+    assert_eq!(
+        provider_settled.source_credit[source_domain as usize].provider_receivable_num,
+        0
+    );
+    assert_eq!(
+        provider_settled.source_backing_buckets[source_domain as usize],
+        percolator::BackingBucketV16 {
+            market_id: provider_settled.assets[ASSET as usize].market_id,
+            ..percolator::BackingBucketV16::EMPTY
+        }
+    );
+    assert_ne!(
+        provider_settled.source_credit[source_domain as usize].spent_backing_num, 0,
+        "the terminal route must exercise nonzero audit-only backing history"
+    );
+
+    let custody_before_retirement = env.svm.get_account(&env.vault).unwrap();
+    let drain_cu = env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+        ASSET,
+        0,
+        0,
+    );
+    assert_cu_within("fractional carry DrainOnly", drain_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        env.market_state().1.assets[ASSET as usize].lifecycle,
+        AssetLifecycleV16::DrainOnly
+    );
+    let retire_cu = env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        ASSET,
+        8,
+        0,
+    );
+    assert_cu_within("fractional carry retirement", retire_cu, CUSTODY_CU_LIMIT);
+    let retired = env.market_state().1;
+    assert_eq!(
+        retired.assets[ASSET as usize].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    assert_eq!(
+        retired.assets[ASSET as usize].social_loss_remainder_long_num,
+        0
+    );
+    assert_eq!(
+        retired.assets[ASSET as usize].social_loss_remainder_short_num,
+        0
+    );
+    assert_eq!(retired.assets[ASSET as usize].social_loss_dust_long_num, 0);
+    assert_eq!(retired.assets[ASSET as usize].social_loss_dust_short_num, 0);
+    assert_eq!(
+        retired.assets[ASSET as usize].explicit_unallocated_loss_long,
+        0
+    );
+    assert_eq!(
+        retired.assets[ASSET as usize].explicit_unallocated_loss_short,
+        0
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        custody_before_retirement
+    );
 }
 
 #[test]

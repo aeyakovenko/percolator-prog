@@ -3,11 +3,11 @@
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): recovery and terminal-exit
-//! matrices (`v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock`,
+//! matrices (`v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_progress`,
 //! `v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock`,
 //! `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`,
 //! `v16_program_fragmented_recovery_pair_matrix_clears_every_fragment`,
-//! `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`,
+//! `v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit`,
 //! `v16_program_recovery_residue_matrix_clears_abandoned_owner_residue`,
 //! `v16_program_expired_partial_close_matrix_resolves_and_preserves_idle_exit`,
 //! `v16_program_funding_disabled_round_trip_mark_preserves_stale_terminal_progress`), and
@@ -17,9 +17,10 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! The fractional-carry matrix forks from the same publicly reached state and proves both the
+//! owner-signed reduction and bilateral trade routes clear the leg, normalize the carry, remain
+//! below their CU ceilings, preserve custody, and return all senior capital. These bounded cells
+//! do not replace the remaining lifecycle reachability work required by the charter.
 
 use super::*;
 
@@ -100,7 +101,7 @@ fn v16_program_funding_disabled_round_trip_mark_preserves_stale_terminal_progres
 }
 
 #[test]
-fn v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock() {
+fn v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_progress() {
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         initial_price: 1_000,
         min_nonzero_mm_req: 599,
@@ -195,13 +196,11 @@ fn v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock() {
 
     env.svm.warp_to_slot(3);
     let provider_destination = env.token_account(backing_provider.pubkey(), 0);
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let vault_before = env.svm.get_account(&env.vault).unwrap();
-    let destination_before = env.svm.get_account(&provider_destination).unwrap();
+    let vault_atoms_before = env.token_amount(env.vault);
     let market_id = recovered.assets[0].market_id;
-    for _ in 0..16 {
-        env.svm.expire_blockhash();
-        let withdrawal = env.send(
+    env.svm.expire_blockhash();
+    let withdrawal_cu = env
+        .send(
             ProgInstruction::WithdrawBackingBucket {
                 domain: 0,
                 market_id,
@@ -216,39 +215,121 @@ fn v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock() {
                 AccountMeta::new_readonly(spl_token::ID, false),
             ],
             &[&backing_provider],
-        );
-        assert!(withdrawal.is_err());
-        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
-        assert_eq!(
-            env.svm.get_account(&provider_destination).unwrap(),
-            destination_before
-        );
-    }
-    assert_eq!(env.token_amount(provider_destination), 0);
+        )
+        .expect("settled provider principal must remain withdrawable after bankruptcy history");
+    assert_cu_within(
+        "asset-0 Recovery provider-principal withdrawal",
+        withdrawal_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(provider_destination), principal as u64);
+    assert_eq!(
+        env.token_amount(env.vault),
+        vault_atoms_before - principal as u64
+    );
+    let withdrawn = env.market_state().1;
+    assert!(withdrawn.bankruptcy_hlock_active);
+    assert_eq!(
+        withdrawn.source_backing_buckets[0],
+        percolator::BackingBucketV16 {
+            market_id,
+            ..percolator::BackingBucketV16::EMPTY
+        }
+    );
+
+    let (insurance_destination, insurance_withdraw_cu) = env
+        .try_withdraw_insurance_asset_with_authority(&marketauth, 0, 1)
+        .expect("settled Recovery must release the remaining domain insurance budget");
+    assert_cu_within(
+        "asset-0 Recovery remaining insurance withdrawal",
+        insurance_withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(insurance_destination), 1);
+    let terminal_empty = env.market_state().1;
+    assert!(terminal_empty.bankruptcy_hlock_active);
+    assert_eq!(terminal_empty.insurance_domain_budget_remaining_total, 0);
 
     env.svm.expire_blockhash();
-    let restart = env.send(
-        ProgInstruction::RestartAssetOracle {
-            market_id: 0,
-            asset_index: 0,
-            now_slot: 3,
-            initial_price: 1_000,
-            observation_sequence: u64::MAX,
-        },
-        vec![
-            AccountMeta::new(marketauth.pubkey(), true),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&marketauth],
+    let restart_cu = env
+        .send(
+            ProgInstruction::RestartAssetOracle {
+                market_id: 0,
+                asset_index: 0,
+                now_slot: 3,
+                initial_price: 1_000,
+                observation_sequence: u64::MAX,
+            },
+            vec![
+                AccountMeta::new(marketauth.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&marketauth],
+        )
+        .expect("empty asset-0 Recovery state must restart after provider principal exits");
+    assert_cu_within("asset-0 Recovery restart", restart_cu, CUSTODY_CU_LIMIT);
+    let restarted = env.market_state().1;
+    assert_eq!(restarted.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert!(restarted.assets[0].market_id > market_id);
+    assert_eq!(restarted.assets[0].effective_price, 1_000);
+    assert_eq!(env.token_amount(provider_destination), principal as u64);
+
+    let (fresh_insurance_source, fresh_top_up_cu) =
+        env.top_up_insurance_domain_with_authority_and_cu(&marketauth, 0, 17);
+    assert_cu_within(
+        "fresh post-restart domain insurance top-up",
+        fresh_top_up_cu,
+        CUSTODY_CU_LIMIT,
     );
-    assert!(restart.is_err());
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
-    assert_eq!(
-        env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num / BOUND_SCALE,
-        principal
+    assert_eq!(env.token_amount(fresh_insurance_source), 0);
+    let fresh_insurance_state = env.market_state().1;
+    assert_eq!(fresh_insurance_state.insurance_domain_budget[0], 17);
+    assert_eq!(fresh_insurance_state.insurance_domain_spent[0], 0);
+    let (fresh_insurance_destination, fresh_withdraw_cu) = env
+        .try_withdraw_insurance_asset_with_authority(&marketauth, 0, 17)
+        .expect("fresh post-restart domain insurance must remain withdrawable");
+    assert_cu_within(
+        "fresh post-restart domain insurance withdrawal",
+        fresh_withdraw_cu,
+        CUSTODY_CU_LIMIT,
     );
+    assert_eq!(env.token_amount(fresh_insurance_destination), 17);
+    let fresh_insurance_empty = env.market_state().1;
+    assert_eq!(fresh_insurance_empty.insurance_domain_budget[0], 0);
+    assert_eq!(fresh_insurance_empty.insurance_domain_spent[0], 0);
+
+    let fresh_long_owner = Keypair::new();
+    let fresh_short_owner = Keypair::new();
+    let fresh_long = env.create_portfolio(&fresh_long_owner);
+    let fresh_short = env.create_portfolio(&fresh_short_owner);
+    env.deposit(&fresh_long_owner, fresh_long, 600);
+    env.deposit(&fresh_short_owner, fresh_short, 600);
+    env.trade_asset_with_cu(
+        0,
+        &fresh_long_owner,
+        fresh_long,
+        &fresh_short_owner,
+        fresh_short,
+        POS_SCALE as i128,
+        1_000,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &fresh_long_owner,
+        fresh_long,
+        &fresh_short_owner,
+        fresh_short,
+        -(POS_SCALE as i128),
+        1_000,
+        0,
+    );
+    assert_eq!(env.portfolio_state(fresh_long).capital.get(), 600);
+    assert_eq!(env.portfolio_state(fresh_short).capital.get(), 600);
+    let fresh_long_destination = env.withdraw(&fresh_long_owner, fresh_long, 600);
+    let fresh_short_destination = env.withdraw(&fresh_short_owner, fresh_short, 600);
+    assert_eq!(env.token_amount(fresh_long_destination), 600);
+    assert_eq!(env.token_amount(fresh_short_destination), 600);
 }
 
 #[test]
@@ -617,8 +698,7 @@ fn v16_program_fragmented_recovery_pair_matrix_clears_every_fragment() {
     assert_eq!(group.vault as u64, env.token_amount(env.vault));
 }
 
-#[test]
-fn v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock() {
+fn fractional_social_loss_exit_fixture() -> (V16CuEnv, Keypair, Pubkey, Keypair, Pubkey) {
     let mut params = V16CuMarketParams::default();
     params.initial_price = 1;
     params.max_price_move_bps_per_slot = 10_000;
@@ -757,13 +837,17 @@ fn v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock() {
         percolator::SOCIAL_LOSS_DEN / 2
     );
 
-    let fixed_market = env.svm.get_account(&env.market).unwrap();
-    let fixed_long = env.svm.get_account(&l2).unwrap();
-    let fixed_short = env.svm.get_account(&s2).unwrap();
-    let fixed_vault = env.svm.get_account(&env.vault).unwrap();
+    (env, l2o, l2, s2o, s2)
+}
+
+#[test]
+fn v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit() {
     for route in [0u8, 1] {
+        let (mut env, l2o, l2, s2o, s2) = fractional_social_loss_exit_fixture();
+        let before = env.market_state().1;
+        let fixed_vault = env.svm.get_account(&env.vault).unwrap();
         env.svm.expire_blockhash();
-        let result = if route == 0 {
+        let cu = if route == 0 {
             env.send(
                 ProgInstruction::RebalanceReduce {
                     portfolio_id: env.portfolio_id(l2),
@@ -778,20 +862,50 @@ fn v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock() {
                 ],
                 &[&l2o],
             )
+            .expect("fractional carry must not block owner-signed reduction")
         } else {
             env.try_trade_asset_with_cu(0, &l2o, l2, &s2o, s2, -(POS_SCALE as i128), 5, 0)
+                .expect("fractional carry must not block a bilateral exit trade")
         };
-        assert!(
-            result.is_err(),
-            "fractional carry exit route {route} progressed"
+        assert_cu_within(
+            if route == 0 {
+                "fractional carry RebalanceReduce exit"
+            } else {
+                "fractional carry TradeNoCpi exit"
+            },
+            cu,
+            if route == 0 {
+                CUSTODY_CU_LIMIT
+            } else {
+                TRADE_CU_LIMIT
+            },
         );
-        assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
-        assert_eq!(env.svm.get_account(&l2).unwrap(), fixed_long);
-        assert_eq!(env.svm.get_account(&s2).unwrap(), fixed_short);
+        let after = env.market_state().1;
+        assert_eq!(
+            after.assets[0].oi_eff_long_q,
+            before.assets[0].oi_eff_long_q - POS_SCALE
+        );
+        assert_eq!(
+            after.assets[0].oi_eff_short_q,
+            before.assets[0].oi_eff_short_q - POS_SCALE
+        );
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(l2), 0));
+        if route == 1 {
+            assert!(!has_active_leg_for_asset(&env.portfolio_state(s2), 0));
+        }
+        assert_eq!(after.assets[0].social_loss_dust_long_num, 0);
+        assert_eq!(after.assets[0].explicit_unallocated_loss_long, 1);
         assert_eq!(env.svm.get_account(&env.vault).unwrap(), fixed_vault);
+        assert_eq!(after.vault as u64, env.token_amount(env.vault));
+
+        let owner_after = env.portfolio_state(l2);
+        assert!(owner_after.pnl.get() >= 0);
+        let withdrawable = owner_after.capital.get();
+        assert!(withdrawable > 0);
+        let destination = env.withdraw(&l2o, l2, withdrawable);
+        assert_eq!(env.token_amount(destination), withdrawable as u64);
+        assert_eq!(env.portfolio_state(l2).capital.get(), 0);
     }
-    assert!(has_active_leg_for_asset(&env.portfolio_state(l2), 0));
-    assert!(env.portfolio_state(l2).capital.get() != 0 || env.portfolio_state(l2).pnl.get() != 0);
 }
 
 #[test]

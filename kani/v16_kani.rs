@@ -58,6 +58,9 @@ mod inv_052_split_merge_invariance;
 #[path = "../tests/invariants/kani/inv_063_backing_expiry_normalization.rs"]
 mod inv_063_backing_expiry_normalization;
 
+#[path = "../tests/invariants/kani/inv_074_scope_locality.rs"]
+mod inv_074_scope_locality;
+
 #[path = "../tests/invariants/kani/inv_080_error_propagation_and_exact_rollback.rs"]
 mod inv_080_error_propagation_and_exact_rollback;
 

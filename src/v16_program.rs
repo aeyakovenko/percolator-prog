@@ -4981,6 +4981,22 @@ pub mod policy_v16 {
         authenticated_slot < expiry_slot
     }
 
+    /// Historical bankruptcy is audit state. Domain withdrawal is blocked by live global or
+    /// selected-domain loss state, not by a sticky record that a prior bankruptcy occurred.
+    pub fn domain_withdrawal_has_active_loss(
+        negative_pnl_account_count: u64,
+        pending_domain_loss_barrier: u64,
+        threshold_stress_active: bool,
+        loss_stale_active: bool,
+        recovery_active: bool,
+    ) -> bool {
+        negative_pnl_account_count != 0
+            || pending_domain_loss_barrier != 0
+            || threshold_stress_active
+            || loss_stale_active
+            || recovery_active
+    }
+
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
             return Some(0);
@@ -5366,16 +5382,25 @@ pub mod processor {
             return Ok(true);
         }
         reject_permissionless_resolve_matured_live_view(cfg, group)?;
-        if group.header.bankruptcy_hlock_active != 0
-            || group.header.threshold_stress_active != 0
-            || group.header.loss_stale_active != 0
-            || group
-                .header
-                .recovery_reason
-                .try_to_runtime()
-                .map_err(map_v16_error)?
-                .is_some()
-        {
+        let engine_slot = &group.markets[asset_index].engine;
+        let pending_domain_loss_barrier = if domain % 2 == 0 {
+            engine_slot.pending_domain_loss_barrier_long.get()
+        } else {
+            engine_slot.pending_domain_loss_barrier_short.get()
+        };
+        let recovery_active = group
+            .header
+            .recovery_reason
+            .try_to_runtime()
+            .map_err(map_v16_error)?
+            .is_some();
+        if policy_v16::domain_withdrawal_has_active_loss(
+            group.header.negative_pnl_account_count.get(),
+            pending_domain_loss_barrier,
+            group.header.threshold_stress_active != 0,
+            group.header.loss_stale_active != 0,
+            recovery_active,
+        ) {
             return Err(PercolatorError::EngineLockActive.into());
         }
         if asset_local_loss_stale_view(group, asset_index) {
@@ -11630,9 +11655,6 @@ pub mod processor {
                 observation_sequence,
             )?;
             group
-                .clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(asset_index)
-                .map_err(map_v16_error)?;
-            group
                 .restart_empty_asset_preserving_insurance_budget_not_atomic(
                     asset_index,
                     initial_price,
@@ -12073,16 +12095,6 @@ pub mod processor {
                     let lifecycle = group.markets[asset_index].engine.asset.lifecycle;
                     let retired_policy_count =
                         backing_fee_policy_count_from_profile(&existing_profile);
-                    if matches!(
-                        lifecycle,
-                        ASSET_LIFECYCLE_RECOVERY | ASSET_LIFECYCLE_RETIRED
-                    ) {
-                        group
-                            .clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(
-                                asset_index,
-                            )
-                            .map_err(map_v16_error)?;
-                    }
                     match lifecycle {
                         ASSET_LIFECYCLE_ACTIVE
                         | ASSET_LIFECYCLE_DRAIN_ONLY
