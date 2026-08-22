@@ -6642,6 +6642,19 @@ pub struct PendingCloseRankEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SameAssetCloseLocalityEvidence {
+    pub close_residual_before: u128,
+    pub close_residual_after: u128,
+    pub unrelated_position_q_before: u128,
+    pub unrelated_position_q_after: u128,
+    pub oi_long_before: u128,
+    pub oi_long_after: u128,
+    pub oi_short_before: u128,
+    pub oi_short_after: u128,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurePendingObligationDosEvidence {
     pub cure_deposit: u128,
     pub cure_source_debit: u128,
@@ -6781,6 +6794,141 @@ fn create_public_cancellable_close(
         ));
     }
     Ok(())
+}
+
+pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvidence, String> {
+    const CLOSE_WINNER: usize = 0;
+    const CLOSE_LOSER: usize = 1;
+    const UNRELATED_LONG: usize = 2;
+    const UNRELATED_SHORT: usize = 3;
+    const KEEPER: usize = EXIT_MAKER_INDEX;
+    const ASSET: usize = 0;
+    const UNRELATED_Q: u128 = POS_SCALE / 100;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([0x74; 32], config)?;
+    if !runner.execute_trade(
+        TradeRoute::NoCpi,
+        UNRELATED_LONG,
+        UNRELATED_SHORT,
+        vec![(ASSET, UNRELATED_Q as i128)],
+        0,
+        0,
+        true,
+    )? {
+        return Err("INV-074 same-asset control trade did not land".into());
+    }
+    create_public_cancellable_close(
+        &mut runner,
+        CLOSE_WINNER as u8,
+        CLOSE_LOSER as u8,
+        ASSET as u8,
+        KEEPER as u8,
+    )?;
+
+    let close_before = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-074 close pre-state decode: {error:?}"))?;
+    if !close_before.active || close_before.residual_remaining == 0 {
+        return Err(format!(
+            "INV-074 prerequisite did not retain an active close: {close_before:?}"
+        ));
+    }
+    if runner.positions[UNRELATED_LONG][ASSET] != UNRELATED_Q as i128
+        || runner.positions[UNRELATED_SHORT][ASSET] != -(UNRELATED_Q as i128)
+    {
+        return Err(format!(
+            "INV-074 unrelated pair was not live before reduction: {:?}",
+            runner.positions
+        ));
+    }
+
+    let close_winner_before = runner.env.primary_portfolio_data(CLOSE_WINNER);
+    let close_loser_before = runner.env.primary_portfolio_data(CLOSE_LOSER);
+    let (_, group_before) = runner.env.primary_market_state();
+    let spl_vault_before = runner.env.token_amount(runner.env.vault);
+    let accounted_vault_before = group_before.vault;
+    if !runner.execute_trade(
+        TradeRoute::NoCpi,
+        UNRELATED_LONG,
+        UNRELATED_SHORT,
+        vec![(ASSET, -(UNRELATED_Q as i128))],
+        0,
+        0,
+        true,
+    )? {
+        return Err("INV-074 same-asset risk reduction did not land".into());
+    }
+    runner.assert_global_invariants()?;
+
+    let close_after = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-074 close post-state decode: {error:?}"))?;
+    let (_, group_after) = runner.env.primary_market_state();
+    if close_after != close_before
+        || runner.env.primary_portfolio_data(CLOSE_WINNER) != close_winner_before
+        || runner.env.primary_portfolio_data(CLOSE_LOSER) != close_loser_before
+    {
+        return Err(format!(
+            "INV-074 unrelated same-asset reduction rewrote close scope: {close_before:?} -> {close_after:?}"
+        ));
+    }
+    if runner.positions[UNRELATED_LONG][ASSET] != 0
+        || runner.positions[UNRELATED_SHORT][ASSET] != 0
+        || group_after.assets[ASSET].oi_eff_long_q
+            != group_before.assets[ASSET]
+                .oi_eff_long_q
+                .checked_sub(UNRELATED_Q)
+                .ok_or("INV-074 long OI prerequisite below unrelated quantity")?
+        || group_after.assets[ASSET].oi_eff_short_q
+            != group_before.assets[ASSET]
+                .oi_eff_short_q
+                .checked_sub(UNRELATED_Q)
+                .ok_or("INV-074 short OI prerequisite below unrelated quantity")?
+    {
+        return Err(format!(
+            "INV-074 same-asset reduction did not remove exactly the unrelated pair: positions={:?}, oi={}/{} -> {}/{}",
+            runner.positions,
+            group_before.assets[ASSET].oi_eff_long_q,
+            group_before.assets[ASSET].oi_eff_short_q,
+            group_after.assets[ASSET].oi_eff_long_q,
+            group_after.assets[ASSET].oi_eff_short_q
+        ));
+    }
+    if group_after.vault != accounted_vault_before
+        || runner.env.token_amount(runner.env.vault) != spl_vault_before
+    {
+        return Err("INV-074 same-asset position reduction moved custody".into());
+    }
+
+    Ok(SameAssetCloseLocalityEvidence {
+        close_residual_before: close_before.residual_remaining,
+        close_residual_after: close_after.residual_remaining,
+        unrelated_position_q_before: UNRELATED_Q,
+        unrelated_position_q_after: runner.positions[UNRELATED_LONG][ASSET].unsigned_abs(),
+        oi_long_before: group_before.assets[ASSET].oi_eff_long_q,
+        oi_long_after: group_after.assets[ASSET].oi_eff_long_q,
+        oi_short_before: group_before.assets[ASSET].oi_eff_short_q,
+        oi_short_after: group_after.assets[ASSET].oi_eff_short_q,
+        coverage: runner.coverage,
+    })
 }
 
 pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDosEvidence, String> {

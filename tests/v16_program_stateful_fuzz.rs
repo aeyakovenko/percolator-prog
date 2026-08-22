@@ -211,6 +211,9 @@ mod inv_071_crank_progress;
 #[path = "invariants/stateful/inv_072_order_robust_crankability.rs"]
 mod inv_072_order_robust_crankability;
 
+#[path = "invariants/stateful/inv_074_scope_locality.rs"]
+mod inv_074_scope_locality;
+
 #[path = "invariants/stateful/inv_078_permissionless_recovery_coverage.rs"]
 mod inv_078_permissionless_recovery_coverage;
 
