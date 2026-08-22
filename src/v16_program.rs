@@ -6666,7 +6666,7 @@ pub mod processor {
                 amount,
             ),
             Instruction::CloseResolved { fee_rate_per_slot } => {
-                handle_close_resolved(program_id, accounts, fee_rate_per_slot)
+                handle_close_resolved(program_id, accounts, fee_rate_per_slot, None)
             }
             Instruction::UpdateAuthority { new_pubkey } => {
                 handle_update_authority(program_id, accounts, new_pubkey)
@@ -13123,6 +13123,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         _fee_rate_per_slot: u128,
+        auto_crank_now_slot: Option<u64>,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -13145,10 +13146,15 @@ pub mod processor {
             if group.header.mode != 1 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            let authenticated_slot = authenticated_market_slot_or_fallback_view(&group);
-            group
-                .advance_resolved_slot_not_atomic(authenticated_slot)
-                .map_err(map_v16_error)?;
+            let authenticated_slot = auto_crank_now_slot.map_or_else(
+                || authenticated_market_slot_or_fallback_view(&group),
+                authenticated_slot_or_fallback,
+            );
+            if auto_crank_now_slot.is_none() {
+                group
+                    .advance_resolved_slot_not_atomic(authenticated_slot)
+                    .map_err(map_v16_error)?;
+            }
             if cfg.force_close_delay_slots != 0
                 && authenticated_slot.saturating_sub(group.header.resolved_slot.get())
                     < cfg.force_close_delay_slots
@@ -13156,9 +13162,29 @@ pub mod processor {
                 expect_signer(owner)?;
             }
             let insurance_before = group.header.insurance.get();
-            let outcome = group
-                .close_resolved_account_not_atomic(&mut portfolio, cfg.maintenance_fee_per_slot)
-                .map_err(map_v16_error)?;
+            let outcome = if auto_crank_now_slot.is_some() {
+                let result = group
+                    .permissionless_auto_crank_not_atomic(
+                        &mut portfolio,
+                        AutoCrankWorkV16 {
+                            now_slot: authenticated_slot,
+                            observations: &[],
+                            resolved_close_fee_rate_per_slot: cfg.maintenance_fee_per_slot,
+                        },
+                    )
+                    .map_err(map_v16_error)?;
+                match (result.selected, result.outcome) {
+                    (
+                        AutoCrankPlanV16::CloseResolved,
+                        AutoCrankOutcomeV16::ResolvedClose(outcome),
+                    ) => outcome,
+                    _ => return Err(PercolatorError::EngineNonProgress.into()),
+                }
+            } else {
+                group
+                    .close_resolved_account_not_atomic(&mut portfolio, cfg.maintenance_fee_per_slot)
+                    .map_err(map_v16_error)?
+            };
             // close_resolved can charge an accrued maintenance fee into header.insurance.
             // Domain-credit it (mirroring SyncMaintenanceFee) so it stays withdrawable via
             // a per-domain budget; otherwise it strands in aggregate insurance — withdrawable
@@ -13774,7 +13800,7 @@ pub mod processor {
         let (_, mode, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         if mode == MarketModeV16::Resolved {
-            return handle_close_resolved(program_id, accounts, 0);
+            return handle_close_resolved(program_id, accounts, 0, Some(now_slot));
         }
         handle_permissionless_crank_zero_copy(
             program_id,

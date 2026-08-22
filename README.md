@@ -710,7 +710,7 @@ The cap does not guarantee safety if keepers disappear. It slows effective loss 
 
 The wrapper proof suite does not re-prove engine conservation. It proves wrapper ABI/routing properties around the engine boundary, while the pinned engine crate owns arithmetic/accounting invariants.
 
-Current wrapper Kani anchors live in `tests/v16_kani.rs` and cover:
+Current wrapper Kani anchors live in `kani/v16_kani.rs` and cover:
 
 - packed position-episode monotonicity and matcher-state preservation
 - instruction decode/encode preservation for active wrapper payloads, including authority, oracle, policy, lifecycle, and custody instructions
@@ -811,7 +811,7 @@ coverage and explicit gaps are indexed in
 not treated as independent bug discovery or full invariant certification.
 
 ### Wrapper-level properties (Kani-proven)
-The current Kani suite is in `tests/v16_kani.rs`. It proves wrapper ABI and local validation properties:
+The current Kani suite is in `kani/v16_kani.rs`. It proves wrapper ABI and local validation properties:
 
 - instruction payload decoding preserves wire fields for active instructions
 - unknown tags, truncated payloads, and trailing bytes reject
@@ -828,7 +828,7 @@ The code and test harnesses are the source of truth for counts and exact CU numb
 
 - host unit and LiteSVM integration tests under `tests/`
 - SBF-backed alignment/CU tests in `tests/v16_cu.rs`
-- wrapper Kani proofs in `tests/v16_kani.rs`
+- wrapper Kani proofs in `kani/v16_kani.rs`
 - engine arithmetic/accounting proofs in the pinned `percolator` crate
 
 Before publishing a bounty, run the commands in [Build & test](#build--test) and record the exact output for the current commit.
@@ -972,6 +972,6 @@ PERCOLATOR_FUZZ_CASES=100 PERCOLATOR_FUZZ_ACTIONS=40 \
   PERCOLATOR_FUZZ_SHRINK_ITERS=256 \
   cargo test --test v16_program_stateful_fuzz -- --nocapture
 
-# Kani harnesses (requires kani toolchain; proof-specific 32-byte loops override this bound)
-cargo kani --tests --default-unwind 18
+# Wrapper-owned Kani harnesses (requires Kani; proof-specific 32-byte loops override this bound)
+cargo kani --bin v16-kani --features kani --default-unwind 18 --output-format terse
 ```

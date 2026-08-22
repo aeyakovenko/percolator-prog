@@ -3876,6 +3876,7 @@ impl ScenarioRunner {
                         let payout_snapshot_captured =
                             self.env.primary_market_state().1.payout_snapshot_captured;
                         terminal_routes_callable &= result.landed
+                            || matches!(route, TerminalRoute::Crank)
                             || (matches!(route, TerminalRoute::Claim) && !payout_snapshot_captured);
                         terminal_routes_quiescent &= !result.mutated && result.payout == 0;
                     }

@@ -9,6 +9,11 @@ crate-type = ["cdylib", "lib"]
 name = "percolator_prog"
 path = "src/v16_program.rs"
 
+[[bin]]
+name = "v16-kani"
+path = "kani/v16_kani.rs"
+required-features = ["kani"]
+
 [features]
 # v16 deploys through the Anchor v2 / Pinocchio entrypoint by default. The
 # Solana 1.18 bundled SBF toolchain cannot parse the current Anchor v2
@@ -50,12 +55,12 @@ pinocchio = "0.6"
 arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "3c01f42b52b3b2f56c2e3c64eee9b5c06a7e81fe" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "50ae7b62b214dae37ac34182214c4c6d9ad00740" }
 anchor-lang-v2 = { git = "https://github.com/solana-foundation/anchor", rev = "e3cf760826fa0a60f247635ea0572e59861ec9b5", package = "anchor-lang-v2", default-features = false, features = ["alloc", "guardrails"], optional = true }
 
 [target.'cfg(not(target_os = "solana"))'.dependencies]
 # Host tests use the same zero-copy account/view API as the SBF/program target.
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "3c01f42b52b3b2f56c2e3c64eee9b5c06a7e81fe" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "50ae7b62b214dae37ac34182214c4c6d9ad00740" }
 
 [dev-dependencies]
 bincode = "1"

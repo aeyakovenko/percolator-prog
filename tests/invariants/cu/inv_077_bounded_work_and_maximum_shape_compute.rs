@@ -134,80 +134,216 @@ fn v16_program_max_source_conversion_and_owner_exit_are_bounded() {
     );
 }
 
-fn run_max_shape_resolved_close_order(reverse: bool) {
+fn permissionless_crank_resolved_with_cu(
+    env: &mut V16CuEnv,
+    owner: Pubkey,
+    portfolio: Pubkey,
+    now_slot: u64,
+) -> (Pubkey, u64) {
+    let destination = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            destination,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, owner, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(owner, false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("permissionless resolved crank");
+    (destination, cu)
+}
+
+fn crank_max_shape_resolved_until_terminal(
+    env: &mut V16CuEnv,
+    owner: Pubkey,
+    portfolio: Pubkey,
+    now_slot: u64,
+    stop_when_flat: bool,
+) -> (u64, u64, usize, bool) {
+    let mut paid = 0u64;
+    let mut max_cu = 0u64;
+    for step in 0..64 {
+        let before = env.portfolio_state(portfolio);
+        let active_before = percolator::active_bitmap_count_ones(active_bitmap(&before));
+        let sources_before = before
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count();
+        if stop_when_flat && active_before == 0 {
+            return (paid, max_cu, step, false);
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+        let engine_vault_before = env.market_state().1.vault;
+        let spl_vault_before = env.token_amount(env.vault);
+
+        env.svm.expire_blockhash();
+        let (destination, cu) =
+            permissionless_crank_resolved_with_cu(env, owner, portfolio, now_slot);
+        assert_cu_within(
+            "max-shape PermissionlessCrank resolved continuation",
+            cu,
+            1_375_000,
+        );
+        max_cu = max_cu.max(cu);
+        let payout = env.token_amount(destination);
+        paid = paid.checked_add(payout).expect("resolved payout overflow");
+
+        let after = env.portfolio_state(portfolio);
+        let active_after = percolator::active_bitmap_count_ones(active_bitmap(&after));
+        let receipt = resolved_receipt(&after);
+        assert_eq!(spl_vault_before - env.token_amount(env.vault), payout);
+        assert_eq!(
+            engine_vault_before - env.market_state().1.vault,
+            u128::from(payout)
+        );
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&portfolio).unwrap() != portfolio_before
+                || payout != 0,
+            "successful resolved continuation {step} was a nonterminal no-op"
+        );
+        if active_before != 0 {
+            assert_eq!(
+                active_after + 1,
+                active_before,
+                "resolved continuation must clear exactly one canonical leg"
+            );
+        }
+        if active_before > 1 {
+            assert_eq!(payout, 0, "intermediate leg detach paid early");
+            assert_eq!(after.capital, before.capital);
+            assert_eq!(after.pnl, before.pnl);
+            assert_eq!(
+                after
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.is_occupied())
+                    .count(),
+                sources_before,
+                "intermediate leg detach consumed terminal source claims"
+            );
+        }
+        let sources_after = after
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count();
+        if active_before == 0 && sources_before != 0 {
+            assert_eq!(
+                sources_after + 1,
+                sources_before,
+                "flat resolved continuation must remove exactly one canonical source domain"
+            );
+            if sources_before > 1 {
+                assert_eq!(payout, 0, "intermediate source realization paid early");
+            }
+        }
+        if after.capital.get() == 0
+            && after.pnl.get() == 0
+            && percolator::active_bitmap_is_empty(active_bitmap(&after))
+            && (!receipt.present || receipt.finalized)
+        {
+            assert_eq!(
+                after
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.is_occupied())
+                    .count(),
+                0,
+                "terminal close left source attribution behind"
+            );
+            return (paid, max_cu, step + 1, true);
+        }
+    }
+    panic!("max-shape resolved portfolio did not terminate in 64 bounded calls");
+}
+
+fn run_max_shape_resolved_close_order(reverse: bool) -> ([u64; 2], u64, usize) {
     let (mut env, taker_owner, lp_owner, taker, lp, slot) = setup_max_source_live_pair(0, 14);
     env.configure_permissionless_resolve_with_cu(1, 1);
     let resolve_slot = slot + 2;
     env.resolve_stale_permissionless_with_cu(resolve_slot);
     env.svm.warp_to_slot(resolve_slot + 1);
 
-    let mut claims = [(&taker_owner, taker), (&lp_owner, lp)];
-    if reverse {
-        claims.reverse();
-    }
-    for (owner, portfolio) in claims {
-        if portfolio != lp {
-            let destination = Pubkey::new_unique();
-            env.svm
-                .set_account(
-                    destination,
-                    Account {
-                        lamports: 1_000_000_000,
-                        data: make_token_data(env.mint, owner.pubkey(), 0),
-                        owner: spl_token::ID,
-                        executable: false,
-                        rent_epoch: 0,
-                    },
-                )
-                .unwrap();
-            env.svm.expire_blockhash();
-            let _ = env.send(
-                ProgInstruction::CloseResolved {
-                    fee_rate_per_slot: 0,
+    let claims = if reverse {
+        [(1, &lp_owner, lp), (0, &taker_owner, taker)]
+    } else {
+        [(0, &taker_owner, taker), (1, &lp_owner, lp)]
+    };
+    let mut payouts = [0u64; 2];
+    let mut max_cu = 0u64;
+    let mut total_calls = 0usize;
+    let mut pending = Vec::new();
+    for (claimant, owner, portfolio) in claims {
+        let before_crank = env.portfolio_state(portfolio);
+        let active_before = percolator::active_bitmap_count_ones(active_bitmap(&before_crank));
+        let sources_before = before_crank
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count();
+        let source_claims_before = before_crank
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() != 0)
+            .count();
+        assert_eq!(active_before, 14);
+        let expected_sources = if portfolio == lp {
+            percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+        } else {
+            0
+        };
+        assert_eq!(
+            sources_before, expected_sources,
+            "fixture must preserve its asymmetric historical source attribution"
+        );
+        assert_eq!(
+            source_claims_before, expected_sources,
+            "every occupied LP source domain must carry a live terminal claim"
+        );
+        assert_ne!(before_crank.capital.get(), 0);
+
+        env.svm.expire_blockhash();
+        let crank_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: resolve_slot + 1,
+                    observations: vec![],
                 },
                 vec![
                     AccountMeta::new_readonly(owner.pubkey(), false),
                     AccountMeta::new(env.market, false),
                     AccountMeta::new(portfolio, false),
-                    AccountMeta::new(destination, false),
-                    AccountMeta::new(env.vault, false),
-                    AccountMeta::new_readonly(env.vault_authority, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
                 ],
                 &[],
-            );
-            continue;
-        }
-        let custody_before = env.token_amount(env.vault);
-        let terminal = env.portfolio_state(portfolio);
-        let active_before = percolator::active_bitmap_count_ones(active_bitmap(&terminal));
-        let sources_before = terminal
-            .source_domains
-            .iter()
-            .filter(|source| source.is_occupied())
-            .count();
-        assert_eq!(active_before, 14);
-        assert_eq!(
-            sources_before,
-            percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
-        );
-        assert_ne!(terminal.capital.get(), 0);
-
-        env.svm.expire_blockhash();
-        let market_before_crank = env.svm.get_account(&env.market).unwrap();
-        let portfolio_before_crank = env.svm.get_account(&portfolio).unwrap();
-        let crank = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: resolve_slot + 1,
-                observations: vec![],
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(portfolio, false),
-            ],
-            &[],
-        );
+            )
+            .expect("resolved-mode crank must commit one payout-free leg detach");
+        assert_cu_within("max-shape resolved crank continuation", crank_cu, 1_375_000);
+        max_cu = max_cu.max(crank_cu);
+        total_calls += 1;
         let after_crank = env.portfolio_state(portfolio);
         let active_after = percolator::active_bitmap_count_ones(active_bitmap(&after_crank));
         let sources_after = after_crank
@@ -217,84 +353,60 @@ fn run_max_shape_resolved_close_order(reverse: bool) {
             .count();
         assert_eq!(
             (active_after, sources_after),
-            (active_before, sources_before),
-            "selector crank unexpectedly supplied terminal rank progress"
+            (active_before - 1, sources_before),
+            "resolved-mode crank must lower the terminal leg rank exactly once"
         );
-        if crank.is_err() {
-            assert_eq!(
-                env.svm.get_account(&env.market).unwrap(),
-                market_before_crank
-            );
-            assert_eq!(
-                env.svm.get_account(&portfolio).unwrap(),
-                portfolio_before_crank
-            );
-        }
+        assert_eq!(after_crank.capital, before_crank.capital);
+        assert_eq!(after_crank.pnl, before_crank.pnl);
 
-        let destination = Pubkey::new_unique();
-        env.svm
-            .set_account(
-                destination,
-                Account {
-                    lamports: 1_000_000_000,
-                    data: make_token_data(env.mint, owner.pubkey(), 0),
-                    owner: spl_token::ID,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-        env.svm.expire_blockhash();
-        let market_before_close = env.svm.get_account(&env.market).unwrap();
-        let portfolio_before_close = env.svm.get_account(&portfolio).unwrap();
-        let destination_before = env.svm.get_account(&destination).unwrap();
-        let close = env.send(
-            ProgInstruction::CloseResolved {
-                fee_rate_per_slot: 0,
-            },
-            vec![
-                AccountMeta::new_readonly(owner.pubkey(), false),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(portfolio, false),
-                AccountMeta::new(destination, false),
-                AccountMeta::new(env.vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[],
+        let (paid, claimant_max_cu, calls, terminal) = crank_max_shape_resolved_until_terminal(
+            &mut env,
+            owner.pubkey(),
+            portfolio,
+            resolve_slot + 1,
+            true,
         );
-        assert!(
-            close.is_err(),
-            "max-shape resolved close unexpectedly landed"
-        );
-        let error = format!("{:?}", close.as_ref().unwrap_err());
-        assert!(
-            (error.contains("ComputationalBudgetExceeded")
-                || error.contains("ProgramFailedToComplete"))
-                && error.contains("exceeded CUs meter"),
-            "resolved close failed for a non-CU reason: {error}"
-        );
-        assert_eq!(
-            env.svm.get_account(&env.market).unwrap(),
-            market_before_close
-        );
-        assert_eq!(
-            env.svm.get_account(&portfolio).unwrap(),
-            portfolio_before_close
-        );
-        assert_eq!(
-            env.svm.get_account(&destination).unwrap(),
-            destination_before
-        );
-        assert_eq!(env.token_amount(env.vault), custody_before);
+        payouts[claimant] = payouts[claimant]
+            .checked_add(paid)
+            .expect("resolved payout overflow");
+        max_cu = max_cu.max(claimant_max_cu);
+        total_calls += calls;
+        if !terminal {
+            pending.push((claimant, owner, portfolio));
+        }
     }
+    for (claimant, owner, portfolio) in pending {
+        let (paid, claimant_max_cu, calls, terminal) = crank_max_shape_resolved_until_terminal(
+            &mut env,
+            owner.pubkey(),
+            portfolio,
+            resolve_slot + 1,
+            false,
+        );
+        assert!(terminal, "deferred resolved claimant did not terminate");
+        payouts[claimant] = payouts[claimant]
+            .checked_add(paid)
+            .expect("resolved payout overflow");
+        max_cu = max_cu.max(claimant_max_cu);
+        total_calls += calls;
+    }
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
+    (payouts, max_cu, total_calls)
 }
 
 #[test]
-fn v16_program_max_shape_resolved_close_order_matrix_discovers_terminal_cu_lock() {
-    for reverse in [false, true] {
-        run_max_shape_resolved_close_order(reverse);
-    }
+fn v16_program_max_shape_resolved_close_order_matrix_is_bounded_and_fair() {
+    let forward = run_max_shape_resolved_close_order(false);
+    let reverse = run_max_shape_resolved_close_order(true);
+    assert_eq!(forward.0, reverse.0, "claim order changed owner payouts");
+    assert!(forward.0.iter().all(|payout| *payout != 0));
+    println!(
+        "INV-077 max resolved close CU: forward={} ({} calls), reverse={} ({} calls)",
+        forward.1, forward.2, reverse.1, reverse.2
+    );
 }
 
 fn run_max_source_liquidation_asset(adverse_asset: u16) {
@@ -799,10 +911,25 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 
     env.svm.warp_to_slot(resolve_slot + 1);
-    let destination = env.close_resolved(&victim_owner, victim);
+    let (payout, max_close_cu, close_calls, terminal) = crank_max_shape_resolved_until_terminal(
+        &mut env,
+        victim_owner.pubkey(),
+        victim,
+        resolve_slot + 1,
+        false,
+    );
+    assert!(terminal, "the funded user must reach terminal disposition");
+    assert!(
+        close_calls <= usize::from(MAX_LEGS) + 1,
+        "resolved close exceeded one bounded call per active leg plus payout"
+    );
+    assert_cu_within(
+        "dense zero-delta resolved continuation",
+        max_close_cu,
+        1_375_000,
+    );
     assert_eq!(
-        env.token_amount(destination),
-        1_000_000,
+        payout, 1_000_000,
         "the funded user receives its full terminal entitlement"
     );
 }

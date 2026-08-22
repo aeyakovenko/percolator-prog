@@ -25,7 +25,7 @@ use solana_program::program_error::ProgramError;
 
 const INV084_ASSUME_TOKEN: &[u8] = b"kani\x3a\x3aassume";
 const INV084_INVENTORY: &str = include_str!("../kani_assumption_inventory.tsv");
-const INV084_KANI_ROOT: &str = include_str!("../../v16_kani.rs");
+const INV084_KANI_ROOT: &str = include_str!("../../../kani/v16_kani.rs");
 const INV084_SRC_004: &str = include_str!("inv_004_position_episode_binding.rs");
 const INV084_SRC_010: &str = include_str!("inv_010_out_of_order_safety.rs");
 const INV084_SRC_014: &str = include_str!("inv_014_delayed_policy_and_policy_epoch_safety.rs");
@@ -253,7 +253,7 @@ const fn inv084_inventory_rows_are_classified() -> bool {
 }
 
 const INV084_KANI_MODULES_MOUNTED: usize =
-    inv084_count_token(INV084_KANI_ROOT, b"#[path = \"invariants/kani/");
+    inv084_count_token(INV084_KANI_ROOT, b"#[path = \"../tests/invariants/kani/");
 
 const INV084_ASSUME_TOTAL: usize = inv084_count_token(INV084_SRC_004, INV084_ASSUME_TOKEN)
     + inv084_count_token(INV084_SRC_010, INV084_ASSUME_TOKEN)
@@ -266,7 +266,7 @@ const INV084_ASSUME_TOTAL: usize = inv084_count_token(INV084_SRC_004, INV084_ASS
     + inv084_count_token(INV084_SRC_084, INV084_ASSUME_TOKEN)
     + inv084_count_token(INV084_SRC_085, INV084_ASSUME_TOKEN);
 
-const _: () = assert!(INV084_KANI_MODULES_MOUNTED == 10);
+const _: () = assert!(INV084_KANI_MODULES_MOUNTED == 17);
 const _: () = assert!(inv084_inventory_rows_are_classified());
 const _: () = assert!(inv084_count_inventory_rows() == INV084_ASSUME_TOTAL);
 const _: () = assert!(

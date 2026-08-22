@@ -15,7 +15,86 @@
 use super::*;
 
 #[test]
-fn v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock() {
+fn v16_program_permissionless_crank_closes_capital_only_resolved_account() {
+    const DEPOSIT: u128 = 123_456;
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, DEPOSIT);
+    env.resolve();
+
+    let destination = env.token_account(owner.pubkey(), 0);
+    let now_slot = env.svm.get_sysvar::<Clock>().slot;
+    let market_before = env.market_state().1;
+    let spl_vault_before = env.token_amount(env.vault);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), DEPOSIT);
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("capital-only resolved account must be permissionlessly actionable");
+    assert_cu_within("capital-only resolved PermissionlessCrank", cu, 1_375_000);
+
+    let after = env.portfolio_state(portfolio);
+    assert_eq!(after.capital.get(), 0);
+    assert_eq!(after.pnl.get(), 0);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&after)));
+    assert_eq!(env.token_amount(destination), DEPOSIT as u64);
+    assert_eq!(
+        spl_vault_before - env.token_amount(env.vault),
+        DEPOSIT as u64
+    );
+    assert_eq!(market_before.vault - env.market_state().1.vault, DEPOSIT);
+
+    let market_fixed = env.svm.get_account(&env.market).unwrap();
+    let portfolio_fixed = env.svm.get_account(&portfolio).unwrap();
+    let vault_fixed = env.svm.get_account(&env.vault).unwrap();
+    let destination_fixed = env.svm.get_account(&destination).unwrap();
+    env.svm.expire_blockhash();
+    let retry = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    retry.expect_err("a terminal permissionless crank must not land as a successful no-op");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_fixed);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_fixed);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_fixed);
+    assert_eq!(
+        env.svm.get_account(&destination).unwrap(),
+        destination_fixed
+    );
+}
+
+#[test]
+fn v16_program_prospective_loss_expiry_matrix_keeps_resolved_exit_live() {
     const PRICE: u64 = 100;
     const LOW_PRICE: u64 = 98;
     const DEPOSIT: u128 = 100_000_000;
@@ -141,15 +220,30 @@ fn v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock() {
         (&fee_peer_owner, fee_peer),
     ];
     let mut rejected = 0usize;
+    let mut progressed = 0usize;
     for ((owner, portfolio), destination) in accounts.into_iter().zip(destinations).cycle().take(64)
     {
+        let state = env.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&state);
+        if percolator::active_bitmap_is_empty(active_bitmap(&state))
+            && state.capital.get() == 0
+            && state.pnl.get() == 0
+            && (!receipt.present || receipt.finalized)
+        {
+            continue;
+        }
         env.svm.expire_blockhash();
         let before_market = env.svm.get_account(&env.market).unwrap();
         let before_portfolio = env.svm.get_account(&portfolio).unwrap();
         let before_vault = env.svm.get_account(&env.vault).unwrap();
+        let before_destination = env.svm.get_account(&destination).unwrap();
         let close = env.send(
-            ProgInstruction::CloseResolved {
-                fee_rate_per_slot: 0,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
             },
             vec![
                 AccountMeta::new_readonly(owner.pubkey(), false),
@@ -162,11 +256,28 @@ fn v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock() {
             ],
             &[],
         );
-        if close.is_err() {
-            rejected += 1;
-            assert_eq!(env.svm.get_account(&env.market).unwrap(), before_market);
-            assert_eq!(env.svm.get_account(&portfolio).unwrap(), before_portfolio);
-            assert_eq!(env.svm.get_account(&env.vault).unwrap(), before_vault);
+        match close {
+            Ok(cu) => {
+                progressed += 1;
+                assert_cu_within("prospective-loss resolved crank", cu, CUSTODY_CU_LIMIT);
+                assert!(
+                    env.svm.get_account(&env.market).unwrap() != before_market
+                        || env.svm.get_account(&portfolio).unwrap() != before_portfolio
+                        || env.svm.get_account(&env.vault).unwrap() != before_vault
+                        || env.svm.get_account(&destination).unwrap() != before_destination,
+                    "accepted preterminal resolved crank was a no-op: portfolio={portfolio}"
+                );
+            }
+            Err(_) => {
+                rejected += 1;
+                assert_eq!(env.svm.get_account(&env.market).unwrap(), before_market);
+                assert_eq!(env.svm.get_account(&portfolio).unwrap(), before_portfolio);
+                assert_eq!(env.svm.get_account(&env.vault).unwrap(), before_vault);
+                assert_eq!(
+                    env.svm.get_account(&destination).unwrap(),
+                    before_destination
+                );
+            }
         }
     }
 
@@ -176,18 +287,29 @@ fn v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock() {
         env.portfolio_state(neutral),
         env.portfolio_state(fee_peer),
     ];
-    let locked = states.iter().any(|portfolio| {
-        portfolio.capital.get() != 0
-            || !percolator::active_bitmap_is_empty(active_bitmap(portfolio))
-    });
-    assert_eq!(
-        rejected, 16,
-        "only the prospective-loss account should reject once per schedule round"
+    assert!(
+        progressed > accounts.len(),
+        "the matrix did not exercise bounded multi-step progress"
     );
-    assert!(locked, "rejections retained no funded user state");
-    assert!(has_active_leg_for_asset(&states[0], 0));
-    assert!(states[0].capital.get() != 0);
-    assert_eq!(env.token_amount(destinations[0]), 0);
+    assert_eq!(
+        rejected, 0,
+        "a funded resolved account lost its crank continuation"
+    );
+    for portfolio in &states {
+        let receipt = resolved_receipt(portfolio);
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(portfolio)));
+        assert_eq!(portfolio.capital.get(), 0);
+        assert_eq!(portfolio.pnl.get(), 0);
+        assert!(!receipt.present || receipt.finalized);
+    }
+    assert_eq!(
+        destinations
+            .into_iter()
+            .map(|destination| u128::from(env.token_amount(destination)))
+            .sum::<u128>(),
+        DEPOSIT * accounts.len() as u128,
+        "resolved progress did not conserve funded user principal"
+    );
 }
 
 #[test]
@@ -296,13 +418,27 @@ fn v16_program_prospective_source_expiry_prerequisite_matrix_keeps_exit_live() {
     .cycle()
     .take(32)
     {
+        let state = env.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&state);
+        if percolator::active_bitmap_is_empty(active_bitmap(&state))
+            && state.capital.get() == 0
+            && state.pnl.get() == 0
+            && (!receipt.present || receipt.finalized)
+        {
+            continue;
+        }
         env.svm.expire_blockhash();
         let market_before = env.svm.get_account(&env.market).unwrap();
         let portfolio_before = env.svm.get_account(&portfolio).unwrap();
         let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let destination_before = env.svm.get_account(&destination).unwrap();
         let close = env.send(
-            ProgInstruction::CloseResolved {
-                fee_rate_per_slot: 0,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
             },
             vec![
                 AccountMeta::new_readonly(owner.pubkey(), false),
@@ -315,11 +451,30 @@ fn v16_program_prospective_source_expiry_prerequisite_matrix_keeps_exit_live() {
             ],
             &[],
         );
-        if close.is_err() {
-            rejected += 1;
-            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-            assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
-            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        match close {
+            Ok(cu) => {
+                assert_cu_within("prospective source-expiry close", cu, CUSTODY_CU_LIMIT);
+                assert!(
+                    env.svm.get_account(&env.market).unwrap() != market_before
+                        || env.svm.get_account(&portfolio).unwrap() != portfolio_before
+                        || env.svm.get_account(&env.vault).unwrap() != vault_before
+                        || env.svm.get_account(&destination).unwrap() != destination_before,
+                    "accepted preterminal resolved close was a no-op: portfolio={portfolio}, active={}, capital={}, pnl={}",
+                    percolator::active_bitmap_count_ones(active_bitmap(&state)),
+                    state.capital.get(),
+                    state.pnl.get()
+                );
+            }
+            Err(_) => {
+                rejected += 1;
+                assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+                assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+                assert_eq!(
+                    env.svm.get_account(&destination).unwrap(),
+                    destination_before
+                );
+            }
         }
     }
 

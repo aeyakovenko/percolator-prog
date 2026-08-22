@@ -4403,29 +4403,52 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     }
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 
-    env.svm.expire_blockhash();
-    let loser_crank_cu = env
-        .send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: u64::MAX,
-                observations: vec![CrankObservationHint {
-                    asset_index: u16::MAX,
-                    oracle_accounts: u8::MAX,
-                }],
-            },
-            vec![
-                AccountMeta::new_readonly(victim_owner.pubkey(), false),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(victim, false),
-            ],
-            &[],
-        )
-        .expect("resolved deep cross-margin bad debt has public progress");
-    assert_cu_within(
-        "Resolved PermissionlessCrank unattributed bad debt",
-        loser_crank_cu,
-        CRANK_CU_LIMIT,
-    );
+    for step in 0..4 {
+        let before = env.portfolio_state(victim);
+        let active_before = percolator::active_bitmap_count_ones(active_bitmap(&before));
+        if active_before == 0 && before.capital.get() == 0 && before.pnl.get() == 0 {
+            break;
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&victim).unwrap();
+        env.svm.expire_blockhash();
+        let loser_crank_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: u64::MAX,
+                    observations: vec![CrankObservationHint {
+                        asset_index: u16::MAX,
+                        oracle_accounts: u8::MAX,
+                    }],
+                },
+                vec![
+                    AccountMeta::new_readonly(victim_owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                &[],
+            )
+            .expect("resolved deep cross-margin bad debt has public progress");
+        assert_cu_within(
+            "Resolved PermissionlessCrank unattributed bad debt",
+            loser_crank_cu,
+            CRANK_CU_LIMIT,
+        );
+        let after = env.portfolio_state(victim);
+        let active_after = percolator::active_bitmap_count_ones(active_bitmap(&after));
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&victim).unwrap() != portfolio_before,
+            "resolved loser continuation {step} was a no-op"
+        );
+        if active_before != 0 {
+            assert_eq!(
+                active_after + 1,
+                active_before,
+                "resolved loser continuation must detach one canonical leg"
+            );
+        }
+    }
     let victim_after = env.portfolio_state(victim);
     assert_eq!(
         victim_after.capital.get(),
@@ -4439,7 +4462,92 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     );
     env.close_portfolio_with_cu(&victim_owner, victim);
 
-    let winner_dest = env.close_resolved(&cp_owner, cp);
+    let winner_dest = env.token_account(cp_owner.pubkey(), 0);
+    for step in 0..8 {
+        let before = env.portfolio_state(cp);
+        let receipt = resolved_receipt(&before);
+        if before.capital.get() == 0
+            && before.pnl.get() == 0
+            && percolator::active_bitmap_is_empty(active_bitmap(&before))
+            && (!receipt.present || receipt.finalized)
+        {
+            break;
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&cp).unwrap();
+        let destination_before = env.svm.get_account(&winner_dest).unwrap();
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
+            },
+            vec![
+                AccountMeta::new_readonly(cp_owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(cp, false),
+                AccountMeta::new(winner_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        );
+        let cu = result.unwrap_or_else(|error| {
+            let active_assets: Vec<_> = before
+                .legs
+                .iter()
+                .filter_map(|leg| {
+                    let leg = leg.try_to_runtime().ok()?;
+                    leg.active.then_some((leg.asset_index, leg.basis_pos_q))
+                })
+                .collect();
+            let sources: Vec<_> = before
+                .source_domains
+                .iter()
+                .filter(|source| source.is_occupied())
+                .map(|source| {
+                    (
+                        source.domain.get(),
+                        source.source_claim_bound_num.get(),
+                        source.source_claim_liened_num.get(),
+                        source.source_claim_counterparty_liened_num.get(),
+                        source.source_lien_fee_last_slot.get(),
+                        source.source_lien_capital_at_risk_fee_revenue.get(),
+                        source
+                            .source_lien_impaired_capital_at_risk_fee_revenue
+                            .get(),
+                    )
+                })
+                .collect();
+            panic!(
+                "resolved winner step {step} failed: {error}; active={active_assets:?}, sources={sources:?}, capital={}, pnl={}, current_slot={}, resolved_slot={}",
+                before.capital.get(),
+                before.pnl.get(),
+                env.market_state().1.current_slot,
+                env.market_state().1.resolved_slot
+            )
+        });
+        assert_cu_within("Resolved PermissionlessCrank winner", cu, CRANK_CU_LIMIT);
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&cp).unwrap() != portfolio_before
+                || env.svm.get_account(&winner_dest).unwrap() != destination_before,
+            "resolved winner continuation {step} was a no-op"
+        );
+    }
+    let winner_state = env.portfolio_state(cp);
+    let winner_receipt = resolved_receipt(&winner_state);
+    assert!(
+        winner_state.capital.get() == 0
+            && winner_state.pnl.get() == 0
+            && percolator::active_bitmap_is_empty(active_bitmap(&winner_state))
+            && (!winner_receipt.present || winner_receipt.finalized),
+        "winner did not reach terminal disposition"
+    );
     let winner_payout = env.token_amount(winner_dest);
     assert!(
         (2_000_249..=2_000_250).contains(&winner_payout),

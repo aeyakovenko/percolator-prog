@@ -150,6 +150,14 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
             &[],
         )
     };
+    let is_terminal = |env: &V16CuEnv, portfolio: Pubkey| {
+        let state = env.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&state);
+        percolator::active_bitmap_is_empty(active_bitmap(&state))
+            && state.capital.get() == 0
+            && state.pnl.get() == 0
+            && (!receipt.present || receipt.finalized)
+    };
     send_resolved(
         &mut env,
         trigger_owner.pubkey(),
@@ -184,6 +192,9 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
             ),
             (trigger_owner.pubkey(), trigger, trigger_destination),
         ] {
+            if is_terminal(&env, portfolio) {
+                continue;
+            }
             let market_before = env.svm.get_account(&env.market).unwrap();
             let portfolio_before = env.svm.get_account(&portfolio).unwrap();
             let vault_before = env.svm.get_account(&env.vault).unwrap();
@@ -191,12 +202,12 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
             match send_resolved(&mut env, owner, portfolio, destination, round % 2 != 0) {
                 Ok(cu) => {
                     assert_cu_within("nonblocked resolved peer", cu, 1_000_000);
-                    if portfolio == target
-                        && (env.svm.get_account(&env.market).unwrap() != market_before
-                            || env.svm.get_account(&portfolio).unwrap() != portfolio_before
-                            || env.svm.get_account(&env.vault).unwrap() != vault_before
-                            || env.svm.get_account(&destination).unwrap() != destination_before)
-                    {
+                    let mutated = env.svm.get_account(&env.market).unwrap() != market_before
+                        || env.svm.get_account(&portfolio).unwrap() != portfolio_before
+                        || env.svm.get_account(&env.vault).unwrap() != vault_before
+                        || env.svm.get_account(&destination).unwrap() != destination_before;
+                    assert!(mutated, "accepted resolved peer continuation was a no-op");
+                    if portfolio == target && mutated {
                         target_progressed = true;
                     }
                 }
@@ -216,6 +227,9 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
         }
 
         for use_crank in [false, true] {
+            if is_terminal(&env, trigger_peer) {
+                continue;
+            }
             let market_before = env.svm.get_account(&env.market).unwrap();
             let portfolio_before = env.svm.get_account(&trigger_peer).unwrap();
             let vault_before = env.svm.get_account(&env.vault).unwrap();
@@ -229,10 +243,15 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
             ) {
                 Ok(cu) => {
                     assert_cu_within("impaired prospective-loss progress", cu, 1_000_000);
-                    loser_progressed |= env.svm.get_account(&env.market).unwrap() != market_before
+                    let mutated = env.svm.get_account(&env.market).unwrap() != market_before
                         || env.svm.get_account(&trigger_peer).unwrap() != portfolio_before
                         || env.svm.get_account(&env.vault).unwrap() != vault_before
                         || env.svm.get_account(&loser_destination).unwrap() != destination_before;
+                    assert!(
+                        mutated,
+                        "accepted prospective-loss continuation was a no-op"
+                    );
+                    loser_progressed |= mutated;
                 }
                 Err(error) => {
                     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);

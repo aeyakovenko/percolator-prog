@@ -85,7 +85,7 @@ INV-028	flat-source-lien/terminal-claim-routes	v16_program_flat_source_lien_rout
 INV-028	source-capacity/admission-order-matrix	v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk	admitted-live-leg-must-reserve-a-settlement-source-slot	270,379
 INV-028	shared-expiry/provider-lien-provenance	v16_program_shared_expiry_progress_matrix_preserves_terminal_progress	expired-provider-lien-retirement-must-preserve-provenance-and-terminal-progress	300
 INV-077	max-source/conversion-amount-matrix	v16_program_max_source_conversion_and_owner_exit_are_bounded	max-source-backed-claim-conversion-must-fit-one-bounded-step	357
-INV-077	max-source/resolved-close-order-matrix	v16_program_max_shape_resolved_close_order_matrix_discovers_terminal_cu_lock	max-source-terminal-claim-must-have-a-bounded-close-step	359
+INV-077	max-source/resolved-close-order-matrix	v16_program_max_shape_resolved_close_order_matrix_is_bounded_and_fair	max-source-terminal-claim-must-have-a-bounded-close-step	359
 INV-077	max-source/liquidation-asset-matrix	v16_program_max_source_liquidation_asset_matrix_discovers_funded_cu_lock	max-source-liquidatable-account-must-have-a-bounded-public-reduction	212
 INV-067	terminal-payout/dust-round-trip	v16_program_reported_route_matrix_preserves_terminal_value_partition	terminal-payout-is-invariant-to-flattened-dust-position	283
 INV-067	terminal-bankruptcy/claim-free-residual	v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value	terminal-residual-cannot-double-charge-provider-principal	330
@@ -109,7 +109,7 @@ INV-073	expired-partial-close/unrelated-funded-account	v16_program_expired_parti
 INV-073	recovery-mode/explicit-terminal-routes	v16_program_expired_partial_close_matrix_resolves_and_preserves_idle_exit	recovery-escalation-reaches-public-resolved-continuation	252
 INV-071	micro-price/eager-crank-schedule	v16_program_micro_price_schedule_is_partition_invariant_and_eventually_progresses	canonical-price-remainder-makes-eager-and-delayed-cranks-equivalent	246
 INV-071	bankruptcy-escalation/funded-survivor	v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves	recovery-required-transition-must-not-rollback-funded-survivor-progress	190
-INV-071	prospective-loss/lapsed-source	v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock	prospective-loss-must-not-create-backing-in-lapsed-domain	298
+INV-071	prospective-loss/lapsed-source	v16_program_prospective_loss_expiry_matrix_keeps_resolved_exit_live	prospective-loss-in-lapsed-domain-must-have-bounded-terminal-continuation	298
 INV-074	bankruptcy-scope/unrelated-backed-claim	v16_program_unrelated_bankruptcy_scope_matrix_discovers_backed_claim_lock	asset-local-bankruptcy-cannot-lock-unrelated-backed-claim	229
 INV-063	backing-expiry/authenticated-clock	v16_program_backing_expiry_boundary_rejects_stale_fee_and_preserves_exit	expired-backing-cannot-create-withdrawable-provider-value	367
 INV-063	backing-expiry/favorable-consumers	v16_program_backing_expiry_conversion_boundary_matrix	expired-backing-cannot-capitalize-and-extract-independent-principal	363
