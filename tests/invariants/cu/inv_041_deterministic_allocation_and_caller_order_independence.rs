@@ -7,9 +7,10 @@
 //! These tests exercise the deployed public wrapper with real SBF/LiteSVM accounts and assert
 //! economic state, token custody, side counters, liveness, and compute outcomes.
 //!
-//! Guarantee boundary: the Recovery matrix exhausts equal-sized, zero-drift four-party landing
-//! orders and independently reconstructs its side state after every instruction. Liquidation,
-//! insurance, lien, payout, claim, and close-preemption ordering remain separate open partitions.
+//! Guarantee boundary: the Recovery matrix exhausts four-party landing orders with unequal
+//! one-/two-lot weights and a real 100-to-150 mark move, and independently reconstructs its side
+//! state after every instruction. Liquidation, insurance, lien, payout, claim, and
+//! close-preemption ordering remain separate open partitions.
 
 use super::*;
 
@@ -308,12 +309,13 @@ struct FourPartyRecoveryOutcome {
 }
 
 fn run_four_party_recovery_order(order: [usize; 4]) -> FourPartyRecoveryOutcome {
-    const PRICE: u64 = 100;
+    const OPEN_PRICE: u64 = 100;
+    const RECOVERY_PRICE: u64 = 150;
     const DEPOSIT: u128 = 1_000;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
     env.configure_permissionless_resolve_with_cu(100, 1);
-    env.configure_auth_mark_for_asset_as_admin(FOUR_PARTY_RECOVERY_ASSET as u16, 0, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(FOUR_PARTY_RECOVERY_ASSET as u16, 0, OPEN_PRICE);
     let owners: [Keypair; 4] = std::array::from_fn(|_| Keypair::new());
     let portfolios: [Pubkey; 4] = std::array::from_fn(|index| {
         let portfolio = env.create_portfolio(&owners[index]);
@@ -321,21 +323,25 @@ fn run_four_party_recovery_order(order: [usize; 4]) -> FourPartyRecoveryOutcome 
         portfolio
     });
 
-    for (long_index, short_index) in [(0usize, 1usize), (2, 3)] {
+    for (pair_index, (long_index, short_index)) in
+        [(0usize, 1usize), (2, 3)].into_iter().enumerate()
+    {
+        let size_q = (pair_index as u128 + 1).checked_mul(POS_SCALE).unwrap();
         env.trade_asset_with_cu(
             FOUR_PARTY_RECOVERY_ASSET as u16,
             &owners[long_index],
             portfolios[long_index],
             &owners[short_index],
             portfolios[short_index],
-            POS_SCALE as i128,
-            PRICE,
+            size_q as i128,
+            OPEN_PRICE,
             0,
         );
     }
     assert_eq!(assert_recovery_order_census(&env, &portfolios), 0);
 
     env.svm.warp_to_slot(1);
+    env.push_auth_mark_for_asset_as_admin(FOUR_PARTY_RECOVERY_ASSET as u16, 1, RECOVERY_PRICE);
     env.update_asset_lifecycle_as_admin_with_cu(
         processor::ASSET_ACTION_SHUTDOWN,
         FOUR_PARTY_RECOVERY_ASSET as u16,
@@ -345,6 +351,10 @@ fn run_four_party_recovery_order(order: [usize; 4]) -> FourPartyRecoveryOutcome 
     assert_eq!(
         env.market_state().1.assets[FOUR_PARTY_RECOVERY_ASSET].lifecycle,
         AssetLifecycleV16::Recovery
+    );
+    assert_eq!(
+        env.market_state().1.assets[FOUR_PARTY_RECOVERY_ASSET].effective_price,
+        RECOVERY_PRICE
     );
 
     let label = format!("four-party Recovery order {order:?}");
@@ -424,16 +434,20 @@ fn run_four_party_recovery_order(order: [usize; 4]) -> FourPartyRecoveryOutcome 
     assert_eq!(terminal_asset.loss_weight_sum_short, 0);
 
     let mut payouts = [0u64; 4];
+    let expected_payouts = [DEPOSIT, DEPOSIT - 50, DEPOSIT, DEPOSIT - 100];
     for index in 0..4 {
         let account = env.portfolio_state(portfolios[index]);
-        assert_eq!(account.capital.get(), DEPOSIT);
+        assert_eq!(account.capital.get(), expected_payouts[index]);
         assert_eq!(account.pnl.get(), 0);
-        let destination = env.withdraw(&owners[index], portfolios[index], DEPOSIT);
+        let destination = env.withdraw(&owners[index], portfolios[index], expected_payouts[index]);
         payouts[index] = env.token_amount(destination);
         env.close_portfolio_with_cu(&owners[index], portfolios[index]);
     }
     let terminal = env.market_state().1;
-    assert_eq!(payouts.iter().copied().sum::<u64>(), 4 * DEPOSIT as u64);
+    assert_eq!(
+        payouts.iter().copied().sum::<u64>(),
+        expected_payouts.iter().copied().sum::<u128>() as u64
+    );
     assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
     FourPartyRecoveryOutcome {
         payouts,
@@ -455,8 +469,8 @@ fn v16_program_four_party_recovery_exit_orders_are_economically_identical() {
                         continue;
                     }
                     let outcome = run_four_party_recovery_order(order);
-                    assert_eq!(outcome.payouts, [1_000; 4]);
-                    assert_eq!(outcome.terminal_vault, 0);
+                    assert_eq!(outcome.payouts, [1_000, 950, 1_000, 900]);
+                    assert_eq!(outcome.terminal_vault, 150);
                     assert_eq!(outcome.terminal_c_tot, 0);
                     if let Some(expected) = &baseline {
                         assert_eq!(
