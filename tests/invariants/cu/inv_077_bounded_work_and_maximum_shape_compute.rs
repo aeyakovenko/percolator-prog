@@ -5,9 +5,13 @@
 //! Evidence in this file (I/C plus invariant-specific M assertions): max-source, max-leg,
 //! max-oracle-tail, 10MiB market, terminal insurance, batch, crank, custody, settlement,
 //! recovery, and owner-exit routes are exercised through the deployed public wrapper with
-//! real SBF/LiteSVM account construction. Each test asserts either a bounded CU ceiling, a
-//! bounded successful progress path, or atomic rejection before an attacker-controlled shape can
-//! strand a required exit route.
+//! real SBF/LiteSVM account construction. The maximum composite-oracle/backlog composition uses
+//! all fourteen active legs, three authenticated feed accounts per leg, and the full two-chunk
+//! accrual horizon. A staggered public schedule keeps one unfinished asset as the bounded catch-up
+//! witness while completing the preceding asset, then performs the final whole-account refresh;
+//! every call remains below the transaction ceiling. Each test asserts either a bounded CU
+//! ceiling, a bounded successful progress path, or atomic rejection before an attacker-controlled
+//! shape can strand a required exit route.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -1293,6 +1297,180 @@ fn v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded() {
         "settled loss remains in the vault as backing for the counterparty claim"
     );
     assert_eq!(env.token_amount(env.vault), vault_before);
+}
+
+#[test]
+fn v16_bpf_public_full_14_leg_three_feed_max_backlog_has_bounded_refresh_schedule() {
+    const ASSET_COUNT: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const MARK: u64 = 100;
+    const MOVED_MARK: u64 = 95;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: ASSET_COUNT,
+        initial_price: MARK,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 64,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 64,
+        ..V16CuMarketParams::default()
+    });
+    set_test_clock(&mut env, 1, 100);
+    let feeds = [[0xd1u8; 32], [0xd2u8; 32], [0xd3u8; 32]];
+    let initial_oracles = [
+        env.set_pyth_price(&feeds[0], 3_000_000, -6, 100),
+        env.set_pyth_price(&feeds[1], 150_000_000, -6, 100),
+        env.set_pyth_price(&feeds[2], 200_000_000, -6, 100),
+    ];
+    for asset_index in 0..ASSET_COUNT {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            asset_index,
+            3,
+            ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            feeds,
+            &initial_oracles,
+            1,
+            100,
+            0,
+            0,
+            64,
+            500,
+        )
+        .expect("configure full-backlog three-feed asset");
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000_000);
+    env.deposit(&short_owner, short, 10_000_000);
+    env.send(
+        env.batch_trade_no_cpi_ix(
+            long,
+            short,
+            (0..ASSET_COUNT)
+                .map(|asset_index| BatchTradeLeg {
+                    asset_index,
+                    market_id: first_generation_market_id(asset_index),
+                    size_q: POS_SCALE as i128,
+                    exec_price: MARK,
+                    fee_bps: 0,
+                })
+                .collect(),
+        ),
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(short_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+            AccountMeta::new(short, false),
+        ],
+        &[&long_owner, &short_owner],
+    )
+    .expect("open full-backlog max-shape portfolio");
+
+    let before = env.portfolio_state(long);
+    let (_, before_group) = env.market_state();
+    let start_slots: Vec<_> = before_group.assets[..ASSET_COUNT as usize]
+        .iter()
+        .map(|asset| asset.slot_last)
+        .collect();
+    assert!(
+        start_slots.windows(2).all(|pair| pair[0] == pair[1]),
+        "all max-backlog assets must start from one canonical slot: {start_slots:?}"
+    );
+    let final_slot = start_slots[0] + 2 * percolator::V16_MAX_ACCRUAL_PATH_STEPS as u64;
+    let vault_before = env.token_amount(env.vault);
+
+    set_test_clock(&mut env, final_slot, 200);
+    let moved_oracles = [
+        env.set_pyth_price(&feeds[0], 2_850_000, -6, 200),
+        env.set_pyth_price(&feeds[1], 150_000_000, -6, 200),
+        env.set_pyth_price(&feeds[2], 200_000_000, -6, 200),
+    ];
+
+    let mut schedule = Vec::with_capacity(ASSET_COUNT as usize + 1);
+    schedule.push(vec![0u16]);
+    for next in 1..ASSET_COUNT {
+        schedule.push(vec![next - 1, next]);
+    }
+    schedule.push(vec![ASSET_COUNT - 1]);
+
+    let mut max_cu = 0u64;
+    for (step, assets) in schedule.iter().enumerate() {
+        let observations: Vec<_> = assets
+            .iter()
+            .copied()
+            .map(|asset_index| CrankObservationHint {
+                asset_index,
+                oracle_accounts: 3,
+            })
+            .collect();
+        let mut accounts = vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+        ];
+        for _ in assets {
+            accounts.extend(
+                moved_oracles
+                    .iter()
+                    .copied()
+                    .map(|key| AccountMeta::new_readonly(key, false)),
+            );
+        }
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: final_slot,
+                    observations,
+                },
+                accounts,
+                &[],
+            )
+            .unwrap_or_else(|error| {
+                panic!("max-backlog staggered crank step {step} for assets {assets:?}: {error}")
+            });
+        max_cu = max_cu.max(cu);
+        assert_cu_within("14-leg three-feed max-backlog crank", cu, 1_375_000);
+
+        let (_, group) = env.market_state();
+        if step == 0 {
+            assert!(
+                group.assets[0].slot_last < final_slot,
+                "the first bounded call must leave a real catch-up continuation"
+            );
+        } else {
+            let completed = step - 1;
+            assert_eq!(
+                group.assets[completed].slot_last, final_slot,
+                "staggered step {step} did not complete asset {completed}"
+            );
+        }
+    }
+
+    let after = env.portfolio_state(long);
+    let (_, after_group) = env.market_state();
+    for asset_index in 0..ASSET_COUNT as usize {
+        assert_eq!(after_group.assets[asset_index].slot_last, final_slot);
+        assert_eq!(after_group.assets[asset_index].effective_price, MOVED_MARK);
+        assert_eq!(
+            active_leg_for_asset(&after, asset_index).basis_pos_q,
+            active_leg_for_asset(&before, asset_index).basis_pos_q
+        );
+    }
+    assert_eq!(
+        health_cert(&after).cert_oracle_epoch,
+        after_group.oracle_epoch
+    );
+    assert_eq!(
+        health_cert(&after).cert_funding_epoch,
+        after_group.funding_epoch
+    );
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(after_group.vault, before_group.vault);
+    println!("v16 all-14 three-feed 64-slot staggered refresh max CU: {max_cu}");
 }
 
 #[test]
