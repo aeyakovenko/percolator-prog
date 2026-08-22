@@ -444,6 +444,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "recovery-escalation-reaches-public-resolved-continuation"
                     | "successful-crank-cannot-consume-zero-delta-price-time"
                     | "recovery-required-transition-must-not-rollback-funded-survivor-progress"
+                    | "prospective-loss-in-lapsed-domain-must-have-bounded-terminal-continuation"
                     | "prospective-loss-must-not-create-backing-in-lapsed-domain"
                     | "asset-local-bankruptcy-cannot-lock-unrelated-backed-claim"
                     | "unsigned-lp-cannot-inherit-preexisting-settlement-cohort"

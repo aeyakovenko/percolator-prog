@@ -430,12 +430,6 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
     env.deposit(&owner, account, 1_550);
     env.deposit(&counterparty_owner, counterparty, 1_000_000_000);
 
-    let matcher_program = Pubkey::new_unique();
-    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
-    env.svm.add_program(matcher_program, &matcher_bytes);
-    let (matcher_context, matcher_delegate, _) =
-        env.init_auth_matcher_context(matcher_program, &counterparty_owner, counterparty);
-
     env.send(
         env.batch_trade_no_cpi_ix(
             account,
@@ -561,46 +555,25 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
         },
     );
     let trapped = env.portfolio_state(account);
-    let exposure_before: u128 = trapped
-        .legs
-        .iter()
-        .filter_map(|leg| leg.try_to_runtime().ok())
-        .filter(|leg| leg.active)
-        .map(|leg| leg.basis_pos_q.unsigned_abs())
-        .sum();
+    let active_exposure = |state: &PortfolioAccountV16| -> u128 {
+        state
+            .legs
+            .iter()
+            .filter_map(|leg| leg.try_to_runtime().ok())
+            .filter(|leg| leg.active)
+            .map(|leg| leg.basis_pos_q.unsigned_abs())
+            .sum()
+    };
+    let exposure_before = active_exposure(&trapped);
     assert_ne!(trapped.capital.get(), 0);
     let vault_before = env.token_amount(env.vault);
+    assert_eq!(env.market_state().1.vault as u64, vault_before);
 
-    macro_rules! assert_blocked {
-        ($label:literal, $attempt:expr) => {{
-            env.svm.expire_blockhash();
-            let market_before = env.svm.get_account(&env.market).unwrap();
-            let account_before = env.svm.get_account(&account).unwrap();
-            let counterparty_before = env.svm.get_account(&counterparty).unwrap();
-            let result = $attempt;
-            assert!(result.is_err(), "{} unexpectedly supplied progress", $label);
-            if $label == "max-source liquidation crank" {
-                let error = format!("{:?}", result.as_ref().unwrap_err());
-                assert!(
-                    error.contains("ComputationalBudgetExceeded")
-                        || error.contains("ProgramFailedToComplete")
-                        || error.contains("Computational budget exceeded"),
-                    "max-source crank failed for a non-CU reason: {error}"
-                );
-            }
-            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-            assert_eq!(env.svm.get_account(&account).unwrap(), account_before);
-            assert_eq!(
-                env.svm.get_account(&counterparty).unwrap(),
-                counterparty_before
-            );
-            assert_eq!(env.token_amount(env.vault), vault_before);
-        }};
-    }
-
-    assert_blocked!(
-        "max-source liquidation crank",
-        env.send(
+    env.svm.expire_blockhash();
+    let market_before_refresh = env.svm.get_account(&env.market).unwrap();
+    let account_before_refresh = env.svm.get_account(&account).unwrap();
+    let refresh_cu = env
+        .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 4,
                 observations: vec![],
@@ -612,10 +585,65 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
             ],
             &[],
         )
+        .expect("max-source liquidation refresh must fit");
+    assert_cu_within(
+        "28-source-domain liquidation refresh",
+        refresh_cu,
+        1_375_000,
     );
-    assert_blocked!(
-        "max-source unilateral reduction",
-        env.send(
+    let refreshed = env.portfolio_state(account);
+    assert_eq!(
+        active_exposure(&refreshed),
+        exposure_before,
+        "refresh must not increase or silently alter position exposure"
+    );
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before_refresh
+            || env.svm.get_account(&account).unwrap() != account_before_refresh,
+        "a successful refresh continuation cannot be a no-op"
+    );
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(env.market_state().1.vault as u64, vault_before);
+
+    env.svm.expire_blockhash();
+    let market_before_liquidation = env.svm.get_account(&env.market).unwrap();
+    let account_before_liquidation = env.svm.get_account(&account).unwrap();
+    let liquidation_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+            ],
+            &[],
+        )
+        .expect("max-source liquidation continuation must fit");
+    assert_cu_within(
+        "28-source-domain liquidation continuation",
+        liquidation_cu,
+        1_375_000,
+    );
+    let liquidated = env.portfolio_state(account);
+    let exposure_after_liquidation = active_exposure(&liquidated);
+    assert!(
+        exposure_after_liquidation < exposure_before,
+        "permissionless max-source continuation must strictly reduce exposure"
+    );
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before_liquidation
+            || env.svm.get_account(&account).unwrap() != account_before_liquidation,
+        "a successful liquidation continuation cannot be a no-op"
+    );
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(env.market_state().1.vault as u64, vault_before);
+
+    env.svm.expire_blockhash();
+    let owner_reduce_cu = env
+        .send(
             ProgInstruction::RebalanceReduce {
                 portfolio_id: env.portfolio_id(account),
                 position_epoch: env.portfolio_position_epoch(account),
@@ -629,72 +657,29 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
             ],
             &[&owner],
         )
+        .expect("owner max-source reduction must fit after permissionless progress");
+    assert_cu_within(
+        "28-source-domain owner reduction",
+        owner_reduce_cu,
+        1_375_000,
     );
-    assert_blocked!(
-        "max-source signed trade reduction",
-        env.try_trade_asset_with_cu(
-            adverse_asset,
-            &owner,
-            account,
-            &counterparty_owner,
-            counterparty,
-            POS_SCALE as i128,
-            ADVERSE_PRICE,
-            0,
-        )
+    let owner_reduced = env.portfolio_state(account);
+    assert_eq!(
+        active_exposure(&owner_reduced)
+            .checked_add(POS_SCALE)
+            .expect("exposure sum overflow"),
+        exposure_after_liquidation,
+        "owner reduction must remove exactly the authorized quantity"
     );
-    assert_blocked!(
-        "max-source signed batch reduction",
-        env.send(
-            env.batch_trade_no_cpi_ix(
-                account,
-                counterparty,
-                vec![BatchTradeLeg {
-                    asset_index: adverse_asset,
-                    market_id: first_generation_market_id(adverse_asset),
-                    size_q: POS_SCALE as i128,
-                    exec_price: ADVERSE_PRICE,
-                    fee_bps: 0,
-                }],
-            ),
-            vec![
-                AccountMeta::new(owner.pubkey(), true),
-                AccountMeta::new(counterparty_owner.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(account, false),
-                AccountMeta::new(counterparty, false),
-            ],
-            &[&owner, &counterparty_owner],
-        )
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(env.market_state().1.vault as u64, vault_before);
+    println!(
+        "INV-077 asset {adverse_asset} max-source funded exits: refresh={refresh_cu}, liquidation={liquidation_cu}, owner_reduce={owner_reduce_cu}"
     );
-    assert_blocked!(
-        "max-source authenticated CPI reduction",
-        env.try_trade_cpi_with_cu_on_asset(
-            &owner,
-            account,
-            &counterparty_owner,
-            counterparty,
-            matcher_program,
-            matcher_context,
-            matcher_delegate,
-            adverse_asset,
-            POS_SCALE as i128,
-            0,
-        )
-    );
-    let after = env.portfolio_state(account);
-    let exposure_after: u128 = after
-        .legs
-        .iter()
-        .filter_map(|leg| leg.try_to_runtime().ok())
-        .filter(|leg| leg.active)
-        .map(|leg| leg.basis_pos_q.unsigned_abs())
-        .sum();
-    assert_eq!(exposure_after, exposure_before);
 }
 
 #[test]
-fn v16_program_max_source_liquidation_asset_matrix_discovers_funded_cu_lock() {
+fn v16_program_max_source_liquidation_asset_matrix_has_bounded_public_exits() {
     for adverse_asset in [0, 13] {
         run_max_source_liquidation_asset(adverse_asset);
     }
