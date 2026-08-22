@@ -5,17 +5,22 @@
 //! that a new entrant pays only obligations created by that entrant's own episode.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_stale_cohort_route_matrix_discovers_fresh_principal_subordination` creates a
-//! historical source-backed winner and stale loser entirely through public instructions, then
-//! novates the exposure to a fresh funded entrant through each single/batch CPI/no-CPI route. It
-//! settles every account to a terminal token payout and requires the winner's profit to equal the
-//! fresh entrant's principal loss plus the original loser's loss while total SPL supply remains
-//! conserved. That is an owner-attribution violation even though aggregate stock balances.
+//! `v16_program_stale_cohort_route_matrix_preserves_historical_principal` creates a historical
+//! source-backed winner and an uncrystallized loser entirely through public instructions. Every
+//! single/batch CPI/no-CPI novation route must reject with exact SVM rollback while preserving the
+//! original exposure. The winner can still reduce to zero through the owner route, the original
+//! loser remains permissionlessly settleable in finite cranks, and the fresh entrant remains byte-
+//! and token-identical. A separately funded control proves the same trade becomes admissible once
+//! the complete cohort settles, so the safety gate is not a permanent exit lock.
 //!
-//! Guarantee boundary: this is a retained vulnerable-pin counterexample, not a certification.
-//! Current, half-backed, stale-certificate, loss-stale, pending-close, resolved-payout, and
-//! insurance-withdrawal positive/control rows still need one normalized public route-by-state
-//! matrix before INV-027 can be promoted beyond partial coverage.
+//! `v16_program_exact_kf_reversal_still_requires_cohort_settlement` returns K/F to the original
+//! arithmetic value before the loser refreshes. The old leg still owns a generation membership,
+//! unsafe novation rejects atomically, and the loser advances its epoch exactly once with zero PnL.
+//!
+//! Guarantee boundary: this certifies the stale K/F cohort row on the fixed engine pin. Current,
+//! half-backed, stale-certificate, pending-close, resolved-payout, and insurance-withdrawal rows
+//! still need one normalized public route-by-state matrix before INV-027 can be promoted beyond
+//! partial coverage.
 //! `v16_program_fully_backed_pnl_route_matrix_preserves_unrelated_principal` closes the Current
 //! fully funded control row. It realizes the same directional profit through every trade family,
 //! independently derives realizable support from the claim and backing stocks, and proves the
@@ -24,8 +29,7 @@
 //! liveness counterexample and is owned by INV-071.
 //!
 //! Secondary coverage: INV-039. The same trace proves that novation cannot erase or transfer a
-//! pre-existing cohort's pending loss obligation, while INV-027 owns the terminal principal
-//! attribution equation.
+//! pre-existing cohort's pending loss obligation, while INV-027 owns principal attribution.
 
 use super::*;
 use crate::support::fuzz_model::execute_trade_route;
@@ -381,35 +385,46 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_stale_cohort_route_matrix_discovers_fresh_principal_subordination(
+    fn v16_program_stale_cohort_route_matrix_preserves_historical_principal(
         seed in any::<[u8; 32]>()
     ) {
-        let discoveries = discover_stale_cohort_novations(seed)
+        let certifications = verify_stale_cohort_novation_guards(seed)
             .map_err(TestCaseError::fail)?;
-        prop_assert_eq!(discoveries.len(), StaleCohortRoute::ALL.len());
-        for (expected, discovery) in StaleCohortRoute::ALL.into_iter().zip(&discoveries) {
-            prop_assert_eq!(discovery.route, expected);
-            prop_assert_eq!(discovery.pre_stale_long_count, 0);
-            prop_assert_eq!(discovery.pre_stale_short_count, 0);
-            prop_assert_eq!(discovery.pre_negative_pnl_count, 0);
-            prop_assert!(discovery.novation_landed);
-            prop_assert!(discovery.settlement_cranks > 0);
-            prop_assert!(discovery.winner_profit > 0);
-            prop_assert!(discovery.entrant_principal_loss > 0);
-            prop_assert!(discovery.loser_principal_loss > 0);
-            prop_assert_eq!(
-                discovery.winner_profit,
-                discovery
-                    .entrant_principal_loss
-                    .checked_add(discovery.loser_principal_loss)
-                    .expect("bounded principal losses add")
-            );
-            prop_assert!(discovery.all_positions_terminal);
-            prop_assert!(discovery.token_supply_conserved);
-            prop_assert!(
-                discovery.is_violation(),
-                "vulnerable-pin seniority behavior changed: {discovery:?}"
-            );
+        prop_assert_eq!(certifications.len(), StaleCohortRoute::ALL.len());
+        for (expected, certification) in StaleCohortRoute::ALL.into_iter().zip(&certifications) {
+            prop_assert_eq!(certification.route, expected);
+            prop_assert_eq!(certification.pre_stale_long_count, 0);
+            prop_assert_eq!(certification.pre_stale_short_count, 1);
+            prop_assert_eq!(certification.pre_negative_pnl_count, 0);
+            prop_assert!(certification.unsafe_novation_rejected);
+            prop_assert!(certification.rejection_exact_rollback);
+            prop_assert_eq!(certification.rejected_winner_position_q, 10 * POS_SCALE as i128);
+            prop_assert_eq!(certification.rejected_entrant_position_q, 0);
+            prop_assert!(certification.owner_reduction_landed);
+            prop_assert_eq!(certification.owner_position_after_reduction_q, 0);
+            prop_assert!(certification.settlement_cranks > 0);
+            prop_assert_eq!(certification.post_settlement_stale_long_count, 0);
+            prop_assert_eq!(certification.post_settlement_stale_short_count, 0);
+            prop_assert!(certification.entrant_untouched_by_historical_settlement);
+            prop_assert!(certification.settled_cohort_retry_landed);
+            prop_assert_eq!(certification.retry_winner_position_q, 0);
+            prop_assert_eq!(certification.retry_entrant_position_q, 10 * POS_SCALE as i128);
+            prop_assert!(certification.token_supply_conserved);
         }
+    }
+
+    #[test]
+    fn v16_program_exact_kf_reversal_still_requires_cohort_settlement(
+        seed in any::<[u8; 32]>()
+    ) {
+        let certification = verify_stale_cohort_exact_reversal(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(certification.arithmetic_targets_reversed);
+        prop_assert_eq!(certification.stale_short_count_before_settlement, 1);
+        prop_assert_eq!(certification.stale_short_count_after_settlement, 0);
+        prop_assert!(certification.loser_epoch_advanced);
+        prop_assert!(certification.loser_pnl_zero);
+        prop_assert!(certification.exact_rejection_rollback);
+        prop_assert!(certification.token_supply_conserved);
     }
 }

@@ -796,37 +796,36 @@ pub struct ResolvedAdlCloseDiscovery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StaleCohortNovationDiscovery {
+pub struct StaleCohortNovationCertification {
     pub route: StaleCohortRoute,
-    pub novation_landed: bool,
     pub pre_stale_long_count: u64,
     pub pre_stale_short_count: u64,
     pub pre_negative_pnl_count: u64,
-    pub settlement_cranks: u8,
-    pub winner_extracted: u64,
-    pub entrant_extracted: u64,
-    pub winner_profit: u128,
-    pub entrant_principal_loss: u128,
-    pub loser_principal_loss: u128,
-    pub all_positions_terminal: bool,
+    pub unsafe_novation_rejected: bool,
+    pub rejection_exact_rollback: bool,
+    pub rejected_winner_position_q: i128,
+    pub rejected_entrant_position_q: i128,
+    pub owner_reduction_landed: bool,
+    pub owner_position_after_reduction_q: i128,
+    pub settlement_cranks: u16,
+    pub post_settlement_stale_long_count: u64,
+    pub post_settlement_stale_short_count: u64,
+    pub entrant_untouched_by_historical_settlement: bool,
+    pub settled_cohort_retry_landed: bool,
+    pub retry_winner_position_q: i128,
+    pub retry_entrant_position_q: i128,
     pub token_supply_conserved: bool,
 }
 
-impl StaleCohortNovationDiscovery {
-    pub fn is_violation(&self) -> bool {
-        self.novation_landed
-            && self.settlement_cranks != 0
-            && self.winner_profit != 0
-            && self.entrant_principal_loss != 0
-            && self.loser_principal_loss != 0
-            && self.winner_profit
-                == self
-                    .entrant_principal_loss
-                    .checked_add(self.loser_principal_loss)
-                    .unwrap_or(u128::MAX)
-            && self.all_positions_terminal
-            && self.token_supply_conserved
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StaleCohortExactReversalCertification {
+    pub arithmetic_targets_reversed: bool,
+    pub stale_short_count_before_settlement: u64,
+    pub stale_short_count_after_settlement: u64,
+    pub loser_epoch_advanced: bool,
+    pub loser_pnl_zero: bool,
+    pub exact_rejection_rollback: bool,
+    pub token_supply_conserved: bool,
 }
 
 impl ResolvedAdlCloseDiscovery {
@@ -9457,137 +9456,152 @@ pub fn verify_resolved_adl_close_orders(
         .collect()
 }
 
-fn discover_one_stale_cohort_novation(
+const STALE_COHORT_WINNER: usize = 0;
+const STALE_COHORT_LOSER: usize = 1;
+const STALE_COHORT_ENTRANT: usize = 2;
+const STALE_COHORT_OPEN_PRICE: u64 = 100;
+const STALE_COHORT_LOSS_PRICE: u64 = 500;
+const STALE_COHORT_SIZE_Q: i128 = (10 * POS_SCALE) as i128;
+
+fn stale_cohort_world(
     mut seed: [u8; 32],
     route: StaleCohortRoute,
-) -> Result<StaleCohortNovationDiscovery, String> {
-    const WINNER: usize = 0;
-    const LOSER: usize = 1;
-    const ENTRANT: usize = 2;
-    const OPEN_PRICE: u64 = 100;
-    const LOSS_PRICE: u64 = 500;
-    const SIZE_Q: i128 = (10 * POS_SCALE) as i128;
-    const WINNER_DEPOSIT: u128 = 5_000;
-    const LOSER_DEPOSIT: u128 = 1_000;
-    const ENTRANT_DEPOSIT: u128 = 1_000_000;
-    const WINNER_PROFIT: u128 = 4_000;
-
-    seed[0] ^= 0x39;
+    salt: u8,
+    winner_deposit: u128,
+    loser_deposit: u128,
+) -> Result<(V16Svm, Vec<CrankObservationHint>, u128), String> {
+    seed[0] ^= 0x39 ^ salt;
     seed[1] ^= route.discriminator();
     let mut env = V16Svm::new(
         seed,
         MarketConfig {
-            initial_price: OPEN_PRICE,
+            initial_price: STALE_COHORT_OPEN_PRICE,
             maintenance_margin_bps: 10_000,
             initial_margin_bps: 10_000,
             max_price_move_bps_per_slot: 10_000,
             max_accrual_dt_slots: 1,
             min_funding_lifetime_slots: 1,
-            actor_deposits: [WINNER_DEPOSIT, LOSER_DEPOSIT, ENTRANT_DEPOSIT, 0, 0],
+            actor_deposits: [winner_deposit, loser_deposit, 1_000_000, 0, 0],
             ..MarketConfig::default()
         },
     );
     let supply_before = env.token_supply_observed();
     env.top_up_backing_bucket(1, 10_000, 100)
         .map_err(|error| format!("fund stale-cohort source backing: {error}"))?;
-    env.trade_no_cpi(WINNER, LOSER, 0, SIZE_Q, OPEN_PRICE, 0)
-        .map_err(|error| format!("open stale-cohort exposure: {error}"))?;
+    env.trade_no_cpi(
+        STALE_COHORT_WINNER,
+        STALE_COHORT_LOSER,
+        0,
+        STALE_COHORT_SIZE_Q,
+        STALE_COHORT_OPEN_PRICE,
+        0,
+    )
+    .map_err(|error| format!("open stale-cohort exposure: {error}"))?;
     let observation = vec![CrankObservationHint {
         asset_index: 0,
-        oracle_accounts: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
     }];
     for slot in 2..=5 {
         env.warp_to_slot(slot);
-        env.push_auth_mark(0, slot, LOSS_PRICE)
+        env.push_auth_mark(0, slot, STALE_COHORT_LOSS_PRICE)
             .map_err(|error| format!("publish stale-cohort loss mark at {slot}: {error}"))?;
-        env.crank(WINNER, slot, observation.clone())
+        env.crank(STALE_COHORT_WINNER, slot, observation.clone())
             .map_err(|error| format!("refresh stale-cohort winner at {slot}: {error}"))?;
     }
-    let winner_before_conversion = env.primary_portfolio(WINNER);
-    if winner_before_conversion.pnl.get() != WINNER_PROFIT as i128
-        || env.primary_portfolio(LOSER).pnl.get() != 0
+    let winner_before_conversion = env.primary_portfolio(STALE_COHORT_WINNER);
+    if winner_before_conversion.pnl.get() != 4_000
+        || env.primary_portfolio(STALE_COHORT_LOSER).pnl.get() != 0
     {
         return Err(format!(
             "stale-cohort fixture lost its asymmetric settlement: winner_pnl={}, loser_pnl={}",
             winner_before_conversion.pnl.get(),
-            env.primary_portfolio(LOSER).pnl.get()
+            env.primary_portfolio(STALE_COHORT_LOSER).pnl.get()
         ));
     }
-    let (_, pre_novation_group) = env.primary_market_state();
-    let pre_stale_long_count = pre_novation_group.assets[0].stale_account_count_long;
-    let pre_stale_short_count = pre_novation_group.assets[0].stale_account_count_short;
-    let pre_negative_pnl_count = pre_novation_group.negative_pnl_account_count;
-    let trade_market_id = pre_novation_group.assets[0].market_id;
-    let novation_landed = match route {
+    Ok((env, observation, supply_before))
+}
+
+fn submit_stale_cohort_novation(env: &mut V16Svm, route: StaleCohortRoute) -> Result<(), String> {
+    let trade_market_id = env.primary_market_state().1.assets[0].market_id;
+    match route {
         StaleCohortRoute::NoCpi => env
-            .trade_no_cpi(WINNER, ENTRANT, 0, -SIZE_Q, LOSS_PRICE, 0)
-            .is_ok(),
+            .trade_no_cpi(
+                STALE_COHORT_WINNER,
+                STALE_COHORT_ENTRANT,
+                0,
+                -STALE_COHORT_SIZE_Q,
+                STALE_COHORT_LOSS_PRICE,
+                0,
+            )
+            .map(|_| ()),
         StaleCohortRoute::BatchNoCpi => env
             .batch_trade_no_cpi(
-                WINNER,
-                ENTRANT,
+                STALE_COHORT_WINNER,
+                STALE_COHORT_ENTRANT,
                 vec![BatchTradeLeg {
                     asset_index: 0,
                     market_id: trade_market_id,
-                    size_q: -SIZE_Q,
-                    exec_price: LOSS_PRICE,
+                    size_q: -STALE_COHORT_SIZE_Q,
+                    exec_price: STALE_COHORT_LOSS_PRICE,
                     fee_bps: 0,
                 }],
             )
-            .is_ok(),
-        StaleCohortRoute::Cpi => env.trade_cpi(WINNER, ENTRANT, 0, -SIZE_Q, 0, 0).is_ok(),
+            .map(|_| ()),
+        StaleCohortRoute::Cpi => env
+            .trade_cpi(
+                STALE_COHORT_WINNER,
+                STALE_COHORT_ENTRANT,
+                0,
+                -STALE_COHORT_SIZE_Q,
+                0,
+                0,
+            )
+            .map(|_| ()),
         StaleCohortRoute::BatchCpi => env
             .batch_trade_cpi(
-                WINNER,
-                ENTRANT,
+                STALE_COHORT_WINNER,
+                STALE_COHORT_ENTRANT,
                 vec![BatchTradeCpiLeg {
                     asset_index: 0,
                     market_id: trade_market_id,
-                    size_q: -SIZE_Q,
+                    size_q: -STALE_COHORT_SIZE_Q,
                     fee_bps: 0,
                     limit_price: 0,
                 }],
             )
-            .is_ok(),
-    };
-    if !novation_landed {
-        return Ok(StaleCohortNovationDiscovery {
-            route,
-            novation_landed,
-            pre_stale_long_count,
-            pre_stale_short_count,
-            pre_negative_pnl_count,
-            settlement_cranks: 0,
-            winner_extracted: 0,
-            entrant_extracted: 0,
-            winner_profit: 0,
-            entrant_principal_loss: 0,
-            loser_principal_loss: 0,
-            all_positions_terminal: false,
-            token_supply_conserved: env.token_supply_observed() == supply_before,
-        });
+            .map(|_| ()),
     }
-    if discovery_position(&env.primary_portfolio(WINNER), 0)? != 0
-        || discovery_position(&env.primary_portfolio(ENTRANT), 0)? != SIZE_Q
-    {
-        return Err("unsigned stale-cohort transfer produced the wrong exposure".into());
-    }
+}
 
-    let mut settlement_cranks = 0u8;
+fn settle_stale_cohorts(
+    env: &mut V16Svm,
+    observation: &[CrankObservationHint],
+) -> Result<(u16, bool), String> {
+    let mut settlement_cranks = 0u16;
+    let mut exact_rejection_rollback = true;
     for _ in 0..64 {
+        let (_, before_group) = env.primary_market_state();
+        if before_group.assets[0].stale_account_count_long == 0
+            && before_group.assets[0].stale_account_count_short == 0
+        {
+            break;
+        }
         let mut round_progressed = false;
-        for actor in [LOSER, ENTRANT, WINNER] {
-            if env.crank(actor, 5, observation.clone()).is_ok() {
-                settlement_cranks = settlement_cranks.saturating_add(1);
-                round_progressed = true;
+        for actor in [STALE_COHORT_LOSER, STALE_COHORT_WINNER, 4] {
+            let before = fingerprint(env);
+            match env.crank(actor, 5, observation.to_vec()) {
+                Ok(_) => {
+                    settlement_cranks = settlement_cranks
+                        .checked_add(1)
+                        .ok_or_else(|| "stale-cohort crank counter overflow".to_string())?;
+                    round_progressed |= fingerprint(env) != before;
+                }
+                Err(_) => exact_rejection_rollback &= fingerprint(env) == before,
             }
         }
         let (_, group) = env.primary_market_state();
         if group.assets[0].stale_account_count_long == 0
             && group.assets[0].stale_account_count_short == 0
-            && group.negative_pnl_account_count == 0
-            && group.b_stale_account_count == 0
-            && group.pending_domain_loss_barriers.iter().all(|&v| v == 0)
         {
             break;
         }
@@ -9595,111 +9609,163 @@ fn discover_one_stale_cohort_novation(
             return Err("stale-cohort settlement reached a nonprogressing public state".into());
         }
     }
-
-    if discovery_position(&env.primary_portfolio(ENTRANT), 0)? != 0 {
-        env.forfeit_recovery_leg(ENTRANT, 0, 1)
-            .map_err(|error| format!("detach stale-cohort entrant recovery leg: {error}"))?;
-    }
-    let _ = env.finalize_reset_side(0, 0);
-    for actor in [ENTRANT, WINNER] {
-        for _ in 0..4 {
-            let _ = env.crank(actor, 5, observation.clone());
-        }
-    }
-
-    let terminal_winner_pnl = env.primary_portfolio(WINNER).pnl.get();
-    if terminal_winner_pnl != WINNER_PROFIT as i128 {
-        return Err(format!(
-            "stale-cohort winner claim changed before resolution: {terminal_winner_pnl}"
-        ));
-    }
-    let all_positions_terminal = [WINNER, LOSER, ENTRANT]
-        .into_iter()
-        .map(|actor| discovery_position(&env.primary_portfolio(actor), 0))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .all(|position| position == 0);
-    if !all_positions_terminal {
-        return Err("stale-cohort world retained exposure before terminal resolution".into());
-    }
-    env.resolve_market()
-        .map_err(|error| format!("resolve stale-cohort market: {error}"))?;
-    for round in 0..24 {
-        let before_round = fingerprint(&env);
-        for actor in [LOSER, ENTRANT, WINNER] {
-            if discovery_portfolio_is_terminal(&env.primary_portfolio(actor))? {
-                continue;
-            }
-            let before = fingerprint(&env);
-            if let Err(error) = env.close_resolved_primary_signed(actor) {
-                if fingerprint(&env) != before {
-                    return Err(format!(
-                        "rejected stale-cohort close mutated actor {actor}: {error}"
-                    ));
-                }
-            }
-        }
-        if [LOSER, ENTRANT, WINNER]
-            .into_iter()
-            .try_fold(true, |terminal, actor| {
-                discovery_portfolio_is_terminal(&env.primary_portfolio(actor))
-                    .map(|actor_terminal| terminal && actor_terminal)
-            })?
-        {
-            break;
-        }
-        if fingerprint(&env) == before_round {
-            return Err(format!(
-                "stale-cohort terminal campaign reached a nonterminal fixed point on round {round}"
-            ));
-        }
-    }
-    if ![LOSER, ENTRANT, WINNER]
-        .into_iter()
-        .try_fold(true, |terminal, actor| {
-            discovery_portfolio_is_terminal(&env.primary_portfolio(actor))
-                .map(|actor_terminal| terminal && actor_terminal)
-        })?
+    let (_, settled) = env.primary_market_state();
+    if settled.assets[0].stale_account_count_long != 0
+        || settled.assets[0].stale_account_count_short != 0
     {
-        return Err("stale-cohort terminal campaign did not finish in 24 rounds".into());
+        return Err("stale-cohort settlement did not clear both finite cohorts".into());
     }
-    let winner_extracted = env.token_amount(env.actors[WINNER].destination_token);
-    let entrant_extracted = env.token_amount(env.actors[ENTRANT].destination_token);
-    let loser_extracted = env.token_amount(env.actors[LOSER].destination_token);
-    let winner_profit = u128::from(winner_extracted)
-        .checked_sub(WINNER_DEPOSIT)
-        .ok_or_else(|| "stale-cohort winner did not profit".to_string())?;
-    let entrant_principal_loss = ENTRANT_DEPOSIT
-        .checked_sub(u128::from(entrant_extracted))
-        .ok_or_else(|| "stale-cohort entrant gained capital".to_string())?;
-    let loser_principal_loss = LOSER_DEPOSIT
-        .checked_sub(u128::from(loser_extracted))
-        .ok_or_else(|| "stale-cohort loser gained capital".to_string())?;
+    Ok((settlement_cranks, exact_rejection_rollback))
+}
 
-    Ok(StaleCohortNovationDiscovery {
+fn verify_one_stale_cohort_novation_guard(
+    seed: [u8; 32],
+    route: StaleCohortRoute,
+) -> Result<StaleCohortNovationCertification, String> {
+    let (mut attack_env, attack_observation, attack_supply_before) =
+        stale_cohort_world(seed, route, 0, 5_000, 1_000)?;
+    let (_, pre_novation_group) = attack_env.primary_market_state();
+    let pre_stale_long_count = pre_novation_group.assets[0].stale_account_count_long;
+    let pre_stale_short_count = pre_novation_group.assets[0].stale_account_count_short;
+    let pre_negative_pnl_count = pre_novation_group.negative_pnl_account_count;
+    let before_rejection = fingerprint(&attack_env);
+    let unsafe_novation_rejected = submit_stale_cohort_novation(&mut attack_env, route).is_err();
+    let rejection_exact_rollback = fingerprint(&attack_env) == before_rejection;
+    let rejected_winner_position_q =
+        discovery_position(&attack_env.primary_portfolio(STALE_COHORT_WINNER), 0)?;
+    let rejected_entrant_position_q =
+        discovery_position(&attack_env.primary_portfolio(STALE_COHORT_ENTRANT), 0)?;
+    let entrant_data_before = attack_env.primary_portfolio_data(STALE_COHORT_ENTRANT);
+    let entrant_source_before =
+        attack_env.token_amount(attack_env.actors[STALE_COHORT_ENTRANT].source_token);
+    let entrant_destination_before =
+        attack_env.token_amount(attack_env.actors[STALE_COHORT_ENTRANT].destination_token);
+
+    let owner_reduction_landed = attack_env
+        .rebalance_reduce(STALE_COHORT_WINNER, 0, STALE_COHORT_SIZE_Q.unsigned_abs())
+        .is_ok();
+    let owner_position_after_reduction_q =
+        discovery_position(&attack_env.primary_portfolio(STALE_COHORT_WINNER), 0)?;
+    let (attack_settlement_cranks, attack_rejections_rollback) =
+        settle_stale_cohorts(&mut attack_env, &attack_observation)?;
+    let (_, attack_settled_group) = attack_env.primary_market_state();
+    let entrant_untouched_by_historical_settlement =
+        attack_env.primary_portfolio_data(STALE_COHORT_ENTRANT) == entrant_data_before
+            && attack_env.token_amount(attack_env.actors[STALE_COHORT_ENTRANT].source_token)
+                == entrant_source_before
+            && attack_env.token_amount(attack_env.actors[STALE_COHORT_ENTRANT].destination_token)
+                == entrant_destination_before;
+
+    let (mut retry_env, retry_observation, retry_supply_before) =
+        stale_cohort_world(seed, route, 0xa5, 10_000, 10_000)?;
+    let (retry_settlement_cranks, retry_rejections_rollback) =
+        settle_stale_cohorts(&mut retry_env, &retry_observation)?;
+    let settled_cohort_retry_landed = submit_stale_cohort_novation(&mut retry_env, route).is_ok();
+    let retry_winner_position_q =
+        discovery_position(&retry_env.primary_portfolio(STALE_COHORT_WINNER), 0)?;
+    let retry_entrant_position_q =
+        discovery_position(&retry_env.primary_portfolio(STALE_COHORT_ENTRANT), 0)?;
+
+    Ok(StaleCohortNovationCertification {
         route,
-        novation_landed,
         pre_stale_long_count,
         pre_stale_short_count,
         pre_negative_pnl_count,
-        settlement_cranks,
-        winner_extracted,
-        entrant_extracted,
-        winner_profit,
-        entrant_principal_loss,
-        loser_principal_loss,
-        all_positions_terminal,
-        token_supply_conserved: env.token_supply_observed() == supply_before,
+        unsafe_novation_rejected,
+        rejection_exact_rollback: rejection_exact_rollback
+            && attack_rejections_rollback
+            && retry_rejections_rollback,
+        rejected_winner_position_q,
+        rejected_entrant_position_q,
+        owner_reduction_landed,
+        owner_position_after_reduction_q,
+        settlement_cranks: attack_settlement_cranks
+            .checked_add(retry_settlement_cranks)
+            .ok_or_else(|| "combined stale-cohort crank counter overflow".to_string())?,
+        post_settlement_stale_long_count: attack_settled_group.assets[0].stale_account_count_long,
+        post_settlement_stale_short_count: attack_settled_group.assets[0].stale_account_count_short,
+        entrant_untouched_by_historical_settlement,
+        settled_cohort_retry_landed,
+        retry_winner_position_q,
+        retry_entrant_position_q,
+        token_supply_conserved: attack_env.token_supply_observed() == attack_supply_before
+            && retry_env.token_supply_observed() == retry_supply_before,
     })
 }
 
-pub fn discover_stale_cohort_novations(
+pub fn verify_stale_cohort_novation_guards(
     seed: [u8; 32],
-) -> Result<Vec<StaleCohortNovationDiscovery>, String> {
+) -> Result<Vec<StaleCohortNovationCertification>, String> {
     StaleCohortRoute::ALL
         .into_iter()
-        .map(|route| discover_one_stale_cohort_novation(seed, route))
+        .map(|route| verify_one_stale_cohort_novation_guard(seed, route))
         .collect()
+}
+
+pub fn verify_stale_cohort_exact_reversal(
+    mut seed: [u8; 32],
+) -> Result<StaleCohortExactReversalCertification, String> {
+    seed[0] ^= 0xd7;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: 100,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [10_000, 10_000, 10_000, 0, 0],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.top_up_backing_bucket(1, 10_000, 100)
+        .map_err(|error| format!("fund exact-reversal source backing: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, 100, 0)
+        .map_err(|error| format!("open exact-reversal exposure: {error}"))?;
+    let observation = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    for (slot, price) in [(2, 101), (3, 100)] {
+        env.warp_to_slot(slot);
+        env.push_auth_mark(0, slot, price)
+            .map_err(|error| format!("publish exact-reversal mark at {slot}: {error}"))?;
+        env.crank(0, slot, observation.clone())
+            .map_err(|error| format!("settle exact-reversal winner at {slot}: {error}"))?;
+    }
+    let (_, reversed_group) = env.primary_market_state();
+    let arithmetic_targets_reversed = reversed_group.assets[0].k_long == 0
+        && reversed_group.assets[0].k_short == 0
+        && reversed_group.assets[0].f_long_num == 0
+        && reversed_group.assets[0].f_short_num == 0;
+    let stale_short_count_before_settlement = reversed_group.assets[0].stale_account_count_short;
+    let loser_epoch_before = env.primary_portfolio(1).legs[0]
+        .try_to_runtime()
+        .map_err(|error| format!("decode exact-reversal loser leg: {error:?}"))?
+        .kf_epoch_snap;
+    let before_rejection = fingerprint(&env);
+    let rejected = env.trade_no_cpi(0, 2, 0, -(POS_SCALE as i128), 100, 0);
+    let exact_rejection_rollback = rejected.is_err() && fingerprint(&env) == before_rejection;
+    env.crank(1, 3, observation)
+        .map_err(|error| format!("settle exact-reversal loser: {error}"))?;
+    let (_, settled_group) = env.primary_market_state();
+    let loser_after = env.primary_portfolio(1);
+    let loser_epoch_after = loser_after.legs[0]
+        .try_to_runtime()
+        .map_err(|error| format!("decode settled exact-reversal loser leg: {error:?}"))?
+        .kf_epoch_snap;
+
+    Ok(StaleCohortExactReversalCertification {
+        arithmetic_targets_reversed,
+        stale_short_count_before_settlement,
+        stale_short_count_after_settlement: settled_group.assets[0].stale_account_count_short,
+        loser_epoch_advanced: loser_epoch_after > loser_epoch_before,
+        loser_pnl_zero: loser_after.pnl.get() == 0,
+        exact_rejection_rollback,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+    })
 }
 
 fn discovery_source_claim(

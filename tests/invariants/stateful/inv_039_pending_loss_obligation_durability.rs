@@ -15,17 +15,17 @@
 //! `v16_program_shutdown_commit_ordering_preserves_committed_funding` applies the same ordering
 //! oracle to asset shutdown while constraining the effective price to remain unchanged. Any payout
 //! difference is therefore a committed funding transfer erased by the lifecycle transition.
-//! INV-027 owns the stale-cohort novation counterexample because its terminal economic violation
-//! is subordination of a fresh entrant's protected principal. This file retains the independent
-//! pending-obligation and accrual-ordering matrices that lead to that broader seniority property.
+//! INV-027 owns the stale-cohort novation guard because its economic obligation is protection of
+//! a fresh entrant's principal. This file retains the independent pending-obligation and
+//! accrual-ordering matrices that lead to that broader seniority property.
 //! Direct impact tests remain below. These tests
 //! exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: the prospective-accrual, exposure-removal, asset-shutdown, and
-//! terminal-resolve matrices are fixed-pin certification. INV-027 tracks stale-cohort novation as
-//! a quarantined protected-principal counterexample until its corresponding fix lands.
+//! terminal-resolve matrices are fixed-pin certification. INV-027 now certifies stale-cohort
+//! rejection, exact rollback, finite settlement, and owner-reduction liveness on the fixed pin.
 
 use super::*;
 
