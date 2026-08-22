@@ -1103,3 +1103,327 @@ fn v16_bpf_force_close_liveness_survives_14_stale_leg_grief_via_precrank() {
     assert_eq!(g.assets[13].oi_eff_long_q, 0);
     assert_eq!(g.assets[13].oi_eff_short_q, 0);
 }
+
+#[test]
+fn v16_program_unavailable_pyth_feed_has_bounded_terminal_fallback() {
+    const MARK: u64 = 1_000_000;
+    const TARGET: u64 = 1_100_000;
+    const OPEN_SLOT: u64 = 1;
+    const OBSERVATION_SLOT: u64 = 2;
+    const STALE_SLOTS: u64 = 4;
+    const RESOLVE_SLOT: u64 = OBSERVATION_SLOT + STALE_SLOTS;
+    const PRE_MATURITY_SLOT: u64 = RESOLVE_SLOT - 1;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 1,
+        initial_price: MARK,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(STALE_SLOTS, 1);
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+
+    let feed = [0x78; 32];
+    let initial_oracle = env.set_pyth_price_with_conf(&feed, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0; 32], [0; 32]],
+        &[initial_oracle],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        1,
+        100,
+    )
+    .expect("configure live Pyth-backed market");
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    // Ingest one authenticated target whose 10% move cannot fit the 5%-per-slot envelope.
+    set_test_clock(&mut env, OBSERVATION_SLOT, 101);
+    let fresh_oracle = env.set_pyth_price_with_conf(&feed, TARGET as i64, -6, 0, 101);
+    env.svm.expire_blockhash();
+    let observed_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: OBSERVATION_SLOT,
+                observations: crank_observations_with_accounts(0, 1),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new_readonly(fresh_oracle, false),
+            ],
+            &[],
+        )
+        .expect("ingest the last available authenticated Pyth target");
+    assert_cu_within("last live Pyth observation", observed_cu, CRANK_CU_LIMIT);
+    let observed_asset = env.market_state().1.assets[0];
+    assert_eq!(observed_asset.raw_oracle_target_price, TARGET);
+    assert!(
+        observed_asset.effective_price < TARGET,
+        "the last observation must leave real bounded target lag"
+    );
+    assert!(
+        observed_asset.effective_price > MARK,
+        "the last observation must move the exposed market away from its fallback mark"
+    );
+    let observed_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(
+        observed_profile.mark_ewma_e6,
+        observed_asset.effective_price
+    );
+
+    // External oracle availability is environmental state, not program-owned state. Make every
+    // account carrying the configured feed unusable after the position is live and never pass one
+    // again.
+    for oracle in [initial_oracle, fresh_oracle] {
+        let mut unavailable = env.svm.get_account(&oracle).unwrap();
+        unavailable.owner = solana_sdk::system_program::ID;
+        unavailable.data.clear();
+        env.svm.set_account(oracle, unavailable).unwrap();
+    }
+
+    // Hybrid's public after-hours route remains available after soft staleness. A signed
+    // risk-reducing trade moves the retained fallback mark beyond the last effective price,
+    // creating a real funding/settlement interval without another external observation.
+    set_test_clock(&mut env, OBSERVATION_SLOT + 2, 103);
+    let after_hours_cu = env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -(POS_SCALE as i128 / 2),
+        TARGET,
+        0,
+    );
+    assert_cu_within(
+        "feed-unavailable risk-reducing trade",
+        after_hours_cu,
+        TRADE_CU_LIMIT,
+    );
+    let staged_asset = env.market_state().1.assets[0];
+    let staged_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert!(
+        staged_profile.mark_ewma_e6 > staged_asset.effective_price,
+        "after-hours reduction must leave a real terminal fallback interval: mark={}, effective={}, pending_mark={}, pending_slot={}, slot_last={}",
+        staged_profile.mark_ewma_e6,
+        staged_asset.effective_price,
+        staged_profile.funding_mark_pending_e6,
+        staged_profile.funding_mark_pending_slot,
+        staged_asset.slot_last,
+    );
+    let terminal_fallback_mark = staged_profile.mark_ewma_e6;
+
+    set_test_clock(&mut env, PRE_MATURITY_SLOT, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let premature = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: PRE_MATURITY_SLOT,
+            observations: crank_observations_with_accounts(0, 0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+        ],
+        &[],
+    );
+    premature.expect_err("missing live oracle must reject before terminal maturity");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&long).unwrap(), long_before);
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    set_test_clock(&mut env, RESOLVE_SLOT, 105);
+    let mut max_cu = 0;
+    let mut fallback_progress = 0usize;
+    for step in 0..8 {
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&long).unwrap();
+        env.svm.expire_blockhash();
+        match env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: RESOLVE_SLOT,
+                observations: crank_observations_with_accounts(0, 0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        ) {
+            Ok(cu) => {
+                assert_cu_within("oracle-free terminal accrual", cu, CRANK_CU_LIMIT);
+                max_cu = max_cu.max(cu);
+                fallback_progress += 1;
+                assert!(
+                    env.svm.get_account(&env.market).unwrap() != market_before
+                        || env.svm.get_account(&long).unwrap() != portfolio_before,
+                    "successful oracle-free accrual step {step} was a no-op"
+                );
+            }
+            Err(error)
+                if error.contains("Custom(22)") || error.contains("custom program error: 0x16") =>
+            {
+                assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                assert_eq!(env.svm.get_account(&long).unwrap(), portfolio_before);
+                break;
+            }
+            Err(error) => panic!("oracle-free terminal accrual step {step} rejected: {error}"),
+        }
+    }
+    assert!(
+        fallback_progress > 0,
+        "the unavailable-feed route must perform real canonical fallback settlement"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        terminal_fallback_mark
+    );
+
+    env.svm.expire_blockhash();
+    let resolve_cu = env
+        .send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: RESOLVE_SLOT,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect("oracle-unavailable funded market must resolve permissionlessly");
+    assert_cu_within("oracle-free stale resolution", resolve_cu, CUSTODY_CU_LIMIT);
+    max_cu = max_cu.max(resolve_cu);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+
+    set_test_clock(&mut env, RESOLVE_SLOT + 1, 106);
+    let long_destination = env.token_account(long_owner.pubkey(), 0);
+    let short_destination = env.token_account(short_owner.pubkey(), 0);
+    let terminal = |account: &PortfolioAccountV16| {
+        let receipt = resolved_receipt(account);
+        account.capital.get() == 0
+            && account.pnl.get() == 0
+            && percolator::active_bitmap_is_empty(active_bitmap(account))
+            && (!receipt.present || receipt.finalized)
+    };
+    let actors = [
+        (&long_owner, long, long_destination),
+        (&short_owner, short, short_destination),
+    ];
+    let mut close_progress = 0usize;
+    let mut close_rejections = 0usize;
+    for step in 0..32 {
+        if actors
+            .iter()
+            .all(|(_, portfolio, _)| terminal(&env.portfolio_state(*portfolio)))
+        {
+            break;
+        }
+        let (owner, portfolio, destination) = actors[step % actors.len()];
+        if terminal(&env.portfolio_state(portfolio)) {
+            continue;
+        }
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let destination_before = env.svm.get_account(&destination).unwrap();
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: RESOLVE_SLOT + 1,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        );
+        match result {
+            Ok(cu) => {
+                assert_cu_within("oracle-free terminal crank", cu, CRANK_CU_LIMIT);
+                max_cu = max_cu.max(cu);
+                close_progress += 1;
+                assert!(
+                    env.svm.get_account(&env.market).unwrap() != market_before
+                        || env.svm.get_account(&portfolio).unwrap() != portfolio_before
+                        || env.svm.get_account(&env.vault).unwrap() != vault_before
+                        || env.svm.get_account(&destination).unwrap() != destination_before,
+                    "successful oracle-free terminal crank step {step} was a no-op"
+                );
+            }
+            Err(_) => {
+                close_rejections += 1;
+                assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+                assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+                assert_eq!(
+                    env.svm.get_account(&destination).unwrap(),
+                    destination_before
+                );
+            }
+        }
+    }
+    assert!(close_progress > 0);
+    for (_, portfolio, destination) in actors {
+        let account = env.portfolio_state(portfolio);
+        assert!(
+            terminal(&account),
+            "funded portfolio did not reach terminal state"
+        );
+        assert!(
+            env.token_amount(destination) > 0,
+            "each funded user must retain a positive terminal payout path"
+        );
+    }
+
+    let total_payout = u128::from(env.token_amount(long_destination))
+        + u128::from(env.token_amount(short_destination));
+    let terminal_group = env.market_state().1;
+    let retained_protocol_value = u128::from(env.token_amount(env.vault));
+    assert_eq!(terminal_group.c_tot, 0);
+    assert_eq!(terminal_group.vault, retained_protocol_value);
+    assert_eq!(total_payout + retained_protocol_value, 2 * DEPOSIT);
+    println!(
+        "INV-078 unavailable-Pyth terminal fallback: max_cu={max_cu}, close_rejections={close_rejections}"
+    );
+}
