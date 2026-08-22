@@ -659,14 +659,16 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
     assert_eq!(env.market_state().1.pnl_pos_tot, 0);
 
     let source_domain = ASSET * 2 + 1;
-    let provider_receivable_num =
-        env.market_state().1.source_credit[source_domain as usize].provider_receivable_num;
-    assert_ne!(provider_receivable_num, 0);
-    assert_eq!(provider_receivable_num % BOUND_SCALE, 0);
-    let provider_receivable = provider_receivable_num / BOUND_SCALE;
-    let provider_token = env.top_up_backing_bucket(source_domain, provider_receivable, 101);
-    assert_eq!(env.token_amount(provider_token), 0);
     let provider_ready = env.market_state().1;
+    let source = provider_ready.source_credit[source_domain as usize];
+    assert_eq!(source.positive_claim_bound_num, 0);
+    assert_eq!(source.exact_positive_claim_num, 0);
+    assert_eq!(source.provider_receivable_num, 0);
+    assert_eq!(source.spent_backing_num, 0);
+    assert_ne!(source.fresh_reserved_backing_num, 0);
+    assert_eq!(source.fresh_reserved_backing_num % BOUND_SCALE, 0);
+    let provider_principal = source.fresh_reserved_backing_num / BOUND_SCALE;
+    let provider_token = env.token_account(env.admin.pubkey(), 0);
     assert!(
         provider_ready.bankruptcy_hlock_active,
         "the regression must retain the global bankruptcy history bit"
@@ -682,14 +684,14 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
     let provider_withdraw_cu = env.withdraw_backing_bucket_to_admin_token_with_cu(
         provider_token,
         source_domain,
-        provider_receivable,
+        provider_principal,
     );
     assert_cu_within(
         "fractional carry terminal provider settlement",
         provider_withdraw_cu,
         CUSTODY_CU_LIMIT,
     );
-    assert_eq!(env.token_amount(provider_token), provider_receivable as u64);
+    assert_eq!(env.token_amount(provider_token), provider_principal as u64);
     let provider_settled = env.market_state().1;
     assert_eq!(
         provider_settled.source_credit[source_domain as usize].provider_receivable_num,
@@ -702,9 +704,9 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
             ..percolator::BackingBucketV16::EMPTY
         }
     );
-    assert_ne!(
+    assert_eq!(
         provider_settled.source_credit[source_domain as usize].spent_backing_num, 0,
-        "the terminal route must exercise nonzero audit-only backing history"
+        "canonical B settlement must not manufacture provider debt"
     );
 
     let custody_before_retirement = env.svm.get_account(&env.vault).unwrap();

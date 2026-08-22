@@ -1397,8 +1397,8 @@ pub struct Coverage {
     pub route_success: [u64; 4],
     pub route_reject: [u64; 4],
     pub crank_progress: u64,
-    pub crank_rank_component_seen: [u64; 7],
-    pub crank_rank_component_reduced: [u64; 7],
+    pub crank_rank_component_seen: [u64; 8],
+    pub crank_rank_component_reduced: [u64; 8],
     pub crank_rank_nodes: BTreeSet<u8>,
     pub crank_rank_edges: BTreeSet<(u8, u8)>,
     pub mark_updates: u64,
@@ -1459,8 +1459,8 @@ impl Default for Coverage {
             route_success: [0; 4],
             route_reject: [0; 4],
             crank_progress: 0,
-            crank_rank_component_seen: [0; 7],
-            crank_rank_component_reduced: [0; 7],
+            crank_rank_component_seen: [0; 8],
+            crank_rank_component_reduced: [0; 8],
             crank_rank_nodes: BTreeSet::new(),
             crank_rank_edges: BTreeSet::new(),
             mark_updates: 0,
@@ -1671,6 +1671,7 @@ struct ProgressRank {
     market_locks: u128,
     close_work: u128,
     b_work: u128,
+    obligation_work: u128,
     stale_legs: u128,
     health_work: u128,
 }
@@ -1681,7 +1682,25 @@ impl ProgressRank {
     }
 
     fn account_actionable(self) -> bool {
-        self.close_work != 0 || self.b_work != 0 || self.stale_legs != 0 || self.health_work != 0
+        self.close_work != 0
+            || self.obligation_work != 0
+            || self.b_work != 0
+            || self.stale_legs != 0
+            || self.health_work != 0
+    }
+
+    fn dispatch_priority(self) -> u8 {
+        if self.close_work != 0 {
+            0
+        } else if self.b_work != 0 {
+            1
+        } else if self.obligation_work != 0 {
+            2
+        } else if self.stale_legs != 0 || self.health_work != 0 {
+            3
+        } else {
+            4
+        }
     }
 
     fn reduced_from(self, before: Self) -> bool {
@@ -1691,6 +1710,7 @@ impl ProgressRank {
             self.market_locks,
             self.close_work,
             self.b_work,
+            self.obligation_work,
             self.stale_legs,
             self.health_work,
         ) < (
@@ -1699,18 +1719,20 @@ impl ProgressRank {
             before.market_locks,
             before.close_work,
             before.b_work,
+            before.obligation_work,
             before.stale_legs,
             before.health_work,
         )
     }
 
-    fn components(self) -> [u128; 7] {
+    fn components(self) -> [u128; 8] {
         [
             self.market_mark_lag,
             self.market_loss_lag,
             self.market_locks,
             self.close_work,
             self.b_work,
+            self.obligation_work,
             self.stale_legs,
             self.health_work,
         ]
@@ -2528,6 +2550,26 @@ impl ScenarioRunner {
         self.assert_global_invariants()
     }
 
+    fn run_permissionless_account_progress_campaign(&mut self) -> Result<(), String> {
+        for _ in 0..self.liveness_limit {
+            self.advance_liveness_clock_if_needed()?;
+            let has_account_work = (0..PRIMARY_ACTOR_COUNT)
+                .map(|actor| self.progress_rank(actor))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(ProgressRank::account_actionable);
+            if !has_account_work {
+                return self.assert_global_invariants();
+            }
+            self.drain_one_progress_step(None)?;
+        }
+        Err(format!(
+            "permissionless account drain exceeded deterministic bound {}; {}",
+            self.liveness_limit,
+            self.liveness_diagnostics()
+        ))
+    }
+
     pub fn quarantine_known_progress_blocker(&mut self, error: &str) -> Result<bool, String> {
         let (_, group) = self.env.primary_market_state();
         let lapsed_live_backing = group.mode == MarketModeV16::Live
@@ -2617,6 +2659,19 @@ impl ScenarioRunner {
                     ));
                 }
             }
+        }
+
+        // A successful reduction can create a zero-basis pending-loss obligation. That work did
+        // not exist when the pre-exit crank campaign ran, and withdrawal correctly remains stale
+        // until the permissionless crank releases it. Drain this newly created account-local work
+        // before attempting capital withdrawal.
+        if self.env.primary_market_state().1.mode == MarketModeV16::Live {
+            self.run_permissionless_account_progress_campaign()
+                .map_err(|error| {
+                    format!(
+                        "post-reduction account work could not converge before withdrawal: {error}"
+                    )
+                })?;
         }
 
         for actor in 0..PRIMARY_ACTOR_COUNT {
@@ -4973,9 +5028,7 @@ impl ScenarioRunner {
     fn selected_observation(&self, actor: usize) -> Result<Vec<CrankObservationHint>, String> {
         let (_, group) = self.env.primary_market_state();
         let rank = self.progress_rank(actor)?;
-        let terminal_or_global_lock =
-            group.bankruptcy_hlock_active || group.threshold_stress_active;
-        if rank.b_work != 0 || terminal_or_global_lock {
+        if rank.close_work != 0 || rank.obligation_work != 0 || rank.b_work != 0 {
             return Ok(vec![]);
         }
         Ok((0..ASSET_COUNT)
@@ -5368,10 +5421,11 @@ impl ScenarioRunner {
         }
         candidates.extend((0..PRIMARY_ACTOR_COUNT).filter(|actor| Some(*actor) != preferred));
 
-        let ranks = candidates
+        let mut ranks = candidates
             .iter()
             .map(|actor| Ok((*actor, self.progress_rank(*actor)?)))
             .collect::<Result<Vec<_>, String>>()?;
+        ranks.sort_by_key(|(_, rank)| rank.dispatch_priority());
         let has_account_work = ranks.iter().any(|(_, rank)| rank.account_actionable());
         let mut failures = Vec::new();
         for (actor, before) in ranks {
@@ -5547,6 +5601,13 @@ impl ScenarioRunner {
         let account = self.env.primary_portfolio(actor);
         let (_, group) = self.env.primary_market_state();
         let authenticated_slot = self.env.current_slot();
+        let close = account
+            .close_progress
+            .try_to_runtime()
+            .map_err(|error| format!("progress-rank close decode: {error:?}"))?;
+        let close_has_pending_residual =
+            close.active && !close.finalized && !close.canceled && close.residual_remaining != 0;
+        let release_allowed = !close_has_pending_residual;
         let mut market_mark_lag = 0u128;
         let mut market_loss_lag = 0u128;
         for asset in 0..ASSET_COUNT {
@@ -5580,17 +5641,91 @@ impl ScenarioRunner {
         }
         let mut b_work = 0u128;
         let mut stale_legs = 0u128;
-        let mut active = 0u128;
+        let mut obligation_work = 0u128;
         for leg in decoded_legs(&account) {
             if !leg.active {
                 continue;
             }
-            active += 1;
+            let asset_index = leg.asset_index as usize;
+            let asset = group.assets.get(asset_index).ok_or_else(|| {
+                format!("progress-rank leg references missing asset {asset_index}")
+            })?;
+            let (target_b, side_domain, opposite_stored, opposite_pending) = match leg.side {
+                SideV16::Long => {
+                    let target = if leg.b_epoch_snap == asset.epoch_long {
+                        asset.b_long_num
+                    } else if asset.mode_long == SideModeV16::ResetPending
+                        && leg.b_epoch_snap.checked_add(1) == Some(asset.epoch_long)
+                    {
+                        asset.b_epoch_start_long_num
+                    } else {
+                        return Err(format!(
+                            "progress-rank invalid long B epoch for asset {asset_index}: leg {}, asset {}",
+                            leg.b_epoch_snap, asset.epoch_long
+                        ));
+                    };
+                    let (long_domain, _) = v16_domain_pair_for_asset_index(asset_index)
+                        .map_err(|error| format!("progress-rank domain mapping: {error:?}"))?;
+                    (
+                        target,
+                        long_domain,
+                        asset.stored_pos_count_short,
+                        asset.pending_obligation_count_short,
+                    )
+                }
+                SideV16::Short => {
+                    let target = if leg.b_epoch_snap == asset.epoch_short {
+                        asset.b_short_num
+                    } else if asset.mode_short == SideModeV16::ResetPending
+                        && leg.b_epoch_snap.checked_add(1) == Some(asset.epoch_short)
+                    {
+                        asset.b_epoch_start_short_num
+                    } else {
+                        return Err(format!(
+                            "progress-rank invalid short B epoch for asset {asset_index}: leg {}, asset {}",
+                            leg.b_epoch_snap, asset.epoch_short
+                        ));
+                    };
+                    let (_, short_domain) = v16_domain_pair_for_asset_index(asset_index)
+                        .map_err(|error| format!("progress-rank domain mapping: {error:?}"))?;
+                    (
+                        target,
+                        short_domain,
+                        asset.stored_pos_count_long,
+                        asset.pending_obligation_count_long,
+                    )
+                }
+            };
+            let pending_b = target_b.checked_sub(leg.b_snap).ok_or_else(|| {
+                format!(
+                    "progress-rank B snapshot exceeds target for asset {asset_index}: {} > {target_b}",
+                    leg.b_snap
+                )
+            })?;
             b_work = b_work
-                .checked_add(leg.b_rem)
+                .checked_add(pending_b)
                 .ok_or("B-work rank overflow")?;
-            if leg.b_stale {
+            if leg.b_stale && pending_b == 0 {
                 b_work = b_work.checked_add(1).ok_or("B-work flag overflow")?;
+            }
+            let domain_barrier = group
+                .pending_domain_loss_barriers
+                .get(side_domain)
+                .copied()
+                .ok_or_else(|| format!("progress-rank missing domain {side_domain}"))?;
+            let recovery_release_allowed = asset.lifecycle != AssetLifecycleV16::Recovery
+                || opposite_stored == opposite_pending;
+            if release_allowed
+                && !leg.stale
+                && !leg.b_stale
+                && leg.basis_pos_q == 0
+                && leg.loss_weight != 0
+                && domain_barrier == 0
+                && recovery_release_allowed
+            {
+                obligation_work = obligation_work
+                    .checked_add(1)
+                    .ok_or("pending-obligation rank overflow")?;
             }
             if leg.stale {
                 stale_legs += 1;
@@ -5635,7 +5770,7 @@ impl ScenarioRunner {
                 sum.checked_add(leg.basis_pos_q.unsigned_abs())
                     .ok_or("active-position rank overflow")
             })?;
-        let health_work = if active == 0 || crank_dispatchable_abs_q == 0 {
+        let health_work = if crank_dispatchable_abs_q == 0 {
             0
         } else if cert.valid == 0 || cert_epoch_mismatch {
             crank_dispatchable_abs_q
@@ -5675,11 +5810,7 @@ impl ScenarioRunner {
         // appear actionable.
         let loss_work = reset_pending_work_for_account(&group, &account)?
             .max(u128::from(group.loss_stale_active));
-        let close = account
-            .close_progress
-            .try_to_runtime()
-            .map_err(|error| format!("progress-rank close decode: {error:?}"))?;
-        let close_work = if close.active && !close.finalized {
+        let close_work = if close_has_pending_residual {
             close.residual_remaining
         } else {
             0
@@ -5698,6 +5829,11 @@ impl ScenarioRunner {
             // chunk can reduce it while the aggregate lock/count fields remain unchanged.
             close_work,
             b_work,
+            // A released zero-basis obligation is selected after close and B settlement but
+            // before ordinary account refresh. Count the account-local legs, not only the global
+            // bankruptcy bit, so clearing one obligation is observable even while another account
+            // retains the market lock.
+            obligation_work,
             stale_legs,
             health_work,
         })
@@ -6667,6 +6803,18 @@ pub struct ConcurrentCloseLocalityEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveCloseShutdownEvidence {
+    pub world_count: u64,
+    pub pre_shutdown_progress_worlds: u64,
+    pub live_position_abs_q: u128,
+    pub destination_payouts: [u128; PRIMARY_ACTOR_COUNT],
+    pub final_vault: u128,
+    pub final_capital_total: u128,
+    pub final_insurance: u128,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurePendingObligationDosEvidence {
     pub cure_deposit: u128,
     pub cure_source_debit: u128,
@@ -7142,6 +7290,169 @@ pub fn run_concurrent_close_locality_probe() -> Result<ConcurrentCloseLocalityEv
         second_residual_after: second_after.residual_remaining,
         coverage: runner.coverage,
     })
+}
+
+fn run_active_close_shutdown_world(
+    advance_close_before_shutdown: bool,
+) -> Result<ActiveCloseShutdownEvidence, String> {
+    const CLOSE_WINNER: usize = 0;
+    const CLOSE_LOSER: usize = 1;
+    const UNRELATED_LONG: usize = 2;
+    const UNRELATED_SHORT: usize = 3;
+    const KEEPER: usize = EXIT_MAKER_INDEX;
+    const ASSET: usize = 0;
+    const UNRELATED_Q: i128 = (POS_SCALE / 100) as i128;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let seed_byte = 0x7c + u8::from(advance_close_before_shutdown);
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
+    let destinations_before: [u128; PRIMARY_ACTOR_COUNT] = std::array::from_fn(|actor| {
+        u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        )
+    });
+    runner.run_safety_prefix(&[Action::ConfigurePermissionlessResolve {
+        stale_slots: 1_000,
+        force_close_delay_slots: 1,
+    }])?;
+    if !runner.execute_trade(
+        TradeRoute::NoCpi,
+        UNRELATED_LONG,
+        UNRELATED_SHORT,
+        vec![(ASSET, UNRELATED_Q)],
+        0,
+        0,
+        true,
+    )? {
+        return Err("INV-074 active-close shutdown control trade did not land".into());
+    }
+    create_public_cancellable_close(
+        &mut runner,
+        CLOSE_WINNER as u8,
+        CLOSE_LOSER as u8,
+        ASSET as u8,
+        KEEPER as u8,
+    )?;
+    let close_before = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-074 pre-shutdown close decode: {error:?}"))?;
+    if advance_close_before_shutdown {
+        runner
+            .execute_crank(CLOSE_LOSER, HintMode::Complete, true)
+            .map_err(|error| {
+                format!("INV-074 pre-shutdown close crank: {}", error.into_message())
+            })?;
+        let close_after = runner
+            .env
+            .primary_portfolio(CLOSE_LOSER)
+            .close_progress
+            .try_to_runtime()
+            .map_err(|error| format!("INV-074 advanced close decode: {error:?}"))?;
+        if close_after.residual_remaining >= close_before.residual_remaining {
+            return Err(format!(
+                "INV-074 pre-shutdown crank did not reduce close residual: {close_before:?} -> {close_after:?}"
+            ));
+        }
+    }
+
+    let live_position_abs_q = runner
+        .positions
+        .iter()
+        .map(|positions| positions[ASSET].unsigned_abs())
+        .try_fold(0u128, |sum, quantity| sum.checked_add(quantity))
+        .ok_or("INV-074 live position sum overflow")?;
+    if live_position_abs_q == 0 {
+        return Err("INV-074 shutdown world had no live position".into());
+    }
+    runner.run_safety_prefix(&[Action::ShutdownAsset {
+        asset: ASSET as u8,
+        dt: 1,
+    }])?;
+    if runner.env.primary_market_state().1.assets[ASSET].lifecycle != AssetLifecycleV16::Recovery {
+        return Err("INV-074 accepted shutdown did not enter Recovery".into());
+    }
+    let pre_exit_progress = runner.run_permissionless_account_progress_campaign();
+    if let Err(error) = pre_exit_progress {
+        return Err(format!(
+            "INV-074 honest crank campaign could not prepare Recovery exits: {error}"
+        ));
+    }
+    runner.run_direct_user_exit_campaign().map_err(|error| {
+        format!("INV-074 B settlement did not preserve normal owner exits: {error}")
+    })?;
+    if runner
+        .positions
+        .iter()
+        .any(|positions| positions[ASSET] != 0)
+    {
+        return Err(format!(
+            "INV-074 active-close shutdown retained exposure: {:?}",
+            runner.positions
+        ));
+    }
+
+    let destination_payouts = std::array::from_fn(|actor| {
+        u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        ) - destinations_before[actor]
+    });
+    let (_, group) = runner.env.primary_market_state();
+    Ok(ActiveCloseShutdownEvidence {
+        world_count: 1,
+        pre_shutdown_progress_worlds: u64::from(advance_close_before_shutdown),
+        live_position_abs_q,
+        destination_payouts,
+        final_vault: group.vault,
+        final_capital_total: group.c_tot,
+        final_insurance: group.insurance,
+        coverage: runner.coverage,
+    })
+}
+
+pub fn run_active_close_shutdown_liveness_probe() -> Result<ActiveCloseShutdownEvidence, String> {
+    let mut baseline = run_active_close_shutdown_world(false)?;
+    let progressed = run_active_close_shutdown_world(true)?;
+    let baseline_economics = (
+        baseline.live_position_abs_q,
+        baseline.destination_payouts,
+        baseline.final_vault,
+        baseline.final_capital_total,
+        baseline.final_insurance,
+    );
+    let progressed_economics = (
+        progressed.live_position_abs_q,
+        progressed.destination_payouts,
+        progressed.final_vault,
+        progressed.final_capital_total,
+        progressed.final_insurance,
+    );
+    if progressed_economics != baseline_economics {
+        return Err(format!(
+            "INV-074 shutdown ordering changed terminal economics: immediate={baseline_economics:?}, progressed={progressed_economics:?}"
+        ));
+    }
+    baseline.world_count += progressed.world_count;
+    baseline.pre_shutdown_progress_worlds += progressed.pre_shutdown_progress_worlds;
+    baseline.coverage.merge(progressed.coverage);
+    Ok(baseline)
 }
 
 pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDosEvidence, String> {
