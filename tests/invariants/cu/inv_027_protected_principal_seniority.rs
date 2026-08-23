@@ -380,8 +380,7 @@ fn v16_attack_insolvent_loser_cannot_withdraw_to_escape() {
     for (slot, mark) in [(1u64, 300u64), (2, 800)] {
         env.svm.warp_to_slot(slot);
         env.push_ewma_mark_with_cu(slot, mark);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -852,8 +851,7 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
     for slot in 1..=40u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 1_070_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),

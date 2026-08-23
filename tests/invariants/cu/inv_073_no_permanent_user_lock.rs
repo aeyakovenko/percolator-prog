@@ -1016,8 +1016,7 @@ fn fractional_social_loss_exit_fixture() -> (V16CuEnv, Keypair, Pubkey, Keypair,
         );
     }
     for portfolio in [s1, l1, l2, l3, l4, s2, s3, s4] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 4,
                 observations: crank_observations(0),
@@ -1186,8 +1185,7 @@ fn v16_program_recovery_residue_matrix_clears_abandoned_owner_residue() {
         env.svm.warp_to_slot(6);
         env.push_auth_mark_with_cu(6, 500);
         for portfolio in [short, long] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: 6,
                     observations: crank_observations(0),
@@ -1642,8 +1640,7 @@ pub(super) fn assert_inv_051_unilateral_adl_effective_exit_matrix_preserves_boun
         env.svm.warp_to_slot(6);
         env.push_auth_mark_with_cu(6, 500);
         for portfolio in [short, long] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: 6,
                     observations: crank_observations(0),
@@ -2247,8 +2244,7 @@ fn v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit() {
     for (slot, mark) in [(1u64, 300u64), (2, 800)] {
         env.svm.warp_to_slot(slot);
         env.push_ewma_mark_with_cu(slot, mark);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -2791,8 +2787,7 @@ fn v16_program_withdraw_rejected_when_resolve_matured() {
     // Mark the oracle fresh at slot 3.
     env.svm.warp_to_slot(3);
     env.push_auth_mark_with_cu(3, 100);
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
             observations: crank_observations(0),
@@ -4695,8 +4690,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         );
         for ai in [0u16, 1] {
             for p in [victim, cp] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
+                let _ = env.send_crank_if_actionable(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
                         observations: crank_observations_for_assets(&[ai, 1 - ai]),
@@ -4712,11 +4706,16 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         }
     }
 
-    for _ in 0..8 {
+    'live_settlement: for _ in 0..8 {
+        if env.market_state().1.mode != MarketModeV16::Live {
+            break;
+        }
         for ai in [0u16, 1] {
             for p in [victim, cp] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
+                if env.market_state().1.mode != MarketModeV16::Live {
+                    break 'live_settlement;
+                }
+                let _ = env.send_crank_if_actionable(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: 2,
                         observations: crank_observations_for_assets(&[ai, 1 - ai]),

@@ -225,8 +225,7 @@ fn v16_program_issue406_liquidation_invalidates_stale_lp_matcher_capability() {
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_with_cu(slot, 1_060_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),

@@ -4558,8 +4558,7 @@ fn v16_attack_liquidation_isolated_across_assets() {
     env.svm.warp_to_slot(6);
     env.push_auth_mark_with_cu(6, 500);
     for p in [b0, a0] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,
                 observations: crank_observations(0),
@@ -4642,8 +4641,7 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -4869,8 +4867,7 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_as_admin(1, slot, mark);
         for p in [a1, b1] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(1),
@@ -4885,8 +4882,7 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
         }
     }
     // liquidate the insolvent asset-1 short (socializes its bad debt).
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 4,
             observations: crank_observations(1),
@@ -4965,8 +4961,7 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_backing() {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_as_admin(1, slot, mark);
         for p in [a1, b1] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(1),
@@ -4980,8 +4975,7 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_backing() {
             );
         }
     }
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 4,
             observations: crank_observations(1),

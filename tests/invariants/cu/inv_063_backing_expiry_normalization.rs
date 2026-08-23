@@ -710,7 +710,7 @@ fn v16_attack_backing_expiry_no_overpay() {
     env.add_source_positive_pnl(p, 1, 40);
     // advance PAST the backing expiry.
     env.svm.warp_to_slot(20);
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 20,
             observations: crank_observations(0),

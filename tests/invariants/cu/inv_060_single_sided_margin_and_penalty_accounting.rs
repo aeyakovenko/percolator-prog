@@ -217,9 +217,7 @@ fn v16_program_margin_gap_zone_no_liquidation_no_risk_increase() {
     assert!(equity > maintenance);
     assert!(equity < initial);
     assert_eq!(cert.certified_liq_deficit, 0);
-
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             observations: crank_observations(0),

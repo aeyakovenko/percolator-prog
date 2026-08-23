@@ -2601,8 +2601,7 @@ fn v16_program_liquidation_reward_tail_account_pairs_and_privileges_are_exhausti
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -2740,8 +2739,7 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),

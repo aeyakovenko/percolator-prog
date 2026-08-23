@@ -78,8 +78,7 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
     env.svm.warp_to_slot(6);
     env.push_auth_mark_with_cu(6, 500);
     for p in [b, a] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,
                 observations: crank_observations(0),
@@ -164,8 +163,7 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     env.svm.warp_to_slot(6);
     env.push_auth_mark_with_cu(6, 500);
     for p in [b, a] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,
                 observations: crank_observations(0),

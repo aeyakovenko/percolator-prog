@@ -659,8 +659,7 @@ fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
     for slot in [10u64, 11] {
         env.svm.warp_to_slot(slot);
         for p in [sh, lo] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),

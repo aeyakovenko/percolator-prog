@@ -174,8 +174,7 @@ fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrela
     env.svm.warp_to_slot(6);
     env.push_auth_mark_with_cu(6, ADVERSE_PRICE);
     for portfolio in [loser, winner] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,
                 observations: crank_observations(0),

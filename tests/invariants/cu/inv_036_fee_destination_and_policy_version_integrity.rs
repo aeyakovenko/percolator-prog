@@ -231,8 +231,7 @@ fn run_directional_fee_terminal_world(
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_with_cu(slot, 3 * MARK);
         for _ in 0..3 {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),

@@ -654,7 +654,7 @@ fn v16_program_ewma_mark_respects_per_slot_circuit_breaker() {
         env.push_ewma_mark_with_cu(slot, INITIAL_PRICE * 100); // 100,000,000 — 100x
         env.svm.expire_blockhash();
         // crank may succeed (clamped move) or be refused (RecoveryRequired) — either way price is bounded.
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -770,8 +770,7 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
             &[&env.admin],
         ); // ignore Err; we only require no panic + conservation
            // crank against whatever mark landed; must not corrupt conservation.
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 5,
                 observations: crank_observations(0),
@@ -840,8 +839,7 @@ fn v16_attack_mark_push_clamped_per_slot() {
     for slot in [10u64, 11, 12] {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_with_cu(slot, 1_000_000); // push to a huge mark (10000x) every slot
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -923,8 +921,7 @@ fn v16_attack_ewma_mark_halflife_zero_safe() {
         for slot in [1u64, 2] {
             env.svm.warp_to_slot(slot);
             for p in [psh, plo] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
+                let _ = env.send_crank_if_actionable(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
                         observations: crank_observations(0),

@@ -213,8 +213,7 @@ fn v16_attack_extreme_premium_funding_is_capped() {
         for slot in 1..=4u64 {
             env.svm.warp_to_slot(slot);
             for p in [lo, sh] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
+                let _ = env.send_crank_if_actionable(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
                         observations: crank_observations(0),
@@ -286,8 +285,7 @@ fn v16_attack_funding_direction_mark_below_index_conserves() {
     for slot in 1..=5u64 {
         env.svm.warp_to_slot(slot);
         for p in [lo, sh] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),
@@ -739,8 +737,7 @@ fn v16_regression_premium_funding_settlement_conserves_vault() {
     env.push_ewma_mark_with_cu(1, INITIAL_PRICE * 2);
     let crank_both = |env: &mut V16CuEnv, slot: u64| {
         for acct in [lo, sh] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),

@@ -24,8 +24,7 @@ fn v16_program_permissionless_settle_b_on_healthy_account_is_safe_noop() {
     assert_eq!(capital_before, 1_000);
 
     env.svm.warp_to_slot(5);
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 5,
             observations: crank_observations(0),

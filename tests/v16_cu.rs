@@ -4240,11 +4240,57 @@ impl V16CuEnv {
         self.crank_steps(portfolio, ix, 1)
     }
 
-    fn crank_if_actionable(&mut self, portfolio: Pubkey, ix: ProgInstruction) -> Option<u64> {
-        let market_before = self.svm.get_account(&self.market).expect("market account");
-        let portfolio_before = self.svm.get_account(&portfolio).expect("portfolio account");
+    fn send_crank_if_actionable(
+        &mut self,
+        ix: ProgInstruction,
+        accounts: Vec<AccountMeta>,
+        extra_signers: &[&Keypair],
+    ) -> Option<u64> {
+        assert!(
+            matches!(&ix, ProgInstruction::PermissionlessCrank { .. }),
+            "progress-aware sender is only valid for PermissionlessCrank"
+        );
+        let payer = self.payer.pubkey();
+        let writable_before = accounts
+            .iter()
+            .filter(|account| account.is_writable && account.pubkey != payer)
+            .map(|account| (account.pubkey, self.svm.get_account(&account.pubkey)))
+            .collect::<Vec<_>>();
+        assert!(
+            !writable_before.is_empty(),
+            "permissionless crank must expose writable economic state"
+        );
+        let call = format!("{ix:?}");
+
         self.svm.expire_blockhash();
-        match self.send(
+        match self.send(ix, accounts, extra_signers) {
+            Ok(cu) => {
+                assert!(
+                    writable_before
+                        .iter()
+                        .any(|(key, before)| self.svm.get_account(key) != *before),
+                    "an accepted permissionless crank must mutate writable economic state"
+                );
+                Some(cu)
+            }
+            Err(error) if is_engine_non_progress_error(&error) => {
+                for (key, before) in writable_before {
+                    assert_eq!(
+                        self.svm.get_account(&key),
+                        before,
+                        "EngineNonProgress must roll back writable account {key} exactly"
+                    );
+                }
+                None
+            }
+            Err(error) => {
+                panic!("permissionless crank {call} returned unexpected error: {error}")
+            }
+        }
+    }
+
+    fn crank_if_actionable(&mut self, portfolio: Pubkey, ix: ProgInstruction) -> Option<u64> {
+        self.send_crank_if_actionable(
             ix,
             vec![
                 AccountMeta::new(self.payer.pubkey(), true),
@@ -4252,22 +4298,7 @@ impl V16CuEnv {
                 AccountMeta::new(portfolio, false),
             ],
             &[],
-        ) {
-            Ok(cu) => {
-                assert!(
-                    self.svm.get_account(&self.market).unwrap() != market_before
-                        || self.svm.get_account(&portfolio).unwrap() != portfolio_before,
-                    "an accepted crank must mutate market or portfolio state"
-                );
-                Some(cu)
-            }
-            Err(err) if err.contains("Custom(22)") => {
-                assert_eq!(self.svm.get_account(&self.market).unwrap(), market_before);
-                assert_eq!(self.svm.get_account(&portfolio).unwrap(), portfolio_before);
-                None
-            }
-            Err(err) => panic!("crank: {err}"),
-        }
+        )
     }
 
     fn crank_steps(&mut self, portfolio: Pubkey, ix: ProgInstruction, attempts: usize) -> u64 {

@@ -452,8 +452,7 @@ fn v16_attack_off_market_exec_price_wash_trade_prints_nothing() {
     // or it succeeds and the profit is junior. Drive settlement either way and check the invariants.
     for p in [a, b] {
         env.svm.warp_to_slot(1);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 1,
                 observations: crank_observations(0),

@@ -48,8 +48,7 @@ fn v16_program_insurance_covered_liquidation_close_ledger_partitions_exactly() {
     for slot in 1..=40u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 1_070_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),

@@ -787,8 +787,7 @@ fn v16_attack_liquidation_reward_share_without_tail_still_progresses() {
     for slot in 1..=LIQ_SLOT {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -868,8 +867,7 @@ fn v16_program_partial_liquidation_bounded_and_conserves() {
     for (slot, mark) in [(1u64, 300u64), (2, 800)] {
         env.svm.warp_to_slot(slot);
         env.push_ewma_mark_with_cu(slot, mark);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -884,8 +882,7 @@ fn v16_program_partial_liquidation_bounded_and_conserves() {
     }
     let (_, g_pre) = env.market_state();
     let oi_pre = g_pre.assets[0].oi_eff_short_q;
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             observations: crank_observations(0),
@@ -938,8 +935,7 @@ fn v16_program_healthy_account_not_liquidatable() {
 
     // attacker tries to liquidate the healthy la (no adverse price move).
     env.svm.warp_to_slot(1);
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
             observations: crank_observations(0),
@@ -1046,8 +1042,7 @@ fn v16_program_cross_margin_solvent_account_not_unfairly_liquidated() {
         env.svm.warp_to_slot(slot);
         for ai in [0u16, 1] {
             for p in [victim, cp] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
+                let _ = env.send_crank_if_actionable(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
                         observations: crank_observations_for_assets(&[ai, 1 - ai]),
@@ -1066,8 +1061,7 @@ fn v16_program_cross_margin_solvent_account_not_unfairly_liquidated() {
     let equity_before = v_before.capital.get() as i128 + v_before.pnl.get();
     let (_, g_before) = env.market_state();
     // attacker tries to liquidate the victim's LOSING leg (asset1).
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 11,
             observations: crank_observations(1),
@@ -1118,8 +1112,7 @@ fn v16_program_liquidation_cranker_reward_bounded_by_fee() {
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -1222,8 +1215,7 @@ fn v16_program_liquidation_fee_capped() {
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -1302,8 +1294,7 @@ fn v16_program_repeated_partial_liquidation_stops_charging_after_health_restored
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -1378,8 +1369,7 @@ fn v16_program_liquidation_full_cranker_share_takes_whole_fee_no_mint() {
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -1528,8 +1518,7 @@ fn v16_engine_selected_liquidation_cannot_overclose_or_create_value() {
     for (slot, mark) in [(1u64, 300u64), (2, 800)] {
         env.svm.warp_to_slot(slot);
         env.push_ewma_mark_with_cu(slot, mark);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -1544,8 +1533,7 @@ fn v16_engine_selected_liquidation_cannot_overclose_or_create_value() {
     }
     let (_, g_pre) = env.market_state();
     let oi_pre = g_pre.assets[0].oi_eff_long_q;
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             observations: crank_observations(0),
@@ -1588,8 +1576,7 @@ fn v16_engine_selected_deep_insolvency_close_is_full_and_conserving() {
     env.svm.warp_to_slot(6);
     env.push_auth_mark_with_cu(6, 500);
     for p in [b, a] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,
                 observations: crank_observations(0),
@@ -1649,8 +1636,7 @@ fn v16_engine_selected_liquidation_fee_is_bounded_by_closed_position() {
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),

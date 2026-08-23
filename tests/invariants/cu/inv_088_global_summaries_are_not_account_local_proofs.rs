@@ -144,8 +144,7 @@ fn v16_program_per_asset_crank_isolation() {
     for slot in [10u64, 11] {
         env.svm.warp_to_slot(slot);
         for portfolio in [pa, pb] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),
@@ -536,8 +535,7 @@ fn v16_program_liquidation_updates_same_asset_summaries_without_clobbering_other
     for slot in 1..=LIQ_SLOT {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),

@@ -1033,18 +1033,12 @@ fn v16_attack_insurance_makes_winner_whole_at_resolution() {
         env.svm.warp_to_slot(slot);
         env.push_ewma_mark_with_cu(slot, mark);
         for acct in [lo, sh] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.crank_if_actionable(
+                acct,
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),
                 },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(acct, false),
-                ],
-                &[],
             );
         }
     }
@@ -1438,18 +1432,12 @@ fn v16_regression_roundtrip_recovers_fully_at_resolution() {
     );
     let crank_all = |env: &mut V16CuEnv, s: u64| {
         for p in [sh, lo] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.crank_if_actionable(
+                p,
                 ProgInstruction::PermissionlessCrank {
                     now_slot: s,
                     observations: crank_observations(0),
                 },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(p, false),
-                ],
-                &[],
             );
         }
     };

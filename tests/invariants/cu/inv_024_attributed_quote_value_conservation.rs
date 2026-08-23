@@ -125,8 +125,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
     for slot in [10u64, 11] {
         for ai in [0u16, 1] {
             for p in [pa, pb] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
+                let _ = env.send_crank_if_actionable(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
                         observations: crank_observations_for_assets(&[ai, 1 - ai]),
@@ -238,8 +237,7 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
         env.svm.warp_to_slot(slot);
         env.push_ewma_mark_with_cu(slot, mark);
         for acct in [long_account, short_account] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),
@@ -254,8 +252,7 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
         }
     }
     // Liquidate the insolvent short.
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             observations: crank_observations(0),
@@ -346,8 +343,7 @@ fn v16_attack_insurance_backstop_absorbs_bad_debt_no_underflow() {
         env.svm.warp_to_slot(slot);
         env.push_ewma_mark_with_cu(slot, mark);
         for acct in [long_account, short_account] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),
@@ -361,8 +357,7 @@ fn v16_attack_insurance_backstop_absorbs_bad_debt_no_underflow() {
             );
         }
     }
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             observations: crank_observations(0),
@@ -864,8 +859,7 @@ fn v16_attack_pnl_pos_tot_consistent_through_sign_flips() {
     );
     let crank_both = |env: &mut V16CuEnv, slot: u64| {
         for p in [sh, lo] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),
@@ -994,8 +988,7 @@ fn v16_attack_long_sequence_conservation() {
     for slot in [10u64, 11] {
         env.svm.warp_to_slot(slot);
         for pp in &p {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),
@@ -1032,8 +1025,7 @@ fn v16_attack_long_sequence_conservation() {
     for slot in 20u64..=25 {
         env.svm.warp_to_slot(slot);
         for pp in &p {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),
@@ -1119,8 +1111,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
         env.svm.warp_to_slot(slot);
         for ai in [0u16, 1] {
             for p in [pa, pb] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
+                let _ = env.send_crank_if_actionable(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
                         observations: crank_observations_for_assets(&[ai, 1 - ai]),
@@ -1190,8 +1181,7 @@ fn v16_attack_maintenance_fee_with_open_position_conserves() {
     let mut prev_cap = cap0;
     for slot in 1..=6u64 {
         env.svm.warp_to_slot(slot);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -1339,8 +1329,7 @@ fn v16_attack_funding_and_fee_combined_conserve() {
     for slot in 1..=6u64 {
         env.svm.warp_to_slot(slot);
         for p in [lo, sh] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),
@@ -1536,8 +1525,7 @@ fn v16_attack_max_leg_multi_asset_conserves() {
     // crank every asset; still conserves.
     env.svm.warp_to_slot(5);
     for ai in 0..N {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 5,
                 observations: crank_observations(ai),
@@ -1665,8 +1653,7 @@ fn v16_attack_sequence_with_liquidation_conserves() {
     for (slot, mark) in [(1u64, 300u64), (2, 800)] {
         env.svm.warp_to_slot(slot);
         env.push_ewma_mark_with_cu(slot, mark);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
@@ -1691,8 +1678,7 @@ fn v16_attack_sequence_with_liquidation_conserves() {
     check(&env, "after liquidation");
     // crank big, then cp trades (fresh activity post-liquidation).
     env.svm.warp_to_slot(3);
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    let _ = env.send_crank_if_actionable(
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
             observations: crank_observations(0),
@@ -1801,8 +1787,7 @@ fn v16_attack_multi_account_asymmetric_funding_conserves() {
     for slot in 1..=6u64 {
         env.svm.warp_to_slot(slot);
         for p in [l1, l2, sh] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),
@@ -1909,8 +1894,7 @@ fn v16_attack_cross_margin_netting_conserves() {
         &[&admin],
     );
     for ai in [0u16, 1] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 observations: crank_observations_for_assets(&[ai, 1 - ai]),
@@ -2693,8 +2677,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         );
         for ai in [0u16, 1] {
             for p in [victim, cp] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
+                let _ = env.send_crank_if_actionable(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
                         observations: crank_observations_for_assets(&[ai, 1 - ai]),

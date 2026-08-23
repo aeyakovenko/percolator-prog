@@ -1502,8 +1502,7 @@ fn v16_program_crank_future_now_slot_does_not_overaccrue() {
     env.svm.warp_to_slot(2);
     const LIE: u64 = 1_000_000;
     for acct in [lo, sh, lo] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: LIE,
                 observations: crank_observations(0),

@@ -204,8 +204,7 @@ fn v16_program_resolved_payout_secondary_rail_exhausts_shared_receipt() {
     for slot in [10u64, 11] {
         env.svm.warp_to_slot(slot);
         for portfolio in [loser, winner] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),

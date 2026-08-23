@@ -60,8 +60,7 @@ fn trigger_scope_probe_bankruptcy(
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_with_authority(1, creator, slot, mark);
         for portfolio in [long, short] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(1),
@@ -171,8 +170,7 @@ fn v16_program_unrelated_bankruptcy_preserves_backed_claim_and_owner_exit() {
 
         env.svm.warp_to_slot(6);
         for portfolio in [failed_short, failed_long, target] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: 6,
                     observations: crank_observations(1),
@@ -295,8 +293,7 @@ fn v16_attack_permissionless_asset_bankruptcy_does_not_freeze_base_trading() {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_with_authority(1, &creator, slot, mark);
         for portfolio in [long_account, short_account] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(1),
@@ -1022,8 +1019,7 @@ fn v16_attack_per_asset_funding_isolation() {
     for slot in 1..=4u64 {
         env.svm.warp_to_slot(slot);
         for p in [plo, psh] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
+            let _ = env.send_crank_if_actionable(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
                     observations: crank_observations(0),

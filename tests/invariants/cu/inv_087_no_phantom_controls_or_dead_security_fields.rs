@@ -1056,8 +1056,7 @@ fn v16_program_liquidation_cranker_share_policy_is_enforced_at_public_crank() {
     for slot in 1..=LIQ_SLOT {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_with_cu(slot, 2_000_000);
-        env.svm.expire_blockhash();
-        let _ = env.send(
+        let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
                 observations: crank_observations(0),
