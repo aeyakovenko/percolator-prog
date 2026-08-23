@@ -8,10 +8,14 @@
 //! composite arithmetic, crank time monotonicity, and same-publish-time replay tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! The all-provider matrices additionally cross legal composite transforms, coherent rewind,
+//! exact freshness boundaries, a real adverse-price liquidation with a subsequent owner trade
+//! exit, and composite shutdown/forced-exit/restart with old-provenance rejection and fresh trading.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! plus every additional verification method required by the charter. These public fixtures do
+//! not prove byte-parser equivalence or the full provider-by-lifecycle Cartesian product.
 
 use super::*;
 
@@ -3375,4 +3379,428 @@ fn v16_program_composite_freshness_boundaries_cross_all_provider_orders() {
         max_config_cu,
         max_crank_cu
     );
+}
+
+#[test]
+fn v16_program_composite_epochs_gate_real_liquidation_across_provider_roles() {
+    const INITIAL_PRICES_E6: [u64; 3] = [6_000_000, 2_000_000, 3_000_000];
+    const ADVERSE_PRICES_E6: [u64; 3] = [12_000_000, 2_000_000, 3_000_000];
+    const INITIAL_PRICE_E6: u64 = 1_000_000;
+    const TARGET_PRICE_E6: u64 = 2_000_000;
+    const MAX_STEPS: u64 = 40;
+    const PROVIDER_ORDERS: [[EpochMatrixProvider; 3]; 3] = [
+        [
+            EpochMatrixProvider::Pyth,
+            EpochMatrixProvider::Switchboard,
+            EpochMatrixProvider::Chainlink,
+        ],
+        [
+            EpochMatrixProvider::Switchboard,
+            EpochMatrixProvider::Chainlink,
+            EpochMatrixProvider::Pyth,
+        ],
+        [
+            EpochMatrixProvider::Chainlink,
+            EpochMatrixProvider::Pyth,
+            EpochMatrixProvider::Switchboard,
+        ],
+    ];
+
+    let mut max_oracle_cu = 0u64;
+    let mut max_liquidation_cu = 0u64;
+    for (world, providers) in PROVIDER_ORDERS.into_iter().enumerate() {
+        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+        env.update_liquidation_fee_policy_with_cu(5_000);
+        set_test_clock(&mut env, 1, 100);
+        let legs: Vec<EpochMatrixLeg> = (0..3)
+            .map(|leg_index| {
+                new_epoch_matrix_leg(
+                    &mut env,
+                    providers[leg_index],
+                    20_000 + world,
+                    leg_index,
+                    INITIAL_PRICES_E6[leg_index],
+                    100,
+                    1,
+                )
+            })
+            .collect();
+        let oracle_accounts: Vec<Pubkey> = legs.iter().map(|leg| leg.account).collect();
+        let mut feeds = [[0u8; 32]; 3];
+        for (index, leg) in legs.iter().enumerate() {
+            feeds[index] = leg.feed;
+        }
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            3,
+            ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            feeds,
+            &oracle_accounts,
+            1,
+            100,
+            0,
+            0,
+            1_000,
+            100,
+        )
+        .unwrap_or_else(|error| panic!("liquidation world {world} config: {error}"));
+        assert_eq!(
+            env.market_state().0.oracle_target_price_e6,
+            INITIAL_PRICE_E6
+        );
+
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let cranker_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        let cranker = env.create_portfolio(&cranker_owner);
+        env.deposit(&long_owner, long, 100_000_000);
+        env.deposit(&short_owner, short, 100_000);
+        env.deposit(&cranker_owner, cranker, 1_000);
+        env.trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            INITIAL_PRICE_E6,
+            0,
+        );
+
+        let vault_before = env.token_amount(env.vault);
+        let mut reached_liquidation = false;
+        for step in 1..=MAX_STEPS {
+            let slot = step + 1;
+            let publish_time = 100 + step as i64;
+            set_test_clock(&mut env, slot, publish_time);
+
+            let skew_index = step as usize % legs.len();
+            write_epoch_matrix_leg(
+                &mut env,
+                legs[skew_index],
+                ADVERSE_PRICES_E6[skew_index],
+                publish_time,
+                slot,
+            );
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let cranker_before = env.svm.get_account(&cranker).unwrap();
+            let skew_error = try_epoch_matrix_crank(&mut env, cranker, slot, &oracle_accounts)
+                .expect_err("a selected-leg epoch skew must reject before liquidation");
+            assert!(
+                skew_error.contains("Custom(27)"),
+                "liquidation world {world} step {step} returned wrong skew error: {skew_error}"
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(env.svm.get_account(&cranker).unwrap(), cranker_before);
+
+            for (index, leg) in legs.iter().enumerate() {
+                write_epoch_matrix_leg(
+                    &mut env,
+                    *leg,
+                    ADVERSE_PRICES_E6[index],
+                    publish_time,
+                    slot,
+                );
+            }
+            let oracle_cu = try_epoch_matrix_crank(&mut env, cranker, slot, &oracle_accounts)
+                .unwrap_or_else(|error| {
+                    panic!("liquidation world {world} coherent step {step}: {error}")
+                });
+            max_oracle_cu = max_oracle_cu.max(oracle_cu);
+            let _ = env.send_crank_if_actionable(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: Vec::new(),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(short, false),
+                ],
+                &[],
+            );
+            if health_cert(&env.portfolio_state(short)).certified_liq_deficit != 0 {
+                reached_liquidation = true;
+                break;
+            }
+        }
+        assert!(
+            reached_liquidation,
+            "coherent adverse composite never made world {world} genuinely liquidatable"
+        );
+        assert_eq!(env.market_state().0.oracle_target_price_e6, TARGET_PRICE_E6);
+
+        let cranker_capital_before = env.portfolio_state(cranker).capital.get();
+        let (_, group_before) = env.market_state();
+        let liquidation_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: env.svm.get_sysvar::<Clock>().slot,
+                    observations: Vec::new(),
+                },
+                vec![
+                    AccountMeta::new(cranker_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(short, false),
+                    AccountMeta::new(cranker, false),
+                ],
+                &[&cranker_owner],
+            )
+            .unwrap_or_else(|error| panic!("liquidation world {world}: {error}"));
+        max_liquidation_cu = max_liquidation_cu.max(liquidation_cu);
+        let (_, group_after) = env.market_state();
+        let cranker_reward = env
+            .portfolio_state(cranker)
+            .capital
+            .get()
+            .checked_sub(cranker_capital_before)
+            .expect("liquidation reward cannot reduce cranker capital");
+        assert!(cranker_reward > 0, "world {world} liquidation was vacuous");
+        assert!(
+            group_after.assets[0].oi_eff_short_q < group_before.assets[0].oi_eff_short_q,
+            "world {world} liquidation must reduce short OI"
+        );
+        assert_eq!(
+            health_cert(&env.portfolio_state(short)).certified_liq_deficit,
+            0,
+            "world {world} liquidation must restore current health"
+        );
+        assert_eq!(env.token_amount(env.vault), vault_before);
+        assert_eq!(group_after.vault as u64, vault_before);
+
+        let long_leg = active_leg_for_asset(&env.portfolio_state(long), 0);
+        let short_leg = active_leg_for_asset(&env.portfolio_state(short), 0);
+        let remaining_long = reference_current_epoch_effective_abs(&group_after, long_leg);
+        let remaining_short = reference_current_epoch_effective_abs(&group_after, short_leg);
+        assert_eq!(remaining_long, remaining_short);
+        assert!(remaining_long > 0 && remaining_long <= i128::MAX as u128);
+        env.trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            -(remaining_long as i128),
+            group_after.assets[0].effective_price,
+            0,
+        );
+        let (_, terminal_group) = env.market_state();
+        assert_eq!(terminal_group.assets[0].oi_eff_long_q, 0);
+        assert_eq!(terminal_group.assets[0].oi_eff_short_q, 0);
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
+        assert_eq!(terminal_group.vault as u64, env.token_amount(env.vault));
+    }
+    assert_cu_within(
+        "composite-provider liquidation oracle ingestion",
+        max_oracle_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_cu_within(
+        "composite-provider selected liquidation",
+        max_liquidation_cu,
+        CRANK_CU_LIMIT,
+    );
+    println!(
+        "composite liquidation lifecycle: {} provider-role worlds, oracle max {} CU, liquidation max {} CU",
+        PROVIDER_ORDERS.len(),
+        max_oracle_cu,
+        max_liquidation_cu
+    );
+}
+
+#[test]
+fn v16_program_composite_profile_shutdown_restart_clears_old_provenance() {
+    const INITIAL_PRICES_E6: [u64; 3] = [6_000_000, 2_000_000, 3_000_000];
+    const PRICE_E6: u64 = 1_000_000;
+    const SHUTDOWN_SLOT: u64 = 2;
+    const FORCE_CLOSE_SLOT: u64 = 7;
+    const RESTART_SLOT: u64 = 8;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE_E6,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    set_test_clock(&mut env, 1, 100);
+    let providers = [
+        EpochMatrixProvider::Pyth,
+        EpochMatrixProvider::Switchboard,
+        EpochMatrixProvider::Chainlink,
+    ];
+    let legs: Vec<EpochMatrixLeg> = (0..3)
+        .map(|index| {
+            new_epoch_matrix_leg(
+                &mut env,
+                providers[index],
+                30_000,
+                index,
+                INITIAL_PRICES_E6[index],
+                100,
+                1,
+            )
+        })
+        .collect();
+    let oracle_accounts: Vec<Pubkey> = legs.iter().map(|leg| leg.account).collect();
+    let mut feeds = [[0u8; 32]; 3];
+    for (index, leg) in legs.iter().enumerate() {
+        feeds[index] = leg.feed;
+    }
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        3,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        feeds,
+        &oracle_accounts,
+        1,
+        100,
+        0,
+        0,
+        100,
+        100,
+    )
+    .expect("configure three-provider shutdown profile");
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let keeper_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&long_owner, long, 2_000_000);
+    env.deposit(&short_owner, short, 2_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE_E6,
+        0,
+    );
+    let old_market_id = env.asset_market_id(0);
+    let vault_before = env.token_amount(env.vault);
+
+    set_test_clock(&mut env, SHUTDOWN_SLOT, 101);
+    write_epoch_matrix_leg(&mut env, legs[0], 12_000_000, 101, SHUTDOWN_SLOT);
+    let market_before_skew = env.svm.get_account(&env.market).unwrap();
+    let keeper_before_skew = env.svm.get_account(&keeper).unwrap();
+    let skew_error = try_epoch_matrix_crank(&mut env, keeper, SHUTDOWN_SLOT, &oracle_accounts)
+        .expect_err("pre-shutdown composite skew must reject");
+    assert!(skew_error.contains("Custom(27)"), "{skew_error}");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_skew
+    );
+    assert_eq!(env.svm.get_account(&keeper).unwrap(), keeper_before_skew);
+
+    env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_SHUTDOWN,
+        0,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    let shutdown_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, shutdown_group) = state::read_market(&shutdown_data).unwrap();
+    let shutdown_profile = state::read_asset_oracle_profile(&shutdown_data, 0).unwrap();
+    assert_eq!(
+        shutdown_group.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    assert_eq!(shutdown_group.assets[0].effective_price, PRICE_E6);
+    assert_eq!(shutdown_profile.oracle_target_price_e6, PRICE_E6);
+    assert_eq!(shutdown_profile.oracle_target_publish_time, 0);
+    assert_eq!(shutdown_profile.last_good_oracle_slot, SHUTDOWN_SLOT);
+
+    let recovery_before_tail = env.svm.get_account(&env.market).unwrap();
+    let keeper_before_tail = env.svm.get_account(&keeper).unwrap();
+    let _recovery_tail = try_epoch_matrix_crank(&mut env, keeper, SHUTDOWN_SLOT, &oracle_accounts)
+        .expect_err("Recovery cannot consume the old composite profile");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        recovery_before_tail
+    );
+    assert_eq!(env.svm.get_account(&keeper).unwrap(), keeper_before_tail);
+
+    let admin = Keypair::from_bytes(&env.admin.to_bytes()).expect("clone market admin");
+    set_test_clock(&mut env, 3, 102);
+    let before_early_restart = env.svm.get_account(&env.market).unwrap();
+    assert!(
+        env.try_restart_asset_oracle_with_authority(&admin, 0, 3, PRICE_E6)
+            .is_err(),
+        "restart with live positions must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_early_restart
+    );
+
+    let cranker = Keypair::new();
+    set_test_clock(&mut env, FORCE_CLOSE_SLOT, 106);
+    env.force_close_abandoned_asset_with_cu(&cranker, long, short, 0, FORCE_CLOSE_SLOT, POS_SCALE);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
+
+    set_test_clock(&mut env, RESTART_SLOT, 107);
+    env.try_restart_asset_oracle_with_authority(&admin, 0, RESTART_SLOT, PRICE_E6)
+        .expect("restart empty composite asset");
+    let restarted_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, restarted_group) = state::read_market(&restarted_data).unwrap();
+    let restarted_profile = state::read_asset_oracle_profile(&restarted_data, 0).unwrap();
+    assert_eq!(
+        restarted_group.assets[0].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_ne!(restarted_group.assets[0].market_id, old_market_id);
+    assert_eq!(restarted_group.assets[0].effective_price, PRICE_E6);
+    assert_eq!(
+        restarted_profile.oracle_mode,
+        percolator_prog::constants::ORACLE_MODE_MANUAL
+    );
+    assert_eq!(restarted_profile.oracle_leg_count, 0);
+    assert_eq!(restarted_profile.oracle_leg_flags, 0);
+    assert_eq!(restarted_profile.oracle_leg_feeds, [[0u8; 32]; 3]);
+    assert_eq!(restarted_profile.oracle_leg_prices_e6, [0u64; 3]);
+    assert_eq!(restarted_profile.oracle_leg_publish_times, [0i64; 3]);
+    assert_eq!(restarted_profile.oracle_target_price_e6, PRICE_E6);
+    assert_eq!(restarted_profile.oracle_target_publish_time, 0);
+
+    let before_old_tail = env.svm.get_account(&env.market).unwrap();
+    let keeper_before_old_tail = env.svm.get_account(&keeper).unwrap();
+    let _old_tail = try_epoch_matrix_crank(&mut env, keeper, RESTART_SLOT, &oracle_accounts)
+        .expect_err("old composite tail cannot attach to the restarted manual generation");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), before_old_tail);
+    assert_eq!(
+        env.svm.get_account(&keeper).unwrap(),
+        keeper_before_old_tail
+    );
+
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE_E6,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -(POS_SCALE as i128),
+        PRICE_E6,
+        0,
+    );
+    let (_, terminal_group) = env.market_state();
+    assert_eq!(terminal_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(terminal_group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(terminal_group.vault as u64, vault_before);
+    assert_eq!(env.token_amount(env.vault), vault_before);
 }
