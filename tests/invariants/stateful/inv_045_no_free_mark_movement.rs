@@ -48,6 +48,13 @@
 //! owners convert and withdraw fully. A flat stale winner's no-observation crank is required to
 //! reject with exact rollback before one authenticated asset observation recertifies it, making the
 //! public liveness precondition explicit instead of mistaking `NonProgress` for a funded lock.
+//! `v16_program_low_price_ewma_discovery_is_not_pinned_by_clock_first_cranks` crosses EWMA and
+//! hybrid-after-hours modes with all four trade routes, both movement directions, and trade-first
+//! versus clock-first landing schedules. Its 32 public worlds require identical mark, target,
+//! insurance, and owner-value outcomes; elapsed mark movement is nonzero, bounded by the configured
+//! maximum-dt horizon, and fully fee-backed. A second same-slot reduction cannot move the mark
+//! again, and both owners subsequently close every position. This proves that a permissionless
+//! clock-only crank cannot erase trade-discovery capacity by landing first in each slot.
 //! These tests exercise the deployed public wrapper with real SBF/LiteSVM account construction and
 //! assert economic state, token, rollback, liveness, or compute outcomes appropriate to the
 //! invariant.
@@ -614,6 +621,10 @@ fn run_valid_accepted_mark_route_sequence(
             case.landing_dt
         ));
     }
+    let mark_dt = landing_slot
+        .checked_sub(before_profile.mark_ewma_last_slot)
+        .ok_or_else(|| "accepted-mark landing preceded mark slot".to_string())?
+        .min(case.max_dt);
 
     let first = submit_accepted_mark_trade_after_route(
         &mut env,
@@ -626,7 +637,7 @@ fn run_valid_accepted_mark_route_sequence(
     let first_profile = env.primary_profile(0);
     let first_group = env.primary_market_state().1;
     let expected_accepted = if mode.updates_from_trade() {
-        accepted_mark_reference_clamp(case.anchor, case.target, case.cap_bps, asset_dt)
+        accepted_mark_reference_clamp(case.anchor, case.target, case.cap_bps, mark_dt)
     } else {
         before_group.assets[0].effective_price
     };
@@ -638,7 +649,7 @@ fn run_valid_accepted_mark_route_sequence(
             first_profile.mark_ewma_e6
         ));
     }
-    if (!mode.updates_from_trade() || asset_dt == 0)
+    if (!mode.updates_from_trade() || mark_dt == 0)
         && first_profile.mark_ewma_e6 != before_profile.mark_ewma_e6
     {
         return Err(format!(
@@ -646,7 +657,7 @@ fn run_valid_accepted_mark_route_sequence(
         ));
     }
     if mode.updates_from_trade()
-        && asset_dt != 0
+        && mark_dt != 0
         && case.target != case.anchor
         && first_profile.mark_ewma_e6 == before_profile.mark_ewma_e6
     {
@@ -985,6 +996,251 @@ fn v16_program_trade_driven_mark_route_orders_converge_economically() {
         stale_cpi_rejections, 32,
         "every no-CPI-to-CPI transition rejects atomically before public refresh"
     );
+    assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LowPriceCrankOrderOutcome {
+    mark_ewma_e6: u64,
+    mark_ewma_last_slot: u64,
+    raw_target_price: u64,
+    effective_price: u64,
+    insurance: u128,
+    pair_value_and_insurance: i128,
+    max_cu: u64,
+}
+
+fn run_low_price_crank_order(
+    mode: AcceptedMarkMode,
+    route: DiscoveryTradeRoute,
+    rises: bool,
+    crank_before_trade: bool,
+) -> Result<LowPriceCrankOrderOutcome, String> {
+    const ANCHOR: u64 = 100;
+    const ELAPSED_SLOTS: u64 = 9;
+    const CAP_BPS: u64 = 24;
+    const REDUCE_Q: i128 = POS_SCALE as i128;
+
+    let reported_price = if rises { 200 } else { 50 };
+    let reduce_q = if rises { REDUCE_Q } else { -REDUCE_Q };
+    let open_q = -reduce_q
+        .checked_mul(10)
+        .ok_or_else(|| "low-price setup quantity overflow".to_string())?;
+    let context = format!("{mode:?}/{route:?}/rises={rises}/clock-first={crank_before_trade}");
+
+    let mut seed = [0x5e; 32];
+    seed[0] ^= mode as u8;
+    seed[1] ^= route as u8;
+    seed[2] ^= u8::from(rises);
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: ANCHOR,
+            max_trading_fee_bps: 1_000,
+            max_price_move_bps_per_slot: CAP_BPS,
+            max_accrual_dt_slots: 20,
+            min_funding_lifetime_slots: 20,
+            ..MarketConfig::default()
+        },
+    );
+    let oracle = configure_accepted_mark_mode(&mut env, mode, ANCHOR)
+        .map_err(|error| format!("{context}: configure low-price world: {error}"))?;
+    if accepted_mark_route_is_cpi(route) {
+        env.set_matcher_spreads(1, 0, 0)
+            .map_err(|error| format!("{context}: configure setup matcher: {error}"))?;
+    }
+    let open = submit_accepted_mark_trade(&mut env, route, open_q, ANCHOR)
+        .map_err(|error| format!("{context}: open low-price matched position: {error}"))?;
+    let mut max_cu = open.compute_units;
+    let base_slot = prepare_accepted_mark_landing_dt(&mut env, mode, 0, oracle)
+        .map_err(|error| format!("{context}: prepare mark regime: {error}"))?;
+    let landing_slot = base_slot
+        .checked_add(ELAPSED_SLOTS)
+        .ok_or_else(|| format!("{context}: landing slot overflow"))?;
+
+    if crank_before_trade {
+        for slot in (base_slot + 1)..=landing_slot {
+            match mode {
+                AcceptedMarkMode::EwmaMark => env.warp_to_slot(slot),
+                AcceptedMarkMode::HybridAfterHours => {
+                    env.set_clock(slot, 1_000 + i64::try_from(slot).unwrap())
+                }
+                AcceptedMarkMode::AuthMark | AcceptedMarkMode::HybridFresh => {
+                    return Err(format!("{context}: mode is not trade-driven"));
+                }
+            }
+            let observations = vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: u8::from(mode == AcceptedMarkMode::HybridAfterHours),
+            }];
+            let crank = if mode == AcceptedMarkMode::HybridAfterHours {
+                env.crank_with_oracles(
+                    4,
+                    slot,
+                    observations,
+                    &[oracle.ok_or_else(|| format!("{context}: missing hybrid oracle"))?],
+                )
+            } else {
+                env.crank(4, slot, observations)
+            }
+            .map_err(|error| format!("{context}: advance engine clock at slot {slot}: {error}"))?;
+            max_cu = max_cu.max(crank.compute_units);
+            let group = env.primary_market_state().1;
+            let profile = env.primary_profile(0);
+            if profile.mark_ewma_e6 != ANCHOR
+                || group.assets[0].effective_price != ANCHOR
+                || group.assets[0].raw_oracle_target_price != ANCHOR
+            {
+                return Err(format!(
+                    "{context}: clock-only crank unexpectedly moved the low-price mark at slot {slot}: profile={profile:?}, asset={:?}",
+                    group.assets[0]
+                ));
+            }
+        }
+    } else {
+        let prepared = advance_accepted_mark_landing_from_current(&mut env, mode, ELAPSED_SLOTS)
+            .map_err(|error| format!("{context}: prepare trade-first landing: {error}"))?;
+        if prepared != landing_slot {
+            return Err(format!(
+                "{context}: prepared landing {prepared}, expected {landing_slot}"
+            ));
+        }
+    }
+
+    configure_accepted_mark_target_quote(&mut env, route, ANCHOR, reported_price)
+        .map_err(|error| format!("{context}: configure discovery quote: {error}"))?;
+    let before_profile = env.primary_profile(0);
+    let before_group = env.primary_market_state().1;
+    let before_pair_value = accepted_mark_pair_value_and_insurance(&env);
+    let before_supply = env.token_supply_observed();
+    let before_foreign = env.market_data(true);
+    let mark_dt = landing_slot
+        .checked_sub(before_profile.mark_ewma_last_slot)
+        .ok_or_else(|| format!("{context}: EWMA movement slot is in the future"))?;
+    let accepted = accepted_mark_reference_clamp(ANCHOR, reported_price, CAP_BPS, mark_dt);
+    let reduce = submit_accepted_mark_trade(&mut env, route, reduce_q, reported_price)
+        .map_err(|error| format!("{context}: submit low-price reduction: {error}"))?;
+    max_cu = max_cu.max(reduce.compute_units);
+    let moved_group = env.primary_market_state().1;
+    let moved_profile = env.primary_profile(0);
+    let low = ANCHOR.min(accepted);
+    let high = ANCHOR.max(accepted);
+    let moved_in_direction = if rises {
+        moved_profile.mark_ewma_e6 > ANCHOR
+    } else {
+        moved_profile.mark_ewma_e6 < ANCHOR
+    };
+    let move_bps = accepted_mark_reference_move_bps(ANCHOR, moved_profile.mark_ewma_e6);
+    let insurance_gain = moved_group
+        .insurance
+        .checked_sub(before_group.insurance)
+        .ok_or_else(|| format!("{context}: movement reduced insurance"))?;
+    let trade_notional = reduce_q
+        .unsigned_abs()
+        .checked_mul(accepted as u128)
+        .and_then(|value| value.checked_add(POS_SCALE - 1))
+        .ok_or_else(|| format!("{context}: trade notional overflow"))?
+        / POS_SCALE;
+    let max_side_notional = before_group.assets[0]
+        .oi_eff_long_q
+        .max(before_group.assets[0].oi_eff_short_q)
+        .checked_mul(ANCHOR as u128)
+        .and_then(|value| value.checked_add(POS_SCALE - 1))
+        .ok_or_else(|| format!("{context}: side notional overflow"))?
+        / POS_SCALE;
+    let required_fee = max_side_notional
+        .max(trade_notional)
+        .checked_mul(2)
+        .and_then(|value| value.checked_mul(move_bps as u128))
+        .and_then(|value| value.checked_add(9_999))
+        .ok_or_else(|| format!("{context}: movement fee overflow"))?
+        / 10_000;
+    if !moved_in_direction
+        || !(low..=high).contains(&moved_profile.mark_ewma_e6)
+        || moved_profile.mark_ewma_last_slot != landing_slot
+        || moved_group.assets[0].raw_oracle_target_price != moved_profile.mark_ewma_e6
+        || moved_group.assets[0].oi_eff_long_q != 9 * POS_SCALE
+        || moved_group.assets[0].oi_eff_short_q != 9 * POS_SCALE
+        || move_bps == 0
+        || insurance_gain < required_fee
+        || accepted_mark_pair_value_and_insurance(&env) != before_pair_value
+        || env.token_supply_observed() != before_supply
+        || env.market_data(true) != before_foreign
+        || max_cu >= crate::support::v16_svm::TX_CU_LIMIT
+    {
+        return Err(format!(
+            "{context}: low-price movement mismatch: accepted={accepted}, mark_dt={mark_dt}, move_bps={move_bps}, insurance_gain={insurance_gain}, required_fee={required_fee}, profile={moved_profile:?}, group={moved_group:?}, CU={max_cu}"
+        ));
+    }
+
+    configure_accepted_mark_target_quote(&mut env, route, ANCHOR, reported_price)
+        .map_err(|error| format!("{context}: configure exit quote: {error}"))?;
+    let close = submit_accepted_mark_trade(&mut env, route, reduce_q * 9, reported_price)
+        .map_err(|error| format!("{context}: complete same-slot owner exit: {error}"))?;
+    max_cu = max_cu.max(close.compute_units);
+    let group = env.primary_market_state().1;
+    let profile = env.primary_profile(0);
+    if profile.mark_ewma_e6 != moved_profile.mark_ewma_e6
+        || profile.mark_ewma_last_slot != moved_profile.mark_ewma_last_slot
+        || group.assets[0].raw_oracle_target_price != moved_group.assets[0].raw_oracle_target_price
+        || group.assets[0].oi_eff_long_q != 0
+        || group.assets[0].oi_eff_short_q != 0
+        || accepted_mark_pair_value_and_insurance(&env) != before_pair_value
+        || env.token_supply_observed() != before_supply
+        || env.market_data(true) != before_foreign
+        || max_cu >= crate::support::v16_svm::TX_CU_LIMIT
+    {
+        return Err(format!(
+            "{context}: complete exit changed the mark frame or left exposure: profile={profile:?}, group={group:?}, CU={max_cu}"
+        ));
+    }
+    crate::support::fuzz_model::assert_public_stock_census(&context, &env)?;
+    crate::support::fuzz_model::assert_public_encumbrance_census(&context, &env)?;
+    Ok(LowPriceCrankOrderOutcome {
+        mark_ewma_e6: profile.mark_ewma_e6,
+        mark_ewma_last_slot: profile.mark_ewma_last_slot,
+        raw_target_price: group.assets[0].raw_oracle_target_price,
+        effective_price: group.assets[0].effective_price,
+        insurance: group.insurance,
+        pair_value_and_insurance: accepted_mark_pair_value_and_insurance(&env),
+        max_cu,
+    })
+}
+
+#[test]
+fn v16_program_low_price_ewma_discovery_is_not_pinned_by_clock_first_cranks() {
+    let mut world_count = 0usize;
+    let mut max_cu = 0u64;
+    for mode in [
+        AcceptedMarkMode::EwmaMark,
+        AcceptedMarkMode::HybridAfterHours,
+    ] {
+        for route in DiscoveryTradeRoute::ALL {
+            for rises in [false, true] {
+                let context = format!("{mode:?}/{route:?}/rises={rises}");
+                let trade_first = run_low_price_crank_order(mode, route, rises, false)
+                    .unwrap_or_else(|error| panic!("{context}/trade-first: {error}"));
+                let crank_first = run_low_price_crank_order(mode, route, rises, true)
+                    .unwrap_or_else(|error| panic!("{context}/clock-first: {error}"));
+
+                assert_eq!(crank_first.mark_ewma_e6, trade_first.mark_ewma_e6);
+                assert_eq!(
+                    crank_first.mark_ewma_last_slot,
+                    trade_first.mark_ewma_last_slot
+                );
+                assert_eq!(crank_first.raw_target_price, trade_first.raw_target_price);
+                assert_eq!(crank_first.effective_price, trade_first.effective_price);
+                assert_eq!(crank_first.insurance, trade_first.insurance);
+                assert_eq!(
+                    crank_first.pair_value_and_insurance, trade_first.pair_value_and_insurance,
+                    "{context}: clock-first cranks erased elapsed paid mark capacity"
+                );
+                max_cu = max_cu.max(crank_first.max_cu).max(trade_first.max_cu);
+                world_count += 2;
+            }
+        }
+    }
+    assert_eq!(world_count, 32);
     assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
 }
 

@@ -62,6 +62,13 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
         0,
     );
     let insurance_before = env.market_state().1.insurance;
+    let coalition_before = [attacker_account, wash_long_account, wash_short_account]
+        .into_iter()
+        .map(|portfolio| {
+            let account = env.portfolio_state(portfolio);
+            i128::try_from(account.capital.get()).unwrap() + account.pnl.get()
+        })
+        .sum::<i128>();
 
     for slot in 2..=20u64 {
         env.svm.warp_to_slot(slot);
@@ -107,6 +114,7 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
             0,
         )
         .unwrap_or_else(|err| panic!("small wash trade at slot {slot} failed: {err}"));
+        let mark_after_open = env.market_state().0.mark_ewma_e6;
         // Target staging may block another risk increase, but cannot strand either side. Both
         // accounts can return to zero immediately while the just-published target is pending.
         env.svm.expire_blockhash();
@@ -121,14 +129,27 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
             0,
         )
         .unwrap_or_else(|err| panic!("wash exit at slot {slot} failed: {err}"));
+        let (cfg_after_exit, group_after_exit) = env.market_state();
+        assert_eq!(
+            cfg_after_exit.mark_ewma_e6, mark_after_open,
+            "slot {slot}: same-slot exit compounded or reversed the paid mark movement"
+        );
+        assert_eq!(
+            group_after_exit.assets[0].raw_oracle_target_price, mark_after_open,
+            "slot {slot}: exit staged a second target"
+        );
     }
 
     let (cfg_before_crank, group_before_crank) = env.market_state();
     let fees_paid = group_before_crank.insurance - insurance_before;
     assert!(group_before_crank.assets[0].effective_price > MARK);
+    assert!(
+        cfg_before_crank.mark_ewma_e6 >= group_before_crank.assets[0].effective_price,
+        "the paid upward target cannot reverse before catch-up"
+    );
     assert_eq!(
-        cfg_before_crank.mark_ewma_e6, group_before_crank.assets[0].effective_price,
-        "same-slot risk reduction must not leave a second uncommitted mark segment"
+        group_before_crank.assets[0].raw_oracle_target_price, cfg_before_crank.mark_ewma_e6,
+        "exactly one paid target may remain pending"
     );
     env.svm.warp_to_slot(21);
     for portfolio in [attacker_account, victim_account] {
@@ -141,8 +162,20 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
             },
         );
     }
+    let (cfg_after_crank, group_after_crank) = env.market_state();
+    assert_eq!(
+        group_after_crank.assets[0].effective_price, cfg_after_crank.mark_ewma_e6,
+        "the next bounded public crank must catch up the one pending segment"
+    );
 
     let attacker_pnl = env.portfolio_state(attacker_account).pnl.get();
+    let coalition_after = [attacker_account, wash_long_account, wash_short_account]
+        .into_iter()
+        .map(|portfolio| {
+            let account = env.portfolio_state(portfolio);
+            i128::try_from(account.capital.get()).unwrap() + account.pnl.get()
+        })
+        .sum::<i128>();
     assert!(
         attacker_pnl > 0,
         "wash prints must actually move the large book"
@@ -150,6 +183,10 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
     assert!(
         attacker_pnl as u128 <= fees_paid,
         "small wash fills must pay for the full passive-book transfer: pnl={attacker_pnl}, fees={fees_paid}"
+    );
+    assert!(
+        coalition_after <= coalition_before,
+        "the mark manipulator coalition must be EV-neutral or worse: {coalition_before}->{coalition_after}"
     );
 }
 
@@ -198,6 +235,14 @@ fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
         0,
     );
     let insurance_before = env.market_state().1.insurance;
+    let victim_capital_before = env.portfolio_state(victim_account).capital.get();
+    let coalition_before = [attacker_account, wash_long_account, wash_short_account]
+        .into_iter()
+        .map(|portfolio| {
+            let account = env.portfolio_state(portfolio);
+            i128::try_from(account.capital.get()).unwrap() + account.pnl.get()
+        })
+        .sum::<i128>();
 
     for slot in 2..=20u64 {
         env.svm.warp_to_slot(slot);
@@ -243,6 +288,7 @@ fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
             0,
         )
         .unwrap_or_else(|err| panic!("wash trade at slot {slot} failed: {err}"));
+        let mark_after_open = env.market_state().0.mark_ewma_e6;
         env.svm.expire_blockhash();
         env.try_trade_asset_with_cu(
             0,
@@ -255,15 +301,27 @@ fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
             0,
         )
         .unwrap_or_else(|err| panic!("wash exit at slot {slot} failed: {err}"));
+        let (cfg_after_exit, group_after_exit) = env.market_state();
+        assert_eq!(
+            cfg_after_exit.mark_ewma_e6, mark_after_open,
+            "slot {slot}: same-slot exit compounded or reversed the paid mark movement"
+        );
+        assert_eq!(
+            group_after_exit.assets[0].raw_oracle_target_price, mark_after_open,
+            "slot {slot}: exit staged a second target"
+        );
     }
 
     let (cfg_before_crank, group_before_crank) = env.market_state();
     let fees_paid = group_before_crank.insurance - insurance_before;
-    let victim_capital_before = env.portfolio_state(victim_account).capital.get();
     assert!(group_before_crank.assets[0].effective_price > MARK);
+    assert!(
+        cfg_before_crank.mark_ewma_e6 >= group_before_crank.assets[0].effective_price,
+        "the paid upward target cannot reverse before catch-up"
+    );
     assert_eq!(
-        cfg_before_crank.mark_ewma_e6,
-        group_before_crank.assets[0].effective_price
+        group_before_crank.assets[0].raw_oracle_target_price, cfg_before_crank.mark_ewma_e6,
+        "exactly one paid target may remain pending"
     );
 
     env.svm.warp_to_slot(21);
@@ -277,25 +335,43 @@ fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
             },
         );
     }
+    let (cfg_after_crank, group_after_crank) = env.market_state();
+    assert_eq!(
+        group_after_crank.assets[0].effective_price, cfg_after_crank.mark_ewma_e6,
+        "the next bounded public crank must catch up the one pending segment"
+    );
 
     let attacker_after = env.portfolio_state(attacker_account);
     let victim_after = env.portfolio_state(victim_account);
     let attacker_pnl = attacker_after.pnl.get();
+    let coalition_after = [attacker_account, wash_long_account, wash_short_account]
+        .into_iter()
+        .map(|portfolio| {
+            let account = env.portfolio_state(portfolio);
+            i128::try_from(account.capital.get()).unwrap() + account.pnl.get()
+        })
+        .sum::<i128>();
     assert!(attacker_pnl > 0);
     assert_eq!(
         victim_after.pnl.get(),
         0,
         "the losing short settles its negative PnL"
     );
+    let victim_loss = victim_capital_before
+        .checked_sub(victim_after.capital.get())
+        .expect("upward paid mark cannot credit the passive short");
     assert_eq!(
-        victim_after.capital.get(),
-        victim_capital_before,
-        "fee-backed mark movement must not debit the passive counterparty's principal"
+        victim_loss, attacker_pnl as u128,
+        "the passive loss and attacker claim must attribute exactly"
     );
     assert!(
         attacker_pnl as u128 <= fees_paid,
         "accumulated mark-created claim must remain covered by wash fees: pnl={}, fees={fees_paid}",
         attacker_pnl
+    );
+    assert!(
+        coalition_after <= coalition_before,
+        "the mark manipulator coalition must be EV-neutral or worse: {coalition_before}->{coalition_after}"
     );
 }
 

@@ -7454,10 +7454,12 @@ pub mod processor {
             .map_err(map_v16_error)?;
             // F-TRADENOCPI-FEE / F-NOCPI-MARK-FEE: request.exec_price is used by the engine only as
             // fee notional. In price-managed EWMA/stale-hybrid modes, the caller's reported print is
-            // also the mark-discovery input, so first normalize it to the same per-asset dt price
-            // envelope the engine will accept. Use that accepted print consistently for dynamic fee
-            // sizing, engine fee notional, and the EWMA update. Modes without trade-driven mark
-            // discovery fall back to the current effective mark.
+            // also the mark-discovery input. Normalize it against elapsed EWMA time, which only a
+            // paid mark movement may reset; a permissionless clock-only crank must not erase that
+            // capacity. Use the accepted print consistently for dynamic fee sizing, engine fee
+            // notional, and the EWMA update. The engine independently applies its canonical carried
+            // cap while the staged target catches up. Modes without trade-driven mark discovery fall
+            // back to the current effective mark.
             let fee_basis_price = accepted_reported_trade_price_view(
                 &oracle_profile,
                 &group,
@@ -14693,9 +14695,17 @@ pub mod processor {
             return Ok(effective_price);
         }
         // A same-slot trade can execute, but it cannot borrow a future slot of mark movement.
-        let dt_slots = asset_segment_dt_view(group, asset_index, now_slot)?;
+        // Apply elapsed discovery capacity from the current EWMA mark, bounded by the configured
+        // accrual horizon. Anchoring to lagging engine effective price lets a same-slot exit pull the
+        // mark back and create a second uncommitted segment. Engine `asset.slot_last` may also advance
+        // during a clock-only crank while the mark is unchanged; using it as the time anchor lets a
+        // cranker erase all sub-atom discovery capacity by landing first in every slot.
+        let dt_slots = now_slot
+            .checked_sub(profile.mark_ewma_last_slot)
+            .ok_or(PercolatorError::EngineStale)?
+            .min(group.header.config.max_accrual_dt_slots.get());
         Ok(oracle_v16::clamp_toward_engine_dt(
-            effective_price,
+            profile.mark_ewma_e6,
             reported_exec_price,
             group.header.config.max_price_move_bps_per_slot.get(),
             dt_slots,
