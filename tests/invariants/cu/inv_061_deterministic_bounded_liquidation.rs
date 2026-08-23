@@ -11,10 +11,11 @@
 //!
 //! The reset-carry matrix creates a denominator-crossing social-loss carry through public
 //! bankruptcies and owner reduction, then requires the sole public crank to liquidate the next
-//! unhealthy account below the CU ceiling, normalize the carry, reduce both effective-OI sides to
-//! zero, detach every prior-epoch leg, finalize both side resets, and retire the empty dynamic
-//! asset without changing SPL custody. Equal-risk liquidation permutations, arbitrary close
-//! partitions, and complete loss attribution remain.
+//! unhealthy account below the CU ceiling and normalize the carry. The remaining funded owners
+//! then submit stale raw-basis work budgets; each public reduction is independently checked to
+//! consume only effective OI, after which bounded cleanup, provider-receivable refill, both side
+//! finalizers, and retirement preserve SPL custody. Equal-risk liquidation permutations,
+//! arbitrary close partitions, and complete loss attribution remain.
 
 use super::*;
 
@@ -164,17 +165,28 @@ fn run_post_adl_transfer_world(probe_before_mark: bool) -> PostAdlTransferOutcom
     );
 
     let before_exit = env.market_state().1;
-    let raw_before_exit = active_leg_for_asset(&env.portfolio_state(short), 0)
-        .basis_pos_q
-        .unsigned_abs();
+    let leg_before_exit = active_leg_for_asset(&env.portfolio_state(short), 0);
+    let raw_before_exit = leg_before_exit.basis_pos_q.unsigned_abs();
+    let effective_before_exit =
+        reference_current_epoch_effective_abs(&before_exit, leg_before_exit);
     let exit_q = OPEN_Q / 4;
+    let expected_effective_after = effective_before_exit - exit_q;
+    let expected_raw_after = reference_raw_basis_for_current_effective(
+        &before_exit,
+        leg_before_exit,
+        expected_effective_after,
+    );
     let exit_cu = env.rebalance_reduce_with_cu(&short_owner, short, 0, exit_q);
     assert_cu_within("post-ADL short owner reduction", exit_cu, CUSTODY_CU_LIMIT);
     let after_exit = env.market_state().1;
     let final_raw_q = active_leg_for_asset(&env.portfolio_state(short), 0)
         .basis_pos_q
         .unsigned_abs();
-    assert_eq!(final_raw_q, raw_before_exit - exit_q);
+    assert_eq!(final_raw_q, expected_raw_after);
+    assert!(
+        raw_before_exit - final_raw_q >= exit_q,
+        "an effective-unit reduction must remove at least that much stale raw basis"
+    );
     assert_eq!(
         after_exit.assets[0].oi_eff_long_q,
         before_exit.assets[0].oi_eff_long_q - exit_q
@@ -312,7 +324,15 @@ fn v16_program_post_adl_transfer_rejects_phantom_value_and_preserves_owner_progr
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
 
     let before_exit = env.market_state().1;
+    let leg_before_exit = active_leg_for_asset(&env.portfolio_state(survivor), 0);
     let exit_q = effective_q.min(raw_q / 2).max(1);
+    let account_effective_before =
+        reference_current_epoch_effective_abs(&before_exit, leg_before_exit);
+    let expected_raw_after = reference_raw_basis_for_current_effective(
+        &before_exit,
+        leg_before_exit,
+        account_effective_before - exit_q,
+    );
     let exit_cu = env.rebalance_reduce_with_cu(&survivor_owner, survivor, 0, exit_q);
     assert_cu_within(
         "post-ADL survivor owner reduction",
@@ -324,7 +344,7 @@ fn v16_program_post_adl_transfer_rejects_phantom_value_and_preserves_owner_progr
         active_leg_for_asset(&env.portfolio_state(survivor), 0)
             .basis_pos_q
             .unsigned_abs(),
-        raw_q - exit_q
+        expected_raw_after
     );
     assert_eq!(
         after_exit.assets[0].oi_eff_long_q,
@@ -442,14 +462,28 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
         active_leg_for_asset(&env.portfolio_state(l1), ASSET as usize).b_rem,
         percolator::SOCIAL_LOSS_DEN - 121_035
     );
+    let before_owner_reduction = env.market_state().1;
+    let l1_leg_before = active_leg_for_asset(&env.portfolio_state(l1), ASSET as usize);
+    let l1_effective_before =
+        reference_current_epoch_effective_abs(&before_owner_reduction, l1_leg_before);
+    assert!(
+        l1_effective_before < l1_leg_before.basis_pos_q.unsigned_abs(),
+        "fixture must exercise non-unit ADL conversion"
+    );
     env.rebalance_reduce_with_cu(&l1o, l1, ASSET, 1_897_305);
     assert!(!has_active_leg_for_asset(
         &env.portfolio_state(l1),
         ASSET as usize
     ));
     let carry_state = env.market_state().1;
-    assert_eq!(carry_state.assets[ASSET as usize].oi_eff_long_q, 1_162_175);
-    assert_eq!(carry_state.assets[ASSET as usize].oi_eff_short_q, 1_162_175);
+    assert_eq!(
+        carry_state.assets[ASSET as usize].oi_eff_long_q,
+        before_owner_reduction.assets[ASSET as usize].oi_eff_long_q - l1_effective_before
+    );
+    assert_eq!(
+        carry_state.assets[ASSET as usize].oi_eff_short_q,
+        before_owner_reduction.assets[ASSET as usize].oi_eff_short_q - l1_effective_before
+    );
     assert_eq!(
         carry_state.assets[ASSET as usize].social_loss_dust_long_num,
         percolator::SOCIAL_LOSS_DEN - 121_035
@@ -538,6 +572,66 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
         &env.portfolio_state(s2),
         ASSET as usize
     ));
+    let liquidation_progressed = env.market_state().1;
+    assert_eq!(
+        liquidation_progressed.assets[ASSET as usize].oi_eff_long_q,
+        liquidation_progressed.assets[ASSET as usize].oi_eff_short_q
+    );
+    assert!(liquidation_progressed.assets[ASSET as usize].oi_eff_long_q > 0);
+
+    // The corrected engine no longer subtracts a raw ADL basis amount from pooled effective OI.
+    // Explicitly close the other live owners through owner-signed reductions, using an independent
+    // full-width oracle for each account's current effective quantity. Supplying retained raw basis
+    // is only a best-effort work budget; the engine clamps it to economically live matched OI.
+    let vault_before_matched_exits = env.svm.get_account(&env.vault).unwrap();
+    for (name, long_owner, long) in [
+        ("l2", &l2o, l2),
+        ("l3", &l3o, l3),
+        ("l4", &l4o, l4),
+        ("l5", &l5o, l5),
+    ] {
+        let before = env.market_state().1;
+        let long_leg = active_leg_for_asset(&env.portfolio_state(long), ASSET as usize);
+        let raw_before_exit = long_leg.basis_pos_q.unsigned_abs();
+        let exit_q = reference_current_epoch_effective_abs(&before, long_leg)
+            .min(before.assets[ASSET as usize].oi_eff_long_q)
+            .min(before.assets[ASSET as usize].oi_eff_short_q);
+        assert!(exit_q > 0);
+        let exit_cu = env.rebalance_reduce_with_cu(
+            long_owner,
+            long,
+            ASSET,
+            long_leg.basis_pos_q.unsigned_abs(),
+        );
+        assert_cu_within(
+            &format!("fractional carry {name} effective owner exit"),
+            exit_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        let after = env.market_state().1;
+        assert_eq!(
+            after.assets[ASSET as usize].oi_eff_long_q,
+            before.assets[ASSET as usize].oi_eff_long_q - exit_q
+        );
+        assert_eq!(
+            after.assets[ASSET as usize].oi_eff_short_q,
+            before.assets[ASSET as usize].oi_eff_short_q - exit_q
+        );
+        let raw_after_exit = if has_active_leg_for_asset(&env.portfolio_state(long), ASSET as usize)
+        {
+            active_leg_for_asset(&env.portfolio_state(long), ASSET as usize)
+                .basis_pos_q
+                .unsigned_abs()
+        } else {
+            0
+        };
+        assert!(raw_after_exit < raw_before_exit);
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before_matched_exits
+        );
+    }
+
     let progressed = env.market_state().1;
     assert_eq!(progressed.assets[ASSET as usize].oi_eff_long_q, 0);
     assert_eq!(progressed.assets[ASSET as usize].oi_eff_short_q, 0);
@@ -659,15 +753,28 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
     assert_eq!(env.market_state().1.pnl_pos_tot, 0);
 
     let source_domain = ASSET * 2 + 1;
-    let provider_ready = env.market_state().1;
-    let source = provider_ready.source_credit[source_domain as usize];
+    let provider_obligated = env.market_state().1;
+    let source = provider_obligated.source_credit[source_domain as usize];
     assert_eq!(source.positive_claim_bound_num, 0);
     assert_eq!(source.exact_positive_claim_num, 0);
-    assert_eq!(source.provider_receivable_num, 0);
-    assert_eq!(source.spent_backing_num, 0);
-    assert_ne!(source.fresh_reserved_backing_num, 0);
-    assert_eq!(source.fresh_reserved_backing_num % BOUND_SCALE, 0);
-    let provider_principal = source.fresh_reserved_backing_num / BOUND_SCALE;
+    assert!(source.provider_receivable_num > 0);
+    assert_eq!(source.provider_receivable_num, source.spent_backing_num);
+    assert_eq!(source.provider_receivable_num % BOUND_SCALE, 0);
+    let refill_atoms = source.provider_receivable_num / BOUND_SCALE;
+    let refill_expiry =
+        provider_obligated.source_backing_buckets[source_domain as usize].expiry_slot;
+    env.top_up_backing_bucket(source_domain, refill_atoms, refill_expiry);
+
+    let provider_ready = env.market_state().1;
+    let refilled_source = provider_ready.source_credit[source_domain as usize];
+    assert_eq!(refilled_source.provider_receivable_num, 0);
+    assert_eq!(refilled_source.spent_backing_num, source.spent_backing_num);
+    assert_eq!(
+        refilled_source.fresh_reserved_backing_num,
+        source.fresh_reserved_backing_num + source.provider_receivable_num
+    );
+    assert_eq!(refilled_source.fresh_reserved_backing_num % BOUND_SCALE, 0);
+    let provider_principal = refilled_source.fresh_reserved_backing_num / BOUND_SCALE;
     let provider_token = env.token_account(env.admin.pubkey(), 0);
     assert!(
         provider_ready.bankruptcy_hlock_active,
@@ -705,8 +812,9 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
         }
     );
     assert_eq!(
-        provider_settled.source_credit[source_domain as usize].spent_backing_num, 0,
-        "canonical B settlement must not manufacture provider debt"
+        provider_settled.source_credit[source_domain as usize].spent_backing_num,
+        source.spent_backing_num,
+        "principal withdrawal preserves the cumulative spent-backing audit"
     );
 
     let custody_before_retirement = env.svm.get_account(&env.vault).unwrap();
@@ -750,6 +858,11 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
     assert_eq!(
         retired.assets[ASSET as usize].explicit_unallocated_loss_short,
         0
+    );
+    assert_eq!(
+        retired.source_credit[source_domain as usize],
+        percolator::SourceCreditStateV16::EMPTY,
+        "retirement consumes only the historical spent-backing audit"
     );
     assert_eq!(
         env.svm.get_account(&env.vault).unwrap(),

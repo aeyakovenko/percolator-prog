@@ -2,16 +2,16 @@
 //!
 //! Normative obligation: every route uses the engine's pooled effective OI as the amount that can
 //! still be reduced, while raw per-portfolio basis remains an attribution record. A route that
-//! consumes the final effective OI cannot leave non-obligation raw basis in `Normal`: it must
-//! atomically enter `ResetPending`, after which one bounded public auto-crank detaches the
-//! prior-epoch residue without subtracting OI a second time.
+//! consumes a leg's final effective exposure must clear its retained raw basis in the same
+//! transition. If the side-wide A index still needs normalization after pooled OI reaches zero,
+//! the side enters `ResetPending` and one bounded permissionless finalizer restores the unit index.
 //!
 //! Evidence in this file (I/C/M over public routes): the crossed-trade and owner-signed unilateral
 //! matrices independently create partial ADL through ordinary deposits, trades, authenticated
 //! marks, maintenance, and permissionless cranks. Each then consumes exactly the remaining pooled
 //! OI through a different public route. Both require `(oi_long, oi_short) == (0, 0)`, a
-//! `ResetPending` side, exact rollback from direct routes that would double-subtract OI, one
-//! bounded no-observation crank that removes the raw residue, conserved SPL custody, and recovery
+//! `ResetPending` side, exact rollback from absent-leg retries and reset-time risk reopening, one
+//! bounded side finalizer, conserved SPL custody, and recovery
 //! of the owner's remaining capital. The liquidation matrix exercises the same zero-effective-OI
 //! boundary through public maintenance-fee pressure and permissionless liquidation. The stateful
 //! global oracle in `support/fuzz_model.rs` applies the same zero-OI/reset condition after every

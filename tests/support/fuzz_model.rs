@@ -1752,52 +1752,6 @@ impl ProgressRank {
     }
 }
 
-fn add_mod_with_carry(lhs: u128, rhs: u128, modulus: u128) -> (u128, u128) {
-    debug_assert!(modulus != 0 && lhs < modulus && rhs < modulus);
-    let gap = modulus - rhs;
-    if lhs >= gap {
-        (1, lhs - gap)
-    } else {
-        (0, lhs + rhs)
-    }
-}
-
-// Exact floor(lhs * rhs / denominator) without using the engine's U256 implementation or
-// overflowing u128. INV-030 uses this as an independent persisted-state oracle.
-fn reference_mul_div_floor(lhs: u128, rhs: u128, denominator: u128) -> Result<u128, String> {
-    if denominator == 0 {
-        return Err("source-credit reference division by zero".into());
-    }
-    let whole = lhs / denominator;
-    let mut quotient = whole
-        .checked_mul(rhs)
-        .ok_or("source-credit reference quotient overflow")?;
-    let reduced_lhs = lhs % denominator;
-    let mut remainder = 0u128;
-    let mut fractional = 0u128;
-    for bit in (0..u128::BITS).rev() {
-        fractional = fractional
-            .checked_mul(2)
-            .ok_or("source-credit reference fractional overflow")?;
-        let (double_carry, doubled) = add_mod_with_carry(remainder, remainder, denominator);
-        fractional = fractional
-            .checked_add(double_carry)
-            .ok_or("source-credit reference fractional carry overflow")?;
-        remainder = doubled;
-        if rhs & (1u128 << bit) != 0 {
-            let (add_carry, next) = add_mod_with_carry(remainder, reduced_lhs, denominator);
-            fractional = fractional
-                .checked_add(add_carry)
-                .ok_or("source-credit reference add carry overflow")?;
-            remainder = next;
-        }
-    }
-    quotient = quotient
-        .checked_add(fractional)
-        .ok_or("source-credit reference result overflow")?;
-    Ok(quotient)
-}
-
 pub(crate) fn assert_source_credit_rates(
     label: &str,
     group: &MarketGroupV16,
@@ -1837,7 +1791,7 @@ pub(crate) fn assert_source_credit_rates(
         {
             CREDIT_RATE_SCALE
         } else {
-            reference_mul_div_floor(
+            super::reference_math::mul_div_floor(
                 available,
                 CREDIT_RATE_SCALE,
                 source.positive_claim_bound_num,
@@ -2864,6 +2818,20 @@ impl ScenarioRunner {
                     return Err("successful rebalance exit made no position progress".into());
                 }
                 let account_after = self.env.primary_portfolio(user);
+                let (_, group_after) = self.env.primary_market_state();
+                let old_leg = Self::account_leg_for_asset(&account_before, asset)?
+                    .ok_or("rebalance exit missing pre-state leg")?;
+                let old_effective_q = Self::leg_effective_oi(&group_before, asset, old_leg, false)?;
+                let new_effective_q = Self::account_leg_for_asset(&account_after, asset)?
+                    .map(|leg| Self::leg_effective_oi(&group_after, asset, leg, false))
+                    .transpose()?
+                    .unwrap_or(0);
+                let reduced_effective_q = old_effective_q
+                    .checked_sub(new_effective_q)
+                    .ok_or("rebalance exit increased effective position")?;
+                if reduced_effective_q == 0 {
+                    return Err("successful rebalance exit made no effective progress".into());
+                }
                 self.apply_account_oi_transition(
                     &account_before,
                     &account_after,
@@ -2878,7 +2846,7 @@ impl ScenarioRunner {
                     } else {
                         SideV16::Short
                     },
-                    reduced,
+                    reduced_effective_q,
                     "owner rebalance exit",
                 )?;
                 self.positions[user][asset] = size_after;
@@ -3790,7 +3758,7 @@ impl ScenarioRunner {
             }
         } else if before.present {
             let ledger = group_after.resolved_payout_ledger;
-            let claimable = reference_mul_div_floor(
+            let claimable = super::reference_math::mul_div_floor(
                 before.terminal_positive_claim_face,
                 ledger.current_payout_rate_num,
                 ledger.current_payout_rate_den,
@@ -5191,6 +5159,58 @@ impl ScenarioRunner {
                 && mode != SideModeV16::ResetPending)
     }
 
+    fn leg_effective_oi(
+        group: &MarketGroupV16,
+        asset: usize,
+        leg: PortfolioLegV16,
+        allow_internal_exhausted_reset: bool,
+    ) -> Result<u128, String> {
+        if leg.basis_pos_q == 0
+            || Self::leg_oi_was_removed_by_reset(group, asset, leg, allow_internal_exhausted_reset)
+        {
+            return Ok(0);
+        }
+        let engine_asset = group
+            .assets
+            .get(asset)
+            .ok_or_else(|| format!("effective-OI oracle missing asset {asset}"))?;
+        let (current_a, current_epoch) = match leg.side {
+            SideV16::Long => (engine_asset.a_long, engine_asset.epoch_long),
+            SideV16::Short => (engine_asset.a_short, engine_asset.epoch_short),
+        };
+        if leg.epoch_snap != current_epoch || leg.a_basis == 0 || current_a > leg.a_basis {
+            return Err(format!(
+                "effective-OI oracle found invalid asset {asset} {:?} epoch/A: leg epoch {}, current epoch {}, current A {}, basis A {}",
+                leg.side, leg.epoch_snap, current_epoch, current_a, leg.a_basis,
+            ));
+        }
+        super::reference_math::mul_div_ceil(leg.basis_pos_q.unsigned_abs(), current_a, leg.a_basis)
+    }
+
+    fn leg_signed_effective_oi(
+        group: &MarketGroupV16,
+        asset: usize,
+        leg: Option<PortfolioLegV16>,
+        allow_internal_exhausted_reset: bool,
+    ) -> Result<i128, String> {
+        let Some(leg) = leg else {
+            return Ok(0);
+        };
+        let effective_q = i128::try_from(Self::leg_effective_oi(
+            group,
+            asset,
+            leg,
+            allow_internal_exhausted_reset,
+        )?)
+        .map_err(|_| "effective-OI oracle quantity exceeds signed range")?;
+        match leg.side {
+            SideV16::Long => Ok(effective_q),
+            SideV16::Short => effective_q
+                .checked_neg()
+                .ok_or_else(|| "effective-OI oracle sign overflow".into()),
+        }
+    }
+
     fn replace_expected_oi(
         &mut self,
         asset: usize,
@@ -5224,19 +5244,16 @@ impl ScenarioRunner {
         allow_internal_exhausted_reset: bool,
         context: &str,
     ) -> Result<(), String> {
+        let (_, group_after) = self.env.primary_market_state();
         for asset in 0..ASSET_COUNT {
             let old_leg = Self::account_leg_for_asset(account_before, asset)?;
             let new_leg = Self::account_leg_for_asset(account_after, asset)?;
             match (old_leg, new_leg) {
                 (None, None) => {}
                 (None, Some(new_leg)) => {
-                    self.replace_expected_oi(
-                        asset,
-                        new_leg.side,
-                        0,
-                        new_leg.basis_pos_q.unsigned_abs(),
-                        context,
-                    )?;
+                    let new_effective_q =
+                        Self::leg_effective_oi(&group_after, asset, new_leg, false)?;
+                    self.replace_expected_oi(asset, new_leg.side, 0, new_effective_q, context)?;
                 }
                 (Some(old_leg), None) => {
                     if !Self::leg_oi_was_removed_by_reset(
@@ -5245,13 +5262,25 @@ impl ScenarioRunner {
                         old_leg,
                         allow_internal_exhausted_reset,
                     ) {
-                        self.replace_expected_oi(
+                        let old_effective_q = Self::leg_effective_oi(
+                            group_before,
                             asset,
-                            old_leg.side,
-                            old_leg.basis_pos_q.unsigned_abs(),
-                            0,
-                            context,
+                            old_leg,
+                            allow_internal_exhausted_reset,
                         )?;
+                        let side_index = Self::side_index(old_leg.side);
+                        if old_effective_q > self.expected_effective_oi[asset][side_index] {
+                            return Err(format!(
+                                "{context} account clear exceeds the independent {:?} OI ledger for asset {asset}: \
+                                 raw={}, effective={old_effective_q}, ledger={}, before_asset={:?}, after_asset={:?}",
+                                old_leg.side,
+                                old_leg.basis_pos_q,
+                                self.expected_effective_oi[asset][side_index],
+                                group_before.assets[asset],
+                                group_after.assets[asset],
+                            ));
+                        }
+                        self.replace_expected_oi(asset, old_leg.side, old_effective_q, 0, context)?;
                     }
                 }
                 (Some(old_leg), Some(new_leg)) if old_leg.side == new_leg.side => {
@@ -5268,13 +5297,65 @@ impl ScenarioRunner {
                         ));
                     }
                     if !already_removed && old_leg.basis_pos_q != new_leg.basis_pos_q {
-                        self.replace_expected_oi(
+                        let old_effective_q = Self::leg_effective_oi(
+                            group_before,
                             asset,
-                            old_leg.side,
-                            old_leg.basis_pos_q.unsigned_abs(),
-                            new_leg.basis_pos_q.unsigned_abs(),
-                            context,
+                            old_leg,
+                            allow_internal_exhausted_reset,
                         )?;
+                        let new_effective_q =
+                            Self::leg_effective_oi(&group_after, asset, new_leg, false)?;
+                        let side_index = Self::side_index(old_leg.side);
+                        let ledger_before = self.expected_effective_oi[asset][side_index];
+                        let deployed_before = match old_leg.side {
+                            SideV16::Long => group_before.assets[asset].oi_eff_long_q,
+                            SideV16::Short => group_before.assets[asset].oi_eff_short_q,
+                        };
+                        let deployed_after = match old_leg.side {
+                            SideV16::Long => group_after.assets[asset].oi_eff_long_q,
+                            SideV16::Short => group_after.assets[asset].oi_eff_short_q,
+                        };
+                        let exhausted_rounding_residue = old_effective_q.checked_sub(ledger_before)
+                            == Some(1)
+                            && deployed_before == ledger_before
+                            && deployed_after == 0
+                            && new_effective_q == 0
+                            && new_leg.basis_pos_q != 0
+                            && Self::leg_oi_was_removed_by_reset(
+                                &group_after,
+                                asset,
+                                new_leg,
+                                false,
+                            );
+                        if old_effective_q > ledger_before && !exhausted_rounding_residue {
+                            return Err(format!(
+                                "{context} account resize exceeds the independent {:?} OI ledger for asset {asset}: \
+                                 raw={}->{}, effective={old_effective_q}->{new_effective_q}, ledger={ledger_before}, \
+                                 before_asset={:?}, after_asset={:?}",
+                                old_leg.side,
+                                old_leg.basis_pos_q,
+                                new_leg.basis_pos_q,
+                                group_before.assets[asset],
+                                group_after.assets[asset],
+                            ));
+                        }
+                        if exhausted_rounding_residue {
+                            self.replace_expected_oi(
+                                asset,
+                                old_leg.side,
+                                ledger_before,
+                                0,
+                                context,
+                            )?;
+                        } else {
+                            self.replace_expected_oi(
+                                asset,
+                                old_leg.side,
+                                old_effective_q,
+                                new_effective_q,
+                                context,
+                            )?;
+                        }
                     }
                 }
                 (Some(old_leg), Some(new_leg)) => {
@@ -5284,21 +5365,17 @@ impl ScenarioRunner {
                         old_leg,
                         allow_internal_exhausted_reset,
                     ) {
-                        self.replace_expected_oi(
+                        let old_effective_q = Self::leg_effective_oi(
+                            group_before,
                             asset,
-                            old_leg.side,
-                            old_leg.basis_pos_q.unsigned_abs(),
-                            0,
-                            context,
+                            old_leg,
+                            allow_internal_exhausted_reset,
                         )?;
+                        self.replace_expected_oi(asset, old_leg.side, old_effective_q, 0, context)?;
                     }
-                    self.replace_expected_oi(
-                        asset,
-                        new_leg.side,
-                        0,
-                        new_leg.basis_pos_q.unsigned_abs(),
-                        context,
-                    )?;
+                    let new_effective_q =
+                        Self::leg_effective_oi(&group_after, asset, new_leg, false)?;
+                    self.replace_expected_oi(asset, new_leg.side, 0, new_effective_q, context)?;
                 }
             }
         }
@@ -5338,6 +5415,7 @@ impl ScenarioRunner {
             ));
         }
         let account_after = self.env.primary_portfolio(actor);
+        let (_, group_after) = self.env.primary_market_state();
         let observed = observed_positions(&account_after)?;
         let mut unilateral_reductions = Vec::new();
         for (asset, new) in observed.into_iter().enumerate() {
@@ -5346,37 +5424,55 @@ impl ScenarioRunner {
                 .checked_sub(old)
                 .ok_or("observed account position delta overflow")?;
             let expected = expected_deltas[asset];
-            let ordinary_post = old
+            let old_leg = Self::account_leg_for_asset(account_before, asset)?;
+            let new_leg = Self::account_leg_for_asset(&account_after, asset)?;
+            let old_effective = Self::leg_signed_effective_oi(
+                group_before,
+                asset,
+                old_leg,
+                allow_unspecified_reduction,
+            )?;
+            let new_effective = Self::leg_signed_effective_oi(&group_after, asset, new_leg, false)?;
+            let ordinary_post = old_effective
                 .checked_add(expected)
-                .ok_or("expected account position overflow")?;
-            if new == ordinary_post {
+                .ok_or("expected effective account position overflow")?;
+            let prior_reset_cleanup =
+                Self::prior_reset_cleanup_eligible(account_before, group_before, asset)
+                    && new_effective == expected;
+            if new_effective == ordinary_post && !prior_reset_cleanup {
+                self.protocol_positions[asset] = self.protocol_positions[asset]
+                    .checked_sub(delta)
+                    .ok_or("matched effective-position attribution overflow")?;
                 self.positions[actor][asset] = new;
                 continue;
             }
-            let prior_reset_cleanup =
-                Self::prior_reset_cleanup_eligible(account_before, group_before, asset)
-                    && new == expected;
-            let same_side_or_flat = (old > 0 && new >= 0) || (old < 0 && new <= 0);
-            let strict_reduction =
-                old != 0 && same_side_or_flat && new.unsigned_abs() < old.unsigned_abs();
+            let same_side_or_flat = (old_effective > 0 && new_effective >= 0)
+                || (old_effective < 0 && new_effective <= 0);
+            let strict_reduction = old_effective != 0
+                && same_side_or_flat
+                && new_effective.unsigned_abs() < old_effective.unsigned_abs();
             let liquidation_reduction =
                 expected == 0 && allow_unspecified_reduction && strict_reduction;
             if !prior_reset_cleanup && !liquidation_reduction {
                 return Err(format!(
-                    "{context} changed actor {actor} asset {asset} from {old} to {new} (delta \
-                     {delta}) instead of signed post-state {ordinary_post}; no liquidation or \
-                     prior-reset witness explains the difference"
+                    "{context} changed actor {actor} asset {asset} effective position from \
+                     {old_effective} to {new_effective} (raw {old}->{new}) instead of signed \
+                     effective post-state {ordinary_post}; no liquidation or prior-reset witness \
+                     explains the difference"
                 ));
             }
-            let unilateral_delta = delta
-                .checked_sub(expected)
-                .ok_or("unilateral position delta overflow")?;
             self.protocol_positions[asset] = self.protocol_positions[asset]
-                .checked_sub(unilateral_delta)
+                .checked_sub(delta)
                 .ok_or("protocol unilateral-position attribution overflow")?;
             self.positions[actor][asset] = new;
             if !prior_reset_cleanup {
-                let reduced = old.unsigned_abs() - new.unsigned_abs();
+                let reduced = old_effective
+                    .unsigned_abs()
+                    .checked_sub(new_effective.unsigned_abs())
+                    .ok_or("liquidation increased effective position")?;
+                if reduced == 0 {
+                    return Err("liquidation changed raw basis without effective progress".into());
+                }
                 unilateral_reductions.push((
                     asset,
                     if old > 0 {
@@ -21290,8 +21386,60 @@ pub fn reproduce_trade_driven_liquidation_reward(
         env.crank(actor, trade_slot, Vec::new())
             .map_err(|error| format!("{mode:?} {route:?} refresh wash actor {actor}: {error}"))?;
     }
-    execute_trade_route(&mut env, route, 2, 3, 0, -TINY_Q, queued_mark, 0)
-        .map_err(|error| format!("{mode:?} {route:?} close wash pair: {error}"))?;
+    let (_, refreshed_group) = env.primary_market_state();
+    let mut effective_wash_q = [0u128; 2];
+    for (index, actor) in [2usize, 3].into_iter().enumerate() {
+        let leg = decoded_legs(&env.primary_portfolio(actor))
+            .into_iter()
+            .find(|leg| leg.active && leg.asset_index == 0)
+            .ok_or_else(|| format!("{mode:?} {route:?} wash actor {actor} lost its live leg"))?;
+        effective_wash_q[index] =
+            ScenarioRunner::leg_effective_oi(&refreshed_group, 0, leg, false)?;
+    }
+    let matched_close_q = effective_wash_q[0].min(effective_wash_q[1]);
+    if matched_close_q == 0 {
+        return Err(format!(
+            "{mode:?} {route:?} wash close became vacuous after ADL: {effective_wash_q:?}"
+        ));
+    }
+    let matched_close_q = i128::try_from(matched_close_q)
+        .map_err(|_| "PR 280 matched effective close exceeds signed range")?;
+    let close_price = refreshed_group.assets[0].effective_price;
+    execute_trade_route(&mut env, route, 2, 3, 0, -matched_close_q, close_price, 0)
+        .map_err(|error| format!("{mode:?} {route:?} close effective wash pair: {error}"))?;
+
+    for actor in [2usize, 3] {
+        for _ in 0..4 {
+            let Some(leg) = decoded_legs(&env.primary_portfolio(actor))
+                .into_iter()
+                .find(|leg| leg.active && leg.asset_index == 0)
+            else {
+                break;
+            };
+            let (_, group) = env.primary_market_state();
+            let effective_q = ScenarioRunner::leg_effective_oi(&group, 0, leg, false)?;
+            if effective_q == 0 {
+                env.crank(actor, trade_slot, Vec::new()).map_err(|error| {
+                    format!("{mode:?} {route:?} detach zero-effective wash actor {actor}: {error}")
+                })?;
+            } else {
+                env.rebalance_reduce(actor, 0, effective_q)
+                    .map_err(|error| {
+                        format!(
+                            "{mode:?} {route:?} reduce residual wash actor {actor} by {effective_q}: {error}"
+                        )
+                    })?;
+            }
+        }
+        if decoded_legs(&env.primary_portfolio(actor))
+            .into_iter()
+            .any(|leg| leg.active && leg.asset_index == 0)
+        {
+            return Err(format!(
+                "{mode:?} {route:?} bounded effective exit left wash actor {actor} positioned"
+            ));
+        }
+    }
     for actor in [2, 3] {
         let pnl = env.primary_portfolio(actor).pnl.get();
         if pnl > 0 {

@@ -95,11 +95,11 @@ INV-035	bankruptcy-residual/cross-domain-b	v16_program_two_asset_bankruptcy_pres
 INV-053	full-refresh/omitted-later-leg	v16_program_full_refresh_equivalence_rejects_omitted_rescue_liquidation	liquidation-certificate-cannot-be-healthier-than-full-refresh	220,366
 INV-053	full-refresh/stale-later-mark	v16_program_stale_refresh_scans_all_live_legs_for_pending_mark	liquidation-certificate-cannot-be-healthier-than-full-refresh	220,366
 INV-061	resolved-adl/close-order	v16_program_resolved_adl_close_order_matrix_preserves_funded_exits	funded-resolved-adl-winner-has-bounded-public-exit	216
-INV-061	bankruptcy/reset-carry-liquidation	v16_program_reset_carry_liquidation_matrix_preserves_progress	fractional-reset-carry-cannot-block-permissionless-liquidation	218
+INV-061	bankruptcy/reset-carry-liquidation	v16_program_reset_carry_liquidation_matrix_preserves_progress	fractional-reset-carry-cannot-block-liquidation-effective-owner-exits-or-provider-settlement	218
 INV-061	post-adl/split-transfer-extraction	v16_program_post_adl_transfer_extraction_is_rejected_before_backing_drain	post-adl-split-cannot-increase-withdrawable-backing-funded-value	250
-INV-073	partial-adl/exact-effective-reduction	v16_program_unilateral_adl_effective_exit_matrix_preserves_bounded_cleanup	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	268
-INV-073	crossed-adl/exact-effective-trade	v16_program_crossed_adl_effective_exit_matrix_preserves_bounded_cleanup	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	266
-INV-073	partial-adl/recovery-force-close	v16_program_recovery_residue_matrix_clears_abandoned_owner_residue	partial-adl-recovery-residue-has-permissionless-bounded-cleanup	203
+INV-073	partial-adl/exact-effective-reduction	v16_program_unilateral_adl_effective_exit_matrix_preserves_bounded_cleanup	exact-effective-owner-exit-clears-retained-basis-and-leaves-bounded-side-finalization	268
+INV-073	crossed-adl/exact-effective-trade	v16_program_crossed_adl_effective_exit_matrix_preserves_bounded_cleanup	exact-effective-crossed-exit-clears-retained-basis-and-leaves-bounded-side-finalization	266
+INV-073	partial-adl/recovery-force-close	v16_program_recovery_residue_matrix_clears_abandoned_owner_residue	partial-adl-recovery-effective-close-clears-both-legs-in-one-bounded-call	203
 INV-073	social-loss/fractional-carry-exit-routes	v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit	fractional-social-loss-carry-cannot-lock-funded-owner-exit	217
 INV-073	recovery/fragmented-opposite-oi	v16_program_fragmented_recovery_pair_matrix_clears_every_fragment	fragmented-recovery-must-have-a-permissionless-pairwise-close-path	228
 INV-073	recovery/forfeit-order-loss-durability	v16_program_recovery_forfeit_orders_preserve_loss_and_terminal_exit	forfeit-order-cannot-lock-provider-backed-recovery	371

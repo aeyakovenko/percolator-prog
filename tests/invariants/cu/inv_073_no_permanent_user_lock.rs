@@ -1096,6 +1096,11 @@ fn v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit() 
     for route in [0u8, 1] {
         let (mut env, l2o, l2, s2o, s2) = fractional_social_loss_exit_fixture();
         let before = env.market_state().1;
+        let l2_leg_before = active_leg_for_asset(&env.portfolio_state(l2), 0);
+        let exit_q = reference_current_epoch_effective_abs(&before, l2_leg_before)
+            .min(before.assets[0].oi_eff_long_q)
+            .min(before.assets[0].oi_eff_short_q);
+        assert!(exit_q > 0 && exit_q <= POS_SCALE);
         let fixed_vault = env.svm.get_account(&env.vault).unwrap();
         env.svm.expire_blockhash();
         let cu = if route == 0 {
@@ -1104,7 +1109,7 @@ fn v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit() 
                     portfolio_id: env.portfolio_id(l2),
                     position_epoch: env.portfolio_position_epoch(l2),
                     asset_index: 0,
-                    reduce_q: POS_SCALE,
+                    reduce_q: exit_q,
                 },
                 vec![
                     AccountMeta::new(l2o.pubkey(), true),
@@ -1115,7 +1120,7 @@ fn v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit() 
             )
             .expect("fractional carry must not block owner-signed reduction")
         } else {
-            env.try_trade_asset_with_cu(0, &l2o, l2, &s2o, s2, -(POS_SCALE as i128), 5, 0)
+            env.try_trade_asset_with_cu(0, &l2o, l2, &s2o, s2, -(exit_q as i128), 5, 0)
                 .expect("fractional carry must not block a bilateral exit trade")
         };
         assert_cu_within(
@@ -1134,16 +1139,13 @@ fn v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit() 
         let after = env.market_state().1;
         assert_eq!(
             after.assets[0].oi_eff_long_q,
-            before.assets[0].oi_eff_long_q - POS_SCALE
+            before.assets[0].oi_eff_long_q - exit_q
         );
         assert_eq!(
             after.assets[0].oi_eff_short_q,
-            before.assets[0].oi_eff_short_q - POS_SCALE
+            before.assets[0].oi_eff_short_q - exit_q
         );
         assert!(!has_active_leg_for_asset(&env.portfolio_state(l2), 0));
-        if route == 1 {
-            assert!(!has_active_leg_for_asset(&env.portfolio_state(s2), 0));
-        }
         assert_eq!(after.assets[0].social_loss_dust_long_num, 0);
         assert_eq!(after.assets[0].explicit_unallocated_loss_long, 1);
         assert_eq!(env.svm.get_account(&env.vault).unwrap(), fixed_vault);
@@ -1221,55 +1223,38 @@ fn v16_program_recovery_residue_matrix_clears_abandoned_owner_residue() {
             .expect("authenticated shutdown enters asset Recovery");
         env.svm.warp_to_slot(8);
         let cranker = Keypair::new();
+        let long_epoch_before_close = env.portfolio_position_epoch(long);
+        let short_epoch_before_close = env.portfolio_position_epoch(short);
         env.svm.expire_blockhash();
-        env.try_force_close_abandoned_asset_with_cu(&cranker, long, short, 0, 8, 2 * POS_SCALE)
-            .expect("first permissionless close consumes the matched quantity");
+        let close_cu = env
+            .try_force_close_abandoned_asset_with_cu(&cranker, long, short, 0, 8, 2 * POS_SCALE)
+            .expect("permissionless close consumes the exact effective exposure");
+        assert_cu_within(
+            "partial-ADL Recovery effective close",
+            close_cu,
+            CUSTODY_CU_LIMIT,
+        );
 
         let group = env.market_state().1;
         let long_state = env.portfolio_state(long);
         assert_eq!(group.assets[0].oi_eff_long_q, 0);
         assert_eq!(group.assets[0].oi_eff_short_q, 0);
-        assert_eq!(
-            active_leg_for_asset(&long_state, 0).basis_pos_q,
-            (2 * POS_SCALE - matched_oi) as i128
-        );
+        assert_eq!(group.assets[0].mode_long, SideModeV16::ResetPending);
+        assert!(!has_active_leg_for_asset(&long_state, 0));
         assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
         assert!(long_state.capital.get() != 0 || long_state.pnl.get() != 0);
-
-        let long_capital_before_cleanup = long_state.capital.get();
-        let long_pnl_before_cleanup = long_state.pnl.get();
-        let long_epoch_before_cleanup = env.portfolio_position_epoch(long);
-        let short_epoch_before_cleanup = env.portfolio_position_epoch(short);
-        let vault_before_cleanup = env.market_state().1.vault;
-
-        env.svm.expire_blockhash();
-        let cleanup_cu = env
-            .try_force_close_abandoned_asset_with_cu(
-                &cranker,
-                long,
-                short,
-                0,
-                8,
-                percolator::MAX_VAULT_TVL,
-            )
-            .expect("zero-OI Recovery residue must detach without its owner");
-        assert_cu_within(
-            "partial-ADL Recovery singleton cleanup",
-            cleanup_cu,
-            CUSTODY_CU_LIMIT,
-        );
-        assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
-        assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
         assert_eq!(
             env.portfolio_position_epoch(long),
-            long_epoch_before_cleanup + 1,
-            "the changed position episode advances exactly once"
+            long_epoch_before_close + 1
         );
         assert_eq!(
             env.portfolio_position_epoch(short),
-            short_epoch_before_cleanup,
-            "the already-flat counterparty episode is unchanged"
+            short_epoch_before_close + 1
         );
+
+        let long_capital_before_cleanup = long_state.capital.get();
+        let long_pnl_before_cleanup = long_state.pnl.get();
+        let vault_before_cleanup = env.market_state().1.vault;
 
         let finalize_cu = env.finalize_reset_side_with_cu(0, 0);
         assert_cu_within(
@@ -1530,13 +1515,14 @@ pub(super) fn assert_inv_051_crossed_adl_effective_exit_matrix_preserves_bounded
         .expect("exact-effective crossed reduction");
 
         let crossed = env.market_state().1;
-        let residual = active_leg_for_asset(&env.portfolio_state(survivor), 0)
-            .basis_pos_q
-            .unsigned_abs();
         assert_eq!(crossed.assets[0].oi_eff_long_q, 0);
         assert_eq!(crossed.assets[0].oi_eff_short_q, 0);
         assert_eq!(crossed.assets[0].mode_long, SideModeV16::ResetPending);
-        assert!(residual > 0);
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(survivor), 0));
+        assert!(!has_active_leg_for_asset(
+            &env.portfolio_state(counterparty),
+            0
+        ));
         assert!(env.portfolio_state(survivor).capital.get() > 0);
 
         let fixed_market = env.svm.get_account(&env.market).unwrap();
@@ -1547,7 +1533,7 @@ pub(super) fn assert_inv_051_crossed_adl_effective_exit_matrix_preserves_bounded
                 portfolio_id: env.portfolio_id(survivor),
                 position_epoch: env.portfolio_position_epoch(survivor),
                 asset_index: 0,
-                reduce_q: residual,
+                reduce_q: 1,
             },
             vec![
                 AccountMeta::new(survivor_owner.pubkey(), true),
@@ -1568,7 +1554,7 @@ pub(super) fn assert_inv_051_crossed_adl_effective_exit_matrix_preserves_bounded
             counterparty,
             &survivor_owner,
             survivor,
-            residual as i128,
+            1,
             PRICE,
             0,
         );
@@ -1580,29 +1566,18 @@ pub(super) fn assert_inv_051_crossed_adl_effective_exit_matrix_preserves_bounded
             counterparty_before
         );
 
-        env.svm.expire_blockhash();
-        let cleanup_cu = env
-            .send(
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: 35,
-                    observations: vec![],
-                },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(survivor, false),
-                ],
-                &[],
-            )
-            .expect("one public crank must clear the crossed zero-OI residue");
+        let cleanup_cu = env.finalize_reset_side_with_cu(0, 0);
         assert_cu_within(
-            "crossed zero-OI residue cleanup",
+            "crossed zero-OI side-reset finalization",
             cleanup_cu,
-            CRANK_CU_LIMIT,
+            CUSTODY_CU_LIMIT,
         );
         let cleaned = env.portfolio_state(survivor);
         assert!(!has_active_leg_for_asset(&cleaned, 0));
-        assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 0);
+        let reset_done = env.market_state().1;
+        assert_eq!(reset_done.assets[0].oi_eff_long_q, 0);
+        assert_eq!(reset_done.assets[0].mode_long, SideModeV16::Normal);
+        assert_eq!(reset_done.assets[0].a_long, ADL_ONE);
         let withdrawable = cleaned.capital.get();
         if withdrawable > 0 {
             let destination = env.withdraw(&survivor_owner, survivor, withdrawable);
@@ -1682,10 +1657,9 @@ pub(super) fn assert_inv_051_unilateral_adl_effective_exit_matrix_preserves_boun
         assert_eq!(reduced.assets[0].oi_eff_long_q, 0);
         assert_eq!(reduced.assets[0].oi_eff_short_q, 0);
 
-        let residual_before = active_leg_for_asset(&env.portfolio_state(long), 0).basis_pos_q;
-        assert!(residual_before > 0);
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
         assert_eq!(reduced.assets[0].mode_long, SideModeV16::ResetPending);
-        assert_eq!(reduced.assets[0].stored_pos_count_long, 1);
+        assert_eq!(reduced.assets[0].stored_pos_count_long, 0);
         let fixed_market = env.svm.get_account(&env.market).unwrap();
         let fixed_long = env.svm.get_account(&long).unwrap();
         env.svm.expire_blockhash();
@@ -1694,7 +1668,7 @@ pub(super) fn assert_inv_051_unilateral_adl_effective_exit_matrix_preserves_boun
                 portfolio_id: env.portfolio_id(long),
                 position_epoch: env.portfolio_position_epoch(long),
                 asset_index: 0,
-                reduce_q: residual_before.unsigned_abs(),
+                reduce_q: 1,
             },
             vec![
                 AccountMeta::new(long_owner.pubkey(), true),
@@ -1705,7 +1679,7 @@ pub(super) fn assert_inv_051_unilateral_adl_effective_exit_matrix_preserves_boun
         );
         assert!(
             owner_retry.is_err(),
-            "zero-OI owner retry unexpectedly detached"
+            "an absent-leg owner retry unexpectedly succeeded"
         );
         assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
         assert_eq!(env.svm.get_account(&long).unwrap(), fixed_long);
@@ -1717,47 +1691,28 @@ pub(super) fn assert_inv_051_unilateral_adl_effective_exit_matrix_preserves_boun
         let trade_long = env.svm.get_account(&long).unwrap();
         let trade_fresh = env.svm.get_account(&fresh).unwrap();
         env.svm.expire_blockhash();
-        let matched_exit = env.try_trade_asset_with_cu(
-            0,
-            &long_owner,
-            long,
-            &fresh_owner,
-            fresh,
-            -residual_before,
-            500,
-            0,
-        );
+        let matched_exit =
+            env.try_trade_asset_with_cu(0, &long_owner, long, &fresh_owner, fresh, -1, 500, 0);
         assert!(
             matched_exit.is_err(),
-            "fresh willing counterparty unexpectedly detached zero-OI residue"
+            "a fresh counterparty unexpectedly reopened risk during side reset"
         );
         assert_eq!(env.svm.get_account(&env.market).unwrap(), trade_market);
         assert_eq!(env.svm.get_account(&long).unwrap(), trade_long);
         assert_eq!(env.svm.get_account(&fresh).unwrap(), trade_fresh);
 
-        env.svm.expire_blockhash();
-        let cleanup_cu = env
-            .send(
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: 6,
-                    observations: vec![],
-                },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(long, false),
-                ],
-                &[],
-            )
-            .expect("one honest crank must clear the unilateral zero-OI residue");
+        let cleanup_cu = env.finalize_reset_side_with_cu(0, 0);
         assert_cu_within(
-            "unilateral zero-OI residue cleanup",
+            "unilateral zero-OI side-reset finalization",
             cleanup_cu,
-            CRANK_CU_LIMIT,
+            CUSTODY_CU_LIMIT,
         );
         let cleaned = env.portfolio_state(long);
         assert!(!has_active_leg_for_asset(&cleaned, 0));
-        assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 0);
+        let reset_done = env.market_state().1;
+        assert_eq!(reset_done.assets[0].oi_eff_long_q, 0);
+        assert_eq!(reset_done.assets[0].mode_long, SideModeV16::Normal);
+        assert_eq!(reset_done.assets[0].a_long, ADL_ONE);
         let withdrawable = cleaned.capital.get();
         assert!(withdrawable > 0);
         let destination = env.withdraw(&long_owner, long, withdrawable);

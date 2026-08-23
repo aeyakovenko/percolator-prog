@@ -1,7 +1,7 @@
 # Open finding claims that do not meet the public LoF/DoS acceptance rule on the pinned program.
 # Every row needs executable public-route evidence or a canonical independently discovered duplicate.
 # pr	classification	evidence	reason
-202	correct-input-progress	v16_program_unilateral_adl_effective_exit_matrix_preserves_bounded_cleanup	The stale max-basis request rejects, while the public effective-OI amount makes the requested reduction and the sole public crank performs the bounded zero-OI cleanup.
+202	correct-input-progress	v16_program_unilateral_adl_effective_exit_matrix_preserves_bounded_cleanup	A retained raw-basis work budget is clamped to the account's effective exposure; the exact public reduction clears the leg and a bounded permissionless side finalizer normalizes the empty ADL index.
 204	bounded-public-exit	v16_program_fixed_blockers_remain_progressing	The formerly blocked public trace now expires lapsed backing through the sole public crank and preserves the owner's exit.
 219	prerequisite-unreachable	v16_program_reset_carry_liquidation_matrix_preserves_progress	The proposed bilateral-zero-OI state is downstream of PR218's fix; on the pinned program the second bankruptcy rejects exactly while both effective-OI counters remain nonzero.
 237	privileged-self-action	v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers	Only the configured insurance authority can invoke the alleged withdrawal; an untrusted public caller rejects with exact market and custody rollback.

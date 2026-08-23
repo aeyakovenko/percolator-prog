@@ -2431,7 +2431,7 @@ fn discover_forfeit_portfolio_incarnation_replay(
     )
 }
 
-fn has_active_recovery_leg(env: &V16Svm, actor: usize, asset_index: u16) -> Result<bool, String> {
+fn has_active_asset_leg(env: &V16Svm, actor: usize, asset_index: u16) -> Result<bool, String> {
     env.primary_portfolio(actor)
         .legs
         .iter()
@@ -2460,14 +2460,14 @@ fn settle_recovery_pair_for_recreation(
     // obligation before the fixture can withdraw and close the old portfolio.
     for actor in [first, second] {
         for _ in 0..8 {
-            if !has_active_recovery_leg(env, actor, asset_index)? {
+            if !has_active_asset_leg(env, actor, asset_index)? {
                 break;
             }
             env.crank(actor, now_slot, vec![]).map_err(|error| {
                 format!("settle retained Recovery obligation for actor {actor}: {error}")
             })?;
         }
-        if has_active_recovery_leg(env, actor, asset_index)? {
+        if has_active_asset_leg(env, actor, asset_index)? {
             return Err(format!(
                 "actor {actor} retained a Recovery obligation after eight public cranks"
             ));
@@ -7804,8 +7804,28 @@ fn discover_one_trade_driven_liquidation(
         env.crank(actor, trade_slot, Vec::new())
             .map_err(|error| format!("{mode:?} refresh coalition actor {actor}: {error}"))?;
     }
-    execute_reported_price_route(&mut env, route, 2, 3, -move_size_q, queued_mark)
-        .map_err(|error| format!("{mode:?} {route:?} close mark-moving pair: {error}"))?;
+    for actor in [2usize, 3] {
+        for _ in 0..8 {
+            if !has_active_asset_leg(&env, actor, 0)? {
+                break;
+            }
+            env.crank_if_actionable(actor, trade_slot, Vec::new())
+                .map_err(|error| {
+                    format!("{mode:?} {route:?} progress coalition actor {actor}: {error}")
+                })?;
+            if !has_active_asset_leg(&env, actor, 0)? {
+                break;
+            }
+            env.rebalance_reduce(actor, 0, u128::MAX).map_err(|error| {
+                format!("{mode:?} {route:?} reduce coalition actor {actor}: {error}")
+            })?;
+        }
+        if has_active_asset_leg(&env, actor, 0)? {
+            return Err(format!(
+                "{mode:?} {route:?} bounded public reductions left coalition actor {actor} positioned"
+            ));
+        }
+    }
     for actor in [2usize, 3] {
         let pnl = env.primary_portfolio(actor).pnl.get();
         if pnl > 0 {

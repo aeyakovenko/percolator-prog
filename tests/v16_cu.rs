@@ -251,6 +251,41 @@ fn active_leg_for_asset(
         .unwrap()
 }
 
+fn reference_current_epoch_effective_abs(
+    group: &MarketGroupV16,
+    leg: percolator::PortfolioLegV16,
+) -> u128 {
+    let asset = group.assets[leg.asset_index as usize];
+    let (current_a, current_epoch) = match leg.side {
+        SideV16::Long => (asset.a_long, asset.epoch_long),
+        SideV16::Short => (asset.a_short, asset.epoch_short),
+    };
+    assert_eq!(
+        leg.epoch_snap, current_epoch,
+        "effective-quantity oracle requires a current-epoch leg"
+    );
+    support::reference_math::mul_div_ceil(leg.basis_pos_q.unsigned_abs(), current_a, leg.a_basis)
+        .expect("bounded reference ADL effective quantity")
+}
+
+fn reference_raw_basis_for_current_effective(
+    group: &MarketGroupV16,
+    leg: percolator::PortfolioLegV16,
+    effective_abs_q: u128,
+) -> u128 {
+    let asset = group.assets[leg.asset_index as usize];
+    let (current_a, current_epoch) = match leg.side {
+        SideV16::Long => (asset.a_long, asset.epoch_long),
+        SideV16::Short => (asset.a_short, asset.epoch_short),
+    };
+    assert_eq!(
+        leg.epoch_snap, current_epoch,
+        "raw-basis oracle requires a current-epoch leg"
+    );
+    support::reference_math::mul_div_floor(effective_abs_q, leg.a_basis, current_a)
+        .expect("bounded reference retained raw basis")
+}
+
 fn has_active_leg_for_asset(account: &PortfolioAccountV16, asset_index: usize) -> bool {
     account
         .legs
