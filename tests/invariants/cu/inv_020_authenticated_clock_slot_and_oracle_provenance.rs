@@ -1598,7 +1598,7 @@ fn v16_attack_sync_maintenance_fee_future_slot_no_overcharge() {
     env.update_maintenance_fee_policy_with_cu(0);
     // real clock = slot 10; attacker lies with now_slot = 1_000_000.
     env.svm.warp_to_slot(10);
-    let _ = env.try_sync_maintenance_fee_with_cu(p, None, 1_000_000);
+    env.sync_maintenance_fee_with_cu(p, None, 1_000_000);
     let a = env.portfolio_state(p);
     // fee reflects ~10 real slots (10*58 = 580), NOT 1_000_000 slots (which would drain everything).
     assert!(
@@ -1628,7 +1628,7 @@ fn v16_attack_sync_maintenance_fee_future_slot_no_overcharge() {
     // a follow-up sync at the same real slot is a no-op (no further drain).
     let cap_before = env.portfolio_state(p).capital.get();
     env.svm.expire_blockhash();
-    let _ = env.try_sync_maintenance_fee_with_cu(p, None, 1_000_000);
+    env.sync_maintenance_fee_with_cu(p, None, 1_000_000);
     assert_eq!(
         env.portfolio_state(p).capital.get(),
         cap_before,

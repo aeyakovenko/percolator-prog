@@ -262,6 +262,9 @@ fn v16_program_resolved_payout_secondary_rail_exhausts_shared_receipt() {
     );
 
     let primary_close_dest = env.token_account_for_mint(env.mint, winner_owner.pubkey(), 0);
+    let market_before_primary_retry = env.svm.get_account(&env.market).unwrap();
+    let winner_before_primary_retry = env.svm.get_account(&winner).unwrap();
+    let vault_before_primary_retry = env.svm.get_account(&env.vault).unwrap();
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::CloseResolved {
@@ -278,10 +281,25 @@ fn v16_program_resolved_payout_secondary_rail_exhausts_shared_receipt() {
         ],
         &[],
     );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_primary_retry
+    );
+    assert_eq!(
+        env.svm.get_account(&winner).unwrap(),
+        winner_before_primary_retry
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_primary_retry
+    );
     assert_eq!(env.token_amount(primary_close_dest), 0);
     assert_eq!(env.token_amount(env.vault), 1_100_000);
 
     let primary_topup_dest = env.token_account_for_mint(env.mint, winner_owner.pubkey(), 0);
+    let market_before_topup_retry = env.svm.get_account(&env.market).unwrap();
+    let winner_before_topup_retry = env.svm.get_account(&winner).unwrap();
+    let vault_before_topup_retry = env.svm.get_account(&env.vault).unwrap();
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::ClaimResolvedPayoutTopup,
@@ -295,6 +313,18 @@ fn v16_program_resolved_payout_secondary_rail_exhausts_shared_receipt() {
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
         &[],
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_topup_retry
+    );
+    assert_eq!(
+        env.svm.get_account(&winner).unwrap(),
+        winner_before_topup_retry
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_topup_retry
     );
     assert_eq!(env.token_amount(primary_topup_dest), 0);
     assert_eq!(env.token_amount(env.vault), 1_100_000);

@@ -923,7 +923,7 @@ fn v16_attack_convert_bounded_by_available_backing() {
     let (_, g0) = env.market_state();
     // convert with a huge cap -> released amount must be bounded by the available backing.
     env.svm.expire_blockhash();
-    let _ = env.send(
+    env.send(
         env.convert_released_pnl_ix(p, 1_000_000_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
@@ -931,8 +931,13 @@ fn v16_attack_convert_bounded_by_available_backing() {
             AccountMeta::new(p, false),
         ],
         &[&owner],
-    );
+    )
+    .expect("convert the backed portion of released pnl");
     let converted = env.portfolio_state(p).capital.get() - cap_before;
+    assert!(
+        converted > 0,
+        "the backing cap check must observe a real conversion"
+    );
     assert!(
         converted <= BACKING,
         "convert released at most the available backing ({} <= {})",

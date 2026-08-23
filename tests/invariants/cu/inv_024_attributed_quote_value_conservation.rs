@@ -177,7 +177,7 @@ fn v16_attack_fee_accrual_does_not_lock_user_funds() {
     env.update_maintenance_fee_policy_with_cu(0);
     // long idle period, then settle the maintenance fee.
     env.svm.warp_to_slot(500);
-    let _ = env.try_sync_maintenance_fee_with_cu(p, None, 500);
+    env.sync_maintenance_fee_with_cu(p, None, 500);
     let remaining = state::read_portfolio(&env.svm.get_account(&p).unwrap().data)
         .unwrap()
         .capital
@@ -1194,7 +1194,7 @@ fn v16_attack_maintenance_fee_with_open_position_conserves() {
             &[],
         );
         env.svm.expire_blockhash();
-        let _ = env.try_sync_maintenance_fee_with_cu(pa, None, slot);
+        env.sync_maintenance_fee_with_cu(pa, None, slot);
         let cap = env.portfolio_state(pa).capital.get();
         let step = prev_cap - cap;
         max_step = max_step.max(step);
@@ -1342,7 +1342,24 @@ fn v16_attack_funding_and_fee_combined_conserve() {
                 &[],
             );
             env.svm.expire_blockhash();
-            let _ = env.try_sync_maintenance_fee_with_cu(p, None, slot);
+            let market_before_sync = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before_sync = env.svm.get_account(&p).unwrap();
+            if let Err(error) = env.try_sync_maintenance_fee_with_cu(p, None, slot) {
+                assert!(
+                    error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+                    "the optional post-crank fee sync must fail only at the live account lock: {error}"
+                );
+                assert_eq!(
+                    env.svm.get_account(&env.market).unwrap(),
+                    market_before_sync,
+                    "rejected post-crank fee sync must roll back market state"
+                );
+                assert_eq!(
+                    env.svm.get_account(&p).unwrap(),
+                    portfolio_before_sync,
+                    "rejected post-crank fee sync must roll back portfolio state"
+                );
+            }
         }
     }
     let (_, g) = env.market_state();
@@ -1714,7 +1731,7 @@ fn v16_attack_self_crank_maintenance_fee_conserves() {
     let (_, g0) = env.market_state();
     // la syncs its OWN fee, naming ITSELF as the cranker.
     env.svm.warp_to_slot(10);
-    let _ = env.try_sync_maintenance_fee_with_cu(pa, Some(pa), 10);
+    env.sync_maintenance_fee_with_cu(pa, Some(pa), 10);
     let cap1 = env.portfolio_state(pa).capital.get();
     let (_, g1) = env.market_state();
     // net effect on la's capital = -(fee) + (cranker share). insurance += (fee - cranker share).
@@ -1879,7 +1896,7 @@ fn v16_attack_cross_margin_netting_conserves() {
     env.svm.warp_to_slot(2);
     let _ = env.push_auth_mark_with_cu(2, 110);
     env.svm.expire_blockhash();
-    let _ = env.send(
+    env.send(
         ProgInstruction::PushAuthMark {
             market_id: 0,
             observation_sequence: u64::MAX,
@@ -1892,7 +1909,8 @@ fn v16_attack_cross_margin_netting_conserves() {
             AccountMeta::new(env.market, false),
         ],
         &[&admin],
-    );
+    )
+    .expect("push the asset-1 authenticated mark");
     for ai in [0u16, 1] {
         let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
@@ -2797,8 +2815,10 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         "setup must leave winner paper pnl above backed residual"
     );
     let cap_before = env.portfolio_state(cp).capital.get();
+    let market_before_conversion = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before_conversion = env.svm.get_account(&cp).unwrap();
     env.svm.expire_blockhash();
-    let _ = env.send(
+    let conversion = env.send(
         env.convert_released_pnl_ix(cp, 1_000_000_000),
         vec![
             AccountMeta::new(cp_owner.pubkey(), true),
@@ -2808,6 +2828,29 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         &[&cp_owner],
     );
     let converted = env.portfolio_state(cp).capital.get() - cap_before;
+    match conversion {
+        Ok(_) => assert!(
+            converted > 0,
+            "an accepted conversion must move a positive backed amount"
+        ),
+        Err(error) => {
+            assert!(
+                error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+                "an unavailable conversion must fail at the realizability lock: {error}"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before_conversion,
+                "rejected conversion must roll back market accounting"
+            );
+            assert_eq!(
+                env.svm.get_account(&cp).unwrap(),
+                portfolio_before_conversion,
+                "rejected conversion must roll back the winner portfolio"
+            );
+            assert_eq!(converted, 0, "rejected conversion cannot create capital");
+        }
+    }
     assert!(
         converted <= residual2,
         "winner conversion bounded by residual ({} <= {})",
@@ -2831,7 +2874,15 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         )
         .unwrap();
     let cap_now = env.portfolio_state(cp).capital.get();
-    let _ = env.send(
+    assert!(
+        cap_now > 0,
+        "the withdrawal probe must target funded capital"
+    );
+    let market_before_withdraw = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before_withdraw = env.svm.get_account(&cp).unwrap();
+    let vault_before_withdraw = env.svm.get_account(&env.vault).unwrap();
+    let dest_before_withdraw = env.svm.get_account(&dest).unwrap();
+    let withdrawal = env.send(
         env.withdraw_ix(cp, cap_now),
         vec![
             AccountMeta::new(cp_owner.pubkey(), true),
@@ -2848,6 +2899,36 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         let d = env.svm.get_account(&dest).unwrap().data;
         u64::from_le_bytes(d[64..72].try_into().unwrap()) as u128
     };
+    match withdrawal {
+        Ok(_) => assert!(out > 0, "an accepted withdrawal must move SPL value"),
+        Err(error) => {
+            assert!(
+                error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+                "an unavailable withdrawal must fail at the realizability lock: {error}"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before_withdraw,
+                "rejected withdrawal must roll back market accounting"
+            );
+            assert_eq!(
+                env.svm.get_account(&cp).unwrap(),
+                portfolio_before_withdraw,
+                "rejected withdrawal must roll back the winner portfolio"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before_withdraw,
+                "rejected withdrawal must roll back custody"
+            );
+            assert_eq!(
+                env.svm.get_account(&dest).unwrap(),
+                dest_before_withdraw,
+                "rejected withdrawal must not credit the destination"
+            );
+            assert_eq!(out, 0, "rejected withdrawal cannot move SPL value");
+        }
+    }
     assert!(
         out <= 2_000_250,
         "winner cannot extract more tokens than the vault holds (got {})",

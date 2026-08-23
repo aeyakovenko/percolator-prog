@@ -352,7 +352,7 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
     // SPAM: repeated syncs in the same slot charge nothing more (idempotent -> no grief over-drain).
     for _ in 0..5 {
         env.svm.expire_blockhash();
-        let _ = env.try_sync_maintenance_fee_with_cu(p, None, 50);
+        env.sync_maintenance_fee_with_cu(p, None, 50);
     }
     assert_eq!(
         env.portfolio_state(p).capital.get(),
@@ -361,7 +361,7 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
     );
     // FUTURE now_slot lie: real clock is still 50, so no future time can be charged.
     env.svm.expire_blockhash();
-    let _ = env.try_sync_maintenance_fee_with_cu(p, None, 50 + 1_000_000);
+    env.sync_maintenance_fee_with_cu(p, None, 50 + 1_000_000);
     assert_eq!(
         env.portfolio_state(p).capital.get(),
         cap1,

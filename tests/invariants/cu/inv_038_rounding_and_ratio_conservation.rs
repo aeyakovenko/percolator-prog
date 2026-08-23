@@ -52,7 +52,18 @@ fn v16_attack_trade_fee_rounds_up_no_free_dust_trades() {
     // close the accumulated dust position; conservation still exact, insurance only grew.
     if opened > 0 {
         env.svm.expire_blockhash();
-        let _ = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, -opened, 100, 0);
+        env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, -opened, 100, 0)
+            .expect("close the accumulated dust position");
+        assert_eq!(
+            env.portfolio_state(pa).legs[0].basis_pos_q.get(),
+            0,
+            "the dust round trip must actually close the long leg"
+        );
+        assert_eq!(
+            env.portfolio_state(pb).legs[0].basis_pos_q.get(),
+            0,
+            "the dust round trip must actually close the short leg"
+        );
     }
     let (_, g) = env.market_state();
     assert_eq!(g.vault, 2_000_000, "vault conserved across dust churn");

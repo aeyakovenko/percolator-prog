@@ -40,6 +40,11 @@
 //! writable and lamport rollback. The three schedules converge byte-for-byte across wrapper/engine
 //! state, every portfolio, all SPL accounts, token supply, and the foreign instance while each call
 //! remains below the CU ceiling.
+//! `v16_program_terminal_insurance_withdrawal_is_split_merge_invariant` takes the alternate
+//! market-wide insurance rail through a complete public ResolveMarket -> claimant close ->
+//! portfolio close lifecycle. Aggregate, generated split, and reversed withdrawals must drain the
+//! same terminal insurance atoms into the same SPL destination, frame every closed portfolio and
+//! foreign account, preserve token supply, and reject a one-atom retry with exact rollback.
 //! `v16_program_backed_claim_conversion_is_atomic_under_split_caps` creates a real half-backed
 //! user claim through each of the four trade routes. The public conversion API is intentionally
 //! all-or-nothing: generated strict sub-caps reject with exact rollback rather than partially
@@ -498,6 +503,150 @@ fn run_insurance_withdrawal_partition(
         return Err(
             "insurance partition escaped its exact stock, custody, or frame oracle".to_string(),
         );
+    }
+
+    Ok(InsuranceWithdrawalPartitionOutcome {
+        frame,
+        max_compute_units,
+        public_steps: trace.steps.len(),
+    })
+}
+
+fn run_terminal_insurance_withdrawal_partition(
+    seed: [u8; 32],
+    total: u128,
+    parts: &[u128],
+) -> Result<InsuranceWithdrawalPartitionOutcome, String> {
+    let partition_total = parts.iter().try_fold(0u128, |sum, part| {
+        sum.checked_add(*part)
+            .ok_or_else(|| "terminal insurance partition overflow".to_string())
+    })?;
+    if total == 0 || parts.is_empty() || parts.iter().any(|part| *part == 0) {
+        return Err("terminal insurance partition must contain positive atoms".to_string());
+    }
+    if partition_total != total {
+        return Err("terminal insurance partition does not sum to its funded total".to_string());
+    }
+
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let initial = insurance_withdrawal_frame(&env);
+    if initial.group.insurance != 0 || initial.group.vault != initial.group.c_tot {
+        return Err("terminal insurance fixture did not start without insurance".to_string());
+    }
+    let destination_before = initial.provider_destination_amount;
+    env.begin_public_trace();
+
+    let top_up = env
+        .top_up_insurance(total)
+        .map_err(|error| format!("top up terminal insurance: {error}"))?;
+    let resolve = env
+        .resolve_market()
+        .map_err(|error| format!("resolve terminal insurance market: {error}"))?;
+    let mut max_compute_units = top_up.compute_units.max(resolve.compute_units);
+
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let close = env
+            .close_resolved_primary(actor)
+            .map_err(|error| format!("settle terminal insurance claimant {actor}: {error}"))?;
+        max_compute_units = max_compute_units.max(close.compute_units);
+    }
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let close = env
+            .close_primary_portfolio(actor)
+            .map_err(|error| format!("close terminal insurance portfolio {actor}: {error}"))?;
+        max_compute_units = max_compute_units.max(close.compute_units);
+    }
+
+    let terminal = env.primary_market_state().1;
+    if terminal.c_tot != 0
+        || terminal.materialized_portfolio_count != 0
+        || terminal.insurance != total
+        || terminal.vault != total
+        || env.token_amount(env.vault) as u128 != total
+    {
+        return Err("terminal insurance fixture did not reach its exact funded state".to_string());
+    }
+
+    let mut withdrawn = 0u128;
+    for (index, part) in parts.iter().copied().enumerate() {
+        let group_before = env.primary_market_state().1;
+        let vault_before = env.token_amount(env.vault);
+        let destination_before_part = env.token_amount(env.provider_destination_token);
+        let success = env
+            .withdraw_terminal_insurance_as_admin(part)
+            .map_err(|error| format!("terminal insurance partition {index}: {error}"))?;
+        max_compute_units = max_compute_units.max(success.compute_units);
+        withdrawn = withdrawn
+            .checked_add(part)
+            .ok_or_else(|| "terminal insurance withdrawn total overflow".to_string())?;
+        let part_u64 = u64::try_from(part)
+            .map_err(|_| "terminal insurance part does not fit SPL amount".to_string())?;
+        let group_after = env.primary_market_state().1;
+        if group_before.insurance - group_after.insurance != part
+            || group_before.vault - group_after.vault != part
+            || vault_before - env.token_amount(env.vault) != part_u64
+            || env.token_amount(env.provider_destination_token) - destination_before_part
+                != part_u64
+        {
+            return Err(format!(
+                "terminal insurance partition {index} did not move exactly {part} atoms"
+            ));
+        }
+    }
+    if withdrawn != total {
+        return Err("terminal insurance partition did not drain its funded total".to_string());
+    }
+
+    let before_retry = insurance_withdrawal_frame(&env);
+    if env.withdraw_terminal_insurance_as_admin(1).is_ok()
+        || insurance_withdrawal_frame(&env) != before_retry
+    {
+        return Err("empty terminal insurance retry was not exactly atomic".to_string());
+    }
+
+    let trace = env.finish_public_trace();
+    let successful_steps = 2 + 2 * PRIMARY_ACTOR_COUNT + parts.len();
+    if trace.out_of_band_economic_mutations != 0
+        || trace.steps.len() != successful_steps + 1
+        || trace.steps[..successful_steps]
+            .iter()
+            .any(|step| !step.succeeded)
+        || trace.steps[successful_steps].succeeded
+        || trace.steps[successful_steps].rejected_exact_writable_rollback != Some(true)
+        || trace.steps[successful_steps].rejected_no_program_lamport_delta != Some(true)
+    {
+        return Err(
+            "terminal insurance partition trace was not public, successful, then atomic"
+                .to_string(),
+        );
+    }
+    if trace
+        .steps
+        .iter()
+        .filter_map(|step| step.compute_units)
+        .any(|compute_units| compute_units >= TX_CU_LIMIT)
+    {
+        return Err("terminal insurance partition exceeded the transaction CU limit".to_string());
+    }
+
+    let frame = insurance_withdrawal_frame(&env);
+    if frame.group.insurance != 0
+        || frame.group.vault != 0
+        || frame.group.c_tot != 0
+        || frame.group.materialized_portfolio_count != 0
+        || frame.provider_destination_amount
+            != destination_before
+                .checked_add(
+                    u64::try_from(total).map_err(|_| {
+                        "terminal insurance total does not fit SPL amount".to_string()
+                    })?,
+                )
+                .ok_or_else(|| "terminal insurance destination overflow".to_string())?
+        || frame.token_supply != initial.token_supply
+        || frame.foreign_market != initial.foreign_market
+        || frame.foreign_portfolio != initial.foreign_portfolio
+    {
+        return Err("terminal insurance partition escaped its terminal stock or frame".to_string());
     }
 
     Ok(InsuranceWithdrawalPartitionOutcome {
@@ -1728,6 +1877,53 @@ proptest! {
         prop_assert_eq!(aggregate.public_steps, 4);
         prop_assert_eq!(split.public_steps, 5);
         prop_assert_eq!(reversed.public_steps, 5);
+        prop_assert!(aggregate.max_compute_units < TX_CU_LIMIT);
+        prop_assert!(split.max_compute_units < TX_CU_LIMIT);
+        prop_assert!(reversed.max_compute_units < TX_CU_LIMIT);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_052_terminal_insurance_withdrawal_partition.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_terminal_insurance_withdrawal_is_split_merge_invariant(
+        seed in any::<[u8; 32]>(),
+        total_raw in 2u64..=500_000,
+        first_part_raw in any::<u64>(),
+    ) {
+        let total = u128::from(total_raw);
+        let first_part = 1 + u128::from(first_part_raw) % (total - 1);
+        let second_part = total - first_part;
+
+        let aggregate = run_terminal_insurance_withdrawal_partition(seed, total, &[total])
+            .map_err(TestCaseError::fail)?;
+        let split = run_terminal_insurance_withdrawal_partition(
+            seed,
+            total,
+            &[first_part, second_part],
+        )
+        .map_err(TestCaseError::fail)?;
+        let reversed = run_terminal_insurance_withdrawal_partition(
+            seed,
+            total,
+            &[second_part, first_part],
+        )
+        .map_err(TestCaseError::fail)?;
+
+        prop_assert_eq!(&aggregate.frame, &split.frame);
+        prop_assert_eq!(&aggregate.frame, &reversed.frame);
+        prop_assert_eq!(split.public_steps, aggregate.public_steps + 1);
+        prop_assert_eq!(reversed.public_steps, aggregate.public_steps + 1);
         prop_assert!(aggregate.max_compute_units < TX_CU_LIMIT);
         prop_assert!(split.max_compute_units < TX_CU_LIMIT);
         prop_assert!(reversed.max_compute_units < TX_CU_LIMIT);

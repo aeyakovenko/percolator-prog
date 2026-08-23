@@ -752,7 +752,8 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
     // push extreme marks; each must reject or be clamped — never panic, never corrupt state.
     for mark in [0u64, 1, u64::MAX, u64::MAX / 2] {
         env.svm.expire_blockhash();
-        let _ = send_tx(
+        let market_before_push = env.svm.get_account(&env.market).unwrap();
+        let push = send_tx(
             &mut env.svm,
             env.program_id,
             &env.payer,
@@ -768,8 +769,21 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
                 AccountMeta::new(env.market, false),
             ],
             &[&env.admin],
-        ); // ignore Err; we only require no panic + conservation
-           // crank against whatever mark landed; must not corrupt conservation.
+        );
+        match push {
+            Ok(_) => assert_ne!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before_push,
+                "an accepted extreme mark push must commit authenticated profile state"
+            ),
+            Err(_) => assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before_push,
+                "a rejected extreme mark push must roll back exactly"
+            ),
+        }
+        // Crank against whatever mark landed; it must make bounded progress or
+        // reject as an exactly framed fixed point.
         let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 5,
