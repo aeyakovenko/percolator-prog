@@ -1380,10 +1380,8 @@ fn v16_program_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
 }
 
-// security.md sweep — crank idempotency / double-accrual (#32 race): re-cranking an asset at the SAME
-// slot must be a no-op. If a second same-slot crank re-applies the price move/funding, an attacker
-// could double-realize a counterparty's loss or double-charge funding. We first crank to the
-// settlement fixed point (§6.1/§6.2 needs multiple passes), then assert re-cranking is an exact no-op.
+// Same-slot retries must not double-realize loss or funding. The sole public crank must make real
+// progress until settlement is complete, then reject at the fixed point with exact rollback.
 #[test]
 fn v16_regression_crank_idempotent_at_settlement_fixed_point() {
     let mut env = V16CuEnv::new();
@@ -1406,36 +1404,52 @@ fn v16_regression_crank_idempotent_at_settlement_fixed_point() {
     );
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110);
-    let crank = |env: &mut V16CuEnv, p: Pubkey, slot: u64| {
-        env.svm.expire_blockhash();
-        let _ = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: slot,
-                observations: crank_observations(0),
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(p, false),
-            ],
-            &[],
-        );
+    let crank_ix = |slot: u64| ProgInstruction::PermissionlessCrank {
+        now_slot: slot,
+        observations: crank_observations(0),
     };
-    // crank many passes at slot 11 and watch the short's capital: it must CONVERGE to a fixed point
-    // (settlement completing), not keep dropping (which would be double-accrual).
+    // Settle every reachable cohort. At least one call must mutate; later calls may report the
+    // explicit fixed point, but may never land as successful no-ops.
     env.svm.warp_to_slot(11);
+    let mut progress_calls = 0usize;
     for _ in 0..8 {
         for p in [sh, lo] {
-            crank(&mut env, p, 11);
+            progress_calls += usize::from(env.crank_if_actionable(p, crank_ix(11)).is_some());
         }
-    } // crank to the settlement fixed point
-    let lo1 = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
-    let sh1 = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    }
+    assert_ne!(
+        progress_calls, 0,
+        "settlement fixture must make real progress"
+    );
+
+    let fixed_market = env.svm.get_account(&env.market).unwrap();
+    let fixed_lo = env.svm.get_account(&lo).unwrap();
+    let fixed_sh = env.svm.get_account(&sh).unwrap();
+    let lo1 = state::read_portfolio(&fixed_lo.data).unwrap();
+    let sh1 = state::read_portfolio(&fixed_sh.data).unwrap();
     let (_, g1) = env.market_state();
     let ep1 = g1.assets[0].effective_price;
     for _ in 0..3 {
         for p in [sh, lo] {
-            crank(&mut env, p, 11);
+            env.svm.expire_blockhash();
+            let error = env
+                .send(
+                    crank_ix(11),
+                    vec![
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(p, false),
+                    ],
+                    &[],
+                )
+                .expect_err("same-slot settlement fixed point must reject");
+            assert!(
+                is_engine_non_progress_error(&error),
+                "fixed point returned the wrong error: {error}"
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+            assert_eq!(env.svm.get_account(&lo).unwrap(), fixed_lo);
+            assert_eq!(env.svm.get_account(&sh).unwrap(), fixed_sh);
         }
     }
     let lo2 = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
@@ -1444,7 +1458,7 @@ fn v16_regression_crank_idempotent_at_settlement_fixed_point() {
 
     assert_eq!(
         g2.assets[0].effective_price, ep1,
-        "effective price unchanged by same-slot re-crank"
+        "effective price unchanged by same-slot fixed-point retry"
     );
     assert_eq!(
         (lo2.capital.get(), lo2.pnl.get()),
@@ -1462,4 +1476,49 @@ fn v16_regression_crank_idempotent_at_settlement_fixed_point() {
     );
     assert_eq!(g2.vault, 2_000_000, "vault conserved");
     assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation");
+}
+
+#[test]
+fn v16_program_ewma_crank_commits_once_then_rejects_same_slot_fixed_point() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, 100, 1, 0);
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+
+    env.svm.warp_to_slot(2);
+    env.push_ewma_mark_with_cu(2, 200);
+    let before_progress = env.svm.get_account(&env.market).unwrap();
+    let progress_cu = env
+        .crank_if_actionable(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        )
+        .expect("the first EWMA crank must commit authenticated market progress");
+    assert_cu_within("EWMA market-progress crank", progress_cu, CRANK_CU_LIMIT);
+    assert_ne!(env.svm.get_account(&env.market).unwrap(), before_progress);
+
+    let fixed_market = env.svm.get_account(&env.market).unwrap();
+    let fixed_portfolio = env.svm.get_account(&portfolio).unwrap();
+    assert!(
+        env.crank_if_actionable(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        )
+        .is_none(),
+        "the identical same-slot EWMA retry must report the fixed point"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), fixed_portfolio);
 }
