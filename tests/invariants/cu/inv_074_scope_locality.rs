@@ -9,8 +9,9 @@
 //!
 //! Guarantee boundary: these bounded public worlds certify the covered scope
 //! relationships, not every possible cross-domain composition. Partial-receipt-to-flat-principal
-//! locality is covered; receipt substitution, multiple concurrent receipts, and the remaining
-//! side/domain/lifecycle cross-products stay open in the audit matrix.
+//! locality, receipt substitution, concurrent receipts, and ResetPending/Recovery versus an
+//! unrelated bilateral exit are covered across the stateful and CU owners. The remaining
+//! portfolio/domain/lifecycle cross-products stay open in the audit matrix.
 
 use super::*;
 
