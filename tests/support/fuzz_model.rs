@@ -7022,6 +7022,20 @@ pub struct ActiveCloseShutdownEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveCloseCrossAssetAdmissionEvidence {
+    pub world_count: u64,
+    pub route_worlds: [u64; 4],
+    pub close_orientation_worlds: [u64; 2],
+    pub active_role_worlds: [u64; 2],
+    pub requested_side_worlds: [u64; 2],
+    pub exact_rejections: u64,
+    pub close_progress_worlds: u64,
+    pub owner_exit_worlds: u64,
+    pub total_owner_payout: u128,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurePendingObligationDosEvidence {
     pub cure_deposit: u128,
     pub cure_source_debit: u128,
@@ -8120,6 +8134,287 @@ pub fn run_active_close_shutdown_liveness_probe() -> Result<ActiveCloseShutdownE
     baseline.pre_shutdown_progress_worlds += progressed.pre_shutdown_progress_worlds;
     baseline.coverage.merge(progressed.coverage);
     Ok(baseline)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActiveCloseCrossAssetAdmissionWorld {
+    destination_payouts: [u128; PRIMARY_ACTOR_COUNT],
+    final_vault: u128,
+    final_capital_total: u128,
+    final_insurance: u128,
+    evidence: ActiveCloseCrossAssetAdmissionEvidence,
+}
+
+fn run_active_close_cross_asset_admission_world(
+    route: TradeRoute,
+    close_winner_side: SideV16,
+    active_as_taker: bool,
+    requested_active_long: bool,
+    seed_byte: u8,
+) -> Result<ActiveCloseCrossAssetAdmissionWorld, String> {
+    const CLOSE_WINNER: usize = 0;
+    const ACTIVE_CLOSE_ACCOUNT: usize = 1;
+    const UNRELATED_COUNTERPARTY: usize = 3;
+    const KEEPER: usize = EXIT_MAKER_INDEX;
+    const CLOSE_ASSET: usize = 0;
+    const UNRELATED_ASSET: usize = 1;
+    const REQUEST_Q: i128 = (POS_SCALE / 100) as i128;
+
+    let case = format!(
+        "INV-055/074 active-close admission {route:?}/{close_winner_side:?}/active-taker={active_as_taker}/active-long={requested_active_long}"
+    );
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
+    let token_supply = runner.env.token_supply_observed();
+    let destinations_before: [u128; PRIMARY_ACTOR_COUNT] = std::array::from_fn(|actor| {
+        u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        )
+    });
+    create_public_cancellable_close_via_route_and_side(
+        &mut runner,
+        CLOSE_WINNER as u8,
+        ACTIVE_CLOSE_ACCOUNT as u8,
+        CLOSE_ASSET as u8,
+        KEEPER as u8,
+        route,
+        close_winner_side,
+    )
+    .map_err(|error| format!("{case}: close fixture: {error}"))?;
+    let close_before = runner
+        .env
+        .primary_portfolio(ACTIVE_CLOSE_ACCOUNT)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("{case}: active close decode: {error:?}"))?;
+    if !close_before.active || close_before.residual_remaining == 0 {
+        return Err(format!("{case}: fixture did not retain an active close"));
+    }
+
+    let active_signed_q = if requested_active_long {
+        REQUEST_Q
+    } else {
+        -REQUEST_Q
+    };
+    let (taker, maker, route_signed_q) = if active_as_taker {
+        (
+            ACTIVE_CLOSE_ACCOUNT,
+            UNRELATED_COUNTERPARTY,
+            active_signed_q,
+        )
+    } else {
+        (
+            UNRELATED_COUNTERPARTY,
+            ACTIVE_CLOSE_ACCOUNT,
+            -active_signed_q,
+        )
+    };
+    if runner.execute_trade(
+        route,
+        taker,
+        maker,
+        vec![(UNRELATED_ASSET, route_signed_q)],
+        0,
+        0,
+        false,
+    )? {
+        return Err(format!(
+            "{case}: an active-close portfolio attached unrelated fresh risk"
+        ));
+    }
+    let close_after_rejection = runner
+        .env
+        .primary_portfolio(ACTIVE_CLOSE_ACCOUNT)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("{case}: rejected close decode: {error:?}"))?;
+    if close_after_rejection != close_before
+        || runner.positions[ACTIVE_CLOSE_ACCOUNT][UNRELATED_ASSET] != 0
+        || runner.positions[UNRELATED_COUNTERPARTY][UNRELATED_ASSET] != 0
+    {
+        return Err(format!(
+            "{case}: rejected cross-asset attachment changed close or position state"
+        ));
+    }
+
+    runner
+        .run_permissionless_account_progress_campaign()
+        .map_err(|error| format!("{case}: close did not progress after rejection: {error}"))?;
+    let close_after_progress = runner
+        .env
+        .primary_portfolio(ACTIVE_CLOSE_ACCOUNT)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("{case}: progressed close decode: {error:?}"))?;
+    if close_after_progress.active && close_after_progress.residual_remaining != 0 {
+        return Err(format!(
+            "{case}: close retained work after bounded permissionless progress: {close_after_progress:?}"
+        ));
+    }
+    runner
+        .run_direct_user_exit_campaign()
+        .map_err(|error| format!("{case}: funded owner exit: {error}"))?;
+    runner.assert_global_invariants()?;
+    if runner
+        .positions
+        .iter()
+        .flatten()
+        .any(|position| *position != 0)
+        || (0..PRIMARY_ACTOR_COUNT)
+            .any(|actor| runner.env.primary_portfolio(actor).capital.get() != 0)
+        || runner.env.token_supply_observed() != token_supply
+        || runner.coverage.max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "{case}: terminal world retained risk/capital, changed supply, or exceeded CU"
+        ));
+    }
+    assert_public_stock_census("INV-055/074 active-close admission terminal", &runner.env)?;
+    assert_public_encumbrance_census("INV-055/074 active-close admission terminal", &runner.env)?;
+
+    let destination_payouts = std::array::from_fn(|actor| {
+        u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        ) - destinations_before[actor]
+    });
+    let total_owner_payout = destination_payouts
+        .iter()
+        .try_fold(0u128, |total, payout| {
+            total
+                .checked_add(*payout)
+                .ok_or("active-close admission payout overflow")
+        })?;
+    let (_, group) = runner.env.primary_market_state();
+    let mut route_worlds = [0; 4];
+    route_worlds[route.index()] = 1;
+    let mut close_orientation_worlds = [0; 2];
+    close_orientation_worlds[usize::from(close_winner_side == SideV16::Long)] = 1;
+    let mut active_role_worlds = [0; 2];
+    active_role_worlds[usize::from(active_as_taker)] = 1;
+    let mut requested_side_worlds = [0; 2];
+    requested_side_worlds[usize::from(requested_active_long)] = 1;
+
+    Ok(ActiveCloseCrossAssetAdmissionWorld {
+        destination_payouts,
+        final_vault: group.vault,
+        final_capital_total: group.c_tot,
+        final_insurance: group.insurance,
+        evidence: ActiveCloseCrossAssetAdmissionEvidence {
+            world_count: 1,
+            route_worlds,
+            close_orientation_worlds,
+            active_role_worlds,
+            requested_side_worlds,
+            exact_rejections: 1,
+            close_progress_worlds: 1,
+            owner_exit_worlds: 1,
+            total_owner_payout,
+            coverage: runner.coverage,
+        },
+    })
+}
+
+pub fn run_active_close_cross_asset_admission_probe(
+) -> Result<ActiveCloseCrossAssetAdmissionEvidence, String> {
+    let mut aggregate: Option<ActiveCloseCrossAssetAdmissionEvidence> = None;
+    for (route_index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (close_side_index, close_winner_side) in
+            [SideV16::Short, SideV16::Long].into_iter().enumerate()
+        {
+            let mut normalized_economics = None;
+            for active_as_taker in [false, true] {
+                for requested_active_long in [false, true] {
+                    let seed_byte = 0xa0 ^ route_index as u8 ^ ((close_side_index as u8) << 2);
+                    let world = run_active_close_cross_asset_admission_world(
+                        route,
+                        close_winner_side,
+                        active_as_taker,
+                        requested_active_long,
+                        seed_byte,
+                    )?;
+                    let economics = (
+                        world.destination_payouts,
+                        world.final_vault,
+                        world.final_capital_total,
+                        world.final_insurance,
+                    );
+                    if let Some(expected) = normalized_economics {
+                        if economics != expected {
+                            return Err(format!(
+                                "INV-055/074 rejected attachment changed terminal economics for {route:?}/{close_winner_side:?}: expected={expected:?}, actual={economics:?}"
+                            ));
+                        }
+                    } else {
+                        normalized_economics = Some(economics);
+                    }
+
+                    let evidence = world.evidence;
+                    if let Some(total) = aggregate.as_mut() {
+                        total.world_count += evidence.world_count;
+                        for (sum, count) in total.route_worlds.iter_mut().zip(evidence.route_worlds)
+                        {
+                            *sum += count;
+                        }
+                        for (sum, count) in total
+                            .close_orientation_worlds
+                            .iter_mut()
+                            .zip(evidence.close_orientation_worlds)
+                        {
+                            *sum += count;
+                        }
+                        for (sum, count) in total
+                            .active_role_worlds
+                            .iter_mut()
+                            .zip(evidence.active_role_worlds)
+                        {
+                            *sum += count;
+                        }
+                        for (sum, count) in total
+                            .requested_side_worlds
+                            .iter_mut()
+                            .zip(evidence.requested_side_worlds)
+                        {
+                            *sum += count;
+                        }
+                        total.exact_rejections += evidence.exact_rejections;
+                        total.close_progress_worlds += evidence.close_progress_worlds;
+                        total.owner_exit_worlds += evidence.owner_exit_worlds;
+                        total.total_owner_payout = total
+                            .total_owner_payout
+                            .checked_add(evidence.total_owner_payout)
+                            .ok_or("aggregate active-close admission payout overflow")?;
+                        total.coverage.merge(evidence.coverage);
+                    } else {
+                        aggregate = Some(evidence);
+                    }
+                }
+            }
+        }
+    }
+    aggregate.ok_or_else(|| "INV-055/074 active-close admission matrix produced no worlds".into())
 }
 
 fn cure_primary_close_with_bounded_deposit(

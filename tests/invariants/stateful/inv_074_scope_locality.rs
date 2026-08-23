@@ -35,6 +35,11 @@
 //! the canonical account crank must clear the stale asset-0 prerequisite and make the identical
 //! exit succeed. Crank-first and exit-attempt-first schedules must converge economically.
 //!
+//! A seventh matrix proves the adjacent overlap is unreachable from the other direction: after a
+//! portfolio enters an active close on asset 0, all four trade routes reject attaching fresh risk
+//! on asset 1 for either account role and either requested side. Every rejection frames the whole
+//! economic snapshot, and the original close still drains permissionlessly before all owners exit.
+//!
 //! Guarantee boundary: these are the same-asset risk-reduction and two-asset/two-account close
 //! cells. Risk increase while a domain loss barrier is active is intentionally outside the
 //! guarantee; broader side/domain/lifecycle combinations remain open.
@@ -42,8 +47,8 @@
 use super::inv_052_split_merge_invariance::run_resolved_claim_partition;
 use crate::support::fuzz_model::{
     assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
-    run_active_close_shutdown_liveness_probe, run_concurrent_close_locality_probe,
-    run_same_asset_close_locality_probe, TradeRoute,
+    run_active_close_cross_asset_admission_probe, run_active_close_shutdown_liveness_probe,
+    run_concurrent_close_locality_probe, run_same_asset_close_locality_probe, TradeRoute,
 };
 use crate::support::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, TX_CU_LIMIT};
 use percolator::{AssetLifecycleV16, SideModeV16, POS_SCALE};
@@ -631,6 +636,24 @@ fn v16_program_active_close_shutdown_order_preserves_all_funded_exits() {
         "the public crank must settle derived B work: {evidence:?}"
     );
     assert_ne!(evidence.coverage.user_positions_closed, 0, "{evidence:?}");
+    assert_ne!(evidence.coverage.withdrawals, 0, "{evidence:?}");
+}
+
+#[test]
+fn v16_program_active_close_rejects_cross_asset_risk_without_blocking_exit() {
+    let evidence = run_active_close_cross_asset_admission_probe()
+        .expect("INV-055/074 active-close cross-asset admission probe");
+
+    assert_eq!(evidence.world_count, 32, "{evidence:?}");
+    assert_eq!(evidence.route_worlds, [8; 4], "{evidence:?}");
+    assert_eq!(evidence.close_orientation_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.active_role_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.requested_side_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.exact_rejections, 32, "{evidence:?}");
+    assert_eq!(evidence.close_progress_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.owner_exit_worlds, 32, "{evidence:?}");
+    assert_ne!(evidence.total_owner_payout, 0, "{evidence:?}");
+    assert_ne!(evidence.coverage.crank_progress, 0, "{evidence:?}");
     assert_ne!(evidence.coverage.withdrawals, 0, "{evidence:?}");
 }
 
