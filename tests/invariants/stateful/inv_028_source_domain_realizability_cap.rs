@@ -9,9 +9,9 @@
 //! and tests canonical crank, unilateral reduction, and all four trade routes from independent
 //! worlds. Every route must unwind the vanished claim and reduce exposure in bounded calls; any
 //! rejected attempt must preserve exact SVM rollback while real capital and custody remain.
-//! `v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock` independently constructs
-//! two fractional source domains in both asset orders, reverses one source, and requires all six
-//! public exit families plus a later honest crank to remain blocked before accepting a finding.
+//! `v16_program_cross_domain_rounding_exit_matrix_preserves_bounded_exit` independently constructs
+//! two fractional source domains in both asset orders, reverses one source, and requires a bounded
+//! public exit while preserving exact rollback for every rejected prefix.
 //! `v16_program_flat_source_lien_route_matrix_discovers_backed_claim_lock` flattens all exposure
 //! while retaining a real source lien, then requires full/partial conversion, close, later honest
 //! cranks, and CPI/no-CPI single/batch reopen-and-flatten escapes all to leave the backed PnL claim
@@ -22,8 +22,8 @@
 //! admit a risk increase, and the complete cycle returns every user balance and source ledger.
 //!
 //! Guarantee boundary: the reversal matrix certifies the fixed source-lien unwind across all six
-//! wrapper routes. The remaining tests in this file retain separate counterexamples for unrelated
-//! cross-domain rounding and flat-lien findings.
+//! wrapper routes. Cross-domain fractional support now has a public progress regression; the
+//! remaining flat-lien test retains its separate counterexample.
 
 use super::*;
 use crate::support::fuzz_model::execute_trade_route;
@@ -261,7 +261,7 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock(
+    fn v16_program_cross_domain_rounding_exit_matrix_preserves_bounded_exit(
         seed in any::<[u8; 32]>(),
     ) {
         let discoveries = discover_cross_domain_rounding_exit_locks(seed);
@@ -278,8 +278,8 @@ proptest! {
         );
         for discovery in discoveries {
             prop_assert!(
-                discovery.is_persistent_funded_exit_lock(),
-                "cross-domain rounding retained a public exit: {:?}",
+                discovery.preserves_bounded_funded_exit(),
+                "cross-domain rounding failed to retain a bounded public exit: {:?}",
                 discovery
             );
         }

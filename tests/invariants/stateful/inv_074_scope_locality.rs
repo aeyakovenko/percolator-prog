@@ -19,13 +19,20 @@
 //! before or after one close continuation. Both schedules must preserve a bounded public exit for
 //! every funded portfolio and converge to identical owner payouts and terminal accounting.
 //!
+//! A fourth probe publicly materializes two simultaneous partial payout receipts in different
+//! source domains. Substituting either claimant's valid quote destination for the other's must
+//! reject with a complete economic snapshot frame. A canonical value-moving top-up for either
+//! claimant must preserve the other portfolio, receipt, and destination byte-for-byte, after which
+//! both receipts retain bounded terminal continuations.
+//!
 //! Guarantee boundary: these are the same-asset risk-reduction and two-asset/two-account close
 //! cells. Risk increase while a domain loss barrier is active is intentionally outside the
-//! guarantee; same-domain competing closes and broader lifecycle combinations remain open.
+//! guarantee; broader side/domain/lifecycle combinations remain open.
 
+use super::inv_052_split_merge_invariance::run_resolved_claim_partition;
 use crate::support::fuzz_model::{
     run_active_close_shutdown_liveness_probe, run_concurrent_close_locality_probe,
-    run_same_asset_close_locality_probe,
+    run_same_asset_close_locality_probe, TradeRoute,
 };
 
 #[test]
@@ -106,4 +113,15 @@ fn v16_program_active_close_shutdown_order_preserves_all_funded_exits() {
     );
     assert_ne!(evidence.coverage.user_positions_closed, 0, "{evidence:?}");
     assert_ne!(evidence.coverage.withdrawals, 0, "{evidence:?}");
+}
+
+#[test]
+fn v16_program_concurrent_partial_receipts_are_claimant_local() {
+    let evidence = run_resolved_claim_partition(true, TradeRoute::NoCpi, TradeRoute::BatchCpi)
+        .expect("INV-074 concurrent public receipt locality probe");
+
+    assert_eq!(evidence.concurrent_receipts, 2, "{evidence:?}");
+    assert!(evidence.destination_substitution_rejected, "{evidence:?}");
+    assert!(evidence.concurrent_receipt_framed, "{evidence:?}");
+    assert_ne!(evidence.locality_claim_payout, 0, "{evidence:?}");
 }

@@ -80,7 +80,7 @@ INV-020	composite-oracle/timestamp-coherence	v16_program_composite_timestamp_coh
 INV-020	hybrid-terminal/expired-composite-leg	v16_program_hybrid_terminal_snapshot_discovers_expired_leg_settlement	terminal-snapshot-must-use-current-authenticated-oracle-state	261
 INV-028	source-lien/reversal-exit-matrix	v16_program_source_lien_reversal_exit_matrix_preserves_bounded_exit	vanished-source-claim-must-have-a-bounded-public-unwind	213
 INV-028	source-lien/authenticated-expiry-routes	v16_program_expired_source_lien_route_matrix_preserves_bounded_owner_exit	expired-source-lien-must-have-bounded-public-reconciliation	214
-INV-028	cross-domain-rounding/public-exit-matrix	v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock	fractional-source-domains-must-have-a-bounded-public-unwind	306
+INV-028	cross-domain-rounding/public-exit-matrix	v16_program_cross_domain_rounding_exit_matrix_preserves_bounded_exit	fractional-source-domains-must-have-a-bounded-public-unwind	306
 INV-028	flat-source-lien/terminal-claim-routes	v16_program_flat_source_lien_route_matrix_discovers_backed_claim_lock	flat-backed-claim-must-have-bounded-terminal-conversion	364
 INV-028	source-capacity/admission-order-matrix	v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk	admitted-live-leg-must-reserve-a-settlement-source-slot	270,379
 INV-028	shared-expiry/provider-lien-provenance	v16_program_shared_expiry_progress_matrix_preserves_terminal_progress	expired-provider-lien-retirement-must-preserve-provenance-and-terminal-progress	300

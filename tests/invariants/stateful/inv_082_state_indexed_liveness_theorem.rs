@@ -27,9 +27,19 @@
 //! crank must make the certificate current while framing all economic state; an
 //! apparent Recovery observation still rejects atomically, and the owner's
 //! strict reduction remains live.
+//!
+//! The multi-domain loss-stale regression reaches three stale legs through
+//! exactly three authenticated public mark pushes. On the fixed engine, the
+//! selector consumes the per-domain whole-atom support that actually exists
+//! and takes a strict progress edge; the old aggregate-before-rounding rule
+//! classified the same state actionable while every crank returned
+//! `LockActive`. Removing any one mark removes the counterexample, which keeps
+//! this as a minimized public reachability witness rather than injected state.
 
 use super::*;
-use crate::support::fuzz_model::run_bounded_public_liveness_graph;
+use crate::support::fuzz_model::{
+    run_bounded_public_liveness_graph, run_multileg_loss_stale_progress_regression,
+};
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{AssetLifecycleV16, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
@@ -100,6 +110,16 @@ fn v16_program_bounded_public_crank_graph_reaches_terminal_rank() {
             "observed actionable rank class {start:#08b} has no public path to zero: {coverage:?}"
         );
     }
+}
+
+#[test]
+fn v16_program_multileg_loss_stale_account_has_permissionless_progress() {
+    let coverage = run_multileg_loss_stale_progress_regression()
+        .expect("a public multi-asset loss-stale account must retain a progressing crank");
+    assert!(
+        coverage.crank_progress != 0,
+        "the directed public trace must execute a rank-decreasing crank: {coverage:?}"
+    );
 }
 
 #[test]

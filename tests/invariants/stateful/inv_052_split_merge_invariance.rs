@@ -93,6 +93,8 @@ use crate::support::{
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
 use percolator_prog::state;
+use solana_sdk::instruction::AccountMeta;
+use solana_sdk::signature::Signer;
 
 const INITIAL_PRICE: u64 = 1_000_000;
 const BACKING_FRESHNESS_HORIZON: u64 = 100;
@@ -188,7 +190,7 @@ struct BackingConversionPartitionOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ResolvedClaimPartitionOutcome {
+pub(super) struct ResolvedClaimPartitionOutcome {
     winner_claim_face: u128,
     winner_receipt_face: u128,
     winner_seeded_paid_effective: u128,
@@ -202,6 +204,35 @@ struct ResolvedClaimPartitionOutcome {
     final_claim_bound_num: u128,
     max_compute_units: u64,
     public_steps: usize,
+    pub(super) concurrent_receipts: usize,
+    pub(super) destination_substitution_rejected: bool,
+    pub(super) concurrent_receipt_framed: bool,
+    pub(super) locality_claim_payout: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedClaimLocalitySnapshot {
+    market: Vec<u8>,
+    foreign_market: Vec<u8>,
+    portfolios: Vec<Vec<u8>>,
+    foreign_portfolio: Vec<u8>,
+    backing_ledger: Vec<u8>,
+    tokens: Vec<(solana_sdk::pubkey::Pubkey, Vec<u8>)>,
+    matcher_contexts: Vec<Vec<u8>>,
+    economic_lamports: Vec<(solana_sdk::pubkey::Pubkey, u64)>,
+}
+
+fn resolved_claim_locality_snapshot(env: &V16Svm) -> ResolvedClaimLocalitySnapshot {
+    ResolvedClaimLocalitySnapshot {
+        market: env.market_data(false),
+        foreign_market: env.market_data(true),
+        portfolios: env.all_primary_portfolio_data(),
+        foreign_portfolio: env.foreign_portfolio_data(),
+        backing_ledger: env.backing_domain_ledger_data(),
+        tokens: env.all_token_account_data(),
+        matcher_contexts: env.all_matcher_context_data(),
+        economic_lamports: env.all_economic_account_lamports(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1348,7 +1379,7 @@ fn resolved_claim_partition_source_face(env: &V16Svm, actors: &[usize], domain: 
         .sum()
 }
 
-fn run_resolved_claim_partition(
+pub(super) fn run_resolved_claim_partition(
     split_claim: bool,
     open_route: TradeRoute,
     close_route: TradeRoute,
@@ -1614,6 +1645,96 @@ fn run_resolved_claim_partition(
             .ok_or_else(|| "resolved-claim seeded payout overflow".to_string())
     })?;
     settle_resolved_portfolios(&mut env, &[BACKED_WINNER], &mut max_compute_units)?;
+
+    let mut destination_substitution_rejected = false;
+    let mut concurrent_receipt_framed = false;
+    let mut locality_claim_payout = 0u128;
+    if split_claim {
+        let first_actor = WINNERS[0];
+        let other_actor = WINNERS[1];
+        let first_receipt = env
+            .primary_portfolio(first_actor)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("decode first concurrent receipt: {error:?}"))?;
+        let other_receipt = env
+            .primary_portfolio(other_actor)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("decode other concurrent receipt: {error:?}"))?;
+        if !first_receipt.present
+            || first_receipt.finalized
+            || !other_receipt.present
+            || other_receipt.finalized
+        {
+            return Err(format!(
+                "public split claim did not retain concurrent partial receipts: first={first_receipt:?}, other={other_receipt:?}"
+            ));
+        }
+
+        let before_substitution = resolved_claim_locality_snapshot(&env);
+        let first = &env.actors[first_actor];
+        let substituted_accounts = vec![
+            AccountMeta::new_readonly(first.signer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(first.portfolio, false),
+            AccountMeta::new(env.actors[other_actor].destination_token, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        let substitution =
+            env.claim_resolved_payout_topup_primary_with_accounts(substituted_accounts);
+        if substitution.is_ok() {
+            return Err("one claimant paid into another claimant's valid destination".into());
+        }
+        if resolved_claim_locality_snapshot(&env) != before_substitution {
+            return Err(
+                "rejected concurrent-receipt destination substitution mutated state".into(),
+            );
+        }
+        destination_substitution_rejected = true;
+
+        let other_portfolio_before = env.primary_portfolio_data(other_actor);
+        let other_destination = env.actors[other_actor].destination_token;
+        let other_destination_before = env.token_amount(other_destination);
+        let first_destination = env.actors[first_actor].destination_token;
+        let first_destination_before = env.token_amount(first_destination);
+        let spl_vault_before = env.token_amount(env.vault);
+        let engine_vault_before = env.primary_market_state().1.vault;
+        let claim = env
+            .claim_resolved_payout_topup_primary(first_actor)
+            .map_err(|error| format!("canonical concurrent-receipt claim: {error}"))?;
+        max_compute_units = max_compute_units.max(claim.compute_units);
+        let first_destination_after = env.token_amount(first_destination);
+        locality_claim_payout = u128::from(
+            first_destination_after
+                .checked_sub(first_destination_before)
+                .ok_or("canonical locality claim decreased destination")?,
+        );
+        if locality_claim_payout == 0
+            || spl_vault_before.checked_sub(env.token_amount(env.vault))
+                != u64::try_from(locality_claim_payout).ok()
+            || engine_vault_before.checked_sub(env.primary_market_state().1.vault)
+                != Some(locality_claim_payout)
+        {
+            return Err(format!(
+                "canonical concurrent-receipt claim did not move exact value: payout={locality_claim_payout}"
+            ));
+        }
+        let other_receipt_after = env
+            .primary_portfolio(other_actor)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("decode framed concurrent receipt: {error:?}"))?;
+        if env.primary_portfolio_data(other_actor) != other_portfolio_before
+            || env.token_amount(other_destination) != other_destination_before
+            || other_receipt_after != other_receipt
+        {
+            return Err("canonical claim mutated the concurrent claimant's scope".into());
+        }
+        concurrent_receipt_framed = true;
+    }
     settle_resolved_portfolios(&mut env, &all_actors, &mut max_compute_units)?;
 
     let payouts = env
@@ -1644,9 +1765,10 @@ fn run_resolved_claim_partition(
         ));
     }
     let trace = env.finish_public_trace();
-    if trace.out_of_band_economic_mutations != 0 || trace.steps.iter().any(|step| !step.succeeded) {
+    let rejected_steps = trace.steps.iter().filter(|step| !step.succeeded).count();
+    if trace.out_of_band_economic_mutations != 0 || rejected_steps != usize::from(split_claim) {
         return Err(format!(
-            "resolved-claim partition did not use an all-successful public trace: {trace:?}"
+            "resolved-claim partition had unexpected public failures or out-of-band mutation: {trace:?}"
         ));
     }
 
@@ -1664,6 +1786,10 @@ fn run_resolved_claim_partition(
         final_claim_bound_num: terminal.source_claim_bound_total_num,
         max_compute_units,
         public_steps: trace.steps.len(),
+        concurrent_receipts: claimant_winners.len(),
+        destination_substitution_rejected,
+        concurrent_receipt_framed,
+        locality_claim_payout,
     })
 }
 
@@ -2770,6 +2896,14 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
             assert_eq!(split.final_engine_vault, split.final_spl_vault);
             assert_eq!(aggregate.final_claim_bound_num, 0);
             assert_eq!(split.final_claim_bound_num, 0);
+            assert_eq!(aggregate.concurrent_receipts, 1);
+            assert!(!aggregate.destination_substitution_rejected);
+            assert!(!aggregate.concurrent_receipt_framed);
+            assert_eq!(aggregate.locality_claim_payout, 0);
+            assert_eq!(split.concurrent_receipts, 2);
+            assert!(split.destination_substitution_rejected);
+            assert!(split.concurrent_receipt_framed);
+            assert!(split.locality_claim_payout > 0);
             assert!(aggregate.public_steps > 0 && split.public_steps > aggregate.public_steps);
             assert!(aggregate.max_compute_units < TX_CU_LIMIT);
             assert!(split.max_compute_units < TX_CU_LIMIT);

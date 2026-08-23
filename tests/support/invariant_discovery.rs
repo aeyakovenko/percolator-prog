@@ -1504,6 +1504,18 @@ impl CrossDomainRoundingDiscovery {
             && self.canonical_vault_liquidity >= self.funded_capital
             && self.token_supply_conserved
     }
+
+    pub fn preserves_bounded_funded_exit(&self) -> bool {
+        self.fractional_source_domains == 2
+            && self.positive_pnl_before_reversal > 0
+            && self.funded_capital != 0
+            && self.stranded_position_q != 0
+            && self.blocked_public_routes < SourceLienReversalExitRoute::ALL.len() as u8
+            && !self.later_honest_crank_blocked
+            && self.exact_rollback
+            && self.canonical_vault_liquidity >= self.funded_capital
+            && self.token_supply_conserved
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

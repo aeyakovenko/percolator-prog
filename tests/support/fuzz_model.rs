@@ -6588,6 +6588,42 @@ pub fn run_scenario(scenario: &Scenario) -> Result<Coverage, String> {
     Ok(progress_runner.coverage)
 }
 
+pub fn run_multileg_loss_stale_progress_regression() -> Result<Coverage, String> {
+    let scenario = Scenario {
+        seed: [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 77, 182, 12, 69, 166, 229, 252, 30, 36, 192, 107, 147, 252,
+            185, 20, 248, 122, 70, 36, 90, 32, 97, 6,
+        ],
+        config: SmallMarketConfig {
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 4,
+            max_abs_funding_e9_per_slot: 10_000,
+            maintenance_fee_per_slot: 0,
+        },
+        actions: vec![
+            Action::PushMark {
+                asset: 190,
+                dt: 3,
+                move_bps: 224,
+            },
+            Action::PushMark {
+                asset: 75,
+                dt: 1,
+                move_bps: 124,
+            },
+            Action::PushMark {
+                asset: 38,
+                dt: 3,
+                move_bps: -152,
+            },
+        ],
+    };
+    let mut runner = ScenarioRunner::new(&scenario)?;
+    runner.run_safety_prefix(&scenario.actions)?;
+    runner.run_permissionless_progress_campaign()?;
+    Ok(runner.coverage)
+}
+
 pub fn run_value_withdrawal_route_oracle() -> Result<Coverage, String> {
     let scenario = Scenario {
         seed: [0x24; 32],
