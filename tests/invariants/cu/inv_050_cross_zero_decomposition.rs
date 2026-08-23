@@ -8,13 +8,16 @@
 //! without unrelated auxiliary OI. Both reject with exact rollback. The auxiliary-OI cases also
 //! attempt one atom beyond the account-local effective exposure before closing exactly that
 //! exposure through each public trade route. The control cases close through owner
-//! `RebalanceReduce`. This proves the cap does not turn into an exit DoS. These tests exercise real
-//! SBF/LiteSVM account construction and assert economic state, token, rollback, liveness, and
-//! compute outcomes.
+//! `RebalanceReduce`. A separate all-route scalar matrix crosses zero, one-atom reduction,
+//! one-atom opposite exposure, exact close, and the first value above the public trade cap. This
+//! proves the cap does not turn into an exit DoS. These tests exercise real SBF/LiteSVM account
+//! construction and assert economic state, token, rollback, liveness, and compute outcomes.
 //!
 //! Guarantee boundary: the matrix covers all four trade routes and both OI preflight branches for
-//! one nonzero partial-ADL shape. Cross-zero quantity boundaries, pending-obligation epochs, and
-//! all lifecycle modes remain separate coverage obligations.
+//! one nonzero partial-ADL shape, scalar quantity boundaries, and all four routes in the two
+//! publicly reachable exit-only lifecycle modes. Simultaneous/cross-asset pending-obligation
+//! epochs and lifecycle modes that cannot retain live exposure remain separate coverage
+//! obligations.
 
 use super::*;
 
@@ -382,134 +385,364 @@ fn v16_program_post_liquidation_cross_zero_rejects_basis_reissue_on_all_routes()
     }
 }
 
-#[test]
-fn v16_attack_batch_nocpi_exit_only_rejects_cross_zero_flip() {
-    for lifecycle_case in ["DrainOnly", "Recovery"] {
-        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
-        if lifecycle_case == "Recovery" {
-            env.configure_permissionless_resolve_with_cu(100, 50);
-        }
-        let long_owner = Keypair::new();
-        let short_owner = Keypair::new();
-        let long_account = env.create_portfolio(&long_owner);
-        let short_account = env.create_portfolio(&short_owner);
-        env.deposit(&long_owner, long_account, 1_000_000);
-        env.deposit(&short_owner, short_account, 1_000_000);
-        env.trade_asset_with_cu(
-            0,
+fn run_active_cross_zero_quantity_boundary_world(route: AdlCrossZeroRoute) {
+    const PRICE: u64 = 100;
+    const OPEN_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 1_000);
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 20_000_000_000);
+    env.deposit(&short_owner, short, 20_000_000_000);
+    env.trade_asset_with_cu(0, &long_owner, long, &short_owner, short, OPEN_Q, PRICE, 0);
+    let matcher = route.uses_cpi().then(|| {
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let (context, delegate, _) =
+            env.init_auth_matcher_context(matcher_program, &short_owner, short);
+        (matcher_program, context, delegate)
+    });
+
+    let market_before_zero = env.svm.get_account(&env.market).unwrap();
+    let long_before_zero = env.svm.get_account(&long).unwrap();
+    let short_before_zero = env.svm.get_account(&short).unwrap();
+    let matcher_before_zero = matcher.map(|(_, context, _)| env.svm.get_account(&context).unwrap());
+    let vault_before_zero = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    assert!(
+        try_adl_cross_zero_route(
+            &mut env,
+            route,
             &long_owner,
-            long_account,
+            long,
             &short_owner,
-            short_account,
-            POS_SCALE as i128,
-            100,
+            short,
             0,
-        );
+            PRICE,
+            matcher,
+        )
+        .is_err(),
+        "{route:?} zero-size trade must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_zero
+    );
+    assert_eq!(env.svm.get_account(&long).unwrap(), long_before_zero);
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_before_zero);
+    if let (Some((_, context, _)), Some(before)) = (matcher, matcher_before_zero) {
+        assert_eq!(env.svm.get_account(&context).unwrap(), before);
+    }
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before_zero);
 
-        match lifecycle_case {
-            "DrainOnly" => {
-                env.update_asset_lifecycle_as_admin_with_cu(
-                    percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
-                    0,
-                    0,
-                    0,
-                );
-                assert_eq!(
-                    env.market_state().1.assets[0].lifecycle,
-                    AssetLifecycleV16::DrainOnly
-                );
-            }
-            "Recovery" => {
-                env.svm.warp_to_slot(10);
-                env.update_asset_lifecycle_as_admin_with_cu(
-                    percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
-                    0,
-                    10,
-                    0,
-                );
-                assert_eq!(
-                    env.market_state().1.assets[0].lifecycle,
-                    AssetLifecycleV16::Recovery
-                );
-            }
-            _ => unreachable!(),
-        }
+    env.svm.expire_blockhash();
+    let one_atom_reduce_cu = try_adl_cross_zero_route(
+        &mut env,
+        route,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -1,
+        PRICE,
+        matcher,
+    )
+    .expect("one-atom same-side reduction must land");
+    assert_cu_within(
+        &format!("{route:?} one-atom reduction"),
+        one_atom_reduce_cu,
+        TRADE_CU_LIMIT,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(long), 0).basis_pos_q,
+        OPEN_Q - 1
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(short), 0).basis_pos_q,
+        -(OPEN_Q - 1)
+    );
 
-        let market_before = env.svm.get_account(&env.market).unwrap();
-        let long_before = env.svm.get_account(&long_account).unwrap();
-        let short_before = env.svm.get_account(&short_account).unwrap();
-        env.svm.expire_blockhash();
-        let flip = env.send(
-            env.batch_trade_no_cpi_ix(
+    env.svm.expire_blockhash();
+    let one_atom_flip_cu = try_adl_cross_zero_route(
+        &mut env,
+        route,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -OPEN_Q,
+        PRICE,
+        matcher,
+    )
+    .expect("one-atom opposite exposure must pass the ordinary Active gate");
+    assert_cu_within(
+        &format!("{route:?} one-atom cross-zero"),
+        one_atom_flip_cu,
+        TRADE_CU_LIMIT,
+    );
+    let long_after_flip = active_leg_for_asset(&env.portfolio_state(long), 0);
+    let short_after_flip = active_leg_for_asset(&env.portfolio_state(short), 0);
+    assert_eq!(long_after_flip.side, SideV16::Short);
+    assert_eq!(short_after_flip.side, SideV16::Long);
+    assert_eq!(long_after_flip.basis_pos_q.unsigned_abs(), 1);
+    assert_eq!(short_after_flip.basis_pos_q.unsigned_abs(), 1);
+
+    env.svm.expire_blockhash();
+    let exact_close_cu = try_adl_cross_zero_route(
+        &mut env,
+        route,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        1,
+        PRICE,
+        matcher,
+    )
+    .expect("one-atom opposite exposure must remain exactly closeable");
+    assert_cu_within(
+        &format!("{route:?} one-atom exact close"),
+        exact_close_cu,
+        TRADE_CU_LIMIT,
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
+    let (_, flat_group) = env.market_state();
+    assert_eq!(flat_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(flat_group.assets[0].oi_eff_short_q, 0);
+
+    let market_before_cap = env.svm.get_account(&env.market).unwrap();
+    let long_before_cap = env.svm.get_account(&long).unwrap();
+    let short_before_cap = env.svm.get_account(&short).unwrap();
+    let matcher_before_cap = matcher.map(|(_, context, _)| env.svm.get_account(&context).unwrap());
+    let vault_before_cap = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let above_cap =
+        i128::try_from(percolator::MAX_TRADE_SIZE_Q + 1).expect("MAX_TRADE_SIZE_Q + 1 fits i128");
+    assert!(
+        try_adl_cross_zero_route(
+            &mut env,
+            route,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            above_cap,
+            PRICE,
+            matcher,
+        )
+        .is_err(),
+        "{route:?} first quantity above the public cap must reject"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_cap);
+    assert_eq!(env.svm.get_account(&long).unwrap(), long_before_cap);
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_before_cap);
+    if let (Some((_, context, _)), Some(before)) = (matcher, matcher_before_cap) {
+        assert_eq!(env.svm.get_account(&context).unwrap(), before);
+    }
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before_cap);
+
+    let max_q = i128::try_from(percolator::MAX_TRADE_SIZE_Q)
+        .expect("MAX_TRADE_SIZE_Q fits the signed request domain");
+    env.svm.expire_blockhash();
+    let max_open_cu = try_adl_cross_zero_route(
+        &mut env,
+        route,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        max_q,
+        PRICE,
+        matcher,
+    )
+    .expect("the exact public quantity cap must remain executable");
+    assert_cu_within(
+        &format!("{route:?} exact maximum quantity open"),
+        max_open_cu,
+        TRADE_CU_LIMIT,
+    );
+    let (_, max_group) = env.market_state();
+    assert_eq!(
+        max_group.assets[0].oi_eff_long_q,
+        percolator::MAX_TRADE_SIZE_Q
+    );
+    assert_eq!(
+        max_group.assets[0].oi_eff_short_q,
+        percolator::MAX_TRADE_SIZE_Q
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(long), 0).basis_pos_q,
+        max_q
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(short), 0).basis_pos_q,
+        -max_q
+    );
+
+    env.svm.expire_blockhash();
+    let max_close_cu = try_adl_cross_zero_route(
+        &mut env,
+        route,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -max_q,
+        PRICE,
+        matcher,
+    )
+    .expect("the exact maximum position must remain closeable");
+    assert_cu_within(
+        &format!("{route:?} exact maximum quantity close"),
+        max_close_cu,
+        TRADE_CU_LIMIT,
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
+    let (_, terminal_group) = env.market_state();
+    assert_eq!(terminal_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(terminal_group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(terminal_group.vault as u64, env.token_amount(env.vault));
+}
+
+#[test]
+fn v16_program_cross_zero_scalar_boundaries_hold_on_all_routes() {
+    for route in AdlCrossZeroRoute::ALL {
+        run_active_cross_zero_quantity_boundary_world(route);
+    }
+}
+
+#[test]
+fn v16_program_exit_only_lifecycles_reject_cross_zero_on_all_routes() {
+    for route in AdlCrossZeroRoute::ALL {
+        for lifecycle_case in ["DrainOnly", "Recovery"] {
+            let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+            if lifecycle_case == "Recovery" {
+                env.configure_permissionless_resolve_with_cu(100, 50);
+            }
+            let long_owner = Keypair::new();
+            let short_owner = Keypair::new();
+            let long_account = env.create_portfolio(&long_owner);
+            let short_account = env.create_portfolio(&short_owner);
+            env.deposit(&long_owner, long_account, 1_000_000);
+            env.deposit(&short_owner, short_account, 1_000_000);
+            env.trade_asset_with_cu(
+                0,
+                &long_owner,
                 long_account,
+                &short_owner,
                 short_account,
-                vec![BatchTradeLeg {
-                    asset_index: 0,
-                    market_id: first_generation_market_id(0),
-                    size_q: -(2 * POS_SCALE as i128),
-                    exec_price: 100,
-                    fee_bps: 0,
-                }],
-            ),
-            vec![
-                AccountMeta::new(long_owner.pubkey(), true),
-                AccountMeta::new(short_owner.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(long_account, false),
-                AccountMeta::new(short_account, false),
-            ],
-            &[&long_owner, &short_owner],
-        );
-        assert!(
-            flip.is_err(),
-            "{lifecycle_case} BatchTradeNoCpi must reject a cross-zero flip"
-        );
-        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-        assert_eq!(env.svm.get_account(&long_account).unwrap(), long_before);
-        assert_eq!(env.svm.get_account(&short_account).unwrap(), short_before);
+                POS_SCALE as i128,
+                100,
+                0,
+            );
+            let matcher = route.uses_cpi().then(|| {
+                let matcher_program = Pubkey::new_unique();
+                let matcher_bytes =
+                    std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
+                env.svm.add_program(matcher_program, &matcher_bytes);
+                let (context, delegate, _) =
+                    env.init_auth_matcher_context(matcher_program, &short_owner, short_account);
+                (matcher_program, context, delegate)
+            });
 
-        env.svm.expire_blockhash();
-        let close_cu = env
-            .send(
-                env.batch_trade_no_cpi_ix(
-                    long_account,
-                    short_account,
-                    vec![BatchTradeLeg {
-                        asset_index: 0,
-                        market_id: first_generation_market_id(0),
-                        size_q: -(POS_SCALE as i128),
-                        exec_price: 100,
-                        fee_bps: 0,
-                    }],
-                ),
-                vec![
-                    AccountMeta::new(long_owner.pubkey(), true),
-                    AccountMeta::new(short_owner.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(long_account, false),
-                    AccountMeta::new(short_account, false),
-                ],
-                &[&long_owner, &short_owner],
+            match lifecycle_case {
+                "DrainOnly" => {
+                    env.update_asset_lifecycle_as_admin_with_cu(
+                        percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+                        0,
+                        0,
+                        0,
+                    );
+                    assert_eq!(
+                        env.market_state().1.assets[0].lifecycle,
+                        AssetLifecycleV16::DrainOnly
+                    );
+                }
+                "Recovery" => {
+                    env.svm.warp_to_slot(10);
+                    env.update_asset_lifecycle_as_admin_with_cu(
+                        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+                        0,
+                        10,
+                        0,
+                    );
+                    assert_eq!(
+                        env.market_state().1.assets[0].lifecycle,
+                        AssetLifecycleV16::Recovery
+                    );
+                }
+                _ => unreachable!(),
+            }
+
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let long_before = env.svm.get_account(&long_account).unwrap();
+            let short_before = env.svm.get_account(&short_account).unwrap();
+            let matcher_before =
+                matcher.map(|(_, context, _)| env.svm.get_account(&context).unwrap());
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            env.svm.expire_blockhash();
+            let flip = try_adl_cross_zero_route(
+                &mut env,
+                route,
+                &long_owner,
+                long_account,
+                &short_owner,
+                short_account,
+                -(2 * POS_SCALE as i128),
+                100,
+                matcher,
+            );
+            assert!(
+                flip.is_err(),
+                "{route:?} {lifecycle_case} must reject a cross-zero flip"
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(env.svm.get_account(&long_account).unwrap(), long_before);
+            assert_eq!(env.svm.get_account(&short_account).unwrap(), short_before);
+            if let (Some((_, context, _)), Some(before)) = (matcher, matcher_before) {
+                assert_eq!(env.svm.get_account(&context).unwrap(), before);
+            }
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+            env.svm.expire_blockhash();
+            let close_cu = try_adl_cross_zero_route(
+                &mut env,
+                route,
+                &long_owner,
+                long_account,
+                &short_owner,
+                short_account,
+                -(POS_SCALE as i128),
+                100,
+                matcher,
             )
-            .expect("exact BatchTradeNoCpi lifecycle close must remain live");
-        assert_cu_within(
-            &format!("{lifecycle_case} BatchTradeNoCpi exact close"),
-            close_cu,
-            TRADE_CU_LIMIT,
-        );
-        let (_, group_after) = env.market_state();
-        assert_eq!(group_after.assets[0].oi_eff_long_q, 0);
-        assert_eq!(group_after.assets[0].oi_eff_short_q, 0);
-        assert!(
-            !has_active_leg_for_asset(&env.portfolio_state(long_account), 0),
-            "{lifecycle_case} exact close leaves the long account flat"
-        );
-        assert!(
-            !has_active_leg_for_asset(&env.portfolio_state(short_account), 0),
-            "{lifecycle_case} exact close leaves the short account flat"
-        );
-        assert_eq!(group_after.vault as u64, env.token_amount(env.vault));
-        assert!(group_after.vault >= group_after.c_tot + group_after.insurance);
+            .expect("exact exit-only lifecycle close must remain live");
+            assert_cu_within(
+                &format!("{route:?} {lifecycle_case} exact close"),
+                close_cu,
+                TRADE_CU_LIMIT,
+            );
+            let (_, group_after) = env.market_state();
+            assert_eq!(group_after.assets[0].oi_eff_long_q, 0);
+            assert_eq!(group_after.assets[0].oi_eff_short_q, 0);
+            assert!(
+                !has_active_leg_for_asset(&env.portfolio_state(long_account), 0),
+                "{lifecycle_case} exact close leaves the long account flat"
+            );
+            assert!(
+                !has_active_leg_for_asset(&env.portfolio_state(short_account), 0),
+                "{lifecycle_case} exact close leaves the short account flat"
+            );
+            assert_eq!(group_after.vault as u64, env.token_amount(env.vault));
+            assert!(group_after.vault >= group_after.c_tot + group_after.insurance);
+        }
     }
 }
 

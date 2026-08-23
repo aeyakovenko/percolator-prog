@@ -7011,6 +7011,18 @@ pub struct CurePendingObligationDosEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingBarrierCrossZeroEvidence {
+    pub world_count: u64,
+    pub route_worlds: [u64; 4],
+    pub long_barrier_worlds: u64,
+    pub short_barrier_worlds: u64,
+    pub rejected_cross_zero_worlds: u64,
+    pub exact_exit_worlds: u64,
+    pub released_barrier_worlds: u64,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaterializedPortfolioCensusEvidence {
     pub initial_count: u64,
     pub after_close_count: u64,
@@ -7073,13 +7085,43 @@ fn create_public_cancellable_close_via_route(
     cranker: u8,
     route: TradeRoute,
 ) -> Result<(), String> {
+    create_public_cancellable_close_via_route_and_side(
+        runner,
+        winner,
+        loser,
+        asset,
+        cranker,
+        route,
+        SideV16::Long,
+    )
+}
+
+fn create_public_cancellable_close_via_route_and_side(
+    runner: &mut ScenarioRunner,
+    winner: u8,
+    loser: u8,
+    asset: u8,
+    cranker: u8,
+    route: TradeRoute,
+    winner_side: SideV16,
+) -> Result<(), String> {
     let asset_index = asset as usize;
     let winner_index = winner as usize;
     let loser_index = loser as usize;
-    let open_q = (POS_SCALE as i128)
+    let open_abs_q = (POS_SCALE as i128)
         .checked_mul(3)
         .and_then(|value| value.checked_div(4))
         .ok_or("INV-076 close fixture quantity overflow")?;
+    let open_q = match winner_side {
+        SideV16::Long => open_abs_q,
+        SideV16::Short => open_abs_q
+            .checked_neg()
+            .ok_or("INV-076 close fixture quantity negation overflow")?,
+    };
+    let adverse_move_bps = match winner_side {
+        SideV16::Long => 500,
+        SideV16::Short => -500,
+    };
     if !runner.execute_trade(
         route,
         winner_index,
@@ -7097,7 +7139,7 @@ fn create_public_cancellable_close_via_route(
         runner.run_safety_prefix(&[Action::PushMark {
             asset,
             dt: 1,
-            move_bps: 500,
+            move_bps: adverse_move_bps,
         }])?;
         if runner.env.primary_market_state().1.bankruptcy_hlock_active {
             runner
@@ -8044,6 +8086,30 @@ pub fn run_active_close_shutdown_liveness_probe() -> Result<ActiveCloseShutdownE
     Ok(baseline)
 }
 
+fn cure_primary_close_with_bounded_deposit(
+    runner: &mut ScenarioRunner,
+    actor: usize,
+) -> Result<u128, String> {
+    let mut cure_deposit = 1_000_000u128;
+    loop {
+        match runner
+            .env
+            .cure_and_cancel_primary_close(actor, cure_deposit)
+        {
+            Ok(_) => return Ok(cure_deposit),
+            Err(error) if error.contains("Custom(14)") => {
+                cure_deposit = cure_deposit
+                    .checked_mul(2)
+                    .filter(|amount| *amount <= 100_000_000_000)
+                    .ok_or_else(|| {
+                        format!("no bounded valid public cure amount found; last error: {error}")
+                    })?;
+            }
+            Err(error) => return Err(format!("public close cure: {error}")),
+        }
+    }
+}
+
 pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDosEvidence, String> {
     const FIRST_WINNER: usize = 0;
     const LOSER: usize = 1;
@@ -8079,24 +8145,7 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
     let cure_accounted_vault_before = runner.env.primary_market_state().1.vault;
     let cure_capital_before = runner.env.primary_portfolio(LOSER).capital.get();
 
-    let mut cure_deposit = 1_000_000u128;
-    loop {
-        match runner
-            .env
-            .cure_and_cancel_primary_close(LOSER, cure_deposit)
-        {
-            Ok(_) => break,
-            Err(error) if error.contains("Custom(14)") => {
-                cure_deposit = cure_deposit
-                    .checked_mul(2)
-                    .filter(|amount| *amount <= 100_000_000_000)
-                    .ok_or_else(|| {
-                        format!("no bounded valid public cure amount found; last error: {error}")
-                    })?;
-            }
-            Err(error) => return Err(format!("old-episode cure control: {error}")),
-        }
-    }
+    let cure_deposit = cure_primary_close_with_bounded_deposit(&mut runner, LOSER)?;
     let cure_source_debit = u128::from(
         cure_source_before
             .checked_sub(
@@ -8250,6 +8299,264 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
         unrelated_trade_rejected,
         owner_withdraw_rejected,
     })
+}
+
+fn run_pending_barrier_cross_zero_world(
+    route: TradeRoute,
+    barrier_side: SideV16,
+    seed_byte: u8,
+) -> Result<PendingBarrierCrossZeroEvidence, String> {
+    const CLOSE_WINNER: usize = 0;
+    const CLOSE_LOSER: usize = 1;
+    const AUXILIARY_LONG: usize = 2;
+    const AUXILIARY_SHORT: usize = 3;
+    const KEEPER: usize = EXIT_MAKER_INDEX;
+    const ASSET: usize = 0;
+    const AUXILIARY_Q: i128 = POS_SCALE as i128 / 4;
+    const RELEASE_BOUND: usize = 8;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 1_000_000_000_000, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
+    if !runner.execute_trade(
+        route,
+        AUXILIARY_LONG,
+        AUXILIARY_SHORT,
+        vec![(ASSET, AUXILIARY_Q)],
+        0,
+        0,
+        true,
+    )? {
+        return Err(format!(
+            "INV-050 {route:?} auxiliary control position did not open"
+        ));
+    }
+    create_public_cancellable_close_via_route_and_side(
+        &mut runner,
+        CLOSE_WINNER as u8,
+        CLOSE_LOSER as u8,
+        ASSET as u8,
+        KEEPER as u8,
+        TradeRoute::NoCpi,
+        barrier_side,
+    )?;
+    runner.assert_global_invariants()?;
+
+    let (_, barrier_group) = runner.env.primary_market_state();
+    let barrier_asset = barrier_group.assets[ASSET];
+    let active_close = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-050 active close decode: {error:?}"))?;
+    let long_barrier = active_close.domain_side == SideV16::Long;
+    let short_barrier = active_close.domain_side == SideV16::Short;
+    let retained_leg = runner.env.primary_portfolio(CLOSE_WINNER).legs[0]
+        .try_to_runtime()
+        .map_err(|error| format!("INV-050 retained obligation decode: {error:?}"))?;
+    if !active_close.active
+        || active_close.canceled
+        || active_close.finalized
+        || active_close.residual_remaining == 0
+        || active_close.domain_side != barrier_side
+        || long_barrier == short_barrier
+        || !retained_leg.active
+        || retained_leg.basis_pos_q != 0
+        || retained_leg.loss_weight == 0
+    {
+        return Err(format!(
+            "INV-050 {route:?} fixture did not expose one active close barrier and retained obligation: close={active_close:?}, asset={barrier_asset:?}, leg={retained_leg:?}"
+        ));
+    }
+
+    let positions_before_rejection = runner.positions;
+    let rejected = !runner.execute_trade(
+        route,
+        AUXILIARY_LONG,
+        AUXILIARY_SHORT,
+        vec![(ASSET, -(AUXILIARY_Q + 1))],
+        0,
+        0,
+        false,
+    )?;
+    if !rejected {
+        return Err(format!(
+            "INV-050 {route:?} pending-loss barrier admitted a cross-zero reissue: barrier={barrier_asset:?}, retained={retained_leg:?}, positions={positions_before_rejection:?}->{:?}",
+            runner.positions
+        ));
+    }
+    if runner.positions != positions_before_rejection {
+        return Err(format!(
+            "INV-050 {route:?} rejected cross-zero changed the ghost ledger: {positions_before_rejection:?}->{:?}",
+            runner.positions
+        ));
+    }
+
+    if !runner.execute_trade(
+        route,
+        AUXILIARY_LONG,
+        AUXILIARY_SHORT,
+        vec![(ASSET, -AUXILIARY_Q)],
+        0,
+        0,
+        true,
+    )? {
+        return Err(format!(
+            "INV-050 {route:?} pending-loss barrier blocked the exact same-side owner exit"
+        ));
+    }
+    let (_, exited_group) = runner.env.primary_market_state();
+    if runner.positions[AUXILIARY_LONG][ASSET] != 0
+        || runner.positions[AUXILIARY_SHORT][ASSET] != 0
+        || exited_group.assets[ASSET].oi_eff_long_q != 0
+        || exited_group.assets[ASSET].oi_eff_short_q != 0
+    {
+        return Err(format!(
+            "INV-050 {route:?} exact barrier-era exit did not clear the auxiliary pair: positions={:?}, asset={:?}",
+            runner.positions, exited_group.assets[ASSET]
+        ));
+    }
+
+    let close_after_exit = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-050 framed close decode: {error:?}"))?;
+    if close_after_exit != active_close {
+        return Err(format!(
+            "INV-050 {route:?} auxiliary exit rewrote the active close: {active_close:?}->{close_after_exit:?}"
+        ));
+    }
+
+    cure_primary_close_with_bounded_deposit(&mut runner, CLOSE_LOSER)?;
+    runner.assert_global_invariants()?;
+    let cured_close = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-050 canceled close decode: {error:?}"))?;
+    if !cured_close.canceled {
+        return Err(format!(
+            "INV-050 {route:?} public cure did not cancel the barrier episode: {cured_close:?}"
+        ));
+    }
+
+    let (_, cured_group) = runner.env.primary_market_state();
+    let next_slot = cured_group.assets[ASSET]
+        .slot_last
+        .checked_add(1)
+        .ok_or("INV-050 barrier release slot overflow")?;
+    if runner.env.current_slot() < next_slot {
+        runner.env.warp_to_slot(next_slot);
+    }
+    for _ in 0..RELEASE_BOUND {
+        let (_, current_group) = runner.env.primary_market_state();
+        let current_asset = current_group.assets[ASSET];
+        if current_asset.pending_obligation_count_long == 0
+            && current_asset.pending_obligation_count_short == 0
+        {
+            break;
+        }
+        let mut obligation_actor = None;
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            let portfolio = runner.env.primary_portfolio(actor);
+            let mut owns_obligation = false;
+            for stored_leg in portfolio.legs {
+                let leg = stored_leg.try_to_runtime().map_err(|error| {
+                    format!("INV-050 obligation-owner leg decode for actor {actor}: {error:?}")
+                })?;
+                if leg.active
+                    && leg.asset_index as usize == ASSET
+                    && leg.basis_pos_q == 0
+                    && leg.loss_weight != 0
+                {
+                    owns_obligation = true;
+                    break;
+                }
+            }
+            if owns_obligation {
+                obligation_actor = Some(actor);
+                break;
+            }
+        }
+        let obligation_actor = obligation_actor.ok_or_else(|| {
+            format!(
+                "INV-050 {route:?} pending count had no public obligation owner: {current_asset:?}"
+            )
+        })?;
+        runner
+            .execute_crank(obligation_actor, HintMode::Complete, true)
+            .map_err(CrankFailure::into_message)?;
+    }
+    runner.assert_global_invariants()?;
+    let (_, released_group) = runner.env.primary_market_state();
+    let released_asset = released_group.assets[ASSET];
+    if released_asset.pending_obligation_count_long != 0
+        || released_asset.pending_obligation_count_short != 0
+    {
+        return Err(format!(
+            "INV-050 {route:?} pending-loss barrier did not release in {RELEASE_BOUND} public cranks: {released_asset:?}"
+        ));
+    }
+
+    let mut route_worlds = [0; 4];
+    route_worlds[route.index()] = 1;
+    Ok(PendingBarrierCrossZeroEvidence {
+        world_count: 1,
+        route_worlds,
+        long_barrier_worlds: u64::from(long_barrier),
+        short_barrier_worlds: u64::from(short_barrier),
+        rejected_cross_zero_worlds: 1,
+        exact_exit_worlds: 1,
+        released_barrier_worlds: 1,
+        coverage: runner.coverage,
+    })
+}
+
+pub fn run_pending_barrier_cross_zero_probe() -> Result<PendingBarrierCrossZeroEvidence, String> {
+    let mut aggregate: Option<PendingBarrierCrossZeroEvidence> = None;
+    for (route_index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (side_index, barrier_side) in [SideV16::Long, SideV16::Short].into_iter().enumerate() {
+            let seed_byte = 0xd0 + (route_index * 2 + side_index) as u8;
+            let evidence = run_pending_barrier_cross_zero_world(route, barrier_side, seed_byte)?;
+            if let Some(existing) = aggregate.as_mut() {
+                existing.world_count += evidence.world_count;
+                for (total, count) in existing.route_worlds.iter_mut().zip(evidence.route_worlds) {
+                    *total += count;
+                }
+                existing.long_barrier_worlds += evidence.long_barrier_worlds;
+                existing.short_barrier_worlds += evidence.short_barrier_worlds;
+                existing.rejected_cross_zero_worlds += evidence.rejected_cross_zero_worlds;
+                existing.exact_exit_worlds += evidence.exact_exit_worlds;
+                existing.released_barrier_worlds += evidence.released_barrier_worlds;
+                existing.coverage.merge(evidence.coverage);
+            } else {
+                aggregate = Some(evidence);
+            }
+        }
+    }
+    aggregate.ok_or_else(|| "INV-050 pending-barrier matrix produced no worlds".into())
 }
 
 pub fn run_materialized_portfolio_lifecycle_census(
