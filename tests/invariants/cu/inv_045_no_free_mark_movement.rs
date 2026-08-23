@@ -74,6 +74,26 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
                     observations: crank_observations(0),
                 },
             );
+            for portfolio in [attacker_account, victim_account] {
+                let state = env.portfolio_state(portfolio);
+                let leg = active_leg_for_asset(&state, 0);
+                let asset = env.market_state().1.assets[0];
+                let cohort_epoch = match leg.side {
+                    SideV16::Long => asset.kf_epoch_long,
+                    SideV16::Short => asset.kf_epoch_short,
+                };
+                if leg.kf_epoch_snap == cohort_epoch {
+                    continue;
+                }
+                env.svm.expire_blockhash();
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: vec![],
+                    },
+                );
+            }
         }
         env.svm.expire_blockhash();
         env.try_trade_asset_with_cu(
@@ -113,7 +133,7 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
     env.svm.warp_to_slot(21);
     for portfolio in [attacker_account, victim_account] {
         env.svm.expire_blockhash();
-        env.crank(
+        env.crank_if_actionable(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 21,
@@ -190,6 +210,26 @@ fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
                     observations: crank_observations(0),
                 },
             );
+            for portfolio in [attacker_account, victim_account] {
+                let state = env.portfolio_state(portfolio);
+                let leg = active_leg_for_asset(&state, 0);
+                let asset = env.market_state().1.assets[0];
+                let cohort_epoch = match leg.side {
+                    SideV16::Long => asset.kf_epoch_long,
+                    SideV16::Short => asset.kf_epoch_short,
+                };
+                if leg.kf_epoch_snap == cohort_epoch {
+                    continue;
+                }
+                env.svm.expire_blockhash();
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: vec![],
+                    },
+                );
+            }
         }
         env.svm.expire_blockhash();
         env.try_trade_asset_with_cu(
@@ -229,7 +269,7 @@ fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
     env.svm.warp_to_slot(21);
     for portfolio in [attacker_account, victim_account] {
         env.svm.expire_blockhash();
-        env.crank(
+        env.crank_if_actionable(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 21,
@@ -248,9 +288,9 @@ fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
         "the losing short settles its negative PnL"
     );
     assert_eq!(
-        victim_capital_before - victim_after.capital.get(),
-        attacker_pnl as u128,
-        "the attacker's mark-created claim is the victim's realized capital loss"
+        victim_after.capital.get(),
+        victim_capital_before,
+        "fee-backed mark movement must not debit the passive counterparty's principal"
     );
     assert!(
         attacker_pnl as u128 <= fees_paid,

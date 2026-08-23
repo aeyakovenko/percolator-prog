@@ -11,7 +11,9 @@
 //! witness while completing the preceding asset, then performs the final whole-account refresh;
 //! every call remains below the transaction ceiling. Each test asserts either a bounded CU
 //! ceiling, a bounded successful progress path, or atomic rejection before an attacker-controlled
-//! shape can strand a required exit route.
+//! shape can strand a required exit route. A dedicated 14-leg/28-source Recovery test leaves one
+//! K/F cohort unsettled, freezes its asset, and proves the sole public crank settles committed
+//! state without accruing the frozen asset or exceeding the CU ceiling.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -482,18 +484,23 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
             },
         );
     }
-    for portfolio in [account, counterparty] {
-        env.crank(
-            portfolio,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
-                observations: vec![],
-            },
-        );
-    }
+    let market_before_refresh = env.svm.get_account(&env.market).unwrap();
+    let account_before_refresh = env.svm.get_account(&account).unwrap();
+    env.crank(
+        account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: vec![],
+        },
+    );
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before_refresh
+            || env.svm.get_account(&account).unwrap() != account_before_refresh,
+        "the final slot-2 account refresh was a no-op"
+    );
     for asset_index in 0..ASSETS {
         let units = if asset_index == adverse_asset { 140 } else { 1 };
-        env.trade_asset_with_cu(
+        env.try_trade_asset_with_cu(
             asset_index,
             &owner,
             account,
@@ -502,7 +509,8 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
             -((2 * units * POS_SCALE) as i128),
             PROFIT_PRICE,
             0,
-        );
+        )
+        .unwrap_or_else(|error| panic!("flip max-source asset {asset_index}: {error}"));
     }
 
     env.svm.warp_to_slot(3);
@@ -523,21 +531,19 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
             },
         );
     }
-    for portfolio in [account, counterparty] {
-        env.crank(
-            portfolio,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 3,
-                observations: vec![],
-            },
-        );
-    }
+    let market_before_refresh = env.svm.get_account(&env.market).unwrap();
+    let account_before_refresh = env.svm.get_account(&account).unwrap();
     env.crank(
         account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
             observations: vec![],
         },
+    );
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before_refresh
+            || env.svm.get_account(&account).unwrap() != account_before_refresh,
+        "the final slot-3 account refresh was a no-op"
     );
     let current = env.portfolio_state(account);
     assert_eq!(
@@ -926,7 +932,7 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
 #[test]
 fn v16_program_dense_zero_delta_resolution_shape_matrix_keeps_terminal_exit_bounded() {
     run_dense_zero_delta_resolution_shape(128);
-    run_dense_zero_delta_resolution_shape(5_834);
+    run_dense_zero_delta_resolution_shape(MAX_10M_MARKET_SLOTS as u16);
 }
 
 #[test]
@@ -1543,15 +1549,20 @@ fn v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit() {
             },
         );
     }
-    for portfolio in [long_account, short_account] {
-        env.crank(
-            portfolio,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
-                observations: vec![],
-            },
-        );
-    }
+    let market_before_refresh = env.svm.get_account(&env.market).unwrap();
+    let long_before_refresh = env.svm.get_account(&long_account).unwrap();
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: vec![],
+        },
+    );
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before_refresh
+            || env.svm.get_account(&long_account).unwrap() != long_before_refresh,
+        "the final slot-2 long refresh was a no-op"
+    );
 
     let long_before = env.portfolio_state(long_account);
     let occupied_before = long_before
@@ -1597,15 +1608,20 @@ fn v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit() {
             },
         );
     }
-    for portfolio in [long_account, short_account] {
-        env.crank(
-            portfolio,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 3,
-                observations: vec![],
-            },
-        );
-    }
+    let market_before_refresh = env.svm.get_account(&env.market).unwrap();
+    let long_before_refresh = env.svm.get_account(&long_account).unwrap();
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: vec![],
+        },
+    );
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before_refresh
+            || env.svm.get_account(&long_account).unwrap() != long_before_refresh,
+        "the final slot-3 long refresh was a no-op"
+    );
 
     let long_before_reduction = env.portfolio_state(long_account);
     let occupied_before_reduction = long_before_reduction
@@ -1643,7 +1659,7 @@ fn v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit() {
 
 #[test]
 fn v16_bpf_10m_market_high_asset_resolved_exit_stays_bounded() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
 
@@ -1699,7 +1715,7 @@ fn v16_bpf_10m_market_high_asset_resolved_exit_stays_bounded() {
 
 #[test]
 fn v16_bpf_10m_market_rebalance_reduce_high_asset_stays_bounded() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
     const AMOUNT: u128 = 1_000_000;
@@ -1955,7 +1971,7 @@ fn v16_bpf_public_stale_7_leg_tradenocpi_boundary_is_bounded() {
 
 #[test]
 fn v16_bpf_10m_market_resolution_stays_bounded() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
 
@@ -1994,7 +2010,7 @@ fn v16_bpf_10m_market_resolution_stays_bounded() {
 
 #[test]
 fn v16_bpf_10m_flat_user_withdraw_and_close_stay_bounded() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
     const DEPOSIT: u128 = 1_000_000;
@@ -2438,15 +2454,111 @@ fn v16_attack_public_14_leg_28_source_recovery_forfeit_stays_bounded() {
 }
 
 #[test]
+fn v16_program_recovery_kf_refresh_at_14_leg_28_source_shape_is_bounded() {
+    const MOVED_PRICE: u64 = 101;
+
+    let (mut env, _taker_owner, _lp_owner, taker, lp, mut slot) =
+        setup_max_source_live_pair(0, percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS);
+    let asset_index = MAX_SOURCE_LIVE_ASSETS - 1;
+    let asset_slot = usize::from(asset_index);
+    let custody_before = env.token_amount(env.vault);
+    env.configure_permissionless_resolve_with_cu(1_000, 5);
+
+    slot += 1;
+    env.svm.warp_to_slot(slot);
+    env.push_auth_mark_for_asset_as_admin(asset_index, slot, MOVED_PRICE);
+    env.crank(
+        taker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations(asset_index),
+        },
+    );
+
+    let active = env.market_state().1;
+    let lp_stale = env.portfolio_state(lp);
+    let stale_leg = active_leg_for_asset(&lp_stale, asset_slot);
+    assert_eq!(stale_leg.side, SideV16::Short);
+    assert!(stale_leg.kf_epoch_snap < active.assets[asset_slot].kf_epoch_short);
+    assert_eq!(
+        lp_stale
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+    );
+    let stale_count_before = active.assets[asset_slot].stale_account_count_short;
+    assert!(stale_count_before > 0);
+
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        asset_index,
+        slot,
+        0,
+    );
+    let recovery_before = env.market_state().1;
+    let frozen_asset = recovery_before.assets[asset_slot];
+    assert_eq!(frozen_asset.lifecycle, AssetLifecycleV16::Recovery);
+
+    let active_bitmap_before = active_bitmap(&env.portfolio_state(lp));
+    let refresh_cu = env.crank(
+        lp,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: vec![],
+        },
+    );
+    assert_cu_within(
+        "14-leg/28-source Recovery K/F committed-state refresh",
+        refresh_cu,
+        1_375_000,
+    );
+
+    let recovery_after = env.market_state().1;
+    let refreshed_asset = recovery_after.assets[asset_slot];
+    let lp_after = env.portfolio_state(lp);
+    let refreshed_leg = active_leg_for_asset(&lp_after, asset_slot);
+    assert_eq!(refreshed_asset.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(
+        refreshed_asset.effective_price,
+        frozen_asset.effective_price
+    );
+    assert_eq!(refreshed_asset.slot_last, frozen_asset.slot_last);
+    assert_eq!(refreshed_asset.k_long, frozen_asset.k_long);
+    assert_eq!(refreshed_asset.k_short, frozen_asset.k_short);
+    assert_eq!(refreshed_asset.f_long_num, frozen_asset.f_long_num);
+    assert_eq!(refreshed_asset.f_short_num, frozen_asset.f_short_num);
+    assert_eq!(
+        refreshed_asset.stale_account_count_short,
+        stale_count_before - 1
+    );
+    assert_eq!(refreshed_leg.kf_epoch_snap, refreshed_asset.kf_epoch_short);
+    assert_eq!(active_bitmap(&lp_after), active_bitmap_before);
+    assert_eq!(
+        health_cert(&lp_after).cert_risk_epoch,
+        recovery_after.risk_epoch
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+    assert_eq!(recovery_after.vault, recovery_before.vault);
+    eprintln!("14-leg/28-source Recovery K/F refresh CU: {refresh_cu}");
+}
+
+#[test]
 fn v16_attack_max_source_maintenance_sync_stays_bounded() {
-    let (mut env, _taker_owner, _lp_owner, _taker, lp, slot) = setup_max_source_live_pair(1, 1);
+    let (mut env, _taker_owner, _lp_owner, _taker, lp, _slot) = setup_max_source_live_pair(1, 1);
     let before = env.portfolio_state(lp);
     let group_before = env.market_state().1;
     let custody_before = env.token_amount(env.vault);
+    let charge_slot = before
+        .last_fee_slot
+        .get()
+        .checked_add(1)
+        .expect("maintenance charge slot");
 
-    env.svm.warp_to_slot(slot + 1);
+    env.svm.warp_to_slot(charge_slot);
     env.svm.expire_blockhash();
-    let cu = env.sync_maintenance_fee_with_cu(lp, None, slot + 1);
+    let cu = env.sync_maintenance_fee_with_cu(lp, None, charge_slot);
     println!("v16 28-source-domain SyncMaintenanceFee CU: {cu}");
     assert_cu_within("28-source-domain SyncMaintenanceFee", cu, 1_375_000);
 
@@ -2882,7 +2994,7 @@ fn v16_program_market_exceeds_64_assets_position_holds_any_14_legs() {
 // a smaller tail budget for real integrations.
 #[test]
 fn v16_program_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const TAIL_LEGS: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
     const FIRST_TAIL_ASSET: usize = N - TAIL_LEGS;
     const PRICE: u64 = 100;
@@ -3514,6 +3626,7 @@ fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
         assert_eq!(parsed_owner, owner.pubkey().to_bytes());
     }
 
+    env.svm.warp_to_slot(2);
     let after_extra = env.crank(
         portfolio,
         ProgInstruction::PermissionlessCrank {
@@ -3534,7 +3647,7 @@ fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
 
 #[test]
 fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
     const TRADE_SLOT: u64 = 1;
@@ -3653,8 +3766,8 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
 //
 // We cannot activate thousands of assets via thousands of UpdateAssetLifecycle txs (far too slow), so
 // we CONSTRUCT the market state directly: start from a known-good 1-asset market, make asset 0
-// active+flat via ConfigureAuthMark, grow the on-chain account to market_account_len_for_capacity(5834),
-// then via the host mirror set max_market_slots=5834 and clone asset 0's active state into a high
+// active+flat via ConfigureAuthMark, grow the on-chain account to the current maximal capacity,
+// then via the host mirror set max_market_slots and clone asset 0's active state into a high
 // traded index (index 5833). All intermediate slots stay canonical DISABLED slots (validate_shape accepts them).
 // A real BPF TradeNoCpi on index 5833 then opens a balanced position; its CU is compared to a
 // small-N trade to prove per-trade compute does NOT scale with the thousands-of-assets count.
@@ -3670,7 +3783,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
 //     profile bytes into the high slot so the high index has a valid, current (non-stale) mark.
 #[test]
 fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
     const TRADED: usize = N - 1; // 5833 — a HIGH index, proving the trade isn't special to asset 0.
     const PRICE: u64 = 100;
@@ -3885,7 +3998,7 @@ fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
 // then close the slab.
 #[test]
 fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
@@ -4005,7 +4118,7 @@ fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market()
 // withdrawal counters.
 #[test]
 fn v16_bpf_terminal_insurance_ledger_last_domain_withdraw_stays_bounded_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
@@ -4087,7 +4200,7 @@ fn v16_bpf_terminal_insurance_ledger_last_domain_withdraw_stays_bounded_on_10m_m
 // every remaining atom, there is no residual insurance balance to reconcile.
 #[test]
 fn v16_bpf_terminal_insurance_initialized_ledger_full_drain_stays_bounded_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
@@ -4188,7 +4301,7 @@ fn v16_bpf_terminal_insurance_initialized_ledger_full_drain_stays_bounded_on_10m
 // withdrawal cannot brick ledger-using insurance operators on a near-10 MiB market.
 #[test]
 fn v16_bpf_terminal_insurance_partial_ledger_withdraw_stays_bounded_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
@@ -4284,7 +4397,7 @@ fn v16_bpf_terminal_insurance_partial_ledger_withdraw_stays_bounded_on_10m_marke
 // can force a full account walk before the tail authority can recover even one atom.
 #[test]
 fn v16_bpf_terminal_insurance_partial_ledger_ignores_other_authority_budget_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
     const OTHER_AUTHORITY_FUNDED: u128 = 77;
@@ -4367,7 +4480,7 @@ fn v16_bpf_terminal_insurance_partial_ledger_ignores_other_authority_budget_on_1
 
 #[test]
 fn v16_bpf_terminal_asset_insurance_partial_ledger_middle_domain_stays_bounded_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = MAX_10M_MARKET_SLOTS;
     const MIDDLE_ASSET: usize = N / 2;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;

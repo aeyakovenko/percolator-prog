@@ -97,6 +97,7 @@ fn v16_program_permissionless_crank_closes_capital_only_resolved_account() {
 fn v16_program_prospective_loss_expiry_matrix_keeps_resolved_exit_live() {
     const PRICE: u64 = 100;
     const LOW_PRICE: u64 = 98;
+    const FINAL_LOW_PRICE: u64 = 96;
     const DEPOSIT: u128 = 100_000_000;
     const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
 
@@ -166,6 +167,13 @@ fn v16_program_prospective_loss_expiry_matrix_keeps_resolved_exit_live() {
         .source_domains
         .iter()
         .all(|source| !source.is_occupied()));
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: vec![],
+        },
+    );
     env.trade_with_cu(
         &short_owner,
         short,
@@ -174,6 +182,16 @@ fn v16_program_prospective_loss_expiry_matrix_keeps_resolved_exit_live() {
         SIZE_Q,
         LOW_PRICE,
         0,
+    );
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_as_admin(0, 4, FINAL_LOW_PRICE);
+    env.crank(
+        neutral,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(0),
+        },
     );
 
     env.svm.warp_to_slot(9);
@@ -202,7 +220,8 @@ fn v16_program_prospective_loss_expiry_matrix_keeps_resolved_exit_live() {
         .all(|source| !source.is_occupied()));
     assert_eq!(
         market_before.source_backing_buckets[0].status,
-        BackingBucketStatusV16::Fresh
+        BackingBucketStatusV16::Expired,
+        "the authenticated slot-9 crank must normalize the slot-8 bucket before resolution"
     );
     assert_eq!(market_before.source_backing_buckets[0].expiry_slot, 8);
     env.resolve();
@@ -997,6 +1016,31 @@ fn v16_attack_stale_liquidation_budget_observation_crank_progresses_without_rewa
         cranker_before,
         "observation-only stale-budget crank pays no liquidation reward"
     );
+
+    let market_fixed = env.svm.get_account(&env.market).unwrap();
+    let target_fixed = env.svm.get_account(&target).unwrap();
+    let cranker_fixed = env.svm.get_account(&cranker).unwrap();
+    env.svm.expire_blockhash();
+    let duplicate = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(target, false),
+            AccountMeta::new_readonly(fresh0, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    );
+    duplicate.expect_err(
+        "an identical same-slot observation at the market/account fixed point must not succeed",
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_fixed);
+    assert_eq!(env.svm.get_account(&target).unwrap(), target_fixed);
+    assert_eq!(env.svm.get_account(&cranker).unwrap(), cranker_fixed);
 }
 
 #[test]

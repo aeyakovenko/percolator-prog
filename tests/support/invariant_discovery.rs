@@ -3206,8 +3206,21 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
     env.crank(1, 2, observation.clone())
         .map_err(|error| format!("observe first bankrupt loser: {error}"))?;
     for step in 0..3 {
-        env.crank(1, 2, Vec::new())
-            .map_err(|error| format!("advance first bankrupt loser step {step}: {error}"))?;
+        let before = fingerprint(&env);
+        match env.crank(1, 2, Vec::new()) {
+            Ok(_) if fingerprint(&env) == before => {
+                return Err(format!(
+                    "advance first bankrupt loser step {step} landed as a successful no-op"
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.contains("Custom(22)") && fingerprint(&env) == before => break,
+            Err(error) => {
+                return Err(format!(
+                    "advance first bankrupt loser step {step} failed without an exact fixed point: {error}"
+                ));
+            }
+        }
     }
     if env.primary_market_state().1.assets[0].mode_long != SideModeV16::ResetPending
         || discovery_position(&env.primary_portfolio(0), 0)? == 0
@@ -3236,8 +3249,21 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
     env.crank(2, 3, observation)
         .map_err(|error| format!("observe second bankrupt loser: {error}"))?;
     for step in 0..3 {
-        env.crank(2, 3, Vec::new())
-            .map_err(|error| format!("advance second bankrupt loser step {step}: {error}"))?;
+        let before = fingerprint(&env);
+        match env.crank(2, 3, Vec::new()) {
+            Ok(_) if fingerprint(&env) == before => {
+                return Err(format!(
+                    "advance second bankrupt loser step {step} landed as a successful no-op"
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.contains("Custom(22)") && fingerprint(&env) == before => break,
+            Err(error) => {
+                return Err(format!(
+                    "advance second bankrupt loser step {step} failed without an exact fixed point: {error}"
+                ));
+            }
+        }
     }
     if env.primary_market_state().1.assets[0].mode_long != SideModeV16::ResetPending
         || discovery_position(&env.primary_portfolio(0), 0)? == 0
@@ -4820,13 +4846,25 @@ fn crank_discovery_steps_for_assets(
             oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
         })
         .collect::<Vec<_>>();
+    let mut progressed = false;
     for step in 0..4 {
-        env.crank(actor, slot, observations.clone())
+        let outcome = env
+            .crank_if_actionable(actor, slot, observations.clone())
             .map_err(|error| {
                 format!(
                     "source-fee crank actor {actor} assets {asset_indices:?} step {step}: {error}"
                 )
             })?;
+        if outcome.is_some() {
+            progressed = true;
+        } else {
+            break;
+        }
+    }
+    if !progressed {
+        return Err(format!(
+            "source-fee actor {actor} assets {asset_indices:?} had no public work"
+        ));
     }
     Ok(())
 }
@@ -5359,7 +5397,7 @@ fn settle_zero_move_actors(
 ) -> Result<(), String> {
     accrue_zero_move_asset_to_slot(env, settlement_slot)?;
     for &actor in actors {
-        env.crank(actor, settlement_slot, zero_move_observation_discovery(env))
+        env.crank_if_actionable(actor, settlement_slot, zero_move_observation_discovery(env))
             .map_err(|error| format!("settle zero-move actor {actor}: {error}"))?;
     }
     Ok(())
@@ -6942,6 +6980,10 @@ fn discover_one_pending_mark_inheritance(
             "{route:?} pending mark did not commit: {committed_mark}/{pending_mark}"
         ));
     }
+    env.crank(0, 3, observations())
+        .map_err(|error| format!("{route:?} settle pending-mark seed winner: {error}"))?;
+    env.crank(1, 3, observations())
+        .map_err(|error| format!("{route:?} settle pending-mark seed loser: {error}"))?;
 
     let attacker_capital_before = env.primary_portfolio(2).capital.get();
     let victim_capital_before = env.primary_portfolio(3).capital.get();
@@ -7068,9 +7110,17 @@ fn run_pending_target_world(
     }
 
     env.warp_to_slot(6);
+    let mut advanced_before_rebound = false;
     for actor in [0, 1] {
-        env.crank(actor, 6, observations())
-            .map_err(|error| format!("{route:?} advance actor before rebound: {error}"))?;
+        advanced_before_rebound |= env
+            .crank_if_actionable(actor, 6, observations())
+            .map_err(|error| format!("{route:?} advance actor before rebound: {error}"))?
+            .is_some();
+    }
+    if !advanced_before_rebound {
+        return Err(format!(
+            "{route:?} no crank advanced market state before the pending rebound"
+        ));
     }
     let rebound_input = BASIS
         .checked_mul(2)
@@ -7114,12 +7164,20 @@ fn run_pending_target_world(
 
     let mut slot = 7u64;
     loop {
+        let mut progressed = false;
         for actor in [0, 1] {
-            env.crank(actor, slot, observations())
-                .map_err(|error| format!("{route:?} converge actor {actor}: {error}"))?;
+            progressed |= env
+                .crank_if_actionable(actor, slot, observations())
+                .map_err(|error| format!("{route:?} converge actor {actor}: {error}"))?
+                .is_some();
         }
         if env.primary_market_state().1.assets[0].effective_price == target {
             break;
+        }
+        if !progressed {
+            return Err(format!(
+                "{route:?} pending target remained without a progressing public crank"
+            ));
         }
         slot = slot
             .checked_add(1)
@@ -7522,10 +7580,17 @@ fn discover_one_mark_movement_reserve_violation(
 
     execute_discovery_trade_route(&mut env, route, 0, 3, ASSET, POSITION_Q, committed_mark)
         .map_err(|error| format!("{route:?} close independent exposure: {error}"))?;
-    env.crank(0, 4, Vec::new())
-        .map_err(|error| format!("{route:?} settle coalition close: {error}"))?;
-    env.crank(3, 4, Vec::new())
-        .map_err(|error| format!("{route:?} settle victim close: {error}"))?;
+    for (actor, label) in [(0, "coalition"), (3, "victim")] {
+        let before = fingerprint(&env);
+        let error = env
+            .crank(actor, 4, Vec::new())
+            .expect_err("a settled close must be an explicit crank fixed point");
+        if !error.contains("Custom(22)") || fingerprint(&env) != before {
+            return Err(format!(
+                "{route:?} settled {label} crank was not exact NonProgress: {error}"
+            ));
+        }
+    }
 
     for actor in 0..4 {
         let pnl = env.primary_portfolio(actor).pnl.get();
@@ -8193,7 +8258,7 @@ fn discover_one_composite_rounding_violation(
         env.crank_with_oracles(2, slot, observations(), &fresh_oracles)
             .map_err(|error| format!("{scale:?} catch-up at slot {slot}: {error}"))?;
     }
-    env.crank_with_oracles(0, slot, observations(), &fresh_oracles)
+    env.crank_with_oracles_if_actionable(0, slot, observations(), &fresh_oracles)
         .map_err(|error| format!("{scale:?} refresh victim: {error}"))?;
     let victim_cert = env
         .primary_portfolio(0)
@@ -8889,7 +8954,7 @@ fn run_terminal_dust_world(
         env.push_ewma_mark(0, slot, 1)
             .map_err(|error| format!("{route:?} publish terminal low mark: {error}"))?;
         for actor in [0, 1] {
-            env.crank(actor, slot, observations())
+            env.crank_if_actionable(actor, slot, observations())
                 .map_err(|error| format!("{route:?} accrue terminal actor {actor}: {error}"))?;
         }
     }
@@ -8904,7 +8969,7 @@ fn run_terminal_dust_world(
 
     env.warp_to_slot(6);
     for actor in [0, 1] {
-        env.crank(actor, 6, observations())
+        env.crank_if_actionable(actor, 6, observations())
             .map_err(|error| format!("{route:?} advance terminal actor: {error}"))?;
     }
     let rebound_input = BASIS
@@ -8921,7 +8986,7 @@ fn run_terminal_dust_world(
     let mut slot = 7u64;
     loop {
         for actor in [0, 1] {
-            env.crank(actor, slot, observations())
+            env.crank_if_actionable(actor, slot, observations())
                 .map_err(|error| format!("{route:?} converge terminal actor: {error}"))?;
         }
         if env.primary_market_state().1.assets[0].effective_price == BASIS {
@@ -9226,8 +9291,11 @@ pub fn discover_cross_domain_backing_violation(
     }
 
     for asset in [0u16, 1] {
-        env.trade_no_cpi(0, 2, asset, -SIZE_Q, MOVED_PRICE, 0)
-            .map_err(|error| format!("flatten winner asset {asset}: {error}"))?;
+        env.rebalance_reduce(0, asset, SIZE_Q.unsigned_abs())
+            .map_err(|error| format!("reduce winner asset {asset}: {error}"))?;
+    }
+    if discovery_total_abs_position(&env.primary_portfolio(0))? != 0 {
+        return Err("cross-domain winner remained positioned before conversion".into());
     }
     env.convert_released_pnl(0, CLAIM_PER_ASSET)
         .map_err(|error| format!("first aggregate conversion: {error}"))?;
@@ -9243,10 +9311,15 @@ pub fn discover_cross_domain_backing_violation(
         );
     }
 
-    env.trade_no_cpi(0, 2, 0, POS_SCALE as i128, MOVED_PRICE, 0)
-        .map_err(|error| format!("refresh-certificate open: {error}"))?;
-    env.trade_no_cpi(0, 2, 0, -(POS_SCALE as i128), MOVED_PRICE, 0)
-        .map_err(|error| format!("refresh-certificate close: {error}"))?;
+    env.crank(
+        0,
+        2,
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: env.primary_profile(0).oracle_leg_count,
+        }],
+    )
+    .map_err(|error| format!("refresh flat winner certificate: {error}"))?;
     env.convert_released_pnl(0, CLAIM_PER_ASSET)
         .map_err(|error| format!("second aggregate conversion: {error}"))?;
     let after_second = env.primary_market_state().1;
@@ -11161,7 +11234,7 @@ fn discover_one_cross_domain_rounding_exit_lock(
             .map_err(|error| format!("publish opening mark for asset {asset_index}: {error}"))?;
         env.crank(TARGET, slot, observation(asset_index))
             .map_err(|error| format!("crank target opening asset {asset_index}: {error}"))?;
-        env.crank(TARGET_SHORTS[offset], slot, observation(asset_index))
+        env.crank_if_actionable(TARGET_SHORTS[offset], slot, observation(asset_index))
             .map_err(|error| format!("crank target short opening asset {asset_index}: {error}"))?;
 
         env.trade_no_cpi(
@@ -11631,6 +11704,25 @@ pub fn discover_cross_domain_b_violation(
         || discovery_source_claim(&first_claims, FUNDED_DOMAIN) != 100 * percolator::BOUND_SCALE
     {
         return Err("B-settlement setup did not create equal source claims".into());
+    }
+    for asset_index in [0u16, 1] {
+        let oracle_accounts = env.primary_profile(asset_index as usize).oracle_leg_count;
+        for _ in 0..4 {
+            if env
+                .crank_if_actionable(
+                    1,
+                    2,
+                    vec![CrankObservationHint {
+                        asset_index,
+                        oracle_accounts,
+                    }],
+                )
+                .map_err(|error| format!("settle original loser asset {asset_index}: {error}"))?
+                .is_none()
+            {
+                break;
+            }
+        }
     }
 
     env.trade_no_cpi(0, 2, 1, POS_SCALE as i128, FIRST_MARK, 0)

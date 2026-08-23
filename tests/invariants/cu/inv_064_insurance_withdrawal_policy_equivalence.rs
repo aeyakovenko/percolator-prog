@@ -541,18 +541,27 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_insurance_gate() {
     let cranker_owner = Keypair::new();
     let cranker = env.create_portfolio(&cranker_owner);
     env.svm.warp_to_slot(3);
+    let mut asset0_steps = 0usize;
     for _ in 0..3 {
         env.svm.expire_blockhash();
-        env.crank(
-            cranker,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 3,
-                observations: crank_observations(0),
-            },
-        );
+        if env
+            .crank_if_actionable(
+                cranker,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 3,
+                    observations: crank_observations(0),
+                },
+            )
+            .is_some()
+        {
+            asset0_steps += 1;
+        } else {
+            break;
+        }
     }
+    assert!(asset0_steps > 0, "asset 0 must make authenticated progress");
     env.svm.expire_blockhash();
-    env.crank(
+    env.crank_if_actionable(
         cranker,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
@@ -570,7 +579,7 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_insurance_gate() {
     );
 
     env.svm.expire_blockhash();
-    env.crank(
+    env.crank_if_actionable(
         cranker,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,

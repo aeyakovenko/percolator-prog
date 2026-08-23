@@ -1689,6 +1689,10 @@ impl ProgressRank {
             || self.health_work != 0
     }
 
+    fn crank_call_actionable(self) -> bool {
+        self.account_actionable() || self.market_mark_lag != 0 || self.market_locks != 0
+    }
+
     fn dispatch_priority(self) -> u8 {
         if self.close_work != 0 {
             0
@@ -2996,7 +3000,11 @@ impl ScenarioRunner {
         self.coverage.mark_updates += 1;
         self.coverage.observe_success(None, &mark_success);
         self.assert_no_token_side_effects(&before)?;
-        self.drain_actor(0, self.liveness_limit)?;
+        // The required prefix is a clean baseline for every later generated
+        // action. A mark update creates a bilateral K/F cohort, so settle every
+        // materialized participant rather than refreshing only actor 0 and
+        // leaking historical cohort work into unrelated action coverage.
+        self.drain_cranks(self.liveness_limit)?;
         self.assert_global_invariants()
     }
 
@@ -4929,7 +4937,11 @@ impl ScenarioRunner {
         let account_before = self.env.primary_portfolio(actor);
         let (_, group_before) = self.env.primary_market_state();
         let before = self.snapshot();
-        let rank_before = self.progress_rank(actor).map_err(CrankFailure::Invariant)?;
+        let ranks_before = (0..PRIMARY_ACTOR_COUNT)
+            .map(|candidate| self.progress_rank(candidate))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(CrankFailure::Invariant)?;
+        let rank_before = ranks_before[actor];
         let diagnostics_before = self.liveness_diagnostics();
         let liquidation_authorized = self.current_liquidation_authorization(actor);
         let observations = match hints {
@@ -4970,7 +4982,7 @@ impl ScenarioRunner {
                 .map_err(CrankFailure::Invariant)?;
                 let rank_after = self.progress_rank(actor).map_err(CrankFailure::Invariant)?;
                 if require_progress
-                    && rank_before.actionable()
+                    && rank_before.crank_call_actionable()
                     && !rank_after.reduced_from(rank_before)
                 {
                     return Err(CrankFailure::Invariant(format!(
@@ -4982,12 +4994,24 @@ impl ScenarioRunner {
                 if rank_after.reduced_from(rank_before) {
                     self.record_permissionless_rank_reduction(rank_before, rank_after);
                 }
+                let ranks_after = (0..PRIMARY_ACTOR_COUNT)
+                    .map(|candidate| self.progress_rank(candidate))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(CrankFailure::Invariant)?;
+                for candidate in 0..PRIMARY_ACTOR_COUNT {
+                    if candidate != actor && ranks_before[candidate] != ranks_after[candidate] {
+                        self.record_observed_rank_edge(
+                            ranks_before[candidate],
+                            ranks_after[candidate],
+                        );
+                    }
+                }
                 Ok(())
             }
             Err(error) => {
                 self.assert_snapshot_unchanged(&before)
                     .map_err(CrankFailure::Invariant)?;
-                if require_progress && rank_before.actionable() {
+                if require_progress && rank_before.crank_call_actionable() {
                     Err(CrankFailure::Rejected(format!(
                         "sole public crank rejected actionable rank {rank_before:?} with \
                          observations {observations:?}: {error}; {}",
@@ -5016,6 +5040,16 @@ impl ScenarioRunner {
                 self.coverage.crank_rank_component_reduced[index] += 1;
             }
         }
+        let before_class = rank_before.class_mask();
+        let after_class = rank_after.class_mask();
+        self.coverage.crank_rank_nodes.insert(before_class);
+        self.coverage.crank_rank_nodes.insert(after_class);
+        self.coverage
+            .crank_rank_edges
+            .insert((before_class, after_class));
+    }
+
+    fn record_observed_rank_edge(&mut self, rank_before: ProgressRank, rank_after: ProgressRank) {
         let before_class = rank_before.class_mask();
         let after_class = rank_after.class_mask();
         self.coverage.crank_rank_nodes.insert(before_class);
@@ -5633,9 +5667,15 @@ impl ScenarioRunner {
             }
             if asset_contributes_to_loss_stale(engine_asset) {
                 market_loss_lag = market_loss_lag
-                    .checked_add(u128::from(
-                        authenticated_slot.saturating_sub(engine_asset.slot_last),
-                    ))
+                    .checked_add(u128::from(engine_asset.stale_account_count_long))
+                    .and_then(|rank| {
+                        rank.checked_add(u128::from(engine_asset.stale_account_count_short))
+                    })
+                    .and_then(|rank| {
+                        rank.checked_add(u128::from(
+                            authenticated_slot.saturating_sub(engine_asset.slot_last),
+                        ))
+                    })
                     .ok_or("loss-currentness rank overflow")?;
             }
         }
@@ -5730,6 +5770,15 @@ impl ScenarioRunner {
             if leg.stale {
                 stale_legs += 1;
             }
+            let kf_epoch = match leg.side {
+                SideV16::Long => asset.kf_epoch_long,
+                SideV16::Short => asset.kf_epoch_short,
+            };
+            if leg.kf_epoch_snap < kf_epoch {
+                stale_legs = stale_legs
+                    .checked_add(1)
+                    .ok_or("K/F-cohort rank overflow")?;
+            }
         }
         if account.b_stale_state != 0 {
             b_work = b_work
@@ -5747,10 +5796,9 @@ impl ScenarioRunner {
             || cert.cert_risk_epoch.get() != group.risk_epoch
             || cert.cert_asset_set_epoch.get() != group.asset_set_epoch
             || cert.active_bitmap_at_cert != account.active_bitmap;
-        // Recovery legs remain owner-exitable, but the engine deliberately excludes them from
-        // auto-crank refresh/liquidation selection. Keep the permissionless-crank rank scoped to
-        // the same dispatch domain; the separate direct-user campaign owns Recovery exit
-        // liveness and INV-082 has a public regression for the classifier boundary.
+        // Recovery legs cannot accrue or liquidate, but the sole public crank can now refresh
+        // their already-committed K/F/B work before the owner's matched reduction. Count that
+        // bounded work in the same health rank as Active/DrainOnly account refresh.
         let crank_dispatchable_abs_q = decoded_legs(&account)
             .into_iter()
             .filter(|leg| {
@@ -5761,7 +5809,9 @@ impl ScenarioRunner {
                         .map(|asset| {
                             matches!(
                                 asset.lifecycle,
-                                AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                                AssetLifecycleV16::Active
+                                    | AssetLifecycleV16::DrainOnly
+                                    | AssetLifecycleV16::Recovery
                             )
                         })
                         .unwrap_or(false)
@@ -5808,8 +5858,12 @@ impl ScenarioRunner {
         // Include the future finalize step when this account owns the last stored leg so clear
         // changes 2 -> 1 and finalize changes 1 -> 0 without making unrelated empty accounts
         // appear actionable.
-        let loss_work = reset_pending_work_for_account(&group, &account)?
-            .max(u128::from(group.loss_stale_active));
+        // `loss_stale_active` is an asset-local hot-path cache for the last
+        // touched asset, not a monotonic global-work counter. The independent
+        // rank derives real loss-currentness above from every asset's slot and
+        // K/F cohort counts; treating the cache bit as rank can turn a genuine
+        // account refresh into an apparent increase when the touched asset changes.
+        let loss_work = reset_pending_work_for_account(&group, &account)?;
         let close_work = if close_has_pending_residual {
             close.residual_remaining
         } else {
@@ -6015,7 +6069,9 @@ impl ScenarioRunner {
                             .checked_add(1)
                             .ok_or("observed long position-count overflow")?;
                         observed_long_stale_count[asset] = observed_long_stale_count[asset]
-                            .checked_add(u64::from(leg.stale))
+                            .checked_add(u64::from(
+                                leg.kf_epoch_snap < group.assets[asset].kf_epoch_long,
+                            ))
                             .ok_or("observed long stale-count overflow")?;
                         observed_long_pending_count[asset] = observed_long_pending_count[asset]
                             .checked_add(u64::from(pending_obligation))
@@ -6034,7 +6090,9 @@ impl ScenarioRunner {
                             .checked_add(1)
                             .ok_or("observed short position-count overflow")?;
                         observed_short_stale_count[asset] = observed_short_stale_count[asset]
-                            .checked_add(u64::from(leg.stale))
+                            .checked_add(u64::from(
+                                leg.kf_epoch_snap < group.assets[asset].kf_epoch_short,
+                            ))
                             .ok_or("observed short stale-count overflow")?;
                         observed_short_pending_count[asset] = observed_short_pending_count[asset]
                             .checked_add(u64::from(pending_obligation))
@@ -11399,7 +11457,7 @@ pub fn reproduce_composite_oracle_rounding(
         env.crank_with_oracles(2, slot, observations(), &fresh_oracles)
             .map_err(|error| format!("{case:?} composite catch-up at slot {slot}: {error}"))?;
     }
-    env.crank_with_oracles(0, slot, observations(), &fresh_oracles)
+    env.crank_with_oracles_if_actionable(0, slot, observations(), &fresh_oracles)
         .map_err(|error| format!("{case:?} refresh victim at rounded mark: {error}"))?;
     let victim_cert = env
         .primary_portfolio(0)
@@ -20349,6 +20407,8 @@ pub fn reproduce_pending_ewma_inheritance(
             "{route:?} queued EWMA mark did not apply: {applied_mark}"
         ));
     }
+    env.crank(0, 3, observations())
+        .map_err(|error| format!("{route:?} settle pending EWMA seed winner: {error}"))?;
 
     execute_trade_route(&mut env, route, 2, 3, 0, LARGE_Q, applied_mark, 0)
         .map_err(|error| format!("{route:?} post-commit trade rejected: {error}"))?;
@@ -20520,10 +20580,17 @@ pub fn reproduce_reclaimable_ewma_fee(
 
     execute_trade_route(&mut env, route, 0, 3, ASSET, POSITION_Q, effective_mark, 0)
         .map_err(|error| format!("{route:?} close against independent LP: {error}"))?;
-    env.crank(0, 4, Vec::new())
-        .map_err(|error| format!("{route:?} settle attacker close: {error}"))?;
-    env.crank(3, 4, Vec::new())
-        .map_err(|error| format!("{route:?} settle victim close: {error}"))?;
+    for (actor, label) in [(0, "attacker"), (3, "victim")] {
+        let before = tracked_economic_accounts(&env);
+        let error = env
+            .crank(actor, 4, Vec::new())
+            .expect_err("a settled close must be an explicit crank fixed point");
+        if !error.contains("Custom(22)") || tracked_economic_accounts(&env) != before {
+            return Err(format!(
+                "{route:?} settled {label} crank was not exact NonProgress: {error}"
+            ));
+        }
+    }
 
     for actor in 0..PRIMARY_ACTOR_COUNT {
         let pnl = env.primary_portfolio(actor).pnl.get();
@@ -20913,8 +20980,8 @@ pub fn reproduce_cross_domain_backing_double_spend(
     }
 
     for asset in [0u16, 1u16] {
-        env.trade_no_cpi(0, 2, asset, -SIZE_Q, MOVED_PRICE, 0)
-            .map_err(|error| format!("PR 267 flatten winner asset {asset}: {error}"))?;
+        env.rebalance_reduce(0, asset, SIZE_Q.unsigned_abs())
+            .map_err(|error| format!("PR 267 reduce winner asset {asset}: {error}"))?;
     }
     if decoded_legs(&env.primary_portfolio(0))
         .into_iter()
@@ -20940,10 +21007,15 @@ pub fn reproduce_cross_domain_backing_double_spend(
         ));
     }
 
-    env.trade_no_cpi(0, 2, 0, POS_SCALE as i128, MOVED_PRICE, 0)
-        .map_err(|error| format!("PR 267 refresh-certificate open: {error}"))?;
-    env.trade_no_cpi(0, 2, 0, -(POS_SCALE as i128), MOVED_PRICE, 0)
-        .map_err(|error| format!("PR 267 refresh-certificate close: {error}"))?;
+    env.crank(
+        0,
+        2,
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: env.primary_profile(0).oracle_leg_count,
+        }],
+    )
+    .map_err(|error| format!("PR 267 refresh flat winner certificate: {error}"))?;
     env.convert_released_pnl(0, CLAIM_PER_ASSET)
         .map_err(|error| format!("PR 267 second cross-domain conversion: {error}"))?;
     let after_second = env.primary_market_state().1;
@@ -21036,6 +21108,9 @@ pub fn reproduce_cross_domain_b_settlement(
             .map_err(|error| format!("PR 281 move asset {asset_index}: {error}"))?;
         crank_adapter_steps(&mut env, 0, 2, asset_index, 4)
             .map_err(|error| format!("PR 281 settle asset {asset_index} first claim: {error}"))?;
+        crank_adapter_steps(&mut env, 1, 2, asset_index, 4).map_err(|error| {
+            format!("PR 281 settle asset {asset_index} counterparty cohort: {error}")
+        })?;
     }
     let first_claims = env.primary_portfolio(0);
     if source_claim_for_domain(&first_claims, UNFUNDED_DOMAIN) != 100 * percolator::BOUND_SCALE
@@ -21354,9 +21429,10 @@ fn run_pending_ewma_target_world(
             format!("{route:?} publish honest low mark at slot {slot}: {error}")
         })?;
         for actor in [0, 1] {
-            env.crank(actor, slot, observations()).map_err(|error| {
-                format!("{route:?} accrue directional actor {actor} at slot {slot}: {error}")
-            })?;
+            env.crank_if_actionable(actor, slot, observations())
+                .map_err(|error| {
+                    format!("{route:?} accrue directional actor {actor} at slot {slot}: {error}")
+                })?;
         }
     }
     let low_price = env.primary_market_state().1.assets[0].effective_price;
@@ -21368,9 +21444,10 @@ fn run_pending_ewma_target_world(
 
     env.warp_to_slot(6);
     for actor in [0, 1] {
-        env.crank(actor, 6, observations()).map_err(|error| {
-            format!("{route:?} advance directional actor {actor} before rebound: {error}")
-        })?;
+        env.crank_if_actionable(actor, 6, observations())
+            .map_err(|error| {
+                format!("{route:?} advance directional actor {actor} before rebound: {error}")
+            })?;
     }
     let rebound_input = BASIS
         .checked_mul(2)
@@ -21563,9 +21640,10 @@ fn run_terminal_dust_payout_world(
         env.push_ewma_mark(0, slot, 1)
             .map_err(|error| format!("{route:?} publish terminal-dust low slot {slot}: {error}"))?;
         for actor in [0, 1] {
-            env.crank(actor, slot, observations()).map_err(|error| {
-                format!("{route:?} accrue terminal-dust actor {actor} at slot {slot}: {error}")
-            })?;
+            env.crank_if_actionable(actor, slot, observations())
+                .map_err(|error| {
+                    format!("{route:?} accrue terminal-dust actor {actor} at slot {slot}: {error}")
+                })?;
         }
     }
     let low_price = env.primary_market_state().1.assets[0].effective_price;
@@ -21581,9 +21659,10 @@ fn run_terminal_dust_payout_world(
 
     env.warp_to_slot(6);
     for actor in [0, 1] {
-        env.crank(actor, 6, observations()).map_err(|error| {
-            format!("{route:?} advance terminal-dust actor {actor} before rebound: {error}")
-        })?;
+        env.crank_if_actionable(actor, 6, observations())
+            .map_err(|error| {
+                format!("{route:?} advance terminal-dust actor {actor} before rebound: {error}")
+            })?;
     }
     let rebound_input = BASIS
         .checked_mul(2)
@@ -21602,9 +21681,12 @@ fn run_terminal_dust_payout_world(
     let mut slot = 7;
     loop {
         for actor in [0, 1] {
-            env.crank(actor, slot, observations()).map_err(|error| {
-                format!("{route:?} converge terminal-dust actor {actor} at slot {slot}: {error}")
-            })?;
+            env.crank_if_actionable(actor, slot, observations())
+                .map_err(|error| {
+                    format!(
+                        "{route:?} converge terminal-dust actor {actor} at slot {slot}: {error}"
+                    )
+                })?;
         }
         if env.primary_market_state().1.assets[0].effective_price == BASIS {
             break;
@@ -22774,7 +22856,7 @@ fn run_trade_funding_order_world(
 
     if !close_before_crank {
         for actor in [0, 1] {
-            env.crank(actor, 3, zero_move_observation(&env))
+            env.crank_if_actionable(actor, 3, zero_move_observation(&env))
                 .map_err(|error| format!("PR 271 control crank actor {actor}: {error}"))?;
         }
     }
@@ -22782,7 +22864,7 @@ fn run_trade_funding_order_world(
         .map_err(|error| format!("PR 271 {route:?} close: {error}"))?;
     if close_before_crank {
         for actor in [0, 1] {
-            env.crank(actor, 3, zero_move_observation(&env))
+            env.crank_if_actionable(actor, 3, zero_move_observation(&env))
                 .map_err(|error| format!("PR 271 attack crank actor {actor}: {error}"))?;
         }
     }
@@ -22820,13 +22902,13 @@ fn run_rebalance_funding_order_world(
 
     if !reduce_before_crank {
         for actor in [0, 1] {
-            env.crank(actor, 3, zero_move_observation(&env))
+            env.crank_if_actionable(actor, 3, zero_move_observation(&env))
                 .map_err(|error| format!("PR 272 control crank actor {actor}: {error}"))?;
         }
     }
     env.rebalance_reduce(0, 0, Q as u128)
         .map_err(|error| format!("PR 272 unilateral reduce: {error}"))?;
-    env.crank(1, 3, zero_move_observation(&env))
+    env.crank_if_actionable(1, 3, zero_move_observation(&env))
         .map_err(|error| format!("PR 272 settle independent LP: {error}"))?;
 
     let attacker = env.primary_portfolio(0);
@@ -22866,7 +22948,7 @@ fn run_forfeit_funding_order_world(
 
     if !forfeit_before_crank {
         for actor in 0..4 {
-            env.crank(actor, 3, zero_move_observation(&env))
+            env.crank_if_actionable(actor, 3, zero_move_observation(&env))
                 .map_err(|error| format!("PR 273 control crank actor {actor}: {error}"))?;
         }
     }
@@ -22881,7 +22963,7 @@ fn run_forfeit_funding_order_world(
     }
     env.forfeit_recovery_leg(0, 0, u128::from(u64::MAX))
         .map_err(|error| format!("PR 273 forfeit attacker recovery leg: {error}"))?;
-    env.crank(3, 3, zero_move_observation(&env))
+    env.crank_if_actionable(3, 3, zero_move_observation(&env))
         .map_err(|error| format!("PR 273 settle independent LP: {error}"))?;
 
     let attacker = env.primary_portfolio(0);

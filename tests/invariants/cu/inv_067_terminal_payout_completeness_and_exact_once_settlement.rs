@@ -472,8 +472,18 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
     assert_eq!(env.market_state().1.assets[0].effective_price, FINAL_MARK);
 
     public_crank(&mut env, short, slot, true).expect("settle losing account");
-    for _ in 0..4 {
+    for _ in 0..8 {
+        if percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(short))) {
+            break;
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let short_before = env.svm.get_account(&short).unwrap();
         public_crank(&mut env, short, slot, false).expect("liquidation progress");
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&short).unwrap() != short_before,
+            "accepted liquidation continuation was a no-op"
+        );
     }
     assert!(percolator::active_bitmap_is_empty(active_bitmap(
         &env.portfolio_state(short)

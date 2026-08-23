@@ -63,13 +63,6 @@ fn v16_program_insurance_covered_liquidation_close_ledger_partitions_exactly() {
         );
     }
 
-    env.crank(
-        short,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 40,
-            observations: crank_observations(0),
-        },
-    );
     let short_after = env.portfolio_state(short);
     let ledger = close_progress(&short_after);
     assert_eq!(short_after.capital.get(), 0);

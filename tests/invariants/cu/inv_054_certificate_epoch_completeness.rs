@@ -128,7 +128,7 @@ fn assert_stale_conversion_rolls_back(env: &mut V16CuEnv, owner: &Keypair, portf
 
 fn refresh_public_claim_certificate(env: &mut V16CuEnv, portfolio: Pubkey) {
     let now_slot = env.svm.get_sysvar::<Clock>().slot;
-    env.crank(
+    env.crank_if_actionable(
         portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot,

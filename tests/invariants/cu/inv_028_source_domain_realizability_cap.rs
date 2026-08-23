@@ -39,10 +39,12 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
     const Q: i128 = 1_000 * POS_SCALE as i128;
     const PRICE: u64 = 100;
     const UP_PRICE: u64 = 105;
+    const FINAL_PRICE: u64 = 110;
+    const RESOLVE_SLOT: u64 = 4;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 5_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
-    env.top_up_backing_bucket(1, 100_000, 3);
+    env.top_up_backing_bucket(1, 100_000, RESOLVE_SLOT);
 
     let target_owner = Keypair::new();
     let target_peer_owner = Keypair::new();
@@ -81,7 +83,7 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
 
     env.svm.warp_to_slot(2);
     env.push_auth_mark_for_asset_as_admin(0, 2, UP_PRICE);
-    for portfolio in [target_peer, target, trigger] {
+    for portfolio in [target_peer, target, trigger, trigger_peer] {
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
@@ -92,12 +94,6 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
     }
     assert_eq!(env.portfolio_state(target).pnl.get(), 5_000);
     assert_eq!(env.portfolio_state(trigger).pnl.get(), 5_000);
-    let prospective_loser = env.portfolio_state(trigger_peer);
-    assert_eq!(prospective_loser.pnl.get(), 0);
-    assert!(
-        env.market_state().1.assets[0].k_short < active_leg_for_asset(&prospective_loser, 0).k_snap,
-        "the opposing loser must retain an adverse prospective K/F delta"
-    );
     env.trade_with_cu(
         &target_owner,
         target,
@@ -115,6 +111,22 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
     assert_eq!(trigger_source.source_claim_liened_num.get(), 0);
 
     env.svm.warp_to_slot(3);
+    env.push_auth_mark_for_asset_as_admin(0, 3, FINAL_PRICE);
+    env.crank(
+        trigger,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    let prospective_loser = env.portfolio_state(trigger_peer);
+    assert_eq!(prospective_loser.pnl.get(), 0);
+    assert!(
+        env.market_state().1.assets[0].k_short < active_leg_for_asset(&prospective_loser, 0).k_snap,
+        "the opposing loser must retain a fresh adverse prospective K/F delta"
+    );
+
+    env.svm.warp_to_slot(RESOLVE_SLOT);
     env.resolve();
     let target_destination = env.token_account(target_owner.pubkey(), 0);
     let target_peer_destination = env.token_account(target_peer_owner.pubkey(), 0);
@@ -128,7 +140,7 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
         env.svm.expire_blockhash();
         let instruction = if use_crank {
             ProgInstruction::PermissionlessCrank {
-                now_slot: 3,
+                now_slot: RESOLVE_SLOT,
                 observations: crank_observations(0),
             }
         } else {

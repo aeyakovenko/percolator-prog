@@ -2301,6 +2301,7 @@ fn v16_bpf_perps_positive_smoke_cross_margin_pnl_convert_close_and_withdraw() {
     env.push_auth_mark_for_asset_as_admin(0, 2, ASSET0_MARK);
     env.push_auth_mark_for_asset_as_admin(1, 2, ASSET1_MARK);
 
+    let mut refresh_steps = 0usize;
     for (portfolio, asset_index, label) in [
         (
             counterparty_account,
@@ -2315,15 +2316,21 @@ fn v16_bpf_perps_positive_smoke_cross_margin_pnl_convert_close_and_withdraw() {
         ),
         (cross_account, 1, "cross account asset[1] gain refresh"),
     ] {
-        let cu = env.crank(
+        if let Some(cu) = env.crank_if_actionable(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 observations: crank_observations(asset_index),
             },
-        );
-        assert_cu_within(label, cu, CRANK_CU_LIMIT);
+        ) {
+            refresh_steps += 1;
+            assert_cu_within(label, cu, CRANK_CU_LIMIT);
+        }
     }
+    assert!(
+        refresh_steps >= 2,
+        "both portfolios must make public progress"
+    );
 
     let cross_after_refresh = env.portfolio_state(cross_account);
     let counterparty_after_refresh = env.portfolio_state(counterparty_account);

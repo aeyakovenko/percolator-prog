@@ -2963,6 +2963,34 @@ impl V16Svm {
         )
     }
 
+    fn classify_optional_crank(
+        &self,
+        before: TraceStateSnapshot,
+        result: Result<TxSuccess, String>,
+    ) -> Result<Option<TxSuccess>, String> {
+        let after = self.crank_state_snapshot();
+        match result {
+            Ok(success) if after != before => Ok(Some(success)),
+            Ok(_) => Err("accepted permissionless crank made no persistent progress".into()),
+            Err(error) if error.contains("Custom(22)") && after == before => Ok(None),
+            Err(error) if error.contains("Custom(22)") => {
+                Err("EngineNonProgress crank did not roll back exactly".into())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn crank_if_actionable(
+        &mut self,
+        actor_index: usize,
+        now_slot: u64,
+        observations: Vec<CrankObservationHint>,
+    ) -> Result<Option<TxSuccess>, String> {
+        let before = self.crank_state_snapshot();
+        let result = self.crank(actor_index, now_slot, observations);
+        self.classify_optional_crank(before, result)
+    }
+
     pub fn crank_resolved_primary_signed(
         &mut self,
         actor_index: usize,
@@ -3015,6 +3043,18 @@ impl V16Svm {
             accounts,
             &[],
         )
+    }
+
+    pub fn crank_with_oracles_if_actionable(
+        &mut self,
+        actor_index: usize,
+        now_slot: u64,
+        observations: Vec<CrankObservationHint>,
+        oracle_accounts: &[Pubkey],
+    ) -> Result<Option<TxSuccess>, String> {
+        let before = self.crank_state_snapshot();
+        let result = self.crank_with_oracles(actor_index, now_slot, observations, oracle_accounts);
+        self.classify_optional_crank(before, result)
     }
 
     pub fn crank_with_reward(
@@ -4223,6 +4263,13 @@ impl V16Svm {
                 .map(|key| (key, self.trace_account_state(key)))
                 .collect(),
         )
+    }
+
+    fn crank_state_snapshot(&self) -> TraceStateSnapshot {
+        let fee_payer = self.payer.pubkey();
+        let mut snapshot = self.trace_state_snapshot();
+        snapshot.0.retain(|(key, _)| *key != fee_payer);
+        snapshot
     }
 
     fn trace_token_balances(&self) -> Vec<(Pubkey, u64)> {

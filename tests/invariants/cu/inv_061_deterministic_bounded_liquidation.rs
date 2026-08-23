@@ -1294,6 +1294,8 @@ fn v16_program_repeated_partial_liquidation_stops_charging_after_health_restored
     let l = env.create_portfolio(&lo);
     let so = Keypair::new();
     let s = env.create_portfolio(&so);
+    let neutral_owner = Keypair::new();
+    let neutral = env.create_portfolio(&neutral_owner);
     env.deposit(&lo, l, 100_000_000);
     env.deposit(&so, s, 200_000); // enough to open 2*POS_SCALE at 5% IM, then go insolvent
     env.trade_asset_with_cu(0, &lo, l, &so, s, (2 * POS_SCALE) as i128, 1_000_000, 0);
@@ -1309,37 +1311,44 @@ fn v16_program_repeated_partial_liquidation_stops_charging_after_health_restored
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
                 AccountMeta::new(env.market, false),
-                AccountMeta::new(s, false),
+                AccountMeta::new(neutral, false),
             ],
             &[],
         );
     }
-    // mark is now fixed (no further pushes). Liquidate in two equal POS_SCALE partials.
-    let liq = |env: &mut V16CuEnv| -> u128 {
-        let ins0 = env.market_state().1.insurance;
-        env.crank(
+    // Mark accrual above used an unrelated account, so the first measured victim action is real.
+    let insurance_before = env.market_state().1.insurance;
+    for _ in 0..4 {
+        env.crank_if_actionable(
             s,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 30,
                 observations: crank_observations(0),
             },
         );
-        env.market_state().1.insurance - ins0
-    };
-    let fee1 = liq(&mut env);
-    let fee2 = liq(&mut env);
+        if env.market_state().1.insurance > insurance_before {
+            break;
+        }
+    }
+    let fee1 = env.market_state().1.insurance - insurance_before;
+    let retry = env.crank_if_actionable(
+        s,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 30,
+            observations: crank_observations(0),
+        },
+    );
 
-    // STOP: a real first liquidation charged a fee, but replaying the same close hint after the
-    // account is no longer liquidatable cannot charge a second liquidation fee.
+    // STOP: a real first liquidation charged a fee, but replaying at the healthy fixed point is an
+    // instruction error with exact rollback, not a second fee or a successful no-op.
     assert!(
         fee1 > 0,
         "first partial charges a fee (non-vacuous), fee1={}",
         fee1
     );
-    assert_eq!(
-        fee2, 0,
-        "second no-longer-liquidatable close hint charges no fee (fee1={} fee2={})",
-        fee1, fee2
+    assert!(
+        retry.is_none(),
+        "second no-longer-liquidatable close hint must reject after fee1={fee1}"
     );
     let g = env.market_state().1;
     assert_eq!(

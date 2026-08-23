@@ -37,6 +37,7 @@ const CUSTODY_CU_LIMIT: u64 = 300_000;
 const TRADE_CU_LIMIT: u64 = 345_000;
 const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
+const MAX_10M_MARKET_SLOTS: usize = 5_782;
 
 fn next_control_sequence(current: u64) -> u64 {
     current.checked_add(1).expect("control sequence exhausted")
@@ -4239,6 +4240,36 @@ impl V16CuEnv {
         self.crank_steps(portfolio, ix, 1)
     }
 
+    fn crank_if_actionable(&mut self, portfolio: Pubkey, ix: ProgInstruction) -> Option<u64> {
+        let market_before = self.svm.get_account(&self.market).expect("market account");
+        let portfolio_before = self.svm.get_account(&portfolio).expect("portfolio account");
+        self.svm.expire_blockhash();
+        match self.send(
+            ix,
+            vec![
+                AccountMeta::new(self.payer.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        ) {
+            Ok(cu) => {
+                assert!(
+                    self.svm.get_account(&self.market).unwrap() != market_before
+                        || self.svm.get_account(&portfolio).unwrap() != portfolio_before,
+                    "an accepted crank must mutate market or portfolio state"
+                );
+                Some(cu)
+            }
+            Err(err) if err.contains("Custom(22)") => {
+                assert_eq!(self.svm.get_account(&self.market).unwrap(), market_before);
+                assert_eq!(self.svm.get_account(&portfolio).unwrap(), portfolio_before);
+                None
+            }
+            Err(err) => panic!("crank: {err}"),
+        }
+    }
+
     fn crank_steps(&mut self, portfolio: Pubkey, ix: ProgInstruction, attempts: usize) -> u64 {
         let mut max_cu = 0;
         let mut progressed = false;
@@ -4279,7 +4310,9 @@ impl V16CuEnv {
                 transactions <= 16_384,
                 "crank did not finish bounded market catch-up"
             );
-            let cu = self.crank(portfolio, ix.clone());
+            let Some(cu) = self.crank_if_actionable(portfolio, ix.clone()) else {
+                break;
+            };
             max_cu = max_cu.max(cu);
             if !self.crank_observations_need_more_catchup(&ix) {
                 account_steps += 1;
@@ -7882,7 +7915,7 @@ fn setup_max_source_live_pair_with_configured_assets(
             cpi_fill(&mut env, asset_index, -MAX_SOURCE_LIVE_SIZE_Q);
         } else {
             for active_asset in (MAX_SOURCE_LIVE_ASSETS - retained_active_assets)..=asset_index {
-                env.crank(
+                env.crank_if_actionable(
                     taker,
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,

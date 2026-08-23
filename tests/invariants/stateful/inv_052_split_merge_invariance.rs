@@ -10,7 +10,9 @@
 //! decoded economic market, wrapper profiles/control sequences, both exposed portfolios, and every
 //! SPL-token account after each common prefix. Absolute refresh-count/version IDs, derived
 //! health-certificate caches, and the transaction-time origin of a fresh backing lifetime are
-//! normalized. Raw backing expiries are checked separately: every schedule starts the same bounded
+//! normalized. Absolute K/F cohort generation IDs are likewise normalized while preserving the
+//! exact no-generation/current/stale relation for every leg and the exact stale-account census.
+//! Raw backing expiries are checked separately: every schedule starts the same bounded
 //! lifetime inside the episode that first crystallizes the loss, and that expiry is immutable
 //! thereafter. Gross paid/received funding telemetry is reduced to its exact net form because
 //! settlement timing can split one net flow into offsetting observations; a separate regression
@@ -200,6 +202,40 @@ fn fresh_backing_expiries(group: &state::MarketGroupV16) -> Vec<Option<u64>> {
         .collect()
 }
 
+fn normalize_portfolio_kf_epochs(
+    account: &mut state::PortfolioAccountV16,
+    assets: &[percolator::AssetStateV16],
+) -> Result<(), String> {
+    for leg in &mut account.legs {
+        let decoded = leg
+            .try_to_runtime()
+            .map_err(|error| format!("decode K/F cohort leg: {error:?}"))?;
+        if !decoded.active {
+            continue;
+        }
+        let asset = assets
+            .get(decoded.asset_index as usize)
+            .ok_or_else(|| format!("K/F cohort asset {} is out of range", decoded.asset_index))?;
+        let asset_epoch = match decoded.side {
+            percolator::SideV16::Long => asset.kf_epoch_long,
+            percolator::SideV16::Short => asset.kf_epoch_short,
+        };
+        if decoded.kf_epoch_snap > asset_epoch {
+            return Err(format!(
+                "leg K/F epoch {} exceeds asset epoch {asset_epoch}",
+                decoded.kf_epoch_snap
+            ));
+        }
+        let canonical_snap = if asset_epoch == 0 {
+            0
+        } else {
+            u64::from(decoded.kf_epoch_snap == asset_epoch)
+        };
+        leg.kf_epoch_snap = percolator::V16PodU64::new(canonical_snap);
+    }
+    Ok(())
+}
+
 fn canonical_prefix_snapshot(env: &V16Svm) -> Result<CanonicalPrefixSnapshot, String> {
     let (wrapper_config, mut group) = env.primary_market_state();
     for (source, reservation) in group
@@ -248,6 +284,12 @@ fn canonical_prefix_snapshot(env: &V16Svm) -> Result<CanonicalPrefixSnapshot, St
         &mut short_portfolio.funding_short_paid_atoms_total,
         &mut short_portfolio.funding_short_received_atoms_total,
     );
+    normalize_portfolio_kf_epochs(&mut long_portfolio, &group.assets)?;
+    normalize_portfolio_kf_epochs(&mut short_portfolio, &group.assets)?;
+    for asset in &mut group.assets {
+        asset.kf_epoch_long = u64::from(asset.kf_epoch_long != 0);
+        asset.kf_epoch_short = u64::from(asset.kf_epoch_short != 0);
+    }
 
     let profiles = (0..group.assets.len())
         .map(|asset_index| env.primary_profile(asset_index))
@@ -487,11 +529,11 @@ fn run_backing_conversion_partition(
     const ASSET: u16 = 0;
     const SOURCE_DOMAIN: usize = 1;
     const START_PRICE: u64 = 100;
-    const SETTLED_PRICE: u64 = 105;
+    const SETTLED_PRICE: u64 = 150;
     const POSITION_Q: i128 = 40 * POS_SCALE as i128;
     const DEPOSIT: u128 = 1_000;
-    const CLAIM_ATOMS: u128 = 200;
-    const BACKING_ATOMS: u128 = 100;
+    const CLAIM_ATOMS: u128 = 2_000;
+    const BACKING_ATOMS: u128 = 1_000;
 
     if rejected_caps
         .iter()
@@ -516,9 +558,6 @@ fn run_backing_conversion_partition(
         },
     );
     env.begin_public_trace();
-    let top_up = env
-        .top_up_backing_bucket(SOURCE_DOMAIN as u16, BACKING_ATOMS, 100)
-        .map_err(|error| format!("fund backing conversion source: {error}"))?;
     let open = execute_trade_route(
         &mut env,
         route,
@@ -530,20 +569,39 @@ fn run_backing_conversion_partition(
         0,
     )
     .map_err(|error| format!("open backing conversion claim: {error}"))?;
-    env.warp_to_slot(2);
-    let mark = env
-        .push_auth_mark(ASSET, 2, SETTLED_PRICE)
-        .map_err(|error| format!("publish backing conversion mark: {error}"))?;
-    let crank = env
+    let mut max_compute_units = open.compute_units;
+    for (offset, price) in (105..=SETTLED_PRICE).step_by(5).enumerate() {
+        let slot = 2 + offset as u64;
+        env.warp_to_slot(slot);
+        let mark = env
+            .push_auth_mark(ASSET, slot, price)
+            .map_err(|error| format!("publish backing conversion mark {price}: {error}"))?;
+        let crank = env
+            .crank(
+                WINNER,
+                slot,
+                vec![CrankObservationHint {
+                    asset_index: ASSET,
+                    oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
+                }],
+            )
+            .map_err(|error| format!("settle backing conversion winner at {price}: {error}"))?;
+        max_compute_units = max_compute_units
+            .max(mark.compute_units)
+            .max(crank.compute_units);
+    }
+    let settlement_slot = 1 + ((SETTLED_PRICE - START_PRICE) / 5);
+    let counterparty_settlement = env
         .crank(
-            WINNER,
-            2,
+            OPEN_COUNTERPARTY,
+            settlement_slot,
             vec![CrankObservationHint {
                 asset_index: ASSET,
                 oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
             }],
         )
-        .map_err(|error| format!("settle backing conversion claim: {error}"))?;
+        .map_err(|error| format!("settle backing conversion counterparty: {error}"))?;
+    max_compute_units = max_compute_units.max(counterparty_settlement.compute_units);
     let close = execute_trade_route(
         &mut env,
         route,
@@ -555,16 +613,7 @@ fn run_backing_conversion_partition(
         0,
     )
     .map_err(|error| format!("flatten backing conversion winner: {error}"))?;
-    let mut max_compute_units = [
-        top_up.compute_units,
-        open.compute_units,
-        mark.compute_units,
-        crank.compute_units,
-        close.compute_units,
-    ]
-    .into_iter()
-    .max()
-    .expect("nonempty setup CU set");
+    max_compute_units = max_compute_units.max(close.compute_units);
 
     let before_conversion = env.primary_market_state().1;
     let winner_before = env.primary_portfolio(WINNER);
@@ -703,8 +752,32 @@ fn snapshot_difference(left: &CanonicalPrefixSnapshot, right: &CanonicalPrefixSn
         .enumerate()
         .filter_map(|(index, (left, right))| (left != right).then_some((index, *left, *right)))
         .collect();
+    let asset_differences: Vec<_> = left
+        .group
+        .assets
+        .iter()
+        .zip(right.group.assets.iter())
+        .enumerate()
+        .filter_map(|(index, (left, right))| (left != right).then_some((index, *left, *right)))
+        .collect();
+    let long_leg_differences: Vec<_> = left
+        .long_portfolio
+        .legs
+        .iter()
+        .zip(right.long_portfolio.legs.iter())
+        .enumerate()
+        .filter_map(|(index, (left, right))| (left != right).then_some((index, *left, *right)))
+        .collect();
+    let short_leg_differences: Vec<_> = left
+        .short_portfolio
+        .legs
+        .iter()
+        .zip(right.short_portfolio.legs.iter())
+        .enumerate()
+        .filter_map(|(index, (left, right))| (left != right).then_some((index, *left, *right)))
+        .collect();
     format!(
-        "wrapper_equal={}; group_differences={:?}; backing_bucket_differences={backing_bucket_differences:?}; profiles_equal={}; controls_equal={}; long_equal={}; short_equal={}; tokens_equal={}",
+        "wrapper_equal={}; group_differences={:?}; backing_bucket_differences={backing_bucket_differences:?}; asset_differences={asset_differences:?}; profiles_equal={}; controls_equal={}; long_equal={}; long_leg_differences={long_leg_differences:?}; short_equal={}; short_leg_differences={short_leg_differences:?}; tokens_equal={}",
         left.wrapper_config == right.wrapper_config,
         group_differences(&left.group, &right.group),
         left.profiles == right.profiles,
@@ -1566,7 +1639,7 @@ proptest! {
         seed in any::<[u8; 32]>(),
         first_cap_raw in any::<u64>(),
     ) {
-        const BACKING_ATOMS: u128 = 100;
+        const BACKING_ATOMS: u128 = 1_000;
         let first_cap = 1 + u128::from(first_cap_raw) % (BACKING_ATOMS - 1);
         let second_cap = BACKING_ATOMS - first_cap;
         for route in [

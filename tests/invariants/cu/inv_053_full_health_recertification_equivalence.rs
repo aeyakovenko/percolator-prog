@@ -754,6 +754,52 @@ fn v16_bpf_tradecpi_refreshes_stale_traded_portfolio_leg_on_demand() {
         "LP traded leg snapshot is stale before TradeCpi"
     );
 
+    let market_before_rejection = env.svm.get_account(&env.market).unwrap();
+    let taker_before_rejection = env.svm.get_account(&taker_account).unwrap();
+    let lp_before_rejection = env.svm.get_account(&lp_account).unwrap();
+    let matcher_before_rejection = env.svm.get_account(&ctx).unwrap();
+    let stale_error = env
+        .try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker_account,
+            &lp_owner,
+            lp_account,
+            matcher_program,
+            ctx,
+            delegate,
+            1,
+            POS_SCALE as i128,
+            100,
+        )
+        .expect_err("risk increase cannot consume an unsettled K/F cohort");
+    assert!(
+        stale_error.contains("Custom(21)") || stale_error.contains("custom program error: 0x15"),
+        "stale-cohort CPI trade failed for the wrong reason: {stale_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_rejection
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_account).unwrap(),
+        taker_before_rejection
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_account).unwrap(),
+        lp_before_rejection
+    );
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), matcher_before_rejection);
+
+    for account in [taker_account, lp_account, crank_short_account] {
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: vec![],
+            },
+        );
+    }
+
     let trade_cu = env.trade_cpi_with_cu_on_asset(
         &taker_owner,
         taker_account,
@@ -766,9 +812,9 @@ fn v16_bpf_tradecpi_refreshes_stale_traded_portfolio_leg_on_demand() {
         POS_SCALE as i128,
         100,
     );
-    println!("v16 TradeCpi refreshes stale traded leg on-demand CU: {trade_cu}");
+    println!("v16 TradeCpi after explicit stale-cohort refresh CU: {trade_cu}");
     assert_cu_within(
-        "TradeCpi on-demand refresh of stale traded leg",
+        "TradeCpi after stale-cohort refresh",
         trade_cu,
         MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
     );

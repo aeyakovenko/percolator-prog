@@ -244,6 +244,13 @@ fn v16_bpf_force_close_pair_order_preserves_terminal_user_payouts() {
                 observations: crank_observations(0),
             },
         );
+        env.crank(
+            portfolios[1],
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![],
+            },
+        );
         assert_eq!(env.market_state().1.assets[0].effective_price, 200);
         env.trade_asset_with_cu(
             0,
@@ -403,24 +410,25 @@ fn v16_attack_resolved_two_public_winners_are_close_order_independent() {
         }
         assert_eq!(env.market_state().1.assets[0].effective_price, 1_100_000);
         env.close_portfolio_with_cu(&accrual_owner, accrual);
+        let mut settlement_steps = 0usize;
         for _ in 0..2 {
             for portfolio in [winner_a, winner_b, loser] {
-                env.svm.expire_blockhash();
-                env.send(
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: 50,
-                        observations: crank_observations(0),
-                    },
-                    vec![
-                        AccountMeta::new(env.payer.pubkey(), true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(portfolio, false),
-                    ],
-                    &[],
-                )
-                .expect("public pre-resolution settlement crank");
+                settlement_steps += usize::from(
+                    env.crank_if_actionable(
+                        portfolio,
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot: 50,
+                            observations: crank_observations(0),
+                        },
+                    )
+                    .is_some(),
+                );
             }
         }
+        assert!(
+            settlement_steps >= 3,
+            "each funded portfolio must make public settlement progress"
+        );
         for (owner, winner) in [(&winner_a_owner, winner_a), (&winner_b_owner, winner_b)] {
             env.trade_asset_with_cu(
                 0,

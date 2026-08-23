@@ -54,11 +54,11 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
     const ASSET: u16 = 0;
     const SOURCE_DOMAIN: usize = 1;
     const START_PRICE: u64 = 100;
-    const SETTLED_PRICE: u64 = 105;
+    const SETTLED_PRICE: u64 = 150;
     const POSITION_Q: i128 = 40 * POS_SCALE as i128;
     const DEPOSIT: u128 = 1_000;
-    const CLAIM_ATOMS: u128 = 200;
-    const BACKING_TRANCHE_ATOMS: u128 = 100;
+    const CLAIM_ATOMS: u128 = 2_000;
+    const BACKING_TRANCHE_ATOMS: u128 = 1_000;
 
     let mut seed = [0x31; 32];
     seed[0] = seed_tag;
@@ -78,8 +78,6 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
     let label = format!("INV-031 {route:?}");
     env.begin_public_trace();
 
-    env.top_up_backing_bucket(SOURCE_DOMAIN as u16, BACKING_TRANCHE_ATOMS, 100)
-        .map_err(|error| format!("{label} initial backing top-up: {error}"))?;
     execute_trade_route(
         &mut env,
         route,
@@ -91,18 +89,38 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
         0,
     )
     .map_err(|error| format!("{label} open claim-bearing position: {error}"))?;
-    env.warp_to_slot(2);
-    env.push_auth_mark(ASSET, 2, SETTLED_PRICE)
-        .map_err(|error| format!("{label} authenticate favorable mark: {error}"))?;
+    // Repeated bounded marks can move farther than initial margin while the losing
+    // side remains in the historical cohort. The winner settles each generation;
+    // the loser settles once at the end, contributing only its finite capital as
+    // source backing and leaving a genuinely half-backed positive claim.
+    for (offset, price) in (105..=SETTLED_PRICE).step_by(5).enumerate() {
+        let slot = 2 + offset as u64;
+        env.warp_to_slot(slot);
+        env.push_auth_mark(ASSET, slot, price)
+            .map_err(|error| format!("{label} authenticate favorable mark {price}: {error}"))?;
+        env.crank(
+            WINNER,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: ASSET,
+                oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
+            }],
+        )
+        .map_err(|error| format!("{label} settle winner at mark {price}: {error}"))?;
+    }
+    let settlement_slot = 1 + ((SETTLED_PRICE - START_PRICE) / 5);
+    // The favorable move created a K/F settlement cohort containing both original
+    // counterparties. A fresh account must not inherit the unsettled loser's debit,
+    // so discharge that cohort through the sole public crank before novating risk.
     env.crank(
-        WINNER,
-        2,
+        OPEN_COUNTERPARTY,
+        settlement_slot,
         vec![CrankObservationHint {
             asset_index: ASSET,
             oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
         }],
     )
-    .map_err(|error| format!("{label} settle source-attributed claim: {error}"))?;
+    .map_err(|error| format!("{label} settle original counterparty cohort: {error}"))?;
     execute_trade_route(
         &mut env,
         route,

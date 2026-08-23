@@ -164,13 +164,24 @@ fn v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_pr
             },
         );
     }
-    for _ in 0..5 {
+    for _ in 0..8 {
+        let group = env.market_state().1;
+        if group.bankruptcy_hlock_active && group.insurance_domain_budget_remaining_total == 1 {
+            break;
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let long_before = env.svm.get_account(&long).unwrap();
         env.crank(
             long,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 observations: vec![],
             },
+        );
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&long).unwrap() != long_before,
+            "accepted bankruptcy continuation was a no-op"
         );
     }
     let bankrupt = env.market_state().1;
@@ -461,6 +472,13 @@ fn run_recovery_forfeit_order(winner_first: bool) -> RecoveryForfeitOrderOutcome
             observations: crank_observations(ASSET),
         },
     );
+    env.crank(
+        loser,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: vec![],
+        },
+    );
     env.trade_asset_with_cu(
         0,
         &winner_owner,
@@ -669,8 +687,8 @@ fn v16_program_recovery_forfeit_orders_preserve_loss_and_terminal_exit() {
     assert_eq!(winner_first.winner_payout, 151_000);
     assert_eq!(winner_first.loser_payout, 0);
     assert_eq!(winner_first.base_peer_payout, 100_000);
-    assert_eq!(winner_first.provider_withdrawal, 49_000);
-    assert_eq!(winner_first.vault_remaining, 51_000);
+    assert_eq!(winner_first.provider_withdrawal, 97_000);
+    assert_eq!(winner_first.vault_remaining, 3_000);
     assert_eq!(winner_first.loser_crystallized_loss, 51_000);
     assert_eq!(winner_first.provider_receivable_num, 51_000 * BOUND_SCALE);
     assert_eq!(winner_first.spent_backing_num, 51_000 * BOUND_SCALE);

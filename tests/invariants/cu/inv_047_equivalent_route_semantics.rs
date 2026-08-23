@@ -310,7 +310,13 @@ fn v16_audit_empty_target_oracle_crank_matches_exposed_target_settlement() {
             "the observation advances the exposed market even when the target portfolio is empty"
         );
 
-        for target in [long, short] {
+        let refresh_targets: &[Pubkey] = if commit_through_empty {
+            &[long, short]
+        } else {
+            // The observation-bearing first crank already refreshed `long`.
+            &[short]
+        };
+        for target in refresh_targets.iter().copied() {
             env.svm.expire_blockhash();
             let refresh = env.send(
                 ProgInstruction::PermissionlessCrank {

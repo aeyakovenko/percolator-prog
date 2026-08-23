@@ -13419,6 +13419,7 @@ pub mod processor {
                 Vec::with_capacity(percolator::V16_MAX_PORTFOLIO_ASSETS_N);
             let mut settlement_only_after_maturity = None;
             let mut bounded_market_catchup_only = false;
+            let mut market_accrual_performed = false;
             let clock_unix_ts = Clock::get().ok().map(|c| c.unix_timestamp);
             for hint in observation_hints.iter() {
                 let asset_index = hint.asset_index as usize;
@@ -13544,7 +13545,7 @@ pub mod processor {
                         )
                         .map_err(map_v16_error)?;
                 }
-                if let Some(path) = canonical_path.as_ref() {
+                let accrual = if let Some(path) = canonical_path.as_ref() {
                     group
                         .accrue_asset_path_to_not_atomic(
                             asset_index,
@@ -13553,7 +13554,7 @@ pub mod processor {
                             path,
                             true,
                         )
-                        .map_err(map_v16_error)?;
+                        .map_err(map_v16_error)?
                 } else {
                     group
                         .accrue_asset_to_not_atomic(
@@ -13563,8 +13564,8 @@ pub mod processor {
                             computed_funding_rate_e9,
                             true,
                         )
-                        .map_err(map_v16_error)?;
-                }
+                        .map_err(map_v16_error)?
+                };
                 let asset_slot_after = group.markets[asset_index].engine.asset.slot_last.get();
                 bounded_market_catchup_only |= asset_slot_after < authenticated_now_slot;
                 advance_funding_mark_checkpoint_view(&mut oracle_profile, asset_slot_after);
@@ -13575,6 +13576,14 @@ pub mod processor {
                     accrual_slot,
                     crank_price,
                 )?;
+                let asset_after = &group.markets[asset_index].engine.asset;
+                let profile_changed =
+                    read_oracle_profile_from_view(&group, &cfg, asset_index)? != oracle_profile;
+                market_accrual_performed |= accrual.dt != 0
+                    || asset_after.raw_oracle_target_price.get() != asset.raw_oracle_target_price
+                    || asset_after.effective_price.get() != asset.effective_price
+                    || asset_after.fund_px_last.get() != asset.fund_px_last
+                    || profile_changed;
                 if asset_index == 0 {
                     cfg.last_good_oracle_slot = core::cmp::max(
                         cfg.last_good_oracle_slot,
@@ -13671,8 +13680,18 @@ pub mod processor {
                     resolved_close_fee_rate_per_slot: 0,
                 },
             ) {
+                Ok(result) if matches!(result.selected, AutoCrankPlanV16::NoAction) => {
+                    if market_accrual_performed {
+                        None
+                    } else {
+                        return Err(PercolatorError::EngineNonProgress.into());
+                    }
+                }
                 Ok(result) => Some(result),
-                Err(V16Error::NonProgress) if !observations.is_empty() => None,
+                Err(V16Error::NonProgress) if market_accrual_performed => None,
+                Err(V16Error::NonProgress) => {
+                    return Err(PercolatorError::EngineNonProgress.into());
+                }
                 Err(err) => return Err(map_v16_error(err)),
             };
             for observation in observations.iter() {

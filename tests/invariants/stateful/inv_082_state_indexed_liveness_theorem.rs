@@ -22,11 +22,11 @@
 //! classes or the complete public state space.
 //!
 //! A separate public regression fixes the generated model's lifecycle boundary:
-//! an invalid certificate backed only by a Recovery leg is not auto-crank
-//! dispatchable. Both empty and apparently complete hints reject atomically,
-//! while the owner's strict reduction remains live. That is an engine
-//! classifier/dispatch claim gap, not a persistent user lock; the crank rank and
-//! owner-exit rank must not be conflated.
+//! an invalid certificate backed only by a Recovery leg is dispatchable for a
+//! committed-state refresh, without accruing the frozen asset. The empty-hint
+//! crank must make the certificate current while framing all economic state; an
+//! apparent Recovery observation still rejects atomically, and the owner's
+//! strict reduction remains live.
 
 use super::*;
 use crate::support::fuzz_model::run_bounded_public_liveness_graph;
@@ -234,19 +234,40 @@ fn v16_program_recovery_only_stale_certificate_retains_owner_exit() {
 
     let market_before = env.market_data(false);
     let foreign_market_before = env.market_data(true);
-    let portfolio_before = env.primary_portfolio_data(0);
+    let portfolio_before = env.primary_portfolio(0);
     let tokens_before = env.all_token_account_data();
     let lamports_before = env.all_economic_account_lamports();
-    let empty_error = env
-        .crank(0, 1, vec![])
-        .expect_err("Recovery-only stale certificate has no selected crank asset");
-    assert!(
-        empty_error.contains("Custom(22)") || empty_error.contains("custom program error: 0x16"),
-        "unexpected empty-hint rejection: {empty_error}"
+    env.crank(0, 1, vec![])
+        .expect("Recovery-only stale certificate must have a committed-state refresh");
+    let (_, refreshed_market) = env.primary_market_state();
+    let portfolio_after_refresh = env.primary_portfolio(0);
+    assert_eq!(
+        portfolio_after_refresh.health_cert.cert_risk_epoch.get(),
+        refreshed_market.risk_epoch,
+        "Recovery refresh must consume the stale-certificate rank component"
     );
     assert_eq!(env.market_data(false), market_before);
     assert_eq!(env.market_data(true), foreign_market_before);
-    assert_eq!(env.primary_portfolio_data(0), portfolio_before);
+    assert_eq!(env.all_token_account_data(), tokens_before);
+    assert_eq!(env.all_economic_account_lamports(), lamports_before);
+    let mut normalized_before = portfolio_before;
+    normalized_before.health_cert = portfolio_after_refresh.health_cert;
+    assert_eq!(
+        portfolio_after_refresh, normalized_before,
+        "Recovery certificate refresh must frame every non-certificate portfolio field"
+    );
+
+    let portfolio_after_refresh = env.primary_portfolio_data(0);
+    let empty_error = env
+        .crank(0, 1, vec![])
+        .expect_err("current Recovery account has no remaining permissionless work");
+    assert!(
+        empty_error.contains("Custom(22)") || empty_error.contains("custom program error: 0x16"),
+        "unexpected current-account rejection: {empty_error}"
+    );
+    assert_eq!(env.market_data(false), market_before);
+    assert_eq!(env.market_data(true), foreign_market_before);
+    assert_eq!(env.primary_portfolio_data(0), portfolio_after_refresh);
     assert_eq!(env.all_token_account_data(), tokens_before);
     assert_eq!(env.all_economic_account_lamports(), lamports_before);
 
@@ -259,14 +280,14 @@ fn v16_program_recovery_only_stale_certificate_retains_owner_exit() {
                 oracle_accounts: 0,
             }],
         )
-        .expect_err("Recovery asset cannot be accrued by the crank wrapper");
+        .expect_err("Recovery-only hint cannot turn NoAction into successful work");
     assert!(
-        hinted_error.contains("Custom(21)") || hinted_error.contains("custom program error: 0x15"),
+        hinted_error.contains("Custom(22)") || hinted_error.contains("custom program error: 0x16"),
         "unexpected Recovery-hint rejection: {hinted_error}"
     );
     assert_eq!(env.market_data(false), market_before);
     assert_eq!(env.market_data(true), foreign_market_before);
-    assert_eq!(env.primary_portfolio_data(0), portfolio_before);
+    assert_eq!(env.primary_portfolio_data(0), portfolio_after_refresh);
     assert_eq!(env.all_token_account_data(), tokens_before);
     assert_eq!(env.all_economic_account_lamports(), lamports_before);
 

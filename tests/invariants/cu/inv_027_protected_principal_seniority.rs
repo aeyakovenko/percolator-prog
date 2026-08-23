@@ -562,7 +562,7 @@ fn v16_attack_third_party_withdraw_preserves_pnl_backing() {
     );
     env.svm.warp_to_slot(11);
     for p in [psh, plo] {
-        env.crank(
+        env.crank_if_actionable(
             p,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 11,
@@ -650,12 +650,16 @@ fn v16_attack_deposit_does_not_dilute_junior_backing() {
 
     // refresh the holder's cert (deposit by w should not have changed the holder's backing).
     env.svm.expire_blockhash();
-    env.crank(
-        h,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 0,
-            observations: crank_observations(0),
-        },
+    assert!(
+        env.crank_if_actionable(
+            h,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: crank_observations(0),
+            },
+        )
+        .is_none(),
+        "an unrelated deposit must not make the holder actionable"
     );
     let h_post = env.portfolio_state(h);
     let g_post = env.market_state().1;
@@ -758,7 +762,7 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
 
     // refresh the holder's cert: top-up must not have changed its backing.
     env.svm.expire_blockhash();
-    env.crank(
+    env.crank_if_actionable(
         h,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
@@ -783,7 +787,7 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
 
     // refresh the holder's cert: withdrawal must not have touched its backing either.
     env.svm.expire_blockhash();
-    env.crank(
+    env.crank_if_actionable(
         h,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
@@ -869,25 +873,13 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
         "short capital wiped to 0 by the loss (bad debt exists)"
     );
 
-    // liquidate the insolvent short.
-    let (_, g_pre) = env.market_state();
-    env.crank(
-        s,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 40,
-            observations: crank_observations(0),
-        },
-    );
+    // The bounded public loop above already performed the liquidation/settlement work.
     let (_, g) = env.market_state();
 
     // NO MINT: the unrecovered bad debt is NOT printed — vault stays == total deposits the whole way.
     assert_eq!(
         g.vault, total_deposits,
         "vault never inflated by the bad debt (no mint)"
-    );
-    assert_eq!(
-        g.vault, g_pre.vault,
-        "liquidation of the insolvent short mints nothing"
     );
     assert_eq!(
         g.vault as u64,

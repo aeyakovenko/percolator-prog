@@ -138,7 +138,7 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 amount: 7,
             },
             Action::TopUpBacking {
-                domain: 1,
+                domain: 3,
                 amount: 500,
                 expiry_delta: 200,
             },
@@ -147,7 +147,7 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 amount: 3,
             },
             Action::WithdrawBacking {
-                domain: 1,
+                domain: 3,
                 amount: 3,
             },
             Action::RebalanceReduce { actor: 0, asset: 2 },

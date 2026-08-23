@@ -219,16 +219,23 @@ fn run_funding_cadence(crank_slots: &[u64], target_price: u64) -> FundingCadence
     // Both schedules first commit the same authenticated target and slot-1 boundary.
     env.svm.warp_to_slot(1);
     env.push_auth_mark_with_cu(1, target_price);
+    let mut boundary_progress = false;
     for portfolio in [long, short] {
         env.svm.expire_blockhash();
-        env.crank(
-            portfolio,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 1,
-                observations: crank_observations(0),
-            },
-        );
+        boundary_progress |= env
+            .crank_if_actionable(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+            )
+            .is_some();
     }
+    assert!(
+        boundary_progress,
+        "slot-1 boundary must make public progress"
+    );
     assert_eq!(
         env.market_state().1.assets[0].effective_price,
         if target_price > INITIAL_PRICE {
@@ -242,16 +249,20 @@ fn run_funding_cadence(crank_slots: &[u64], target_price: u64) -> FundingCadence
     for &slot in crank_slots {
         assert!(slot > previous_slot && slot <= 10);
         env.svm.warp_to_slot(slot);
+        let mut slot_progress = false;
         for portfolio in [long, short] {
             env.svm.expire_blockhash();
-            env.crank(
-                portfolio,
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: slot,
-                    observations: crank_observations(0),
-                },
-            );
+            slot_progress |= env
+                .crank_if_actionable(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(0),
+                    },
+                )
+                .is_some();
         }
+        assert!(slot_progress, "slot {slot} must make public progress");
         previous_slot = slot;
     }
     assert_eq!(previous_slot, 10, "schedule must reach the common endpoint");

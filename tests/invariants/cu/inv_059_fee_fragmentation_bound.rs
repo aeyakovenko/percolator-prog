@@ -144,19 +144,24 @@ fn v16_program_healthy_partial_liquidation_retries_cannot_multiply_fees() {
     let vault_fixed_point = env.svm.get_account(&env.vault).unwrap();
     for retry in 0..RETRIES {
         env.svm.expire_blockhash();
-        env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 4,
-                observations: vec![],
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(short, false),
-            ],
-            &[],
-        )
-        .unwrap_or_else(|error| panic!("healthy retry {retry} must be harmless: {error}"));
+        let error = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 4,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(short, false),
+                ],
+                &[],
+            )
+            .expect_err("a healthy retry must return explicit NonProgress");
+        assert!(
+            error.contains("Custom(22)") || error.contains("custom program error: 0x16"),
+            "healthy retry {retry} failed for the wrong reason: {error}"
+        );
         assert_eq!(
             env.svm.get_account(&env.market).unwrap(),
             market_fixed_point,

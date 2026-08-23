@@ -4,8 +4,8 @@
 //! token stock, withdrawable value, health, or senior capital by themselves.
 //!
 //! Evidence in this file (I/C): a third party permissionlessly asks the public
-//! crank route to make B-settlement progress on a flat solvent account. Whether
-//! the engine returns non-progress or a no-op success, the account's capital,
+//! crank route to make B-settlement progress on a flat solvent account. The
+//! engine must return non-progress rather than a successful no-op, and the account's capital,
 //! vault, `c_tot`, insurance, and owner withdrawability must remain exact.
 //! Additional no-phantom-value coverage lives in INV-025, INV-026, INV-069, and
 //! INV-070.
@@ -95,7 +95,7 @@ fn v16_attack_deposit_with_parked_pnl_clean() {
     );
     env.svm.warp_to_slot(11);
     for p in [sh, lo] {
-        env.crank(
+        env.crank_if_actionable(
             p,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 11,
