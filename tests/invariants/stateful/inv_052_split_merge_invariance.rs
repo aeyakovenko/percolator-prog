@@ -59,6 +59,14 @@
 //! move nonzero value after receipt creation; splitting cannot increase payout, and its only
 //! permitted difference is one conservative floor atom. Every claim is retired, engine/SPL vaults
 //! remain exact, and every instruction stays below the transaction CU ceiling.
+//! `v16_program_public_liquidation_split_and_order_are_conservative` holds aggregate collateral,
+//! exposure, authenticated mark history, and liquidation policy fixed while representing the
+//! losing side as either one portfolio or two proportional portfolios. It crosses all four public
+//! opening routes and both split liquidation orders. Every engine-selected close is independently
+//! fee-checked, restores health, preserves exact matched OI and custody, and may differ from the
+//! aggregate only by the stated fee/maintenance-floor envelope. Splitting cannot reduce the fee or
+//! increase current coalition value; the extra open quantity permitted by one additional
+//! maintenance floor is explicitly bounded from the configured health slope.
 //!
 //! Guarantee boundary: target publication order and target lifetime are identical across the
 //! compared executions. Reordering authenticated observations is a different economic history,
@@ -66,7 +74,7 @@
 //! must not be consumed as a partition-invariant reward basis; the fixed regression proves their
 //! net and all economic state remain equal. Deterministic maximum-shape, Hybrid/Pyth, terminal SPL
 //! settlement, and wrapper/engine arithmetic proofs live in the INV-052 CU and Kani files. Exact
-//! Other staleness boundaries and operation families listed in the coverage matrix remain open.
+//! staleness boundaries and other operation families listed in the coverage matrix remain open.
 
 use super::*;
 use crate::support::{
@@ -183,6 +191,32 @@ struct ResolvedClaimPartitionOutcome {
     final_engine_vault: u128,
     final_spl_vault: u128,
     final_claim_bound_num: u128,
+    max_compute_units: u64,
+    public_steps: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LiquidationPartitionEconomics {
+    initial_exposure_q: u128,
+    closed_exposure_q: u128,
+    remaining_exposure_q: u128,
+    liquidation_fee: u128,
+    per_target_outcomes: Vec<(u128, u128, u128)>,
+    target_value_after: i128,
+    counterparty_value_after: i128,
+    oi_q: [u128; 2],
+    a_long: u128,
+    effective_long_scan_q: u128,
+    c_tot_plus_insurance: u128,
+    source_claim_bound_total_num: u128,
+    vault: u128,
+    spl_vault: u128,
+    token_supply: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LiquidationPartitionOutcome {
+    economics: LiquidationPartitionEconomics,
     max_compute_units: u64,
     public_steps: usize,
 }
@@ -1600,6 +1634,389 @@ fn run_resolved_claim_partition(
     })
 }
 
+fn liquidation_partition_basis_q(
+    env: &V16Svm,
+    actor: usize,
+    asset_index: u32,
+) -> Result<u128, String> {
+    let mut matching = env
+        .primary_portfolio(actor)
+        .legs
+        .into_iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| leg.active && leg.asset_index == asset_index);
+    let basis_q = matching
+        .next()
+        .map_or(0, |leg| leg.basis_pos_q.unsigned_abs());
+    if matching.next().is_some() {
+        return Err(format!(
+            "liquidation partition actor {actor} has duplicate asset {asset_index} legs"
+        ));
+    }
+    Ok(basis_q)
+}
+
+fn liquidation_partition_portfolio_value(env: &V16Svm, actors: &[usize]) -> Result<i128, String> {
+    actors.iter().copied().try_fold(0i128, |sum, actor| {
+        let account = env.primary_portfolio(actor);
+        let capital = i128::try_from(account.capital.get())
+            .map_err(|_| "liquidation partition capital exceeds i128".to_string())?;
+        sum.checked_add(capital)
+            .and_then(|value| value.checked_add(account.pnl.get()))
+            .ok_or_else(|| "liquidation partition portfolio-value overflow".to_string())
+    })
+}
+
+fn liquidation_partition_effective_scan_q(
+    env: &V16Svm,
+    actors: &[usize],
+    asset_index: u32,
+) -> Result<u128, String> {
+    let asset = env.primary_market_state().1.assets[asset_index as usize];
+    actors.iter().copied().try_fold(0u128, |sum, actor| {
+        let account = env.primary_portfolio(actor);
+        let effective = account
+            .legs
+            .into_iter()
+            .filter_map(|leg| leg.try_to_runtime().ok())
+            .filter(|leg| leg.active && leg.asset_index == asset_index)
+            .try_fold(0u128, |account_sum, leg| {
+                let a = match leg.side {
+                    percolator::SideV16::Long => asset.a_long,
+                    percolator::SideV16::Short => asset.a_short,
+                };
+                let effective = leg
+                    .basis_pos_q
+                    .unsigned_abs()
+                    .checked_mul(a)
+                    .and_then(|value| value.checked_div(leg.a_basis))
+                    .ok_or_else(|| {
+                        "liquidation partition effective-position arithmetic failed".to_string()
+                    })?;
+                account_sum
+                    .checked_add(effective)
+                    .ok_or_else(|| "liquidation partition account scan overflow".to_string())
+            })?;
+        sum.checked_add(effective)
+            .ok_or_else(|| "liquidation partition scan overflow".to_string())
+    })
+}
+
+fn liquidation_partition_cert_is_current(env: &V16Svm, actor: usize) -> Result<bool, String> {
+    let account = env.primary_portfolio(actor);
+    let cert = account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode liquidation partition certificate: {error:?}"))?;
+    let group = env.primary_market_state().1;
+    Ok(cert.valid
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch)
+}
+
+fn run_liquidation_partition(
+    split: bool,
+    reverse_liquidation_order: bool,
+    route: TradeRoute,
+) -> Result<LiquidationPartitionOutcome, String> {
+    const PRICE: u64 = 1_000_000;
+    const ADVERSE_PRICE: u64 = 1_100_000;
+    const TOTAL_SIZE_Q: u128 = 10 * POS_SCALE;
+    const LIQUIDATION_FEE_BPS: u64 = 5;
+    const SLOT: u64 = 43;
+    const COUNTERPARTIES: [usize; 2] = [0, 2];
+    const TARGETS: [usize; 2] = [1, 3];
+    const HELPER: usize = 4;
+
+    let route_discriminator = match route {
+        TradeRoute::NoCpi => 0,
+        TradeRoute::Cpi => 1,
+        TradeRoute::BatchNoCpi => 2,
+        TradeRoute::BatchCpi => 3,
+    };
+    let mut seed = [0x5c; 32];
+    seed[0] ^= u8::from(split);
+    seed[1] ^= u8::from(reverse_liquidation_order) << 1;
+    seed[2] ^= route_discriminator;
+    let actor_deposits = if split {
+        [1_000_000, 750_000, 1_000_000, 750_000, 0]
+    } else {
+        [2_000_000, 1_500_000, 0, 0, 0]
+    };
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: LIQUIDATION_FEE_BPS,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            min_liquidation_abs: 0,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            min_funding_lifetime_slots: 20,
+            actor_deposits,
+            ..MarketConfig::default()
+        },
+    );
+    let tokens_before = env.all_token_account_data();
+    let supply_before = env.token_supply_observed();
+    let mut max_compute_units = 0u64;
+    env.begin_public_trace();
+
+    env.warp_to_slot(1);
+    let configure = env
+        .configure_auth_mark(false, 0, 1, PRICE)
+        .map_err(|error| format!("configure liquidation partition mark: {error}"))?;
+    max_compute_units = max_compute_units.max(configure.compute_units);
+    let pairs: &[(usize, usize, i128)] = if split {
+        &[
+            (COUNTERPARTIES[0], TARGETS[0], (TOTAL_SIZE_Q / 2) as i128),
+            (COUNTERPARTIES[1], TARGETS[1], (TOTAL_SIZE_Q / 2) as i128),
+        ]
+    } else {
+        &[(COUNTERPARTIES[0], TARGETS[0], TOTAL_SIZE_Q as i128)]
+    };
+    for &(counterparty, target, size_q) in pairs {
+        let open = execute_trade_route(&mut env, route, counterparty, target, 0, size_q, PRICE, 0)
+            .map_err(|error| format!("open liquidation partition via {route:?}: {error}"))?;
+        max_compute_units = max_compute_units.max(open.compute_units);
+    }
+    let active_targets: &[usize] = if split { &TARGETS } else { &[TARGETS[0]] };
+    let active_counterparties: &[usize] = if split {
+        &COUNTERPARTIES
+    } else {
+        &[COUNTERPARTIES[0]]
+    };
+    let initial_exposure_q = active_targets.iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(liquidation_partition_basis_q(&env, *actor, 0)?)
+            .ok_or_else(|| "liquidation partition initial exposure overflow".to_string())
+    })?;
+    if initial_exposure_q != TOTAL_SIZE_Q {
+        return Err(format!(
+            "liquidation partition opened the wrong exposure: {initial_exposure_q}"
+        ));
+    }
+
+    env.warp_to_slot(2);
+    let target = env
+        .push_auth_mark(0, 2, ADVERSE_PRICE)
+        .map_err(|error| format!("publish liquidation partition target: {error}"))?;
+    max_compute_units = max_compute_units.max(target.compute_units);
+    for slot in [21, 41, 42, SLOT] {
+        env.warp_to_slot(slot);
+        let accrual = env
+            .crank(
+                HELPER,
+                slot,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("advance liquidation partition mark at {slot}: {error}"))?;
+        max_compute_units = max_compute_units.max(accrual.compute_units);
+    }
+    let moved = env.primary_market_state().1;
+    if moved.assets[0].effective_price != ADVERSE_PRICE
+        || moved.assets[0].raw_oracle_target_price != ADVERSE_PRICE
+    {
+        return Err(format!(
+            "liquidation partition did not reach the authenticated target: {:?}",
+            moved.assets[0]
+        ));
+    }
+
+    for actor in active_targets.iter().copied() {
+        let before_q = liquidation_partition_basis_q(&env, actor, 0)?;
+        let refresh = env
+            .crank(actor, SLOT, vec![])
+            .map_err(|error| format!("refresh liquidation target {actor}: {error}"))?;
+        max_compute_units = max_compute_units.max(refresh.compute_units);
+        if liquidation_partition_basis_q(&env, actor, 0)? != before_q {
+            return Err(format!(
+                "liquidation target {actor} changed position during the pre-liquidation refresh"
+            ));
+        }
+        let cert = env
+            .primary_portfolio(actor)
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("decode target {actor} pre-liquidation cert: {error:?}"))?;
+        if !cert.valid || cert.certified_liq_deficit == 0 {
+            return Err(format!(
+                "liquidation target {actor} is not current and liquidatable: {cert:?}"
+            ));
+        }
+    }
+
+    let mut liquidation_order = active_targets.to_vec();
+    if reverse_liquidation_order {
+        liquidation_order.reverse();
+    }
+    let mut per_target_outcomes = Vec::with_capacity(liquidation_order.len());
+    for actor in liquidation_order {
+        let position_before = liquidation_partition_basis_q(&env, actor, 0)?;
+        let insurance_before = env.primary_market_state().1.insurance;
+        let mut position_after = position_before;
+        for step in 0..8 {
+            let crank = env
+                .crank(actor, SLOT, vec![])
+                .map_err(|error| format!("liquidate target {actor} at step {step}: {error}"))?;
+            max_compute_units = max_compute_units.max(crank.compute_units);
+            position_after = liquidation_partition_basis_q(&env, actor, 0)?;
+            if position_after < position_before {
+                break;
+            }
+        }
+        if position_after == 0 || position_after >= position_before {
+            return Err(format!(
+                "target {actor} did not receive one partial liquidation: before={position_before}, after={position_after}"
+            ));
+        }
+        let closed_q = position_before - position_after;
+        let insurance_after = env.primary_market_state().1.insurance;
+        let fee = insurance_after
+            .checked_sub(insurance_before)
+            .ok_or_else(|| "liquidation partition insurance decreased".to_string())?;
+        let fee_notional = closed_q
+            .checked_mul(ADVERSE_PRICE as u128)
+            .and_then(|value| value.checked_add(POS_SCALE - 1))
+            .and_then(|value| value.checked_div(POS_SCALE))
+            .ok_or_else(|| "liquidation partition fee-notional overflow".to_string())?;
+        let expected_fee = fee_notional
+            .checked_mul(LIQUIDATION_FEE_BPS as u128)
+            .and_then(|value| value.checked_add(9_999))
+            .and_then(|value| value.checked_div(10_000))
+            .ok_or_else(|| "liquidation partition fee overflow".to_string())?;
+        if fee != expected_fee {
+            return Err(format!(
+                "target {actor} liquidation fee mismatch: closed={closed_q}, fee={fee}, expected={expected_fee}"
+            ));
+        }
+        let cert = env
+            .primary_portfolio(actor)
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("decode target {actor} post-liquidation cert: {error:?}"))?;
+        if !cert.valid || cert.certified_liq_deficit != 0 {
+            return Err(format!(
+                "target {actor} liquidation did not restore health: {cert:?}"
+            ));
+        }
+        per_target_outcomes.push((closed_q, fee, position_after));
+    }
+    per_target_outcomes.sort_unstable();
+
+    for actor in active_targets.iter().copied() {
+        if !liquidation_partition_cert_is_current(&env, actor)? {
+            let before_q = liquidation_partition_basis_q(&env, actor, 0)?;
+            let refresh = env
+                .crank(actor, SLOT, vec![])
+                .map_err(|error| format!("refresh final liquidation target {actor}: {error}"))?;
+            max_compute_units = max_compute_units.max(refresh.compute_units);
+            if liquidation_partition_basis_q(&env, actor, 0)? != before_q {
+                return Err(format!(
+                    "final target refresh unexpectedly liquidated actor {actor} again"
+                ));
+            }
+        }
+        let cert = env
+            .primary_portfolio(actor)
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("decode target {actor} final cert: {error:?}"))?;
+        if !cert.valid || cert.certified_liq_deficit != 0 {
+            return Err(format!(
+                "target {actor} was not healthy after all split liquidations: {cert:?}"
+            ));
+        }
+    }
+
+    let group = env.primary_market_state().1;
+    let remaining_exposure_q = active_targets.iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(liquidation_partition_basis_q(&env, *actor, 0)?)
+            .ok_or_else(|| "liquidation partition remaining exposure overflow".to_string())
+    })?;
+    let closed_exposure_q = initial_exposure_q
+        .checked_sub(remaining_exposure_q)
+        .ok_or_else(|| "liquidation partition closed exposure underflow".to_string())?;
+    let liquidation_fee = per_target_outcomes
+        .iter()
+        .try_fold(0u128, |sum, (_, fee, _)| {
+            sum.checked_add(*fee)
+                .ok_or_else(|| "liquidation partition fee sum overflow".to_string())
+        })?;
+    let effective_long_scan_q =
+        liquidation_partition_effective_scan_q(&env, active_counterparties, 0)?;
+    let effective_short_scan_q = liquidation_partition_effective_scan_q(&env, active_targets, 0)?;
+    let scan_floor_bound = u128::try_from(active_targets.len().saturating_sub(1))
+        .expect("bounded liquidation target count");
+    if group.assets[0].oi_eff_long_q != group.assets[0].oi_eff_short_q
+        || group.assets[0].oi_eff_short_q != remaining_exposure_q
+        || effective_short_scan_q != remaining_exposure_q
+        || effective_long_scan_q > group.assets[0].oi_eff_long_q
+        || group.assets[0].oi_eff_long_q - effective_long_scan_q > scan_floor_bound
+    {
+        return Err(format!(
+            "liquidation partition OI scan diverged: group={:?}, remaining={remaining_exposure_q}, long_scan={effective_long_scan_q}, short_scan={effective_short_scan_q}",
+            group.assets[0]
+        ));
+    }
+    let c_tot_plus_insurance = group
+        .c_tot
+        .checked_add(group.insurance)
+        .ok_or_else(|| "liquidation partition stock overflow".to_string())?;
+    if group.vault != u128::from(env.token_amount(env.vault))
+        || env.token_supply_observed() != supply_before
+        || env.all_token_account_data() != tokens_before
+        || max_compute_units >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "liquidation partition escaped custody/CU frame: group={group:?}, CU={max_compute_units}"
+        ));
+    }
+    let trace = env.finish_public_trace();
+    if trace.out_of_band_economic_mutations != 0 || trace.steps.iter().any(|step| !step.succeeded) {
+        return Err(format!(
+            "liquidation partition did not use an all-successful public trace: {trace:?}"
+        ));
+    }
+
+    Ok(LiquidationPartitionOutcome {
+        economics: LiquidationPartitionEconomics {
+            initial_exposure_q,
+            closed_exposure_q,
+            remaining_exposure_q,
+            liquidation_fee,
+            per_target_outcomes,
+            target_value_after: liquidation_partition_portfolio_value(&env, active_targets)?,
+            counterparty_value_after: liquidation_partition_portfolio_value(
+                &env,
+                active_counterparties,
+            )?,
+            oi_q: [
+                group.assets[0].oi_eff_long_q,
+                group.assets[0].oi_eff_short_q,
+            ],
+            a_long: group.assets[0].a_long,
+            effective_long_scan_q,
+            c_tot_plus_insurance,
+            source_claim_bound_total_num: group.source_claim_bound_total_num,
+            vault: group.vault,
+            spl_vault: u128::from(env.token_amount(env.vault)),
+            token_supply: env.token_supply_observed(),
+        },
+        max_compute_units,
+        public_steps: trace.steps.len(),
+    })
+}
+
 fn run_target_history(
     seed: [u8; 32],
     episodes: &[TargetEpisode],
@@ -1990,6 +2407,139 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
             } else {
                 canonical_split = Some(split_economics);
             }
+        }
+    }
+}
+
+#[test]
+fn v16_program_public_liquidation_split_and_order_are_conservative() {
+    const ROUTES: [TradeRoute; 4] = [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ];
+    const PRICE: u128 = 1_100_000;
+    const MAINTENANCE_MARGIN_BPS: u128 = 500;
+    const LIQUIDATION_FEE_BPS: u128 = 5;
+    let quantity_per_notional_atom = POS_SCALE.div_ceil(PRICE);
+    let position_q_per_health_atom = 10_000u128
+        .div_ceil(MAINTENANCE_MARGIN_BPS - LIQUIDATION_FEE_BPS)
+        * quantity_per_notional_atom;
+    let mut canonical_aggregate = None;
+    let mut canonical_split = None;
+
+    for route in ROUTES {
+        let aggregate = run_liquidation_partition(false, false, route)
+            .unwrap_or_else(|error| panic!("aggregate liquidation via {route:?}: {error}"));
+        let split = run_liquidation_partition(true, false, route)
+            .unwrap_or_else(|error| panic!("split liquidation via {route:?}: {error}"));
+        let reversed = run_liquidation_partition(true, true, route)
+            .unwrap_or_else(|error| panic!("reversed split liquidation via {route:?}: {error}"));
+
+        assert_eq!(
+            split.economics, reversed.economics,
+            "reversing proportional public liquidation order changed economics via {route:?}"
+        );
+        assert_eq!(aggregate.economics.initial_exposure_q, 10 * POS_SCALE);
+        assert_eq!(
+            split.economics.initial_exposure_q,
+            aggregate.economics.initial_exposure_q
+        );
+        assert_eq!(aggregate.economics.per_target_outcomes.len(), 1);
+        assert_eq!(split.economics.per_target_outcomes.len(), 2);
+        assert!(
+            split.economics.liquidation_fee >= aggregate.economics.liquidation_fee,
+            "splitting a liquidatable account reduced its aggregate fee via {route:?}: aggregate={aggregate:?}, split={split:?}"
+        );
+        assert!(
+            split.economics.liquidation_fee - aggregate.economics.liquidation_fee <= 1,
+            "two-way liquidation split exceeded the one-fee-atom ceiling envelope via {route:?}: aggregate={aggregate:?}, split={split:?}"
+        );
+        let fee_delta = split.economics.liquidation_fee - aggregate.economics.liquidation_fee;
+        let close_delta_q = split
+            .economics
+            .closed_exposure_q
+            .abs_diff(aggregate.economics.closed_exposure_q);
+        let close_rounding_bound_q = position_q_per_health_atom * (1 + fee_delta);
+        assert!(
+            close_delta_q <= close_rounding_bound_q,
+            "two-way liquidation split exceeded the explicit maintenance/fee-floor close envelope via {route:?}: aggregate={aggregate:?}, split={split:?}, delta={close_delta_q}, bound={close_rounding_bound_q}"
+        );
+        assert_eq!(
+            aggregate
+                .economics
+                .remaining_exposure_q
+                .abs_diff(split.economics.remaining_exposure_q),
+            close_delta_q
+        );
+        assert_eq!(
+            aggregate.economics.target_value_after - split.economics.target_value_after,
+            i128::try_from(fee_delta).unwrap(),
+            "only the explicit fee floor may change the losing coalition's value via {route:?}"
+        );
+        assert_eq!(
+            split.economics.counterparty_value_after,
+            aggregate.economics.counterparty_value_after
+        );
+        assert_eq!(
+            split.economics.c_tot_plus_insurance,
+            aggregate.economics.c_tot_plus_insurance
+        );
+        assert_eq!(
+            split.economics.source_claim_bound_total_num,
+            aggregate.economics.source_claim_bound_total_num
+        );
+        assert_eq!(split.economics.vault, aggregate.economics.vault);
+        assert_eq!(split.economics.spl_vault, aggregate.economics.spl_vault);
+        assert_eq!(
+            split.economics.token_supply,
+            aggregate.economics.token_supply
+        );
+        assert_eq!(aggregate.economics.vault, aggregate.economics.spl_vault);
+        assert_eq!(split.economics.vault, split.economics.spl_vault);
+        assert_eq!(
+            aggregate.economics.oi_q,
+            [
+                aggregate.economics.remaining_exposure_q,
+                aggregate.economics.remaining_exposure_q,
+            ]
+        );
+        assert_eq!(
+            split.economics.oi_q,
+            [
+                split.economics.remaining_exposure_q,
+                split.economics.remaining_exposure_q,
+            ]
+        );
+        assert_eq!(
+            split.economics.a_long.cmp(&aggregate.economics.a_long),
+            split
+                .economics
+                .remaining_exposure_q
+                .cmp(&aggregate.economics.remaining_exposure_q),
+            "ADL factor and matched OI moved in opposite directions via {route:?}"
+        );
+        assert!(aggregate.max_compute_units < TX_CU_LIMIT);
+        assert!(split.max_compute_units < TX_CU_LIMIT);
+        assert!(reversed.max_compute_units < TX_CU_LIMIT);
+        assert!(aggregate.public_steps > 0 && split.public_steps > aggregate.public_steps);
+
+        if let Some(canonical) = canonical_aggregate.as_ref() {
+            assert_eq!(
+                &aggregate.economics, canonical,
+                "aggregate liquidation changed with opening route {route:?}"
+            );
+        } else {
+            canonical_aggregate = Some(aggregate.economics);
+        }
+        if let Some(canonical) = canonical_split.as_ref() {
+            assert_eq!(
+                &split.economics, canonical,
+                "split liquidation changed with opening route {route:?}"
+            );
+        } else {
+            canonical_split = Some(split.economics);
         }
     }
 }
