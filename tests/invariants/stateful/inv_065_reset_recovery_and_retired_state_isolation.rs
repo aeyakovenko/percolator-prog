@@ -37,6 +37,11 @@
 //! the canonical owner Recovery operations must then remove both legs without sacrificing senior
 //! capital. Both schedules restart the asset, admit a fresh same-route roundtrip, and converge on
 //! identical owner payouts.
+//! `v16_program_two_asset_reset_recovery_orders_progress_without_crossing_scope` composes two
+//! simultaneous reset/Recovery episodes. It exhausts every pair of trade routes, both side
+//! orientations on each asset, and both lifecycle orders. Each successful transition must frame
+//! the other asset's profile, users, matcher state, backing ledger, and SPL accounts before both
+//! episodes restart and all four users exit with order-independent payouts.
 //!
 //! This is bounded generated coverage, not exhaustive reset/recovery/retirement
 //! reachability.
@@ -1078,6 +1083,378 @@ fn v16_program_retained_reduction_landing_after_shutdown_has_a_bounded_recovery_
             );
             assert!(reduce_first.cleanup_cranks > 0, "{reduce_first:?}");
             assert!(shutdown_first.cleanup_cranks > 0, "{shutdown_first:?}");
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OtherAssetScopeSnapshot {
+    asset: percolator::AssetStateV16,
+    profile: percolator_prog::state::AssetOracleProfileV16,
+    portfolios: [Vec<u8>; 2],
+    foreign_market: Vec<u8>,
+    foreign_portfolio: Vec<u8>,
+    backing_ledger: Vec<u8>,
+    tokens: Vec<(solana_sdk::pubkey::Pubkey, Vec<u8>)>,
+    matcher_contexts: [Vec<u8>; 2],
+}
+
+fn other_asset_scope_snapshot(
+    env: &V16Svm,
+    asset_index: u16,
+    actors: [usize; 2],
+) -> OtherAssetScopeSnapshot {
+    OtherAssetScopeSnapshot {
+        asset: env.primary_market_state().1.assets[asset_index as usize],
+        profile: env.primary_profile(asset_index as usize),
+        portfolios: actors.map(|actor| env.primary_portfolio_data(actor)),
+        foreign_market: env.market_data(true),
+        foreign_portfolio: env.foreign_portfolio_data(),
+        backing_ledger: env.backing_domain_ledger_data(),
+        tokens: env.all_token_account_data(),
+        matcher_contexts: actors.map(|actor| {
+            env.svm
+                .get_account(&env.actors[actor].matcher_context)
+                .expect("tracked matcher context")
+                .data
+        }),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TwoAssetLifecycleOrder {
+    AssetZeroThenOne,
+    AssetOneThenZero,
+}
+
+impl TwoAssetLifecycleOrder {
+    fn assets(self) -> [u16; 2] {
+        match self {
+            Self::AssetZeroThenOne => [0, 1],
+            Self::AssetOneThenZero => [1, 0],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TwoAssetLifecycleOutcome {
+    destination_balances: [u64; 4],
+    token_supply: u128,
+    restarted_generations: [u64; 2],
+    cleanup_cranks: [usize; 2],
+}
+
+fn asset_pair(asset_index: u16) -> [usize; 2] {
+    match asset_index {
+        0 => [0, 1],
+        1 => [2, 3],
+        _ => unreachable!("two-asset lifecycle fixture uses assets 0 and 1"),
+    }
+}
+
+fn clear_reset_scope_while_framing_other(
+    env: &mut V16Svm,
+    asset_index: u16,
+    case: &str,
+) -> Result<(u64, usize), String> {
+    let [_, stale_actor] = asset_pair(asset_index);
+    let other_asset = 1 - asset_index;
+    let other_pair = asset_pair(other_asset);
+    let mut max_compute_units = 0u64;
+    let mut calls = 0usize;
+    for _ in 0..8 {
+        if !has_asset_leg(env, stale_actor, asset_index) {
+            break;
+        }
+        let whole_before = lifecycle_rollback_snapshot(env);
+        let other_before = other_asset_scope_snapshot(env, other_asset, other_pair);
+        let crank = env
+            .crank(stale_actor, env.current_slot(), Vec::new())
+            .map_err(|error| {
+                format!("{case}: asset {asset_index} actor {stale_actor} crank: {error}")
+            })?;
+        max_compute_units = max_compute_units.max(crank.compute_units);
+        calls += 1;
+        if lifecycle_rollback_snapshot(env) == whole_before {
+            return Err(format!(
+                "{case}: asset {asset_index} cleanup crank was a successful no-op"
+            ));
+        }
+        if other_asset_scope_snapshot(env, other_asset, other_pair) != other_before {
+            return Err(format!(
+                "{case}: asset {asset_index} cleanup crossed into asset {other_asset} scope"
+            ));
+        }
+    }
+    if calls == 0 || has_asset_leg(env, stale_actor, asset_index) {
+        return Err(format!(
+            "{case}: asset {asset_index} did not clear in bounded permissionless work"
+        ));
+    }
+    let asset = env.primary_market_state().1.assets[asset_index as usize];
+    if asset.stored_pos_count_long != 0
+        || asset.stored_pos_count_short != 0
+        || asset.stale_account_count_long != 0
+        || asset.stale_account_count_short != 0
+        || asset.pending_obligation_count_long != 0
+        || asset.pending_obligation_count_short != 0
+        || asset.oi_eff_long_q != 0
+        || asset.oi_eff_short_q != 0
+    {
+        return Err(format!(
+            "{case}: asset {asset_index} retained lifecycle work: {asset:?}"
+        ));
+    }
+    Ok((max_compute_units, calls))
+}
+
+fn run_two_asset_lifecycle_world(
+    routes: [TradeRoute; 2],
+    reducer_long: [bool; 2],
+    order: TwoAssetLifecycleOrder,
+    seed: [u8; 32],
+) -> Result<TwoAssetLifecycleOutcome, String> {
+    let case = format!("routes={routes:?}/sides={reducer_long:?}/{order:?}");
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let token_supply = env.token_supply_observed();
+    env.configure_permissionless_resolve(1_000, 100)
+        .map_err(|error| format!("{case}: configure Recovery route: {error}"))?;
+    let old_generations: [u64; 2] = std::array::from_fn(|asset_index| {
+        env.primary_market_state().1.assets[asset_index].market_id
+    });
+    let mut max_compute_units = 0u64;
+
+    for asset_index in [0u16, 1u16] {
+        let [reducer, counterparty] = asset_pair(asset_index);
+        let signed_size_q = if reducer_long[asset_index as usize] {
+            POS_SCALE as i128
+        } else {
+            -(POS_SCALE as i128)
+        };
+        let open = execute_trade_route(
+            &mut env,
+            routes[asset_index as usize],
+            reducer,
+            counterparty,
+            asset_index,
+            signed_size_q,
+            INITIAL_PRICE,
+            0,
+        )
+        .map_err(|error| format!("{case}: asset {asset_index} open: {error}"))?;
+        max_compute_units = max_compute_units.max(open.compute_units);
+        let reduce = env
+            .rebalance_reduce(reducer, asset_index, POS_SCALE)
+            .map_err(|error| format!("{case}: asset {asset_index} reduction: {error}"))?;
+        max_compute_units = max_compute_units.max(reduce.compute_units);
+        let asset = env.primary_market_state().1.assets[asset_index as usize];
+        let reset_mode = if reducer_long[asset_index as usize] {
+            asset.mode_short
+        } else {
+            asset.mode_long
+        };
+        if reset_mode != SideModeV16::ResetPending {
+            return Err(format!(
+                "{case}: asset {asset_index} did not enter ResetPending"
+            ));
+        }
+    }
+    assert_public_stock_census("INV-065 simultaneous reset prefix", &env)?;
+    assert_public_encumbrance_census("INV-065 simultaneous reset prefix", &env)?;
+
+    env.warp_to_slot(1);
+    for asset_index in order.assets() {
+        let other_asset = 1 - asset_index;
+        let other_pair = asset_pair(other_asset);
+        let other_before = other_asset_scope_snapshot(&env, other_asset, other_pair);
+        let shutdown = env
+            .shutdown_asset(asset_index, 1)
+            .map_err(|error| format!("{case}: asset {asset_index} shutdown: {error}"))?;
+        max_compute_units = max_compute_units.max(shutdown.compute_units);
+        if other_asset_scope_snapshot(&env, other_asset, other_pair) != other_before {
+            return Err(format!(
+                "{case}: asset {asset_index} shutdown crossed into asset {other_asset} scope"
+            ));
+        }
+    }
+    for asset_index in [0usize, 1usize] {
+        if env.primary_market_state().1.assets[asset_index].lifecycle != AssetLifecycleV16::Recovery
+        {
+            return Err(format!("{case}: asset {asset_index} missed Recovery"));
+        }
+    }
+
+    let mut cleanup_cranks = [0usize; 2];
+    for asset_index in order.assets() {
+        let (compute_units, calls) =
+            clear_reset_scope_while_framing_other(&mut env, asset_index, &case)?;
+        max_compute_units = max_compute_units.max(compute_units);
+        cleanup_cranks[asset_index as usize] = calls;
+    }
+    for asset_index in order.assets() {
+        let other_asset = 1 - asset_index;
+        let other_pair = asset_pair(other_asset);
+        let other_before = other_asset_scope_snapshot(&env, other_asset, other_pair);
+        let side = u8::from(reducer_long[asset_index as usize]);
+        let finalize = env
+            .finalize_reset_side(asset_index, side)
+            .map_err(|error| format!("{case}: asset {asset_index} finalization: {error}"))?;
+        max_compute_units = max_compute_units.max(finalize.compute_units);
+        if other_asset_scope_snapshot(&env, other_asset, other_pair) != other_before {
+            return Err(format!(
+                "{case}: asset {asset_index} finalization crossed into asset {other_asset} scope"
+            ));
+        }
+    }
+
+    env.warp_to_slot(2);
+    for asset_index in order.assets() {
+        let other_asset = 1 - asset_index;
+        let other_pair = asset_pair(other_asset);
+        let other_before = other_asset_scope_snapshot(&env, other_asset, other_pair);
+        let restart = env
+            .restart_asset_oracle(asset_index, 2, INITIAL_PRICE)
+            .map_err(|error| format!("{case}: asset {asset_index} restart: {error}"))?;
+        max_compute_units = max_compute_units.max(restart.compute_units);
+        if other_asset_scope_snapshot(&env, other_asset, other_pair) != other_before {
+            return Err(format!(
+                "{case}: asset {asset_index} restart crossed into asset {other_asset} scope"
+            ));
+        }
+    }
+    let restarted_generations: [u64; 2] = std::array::from_fn(|asset_index| {
+        env.primary_market_state().1.assets[asset_index].market_id
+    });
+    if (0..2).any(|asset_index| restarted_generations[asset_index] <= old_generations[asset_index])
+    {
+        return Err(format!("{case}: one asset generation did not advance"));
+    }
+
+    for asset_index in order.assets() {
+        let [reducer, counterparty] = asset_pair(asset_index);
+        let signed_size_q = if reducer_long[asset_index as usize] {
+            POS_SCALE as i128
+        } else {
+            -(POS_SCALE as i128)
+        };
+        let other_asset = 1 - asset_index;
+        let other_pair = asset_pair(other_asset);
+        let other_before = other_asset_scope_snapshot(&env, other_asset, other_pair);
+        let open = execute_trade_route(
+            &mut env,
+            routes[asset_index as usize],
+            reducer,
+            counterparty,
+            asset_index,
+            signed_size_q,
+            INITIAL_PRICE,
+            0,
+        )
+        .map_err(|error| format!("{case}: asset {asset_index} fresh open: {error}"))?;
+        max_compute_units = max_compute_units.max(open.compute_units);
+        let close = execute_trade_route(
+            &mut env,
+            routes[asset_index as usize],
+            reducer,
+            counterparty,
+            asset_index,
+            -signed_size_q,
+            INITIAL_PRICE,
+            0,
+        )
+        .map_err(|error| format!("{case}: asset {asset_index} fresh close: {error}"))?;
+        max_compute_units = max_compute_units.max(close.compute_units);
+        if other_asset_scope_snapshot(&env, other_asset, other_pair) != other_before {
+            return Err(format!(
+                "{case}: asset {asset_index} fresh roundtrip crossed into asset {other_asset} scope"
+            ));
+        }
+    }
+
+    for actor in 0..4 {
+        let capital = env.primary_portfolio(actor).capital.get();
+        let withdrawal = env
+            .withdraw_primary(actor, capital)
+            .map_err(|error| format!("{case}: actor {actor} withdrawal: {error}"))?;
+        max_compute_units = max_compute_units.max(withdrawal.compute_units);
+        if env.primary_portfolio(actor).capital.get() != 0 {
+            return Err(format!("{case}: actor {actor} retained capital"));
+        }
+    }
+    if max_compute_units >= TX_CU_LIMIT || env.token_supply_observed() != token_supply {
+        return Err(format!(
+            "{case}: simultaneous lifecycle exceeded CU or changed supply: {max_compute_units}"
+        ));
+    }
+    assert_public_stock_census("INV-065 simultaneous lifecycle terminal", &env)?;
+    assert_public_encumbrance_census("INV-065 simultaneous lifecycle terminal", &env)?;
+
+    Ok(TwoAssetLifecycleOutcome {
+        destination_balances: std::array::from_fn(|actor| {
+            env.token_amount(env.actors[actor].destination_token)
+        }),
+        token_supply,
+        restarted_generations,
+        cleanup_cranks,
+    })
+}
+
+#[test]
+fn v16_program_two_asset_reset_recovery_orders_progress_without_crossing_scope() {
+    let routes = [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ];
+    for (route_zero_index, route_zero) in routes.into_iter().enumerate() {
+        for (route_one_index, route_one) in routes.into_iter().enumerate() {
+            for reducer_zero_long in [false, true] {
+                for reducer_one_long in [false, true] {
+                    let mut seed = [0x49; 32];
+                    seed[0] ^= route_zero_index as u8;
+                    seed[1] ^= route_one_index as u8;
+                    seed[2] ^= u8::from(reducer_zero_long);
+                    seed[3] ^= u8::from(reducer_one_long);
+                    let zero_first = run_two_asset_lifecycle_world(
+                        [route_zero, route_one],
+                        [reducer_zero_long, reducer_one_long],
+                        TwoAssetLifecycleOrder::AssetZeroThenOne,
+                        seed,
+                    )
+                    .unwrap_or_else(|error| panic!("asset-zero-first lifecycle: {error}"));
+                    let one_first = run_two_asset_lifecycle_world(
+                        [route_zero, route_one],
+                        [reducer_zero_long, reducer_one_long],
+                        TwoAssetLifecycleOrder::AssetOneThenZero,
+                        seed,
+                    )
+                    .unwrap_or_else(|error| panic!("asset-one-first lifecycle: {error}"));
+                    assert_eq!(
+                        zero_first.destination_balances,
+                        one_first.destination_balances,
+                        "routes={:?}/sides={:?}",
+                        [route_zero, route_one],
+                        [reducer_zero_long, reducer_one_long]
+                    );
+                    assert_eq!(zero_first.token_supply, one_first.token_supply);
+                    assert_eq!(zero_first.cleanup_cranks, one_first.cleanup_cranks);
+                    let mut zero_first_generations = zero_first.restarted_generations;
+                    let mut one_first_generations = one_first.restarted_generations;
+                    zero_first_generations.sort_unstable();
+                    one_first_generations.sort_unstable();
+                    assert_eq!(zero_first_generations, one_first_generations);
+                    assert_ne!(
+                        zero_first.restarted_generations[0],
+                        zero_first.restarted_generations[1]
+                    );
+                    assert_ne!(
+                        one_first.restarted_generations[0],
+                        one_first.restarted_generations[1]
+                    );
+                    assert!(zero_first.cleanup_cranks.into_iter().all(|calls| calls > 0));
+                }
+            }
         }
     }
 }
