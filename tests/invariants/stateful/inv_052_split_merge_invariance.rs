@@ -51,6 +51,14 @@
 //! consuming claim or backing atoms. Aggregate, split-attempt, and reversed-attempt schedules then
 //! execute one complete conversion and converge byte-for-byte; a final retry proves the consumed
 //! claim and lien cannot be reused.
+//! `v16_program_public_resolved_claim_split_is_conservatively_rounded` builds a second, wholly
+//! public two-domain terminal world. One expired-source claim is either held by one portfolio or
+//! split exactly across two independently funded portfolios; an unrelated fresh-backed claim
+//! supplies the same terminal residual. All 16 open/close route pairs must produce the same claim
+//! face and route-independent economics. Both schedules materialize a genuine partial receipt and
+//! move nonzero value after receipt creation; splitting cannot increase payout, and its only
+//! permitted difference is one conservative floor atom. Every claim is retired, engine/SPL vaults
+//! remain exact, and every instruction stays below the transaction CU ceiling.
 //!
 //! Guarantee boundary: target publication order and target lifetime are identical across the
 //! compared executions. Reordering authenticated observations is a different economic history,
@@ -58,11 +66,11 @@
 //! must not be consumed as a partition-invariant reward basis; the fixed regression proves their
 //! net and all economic state remain equal. Deterministic maximum-shape, Hybrid/Pyth, terminal SPL
 //! settlement, and wrapper/engine arithmetic proofs live in the INV-052 CU and Kani files. Exact
-//! staleness boundaries and other operation families listed in the coverage matrix remain open.
+//! Other staleness boundaries and operation families listed in the coverage matrix remain open.
 
 use super::*;
 use crate::support::{
-    fuzz_model::execute_trade_route,
+    fuzz_model::{execute_trade_route, TradeRoute},
     v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
@@ -158,6 +166,23 @@ struct BackingConversionFrame {
 #[derive(Debug)]
 struct BackingConversionPartitionOutcome {
     frame: BackingConversionFrame,
+    max_compute_units: u64,
+    public_steps: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedClaimPartitionOutcome {
+    winner_claim_face: u128,
+    winner_receipt_face: u128,
+    winner_seeded_paid_effective: u128,
+    winner_resolved_payout: u128,
+    winner_payout: u128,
+    loser_payout: u128,
+    unrelated_payout: u128,
+    total_payout: u128,
+    final_engine_vault: u128,
+    final_spl_vault: u128,
+    final_claim_bound_num: u128,
     max_compute_units: u64,
     public_steps: usize,
 }
@@ -1171,19 +1196,20 @@ fn resolved_portfolio_is_terminal(env: &V16Svm, actor: usize) -> bool {
 
 fn settle_resolved_portfolios(
     env: &mut V16Svm,
-    order: [usize; 2],
+    order: &[usize],
     max_compute_units: &mut u64,
 ) -> Result<(), String> {
     const SWEEP_BOUND: usize = 64;
     for sweep in 0..SWEEP_BOUND {
         if order
-            .into_iter()
+            .iter()
+            .copied()
             .all(|actor| resolved_portfolio_is_terminal(env, actor))
         {
             return Ok(());
         }
         let mut sweep_mutated = false;
-        for actor in order {
+        for actor in order.iter().copied() {
             if resolved_portfolio_is_terminal(env, actor) {
                 continue;
             }
@@ -1243,6 +1269,335 @@ fn settle_resolved_portfolios(
     Err(format!(
         "resolved claimant order {order:?} did not terminate in {SWEEP_BOUND} sweeps"
     ))
+}
+
+fn resolved_claim_partition_source_face(env: &V16Svm, actors: &[usize], domain: u32) -> u128 {
+    actors
+        .iter()
+        .copied()
+        .flat_map(|actor| env.primary_portfolio(actor).source_domains)
+        .filter(|source| source.is_occupied() && source.domain.get() == domain)
+        .map(|source| source.source_claim_bound_num.get())
+        .sum()
+}
+
+fn run_resolved_claim_partition(
+    split_claim: bool,
+    open_route: TradeRoute,
+    close_route: TradeRoute,
+) -> Result<ResolvedClaimPartitionOutcome, String> {
+    const SOURCE_DOMAIN: u16 = 1;
+    const BACKED_DOMAIN: u16 = 3;
+    const BACKED_ASSET: u16 = 1;
+    const INITIAL_PRICE: u64 = 100;
+    const WINNING_PRICE: u64 = 150;
+    const HALF_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const JUNIOR_BACKING_ATOMS: u128 = 1;
+    const BACKED_BACKING_ATOMS: u128 = 1_500;
+    const WINNERS: [usize; 2] = [0, 1];
+    const BACKED_WINNER: usize = 4;
+
+    let mut seed = [0x52; 32];
+    seed[0] ^= u8::from(split_claim);
+    seed[1] ^= match open_route {
+        TradeRoute::NoCpi => 0,
+        TradeRoute::Cpi => 1,
+        TradeRoute::BatchNoCpi => 2,
+        TradeRoute::BatchCpi => 3,
+    };
+    seed[2] ^= match close_route {
+        TradeRoute::NoCpi => 0,
+        TradeRoute::Cpi => 1,
+        TradeRoute::BatchNoCpi => 2,
+        TradeRoute::BatchCpi => 3,
+    };
+    let actor_deposits = if split_claim {
+        [1_000, 1_000, 250, 250, 777]
+    } else {
+        [2_000, 0, 500, 0, 777]
+    };
+    let config = MarketConfig {
+        initial_price: INITIAL_PRICE,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        actor_deposits,
+        ..MarketConfig::default()
+    };
+    let mut env = V16Svm::new(seed, config);
+    let backed_loser = env.add_primary_actor(seed, 0, 1_000_000, 250);
+    if backed_loser != PRIMARY_ACTOR_COUNT {
+        return Err(format!(
+            "resolved-claim extra actor index drifted: {backed_loser}"
+        ));
+    }
+    let supply_before = env.token_supply_observed();
+    let destinations_before = env
+        .actors
+        .iter()
+        .map(|actor| u128::from(env.token_amount(actor.destination_token)))
+        .collect::<Vec<_>>();
+    let mut max_compute_units = 0u64;
+    env.begin_public_trace();
+
+    let top_up = env
+        .top_up_backing_bucket(SOURCE_DOMAIN, JUNIOR_BACKING_ATOMS, 12)
+        .map_err(|error| format!("fund resolved-claim rounding control: {error}"))?;
+    max_compute_units = max_compute_units.max(top_up.compute_units);
+    let backed_top_up = env
+        .top_up_backing_bucket_without_ledger(BACKED_DOMAIN, BACKED_BACKING_ATOMS, 13)
+        .map_err(|error| format!("fund independent resolved-payout residual: {error}"))?;
+    max_compute_units = max_compute_units.max(backed_top_up.compute_units);
+
+    let pairs: &[(usize, usize, i128)] = if split_claim {
+        &[(0, 2, HALF_SIZE_Q), (1, 3, HALF_SIZE_Q)]
+    } else {
+        &[(0, 2, 2 * HALF_SIZE_Q)]
+    };
+    for &(winner, loser, size_q) in pairs {
+        let open = execute_trade_route(
+            &mut env,
+            open_route,
+            winner,
+            loser,
+            0,
+            size_q,
+            INITIAL_PRICE,
+            0,
+        )
+        .map_err(|error| format!("open resolved-claim partition pair: {error}"))?;
+        max_compute_units = max_compute_units.max(open.compute_units);
+    }
+    let backed_open = execute_trade_route(
+        &mut env,
+        open_route,
+        BACKED_WINNER,
+        backed_loser,
+        BACKED_ASSET,
+        HALF_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    )
+    .map_err(|error| format!("open independent backed payout pair: {error}"))?;
+    max_compute_units = max_compute_units.max(backed_open.compute_units);
+
+    for (offset, mark) in (105..=WINNING_PRICE).step_by(5).enumerate() {
+        let slot = 2 + u64::try_from(offset).expect("bounded claim-partition mark sequence");
+        env.warp_to_slot(slot);
+        let publication = env
+            .push_auth_mark(0, slot, mark)
+            .map_err(|error| format!("publish claim-partition mark {mark}: {error}"))?;
+        max_compute_units = max_compute_units.max(publication.compute_units);
+        let backed_publication = env
+            .push_auth_mark(BACKED_ASSET, slot, mark)
+            .map_err(|error| format!("publish backed-control mark {mark}: {error}"))?;
+        max_compute_units = max_compute_units.max(backed_publication.compute_units);
+        for actor in if split_claim {
+            &[0usize, 1, 2, 3, BACKED_WINNER, PRIMARY_ACTOR_COUNT][..]
+        } else {
+            &[0usize, 2, BACKED_WINNER, PRIMARY_ACTOR_COUNT][..]
+        } {
+            let crank = env
+                .crank(
+                    *actor,
+                    slot,
+                    vec![
+                        CrankObservationHint {
+                            asset_index: 0,
+                            oracle_accounts: 0,
+                        },
+                        CrankObservationHint {
+                            asset_index: BACKED_ASSET,
+                            oracle_accounts: 0,
+                        },
+                    ],
+                )
+                .map_err(|error| format!("refresh claim-partition actor {actor}: {error}"))?;
+            max_compute_units = max_compute_units.max(crank.compute_units);
+        }
+    }
+
+    for &(winner, loser, size_q) in pairs {
+        let close = execute_trade_route(
+            &mut env,
+            close_route,
+            winner,
+            loser,
+            0,
+            -size_q,
+            WINNING_PRICE,
+            0,
+        )
+        .map_err(|error| format!("close resolved-claim partition pair: {error}"))?;
+        max_compute_units = max_compute_units.max(close.compute_units);
+    }
+    let backed_close = execute_trade_route(
+        &mut env,
+        close_route,
+        BACKED_WINNER,
+        backed_loser,
+        BACKED_ASSET,
+        -HALF_SIZE_Q,
+        WINNING_PRICE,
+        0,
+    )
+    .map_err(|error| format!("close independent backed payout pair: {error}"))?;
+    max_compute_units = max_compute_units.max(backed_close.compute_units);
+    let all_actors = (0..env.actors.len()).collect::<Vec<_>>();
+    for actor in all_actors.iter().copied() {
+        let account = env.primary_portfolio(actor);
+        if !percolator::active_bitmap_is_empty(state::portfolio_active_bitmap(&account)) {
+            return Err(format!(
+                "resolved-claim partition actor {actor} retained active exposure"
+            ));
+        }
+    }
+    let winner_claim_face = WINNERS.iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(env.primary_portfolio(*actor).pnl.get().max(0) as u128)
+    });
+    let Some(winner_claim_face) = winner_claim_face else {
+        return Err("resolved-claim winner face overflow".into());
+    };
+    let source_face_num =
+        resolved_claim_partition_source_face(&env, &WINNERS, u32::from(SOURCE_DOMAIN));
+    let backed_face_num =
+        resolved_claim_partition_source_face(&env, &[BACKED_WINNER], u32::from(BACKED_DOMAIN));
+    if winner_claim_face == 0
+        || source_face_num != winner_claim_face * BOUND_SCALE
+        || backed_face_num == 0
+        || env.primary_market_state().1.source_claim_bound_total_num
+            != source_face_num + backed_face_num
+    {
+        return Err(format!(
+            "resolved-claim partition did not create exact public junior/backed claims: face={winner_claim_face}, junior={source_face_num}, backed={backed_face_num}, market={}",
+            env.primary_market_state().1.source_claim_bound_total_num
+        ));
+    }
+
+    env.warp_to_slot(12);
+    let resolve = env
+        .resolve_market()
+        .map_err(|error| format!("resolve claim-partition market: {error}"))?;
+    max_compute_units = max_compute_units.max(resolve.compute_units);
+
+    settle_resolved_portfolios(&mut env, &[2, 3, backed_loser], &mut max_compute_units)?;
+    let claimant_winners: &[usize] = if split_claim { &WINNERS } else { &[0] };
+    for actor in claimant_winners.iter().copied() {
+        let mut materialized = false;
+        for step in 0..8 {
+            let receipt = env
+                .primary_portfolio(actor)
+                .resolved_payout_receipt
+                .try_to_runtime()
+                .map_err(|error| format!("decode seeded winner {actor} receipt: {error:?}"))?;
+            if receipt.present {
+                materialized = true;
+                break;
+            }
+            let close = env.close_resolved_primary_signed(actor).map_err(|error| {
+                format!("materialize winner {actor} receipt at step {step}: {error}")
+            })?;
+            max_compute_units = max_compute_units.max(close.compute_units);
+        }
+        if !materialized {
+            materialized = env
+                .primary_portfolio(actor)
+                .resolved_payout_receipt
+                .try_to_runtime()
+                .map_err(|error| format!("decode final seeded winner {actor} receipt: {error:?}"))?
+                .present;
+        }
+        if !materialized {
+            return Err(format!(
+                "resolved-claim winner {actor} never materialized a receipt"
+            ));
+        }
+    }
+    let (winner_receipt_face, winner_seeded_paid_effective) =
+        claimant_winners
+            .iter()
+            .try_fold((0u128, 0u128), |(face_sum, paid_sum), actor| {
+                let receipt = env
+                    .primary_portfolio(*actor)
+                    .resolved_payout_receipt
+                    .try_to_runtime()
+                    .map_err(|error| format!("decode winner {actor} partial receipt: {error:?}"))?;
+                if !receipt.present || receipt.finalized {
+                    return Err(format!(
+                        "winner {actor} did not retain a partial receipt: {receipt:?}"
+                    ));
+                }
+                Ok::<_, String>((
+                    face_sum
+                        .checked_add(receipt.terminal_positive_claim_face)
+                        .ok_or_else(|| "resolved-claim receipt-face overflow".to_string())?,
+                    paid_sum
+                        .checked_add(receipt.paid_effective)
+                        .ok_or_else(|| "resolved-claim paid-effective overflow".to_string())?,
+                ))
+            })?;
+    let winner_payout_before_topup = WINNERS.iter().try_fold(0u128, |sum, actor| {
+        let current = u128::from(env.token_amount(env.actors[*actor].destination_token));
+        let delta = current
+            .checked_sub(destinations_before[*actor])
+            .ok_or_else(|| "resolved-claim seeded destination decreased".to_string())?;
+        sum.checked_add(delta)
+            .ok_or_else(|| "resolved-claim seeded payout overflow".to_string())
+    })?;
+    settle_resolved_portfolios(&mut env, &[BACKED_WINNER], &mut max_compute_units)?;
+    settle_resolved_portfolios(&mut env, &all_actors, &mut max_compute_units)?;
+
+    let payouts = env
+        .actors
+        .iter()
+        .enumerate()
+        .map(|(actor_index, actor)| {
+            u128::from(env.token_amount(actor.destination_token)) - destinations_before[actor_index]
+        })
+        .collect::<Vec<_>>();
+    let winner_payout = payouts[0] + payouts[1];
+    let winner_resolved_payout = winner_payout
+        .checked_sub(winner_payout_before_topup)
+        .ok_or_else(|| "resolved-claim post-receipt payout underflow".to_string())?;
+    let loser_payout = payouts[2] + payouts[3];
+    let unrelated_payout = payouts[BACKED_WINNER] + payouts[backed_loser];
+    let total_payout = payouts
+        .into_iter()
+        .try_fold(0u128, |sum, payout| sum.checked_add(payout))
+        .ok_or_else(|| "resolved-claim payout total overflow".to_string())?;
+    let terminal = env.primary_market_state().1;
+    if env.token_supply_observed() != supply_before
+        || terminal.vault != u128::from(env.token_amount(env.vault))
+        || max_compute_units >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "resolved-claim partition escaped custody/CU frame: terminal={terminal:?}, CU={max_compute_units}"
+        ));
+    }
+    let trace = env.finish_public_trace();
+    if trace.out_of_band_economic_mutations != 0 || trace.steps.iter().any(|step| !step.succeeded) {
+        return Err(format!(
+            "resolved-claim partition did not use an all-successful public trace: {trace:?}"
+        ));
+    }
+
+    Ok(ResolvedClaimPartitionOutcome {
+        winner_claim_face,
+        winner_receipt_face,
+        winner_seeded_paid_effective,
+        winner_resolved_payout,
+        winner_payout,
+        loser_payout,
+        unrelated_payout,
+        total_payout,
+        final_engine_vault: terminal.vault,
+        final_spl_vault: u128::from(env.token_amount(env.vault)),
+        final_claim_bound_num: terminal.source_claim_bound_total_num,
+        max_compute_units,
+        public_steps: trace.steps.len(),
+    })
 }
 
 fn run_target_history(
@@ -1389,7 +1744,7 @@ fn run_target_history(
             } else {
                 [0usize, 1usize]
             };
-            settle_resolved_portfolios(&mut env, order, &mut max_compute_units)?;
+            settle_resolved_portfolios(&mut env, &order, &mut max_compute_units)?;
         }
         HistorySuffix::ShutdownForfeit => {
             let shutdown_slot = endpoint
@@ -1538,6 +1893,105 @@ fn v16_program_owner_rebalance_reduction_is_split_merge_invariant() {
     assert_eq!(split.public_steps, 2);
     assert!(aggregate.max_compute_units < TX_CU_LIMIT);
     assert!(split.max_compute_units < TX_CU_LIMIT);
+}
+
+#[test]
+fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
+    const ROUTES: [TradeRoute; 4] = [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ];
+    let mut canonical_aggregate = None;
+    let mut canonical_split = None;
+    for open_route in ROUTES {
+        for close_route in ROUTES {
+            let aggregate = run_resolved_claim_partition(false, open_route, close_route)
+                .unwrap_or_else(|error| {
+                    panic!("aggregate {open_route:?}/{close_route:?}: {error}")
+                });
+            let split = run_resolved_claim_partition(true, open_route, close_route)
+                .unwrap_or_else(|error| panic!("split {open_route:?}/{close_route:?}: {error}"));
+
+            assert_eq!(split.winner_claim_face, aggregate.winner_claim_face);
+            assert_eq!(split.winner_receipt_face, aggregate.winner_receipt_face);
+            assert_eq!(split.loser_payout, aggregate.loser_payout);
+            assert_eq!(split.unrelated_payout, aggregate.unrelated_payout);
+            assert!(
+                aggregate.winner_seeded_paid_effective < aggregate.winner_receipt_face
+                    && split.winner_seeded_paid_effective < split.winner_receipt_face
+                    && aggregate.winner_resolved_payout > 0
+                    && aggregate.winner_resolved_payout < aggregate.winner_receipt_face
+                    && split.winner_resolved_payout > 0
+                    && split.winner_resolved_payout < split.winner_receipt_face,
+                "both public schedules must exercise a genuinely partial resolved payout for {open_route:?}/{close_route:?}: aggregate={aggregate:?}, split={split:?}"
+            );
+            assert!(
+                split.winner_resolved_payout <= aggregate.winner_resolved_payout,
+                "splitting one public claim cannot round payout upward for {open_route:?}/{close_route:?}: aggregate={aggregate:?}, split={split:?}"
+            );
+            assert!(
+                aggregate.winner_resolved_payout - split.winner_resolved_payout <= 1,
+                "two-way public claim split escaped the one-floor rounding envelope for {open_route:?}/{close_route:?}: aggregate={aggregate:?}, split={split:?}"
+            );
+            assert_eq!(
+                aggregate.total_payout - split.total_payout,
+                aggregate.winner_resolved_payout - split.winner_resolved_payout,
+                "only the explicit conservative payout floor may differ for {open_route:?}/{close_route:?}"
+            );
+            assert_eq!(aggregate.final_engine_vault, aggregate.final_spl_vault);
+            assert_eq!(split.final_engine_vault, split.final_spl_vault);
+            assert_eq!(aggregate.final_claim_bound_num, 0);
+            assert_eq!(split.final_claim_bound_num, 0);
+            assert!(aggregate.public_steps > 0 && split.public_steps > aggregate.public_steps);
+            assert!(aggregate.max_compute_units < TX_CU_LIMIT);
+            assert!(split.max_compute_units < TX_CU_LIMIT);
+
+            let aggregate_economics = (
+                aggregate.winner_claim_face,
+                aggregate.winner_receipt_face,
+                aggregate.winner_seeded_paid_effective,
+                aggregate.winner_resolved_payout,
+                aggregate.winner_payout,
+                aggregate.loser_payout,
+                aggregate.unrelated_payout,
+                aggregate.total_payout,
+                aggregate.final_engine_vault,
+                aggregate.final_spl_vault,
+                aggregate.final_claim_bound_num,
+            );
+            let split_economics = (
+                split.winner_claim_face,
+                split.winner_receipt_face,
+                split.winner_seeded_paid_effective,
+                split.winner_resolved_payout,
+                split.winner_payout,
+                split.loser_payout,
+                split.unrelated_payout,
+                split.total_payout,
+                split.final_engine_vault,
+                split.final_spl_vault,
+                split.final_claim_bound_num,
+            );
+            if let Some(canonical) = canonical_aggregate.as_ref() {
+                assert_eq!(
+                    &aggregate_economics, canonical,
+                    "aggregate economics changed with route pair {open_route:?}/{close_route:?}"
+                );
+            } else {
+                canonical_aggregate = Some(aggregate_economics);
+            }
+            if let Some(canonical) = canonical_split.as_ref() {
+                assert_eq!(
+                    &split_economics, canonical,
+                    "split economics changed with route pair {open_route:?}/{close_route:?}"
+                );
+            } else {
+                canonical_split = Some(split_economics);
+            }
+        }
+    }
 }
 
 #[test]
