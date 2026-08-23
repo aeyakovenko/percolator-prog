@@ -2750,3 +2750,629 @@ fn v16_bpf_oracle_composite_divide_legs_produce_correct_cross_rate() {
         cfg.oracle_target_price_e6
     );
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EpochMatrixProvider {
+    Pyth,
+    Switchboard,
+    Chainlink,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EpochMatrixCase {
+    providers: [EpochMatrixProvider; 3],
+    count: u8,
+    flags: u8,
+    invert: u8,
+    unit_scale: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EpochMatrixLeg {
+    provider: EpochMatrixProvider,
+    account: Pubkey,
+    feed: [u8; 32],
+    price_e6: u64,
+}
+
+fn write_epoch_matrix_leg(
+    env: &mut V16CuEnv,
+    leg: EpochMatrixLeg,
+    price_e6: u64,
+    publish_time: i64,
+    result_slot: u64,
+) {
+    let (owner, data) = match leg.provider {
+        EpochMatrixProvider::Pyth => (
+            oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+            make_pyth_data(
+                &leg.feed,
+                i64::try_from(price_e6).expect("matrix Pyth price fits i64"),
+                -6,
+                1,
+                publish_time,
+            ),
+        ),
+        EpochMatrixProvider::Switchboard => (
+            oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+            make_switchboard_data(
+                &[0xabu8; 32],
+                i128::from(price_e6) * 1_000_000_000_000,
+                1,
+                publish_time,
+                3,
+                1,
+                result_slot.max(1),
+            ),
+        ),
+        EpochMatrixProvider::Chainlink => (
+            oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+            make_chainlink_data(
+                1,
+                6,
+                1,
+                1,
+                result_slot.max(1),
+                u32::try_from(publish_time).expect("matrix Chainlink time fits u32"),
+                i128::from(price_e6),
+            ),
+        ),
+    };
+    env.svm
+        .set_account(
+            leg.account,
+            Account {
+                lamports: 1_000_000_000,
+                data,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+}
+
+fn new_epoch_matrix_leg(
+    env: &mut V16CuEnv,
+    provider: EpochMatrixProvider,
+    case_index: usize,
+    leg_index: usize,
+    price_e6: u64,
+    publish_time: i64,
+    result_slot: u64,
+) -> EpochMatrixLeg {
+    let account = Pubkey::new_unique();
+    let feed = match provider {
+        EpochMatrixProvider::Pyth => {
+            let mut feed = [0u8; 32];
+            feed[..8].copy_from_slice(&(case_index as u64 + 1).to_le_bytes());
+            feed[8] = leg_index as u8 + 1;
+            feed[31] = 1;
+            feed
+        }
+        EpochMatrixProvider::Switchboard | EpochMatrixProvider::Chainlink => account.to_bytes(),
+    };
+    let leg = EpochMatrixLeg {
+        provider,
+        account,
+        feed,
+        price_e6,
+    };
+    write_epoch_matrix_leg(env, leg, price_e6, publish_time, result_slot);
+    leg
+}
+
+fn composite_epoch_matrix_cases() -> Vec<EpochMatrixCase> {
+    const PROVIDERS: [EpochMatrixProvider; 3] = [
+        EpochMatrixProvider::Pyth,
+        EpochMatrixProvider::Switchboard,
+        EpochMatrixProvider::Chainlink,
+    ];
+    const SCALES: [u32; 2] = [0, 10];
+    const THREE_LEG_FLAGS: [u8; 4] = [
+        0,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2,
+        ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+    ];
+
+    let mut cases = Vec::new();
+    for provider in PROVIDERS {
+        for invert in [0, 1] {
+            for unit_scale in SCALES {
+                cases.push(EpochMatrixCase {
+                    providers: [
+                        provider,
+                        EpochMatrixProvider::Pyth,
+                        EpochMatrixProvider::Pyth,
+                    ],
+                    count: 1,
+                    flags: 0,
+                    invert,
+                    unit_scale,
+                });
+            }
+        }
+    }
+    for first in PROVIDERS {
+        for second in PROVIDERS {
+            for flags in [0, ORACLE_LEG_FLAG_DIVIDE_LEG2] {
+                for invert in [0, 1] {
+                    for unit_scale in SCALES {
+                        cases.push(EpochMatrixCase {
+                            providers: [first, second, EpochMatrixProvider::Pyth],
+                            count: 2,
+                            flags,
+                            invert,
+                            unit_scale,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let mut word_index = 0usize;
+    for first in PROVIDERS {
+        for second in PROVIDERS {
+            for third in PROVIDERS {
+                let case = EpochMatrixCase {
+                    providers: [first, second, third],
+                    count: 3,
+                    flags: THREE_LEG_FLAGS[word_index % THREE_LEG_FLAGS.len()],
+                    invert: ((word_index / THREE_LEG_FLAGS.len()) % 2) as u8,
+                    unit_scale: SCALES[(word_index / (THREE_LEG_FLAGS.len() * 2)) % SCALES.len()],
+                };
+                cases.push(case);
+                word_index += 1;
+            }
+        }
+    }
+    for flags in THREE_LEG_FLAGS {
+        for invert in [0, 1] {
+            for unit_scale in SCALES {
+                let case = EpochMatrixCase {
+                    providers: [
+                        EpochMatrixProvider::Pyth,
+                        EpochMatrixProvider::Switchboard,
+                        EpochMatrixProvider::Chainlink,
+                    ],
+                    count: 3,
+                    flags,
+                    invert,
+                    unit_scale,
+                };
+                if !cases.contains(&case) {
+                    cases.push(case);
+                }
+            }
+        }
+    }
+    cases
+}
+
+fn try_epoch_matrix_crank(
+    env: &mut V16CuEnv,
+    keeper_portfolio: Pubkey,
+    slot: u64,
+    oracle_accounts: &[Pubkey],
+) -> Result<u64, String> {
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(keeper_portfolio, false),
+    ];
+    accounts.extend(
+        oracle_accounts
+            .iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations_with_accounts(0, oracle_accounts.len() as u8),
+        },
+        accounts,
+        &[],
+    )
+}
+
+#[test]
+fn v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms() {
+    const PRICES_E6: [u64; 3] = [6_000_000, 2_000_000, 3_000_000];
+
+    let mut env = V16CuEnv::new();
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    let cases = composite_epoch_matrix_cases();
+    let mut skew_rejections = 0usize;
+    let mut rewind_rejections = 0usize;
+    let mut max_config_cu = 0u64;
+    let mut max_crank_cu = 0u64;
+
+    for (case_index, case) in cases.iter().copied().enumerate() {
+        let initial_slot = 10 + case_index as u64 * 2;
+        let update_slot = initial_slot + 1;
+        let initial_time = 1_000 + case_index as i64 * 2;
+        let update_time = initial_time + 1;
+        set_test_clock(&mut env, initial_slot, initial_time);
+
+        let legs: Vec<EpochMatrixLeg> = (0..case.count as usize)
+            .map(|leg_index| {
+                new_epoch_matrix_leg(
+                    &mut env,
+                    case.providers[leg_index],
+                    case_index,
+                    leg_index,
+                    PRICES_E6[leg_index],
+                    initial_time,
+                    initial_slot,
+                )
+            })
+            .collect();
+        let mut feeds = [[0u8; 32]; 3];
+        for (index, leg) in legs.iter().enumerate() {
+            feeds[index] = leg.feed;
+        }
+        let oracle_accounts: Vec<Pubkey> = legs.iter().map(|leg| leg.account).collect();
+        let config_cu = env
+            .try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                case.count,
+                case.flags,
+                feeds,
+                &oracle_accounts,
+                initial_slot,
+                initial_time,
+                case.invert,
+                case.unit_scale,
+                3,
+                100,
+            )
+            .unwrap_or_else(|error| panic!("matrix config {case_index} {case:?}: {error}"));
+        max_config_cu = max_config_cu.max(config_cu);
+        let baseline = env.market_state().0;
+        assert!(
+            baseline.oracle_target_price_e6 > 0,
+            "case {case_index} {case:?}"
+        );
+        assert_eq!(baseline.oracle_target_publish_time, initial_time);
+        assert_eq!(baseline.oracle_leg_count, case.count);
+        assert_eq!(baseline.oracle_leg_flags, case.flags);
+        assert_eq!(baseline.invert, case.invert);
+        assert_eq!(baseline.unit_scale, case.unit_scale);
+
+        set_test_clock(&mut env, update_slot, update_time);
+        if case.count > 1 {
+            let skew_index = case_index % case.count as usize;
+            write_epoch_matrix_leg(
+                &mut env,
+                legs[skew_index],
+                legs[skew_index].price_e6 + 1_000_000,
+                update_time,
+                update_slot,
+            );
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let keeper_before = env.svm.get_account(&keeper_portfolio).unwrap();
+            let error =
+                try_epoch_matrix_crank(&mut env, keeper_portfolio, update_slot, &oracle_accounts)
+                    .expect_err(
+                        "cross-epoch composite report must reject before soft-stale fallback",
+                    );
+            assert!(
+                error.contains("Custom(27)"),
+                "case {case_index} {case:?} returned the wrong skew error: {error}"
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(
+                env.svm.get_account(&keeper_portfolio).unwrap(),
+                keeper_before
+            );
+            skew_rejections += 1;
+        }
+
+        for leg in &legs {
+            write_epoch_matrix_leg(&mut env, *leg, leg.price_e6, update_time, update_slot);
+        }
+        let crank_cu =
+            try_epoch_matrix_crank(&mut env, keeper_portfolio, update_slot, &oracle_accounts)
+                .unwrap_or_else(|error| {
+                    panic!("coherent matrix crank {case_index} {case:?}: {error}")
+                });
+        max_crank_cu = max_crank_cu.max(crank_cu);
+        let after = env.market_state().0;
+        assert_eq!(
+            after.oracle_target_price_e6, baseline.oracle_target_price_e6,
+            "same-price coherent retry changed composition in case {case_index} {case:?}"
+        );
+        assert_eq!(after.oracle_target_publish_time, update_time);
+        assert_eq!(after.last_good_oracle_slot, update_slot);
+        assert_eq!(
+            &after.oracle_leg_prices_e6[..case.count as usize],
+            &PRICES_E6[..case.count as usize]
+        );
+        assert!(after.oracle_leg_publish_times[..case.count as usize]
+            .iter()
+            .all(|publish_time| *publish_time == update_time));
+
+        let rewind_slot = update_slot + 1;
+        let rewind_now = update_time + 1;
+        set_test_clock(&mut env, rewind_slot, rewind_now);
+        for leg in &legs {
+            write_epoch_matrix_leg(&mut env, *leg, leg.price_e6, initial_time, rewind_slot);
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let keeper_before = env.svm.get_account(&keeper_portfolio).unwrap();
+        let rewind_error =
+            try_epoch_matrix_crank(&mut env, keeper_portfolio, rewind_slot, &oracle_accounts)
+                .expect_err("coherent but regressed composite epoch must reject");
+        assert!(
+            rewind_error.contains("Custom(27)"),
+            "case {case_index} {case:?} returned the wrong rewind error: {rewind_error}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(
+            env.svm.get_account(&keeper_portfolio).unwrap(),
+            keeper_before
+        );
+        rewind_rejections += 1;
+
+        for leg in &legs {
+            write_epoch_matrix_leg(&mut env, *leg, leg.price_e6, rewind_now, rewind_slot);
+        }
+        let retry_cu =
+            try_epoch_matrix_crank(&mut env, keeper_portfolio, rewind_slot, &oracle_accounts)
+                .unwrap_or_else(|error| panic!("post-rewind retry {case_index} {case:?}: {error}"));
+        max_crank_cu = max_crank_cu.max(retry_cu);
+        let retry = env.market_state().0;
+        assert_eq!(
+            retry.oracle_target_price_e6,
+            baseline.oracle_target_price_e6
+        );
+        assert_eq!(retry.oracle_target_publish_time, rewind_now);
+        assert_eq!(retry.last_good_oracle_slot, rewind_slot);
+        assert!(retry.oracle_leg_publish_times[..case.count as usize]
+            .iter()
+            .all(|publish_time| *publish_time == rewind_now));
+    }
+
+    assert_eq!(
+        skew_rejections,
+        cases.iter().filter(|case| case.count > 1).count()
+    );
+    assert_eq!(rewind_rejections, cases.len());
+    assert_cu_within(
+        "composite epoch matrix configuration",
+        max_config_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_cu_within(
+        "composite epoch matrix coherent crank",
+        max_crank_cu,
+        CRANK_CU_LIMIT,
+    );
+    println!(
+        "composite epoch matrix: {} cases, {} skew rejections, {} rewind rejections, config max {} CU, crank max {} CU",
+        cases.len(),
+        skew_rejections,
+        rewind_rejections,
+        max_config_cu,
+        max_crank_cu
+    );
+}
+
+fn composite_epoch_provider_words() -> Vec<EpochMatrixCase> {
+    const PROVIDERS: [EpochMatrixProvider; 3] = [
+        EpochMatrixProvider::Pyth,
+        EpochMatrixProvider::Switchboard,
+        EpochMatrixProvider::Chainlink,
+    ];
+    const THREE_LEG_FLAGS: [u8; 4] = [
+        0,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2,
+        ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+    ];
+    let mut cases = Vec::new();
+    for provider in PROVIDERS {
+        cases.push(EpochMatrixCase {
+            providers: [
+                provider,
+                EpochMatrixProvider::Pyth,
+                EpochMatrixProvider::Pyth,
+            ],
+            count: 1,
+            flags: 0,
+            invert: (cases.len() % 2) as u8,
+            unit_scale: if cases.len() % 3 == 0 { 10 } else { 0 },
+        });
+    }
+    for first in PROVIDERS {
+        for second in PROVIDERS {
+            let index = cases.len();
+            cases.push(EpochMatrixCase {
+                providers: [first, second, EpochMatrixProvider::Pyth],
+                count: 2,
+                flags: if index % 2 == 0 {
+                    0
+                } else {
+                    ORACLE_LEG_FLAG_DIVIDE_LEG2
+                },
+                invert: ((index / 2) % 2) as u8,
+                unit_scale: if (index / 4) % 2 == 0 { 0 } else { 10 },
+            });
+        }
+    }
+    for first in PROVIDERS {
+        for second in PROVIDERS {
+            for third in PROVIDERS {
+                let index = cases.len();
+                cases.push(EpochMatrixCase {
+                    providers: [first, second, third],
+                    count: 3,
+                    flags: THREE_LEG_FLAGS[index % THREE_LEG_FLAGS.len()],
+                    invert: ((index / THREE_LEG_FLAGS.len()) % 2) as u8,
+                    unit_scale: if (index / (THREE_LEG_FLAGS.len() * 2)) % 2 == 0 {
+                        0
+                    } else {
+                        10
+                    },
+                });
+            }
+        }
+    }
+    cases
+}
+
+#[test]
+fn v16_program_composite_freshness_boundaries_cross_all_provider_orders() {
+    const PRICES_E6: [u64; 3] = [6_000_000, 2_000_000, 3_000_000];
+
+    let mut env = V16CuEnv::new();
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    let cases = composite_epoch_provider_words();
+    let mut stale_config_rejections = 0usize;
+    let mut stale_crank_rejections = 0usize;
+    let mut max_config_cu = 0u64;
+    let mut max_crank_cu = 0u64;
+
+    for (case_index, case) in cases.iter().copied().enumerate() {
+        let initial_slot = 1_000 + case_index as u64 * 3;
+        let now = 10_000 + case_index as i64 * 500;
+        set_test_clock(&mut env, initial_slot, now);
+        let legs: Vec<EpochMatrixLeg> = (0..case.count as usize)
+            .map(|leg_index| {
+                new_epoch_matrix_leg(
+                    &mut env,
+                    case.providers[leg_index],
+                    case_index + 10_000,
+                    leg_index,
+                    PRICES_E6[leg_index],
+                    now - 61,
+                    initial_slot,
+                )
+            })
+            .collect();
+        let mut feeds = [[0u8; 32]; 3];
+        for (index, leg) in legs.iter().enumerate() {
+            feeds[index] = leg.feed;
+        }
+        let oracle_accounts: Vec<Pubkey> = legs.iter().map(|leg| leg.account).collect();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let stale_config = env
+            .try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                case.count,
+                case.flags,
+                feeds,
+                &oracle_accounts,
+                initial_slot,
+                now,
+                case.invert,
+                case.unit_scale,
+                3,
+                100,
+            )
+            .expect_err("max_staleness_secs + 1 configuration must reject");
+        assert!(
+            stale_config.contains("Custom(27)"),
+            "case {case_index} {case:?} returned the wrong stale-config error: {stale_config}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        stale_config_rejections += 1;
+
+        for leg in &legs {
+            write_epoch_matrix_leg(&mut env, *leg, leg.price_e6, now - 60, initial_slot);
+        }
+        env.svm.expire_blockhash();
+        let config_cu = env
+            .try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                case.count,
+                case.flags,
+                feeds,
+                &oracle_accounts,
+                initial_slot,
+                now,
+                case.invert,
+                case.unit_scale,
+                3,
+                100,
+            )
+            .unwrap_or_else(|error| panic!("exact-expiry config {case_index} {case:?}: {error}"));
+        max_config_cu = max_config_cu.max(config_cu);
+        let baseline_target = env.market_state().0.oracle_target_price_e6;
+
+        let crank_slot = initial_slot + 1;
+        let crank_now = now + 100;
+        set_test_clock(&mut env, crank_slot, crank_now);
+        for leg in &legs {
+            write_epoch_matrix_leg(&mut env, *leg, leg.price_e6, crank_now - 61, crank_slot);
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let keeper_before = env.svm.get_account(&keeper_portfolio).unwrap();
+        let stale_crank =
+            try_epoch_matrix_crank(&mut env, keeper_portfolio, crank_slot, &oracle_accounts)
+                .expect_err("max_staleness_secs + 1 crank must reject before fallback maturity");
+        assert!(
+            stale_crank.contains("Custom(27)"),
+            "case {case_index} {case:?} returned the wrong stale-crank error: {stale_crank}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(
+            env.svm.get_account(&keeper_portfolio).unwrap(),
+            keeper_before
+        );
+        stale_crank_rejections += 1;
+
+        for leg in &legs {
+            write_epoch_matrix_leg(&mut env, *leg, leg.price_e6, crank_now - 60, crank_slot);
+        }
+        let exact_cu =
+            try_epoch_matrix_crank(&mut env, keeper_portfolio, crank_slot, &oracle_accounts)
+                .unwrap_or_else(|error| {
+                    panic!("exact-expiry crank {case_index} {case:?}: {error}")
+                });
+        max_crank_cu = max_crank_cu.max(exact_cu);
+        let exact = env.market_state().0;
+        assert_eq!(exact.oracle_target_price_e6, baseline_target);
+        assert_eq!(exact.oracle_target_publish_time, crank_now - 60);
+        assert_eq!(exact.last_good_oracle_slot, crank_slot);
+
+        let fresh_slot = initial_slot + 2;
+        let fresh_now = now + 200;
+        set_test_clock(&mut env, fresh_slot, fresh_now);
+        for leg in &legs {
+            write_epoch_matrix_leg(&mut env, *leg, leg.price_e6, fresh_now - 59, fresh_slot);
+        }
+        let fresh_cu =
+            try_epoch_matrix_crank(&mut env, keeper_portfolio, fresh_slot, &oracle_accounts)
+                .unwrap_or_else(|error| panic!("pre-expiry crank {case_index} {case:?}: {error}"));
+        max_crank_cu = max_crank_cu.max(fresh_cu);
+        let fresh = env.market_state().0;
+        assert_eq!(fresh.oracle_target_price_e6, baseline_target);
+        assert_eq!(fresh.oracle_target_publish_time, fresh_now - 59);
+        assert_eq!(fresh.last_good_oracle_slot, fresh_slot);
+    }
+
+    assert_eq!(stale_config_rejections, cases.len());
+    assert_eq!(stale_crank_rejections, cases.len());
+    assert_cu_within(
+        "composite freshness boundary configuration",
+        max_config_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_cu_within(
+        "composite freshness boundary crank",
+        max_crank_cu,
+        CRANK_CU_LIMIT,
+    );
+    println!(
+        "composite freshness matrix: {} provider words, config max {} CU, crank max {} CU",
+        cases.len(),
+        max_config_cu,
+        max_crank_cu
+    );
+}
