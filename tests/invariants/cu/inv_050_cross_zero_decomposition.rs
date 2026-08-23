@@ -13,14 +13,16 @@
 //! proves the cap does not turn into an exit DoS. These tests exercise real SBF/LiteSVM account
 //! construction and assert economic state, token, rollback, liveness, and compute outcomes.
 //!
-//! Guarantee boundary: the matrix covers all four trade routes and both OI preflight branches for
-//! one nonzero partial-ADL shape, scalar quantity boundaries, and all four routes in the two
-//! publicly reachable exit-only lifecycle modes. A second matrix composes opposite-side active
-//! close barriers on two assets at once, then covers both assets through every route while framing
-//! both close ledgers, retaining both account-local obligation classes, and restoring withdrawal.
+//! Guarantee boundary: the matrix covers all four trade routes and both OI preflight branches,
+//! three distinct publicly reached `a_long` ratios, a mirrored `a_short` ratio, and eleven derived
+//! forbidden interior quantities per account-local world. Scalar boundaries and all deployed
+//! lifecycle modes are covered separately. A second matrix composes opposite-side active-close
+//! barriers on two assets at once, then covers both assets through every route while framing both
+//! close ledgers, retaining both account-local obligation classes, and restoring withdrawal.
 //! ResetPending stale raw legs and Retired exposure unreachability are covered on every route and
 //! both side orientations; INV-046 supplies the existing public Resolved strict/cross-zero and
-//! terminal-payout matrix. Interior full-domain generation remains a separate coverage obligation.
+//! terminal-payout matrix. Full-width ADL arithmetic equivalence remains owned by INV-051/085;
+//! there is no remaining wrapper-specific cross-zero partition on the current public surface.
 
 use super::*;
 
@@ -160,30 +162,101 @@ fn try_adl_cross_zero_route_on_asset(
     }
 }
 
-fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrelated_oi: bool) {
+#[allow(clippy::too_many_arguments)]
+fn assert_adl_route_rejects_exactly(
+    env: &mut V16CuEnv,
+    route: AdlCrossZeroRoute,
+    taker_owner: &Keypair,
+    taker: Pubkey,
+    lp_owner: &Keypair,
+    lp: Pubkey,
+    size_q: i128,
+    price: u64,
+    matcher: Option<(Pubkey, Pubkey, Pubkey)>,
+    require_account_local_gate: bool,
+    context: &str,
+) {
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let lp_before = env.svm.get_account(&lp).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let matcher_before =
+        matcher.map(|(_, matcher_context, _)| env.svm.get_account(&matcher_context).unwrap());
+
+    env.svm.expire_blockhash();
+    let error = try_adl_cross_zero_route(
+        env,
+        route,
+        taker_owner,
+        taker,
+        lp_owner,
+        lp,
+        size_q,
+        price,
+        matcher,
+    )
+    .expect_err(context);
+
+    if require_account_local_gate {
+        assert!(
+            error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+            "{context} must reach the account-local ADL gate: {error}"
+        );
+    }
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    if let (Some((_, matcher_context, _)), Some(before)) = (matcher, matcher_before) {
+        assert_eq!(env.svm.get_account(&matcher_context).unwrap(), before);
+    }
+}
+
+fn run_partial_liquidation_cross_zero_world(
+    route: AdlCrossZeroRoute,
+    add_unrelated_oi: bool,
+    loser_deposit: u128,
+    winner_side: SideV16,
+    adverse_price: u64,
+    maintenance_fee_per_slot: u128,
+) -> u128 {
     const OPEN_PRICE: u64 = 100;
-    const ADVERSE_PRICE: u64 = 500;
     const OPEN_Q: i128 = 2 * POS_SCALE as i128;
     const NEW_SIDE_Q: i128 = POS_SCALE as i128 / 4;
 
-    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let open_q = match winner_side {
+        SideV16::Long => OPEN_Q,
+        SideV16::Short => -OPEN_Q,
+    };
+    let signed_reduction = |quantity_q: u128| match winner_side {
+        SideV16::Long => -(quantity_q as i128),
+        SideV16::Short => quantity_q as i128,
+    };
+
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1,
+        10_000,
+        10_000,
+        10_000,
+        maintenance_fee_per_slot,
+    );
     env.configure_auth_mark_with_cu(0, OPEN_PRICE);
 
     let winner_owner = Keypair::new();
     let loser_owner = Keypair::new();
-    let auxiliary_long_owner = Keypair::new();
-    let auxiliary_short_owner = Keypair::new();
+    let auxiliary_winner_owner = Keypair::new();
+    let auxiliary_loser_owner = Keypair::new();
     let successor_owner = Keypair::new();
     let winner = env.create_portfolio(&winner_owner);
     let loser = env.create_portfolio(&loser_owner);
-    let auxiliary_long = env.create_portfolio(&auxiliary_long_owner);
-    let auxiliary_short = env.create_portfolio(&auxiliary_short_owner);
+    let auxiliary_winner = env.create_portfolio(&auxiliary_winner_owner);
+    let auxiliary_loser = env.create_portfolio(&auxiliary_loser_owner);
     let successor = env.create_portfolio(&successor_owner);
     for (owner, portfolio, deposit) in [
         (&winner_owner, winner, 1_000),
-        (&loser_owner, loser, 900),
-        (&auxiliary_long_owner, auxiliary_long, 1_000_000),
-        (&auxiliary_short_owner, auxiliary_short, 1_000_000),
+        (&loser_owner, loser, loser_deposit),
+        (&auxiliary_winner_owner, auxiliary_winner, 1_000_000),
+        (&auxiliary_loser_owner, auxiliary_loser, 1_000_000),
         (&successor_owner, successor, 1_000_000),
     ] {
         env.deposit(owner, portfolio, deposit);
@@ -194,25 +267,25 @@ fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrela
         winner,
         &loser_owner,
         loser,
-        OPEN_Q,
+        open_q,
         OPEN_PRICE,
         0,
     );
     if add_unrelated_oi {
         env.trade_asset_with_cu(
             0,
-            &auxiliary_long_owner,
-            auxiliary_long,
-            &auxiliary_short_owner,
-            auxiliary_short,
-            OPEN_Q,
+            &auxiliary_winner_owner,
+            auxiliary_winner,
+            &auxiliary_loser_owner,
+            auxiliary_loser,
+            open_q,
             OPEN_PRICE,
             0,
         );
     }
 
     env.svm.warp_to_slot(6);
-    env.push_auth_mark_with_cu(6, ADVERSE_PRICE);
+    env.push_auth_mark_with_cu(6, adverse_price);
     for portfolio in [loser, winner] {
         let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
@@ -235,13 +308,29 @@ fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrela
         },
         2,
     );
+    if add_unrelated_oi && maintenance_fee_per_slot > 0 {
+        env.sync_maintenance_fee_with_cu(auxiliary_winner, None, 6);
+        env.sync_maintenance_fee_with_cu(auxiliary_loser, None, 6);
+    }
 
     let adl = env.market_state().1;
     let winner_leg = active_leg_for_asset(&env.portfolio_state(winner), 0);
+    assert_eq!(winner_leg.side, winner_side);
     let raw_q = winner_leg.basis_pos_q.unsigned_abs();
-    let global_effective_q = adl.assets[0].oi_eff_long_q;
+    let (side_a, global_effective_q, opposite_effective_q) = match winner_side {
+        SideV16::Long => (
+            adl.assets[0].a_long,
+            adl.assets[0].oi_eff_long_q,
+            adl.assets[0].oi_eff_short_q,
+        ),
+        SideV16::Short => (
+            adl.assets[0].a_short,
+            adl.assets[0].oi_eff_short_q,
+            adl.assets[0].oi_eff_long_q,
+        ),
+    };
     let winner_effective_num = raw_q
-        .checked_mul(adl.assets[0].a_long)
+        .checked_mul(side_a)
         .expect("bounded ADL effective quantity");
     let winner_effective_q = winner_effective_num / winner_leg.a_basis;
     let winner_effective_ceiling_q =
@@ -249,8 +338,8 @@ fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrela
     assert_eq!(raw_q, OPEN_Q.unsigned_abs());
     assert!(winner_effective_q > 0 && winner_effective_q < raw_q);
     assert!(winner_effective_ceiling_q < raw_q);
-    assert!(adl.assets[0].a_long < ADL_ONE);
-    assert_eq!(adl.assets[0].oi_eff_short_q, global_effective_q);
+    assert!(side_a < ADL_ONE);
+    assert_eq!(opposite_effective_q, global_effective_q);
     if add_unrelated_oi {
         assert!(
             global_effective_q >= raw_q,
@@ -271,47 +360,40 @@ fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrela
             env.svm.add_program(matcher_program, &matcher_bytes);
             let (context, delegate, _) = env.init_auth_matcher_context(
                 matcher_program,
-                &auxiliary_short_owner,
-                auxiliary_short,
+                &auxiliary_loser_owner,
+                auxiliary_loser,
             );
             (matcher_program, context, delegate)
         });
-        let market_before = env.svm.get_account(&env.market).unwrap();
-        let winner_before = env.svm.get_account(&winner).unwrap();
-        let auxiliary_short_before = env.svm.get_account(&auxiliary_short).unwrap();
-        let matcher_before =
-            reduction_matcher.map(|(_, context, _)| env.svm.get_account(&context).unwrap());
-        let vault_before = env.token_amount(env.vault);
-        env.svm.expire_blockhash();
-        let result = try_adl_cross_zero_route(
-            &mut env,
-            route,
-            &winner_owner,
-            winner,
-            &auxiliary_short_owner,
-            auxiliary_short,
-            -((winner_effective_ceiling_q as i128) + 1),
-            ADVERSE_PRICE,
-            reduction_matcher,
-        );
-
-        let error = result.expect_err(
-            "a same-side trade must not reduce more than the account's ADL-effective exposure",
-        );
-        assert!(
-            error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
-            "{route:?} over-effective reduction must reach the account-local ADL gate: {error}"
-        );
-        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-        assert_eq!(env.svm.get_account(&winner).unwrap(), winner_before);
-        assert_eq!(
-            env.svm.get_account(&auxiliary_short).unwrap(),
-            auxiliary_short_before
-        );
-        if let (Some((_, context, _)), Some(before)) = (reduction_matcher, matcher_before) {
-            assert_eq!(env.svm.get_account(&context).unwrap(), before);
+        let effective_gap_q = raw_q - winner_effective_ceiling_q;
+        let mut forbidden_reductions = vec![
+            winner_effective_ceiling_q + 1,
+            winner_effective_ceiling_q + effective_gap_q / 4,
+            winner_effective_ceiling_q + effective_gap_q / 2,
+            winner_effective_ceiling_q + effective_gap_q * 3 / 4,
+            raw_q - 1,
+            raw_q,
+        ];
+        forbidden_reductions.sort_unstable();
+        forbidden_reductions.dedup();
+        for reduction_q in forbidden_reductions {
+            assert!(reduction_q > winner_effective_ceiling_q && reduction_q <= raw_q);
+            assert_adl_route_rejects_exactly(
+                &mut env,
+                route,
+                &winner_owner,
+                winner,
+                &auxiliary_loser_owner,
+                auxiliary_loser,
+                signed_reduction(reduction_q),
+                adverse_price,
+                reduction_matcher,
+                true,
+                &format!(
+                    "{route:?} post-ADL reduction {reduction_q}/{raw_q} must not consume stale raw basis"
+                ),
+            );
         }
-        assert_eq!(env.token_amount(env.vault), vault_before);
     }
 
     let matcher = route.uses_cpi().then(|| {
@@ -323,38 +405,44 @@ fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrela
             env.init_auth_matcher_context(matcher_program, &successor_owner, successor);
         (matcher_program, context, delegate)
     });
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let winner_before = env.svm.get_account(&winner).unwrap();
-    let successor_before = env.svm.get_account(&successor).unwrap();
-    let matcher_before = matcher.map(|(_, context, _)| env.svm.get_account(&context).unwrap());
-    let vault_before = env.token_amount(env.vault);
-    env.svm.expire_blockhash();
-    let result = try_adl_cross_zero_route(
-        &mut env,
-        route,
-        &winner_owner,
-        winner,
-        &successor_owner,
-        successor,
-        -((raw_q as i128) + NEW_SIDE_Q),
-        ADVERSE_PRICE,
-        matcher,
-    );
-
-    let error = result.expect_err("post-ADL cross-zero must not reissue fresh basis");
-    if add_unrelated_oi {
-        assert!(
-            error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
-            "{route:?} auxiliary-OI path must reach the common ADL LockActive gate: {error}"
+    let mut cross_zero_suffixes = if add_unrelated_oi {
+        vec![
+            1,
+            winner_effective_q / 4,
+            winner_effective_q / 2,
+            winner_effective_q * 3 / 4,
+            winner_effective_q,
+        ]
+    } else {
+        vec![NEW_SIDE_Q as u128]
+    };
+    cross_zero_suffixes.retain(|suffix_q| *suffix_q > 0);
+    cross_zero_suffixes.sort_unstable();
+    cross_zero_suffixes.dedup();
+    for suffix_q in cross_zero_suffixes {
+        if add_unrelated_oi {
+            assert!(
+                raw_q <= global_effective_q,
+                "generated raw reduction component must pass the pooled-OI preflight"
+            );
+            assert!(suffix_q <= winner_effective_q);
+        }
+        assert_adl_route_rejects_exactly(
+            &mut env,
+            route,
+            &winner_owner,
+            winner,
+            &successor_owner,
+            successor,
+            signed_reduction(raw_q + suffix_q),
+            adverse_price,
+            matcher,
+            add_unrelated_oi,
+            &format!(
+                "{route:?} post-ADL cross-zero suffix {suffix_q}/{winner_effective_q} must not reissue fresh basis"
+            ),
         );
     }
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-    assert_eq!(env.svm.get_account(&winner).unwrap(), winner_before);
-    assert_eq!(env.svm.get_account(&successor).unwrap(), successor_before);
-    if let (Some((_, context, _)), Some(before)) = (matcher, matcher_before) {
-        assert_eq!(env.svm.get_account(&context).unwrap(), before);
-    }
-    assert_eq!(env.token_amount(env.vault), vault_before);
 
     let exit_q = winner_effective_ceiling_q;
     let market_before_exit = env.market_state().1;
@@ -367,8 +455,8 @@ fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrela
             env.svm.add_program(matcher_program, &matcher_bytes);
             let (context, delegate, _) = env.init_auth_matcher_context(
                 matcher_program,
-                &auxiliary_short_owner,
-                auxiliary_short,
+                &auxiliary_loser_owner,
+                auxiliary_loser,
             );
             (matcher_program, context, delegate)
         });
@@ -378,10 +466,10 @@ fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrela
             route,
             &winner_owner,
             winner,
-            &auxiliary_short_owner,
-            auxiliary_short,
-            -(exit_q as i128),
-            ADVERSE_PRICE,
+            &auxiliary_loser_owner,
+            auxiliary_loser,
+            signed_reduction(exit_q),
+            adverse_price,
             exit_matcher,
         )
         .expect("the exact ADL-effective exposure must remain trade-closeable");
@@ -412,14 +500,60 @@ fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrela
         market_before_exit.assets[0].oi_eff_short_q - exit_q
     );
     assert_eq!(env.token_amount(env.vault), vault_before_exit);
+    side_a
 }
 
 #[test]
 fn v16_program_post_liquidation_cross_zero_rejects_basis_reissue_on_all_routes() {
     for route in AdlCrossZeroRoute::ALL {
-        run_partial_liquidation_cross_zero_world(route, false);
-        run_partial_liquidation_cross_zero_world(route, true);
+        run_partial_liquidation_cross_zero_world(route, false, 900, SideV16::Long, 500, 0);
     }
+}
+
+#[test]
+fn v16_program_post_adl_generated_interior_quantities_span_ratios_and_directions() {
+    let mut reached_ratios = Vec::new();
+    for loser_deposit in [850, 875, 900] {
+        let mut route_ratios = Vec::new();
+        for route in AdlCrossZeroRoute::ALL {
+            route_ratios.push(run_partial_liquidation_cross_zero_world(
+                route,
+                true,
+                loser_deposit,
+                SideV16::Long,
+                500,
+                0,
+            ));
+        }
+        assert!(
+            route_ratios.windows(2).all(|pair| pair[0] == pair[1]),
+            "route choice must not alter the publicly reached ADL ratio: {route_ratios:?}"
+        );
+        reached_ratios.push(route_ratios[0]);
+    }
+    reached_ratios.sort_unstable();
+    reached_ratios.dedup();
+    assert_eq!(
+        reached_ratios.len(),
+        3,
+        "the generated public worlds must reach three distinct nonunit ADL ratios"
+    );
+
+    let mut route_ratios = Vec::new();
+    for route in AdlCrossZeroRoute::ALL {
+        route_ratios.push(run_partial_liquidation_cross_zero_world(
+            route,
+            true,
+            200,
+            SideV16::Short,
+            20,
+            1,
+        ));
+    }
+    assert!(
+        route_ratios.windows(2).all(|pair| pair[0] == pair[1]),
+        "route choice must not alter the mirrored public ADL ratio: {route_ratios:?}"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

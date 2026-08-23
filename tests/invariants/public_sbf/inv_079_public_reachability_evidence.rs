@@ -1001,10 +1001,10 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
         );
 
         match status {
-            "PARTIAL" => {
+            "PARTIAL" | "CLOSED" => {
                 let (path, function) = evidence.split_once('#').unwrap_or_else(|| {
                     panic!(
-                        "row {} PARTIAL evidence lacks path#function",
+                        "row {} {status} evidence lacks path#function",
                         line_index + 1
                     )
                 });
@@ -1021,6 +1021,21 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
                     "row {} evidence {path} does not define fn {function}",
                     line_index + 1
                 );
+                if status == "CLOSED" {
+                    assert_eq!(
+                        remaining_gap,
+                        "-",
+                        "row {} CLOSED method cannot name a remaining gap",
+                        line_index + 1
+                    );
+                } else {
+                    assert_ne!(
+                        remaining_gap,
+                        "-",
+                        "row {} PARTIAL method must name a remaining gap",
+                        line_index + 1
+                    );
+                }
             }
             "OMITTED" => assert_eq!(
                 evidence,
@@ -1029,7 +1044,7 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
                 line_index + 1
             ),
             _ => panic!(
-                "row {} status must be PARTIAL or OMITTED, got {status}",
+                "row {} status must be CLOSED, PARTIAL, or OMITTED, got {status}",
                 line_index + 1
             ),
         }
