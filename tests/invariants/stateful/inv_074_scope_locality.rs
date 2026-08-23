@@ -30,6 +30,11 @@
 //! frame the unrelated asset and oracle profile; the unrelated exit must frame the complete reset
 //! episode; and both schedules must reach the same owner payouts through bounded public cleanup.
 //!
+//! A sixth matrix puts both assets in the same two portfolios. After asset 0 enters
+//! `ResetPending` and Recovery, an immediate asset-1 exit may either land or reject atomically, but
+//! the canonical account crank must clear the stale asset-0 prerequisite and make the identical
+//! exit succeed. Crank-first and exit-attempt-first schedules must converge economically.
+//!
 //! Guarantee boundary: these are the same-asset risk-reduction and two-asset/two-account close
 //! cells. Risk increase while a domain loss barrier is active is intentionally outside the
 //! guarantee; broader side/domain/lifecycle combinations remain open.
@@ -56,6 +61,272 @@ struct LifecycleLocalityOutcome {
     token_supply: u128,
     reset_generation_after_restart: u64,
     unrelated_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScopedRollbackSnapshot {
+    market: Vec<u8>,
+    foreign_market: Vec<u8>,
+    portfolios: Vec<Vec<u8>>,
+    foreign_portfolio: Vec<u8>,
+    backing_ledger: Vec<u8>,
+    tokens: Vec<(solana_sdk::pubkey::Pubkey, Vec<u8>)>,
+    matcher_contexts: Vec<Vec<u8>>,
+    economic_lamports: Vec<(solana_sdk::pubkey::Pubkey, u64)>,
+}
+
+fn scoped_rollback_snapshot(env: &V16Svm) -> ScopedRollbackSnapshot {
+    ScopedRollbackSnapshot {
+        market: env.market_data(false),
+        foreign_market: env.market_data(true),
+        portfolios: env.all_primary_portfolio_data(),
+        foreign_portfolio: env.foreign_portfolio_data(),
+        backing_ledger: env.backing_domain_ledger_data(),
+        tokens: env.all_token_account_data(),
+        matcher_contexts: env.all_matcher_context_data(),
+        economic_lamports: env.all_economic_account_lamports(),
+    }
+}
+
+fn active_leg_count_for_asset(env: &V16Svm, actor: usize, asset_index: u16) -> usize {
+    env.primary_portfolio(actor)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| leg.active && leg.asset_index == u32::from(asset_index))
+        .count()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SharedPortfolioExitOrder {
+    ExitAttemptThenCrank,
+    CrankThenExit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SharedPortfolioLocalityOutcome {
+    destination_balances: [u64; 2],
+    token_supply: u128,
+    reset_generation_after_restart: u64,
+    unrelated_generation: u64,
+    early_exit_rejected: bool,
+    reset_crank_calls: usize,
+}
+
+fn clear_shared_portfolio_reset_prerequisite(
+    env: &mut V16Svm,
+    reducer_long: bool,
+    case: &str,
+) -> Result<(u64, usize), String> {
+    const STALE_COUNTERPARTY: usize = 1;
+    let observation = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    let mut max_compute_units = 0u64;
+    let mut crank_calls = 0usize;
+    for _ in 0..8 {
+        if active_leg_count_for_asset(env, STALE_COUNTERPARTY, 0) == 0 {
+            break;
+        }
+        let crank = env
+            .crank(STALE_COUNTERPARTY, env.current_slot(), observation.clone())
+            .map_err(|error| format!("{case}: shared-account reset crank: {error}"))?;
+        max_compute_units = max_compute_units.max(crank.compute_units);
+        crank_calls += 1;
+    }
+    if active_leg_count_for_asset(env, STALE_COUNTERPARTY, 0) != 0 {
+        return Err(format!(
+            "{case}: shared-account reset prerequisite exceeded bounded crank budget"
+        ));
+    }
+    let asset = env.primary_market_state().1.assets[0];
+    let (stored, stale, pending) = if reducer_long {
+        (
+            asset.stored_pos_count_short,
+            asset.stale_account_count_short,
+            asset.pending_obligation_count_short,
+        )
+    } else {
+        (
+            asset.stored_pos_count_long,
+            asset.stale_account_count_long,
+            asset.pending_obligation_count_long,
+        )
+    };
+    if (stored, stale, pending) != (0, 0, 0) {
+        return Err(format!(
+            "{case}: shared-account reset cleanup left work: {:?}",
+            (stored, stale, pending)
+        ));
+    }
+    Ok((max_compute_units, crank_calls))
+}
+
+fn run_shared_portfolio_lifecycle_world(
+    route: TradeRoute,
+    reducer_long: bool,
+    order: SharedPortfolioExitOrder,
+    seed: [u8; 32],
+) -> Result<SharedPortfolioLocalityOutcome, String> {
+    const REDUCER: usize = 0;
+    const COUNTERPARTY: usize = 1;
+
+    let case = format!("{route:?}/reducer_long={reducer_long}/{order:?}");
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let token_supply = env.token_supply_observed();
+    env.configure_permissionless_resolve(1_000, 100)
+        .map_err(|error| format!("{case}: configure Recovery route: {error}"))?;
+
+    let reset_size_q = if reducer_long {
+        POS_SCALE as i128
+    } else {
+        -(POS_SCALE as i128)
+    };
+    let unrelated_size_q = -reset_size_q;
+    let mut max_compute_units = execute_trade_route(
+        &mut env,
+        TradeRoute::NoCpi,
+        REDUCER,
+        COUNTERPARTY,
+        0,
+        reset_size_q,
+        INITIAL_PRICE,
+        0,
+    )
+    .map_err(|error| format!("{case}: establish reset-side position: {error}"))?
+    .compute_units;
+    max_compute_units = max_compute_units.max(
+        execute_trade_route(
+            &mut env,
+            route,
+            REDUCER,
+            COUNTERPARTY,
+            1,
+            unrelated_size_q,
+            INITIAL_PRICE,
+            0,
+        )
+        .map_err(|error| format!("{case}: establish shared unrelated position: {error}"))?
+        .compute_units,
+    );
+    max_compute_units = max_compute_units.max(
+        env.rebalance_reduce(REDUCER, 0, POS_SCALE)
+            .map_err(|error| format!("{case}: enter shared ResetPending episode: {error}"))?
+            .compute_units,
+    );
+    max_compute_units = max_compute_units.max(
+        env.shutdown_asset(0, env.current_slot())
+            .map_err(|error| format!("{case}: shutdown shared reset asset: {error}"))?
+            .compute_units,
+    );
+    assert_public_stock_census("INV-074 shared-portfolio lifecycle prefix", &env)?;
+    assert_public_encumbrance_census("INV-074 shared-portfolio lifecycle prefix", &env)?;
+
+    let mut unrelated_exit_landed = false;
+    let mut early_exit_rejected = false;
+    if order == SharedPortfolioExitOrder::ExitAttemptThenCrank {
+        let before_attempt = scoped_rollback_snapshot(&env);
+        match execute_trade_route(
+            &mut env,
+            route,
+            REDUCER,
+            COUNTERPARTY,
+            1,
+            -unrelated_size_q,
+            INITIAL_PRICE,
+            0,
+        ) {
+            Ok(exit) => {
+                max_compute_units = max_compute_units.max(exit.compute_units);
+                unrelated_exit_landed = true;
+            }
+            Err(_) => {
+                early_exit_rejected = true;
+                if scoped_rollback_snapshot(&env) != before_attempt {
+                    return Err(format!(
+                        "{case}: rejected early unrelated exit did not roll back exactly"
+                    ));
+                }
+            }
+        }
+    }
+
+    let (reset_crank_compute_units, reset_crank_calls) =
+        clear_shared_portfolio_reset_prerequisite(&mut env, reducer_long, &case)?;
+    max_compute_units = max_compute_units.max(reset_crank_compute_units);
+    if early_exit_rejected && reset_crank_calls == 0 {
+        return Err(format!(
+            "{case}: early exit rejected without a successful prerequisite crank"
+        ));
+    }
+    if !unrelated_exit_landed {
+        max_compute_units = max_compute_units.max(
+            execute_trade_route(
+                &mut env,
+                route,
+                REDUCER,
+                COUNTERPARTY,
+                1,
+                -unrelated_size_q,
+                INITIAL_PRICE,
+                0,
+            )
+            .map_err(|error| format!("{case}: post-crank unrelated exit: {error}"))?
+            .compute_units,
+        );
+    }
+    let unrelated = env.primary_market_state().1.assets[1];
+    if unrelated.oi_eff_long_q != 0 || unrelated.oi_eff_short_q != 0 {
+        return Err(format!(
+            "{case}: shared-account unrelated exit retained OI: {unrelated:?}"
+        ));
+    }
+
+    let reset_side = u8::from(reducer_long);
+    max_compute_units = max_compute_units.max(
+        env.finalize_reset_side(0, reset_side)
+            .map_err(|error| format!("{case}: finalize shared reset: {error}"))?
+            .compute_units,
+    );
+    env.warp_to_slot(2);
+    max_compute_units = max_compute_units.max(
+        env.restart_asset_oracle(0, 2, INITIAL_PRICE)
+            .map_err(|error| format!("{case}: restart shared reset asset: {error}"))?
+            .compute_units,
+    );
+    for actor in [REDUCER, COUNTERPARTY] {
+        let capital = env.primary_portfolio(actor).capital.get();
+        max_compute_units = max_compute_units.max(
+            env.withdraw_primary(actor, capital)
+                .map_err(|error| format!("{case}: shared actor {actor} withdrawal: {error}"))?
+                .compute_units,
+        );
+    }
+    if max_compute_units >= TX_CU_LIMIT
+        || env.token_supply_observed() != token_supply
+        || [REDUCER, COUNTERPARTY]
+            .into_iter()
+            .any(|actor| env.primary_portfolio(actor).capital.get() != 0)
+    {
+        return Err(format!(
+            "{case}: shared-account lifecycle failed CU, supply, or terminal-capital checks"
+        ));
+    }
+    assert_public_stock_census("INV-074 shared-portfolio lifecycle terminal", &env)?;
+    assert_public_encumbrance_census("INV-074 shared-portfolio lifecycle terminal", &env)?;
+
+    let group = env.primary_market_state().1;
+    Ok(SharedPortfolioLocalityOutcome {
+        destination_balances: std::array::from_fn(|actor| {
+            env.token_amount(env.actors[actor].destination_token)
+        }),
+        token_supply,
+        reset_generation_after_restart: group.assets[0].market_id,
+        unrelated_generation: group.assets[1].market_id,
+        early_exit_rejected,
+        reset_crank_calls,
+    })
 }
 
 fn shutdown_reset_asset_without_touching_unrelated_scope(
@@ -404,6 +675,65 @@ fn v16_program_reset_shutdown_and_unrelated_exit_are_scope_local_and_order_safe(
             )
             .unwrap_or_else(|error| panic!("shutdown-before-exit locality: {error}"));
             assert_eq!(exit_first, shutdown_first, "{route:?}/{reducer_long}");
+        }
+    }
+}
+
+#[test]
+fn v16_program_shared_portfolio_reset_prerequisite_has_bounded_exit_schedule() {
+    for (route_index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for reducer_long in [false, true] {
+            let mut seed = [0x75; 32];
+            seed[0] ^= route_index as u8;
+            seed[1] ^= u8::from(reducer_long);
+            let exit_attempt_first = run_shared_portfolio_lifecycle_world(
+                route,
+                reducer_long,
+                SharedPortfolioExitOrder::ExitAttemptThenCrank,
+                seed,
+            )
+            .unwrap_or_else(|error| panic!("early-exit shared-portfolio schedule: {error}"));
+            let crank_first = run_shared_portfolio_lifecycle_world(
+                route,
+                reducer_long,
+                SharedPortfolioExitOrder::CrankThenExit,
+                seed,
+            )
+            .unwrap_or_else(|error| panic!("crank-first shared-portfolio schedule: {error}"));
+            assert_eq!(
+                exit_attempt_first.destination_balances, crank_first.destination_balances,
+                "{route:?}/{reducer_long}"
+            );
+            assert_eq!(
+                exit_attempt_first.token_supply, crank_first.token_supply,
+                "{route:?}/{reducer_long}"
+            );
+            assert_eq!(
+                exit_attempt_first.reset_generation_after_restart,
+                crank_first.reset_generation_after_restart,
+                "{route:?}/{reducer_long}"
+            );
+            assert_eq!(
+                exit_attempt_first.unrelated_generation, crank_first.unrelated_generation,
+                "{route:?}/{reducer_long}"
+            );
+            assert!(
+                crank_first.reset_crank_calls > 0,
+                "crank-first schedule must execute real reset cleanup: {route:?}/{reducer_long}/{crank_first:?}"
+            );
+            assert!(
+                !exit_attempt_first.early_exit_rejected
+                    || exit_attempt_first.reset_crank_calls > 0,
+                "an early rejection must have a successful public prerequisite: {route:?}/{reducer_long}/{exit_attempt_first:?}"
+            );
         }
     }
 }
