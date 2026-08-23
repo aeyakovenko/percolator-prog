@@ -18,8 +18,9 @@
 //! publicly reachable exit-only lifecycle modes. A second matrix composes opposite-side active
 //! close barriers on two assets at once, then covers both assets through every route while framing
 //! both close ledgers, retaining both account-local obligation classes, and restoring withdrawal.
-//! Interior full-domain generation and lifecycle modes that cannot retain live exposure remain
-//! separate coverage obligations.
+//! ResetPending stale raw legs and Retired exposure unreachability are covered on every route and
+//! both side orientations; INV-046 supplies the existing public Resolved strict/cross-zero and
+//! terminal-payout matrix. Interior full-domain generation remains a separate coverage obligation.
 
 use super::*;
 
@@ -1236,6 +1237,406 @@ fn v16_program_exit_only_lifecycles_reject_cross_zero_on_all_routes() {
             );
             assert_eq!(group_after.vault as u64, env.token_amount(env.vault));
             assert!(group_after.vault >= group_after.c_tot + group_after.insurance);
+        }
+    }
+}
+
+fn run_reset_pending_stale_leg_world(route: AdlCrossZeroRoute, reducer_side: SideV16) {
+    const PRICE: u64 = 100;
+    const OPEN_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new();
+    let reducer_owner = Keypair::new();
+    let stale_owner = Keypair::new();
+    let fresh_owner = Keypair::new();
+    let reducer = env.create_portfolio(&reducer_owner);
+    let stale = env.create_portfolio(&stale_owner);
+    let fresh = env.create_portfolio(&fresh_owner);
+    for (owner, portfolio) in [
+        (&reducer_owner, reducer),
+        (&stale_owner, stale),
+        (&fresh_owner, fresh),
+    ] {
+        env.deposit(owner, portfolio, 1_000_000);
+    }
+
+    let signed_open_q = match reducer_side {
+        SideV16::Long => OPEN_Q,
+        SideV16::Short => -OPEN_Q,
+    };
+    env.trade_asset_with_cu(
+        0,
+        &reducer_owner,
+        reducer,
+        &stale_owner,
+        stale,
+        signed_open_q,
+        PRICE,
+        0,
+    );
+    let reduce_cu = env.rebalance_reduce_with_cu(&reducer_owner, reducer, 0, OPEN_Q as u128);
+    assert_cu_within(
+        &format!("{route:?} {reducer_side:?} ResetPending creation"),
+        reduce_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let stale_leg = active_leg_for_asset(&env.portfolio_state(stale), 0);
+    let expected_stale_side = match reducer_side {
+        SideV16::Long => SideV16::Short,
+        SideV16::Short => SideV16::Long,
+    };
+    assert_eq!(stale_leg.side, expected_stale_side);
+    assert_eq!(stale_leg.basis_pos_q.unsigned_abs(), OPEN_Q as u128);
+    let reset_side = stale_leg.side;
+    let reset = env.market_state().1;
+    let reset_mode = match reset_side {
+        SideV16::Long => reset.assets[0].mode_long,
+        SideV16::Short => reset.assets[0].mode_short,
+    };
+    assert_eq!(reset_mode, SideModeV16::ResetPending);
+    assert_eq!(reset.assets[0].oi_eff_long_q, 0);
+    assert_eq!(reset.assets[0].oi_eff_short_q, 0);
+    let cross_zero_q = if stale_leg.basis_pos_q > 0 {
+        -(OPEN_Q + 1)
+    } else {
+        OPEN_Q + 1
+    };
+
+    let matcher = route.uses_cpi().then(|| {
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let (context, delegate, _) =
+            env.init_auth_matcher_context(matcher_program, &fresh_owner, fresh);
+        (matcher_program, context, delegate)
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let stale_before = env.svm.get_account(&stale).unwrap();
+    let fresh_before = env.svm.get_account(&fresh).unwrap();
+    let matcher_before = matcher.map(|(_, context, _)| env.svm.get_account(&context).unwrap());
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let error = try_adl_cross_zero_route(
+        &mut env,
+        route,
+        &stale_owner,
+        stale,
+        &fresh_owner,
+        fresh,
+        cross_zero_q,
+        PRICE,
+        matcher,
+    )
+    .expect_err("a prior-epoch ResetPending leg must not be reissued across zero");
+    assert!(
+        error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+        "{route:?} {reset_side:?} stale-leg cross-zero must reach EngineLockActive: {error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&stale).unwrap(), stale_before);
+    assert_eq!(env.svm.get_account(&fresh).unwrap(), fresh_before);
+    if let (Some((_, context, _)), Some(before)) = (matcher, matcher_before) {
+        assert_eq!(env.svm.get_account(&context).unwrap(), before);
+    }
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    let crank_cu = env
+        .send_crank_if_actionable(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: env.svm.get_sysvar::<Clock>().slot,
+                observations: Vec::new(),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(stale, false),
+            ],
+            &[],
+        )
+        .expect("the stale ResetPending leg must expose permissionless cleanup");
+    assert_cu_within("ResetPending stale-leg cleanup", crank_cu, CRANK_CU_LIMIT);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(stale), 0));
+    let reset_side_wire = match reset_side {
+        SideV16::Long => 0,
+        SideV16::Short => 1,
+    };
+    let finalize_cu = env.finalize_reset_side_with_cu(0, reset_side_wire);
+    assert_cu_within(
+        "ResetPending stale-leg finalization",
+        finalize_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let finalized = env.market_state().1;
+    let finalized_mode = match reset_side {
+        SideV16::Long => finalized.assets[0].mode_long,
+        SideV16::Short => finalized.assets[0].mode_short,
+    };
+    assert_eq!(finalized_mode, SideModeV16::Normal);
+
+    env.svm.expire_blockhash();
+    let retry_cu = try_adl_cross_zero_route(
+        &mut env,
+        route,
+        &stale_owner,
+        stale,
+        &fresh_owner,
+        fresh,
+        cross_zero_q,
+        PRICE,
+        matcher,
+    )
+    .expect("the identical quantity must become ordinary fresh risk after reset finalization");
+    assert_cu_within("post-reset fresh retry", retry_cu, TRADE_CU_LIMIT);
+    env.svm.expire_blockhash();
+    let close_cu = try_adl_cross_zero_route(
+        &mut env,
+        route,
+        &stale_owner,
+        stale,
+        &fresh_owner,
+        fresh,
+        -cross_zero_q,
+        PRICE,
+        matcher,
+    )
+    .expect("post-reset fresh risk must retain a complete matched exit");
+    assert_cu_within("post-reset fresh close", close_cu, TRADE_CU_LIMIT);
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.assets[0].oi_eff_long_q, 0);
+    assert_eq!(terminal.assets[0].oi_eff_short_q, 0);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(stale), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(fresh), 0));
+    assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+}
+
+#[test]
+fn v16_program_reset_pending_stale_leg_cannot_reissue_basis_on_any_route() {
+    for route in AdlCrossZeroRoute::ALL {
+        for reducer_side in [SideV16::Long, SideV16::Short] {
+            run_reset_pending_stale_leg_world(route, reducer_side);
+        }
+    }
+}
+
+fn run_retired_exposure_unreachability_world(route: AdlCrossZeroRoute, open_side: SideV16) {
+    const ASSET_INDEX: u16 = 1;
+    const PRICE: u64 = 100;
+    const OPEN_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(ASSET_INDEX, 1, PRICE);
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, account_a, 1_000_000);
+    env.deposit(&owner_b, account_b, 1_000_000);
+    let matcher = route.uses_cpi().then(|| {
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let (context, delegate, _) =
+            env.init_auth_matcher_context(matcher_program, &owner_b, account_b);
+        (matcher_program, context, delegate)
+    });
+    let signed_open_q = match open_side {
+        SideV16::Long => OPEN_Q,
+        SideV16::Short => -OPEN_Q,
+    };
+    env.svm.expire_blockhash();
+    let open_cu = try_adl_cross_zero_route_on_asset(
+        &mut env,
+        route,
+        ASSET_INDEX,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        signed_open_q,
+        PRICE,
+        matcher,
+    )
+    .expect("the public route must create live exposure before the retirement attempt");
+    assert_cu_within("pre-retirement public open", open_cu, TRADE_CU_LIMIT);
+    let opened = env.market_state().1;
+    assert_eq!(
+        opened.assets[ASSET_INDEX as usize].oi_eff_long_q,
+        OPEN_Q as u128
+    );
+    assert_eq!(
+        opened.assets[ASSET_INDEX as usize].oi_eff_short_q,
+        OPEN_Q as u128
+    );
+
+    let lifecycle_cu = env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+        ASSET_INDEX,
+        0,
+        0,
+    );
+    assert_cu_within(
+        "live asset enters DrainOnly",
+        lifecycle_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.assets[ASSET_INDEX as usize].lifecycle,
+        AssetLifecycleV16::DrainOnly
+    );
+
+    let admin = env.admin.insecure_clone();
+    let now_slot = env.svm.get_sysvar::<Clock>().slot;
+    let market_id = env.asset_market_id(ASSET_INDEX);
+    let retire_ix = ProgInstruction::UpdateAssetLifecycle {
+        action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+        asset_index: ASSET_INDEX,
+        market_id,
+        now_slot,
+        initial_price: 0,
+        max_init_fee: u128::MAX,
+        insurance_authority: admin.pubkey().to_bytes(),
+        insurance_operator: admin.pubkey().to_bytes(),
+        backing_bucket_authority: admin.pubkey().to_bytes(),
+        oracle_authority: admin.pubkey().to_bytes(),
+    };
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_a_before = env.svm.get_account(&account_a).unwrap();
+    let account_b_before = env.svm.get_account(&account_b).unwrap();
+    let matcher_before = matcher.map(|(_, context, _)| env.svm.get_account(&context).unwrap());
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let retire_error = env
+        .send(
+            retire_ix,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        )
+        .expect_err("an asset with live exposure must not become Retired");
+    assert!(
+        retire_error.contains("Custom(21)") || retire_error.contains("custom program error: 0x15"),
+        "{route:?} {open_side:?} nonempty retirement must reach EngineLockActive: {retire_error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&account_a).unwrap(), account_a_before);
+    assert_eq!(env.svm.get_account(&account_b).unwrap(), account_b_before);
+    if let (Some((_, context, _)), Some(before)) = (matcher, matcher_before) {
+        assert_eq!(env.svm.get_account(&context).unwrap(), before);
+    }
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.expire_blockhash();
+    let close_cu = try_adl_cross_zero_route_on_asset(
+        &mut env,
+        route,
+        ASSET_INDEX,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        -signed_open_q,
+        PRICE,
+        matcher,
+    )
+    .expect("DrainOnly must preserve the same route's exact matched exit");
+    assert_cu_within("pre-retirement exact exit", close_cu, TRADE_CU_LIMIT);
+    let flat = env.market_state().1;
+    let flat_asset = flat.assets[ASSET_INDEX as usize];
+    assert_eq!(flat_asset.oi_eff_long_q, 0);
+    assert_eq!(flat_asset.oi_eff_short_q, 0);
+    assert_eq!(flat_asset.stored_pos_count_long, 0);
+    assert_eq!(flat_asset.stored_pos_count_short, 0);
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(account_a),
+        ASSET_INDEX as usize
+    ));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(account_b),
+        ASSET_INDEX as usize
+    ));
+
+    let retire_cu = env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        ASSET_INDEX,
+        now_slot,
+        0,
+    );
+    assert_cu_within("empty asset retirement", retire_cu, CUSTODY_CU_LIMIT);
+    let retired = env.market_state().1;
+    let retired_asset = retired.assets[ASSET_INDEX as usize];
+    assert_eq!(retired_asset.lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(retired_asset.oi_eff_long_q, 0);
+    assert_eq!(retired_asset.oi_eff_short_q, 0);
+    assert_eq!(retired_asset.stored_pos_count_long, 0);
+    assert_eq!(retired_asset.stored_pos_count_short, 0);
+
+    let market_before_reissue = env.svm.get_account(&env.market).unwrap();
+    let account_a_before_reissue = env.svm.get_account(&account_a).unwrap();
+    let account_b_before_reissue = env.svm.get_account(&account_b).unwrap();
+    let matcher_before_reissue =
+        matcher.map(|(_, context, _)| env.svm.get_account(&context).unwrap());
+    let vault_before_reissue = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let reissue_error = try_adl_cross_zero_route_on_asset(
+        &mut env,
+        route,
+        ASSET_INDEX,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        signed_open_q,
+        PRICE,
+        matcher,
+    )
+    .expect_err("a Retired asset must reject any fresh basis reissue");
+    assert!(
+        reissue_error.contains("Custom(21)")
+            || reissue_error.contains("custom program error: 0x15"),
+        "{route:?} {open_side:?} Retired reissue must reach EngineLockActive: {reissue_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_reissue
+    );
+    assert_eq!(
+        env.svm.get_account(&account_a).unwrap(),
+        account_a_before_reissue
+    );
+    assert_eq!(
+        env.svm.get_account(&account_b).unwrap(),
+        account_b_before_reissue
+    );
+    if let (Some((_, context, _)), Some(before)) = (matcher, matcher_before_reissue) {
+        assert_eq!(env.svm.get_account(&context).unwrap(), before);
+    }
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_reissue
+    );
+    for (owner, portfolio) in [(&owner_a, account_a), (&owner_b, account_b)] {
+        env.svm.expire_blockhash();
+        let (destination, withdraw_cu) = env.withdraw_with_cu(owner, portfolio, 1);
+        assert_cu_within(
+            "flat owner withdrawal after retirement",
+            withdraw_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(env.token_amount(destination), 1);
+    }
+}
+
+#[test]
+fn v16_program_retired_exposure_is_publicly_unreachable_on_every_trade_route() {
+    for route in AdlCrossZeroRoute::ALL {
+        for open_side in [SideV16::Long, SideV16::Short] {
+            run_retired_exposure_unreachability_world(route, open_side);
         }
     }
 }
