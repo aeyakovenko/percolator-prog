@@ -6859,6 +6859,8 @@ pub struct SameAssetCloseDriftProgressEvidence {
     pub funding_enabled_worlds: u64,
     pub same_asset_slot_advances: u64,
     pub funding_index_move_worlds: u64,
+    pub rejected_close_hint_words: u64,
+    pub oi_basis_frame_worlds: u64,
     pub live_close_progresses: u64,
     pub owner_exit_worlds: u64,
     pub minimum_initial_residual: u128,
@@ -7375,10 +7377,16 @@ fn run_same_asset_close_drift_progress_world(
     assert_close_residual_partition("INV-076 pre-drift", &close_before)?;
     let (_, group_before) = runner.env.primary_market_state();
     let asset_before = group_before.assets[ASSET];
+    let control_oi_q = POS_SCALE / 100;
     if asset_before.slot_last != close_before.drift_reference_slot {
         return Err(format!(
             "INV-076 close anchor was not current before drift: asset_slot={}, anchor={}",
             asset_before.slot_last, close_before.drift_reference_slot
+        ));
+    }
+    if asset_before.oi_eff_long_q != control_oi_q || asset_before.oi_eff_short_q != control_oi_q {
+        return Err(format!(
+            "INV-076 close creation did not clear only its own basis/OI: expected={control_oi_q}, asset={asset_before:?}"
         ));
     }
 
@@ -7471,6 +7479,48 @@ fn run_same_asset_close_drift_progress_world(
             "INV-076 funding partition was vacuous or leaked across the disabled control: enabled={funding_enabled}, before={asset_before:?}, after={drifted_asset:?}"
         ));
     }
+    if drifted_asset.oi_eff_long_q != control_oi_q || drifted_asset.oi_eff_short_q != control_oi_q {
+        return Err("INV-076 same-asset accrual changed flat-close/control OI attribution".into());
+    }
+
+    let invalid_hint_words = [
+        vec![
+            CrankObservationHint {
+                asset_index: ASSET as u16,
+                oracle_accounts: 0,
+            },
+            CrankObservationHint {
+                asset_index: ASSET as u16,
+                oracle_accounts: 0,
+            },
+        ],
+        vec![CrankObservationHint {
+            asset_index: ASSET_COUNT as u16,
+            oracle_accounts: 0,
+        }],
+        (0..=percolator::V16_MAX_PORTFOLIO_ASSETS_N)
+            .map(|index| CrankObservationHint {
+                asset_index: index as u16,
+                oracle_accounts: 0,
+            })
+            .collect(),
+        vec![CrankObservationHint {
+            asset_index: ASSET as u16,
+            oracle_accounts: 1,
+        }],
+    ];
+    for hints in invalid_hint_words.iter() {
+        let before_rejection = runner.snapshot();
+        let rejected = runner
+            .env
+            .crank(CLOSE_LOSER, runner.env.current_slot(), hints.clone());
+        if rejected.is_ok() {
+            return Err(format!(
+                "INV-076 malformed close hint word unexpectedly landed: {hints:?}"
+            ));
+        }
+        runner.assert_snapshot_unchanged(&before_rejection)?;
+    }
 
     let vault_before_progress = runner.env.token_amount(runner.env.vault);
     runner
@@ -7487,6 +7537,8 @@ fn run_same_asset_close_drift_progress_world(
     assert_close_residual_partition("INV-076 post-drift progress", &close_after)?;
     if progressed_group.mode != MarketModeV16::Live
         || close_after.residual_remaining >= close_before.residual_remaining
+        || progressed_group.assets[ASSET].oi_eff_long_q != control_oi_q
+        || progressed_group.assets[ASSET].oi_eff_short_q != control_oi_q
         || runner.env.token_amount(runner.env.vault) != vault_before_progress
     {
         return Err(format!(
@@ -7516,6 +7568,12 @@ fn run_same_asset_close_drift_progress_world(
     {
         return Err("INV-076 post-drift close progress left a position or capital locked".into());
     }
+    let final_asset = runner.env.primary_market_state().1.assets[ASSET];
+    if final_asset.oi_eff_long_q != 0 || final_asset.oi_eff_short_q != 0 {
+        return Err(format!(
+            "INV-076 owner exits did not atomically clear final OI: {final_asset:?}"
+        ));
+    }
     let total_owner_payout = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
         let after = u128::from(
             runner
@@ -7544,6 +7602,8 @@ fn run_same_asset_close_drift_progress_world(
         funding_enabled_worlds: u64::from(funding_enabled),
         same_asset_slot_advances: 1,
         funding_index_move_worlds: u64::from(funding_moved),
+        rejected_close_hint_words: invalid_hint_words.len() as u64,
+        oi_basis_frame_worlds: 1,
         live_close_progresses: 1,
         owner_exit_worlds: 1,
         minimum_initial_residual: close_before.residual_remaining,
@@ -7583,6 +7643,8 @@ pub fn run_same_asset_close_drift_progress_probe(
             existing.funding_enabled_worlds += evidence.funding_enabled_worlds;
             existing.same_asset_slot_advances += evidence.same_asset_slot_advances;
             existing.funding_index_move_worlds += evidence.funding_index_move_worlds;
+            existing.rejected_close_hint_words += evidence.rejected_close_hint_words;
+            existing.oi_basis_frame_worlds += evidence.oi_basis_frame_worlds;
             existing.live_close_progresses += evidence.live_close_progresses;
             existing.owner_exit_worlds += evidence.owner_exit_worlds;
             existing.minimum_initial_residual = existing
