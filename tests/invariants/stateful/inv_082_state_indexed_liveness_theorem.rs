@@ -35,10 +35,22 @@
 //! classified the same state actionable while every crank returned
 //! `LockActive`. Removing any one mark removes the counterexample, which keeps
 //! this as a minimized public reachability witness rather than injected state.
+//!
+//! The close/reset composition matrix creates an active bankruptcy close on
+//! asset 0 and an independent prior-epoch `ResetPending` leg on asset 1 through
+//! public calls. It crosses all four trade routes, both close and reset sides,
+//! and both transition landing orders. The first automatic crank must select
+//! the higher-priority close continuation without mutating asset 1; bounded
+//! later calls must clear and finalize the reset episode. Terminal owner-level
+//! payouts must be identical across landing orders, with exact stock,
+//! encumbrance, custody, supply, and CU checks. This closes one concrete
+//! close-plus-lifecycle composition cell without claiming exhaustive
+//! reachability over the remaining lifecycle graph.
 
 use super::*;
 use crate::support::fuzz_model::{
-    run_bounded_public_liveness_graph, run_multileg_loss_stale_progress_regression,
+    run_bounded_public_liveness_graph, run_close_reset_overlap_probe,
+    run_multileg_loss_stale_progress_regression,
 };
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{AssetLifecycleV16, POS_SCALE};
@@ -119,6 +131,31 @@ fn v16_program_multileg_loss_stale_account_has_permissionless_progress() {
     assert!(
         coverage.crank_progress != 0,
         "the directed public trace must execute a rank-decreasing crank: {coverage:?}"
+    );
+}
+
+#[test]
+fn v16_program_close_and_reset_overlap_has_bounded_terminal_schedule() {
+    let evidence = run_close_reset_overlap_probe()
+        .expect("INV-071/074/082 close-plus-reset public liveness matrix");
+
+    assert_eq!(evidence.world_count, 32, "{evidence:?}");
+    assert_eq!(evidence.route_worlds, [8; 4], "{evidence:?}");
+    assert_eq!(evidence.close_orientation_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.reset_orientation_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.landing_order_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.simultaneous_class_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.close_priority_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.reset_completion_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.owner_exit_worlds, 32, "{evidence:?}");
+    assert_ne!(evidence.total_owner_payout, 0, "{evidence:?}");
+    assert_ne!(
+        evidence.coverage.crank_rank_component_reduced[3], 0,
+        "close work must have a strict public reducing edge: {evidence:?}"
+    );
+    assert_ne!(
+        evidence.coverage.crank_rank_component_reduced[2], 0,
+        "ResetPending work must have a strict public reducing edge: {evidence:?}"
     );
 }
 

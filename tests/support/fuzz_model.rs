@@ -5965,9 +5965,12 @@ impl ScenarioRunner {
         } else {
             0
         };
-        let market_locks = u128::from(group.bankruptcy_hlock_active)
-            .checked_add(u128::from(group.threshold_stress_active))
-            .and_then(|value| value.checked_add(loss_work))
+        // `bankruptcy_hlock_active` is retained audit history, not a dispatchable work item. It
+        // can remain set after every close, B, obligation, and position has reached a fixed point,
+        // while account-scoped exits remain live. The concrete ranks above own those actionable
+        // bankruptcy classes; counting the history bit would demand an impossible clearing crank.
+        let market_locks = u128::from(group.threshold_stress_active)
+            .checked_add(loss_work)
             .and_then(|value| value.checked_add(lapsed_live_backing))
             .ok_or("market-lock progress rank overflow")?;
         Ok(ProgressRank {
@@ -7058,6 +7061,21 @@ pub struct DeferredCloseCrossAssetEvidence {
     pub fresh_matcher_reauthorizations: u64,
     pub terminal_equivalence_worlds: u64,
     pub close_progress_worlds: u64,
+    pub owner_exit_worlds: u64,
+    pub total_owner_payout: u128,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloseResetOverlapEvidence {
+    pub world_count: u64,
+    pub route_worlds: [u64; 4],
+    pub close_orientation_worlds: [u64; 2],
+    pub reset_orientation_worlds: [u64; 2],
+    pub landing_order_worlds: [u64; 2],
+    pub simultaneous_class_worlds: u64,
+    pub close_priority_worlds: u64,
+    pub reset_completion_worlds: u64,
     pub owner_exit_worlds: u64,
     pub total_owner_payout: u128,
     pub coverage: Coverage,
@@ -8795,6 +8813,371 @@ pub fn run_deferred_close_cross_asset_probe() -> Result<DeferredCloseCrossAssetE
         }
     }
     aggregate.ok_or_else(|| "INV-057/074 deferred-close matrix produced no worlds".into())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseResetLandingOrder {
+    ResetThenClose,
+    CloseThenReset,
+}
+
+impl CloseResetLandingOrder {
+    fn index(self) -> usize {
+        match self {
+            Self::ResetThenClose => 0,
+            Self::CloseThenReset => 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CloseResetOverlapWorld {
+    destination_payouts: [u128; PRIMARY_ACTOR_COUNT],
+    final_vault: u128,
+    final_capital_total: u128,
+    final_insurance: u128,
+    evidence: CloseResetOverlapEvidence,
+}
+
+fn enter_public_reset_pending(
+    runner: &mut ScenarioRunner,
+    actor: usize,
+    asset: usize,
+    case: &str,
+) -> Result<(), String> {
+    let size_before = runner.positions[actor][asset];
+    if size_before == 0 {
+        return Err(format!("{case}: reset reducer had no public position"));
+    }
+    runner.coverage.extended_action_attempts[4] += 1;
+    if !runner.try_rebalance_exit(actor, asset, size_before)? {
+        return Err(format!(
+            "{case}: owner RebalanceReduce did not enter ResetPending; rejection={:?}",
+            runner.last_trade_rejection
+        ));
+    }
+    runner.coverage.rebalance_reductions += 1;
+    runner.assert_global_invariants()
+}
+
+fn run_close_reset_overlap_world(
+    route: TradeRoute,
+    close_winner_side: SideV16,
+    reset_reducer_long: bool,
+    order: CloseResetLandingOrder,
+    seed_byte: u8,
+) -> Result<CloseResetOverlapWorld, String> {
+    const CLOSE_WINNER: usize = 0;
+    const CLOSE_LOSER: usize = 1;
+    const RESET_REDUCER: usize = 2;
+    const RESET_COUNTERPARTY: usize = 3;
+    const KEEPER: usize = EXIT_MAKER_INDEX;
+    const CLOSE_ASSET: usize = 0;
+    const RESET_ASSET: usize = 1;
+
+    let case = format!(
+        "INV-071/074/082 close-reset overlap {route:?}/{close_winner_side:?}/reset_long={reset_reducer_long}/{order:?}"
+    );
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
+    let token_supply = runner.env.token_supply_observed();
+    let destinations_before: [u128; PRIMARY_ACTOR_COUNT] = std::array::from_fn(|actor| {
+        u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        )
+    });
+    let reset_q = if reset_reducer_long {
+        POS_SCALE as i128
+    } else {
+        -(POS_SCALE as i128)
+    };
+    if !runner.execute_trade(
+        route,
+        RESET_REDUCER,
+        RESET_COUNTERPARTY,
+        vec![(RESET_ASSET, reset_q)],
+        0,
+        0,
+        true,
+    )? {
+        return Err(format!("{case}: reset-side public position did not open"));
+    }
+
+    match order {
+        CloseResetLandingOrder::ResetThenClose => {
+            enter_public_reset_pending(&mut runner, RESET_REDUCER, RESET_ASSET, &case)?;
+            create_public_cancellable_close_via_route_and_side(
+                &mut runner,
+                CLOSE_WINNER as u8,
+                CLOSE_LOSER as u8,
+                CLOSE_ASSET as u8,
+                KEEPER as u8,
+                route,
+                close_winner_side,
+            )?;
+        }
+        CloseResetLandingOrder::CloseThenReset => {
+            create_public_cancellable_close_via_route_and_side(
+                &mut runner,
+                CLOSE_WINNER as u8,
+                CLOSE_LOSER as u8,
+                CLOSE_ASSET as u8,
+                KEEPER as u8,
+                route,
+                close_winner_side,
+            )?;
+            enter_public_reset_pending(&mut runner, RESET_REDUCER, RESET_ASSET, &case)?;
+        }
+    }
+
+    let close_before = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("{case}: overlap close decode: {error:?}"))?;
+    let reset_asset_before = runner.env.primary_market_state().1.assets[RESET_ASSET];
+    let reset_mode_before = if reset_reducer_long {
+        reset_asset_before.mode_short
+    } else {
+        reset_asset_before.mode_long
+    };
+    let close_rank_before = runner.progress_rank(CLOSE_LOSER)?;
+    let reset_rank_before = runner.progress_rank(RESET_COUNTERPARTY)?;
+    if !close_before.active
+        || close_before.finalized
+        || close_before.canceled
+        || close_before.residual_remaining == 0
+        || reset_mode_before != SideModeV16::ResetPending
+        || close_rank_before.close_work == 0
+        || !reset_rank_before.account_actionable()
+        || (reset_rank_before.market_locks == 0 && reset_rank_before.stale_legs == 0)
+    {
+        return Err(format!(
+            "{case}: public prefix did not compose close and reset classes: close={close_before:?}, close_rank={close_rank_before:?}, reset_asset={reset_asset_before:?}, reset_rank={reset_rank_before:?}"
+        ));
+    }
+    assert_public_stock_census("INV-071/074/082 close-reset overlap", &runner.env)?;
+    assert_public_encumbrance_census("INV-071/074/082 close-reset overlap", &runner.env)?;
+
+    runner.drain_one_progress_step(None)?;
+    let close_after_priority = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("{case}: prioritized close decode: {error:?}"))?;
+    let reset_asset_after_priority = runner.env.primary_market_state().1.assets[RESET_ASSET];
+    if close_after_priority.residual_remaining >= close_before.residual_remaining
+        || reset_asset_after_priority != reset_asset_before
+    {
+        return Err(format!(
+            "{case}: selector did not prioritize close while framing reset scope: close={close_before:?}->{close_after_priority:?}, reset={reset_asset_before:?}->{reset_asset_after_priority:?}"
+        ));
+    }
+
+    runner
+        .run_permissionless_progress_campaign()
+        .map_err(|error| format!("{case}: bounded overlap progress: {error}"))?;
+    let close_after = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("{case}: terminal close decode: {error:?}"))?;
+    let reset_asset_after = runner.env.primary_market_state().1.assets[RESET_ASSET];
+    let reset_mode_after = if reset_reducer_long {
+        reset_asset_after.mode_short
+    } else {
+        reset_asset_after.mode_long
+    };
+    if (close_after.active && !close_after.finalized && close_after.residual_remaining != 0)
+        || reset_mode_after == SideModeV16::ResetPending
+        || runner.coverage.crank_rank_component_reduced[3] == 0
+        || runner.coverage.crank_rank_component_reduced[2] == 0
+    {
+        return Err(format!(
+            "{case}: bounded schedule did not discharge both classes: close={close_after:?}, reset={reset_asset_after:?}, coverage={:?}",
+            runner.coverage
+        ));
+    }
+
+    runner
+        .run_direct_user_exit_campaign()
+        .map_err(|error| format!("{case}: funded owner exit: {error}"))?;
+    runner.assert_global_invariants()?;
+    if runner
+        .positions
+        .iter()
+        .flatten()
+        .any(|position| *position != 0)
+        || (0..PRIMARY_ACTOR_COUNT)
+            .any(|actor| runner.env.primary_portfolio(actor).capital.get() != 0)
+        || runner.env.token_supply_observed() != token_supply
+        || runner.coverage.max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "{case}: terminal world retained risk/capital, changed supply, or exceeded CU"
+        ));
+    }
+    assert_public_stock_census("INV-071/074/082 close-reset terminal", &runner.env)?;
+    assert_public_encumbrance_census("INV-071/074/082 close-reset terminal", &runner.env)?;
+
+    let destination_payouts = std::array::from_fn(|actor| {
+        u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        ) - destinations_before[actor]
+    });
+    let total_owner_payout = destination_payouts
+        .iter()
+        .try_fold(0u128, |total, payout| {
+            total
+                .checked_add(*payout)
+                .ok_or("close-reset payout overflow")
+        })?;
+    let (_, group) = runner.env.primary_market_state();
+    let mut route_worlds = [0; 4];
+    route_worlds[route.index()] = 1;
+    let mut close_orientation_worlds = [0; 2];
+    close_orientation_worlds[usize::from(close_winner_side == SideV16::Long)] = 1;
+    let mut reset_orientation_worlds = [0; 2];
+    reset_orientation_worlds[usize::from(reset_reducer_long)] = 1;
+    let mut landing_order_worlds = [0; 2];
+    landing_order_worlds[order.index()] = 1;
+
+    Ok(CloseResetOverlapWorld {
+        destination_payouts,
+        final_vault: group.vault,
+        final_capital_total: group.c_tot,
+        final_insurance: group.insurance,
+        evidence: CloseResetOverlapEvidence {
+            world_count: 1,
+            route_worlds,
+            close_orientation_worlds,
+            reset_orientation_worlds,
+            landing_order_worlds,
+            simultaneous_class_worlds: 1,
+            close_priority_worlds: 1,
+            reset_completion_worlds: 1,
+            owner_exit_worlds: 1,
+            total_owner_payout,
+            coverage: runner.coverage,
+        },
+    })
+}
+
+pub fn run_close_reset_overlap_probe() -> Result<CloseResetOverlapEvidence, String> {
+    let mut aggregate: Option<CloseResetOverlapEvidence> = None;
+    for (route_index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (close_side_index, close_winner_side) in
+            [SideV16::Short, SideV16::Long].into_iter().enumerate()
+        {
+            for reset_reducer_long in [false, true] {
+                let seed_byte = 0xd2
+                    ^ route_index as u8
+                    ^ ((close_side_index as u8) << 2)
+                    ^ (u8::from(reset_reducer_long) << 3);
+                let reset_first = run_close_reset_overlap_world(
+                    route,
+                    close_winner_side,
+                    reset_reducer_long,
+                    CloseResetLandingOrder::ResetThenClose,
+                    seed_byte,
+                )?;
+                let close_first = run_close_reset_overlap_world(
+                    route,
+                    close_winner_side,
+                    reset_reducer_long,
+                    CloseResetLandingOrder::CloseThenReset,
+                    seed_byte,
+                )?;
+                let reset_first_economics = (
+                    reset_first.destination_payouts,
+                    reset_first.final_vault,
+                    reset_first.final_capital_total,
+                    reset_first.final_insurance,
+                );
+                let close_first_economics = (
+                    close_first.destination_payouts,
+                    close_first.final_vault,
+                    close_first.final_capital_total,
+                    close_first.final_insurance,
+                );
+                if close_first_economics != reset_first_economics {
+                    return Err(format!(
+                        "INV-071/074/082 close/reset landing order changed terminal economics for {route:?}/{close_winner_side:?}/reset_long={reset_reducer_long}: reset-first={reset_first_economics:?}, close-first={close_first_economics:?}"
+                    ));
+                }
+
+                for world in [reset_first, close_first] {
+                    let evidence = world.evidence;
+                    if let Some(total) = aggregate.as_mut() {
+                        total.world_count += evidence.world_count;
+                        for (sum, count) in total.route_worlds.iter_mut().zip(evidence.route_worlds)
+                        {
+                            *sum += count;
+                        }
+                        for (sum, count) in total
+                            .close_orientation_worlds
+                            .iter_mut()
+                            .zip(evidence.close_orientation_worlds)
+                        {
+                            *sum += count;
+                        }
+                        for (sum, count) in total
+                            .reset_orientation_worlds
+                            .iter_mut()
+                            .zip(evidence.reset_orientation_worlds)
+                        {
+                            *sum += count;
+                        }
+                        for (sum, count) in total
+                            .landing_order_worlds
+                            .iter_mut()
+                            .zip(evidence.landing_order_worlds)
+                        {
+                            *sum += count;
+                        }
+                        total.simultaneous_class_worlds += evidence.simultaneous_class_worlds;
+                        total.close_priority_worlds += evidence.close_priority_worlds;
+                        total.reset_completion_worlds += evidence.reset_completion_worlds;
+                        total.owner_exit_worlds += evidence.owner_exit_worlds;
+                        total.total_owner_payout = total
+                            .total_owner_payout
+                            .checked_add(evidence.total_owner_payout)
+                            .ok_or("aggregate close-reset payout overflow")?;
+                        total.coverage.merge(evidence.coverage);
+                    } else {
+                        aggregate = Some(evidence);
+                    }
+                }
+            }
+        }
+    }
+    aggregate.ok_or_else(|| "INV-071/074/082 close-reset matrix produced no worlds".into())
 }
 
 fn cure_primary_close_with_bounded_deposit(
