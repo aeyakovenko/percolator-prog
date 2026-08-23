@@ -55,6 +55,12 @@
 //! maximum-dt horizon, and fully fee-backed. A second same-slot reduction cannot move the mark
 //! again, and both owners subsequently close every position. This proves that a permissionless
 //! clock-only crank cannot erase trade-discovery capacity by landing first in each slot.
+//! `v16_program_pending_trade_mark_replacement_preserves_funding_fee_and_exit` leaves the first
+//! paid mark target partially pending, lands a second paid reduction one slot later, and then
+//! completes canonical catch-up. Across both trade-driven modes, all four routes, and both price
+//! directions, the first funding boundary remains immutable, each move is independently funded,
+//! catch-up activates both marks in order, route economics are identical, and both owners convert
+//! and withdraw all remaining value.
 //! These tests exercise the deployed public wrapper with real SBF/LiteSVM account construction and
 //! assert economic state, token, rollback, liveness, or compute outcomes appropriate to the
 //! invariant.
@@ -185,6 +191,37 @@ fn accepted_mark_reference_move_bps(old: u64, new: u64) -> u64 {
         .and_then(|value| value.checked_add(old as u128 - 1))
         .expect("accepted-mark reference movement");
     u64::try_from(numerator / old as u128).expect("accepted-mark movement fits u64")
+}
+
+fn accepted_mark_required_externality_fee(
+    oi_eff_long_q: u128,
+    oi_eff_short_q: u128,
+    effective_price: u64,
+    old_mark: u64,
+    trade_size_q_abs: u128,
+    accepted_price: u64,
+    new_mark: u64,
+) -> Result<u128, String> {
+    let trade_notional = trade_size_q_abs
+        .checked_mul(accepted_price as u128)
+        .and_then(|value| value.checked_add(POS_SCALE - 1))
+        .ok_or_else(|| "accepted-mark trade notional overflow".to_string())?
+        / POS_SCALE;
+    let externality_price = effective_price.max(old_mark);
+    let max_side_notional = oi_eff_long_q
+        .max(oi_eff_short_q)
+        .checked_mul(externality_price as u128)
+        .and_then(|value| value.checked_add(POS_SCALE - 1))
+        .ok_or_else(|| "accepted-mark side notional overflow".to_string())?
+        / POS_SCALE;
+    let move_bps = accepted_mark_reference_move_bps(old_mark, new_mark);
+    max_side_notional
+        .max(trade_notional)
+        .checked_mul(2)
+        .and_then(|value| value.checked_mul(move_bps as u128))
+        .and_then(|value| value.checked_add(9_999))
+        .map(|value| value / 10_000)
+        .ok_or_else(|| "accepted-mark externality fee overflow".to_string())
 }
 
 fn accepted_mark_pair_value_and_insurance(env: &V16Svm) -> i128 {
@@ -1241,6 +1278,348 @@ fn v16_program_low_price_ewma_discovery_is_not_pinned_by_clock_first_cranks() {
         }
     }
     assert_eq!(world_count, 32);
+    assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingTargetReplacementOutcome {
+    owner_payouts: [u64; 2],
+    insurance: u128,
+    vault: u128,
+    vault_tokens: u64,
+    token_supply: u128,
+    final_mark: u64,
+    max_cu: u64,
+}
+
+fn run_pending_target_replacement(
+    mode: AcceptedMarkMode,
+    route: DiscoveryTradeRoute,
+    rises: bool,
+) -> Result<PendingTargetReplacementOutcome, String> {
+    const ANCHOR: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_DT: u64 = 8;
+    const FIRST_DT: u64 = 3;
+    const TOTAL_Q: i128 = 6 * POS_SCALE as i128;
+    const CHUNK_Q: i128 = POS_SCALE as i128;
+
+    let target = if rises { 1_400_000 } else { 600_000 };
+    let reduce_q = if rises { CHUNK_Q } else { -CHUNK_Q };
+    let open_q = if rises { -TOTAL_Q } else { TOTAL_Q };
+    let context = format!("{mode:?}/{route:?}/rises={rises}/pending-replacement");
+    let mut seed = [0x7a; 32];
+    seed[0] ^= mode as u8;
+    seed[1] ^= route as u8;
+    seed[2] ^= u8::from(rises);
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: ANCHOR,
+            max_trading_fee_bps: 1_000,
+            max_price_move_bps_per_slot: CAP_BPS,
+            max_abs_funding_e9_per_slot: 1_000,
+            max_accrual_dt_slots: MAX_DT,
+            min_funding_lifetime_slots: MAX_DT,
+            ..MarketConfig::default()
+        },
+    );
+    let oracle = configure_accepted_mark_mode(&mut env, mode, ANCHOR)
+        .map_err(|error| format!("{context}: configure mode: {error}"))?;
+    if accepted_mark_route_is_cpi(route) {
+        env.set_matcher_spreads(1, 0, 0)
+            .map_err(|error| format!("{context}: configure setup matcher: {error}"))?;
+    }
+    let setup = submit_accepted_mark_trade(&mut env, route, open_q, ANCHOR)
+        .map_err(|error| format!("{context}: open matched position: {error}"))?;
+    let mut max_cu = setup.compute_units;
+    let baseline_supply = env.token_supply_observed();
+    let baseline_foreign = env.market_data(true);
+    let baseline_pair_value = accepted_mark_pair_value_and_insurance(&env);
+
+    let first_slot = prepare_accepted_mark_landing_dt(&mut env, mode, FIRST_DT, oracle)
+        .map_err(|error| format!("{context}: prepare first landing: {error}"))?;
+    configure_accepted_mark_target_quote(&mut env, route, ANCHOR, target)
+        .map_err(|error| format!("{context}: configure first quote: {error}"))?;
+    let first_before_profile = env.primary_profile(0);
+    let first_before_group = env.primary_market_state().1;
+    let first_mark_dt = first_slot
+        .checked_sub(first_before_profile.mark_ewma_last_slot)
+        .ok_or_else(|| format!("{context}: first mark slot regressed"))?
+        .min(MAX_DT);
+    let first_accepted = accepted_mark_reference_clamp(
+        first_before_profile.mark_ewma_e6,
+        target,
+        CAP_BPS,
+        first_mark_dt,
+    );
+    let first = submit_accepted_mark_trade(&mut env, route, reduce_q, target)
+        .map_err(|error| format!("{context}: first reduction: {error}"))?;
+    max_cu = max_cu.max(first.compute_units);
+    let first_profile = env.primary_profile(0);
+    let first_group = env.primary_market_state().1;
+    let first_required_fee = accepted_mark_required_externality_fee(
+        first_before_group.assets[0].oi_eff_long_q,
+        first_before_group.assets[0].oi_eff_short_q,
+        first_before_group.assets[0].effective_price,
+        first_before_profile.mark_ewma_e6,
+        CHUNK_Q as u128,
+        first_accepted,
+        first_profile.mark_ewma_e6,
+    )?;
+    let first_insurance_gain = first_group
+        .insurance
+        .checked_sub(first_before_group.insurance)
+        .ok_or_else(|| format!("{context}: first movement reduced insurance"))?;
+    let first_directional = if rises {
+        first_profile.mark_ewma_e6 > ANCHOR
+    } else {
+        first_profile.mark_ewma_e6 < ANCHOR
+    };
+    if !first_directional
+        || first_profile.mark_ewma_last_slot != first_slot
+        || first_profile.funding_mark_e6 != ANCHOR
+        || first_profile.funding_mark_pending_e6 != first_profile.mark_ewma_e6
+        || first_profile.funding_mark_pending_slot != first_slot
+        || first_group.assets[0].effective_price != ANCHOR
+        || first_group.assets[0].raw_oracle_target_price != first_profile.mark_ewma_e6
+        || first_insurance_gain < first_required_fee
+    {
+        return Err(format!(
+            "{context}: first pending target mismatch: accepted={first_accepted}, required_fee={first_required_fee}, insurance_gain={first_insurance_gain}, profile={first_profile:?}, asset={:?}",
+            first_group.assets[0]
+        ));
+    }
+
+    let second_slot = first_slot
+        .checked_add(1)
+        .ok_or_else(|| format!("{context}: second landing overflow"))?;
+    match mode {
+        AcceptedMarkMode::EwmaMark => env.warp_to_slot(second_slot),
+        AcceptedMarkMode::HybridAfterHours => env.set_clock(
+            second_slot,
+            i64::try_from(1_000u64 + second_slot)
+                .map_err(|_| format!("{context}: second timestamp overflow"))?,
+        ),
+        AcceptedMarkMode::AuthMark | AcceptedMarkMode::HybridFresh => {
+            return Err(format!("{context}: mode is not trade-driven"));
+        }
+    }
+    configure_accepted_mark_target_quote(&mut env, route, ANCHOR, target)
+        .map_err(|error| format!("{context}: configure second quote: {error}"))?;
+    let second_before_profile = env.primary_profile(0);
+    let second_before_group = env.primary_market_state().1;
+    let second_mark_dt = second_slot
+        .checked_sub(second_before_profile.mark_ewma_last_slot)
+        .ok_or_else(|| format!("{context}: second mark slot regressed"))?
+        .min(MAX_DT);
+    let second_accepted = accepted_mark_reference_clamp(
+        second_before_profile.mark_ewma_e6,
+        target,
+        CAP_BPS,
+        second_mark_dt,
+    );
+    let second = submit_accepted_mark_trade(&mut env, route, reduce_q, target)
+        .map_err(|error| format!("{context}: second reduction over pending target: {error}"))?;
+    max_cu = max_cu.max(second.compute_units);
+    let second_profile = env.primary_profile(0);
+    let second_group = env.primary_market_state().1;
+    let second_required_fee = accepted_mark_required_externality_fee(
+        second_before_group.assets[0].oi_eff_long_q,
+        second_before_group.assets[0].oi_eff_short_q,
+        second_before_group.assets[0].effective_price,
+        second_before_profile.mark_ewma_e6,
+        CHUNK_Q as u128,
+        second_accepted,
+        second_profile.mark_ewma_e6,
+    )?;
+    let second_insurance_gain = second_group
+        .insurance
+        .checked_sub(second_before_group.insurance)
+        .ok_or_else(|| format!("{context}: second movement reduced insurance"))?;
+    let second_directional = if rises {
+        second_profile.mark_ewma_e6 > first_profile.mark_ewma_e6
+    } else {
+        second_profile.mark_ewma_e6 < first_profile.mark_ewma_e6
+    };
+    if !second_directional
+        || second_profile.mark_ewma_last_slot != second_slot
+        || second_profile.funding_mark_e6 != ANCHOR
+        || second_profile.funding_mark_pending_e6 != first_profile.mark_ewma_e6
+        || second_profile.funding_mark_pending_slot != first_slot
+        || second_group.assets[0].effective_price != ANCHOR
+        || second_group.assets[0].raw_oracle_target_price != second_profile.mark_ewma_e6
+        || second_group.assets[0].oi_eff_long_q != 4 * POS_SCALE
+        || second_group.assets[0].oi_eff_short_q != 4 * POS_SCALE
+        || second_insurance_gain < second_required_fee
+        || accepted_mark_pair_value_and_insurance(&env) != baseline_pair_value
+        || env.token_supply_observed() != baseline_supply
+        || env.market_data(true) != baseline_foreign
+    {
+        return Err(format!(
+            "{context}: replacement target mismatch: accepted={second_accepted}, required_fee={second_required_fee}, insurance_gain={second_insurance_gain}, first_profile={first_profile:?}, second_profile={second_profile:?}, asset={:?}",
+            second_group.assets[0]
+        ));
+    }
+    crate::support::fuzz_model::assert_public_stock_census(
+        &format!("{context}/pending-replacement"),
+        &env,
+    )?;
+    crate::support::fuzz_model::assert_public_encumbrance_census(
+        &format!("{context}/pending-replacement"),
+        &env,
+    )?;
+
+    let catch_up = crank_accepted_mark_target(
+        &mut env,
+        mode,
+        MAX_DT,
+        oracle,
+        &format!("{context}/catch-up"),
+    )?;
+    max_cu = max_cu.max(catch_up.compute_units);
+    let caught_profile = env.primary_profile(0);
+    let caught_group = env.primary_market_state().1;
+    if caught_profile.funding_mark_e6 != second_profile.mark_ewma_e6
+        || caught_profile.funding_mark_pending_e6 != 0
+        || caught_profile.funding_mark_pending_slot != 0
+        || caught_group.assets[0].effective_price != second_profile.mark_ewma_e6
+        || caught_group.assets[0].raw_oracle_target_price != second_profile.mark_ewma_e6
+    {
+        return Err(format!(
+            "{context}: catch-up did not activate checkpoints in order: before={second_profile:?}, after={caught_profile:?}, asset={:?}",
+            caught_group.assets[0]
+        ));
+    }
+
+    configure_accepted_mark_target_quote(
+        &mut env,
+        route,
+        caught_profile.mark_ewma_e6,
+        caught_profile.mark_ewma_e6,
+    )
+    .map_err(|error| format!("{context}: configure flat exit quote: {error}"))?;
+    let close = submit_accepted_mark_trade(
+        &mut env,
+        route,
+        reduce_q
+            .checked_mul(4)
+            .ok_or_else(|| format!("{context}: close quantity overflow"))?,
+        caught_profile.mark_ewma_e6,
+    )
+    .map_err(|error| format!("{context}: close remaining position: {error}"))?;
+    max_cu = max_cu.max(close.compute_units);
+    let closed_profile = env.primary_profile(0);
+    let closed_group = env.primary_market_state().1;
+    if closed_profile.mark_ewma_e6 != caught_profile.mark_ewma_e6
+        || closed_profile.mark_ewma_last_slot != caught_profile.mark_ewma_last_slot
+        || closed_group.assets[0].oi_eff_long_q != 0
+        || closed_group.assets[0].oi_eff_short_q != 0
+        || accepted_mark_pair_value_and_insurance(&env) != baseline_pair_value
+        || env.token_supply_observed() != baseline_supply
+        || env.market_data(true) != baseline_foreign
+    {
+        return Err(format!(
+            "{context}: flat exit changed mark economics or left exposure: profile={closed_profile:?}, group={closed_group:?}"
+        ));
+    }
+
+    for actor in [0usize, 1] {
+        let released = env.primary_portfolio(actor).pnl.get().max(0) as u128;
+        if released != 0 {
+            let conversion = env
+                .convert_released_pnl(actor, released)
+                .map_err(|error| format!("{context}/actor={actor}: convert PnL: {error}"))?;
+            max_cu = max_cu.max(conversion.compute_units);
+        }
+    }
+    let destination_before =
+        [0usize, 1].map(|actor| env.token_amount(env.actors[actor].destination_token));
+    for actor in [0usize, 1] {
+        let portfolio = env.primary_portfolio(actor);
+        if portfolio.pnl.get() != 0 || portfolio.capital.get() == 0 {
+            return Err(format!(
+                "{context}/actor={actor}: nonterminal portfolio before withdrawal: {portfolio:?}"
+            ));
+        }
+        let withdrawal = env
+            .withdraw_primary(actor, portfolio.capital.get())
+            .map_err(|error| format!("{context}/actor={actor}: withdraw capital: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+    }
+    let owner_payouts = [0usize, 1].map(|actor| {
+        env.token_amount(env.actors[actor].destination_token) - destination_before[actor]
+    });
+    let final_group = env.primary_market_state().1;
+    for actor in [0usize, 1] {
+        let portfolio = env.primary_portfolio(actor);
+        if portfolio.capital.get() != 0 || portfolio.pnl.get() != 0 {
+            return Err(format!(
+                "{context}/actor={actor}: value remained after withdrawal: {portfolio:?}"
+            ));
+        }
+    }
+    crate::support::fuzz_model::assert_public_stock_census(&format!("{context}/withdrawn"), &env)?;
+    crate::support::fuzz_model::assert_public_encumbrance_census(
+        &format!("{context}/withdrawn"),
+        &env,
+    )?;
+    if env.token_supply_observed() != baseline_supply
+        || env.market_data(true) != baseline_foreign
+        || max_cu >= crate::support::v16_svm::TX_CU_LIMIT
+    {
+        return Err(format!(
+            "{context}: terminal frame mismatch: CU={max_cu}, supply={}, foreign_equal={}",
+            env.token_supply_observed(),
+            env.market_data(true) == baseline_foreign
+        ));
+    }
+    Ok(PendingTargetReplacementOutcome {
+        owner_payouts,
+        insurance: final_group.insurance,
+        vault: final_group.vault,
+        vault_tokens: env.token_amount(env.vault),
+        token_supply: env.token_supply_observed(),
+        final_mark: closed_profile.mark_ewma_e6,
+        max_cu,
+    })
+}
+
+#[test]
+fn v16_program_pending_trade_mark_replacement_preserves_funding_fee_and_exit() {
+    let mut world_count = 0usize;
+    let mut max_cu = 0u64;
+    for mode in [
+        AcceptedMarkMode::EwmaMark,
+        AcceptedMarkMode::HybridAfterHours,
+    ] {
+        for rises in [false, true] {
+            let baseline = run_pending_target_replacement(mode, DiscoveryTradeRoute::NoCpi, rises)
+                .unwrap_or_else(|error| panic!("{mode:?}/NoCpi/rises={rises}: {error}"));
+            max_cu = max_cu.max(baseline.max_cu);
+            world_count += 1;
+            for route in [
+                DiscoveryTradeRoute::BatchNoCpi,
+                DiscoveryTradeRoute::Cpi,
+                DiscoveryTradeRoute::BatchCpi,
+            ] {
+                let outcome = run_pending_target_replacement(mode, route, rises)
+                    .unwrap_or_else(|error| panic!("{mode:?}/{route:?}/rises={rises}: {error}"));
+                assert_eq!(
+                    outcome.owner_payouts, baseline.owner_payouts,
+                    "{mode:?}/{route:?}/rises={rises}: route changed owner payouts"
+                );
+                assert_eq!(outcome.insurance, baseline.insurance);
+                assert_eq!(outcome.vault, baseline.vault);
+                assert_eq!(outcome.vault_tokens, baseline.vault_tokens);
+                assert_eq!(outcome.token_supply, baseline.token_supply);
+                assert_eq!(outcome.final_mark, baseline.final_mark);
+                max_cu = max_cu.max(outcome.max_cu);
+                world_count += 1;
+            }
+        }
+    }
+    assert_eq!(world_count, 16);
     assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
 }
 
