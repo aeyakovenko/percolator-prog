@@ -40,6 +40,13 @@
 //! on asset 1 for either account role and either requested side. Every rejection frames the whole
 //! economic snapshot, and the original close still drains permissionlessly before all owners exit.
 //!
+//! An eighth matrix covers the inverse ordering. A one-atom asset-1 leg keeps the losing portfolio
+//! nonflat while the asset-0 bankruptcy reduction lands, so terminal close creation is deferred.
+//! Flattening that last leg must preserve the exact direct-close terminal economics across every
+//! route, close orientation, prior account role, and side, whether normalization needs an explicit
+//! close ledger or not. CPI worlds also prove that a taker-side mutation revokes stale LP authority
+//! and that fresh owner consent restores the route without changing economics.
+//!
 //! Guarantee boundary: these are the same-asset risk-reduction and two-asset/two-account close
 //! cells. Risk increase while a domain loss barrier is active is intentionally outside the
 //! guarantee; broader side/domain/lifecycle combinations remain open.
@@ -48,7 +55,8 @@ use super::inv_052_split_merge_invariance::run_resolved_claim_partition;
 use crate::support::fuzz_model::{
     assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
     run_active_close_cross_asset_admission_probe, run_active_close_shutdown_liveness_probe,
-    run_concurrent_close_locality_probe, run_same_asset_close_locality_probe, TradeRoute,
+    run_concurrent_close_locality_probe, run_deferred_close_cross_asset_probe,
+    run_same_asset_close_locality_probe, TradeRoute,
 };
 use crate::support::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, TX_CU_LIMIT};
 use percolator::{AssetLifecycleV16, SideModeV16, POS_SCALE};
@@ -652,6 +660,27 @@ fn v16_program_active_close_rejects_cross_asset_risk_without_blocking_exit() {
     assert_eq!(evidence.exact_rejections, 32, "{evidence:?}");
     assert_eq!(evidence.close_progress_worlds, 32, "{evidence:?}");
     assert_eq!(evidence.owner_exit_worlds, 32, "{evidence:?}");
+    assert_ne!(evidence.total_owner_payout, 0, "{evidence:?}");
+    assert_ne!(evidence.coverage.crank_progress, 0, "{evidence:?}");
+    assert_ne!(evidence.coverage.withdrawals, 0, "{evidence:?}");
+}
+
+#[test]
+fn v16_program_cross_asset_leg_cannot_erase_deferred_terminal_liability() {
+    let evidence = run_deferred_close_cross_asset_probe()
+        .expect("INV-057/074 deferred cross-asset close probe");
+
+    assert_eq!(evidence.control_worlds, 8, "{evidence:?}");
+    assert_eq!(evidence.deferred_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.route_worlds, [10; 4], "{evidence:?}");
+    assert_eq!(evidence.close_orientation_worlds, [20; 2], "{evidence:?}");
+    assert_eq!(evidence.prior_role_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.prior_side_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.initial_close_deferrals, 32, "{evidence:?}");
+    assert_eq!(evidence.fresh_matcher_reauthorizations, 8, "{evidence:?}");
+    assert_eq!(evidence.terminal_equivalence_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.close_progress_worlds, 8, "{evidence:?}");
+    assert_eq!(evidence.owner_exit_worlds, 40, "{evidence:?}");
     assert_ne!(evidence.total_owner_payout, 0, "{evidence:?}");
     assert_ne!(evidence.coverage.crank_progress, 0, "{evidence:?}");
     assert_ne!(evidence.coverage.withdrawals, 0, "{evidence:?}");

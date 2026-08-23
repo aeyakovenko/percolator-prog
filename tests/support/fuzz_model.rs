@@ -6428,6 +6428,12 @@ impl ScenarioRunner {
         let (_, group) = self.env.primary_market_state();
         let taker_account = self.env.primary_portfolio(taker);
         let maker_account = self.env.primary_portfolio(maker);
+        let taker_matcher =
+            state::read_portfolio_matcher_config(&self.env.primary_portfolio_data(taker))
+                .map_err(|error| format!("taker matcher config: {error:?}"))?;
+        let maker_matcher =
+            state::read_portfolio_matcher_config(&self.env.primary_portfolio_data(maker))
+                .map_err(|error| format!("maker matcher config: {error:?}"))?;
         let assets: Vec<_> = legs
             .iter()
             .map(|(asset, _)| {
@@ -6447,8 +6453,9 @@ impl ScenarioRunner {
             "market={{mode:{:?}, recovery:{:?}, slot:{}, current:{}, oracle_epoch:{}, \
              funding_epoch:{}, risk_epoch:{}, locks:[{},{},{}]}} assets={assets:?} \
              taker={{rank:{:?}, stale:{}, b_stale:{}, rebalance_lock:{}, liquidation_lock:{}, \
-             cert:{:?}}} maker={{rank:{:?}, stale:{}, b_stale:{}, rebalance_lock:{}, \
-             liquidation_lock:{}, cert:{:?}}}",
+             cert:{:?}, matcher:[enabled={},epoch={}]}} maker={{rank:{:?}, stale:{}, \
+             b_stale:{}, rebalance_lock:{}, liquidation_lock:{}, cert:{:?}, \
+             matcher:[enabled={},epoch={}]}}",
             group.mode,
             group.recovery_reason,
             group.slot_last,
@@ -6465,12 +6472,16 @@ impl ScenarioRunner {
             taker_account.rebalance_lock,
             taker_account.liquidation_lock,
             taker_account.health_cert.try_to_runtime().ok(),
+            taker_matcher.enabled(),
+            taker_matcher.position_epoch(),
             self.progress_rank(maker)?,
             maker_account.stale_state,
             maker_account.b_stale_state,
             maker_account.rebalance_lock,
             maker_account.liquidation_lock,
             maker_account.health_cert.try_to_runtime().ok(),
+            maker_matcher.enabled(),
+            maker_matcher.position_epoch(),
         ))
     }
 
@@ -7036,6 +7047,23 @@ pub struct ActiveCloseCrossAssetAdmissionEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeferredCloseCrossAssetEvidence {
+    pub control_worlds: u64,
+    pub deferred_worlds: u64,
+    pub route_worlds: [u64; 4],
+    pub close_orientation_worlds: [u64; 2],
+    pub prior_role_worlds: [u64; 2],
+    pub prior_side_worlds: [u64; 2],
+    pub initial_close_deferrals: u64,
+    pub fresh_matcher_reauthorizations: u64,
+    pub terminal_equivalence_worlds: u64,
+    pub close_progress_worlds: u64,
+    pub owner_exit_worlds: u64,
+    pub total_owner_payout: u128,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurePendingObligationDosEvidence {
     pub cure_deposit: u128,
     pub cure_source_debit: u128,
@@ -7155,6 +7183,44 @@ fn create_public_cancellable_close_via_route_and_side(
     route: TradeRoute,
     winner_side: SideV16,
 ) -> Result<(), String> {
+    let close = drive_public_close_candidate_via_route_and_side(
+        runner,
+        winner,
+        loser,
+        asset,
+        cranker,
+        route,
+        winner_side,
+    )?;
+    if !close.active
+        || close.finalized
+        || close.canceled
+        || close.support_consumed != 0
+        || close.junior_face_burned != 0
+        || close.insurance_spent != 0
+        || close.b_loss_booked != 0
+        || close.explicit_loss_assigned != 0
+        || close.quantity_adl_applied_q != 0
+        || close.drift_consumed != 0
+        || close.residual_remaining == 0
+        || close.residual_remaining != close.gross_loss_at_close_start
+    {
+        return Err(format!(
+            "public final reduction did not create a cancellable close for actor {loser}: {close:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn drive_public_close_candidate_via_route_and_side(
+    runner: &mut ScenarioRunner,
+    winner: u8,
+    loser: u8,
+    asset: u8,
+    cranker: u8,
+    route: TradeRoute,
+    winner_side: SideV16,
+) -> Result<CloseProgressLedgerV16, String> {
     let asset_index = asset as usize;
     let winner_index = winner as usize;
     let loser_index = loser as usize;
@@ -7172,15 +7238,18 @@ fn create_public_cancellable_close_via_route_and_side(
         SideV16::Long => 500,
         SideV16::Short => -500,
     };
-    if !runner.execute_trade(
-        route,
-        winner_index,
-        loser_index,
-        vec![(asset_index, open_q)],
-        0,
-        0,
-        true,
-    )? {
+    if !runner
+        .execute_trade(
+            route,
+            winner_index,
+            loser_index,
+            vec![(asset_index, open_q)],
+            0,
+            0,
+            true,
+        )
+        .map_err(|error| format!("INV-076 {route:?} opening trade: {error}"))?
+    {
         return Err(format!(
             "INV-076 {route:?} close-fixture opening trade did not land"
         ));
@@ -7213,20 +7282,22 @@ fn create_public_cancellable_close_via_route_and_side(
     }
     let winner_position = runner.positions[winner_index][asset_index];
     if winner_position == 0
-        || !runner.execute_trade(
-            route,
-            winner_index,
-            loser_index,
-            vec![(
-                asset_index,
-                winner_position
-                    .checked_neg()
-                    .ok_or("INV-076 close-fixture position negation overflow")?,
-            )],
-            0,
-            0,
-            true,
-        )?
+        || !runner
+            .execute_trade(
+                route,
+                winner_index,
+                loser_index,
+                vec![(
+                    asset_index,
+                    winner_position
+                        .checked_neg()
+                        .ok_or("INV-076 close-fixture position negation overflow")?,
+                )],
+                0,
+                0,
+                true,
+            )
+            .map_err(|error| format!("INV-076 {route:?} final reduction: {error}"))?
     {
         return Err(format!(
             "INV-076 {route:?} close-fixture reduction did not land"
@@ -7238,24 +7309,7 @@ fn create_public_cancellable_close_via_route_and_side(
         .close_progress
         .try_to_runtime()
         .map_err(|error| format!("pending close decode: {error:?}"))?;
-    if !close.active
-        || close.finalized
-        || close.canceled
-        || close.support_consumed != 0
-        || close.junior_face_burned != 0
-        || close.insurance_spent != 0
-        || close.b_loss_booked != 0
-        || close.explicit_loss_assigned != 0
-        || close.quantity_adl_applied_q != 0
-        || close.drift_consumed != 0
-        || close.residual_remaining == 0
-        || close.residual_remaining != close.gross_loss_at_close_start
-    {
-        return Err(format!(
-            "public final reduction did not create a cancellable close for actor {loser}: {close:?}"
-        ));
-    }
-    Ok(())
+    Ok(close)
 }
 
 fn run_same_asset_close_locality_world(
@@ -8415,6 +8469,332 @@ pub fn run_active_close_cross_asset_admission_probe(
         }
     }
     aggregate.ok_or_else(|| "INV-055/074 active-close admission matrix produced no worlds".into())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DeferredCloseCrossAssetWorld {
+    destination_payouts: [u128; PRIMARY_ACTOR_COUNT],
+    final_vault: u128,
+    final_capital_total: u128,
+    final_insurance: u128,
+    evidence: DeferredCloseCrossAssetEvidence,
+}
+
+fn run_deferred_close_cross_asset_world(
+    route: TradeRoute,
+    close_winner_side: SideV16,
+    prior_leg: Option<(bool, bool)>,
+    seed_byte: u8,
+) -> Result<DeferredCloseCrossAssetWorld, String> {
+    const CLOSE_WINNER: usize = 0;
+    const CLOSE_LOSER: usize = 1;
+    const PRIOR_COUNTERPARTY: usize = 3;
+    const KEEPER: usize = EXIT_MAKER_INDEX;
+    const CLOSE_ASSET: usize = 0;
+    const PRIOR_ASSET: usize = 1;
+    const PRIOR_Q: i128 = 1;
+
+    let case =
+        format!("INV-057/074 deferred close {route:?}/{close_winner_side:?}/prior={prior_leg:?}");
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
+    let token_supply = runner.env.token_supply_observed();
+    let destinations_before: [u128; PRIMARY_ACTOR_COUNT] = std::array::from_fn(|actor| {
+        u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        )
+    });
+
+    let mut initial_close_deferrals = 0;
+    let mut fresh_matcher_reauthorizations = 0;
+    if let Some((loser_as_taker, loser_long)) = prior_leg {
+        let loser_signed_q = if loser_long { PRIOR_Q } else { -PRIOR_Q };
+        let (taker, maker, route_signed_q) = if loser_as_taker {
+            (CLOSE_LOSER, PRIOR_COUNTERPARTY, loser_signed_q)
+        } else {
+            (PRIOR_COUNTERPARTY, CLOSE_LOSER, -loser_signed_q)
+        };
+        if !runner.execute_trade(
+            route,
+            taker,
+            maker,
+            vec![(PRIOR_ASSET, route_signed_q)],
+            0,
+            0,
+            true,
+        )? {
+            return Err(format!("{case}: prior cross-asset leg did not open"));
+        }
+        if loser_as_taker && matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+            let matcher = state::read_portfolio_matcher_config(
+                &runner.env.primary_portfolio_data(CLOSE_LOSER),
+            )
+            .map_err(|error| format!("{case}: stale matcher config: {error:?}"))?;
+            if matcher.enabled() != 0 {
+                return Err(format!(
+                    "{case}: taker-side position mutation retained stale LP matcher authority"
+                ));
+            }
+            runner.run_safety_prefix(&[Action::SetMatcherConfig {
+                actor: CLOSE_LOSER as u8,
+                enabled: true,
+                trade_fee_cap_bps: 10_000,
+            }])?;
+            fresh_matcher_reauthorizations = 1;
+        }
+        let deferred = drive_public_close_candidate_via_route_and_side(
+            &mut runner,
+            CLOSE_WINNER as u8,
+            CLOSE_LOSER as u8,
+            CLOSE_ASSET as u8,
+            KEEPER as u8,
+            route,
+            close_winner_side,
+        )?;
+        if deferred.active
+            || runner.positions[CLOSE_WINNER][CLOSE_ASSET] != 0
+            || runner.positions[CLOSE_LOSER][CLOSE_ASSET] != 0
+            || runner.positions[CLOSE_LOSER][PRIOR_ASSET] == 0
+        {
+            return Err(format!(
+                "{case}: nonflat account did not defer terminal close as expected: close={deferred:?}, positions={:?}",
+                runner.positions
+            ));
+        }
+        initial_close_deferrals = 1;
+        if !runner.execute_trade(
+            route,
+            taker,
+            maker,
+            vec![(PRIOR_ASSET, -route_signed_q)],
+            0,
+            0,
+            true,
+        )? {
+            return Err(format!("{case}: final unrelated leg did not close"));
+        }
+        let normalized = runner
+            .env
+            .primary_portfolio(CLOSE_LOSER)
+            .close_progress
+            .try_to_runtime()
+            .map_err(|error| format!("{case}: materialized close decode: {error:?}"))?;
+        if normalized.active && normalized.residual_remaining != 0 {
+            return Err(format!(
+                "{case}: flattening the unrelated leg unexpectedly retained close work: {normalized:?}"
+            ));
+        }
+    } else {
+        create_public_cancellable_close_via_route_and_side(
+            &mut runner,
+            CLOSE_WINNER as u8,
+            CLOSE_LOSER as u8,
+            CLOSE_ASSET as u8,
+            KEEPER as u8,
+            route,
+            close_winner_side,
+        )?;
+    }
+
+    let close_before_progress = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("{case}: pre-progress close decode: {error:?}"))?;
+    let had_close_work =
+        close_before_progress.active && close_before_progress.residual_remaining != 0;
+    runner
+        .run_permissionless_account_progress_campaign()
+        .map_err(|error| format!("{case}: terminal account work did not drain: {error}"))?;
+    let close_after_progress = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("{case}: post-progress close decode: {error:?}"))?;
+    if had_close_work && close_after_progress.active && close_after_progress.residual_remaining != 0
+    {
+        return Err(format!(
+            "{case}: bounded progress retained close work: {close_after_progress:?}"
+        ));
+    }
+    runner
+        .run_direct_user_exit_campaign()
+        .map_err(|error| format!("{case}: funded owner exit: {error}"))?;
+    runner.assert_global_invariants()?;
+    if runner
+        .positions
+        .iter()
+        .flatten()
+        .any(|position| *position != 0)
+        || (0..PRIMARY_ACTOR_COUNT)
+            .any(|actor| runner.env.primary_portfolio(actor).capital.get() != 0)
+        || runner.env.token_supply_observed() != token_supply
+        || runner.coverage.max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "{case}: terminal world retained risk/capital, changed supply, or exceeded CU"
+        ));
+    }
+    assert_public_stock_census("INV-057/074 deferred-close terminal", &runner.env)?;
+    assert_public_encumbrance_census("INV-057/074 deferred-close terminal", &runner.env)?;
+
+    let destination_payouts = std::array::from_fn(|actor| {
+        u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        ) - destinations_before[actor]
+    });
+    let total_owner_payout = destination_payouts
+        .iter()
+        .try_fold(0u128, |total, payout| {
+            total
+                .checked_add(*payout)
+                .ok_or("deferred-close payout overflow")
+        })?;
+    let (_, group) = runner.env.primary_market_state();
+    let mut route_worlds = [0; 4];
+    route_worlds[route.index()] = 1;
+    let mut close_orientation_worlds = [0; 2];
+    close_orientation_worlds[usize::from(close_winner_side == SideV16::Long)] = 1;
+    let mut prior_role_worlds = [0; 2];
+    let mut prior_side_worlds = [0; 2];
+    if let Some((loser_as_taker, loser_long)) = prior_leg {
+        prior_role_worlds[usize::from(loser_as_taker)] = 1;
+        prior_side_worlds[usize::from(loser_long)] = 1;
+    }
+
+    Ok(DeferredCloseCrossAssetWorld {
+        destination_payouts,
+        final_vault: group.vault,
+        final_capital_total: group.c_tot,
+        final_insurance: group.insurance,
+        evidence: DeferredCloseCrossAssetEvidence {
+            control_worlds: u64::from(prior_leg.is_none()),
+            deferred_worlds: u64::from(prior_leg.is_some()),
+            route_worlds,
+            close_orientation_worlds,
+            prior_role_worlds,
+            prior_side_worlds,
+            initial_close_deferrals,
+            fresh_matcher_reauthorizations,
+            terminal_equivalence_worlds: u64::from(prior_leg.is_some()),
+            close_progress_worlds: u64::from(had_close_work),
+            owner_exit_worlds: 1,
+            total_owner_payout,
+            coverage: runner.coverage,
+        },
+    })
+}
+
+pub fn run_deferred_close_cross_asset_probe() -> Result<DeferredCloseCrossAssetEvidence, String> {
+    let mut aggregate: Option<DeferredCloseCrossAssetEvidence> = None;
+    for (route_index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (close_side_index, close_winner_side) in
+            [SideV16::Short, SideV16::Long].into_iter().enumerate()
+        {
+            let seed_byte = 0xb0 ^ route_index as u8 ^ ((close_side_index as u8) << 2);
+            let control =
+                run_deferred_close_cross_asset_world(route, close_winner_side, None, seed_byte)?;
+            let expected_economics = (
+                control.destination_payouts,
+                control.final_vault,
+                control.final_capital_total,
+                control.final_insurance,
+            );
+            let mut worlds = vec![control];
+            for loser_as_taker in [false, true] {
+                for loser_long in [false, true] {
+                    let world = run_deferred_close_cross_asset_world(
+                        route,
+                        close_winner_side,
+                        Some((loser_as_taker, loser_long)),
+                        seed_byte,
+                    )?;
+                    let economics = (
+                        world.destination_payouts,
+                        world.final_vault,
+                        world.final_capital_total,
+                        world.final_insurance,
+                    );
+                    if economics != expected_economics {
+                        return Err(format!(
+                            "INV-057/074 prior-leg close deferral changed terminal economics for {route:?}/{close_winner_side:?}/role={loser_as_taker}/side={loser_long}: control={expected_economics:?}, deferred={economics:?}"
+                        ));
+                    }
+                    worlds.push(world);
+                }
+            }
+
+            for world in worlds {
+                let evidence = world.evidence;
+                if let Some(total) = aggregate.as_mut() {
+                    total.control_worlds += evidence.control_worlds;
+                    total.deferred_worlds += evidence.deferred_worlds;
+                    for (sum, count) in total.route_worlds.iter_mut().zip(evidence.route_worlds) {
+                        *sum += count;
+                    }
+                    for (sum, count) in total
+                        .close_orientation_worlds
+                        .iter_mut()
+                        .zip(evidence.close_orientation_worlds)
+                    {
+                        *sum += count;
+                    }
+                    for (sum, count) in total
+                        .prior_role_worlds
+                        .iter_mut()
+                        .zip(evidence.prior_role_worlds)
+                    {
+                        *sum += count;
+                    }
+                    for (sum, count) in total
+                        .prior_side_worlds
+                        .iter_mut()
+                        .zip(evidence.prior_side_worlds)
+                    {
+                        *sum += count;
+                    }
+                    total.initial_close_deferrals += evidence.initial_close_deferrals;
+                    total.fresh_matcher_reauthorizations += evidence.fresh_matcher_reauthorizations;
+                    total.terminal_equivalence_worlds += evidence.terminal_equivalence_worlds;
+                    total.close_progress_worlds += evidence.close_progress_worlds;
+                    total.owner_exit_worlds += evidence.owner_exit_worlds;
+                    total.total_owner_payout = total
+                        .total_owner_payout
+                        .checked_add(evidence.total_owner_payout)
+                        .ok_or("aggregate deferred-close payout overflow")?;
+                    total.coverage.merge(evidence.coverage);
+                } else {
+                    aggregate = Some(evidence);
+                }
+            }
+        }
+    }
+    aggregate.ok_or_else(|| "INV-057/074 deferred-close matrix produced no worlds".into())
 }
 
 fn cure_primary_close_with_bounded_deposit(
