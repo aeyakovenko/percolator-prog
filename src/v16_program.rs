@@ -4797,6 +4797,81 @@ pub mod oracle_v16 {
         Ok(price as u64)
     }
 
+    pub fn oracle_publish_times_are_coherent(publish_times: &[i64]) -> bool {
+        let Some((first, rest)) = publish_times.split_first() else {
+            return false;
+        };
+        rest.iter().all(|publish_time| publish_time == first)
+    }
+
+    fn read_coherent_oracle_legs(
+        oracle_accounts: &[AccountInfo],
+        expected_feeds: &[[u8; 32]; ORACLE_LEG_CAP],
+        count: usize,
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+        conf_filter_bps: u16,
+    ) -> Result<([u64; ORACLE_LEG_CAP], [i64; ORACLE_LEG_CAP], i64), ProgramError> {
+        let mut prices = [0u64; ORACLE_LEG_CAP];
+        let mut publish_times = [0i64; ORACLE_LEG_CAP];
+        let mut i = 0usize;
+        while i < count {
+            let (price, publish_time) = read_oracle_price_e6(
+                &oracle_accounts[i],
+                &expected_feeds[i],
+                now_unix_ts,
+                max_staleness_secs,
+                conf_filter_bps,
+            )?;
+            prices[i] = price;
+            publish_times[i] = publish_time;
+            i += 1;
+        }
+
+        if !oracle_publish_times_are_coherent(&publish_times[..count]) {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        let common_publish_time = publish_times[0];
+        Ok((prices, publish_times, common_publish_time))
+    }
+
+    fn commit_observed_oracle_legs(
+        stored_prices: &mut [u64; ORACLE_LEG_CAP],
+        stored_publish_times: &mut [i64; ORACLE_LEG_CAP],
+        observed_prices: &[u64; ORACLE_LEG_CAP],
+        observed_publish_times: &[i64; ORACLE_LEG_CAP],
+        count: usize,
+    ) -> Result<bool, ProgramError> {
+        let mut i = 0usize;
+        while i < count {
+            let previous_time = stored_publish_times[i];
+            let previous_price = stored_prices[i];
+            let publish_time = observed_publish_times[i];
+            let price = observed_prices[i];
+            if previous_time != 0 {
+                if publish_time < previous_time {
+                    return Err(PercolatorError::OracleStale.into());
+                }
+                if publish_time == previous_time && previous_price != 0 && price != previous_price {
+                    return Err(PercolatorError::OracleInvalid.into());
+                }
+            }
+            i += 1;
+        }
+
+        let mut advanced = false;
+        i = 0;
+        while i < count {
+            if observed_publish_times[i] > stored_publish_times[i] {
+                stored_publish_times[i] = observed_publish_times[i];
+                stored_prices[i] = observed_prices[i];
+                advanced = true;
+            }
+            i += 1;
+        }
+        Ok(advanced)
+    }
+
     pub fn read_external_price_e6(
         config: &mut WrapperConfigV16,
         oracle_accounts: &[AccountInfo],
@@ -4816,47 +4891,28 @@ pub mod oracle_v16 {
         ) {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
-        let mut prices = [0u64; ORACLE_LEG_CAP];
-        let mut advanced = false;
-        let mut max_publish_time = i64::MIN;
-        let mut i = 0usize;
-        while i < count {
-            let (price, publish_time) = read_oracle_price_e6(
-                &oracle_accounts[i],
-                &config.oracle_leg_feeds[i],
-                now_unix_ts,
-                config.max_staleness_secs,
-                config.conf_filter_bps,
-            )?;
-            let prev_time = config.oracle_leg_publish_times[i];
-            let prev_price = config.oracle_leg_prices_e6[i];
-            if prev_time != 0 {
-                if publish_time < prev_time {
-                    return Err(PercolatorError::OracleStale.into());
-                }
-                if publish_time == prev_time && prev_price != 0 && price != prev_price {
-                    return Err(PercolatorError::OracleInvalid.into());
-                }
-            }
-            if publish_time > prev_time {
-                config.oracle_leg_publish_times[i] = publish_time;
-                config.oracle_leg_prices_e6[i] = price;
-                advanced = true;
-            }
-            max_publish_time = core::cmp::max(max_publish_time, publish_time);
-            prices[i] = price;
-            i += 1;
-        }
-        Ok((
-            compose_price_e6(
-                &prices[..count],
-                config.oracle_leg_flags,
-                config.invert,
-                config.unit_scale,
-            )?,
-            max_publish_time,
-            advanced,
-        ))
+        let (prices, publish_times, common_publish_time) = read_coherent_oracle_legs(
+            oracle_accounts,
+            &config.oracle_leg_feeds,
+            count,
+            now_unix_ts,
+            config.max_staleness_secs,
+            config.conf_filter_bps,
+        )?;
+        let composed_price = compose_price_e6(
+            &prices[..count],
+            config.oracle_leg_flags,
+            config.invert,
+            config.unit_scale,
+        )?;
+        let advanced = commit_observed_oracle_legs(
+            &mut config.oracle_leg_prices_e6,
+            &mut config.oracle_leg_publish_times,
+            &prices,
+            &publish_times,
+            count,
+        )?;
+        Ok((composed_price, common_publish_time, advanced))
     }
 
     pub fn read_external_price_e6_profile(
@@ -4878,47 +4934,28 @@ pub mod oracle_v16 {
         ) {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
-        let mut prices = [0u64; ORACLE_LEG_CAP];
-        let mut advanced = false;
-        let mut max_publish_time = i64::MIN;
-        let mut i = 0usize;
-        while i < count {
-            let (price, publish_time) = read_oracle_price_e6(
-                &oracle_accounts[i],
-                &profile.oracle_leg_feeds[i],
-                now_unix_ts,
-                profile.max_staleness_secs,
-                profile.conf_filter_bps,
-            )?;
-            let prev_time = profile.oracle_leg_publish_times[i];
-            let prev_price = profile.oracle_leg_prices_e6[i];
-            if prev_time != 0 {
-                if publish_time < prev_time {
-                    return Err(PercolatorError::OracleStale.into());
-                }
-                if publish_time == prev_time && prev_price != 0 && price != prev_price {
-                    return Err(PercolatorError::OracleInvalid.into());
-                }
-            }
-            if publish_time > prev_time {
-                profile.oracle_leg_publish_times[i] = publish_time;
-                profile.oracle_leg_prices_e6[i] = price;
-                advanced = true;
-            }
-            max_publish_time = core::cmp::max(max_publish_time, publish_time);
-            prices[i] = price;
-            i += 1;
-        }
-        Ok((
-            compose_price_e6(
-                &prices[..count],
-                profile.oracle_leg_flags,
-                profile.invert,
-                profile.unit_scale,
-            )?,
-            max_publish_time,
-            advanced,
-        ))
+        let (prices, publish_times, common_publish_time) = read_coherent_oracle_legs(
+            oracle_accounts,
+            &profile.oracle_leg_feeds,
+            count,
+            now_unix_ts,
+            profile.max_staleness_secs,
+            profile.conf_filter_bps,
+        )?;
+        let composed_price = compose_price_e6(
+            &prices[..count],
+            profile.oracle_leg_flags,
+            profile.invert,
+            profile.unit_scale,
+        )?;
+        let advanced = commit_observed_oracle_legs(
+            &mut profile.oracle_leg_prices_e6,
+            &mut profile.oracle_leg_publish_times,
+            &prices,
+            &publish_times,
+            count,
+        )?;
+        Ok((composed_price, common_publish_time, advanced))
     }
 
     pub fn clamp_toward_engine_dt(p_last: u64, target: u64, cap_bps: u64, dt_slots: u64) -> u64 {

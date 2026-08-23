@@ -1112,25 +1112,34 @@ pub struct FractionalMovementDiscovery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CompositeTimeCoherenceDiscovery {
+pub struct CompositeTimeCoherenceEvidence {
     pub coherent_price: u64,
-    pub skewed_target: u64,
-    pub skewed_mark: u64,
+    pub rejected_skew_words: u8,
+    pub exact_rollback_words: u8,
+    pub coherent_update_landed: bool,
+    pub target_after: u64,
+    pub mark_after: u64,
     pub victim_capital_loss: u128,
     pub oi_reduction_q: u128,
     pub cranker_reward: u128,
-    pub extracted_tokens: u64,
+    pub owner_exit_landed: bool,
+    pub victim_withdrawn: u128,
+    pub max_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HybridTerminalSnapshotDiscovery {
-    pub stale_resolve_landed: bool,
-    pub stale_terminal_mark: u64,
-    pub current_terminal_mark: u64,
-    pub victim_payout_loss: u128,
-    pub counterparty_payout_gain: u128,
-    pub stale_total_payout: u128,
-    pub current_total_payout: u128,
+pub struct HybridTerminalCoherenceEvidence {
+    pub skewed_config_rejected: bool,
+    pub skewed_config_exact_rollback: bool,
+    pub coherent_config_landed: bool,
+    pub skewed_update_ignored: bool,
+    pub skewed_update_preserved_value: bool,
+    pub coherent_update_landed: bool,
+    pub resolve_landed: bool,
+    pub terminal_mark: u64,
+    pub victim_payout: u128,
+    pub counterparty_payout: u128,
+    pub max_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1696,24 +1705,35 @@ impl TerminalDustDiscovery {
     }
 }
 
-impl CompositeTimeCoherenceDiscovery {
-    pub fn is_violation(&self) -> bool {
-        self.skewed_target > self.coherent_price
-            && self.skewed_mark > self.coherent_price
-            && self.victim_capital_loss != 0
-            && self.oi_reduction_q != 0
-            && self.cranker_reward != 0
-            && self.cranker_reward == u128::from(self.extracted_tokens)
+impl CompositeTimeCoherenceEvidence {
+    pub fn is_protected(&self) -> bool {
+        self.rejected_skew_words == 3
+            && self.exact_rollback_words == self.rejected_skew_words
+            && self.coherent_update_landed
+            && self.target_after == self.coherent_price
+            && self.mark_after == self.coherent_price
+            && self.victim_capital_loss == 0
+            && self.oi_reduction_q == 0
+            && self.cranker_reward == 0
+            && self.owner_exit_landed
+            && self.victim_withdrawn != 0
+            && self.max_cu < super::v16_svm::TX_CU_LIMIT
     }
 }
 
-impl HybridTerminalSnapshotDiscovery {
-    pub fn is_violation(&self) -> bool {
-        self.stale_resolve_landed
-            && self.current_terminal_mark > self.stale_terminal_mark
-            && self.victim_payout_loss != 0
-            && self.victim_payout_loss == self.counterparty_payout_gain
-            && self.stale_total_payout == self.current_total_payout
+impl HybridTerminalCoherenceEvidence {
+    pub fn is_protected(&self) -> bool {
+        self.skewed_config_rejected
+            && self.skewed_config_exact_rollback
+            && self.coherent_config_landed
+            && self.skewed_update_ignored
+            && self.skewed_update_preserved_value
+            && self.coherent_update_landed
+            && self.resolve_landed
+            && self.terminal_mark == 110_000
+            && self.victim_payout == 110_000_000
+            && self.counterparty_payout == 90_000_000
+            && self.max_cu < super::v16_svm::TX_CU_LIMIT
     }
 }
 
@@ -8649,18 +8669,9 @@ pub fn verify_fractional_movement_convergence(
     })
 }
 
-#[derive(Clone, Copy, Debug)]
-struct HybridTerminalWorld {
-    resolve_landed: bool,
-    terminal_mark: u64,
-    victim_payout: u128,
-    counterparty_payout: u128,
-}
-
-fn run_hybrid_terminal_world(
+pub fn verify_hybrid_terminal_time_coherence(
     mut seed: [u8; 32],
-    ingest_current_reports: bool,
-) -> Result<HybridTerminalWorld, String> {
+) -> Result<HybridTerminalCoherenceEvidence, String> {
     const VICTIM: usize = 0;
     const COUNTERPARTY: usize = 1;
     const ORACLE_AUTHORITY: usize = 2;
@@ -8668,8 +8679,8 @@ fn run_hybrid_terminal_world(
     const CAPITAL: u128 = 100_000_000;
     const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
     const FEEDS: [[u8; 32]; 3] = [[0xacu8; 32], [0xadu8; 32], [0u8; 32]];
-    seed[0] ^= 0x61;
-    seed[1] ^= u8::from(ingest_current_reports);
+
+    seed[0] ^= 0x62;
     let mut env = V16Svm::new(
         seed,
         MarketConfig {
@@ -8685,9 +8696,35 @@ fn run_hybrid_terminal_world(
     let supply_before = env.token_supply_observed();
     env.set_clock(1, 160);
     let initial_leg_0 = env.set_pyth_price(&FEEDS[0], OPEN_PRICE as i64, -6, 0, 160);
-    let initial_leg_1 = env.set_pyth_price(&FEEDS[1], 1_000_000, -6, 0, 100);
-    env.configure_hybrid_oracle(0, 1, 160, 0, FEEDS, &[initial_leg_0, initial_leg_1], 3, 500)
-        .map_err(|error| format!("configure terminal Hybrid oracle: {error}"))?;
+    let stale_initial_leg_1 = env.set_pyth_price(&FEEDS[1], 1_000_000, -6, 0, 100);
+    let before_skewed_config = fingerprint(&env);
+    let skewed_config_rejected = env
+        .configure_hybrid_oracle(
+            0,
+            1,
+            160,
+            0,
+            FEEDS,
+            &[initial_leg_0, stale_initial_leg_1],
+            3,
+            500,
+        )
+        .is_err();
+    let skewed_config_exact_rollback = fingerprint(&env) == before_skewed_config;
+
+    let coherent_initial_leg_1 = env.set_pyth_price(&FEEDS[1], 1_000_000, -6, 0, 160);
+    let coherent_config = env
+        .configure_hybrid_oracle(
+            0,
+            1,
+            160,
+            0,
+            FEEDS,
+            &[initial_leg_0, coherent_initial_leg_1],
+            3,
+            500,
+        )
+        .map_err(|error| format!("configure coherent terminal Hybrid oracle: {error}"))?;
     env.update_asset_authority_from_admin(
         0,
         percolator_prog::processor::ASSET_AUTH_ORACLE,
@@ -8695,112 +8732,120 @@ fn run_hybrid_terminal_world(
     )
     .map_err(|error| format!("separate terminal oracle authority: {error}"))?;
     env.trade_no_cpi(VICTIM, COUNTERPARTY, 0, SIZE_Q, OPEN_PRICE, 0)
-        .map_err(|error| format!("open Hybrid terminal pair: {error}"))?;
+        .map_err(|error| format!("open coherent Hybrid terminal pair: {error}"))?;
 
     env.set_clock(100, 220);
-    let current_leg_0 = env.set_pyth_price(&FEEDS[0], OPEN_PRICE as i64, -6, 0, 160);
+    let stale_current_leg_0 = env.set_pyth_price(&FEEDS[0], OPEN_PRICE as i64, -6, 0, 160);
     let current_leg_1 = env.set_pyth_price(&FEEDS[1], 1_100_000, -6, 0, 220);
-    if ingest_current_reports {
-        env.crank_with_oracles(
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 2,
+        }]
+    };
+    let profile_before_skewed_update = env.primary_profile(0);
+    let victim_capital_before_skewed_update = env.primary_portfolio(VICTIM).capital.get();
+    let counterparty_capital_before_skewed_update =
+        env.primary_portfolio(COUNTERPARTY).capital.get();
+    let (_, group_before_skewed_update) = env.primary_market_state();
+    let oi_before_skewed_update = (
+        group_before_skewed_update.assets[0].oi_eff_long_q,
+        group_before_skewed_update.assets[0].oi_eff_short_q,
+    );
+    let supply_before_skewed_update = env.token_supply_observed();
+    let _skewed_update_result = env.crank_with_oracles(
+        ORACLE_AUTHORITY,
+        100,
+        observations(),
+        &[stale_current_leg_0, current_leg_1],
+    );
+    let profile_after_skewed_update = env.primary_profile(0);
+    let skewed_update_ignored = profile_after_skewed_update.oracle_target_price_e6
+        == profile_before_skewed_update.oracle_target_price_e6
+        && profile_after_skewed_update.oracle_target_publish_time
+            == profile_before_skewed_update.oracle_target_publish_time
+        && profile_after_skewed_update.oracle_leg_prices_e6
+            == profile_before_skewed_update.oracle_leg_prices_e6
+        && profile_after_skewed_update.oracle_leg_publish_times
+            == profile_before_skewed_update.oracle_leg_publish_times;
+    let (_, group_after_skewed_update) = env.primary_market_state();
+    let skewed_update_preserved_value = env.primary_portfolio(VICTIM).capital.get()
+        == victim_capital_before_skewed_update
+        && env.primary_portfolio(COUNTERPARTY).capital.get()
+            == counterparty_capital_before_skewed_update
+        && (
+            group_after_skewed_update.assets[0].oi_eff_long_q,
+            group_after_skewed_update.assets[0].oi_eff_short_q,
+        ) == oi_before_skewed_update
+        && group_after_skewed_update.assets[0].effective_price == OPEN_PRICE
+        && env.token_supply_observed() == supply_before_skewed_update;
+
+    let current_leg_0 = env.set_pyth_price(&FEEDS[0], OPEN_PRICE as i64, -6, 0, 220);
+    let coherent_update = env
+        .crank_with_oracles(
             ORACLE_AUTHORITY,
             100,
-            vec![CrankObservationHint {
-                asset_index: 0,
-                oracle_accounts: 2,
-            }],
+            observations(),
             &[current_leg_0, current_leg_1],
         )
-        .map_err(|error| format!("ingest current Hybrid reports: {error}"))?;
-        let authenticated_slot = env.current_slot();
-        let mut accrual_ready = false;
-        for step in 0..16 {
-            if env.primary_market_state().1.assets[0].slot_last >= authenticated_slot {
-                accrual_ready = true;
-                break;
-            }
-            env.crank_with_oracles(
+        .map_err(|error| format!("ingest coherent terminal Hybrid reports: {error}"))?;
+    let authenticated_slot = env.current_slot();
+    let mut max_cu = coherent_config
+        .compute_units
+        .max(coherent_update.compute_units);
+    let mut accrual_ready = false;
+    for step in 0..16 {
+        if env.primary_market_state().1.assets[0].slot_last >= authenticated_slot {
+            accrual_ready = true;
+            break;
+        }
+        let success = env
+            .crank_with_oracles(
                 ORACLE_AUTHORITY,
                 authenticated_slot,
-                vec![CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: 2,
-                }],
+                observations(),
                 &[current_leg_0, current_leg_1],
             )
-            .map_err(|error| format!("current Hybrid terminal catch-up crank {step}: {error}"))?;
-        }
-        if !accrual_ready {
-            return Err("current Hybrid terminal state did not catch up in bounded cranks".into());
-        }
+            .map_err(|error| format!("coherent Hybrid terminal catch-up crank {step}: {error}"))?;
+        max_cu = max_cu.max(success.compute_units);
     }
-    let before_resolve = fingerprint(&env);
-    let resolve = env.resolve_market();
-    let resolve_landed = resolve.is_ok();
-    if !resolve_landed {
-        if fingerprint(&env) != before_resolve {
-            return Err("rejected stale Hybrid resolve did not roll back exactly".into());
-        }
-        return Ok(HybridTerminalWorld {
-            resolve_landed,
-            terminal_mark: env.primary_market_state().1.assets[0].effective_price,
-            victim_payout: 0,
-            counterparty_payout: 0,
-        });
+    if !accrual_ready {
+        return Err("coherent Hybrid terminal state did not catch up in bounded cranks".into());
     }
+
+    let resolve = env
+        .resolve_market()
+        .map_err(|error| format!("resolve coherent Hybrid market: {error}"))?;
+    max_cu = max_cu.max(resolve.compute_units);
     let terminal_mark = env.primary_market_state().1.assets[0].effective_price;
     let counterparty_payout = drain_resolved_discovery_actor(&mut env, COUNTERPARTY)?;
     let victim_payout = drain_resolved_discovery_actor(&mut env, VICTIM)?;
-    if env.token_supply_observed() != supply_before {
-        return Err("Hybrid terminal world changed SPL supply".into());
+    if env.token_supply_observed() != supply_before
+        || victim_payout
+            .checked_add(counterparty_payout)
+            .ok_or_else(|| "Hybrid terminal payout overflow".to_string())?
+            != CAPITAL * 2
+    {
+        return Err("Hybrid terminal coherence world did not conserve SPL value".into());
     }
-    Ok(HybridTerminalWorld {
-        resolve_landed,
+    Ok(HybridTerminalCoherenceEvidence {
+        skewed_config_rejected,
+        skewed_config_exact_rollback,
+        coherent_config_landed: true,
+        skewed_update_ignored,
+        skewed_update_preserved_value,
+        coherent_update_landed: true,
+        resolve_landed: true,
         terminal_mark,
         victim_payout,
         counterparty_payout,
+        max_cu,
     })
 }
 
-pub fn discover_hybrid_terminal_snapshot_violation(
-    seed: [u8; 32],
-) -> Result<HybridTerminalSnapshotDiscovery, String> {
-    let stale = run_hybrid_terminal_world(seed, false)?;
-    let current = run_hybrid_terminal_world(seed, true)?;
-    if !current.resolve_landed {
-        return Err(format!(
-            "current Hybrid terminal control did not resolve: stale={stale:?}, current={current:?}"
-        ));
-    }
-    let victim_payout_loss = current
-        .victim_payout
-        .checked_sub(stale.victim_payout)
-        .ok_or_else(|| "stale Hybrid resolve increased victim payout".to_string())?;
-    let counterparty_payout_gain = stale
-        .counterparty_payout
-        .checked_sub(current.counterparty_payout)
-        .ok_or_else(|| "stale Hybrid resolve decreased counterparty payout".to_string())?;
-    let stale_total_payout = stale
-        .victim_payout
-        .checked_add(stale.counterparty_payout)
-        .ok_or_else(|| "stale Hybrid payout overflow".to_string())?;
-    let current_total_payout = current
-        .victim_payout
-        .checked_add(current.counterparty_payout)
-        .ok_or_else(|| "current Hybrid payout overflow".to_string())?;
-    Ok(HybridTerminalSnapshotDiscovery {
-        stale_resolve_landed: stale.resolve_landed,
-        stale_terminal_mark: stale.terminal_mark,
-        current_terminal_mark: current.terminal_mark,
-        victim_payout_loss,
-        counterparty_payout_gain,
-        stale_total_payout,
-        current_total_payout,
-    })
-}
-
-pub fn discover_composite_time_coherence_violation(
+pub fn verify_composite_time_coherence(
     mut seed: [u8; 32],
-) -> Result<CompositeTimeCoherenceDiscovery, String> {
+) -> Result<CompositeTimeCoherenceEvidence, String> {
     const COHERENT_PRICE: u64 = 1_500_000;
     const INITIAL_A: i64 = 3_000_000;
     const INITIAL_B: i64 = 2_000_000;
@@ -8873,62 +8918,128 @@ pub fn discover_composite_time_coherence_violation(
     let cranker_capital_before = env.primary_portfolio(2).capital.get();
     let supply_before = env.token_supply_observed();
 
-    let fresh_a = env.set_pyth_price(&feeds[0], FRESH_A, -6, 0, 101);
-    let skewed = [fresh_a, initial_b];
+    let fresh_a_101 = env.set_pyth_price(&feeds[0], FRESH_A, -6, 0, 101);
+    let fresh_b_101 = env.set_pyth_price(&feeds[1], FRESH_B, -6, 0, 101);
+    let fresh_a_102 = env.set_pyth_price(&feeds[0], FRESH_A, -6, 0, 102);
+    let fresh_b_102 = env.set_pyth_price(&feeds[1], FRESH_B, -6, 0, 102);
     let observations = || {
         vec![CrankObservationHint {
             asset_index: 0,
             oracle_accounts: 2,
         }]
     };
+    let skew_words = [
+        ([fresh_a_101, initial_b], 101i64),
+        ([initial_a, fresh_b_101], 101i64),
+        ([fresh_a_101, fresh_b_102], 102i64),
+    ];
+    let mut rejected_skew_words = 0u8;
+    let mut exact_rollback_words = 0u8;
     let mut slot = 1u64;
-    for _ in 0..12 {
+    for (word, now_unix_ts) in skew_words {
         slot = slot
             .checked_add(20)
-            .ok_or_else(|| "composite-time catch-up slot overflow".to_string())?;
-        env.set_clock(slot, 101);
-        env.crank_with_oracles(2, slot, observations(), &skewed)
-            .map_err(|error| format!("skewed composite catch-up at slot {slot}: {error}"))?;
+            .ok_or_else(|| "composite-time rejection slot overflow".to_string())?;
+        env.set_clock(slot, now_unix_ts);
+        let before = fingerprint(&env);
+        if env
+            .crank_with_oracles(2, slot, observations(), &word)
+            .is_err()
+        {
+            rejected_skew_words = rejected_skew_words.saturating_add(1);
+        }
+        if fingerprint(&env) == before {
+            exact_rollback_words = exact_rollback_words.saturating_add(1);
+        }
     }
-    env.crank_with_oracles(0, slot, observations(), &skewed)
-        .map_err(|error| format!("refresh skewed-price victim: {error}"))?;
+    if rejected_skew_words != skew_words.len() as u8 || exact_rollback_words != rejected_skew_words
+    {
+        return Err(format!(
+            "composite-time skew matrix was not rejected atomically: rejected={rejected_skew_words}, rollback={exact_rollback_words}"
+        ));
+    }
+
+    slot = slot
+        .checked_add(20)
+        .ok_or_else(|| "composite-time control slot overflow".to_string())?;
+    env.set_clock(slot, 102);
+    let coherent_update = env
+        .crank_with_oracles(2, slot, observations(), &[fresh_a_102, fresh_b_102])
+        .map_err(|error| format!("coherent composite update rejected: {error}"))?;
+    let refresh = env
+        .crank_with_oracles(0, slot, observations(), &[fresh_a_102, fresh_b_102])
+        .map_err(|error| format!("refresh coherent-price victim: {error}"))?;
     let victim_cert = env
         .primary_portfolio(0)
         .health_cert
         .try_to_runtime()
-        .map_err(|error| format!("decode skewed victim certificate: {error:?}"))?;
-    if victim_cert.certified_liq_deficit == 0 {
-        return Err("skewed composite did not certify liquidation".into());
+        .map_err(|error| format!("decode coherent victim certificate: {error:?}"))?;
+    if victim_cert.certified_liq_deficit != 0 {
+        return Err(format!(
+            "coherent cross-rate certified a false liquidation deficit: {}",
+            victim_cert.certified_liq_deficit
+        ));
     }
-    env.crank_with_reward(2, 0, slot, observations(), &skewed)
-        .map_err(|error| format!("skewed-price liquidation: {error}"))?;
     let (wrapper_after, group_after) = env.primary_market_state();
     let victim_capital_loss = victim_capital_before
         .checked_sub(env.primary_portfolio(0).capital.get())
-        .ok_or_else(|| "skewed liquidation increased victim capital".to_string())?;
+        .ok_or_else(|| "coherent refresh increased victim capital".to_string())?;
     let oi_reduction_q = oi_before
         .checked_sub(group_after.assets[0].oi_eff_short_q)
-        .ok_or_else(|| "skewed liquidation increased short OI".to_string())?;
+        .ok_or_else(|| "coherent refresh increased short OI".to_string())?;
     let cranker_reward = env
         .primary_portfolio(2)
         .capital
         .get()
         .checked_sub(cranker_capital_before)
-        .ok_or_else(|| "skewed liquidation reduced cranker capital".to_string())?;
-    env.withdraw_primary(2, cranker_reward)
-        .map_err(|error| format!("withdraw skewed liquidation reward: {error}"))?;
-    let extracted_tokens = env.token_amount(env.actors[2].destination_token);
+        .ok_or_else(|| "coherent refresh reduced cranker capital".to_string())?;
+    if wrapper_after.oracle_target_price_e6 != COHERENT_PRICE
+        || group_after.assets[0].effective_price != COHERENT_PRICE
+        || victim_capital_loss != 0
+        || oi_reduction_q != 0
+        || cranker_reward != 0
+    {
+        return Err(format!(
+            "composite-time control changed economics: target={}, mark={}, victim_loss={victim_capital_loss}, oi_reduction={oi_reduction_q}, reward={cranker_reward}",
+            wrapper_after.oracle_target_price_e6, group_after.assets[0].effective_price
+        ));
+    }
+
+    let close = env
+        .trade_no_cpi(1, 0, 0, -size_q, COHERENT_PRICE, 0)
+        .map_err(|error| format!("coherent owner exit rejected: {error}"))?;
+    let owner_exit_landed = discovery_position(&env.primary_portfolio(0), 0)? == 0
+        && discovery_position(&env.primary_portfolio(1), 0)? == 0
+        && env.primary_market_state().1.assets[0].oi_eff_short_q == 0
+        && env.primary_market_state().1.assets[0].oi_eff_long_q == 0;
+    if !owner_exit_landed {
+        return Err("coherent control did not clear both public positions".into());
+    }
+    let withdrawable = env.primary_portfolio(0).capital.get();
+    let withdraw = env
+        .withdraw_primary(0, withdrawable)
+        .map_err(|error| format!("coherent victim withdrawal rejected: {error}"))?;
+    let victim_withdrawn = u128::from(env.token_amount(env.actors[0].destination_token));
     if env.token_supply_observed() != supply_before {
         return Err("composite-time world changed SPL supply".into());
     }
-    Ok(CompositeTimeCoherenceDiscovery {
+    Ok(CompositeTimeCoherenceEvidence {
         coherent_price: COHERENT_PRICE,
-        skewed_target: wrapper_after.oracle_target_price_e6,
-        skewed_mark: group_after.assets[0].effective_price,
+        rejected_skew_words,
+        exact_rollback_words,
+        coherent_update_landed: true,
+        target_after: wrapper_after.oracle_target_price_e6,
+        mark_after: group_after.assets[0].effective_price,
         victim_capital_loss,
         oi_reduction_q,
         cranker_reward,
-        extracted_tokens,
+        owner_exit_landed,
+        victim_withdrawn,
+        max_cu: coherent_update
+            .compute_units
+            .max(refresh.compute_units)
+            .max(close.compute_units)
+            .max(withdraw.compute_units),
     })
 }
 

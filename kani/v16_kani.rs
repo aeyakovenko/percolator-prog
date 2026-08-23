@@ -43,6 +43,9 @@ fn assert_rejects_trailing_byte(ix: Instruction, extra: u8) {
 #[path = "../tests/invariants/kani/inv_019_cpi_invocation_and_return_data_binding.rs"]
 mod inv_019_cpi_invocation_and_return_data_binding;
 
+#[path = "../tests/invariants/kani/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"]
+mod inv_020_authenticated_clock_slot_and_oracle_provenance;
+
 #[path = "../tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs"]
 mod inv_022_instruction_decoding_and_schema_upgrade_safety;
 
