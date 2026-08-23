@@ -10674,6 +10674,8 @@ pub struct CloseToPartialReceiptEvidence {
     pub resolved_close_finalized: bool,
     pub partial_receipt_face: u128,
     pub partial_receipt_paid: u128,
+    pub post_receipt_payout: u128,
+    pub terminal_actor_count: usize,
 }
 
 struct UnderfundedTerminalGraphEvidence {
@@ -11142,6 +11144,33 @@ pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialRec
         ));
     }
 
+    let destination_before = u128::from(
+        runner
+            .env
+            .token_amount(runner.env.actors[JUNIOR_WINNER].destination_token),
+    );
+    runner.run_terminal_payout_campaign()?;
+    runner.assert_global_invariants()?;
+    let destination_after = u128::from(
+        runner
+            .env
+            .token_amount(runner.env.actors[JUNIOR_WINNER].destination_token),
+    );
+    let post_receipt_payout = destination_after
+        .checked_sub(destination_before)
+        .ok_or("INV-086 close bridge destination balance decreased")?;
+    let terminal_actor_count = (0..PRIMARY_ACTOR_COUNT)
+        .map(|actor| runner.portfolio_is_economically_terminal(actor))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|terminal| *terminal)
+        .count();
+    if post_receipt_payout == 0 || terminal_actor_count != PRIMARY_ACTOR_COUNT {
+        return Err(format!(
+            "INV-086 partial receipt did not compose through a value-moving terminal path: payout={post_receipt_payout}, terminal={terminal_actor_count}/{PRIMARY_ACTOR_COUNT}"
+        ));
+    }
+
     Ok(CloseToPartialReceiptEvidence {
         active_close_residual: close_before.residual_remaining,
         source_claim_domain_count,
@@ -11149,6 +11178,8 @@ pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialRec
         resolved_close_finalized,
         partial_receipt_face: receipt.terminal_positive_claim_face,
         partial_receipt_paid: receipt.paid_effective,
+        post_receipt_payout,
+        terminal_actor_count,
     })
 }
 

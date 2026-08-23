@@ -36,7 +36,9 @@
 //! A separate public prefix composes the adjacent frontier directly: a flat bankrupt account has
 //! an active close with nonzero residual while three source-claim domains remain live;
 //! `ResolveMarket` must frame that close exactly, resolved continuations must finalize the same
-//! `close_id`, and only then may the claimant receive a genuinely partial payout receipt.
+//! `close_id`, and only then may the claimant receive a genuinely partial payout receipt. The
+//! same public state must then produce a value-moving top-up and converge every portfolio to its
+//! economic terminal predicate.
 //! This is finite reachability evidence, not equivalence over unbounded sequences.
 
 use super::*;
@@ -63,6 +65,10 @@ fn active_close_composes_through_resolution_into_partial_receipt() {
         evidence.partial_receipt_face != 0
             && evidence.partial_receipt_paid < evidence.partial_receipt_face,
         "the terminal bridge must end at a nonvacuous partial receipt: {evidence:?}"
+    );
+    assert!(
+        evidence.post_receipt_payout != 0 && evidence.terminal_actor_count == 5,
+        "the same bridge must pay and terminate every funded portfolio: {evidence:?}"
     );
 }
 
