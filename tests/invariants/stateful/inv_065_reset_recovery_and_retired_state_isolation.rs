@@ -31,6 +31,12 @@
 //! after `FinalizeResetSide`. All four trade routes and both reset sides must converge through
 //! Recovery, reject a retained old-generation trade without mutation, admit the same fresh request
 //! against the restarted generation, and return every owner's capital.
+//! `v16_program_retained_reduction_landing_after_shutdown_has_a_bounded_recovery_fallback` covers
+//! the reverse ordering. An owner signs a complete unilateral reduction while Active. It lands
+//! before or after shutdown; a post-shutdown rejection must frame the complete economic state, and
+//! the canonical owner Recovery operations must then remove both legs without sacrificing senior
+//! capital. Both schedules restart the asset, admit a fresh same-route roundtrip, and converge on
+//! identical owner payouts.
 //!
 //! This is bounded generated coverage, not exhaustive reset/recovery/retirement
 //! reachability.
@@ -755,6 +761,325 @@ fn assert_shutdown_after_reset_cleanup(
         max_compute_units < TX_CU_LIMIT,
         "{case}: {max_compute_units}"
     );
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleRollbackSnapshot {
+    market: Vec<u8>,
+    foreign_market: Vec<u8>,
+    portfolios: Vec<Vec<u8>>,
+    foreign_portfolio: Vec<u8>,
+    backing_ledger: Vec<u8>,
+    tokens: Vec<(solana_sdk::pubkey::Pubkey, Vec<u8>)>,
+    matcher_contexts: Vec<Vec<u8>>,
+    economic_lamports: Vec<(solana_sdk::pubkey::Pubkey, u64)>,
+}
+
+fn lifecycle_rollback_snapshot(env: &V16Svm) -> LifecycleRollbackSnapshot {
+    LifecycleRollbackSnapshot {
+        market: env.market_data(false),
+        foreign_market: env.market_data(true),
+        portfolios: env.all_primary_portfolio_data(),
+        foreign_portfolio: env.foreign_portfolio_data(),
+        backing_ledger: env.backing_domain_ledger_data(),
+        tokens: env.all_token_account_data(),
+        matcher_contexts: env.all_matcher_context_data(),
+        economic_lamports: env.all_economic_account_lamports(),
+    }
+}
+
+fn has_asset_leg(env: &V16Svm, actor: usize, asset_index: u16) -> bool {
+    env.primary_portfolio(actor)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .any(|leg| leg.active && leg.asset_index == u32::from(asset_index))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetainedReductionOrder {
+    ReduceThenShutdown,
+    ShutdownThenReduce,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RetainedReductionLifecycleOutcome {
+    destination_balances: [u64; 2],
+    token_supply: u128,
+    restarted_generation: u64,
+    retained_reduce_landed: bool,
+    recovery_forfeits: usize,
+    cleanup_cranks: usize,
+}
+
+fn run_retained_reduction_lifecycle_world(
+    route: TradeRoute,
+    reducer_long: bool,
+    order: RetainedReductionOrder,
+    seed: [u8; 32],
+) -> Result<RetainedReductionLifecycleOutcome, String> {
+    const REDUCER: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const ASSET: u16 = 0;
+
+    let case = format!("{route:?}/reducer_long={reducer_long}/{order:?}");
+    let signed_size_q = if reducer_long {
+        POS_SCALE as i128
+    } else {
+        -(POS_SCALE as i128)
+    };
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let token_supply = env.token_supply_observed();
+    env.configure_permissionless_resolve(1_000, 100)
+        .map_err(|error| format!("{case}: configure Recovery route: {error}"))?;
+    let mut max_compute_units = execute_trade_route(
+        &mut env,
+        route,
+        REDUCER,
+        COUNTERPARTY,
+        ASSET,
+        signed_size_q,
+        INITIAL_PRICE,
+        0,
+    )
+    .map_err(|error| format!("{case}: establish matched position: {error}"))?
+    .compute_units;
+    let old_generation = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let retained_reduce = env.build_retained_rebalance_reduce(REDUCER, ASSET, POS_SCALE);
+
+    let mut retained_reduce_landed = false;
+    match order {
+        RetainedReductionOrder::ReduceThenShutdown => {
+            let reduce = env
+                .land_retained(retained_reduce)
+                .map_err(|error| format!("{case}: pre-shutdown retained reduction: {error}"))?;
+            max_compute_units = max_compute_units.max(reduce.compute_units);
+            retained_reduce_landed = true;
+            env.warp_to_slot(1);
+            let shutdown = env
+                .shutdown_asset(ASSET, 1)
+                .map_err(|error| format!("{case}: shutdown after reduction: {error}"))?;
+            max_compute_units = max_compute_units.max(shutdown.compute_units);
+        }
+        RetainedReductionOrder::ShutdownThenReduce => {
+            env.warp_to_slot(1);
+            let shutdown = env
+                .shutdown_asset(ASSET, 1)
+                .map_err(|error| format!("{case}: shutdown before reduction: {error}"))?;
+            max_compute_units = max_compute_units.max(shutdown.compute_units);
+            let before_reduce = lifecycle_rollback_snapshot(&env);
+            match env.land_retained(retained_reduce) {
+                Ok(reduce) => {
+                    max_compute_units = max_compute_units.max(reduce.compute_units);
+                    retained_reduce_landed = true;
+                }
+                Err(_) => {
+                    if lifecycle_rollback_snapshot(&env) != before_reduce {
+                        return Err(format!(
+                            "{case}: rejected post-shutdown reduction did not roll back exactly"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let recovery = env.primary_market_state().1.assets[ASSET as usize];
+    if recovery.lifecycle != AssetLifecycleV16::Recovery || recovery.market_id != old_generation {
+        return Err(format!(
+            "{case}: shutdown did not preserve the active generation in Recovery"
+        ));
+    }
+    assert_public_stock_census("INV-065 shutdown/reduction landing prefix", &env)?;
+    assert_public_encumbrance_census("INV-065 shutdown/reduction landing prefix", &env)?;
+
+    let mut recovery_forfeits = 0usize;
+    if !retained_reduce_landed {
+        for actor in [COUNTERPARTY, REDUCER] {
+            if !has_asset_leg(&env, actor, ASSET) {
+                continue;
+            }
+            let forfeit = env
+                .forfeit_recovery_leg(actor, ASSET, u128::MAX)
+                .map_err(|error| format!("{case}: actor {actor} Recovery forfeit: {error}"))?;
+            max_compute_units = max_compute_units.max(forfeit.compute_units);
+            recovery_forfeits += 1;
+        }
+    }
+
+    let mut cleanup_cranks = 0usize;
+    for actor in [REDUCER, COUNTERPARTY] {
+        for _ in 0..8 {
+            if !has_asset_leg(&env, actor, ASSET) {
+                break;
+            }
+            let before = lifecycle_rollback_snapshot(&env);
+            let crank = env
+                .crank(actor, env.current_slot(), Vec::new())
+                .map_err(|error| format!("{case}: actor {actor} cleanup crank: {error}"))?;
+            max_compute_units = max_compute_units.max(crank.compute_units);
+            cleanup_cranks += 1;
+            if lifecycle_rollback_snapshot(&env) == before {
+                return Err(format!("{case}: actor {actor} cleanup crank was a no-op"));
+            }
+        }
+        if has_asset_leg(&env, actor, ASSET) {
+            return Err(format!(
+                "{case}: actor {actor} retained an asset leg after bounded cleanup"
+            ));
+        }
+    }
+    for side in [0u8, 1u8] {
+        let asset = env.primary_market_state().1.assets[ASSET as usize];
+        let mode = if side == 0 {
+            asset.mode_long
+        } else {
+            asset.mode_short
+        };
+        if mode == SideModeV16::ResetPending {
+            let finalize = env
+                .finalize_reset_side(ASSET, side)
+                .map_err(|error| format!("{case}: finalize side {side}: {error}"))?;
+            max_compute_units = max_compute_units.max(finalize.compute_units);
+        }
+    }
+    let ready = env.primary_market_state().1.assets[ASSET as usize];
+    if ready.mode_long != SideModeV16::Normal
+        || ready.mode_short != SideModeV16::Normal
+        || ready.oi_eff_long_q != 0
+        || ready.oi_eff_short_q != 0
+        || ready.stored_pos_count_long != 0
+        || ready.stored_pos_count_short != 0
+        || ready.pending_obligation_count_long != 0
+        || ready.pending_obligation_count_short != 0
+    {
+        return Err(format!(
+            "{case}: Recovery cleanup was not terminal: {ready:?}"
+        ));
+    }
+
+    env.warp_to_slot(2);
+    let restart = env
+        .restart_asset_oracle(ASSET, 2, INITIAL_PRICE)
+        .map_err(|error| format!("{case}: restart asset: {error}"))?;
+    max_compute_units = max_compute_units.max(restart.compute_units);
+    let restarted = env.primary_market_state().1.assets[ASSET as usize];
+    if restarted.lifecycle != AssetLifecycleV16::Active || restarted.market_id <= old_generation {
+        return Err(format!("{case}: asset did not restart monotonically"));
+    }
+
+    let reopen = execute_trade_route(
+        &mut env,
+        route,
+        REDUCER,
+        COUNTERPARTY,
+        ASSET,
+        signed_size_q,
+        INITIAL_PRICE,
+        0,
+    )
+    .map_err(|error| format!("{case}: fresh-generation open: {error}"))?;
+    max_compute_units = max_compute_units.max(reopen.compute_units);
+    let reclose = execute_trade_route(
+        &mut env,
+        route,
+        REDUCER,
+        COUNTERPARTY,
+        ASSET,
+        -signed_size_q,
+        INITIAL_PRICE,
+        0,
+    )
+    .map_err(|error| format!("{case}: fresh-generation close: {error}"))?;
+    max_compute_units = max_compute_units.max(reclose.compute_units);
+
+    for actor in [REDUCER, COUNTERPARTY] {
+        let capital = env.primary_portfolio(actor).capital.get();
+        let withdrawal = env
+            .withdraw_primary(actor, capital)
+            .map_err(|error| format!("{case}: actor {actor} withdrawal: {error}"))?;
+        max_compute_units = max_compute_units.max(withdrawal.compute_units);
+        if env.primary_portfolio(actor).capital.get() != 0 {
+            return Err(format!("{case}: actor {actor} retained capital"));
+        }
+    }
+    if max_compute_units >= TX_CU_LIMIT || env.token_supply_observed() != token_supply {
+        return Err(format!(
+            "{case}: lifecycle exceeded CU or changed token supply: {max_compute_units}"
+        ));
+    }
+    assert_public_stock_census("INV-065 shutdown/reduction landing terminal", &env)?;
+    assert_public_encumbrance_census("INV-065 shutdown/reduction landing terminal", &env)?;
+
+    Ok(RetainedReductionLifecycleOutcome {
+        destination_balances: std::array::from_fn(|actor| {
+            env.token_amount(env.actors[actor].destination_token)
+        }),
+        token_supply,
+        restarted_generation: restarted.market_id,
+        retained_reduce_landed,
+        recovery_forfeits,
+        cleanup_cranks,
+    })
+}
+
+#[test]
+fn v16_program_retained_reduction_landing_after_shutdown_has_a_bounded_recovery_fallback() {
+    for (route_index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for reducer_long in [false, true] {
+            let mut seed = [0x48; 32];
+            seed[0] ^= route_index as u8;
+            seed[1] ^= u8::from(reducer_long);
+            let reduce_first = run_retained_reduction_lifecycle_world(
+                route,
+                reducer_long,
+                RetainedReductionOrder::ReduceThenShutdown,
+                seed,
+            )
+            .unwrap_or_else(|error| panic!("reduce-first lifecycle: {error}"));
+            let shutdown_first = run_retained_reduction_lifecycle_world(
+                route,
+                reducer_long,
+                RetainedReductionOrder::ShutdownThenReduce,
+                seed,
+            )
+            .unwrap_or_else(|error| panic!("shutdown-first lifecycle: {error}"));
+            assert!(
+                reduce_first.retained_reduce_landed,
+                "{route:?}/{reducer_long}"
+            );
+            assert_eq!(
+                reduce_first.recovery_forfeits, 0,
+                "{route:?}/{reducer_long}"
+            );
+            assert!(
+                !shutdown_first.retained_reduce_landed,
+                "Recovery must use its explicit owner-exit route: {route:?}/{reducer_long}/{shutdown_first:?}"
+            );
+            assert_eq!(
+                shutdown_first.recovery_forfeits, 2,
+                "{route:?}/{reducer_long}/{shutdown_first:?}"
+            );
+            assert_eq!(
+                reduce_first.destination_balances, shutdown_first.destination_balances,
+                "{route:?}/{reducer_long}"
+            );
+            assert_eq!(reduce_first.token_supply, shutdown_first.token_supply);
+            assert_eq!(
+                reduce_first.restarted_generation, shutdown_first.restarted_generation,
+                "{route:?}/{reducer_long}"
+            );
+            assert!(reduce_first.cleanup_cranks > 0, "{reduce_first:?}");
+            assert!(shutdown_first.cleanup_cranks > 0, "{shutdown_first:?}");
+        }
+    }
 }
 
 #[test]
