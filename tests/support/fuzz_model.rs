@@ -4,8 +4,8 @@ use super::v16_svm::{
 };
 use percolator::{
     active_bitmap_is_empty, v16_domain_pair_for_asset_index, AssetLifecycleV16, AssetStateV16,
-    BackingBucketStatusV16, MarketModeV16, PortfolioLegV16, SideModeV16, SideV16, BOUND_SCALE,
-    CREDIT_RATE_SCALE, PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
+    BackingBucketStatusV16, CloseProgressLedgerV16, MarketModeV16, PortfolioLegV16, SideModeV16,
+    SideV16, BOUND_SCALE, CREDIT_RATE_SCALE, PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -6852,6 +6852,21 @@ pub struct SameAssetCloseLocalityEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SameAssetCloseDriftProgressEvidence {
+    pub world_count: u64,
+    pub route_worlds: [u64; 4],
+    pub direction_worlds: [u64; 2],
+    pub funding_enabled_worlds: u64,
+    pub same_asset_slot_advances: u64,
+    pub funding_index_move_worlds: u64,
+    pub live_close_progresses: u64,
+    pub owner_exit_worlds: u64,
+    pub minimum_initial_residual: u128,
+    pub total_owner_payout: u128,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConcurrentCloseLocalityEvidence {
     pub first_residual_before: u128,
     pub first_residual_after: u128,
@@ -6942,16 +6957,44 @@ fn create_public_cancellable_close(
     asset: u8,
     cranker: u8,
 ) -> Result<(), String> {
-    runner.run_safety_prefix(&[Action::Trade {
-        route: TradeRoute::NoCpi,
-        taker: winner,
-        maker: loser,
+    create_public_cancellable_close_via_route(
+        runner,
+        winner,
+        loser,
         asset,
-        units: 3,
-        fee_bps: 0,
-        price_move_bps: 0,
-        prefer_reduce: false,
-    }])?;
+        cranker,
+        TradeRoute::NoCpi,
+    )
+}
+
+fn create_public_cancellable_close_via_route(
+    runner: &mut ScenarioRunner,
+    winner: u8,
+    loser: u8,
+    asset: u8,
+    cranker: u8,
+    route: TradeRoute,
+) -> Result<(), String> {
+    let asset_index = asset as usize;
+    let winner_index = winner as usize;
+    let loser_index = loser as usize;
+    let open_q = (POS_SCALE as i128)
+        .checked_mul(3)
+        .and_then(|value| value.checked_div(4))
+        .ok_or("INV-076 close fixture quantity overflow")?;
+    if !runner.execute_trade(
+        route,
+        winner_index,
+        loser_index,
+        vec![(asset_index, open_q)],
+        0,
+        0,
+        true,
+    )? {
+        return Err(format!(
+            "INV-076 {route:?} close-fixture opening trade did not land"
+        ));
+    }
     for _ in 0..20 {
         runner.run_safety_prefix(&[Action::PushMark {
             asset,
@@ -6978,19 +7021,30 @@ fn create_public_cancellable_close(
             }])?;
         }
     }
-    runner.run_safety_prefix(&[Action::Trade {
-        route: TradeRoute::NoCpi,
-        taker: winner,
-        maker: loser,
-        asset,
-        units: 1,
-        fee_bps: 0,
-        price_move_bps: 0,
-        prefer_reduce: true,
-    }])?;
+    let winner_position = runner.positions[winner_index][asset_index];
+    if winner_position == 0
+        || !runner.execute_trade(
+            route,
+            winner_index,
+            loser_index,
+            vec![(
+                asset_index,
+                winner_position
+                    .checked_neg()
+                    .ok_or("INV-076 close-fixture position negation overflow")?,
+            )],
+            0,
+            0,
+            true,
+        )?
+    {
+        return Err(format!(
+            "INV-076 {route:?} close-fixture reduction did not land"
+        ));
+    }
     let close = runner
         .env
-        .primary_portfolio(loser as usize)
+        .primary_portfolio(loser_index)
         .close_progress
         .try_to_runtime()
         .map_err(|error| format!("pending close decode: {error:?}"))?;
@@ -7225,6 +7279,325 @@ pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvi
         }
     }
     aggregate.ok_or_else(|| "INV-074 locality matrix produced no worlds".into())
+}
+
+fn assert_close_residual_partition(
+    label: &str,
+    close: &CloseProgressLedgerV16,
+) -> Result<(), String> {
+    let expected = close
+        .gross_loss_at_close_start
+        .checked_add(close.drift_consumed)
+        .ok_or_else(|| format!("{label}: close gross-loss partition overflow"))?;
+    let accounted = close
+        .support_consumed
+        .checked_add(close.junior_face_burned)
+        .and_then(|value| value.checked_add(close.insurance_spent))
+        .and_then(|value| value.checked_add(close.b_loss_booked))
+        .and_then(|value| value.checked_add(close.explicit_loss_assigned))
+        .and_then(|value| value.checked_add(close.residual_remaining))
+        .ok_or_else(|| format!("{label}: close accounted partition overflow"))?;
+    if accounted != expected {
+        return Err(format!(
+            "{label}: close residual partition diverged: accounted={accounted}, expected={expected}, ledger={close:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn run_same_asset_close_drift_progress_world(
+    route: TradeRoute,
+    move_up: bool,
+    funding_enabled: bool,
+    seed_byte: u8,
+) -> Result<SameAssetCloseDriftProgressEvidence, String> {
+    const CLOSE_WINNER: usize = 0;
+    const CLOSE_LOSER: usize = 1;
+    const UNRELATED_LONG: usize = 2;
+    const UNRELATED_SHORT: usize = 3;
+    const KEEPER: usize = EXIT_MAKER_INDEX;
+    const ASSET: usize = 0;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: if funding_enabled { 10_000 } else { 0 },
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
+    if !runner.execute_trade(
+        TradeRoute::NoCpi,
+        UNRELATED_LONG,
+        UNRELATED_SHORT,
+        vec![(ASSET, (POS_SCALE / 100) as i128)],
+        0,
+        0,
+        true,
+    )? {
+        return Err("INV-076 same-asset funding control position did not open".into());
+    }
+    create_public_cancellable_close_via_route(
+        &mut runner,
+        CLOSE_WINNER as u8,
+        CLOSE_LOSER as u8,
+        ASSET as u8,
+        KEEPER as u8,
+        route,
+    )?;
+
+    let close_before = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-076 close pre-state decode: {error:?}"))?;
+    if !close_before.active
+        || close_before.finalized
+        || close_before.canceled
+        || close_before.residual_remaining == 0
+    {
+        return Err(format!(
+            "INV-076 {route:?} drift world did not start with a pending close: {close_before:?}"
+        ));
+    }
+    if runner.positions[CLOSE_LOSER][ASSET] != 0 || runner.positions[CLOSE_WINNER][ASSET] != 0 {
+        return Err(format!(
+            "INV-076 close-drift fixture retained live trade exposure: winner={}, loser={}",
+            runner.positions[CLOSE_WINNER][ASSET], runner.positions[CLOSE_LOSER][ASSET]
+        ));
+    }
+    assert_close_residual_partition("INV-076 pre-drift", &close_before)?;
+    let (_, group_before) = runner.env.primary_market_state();
+    let asset_before = group_before.assets[ASSET];
+    if asset_before.slot_last != close_before.drift_reference_slot {
+        return Err(format!(
+            "INV-076 close anchor was not current before drift: asset_slot={}, anchor={}",
+            asset_before.slot_last, close_before.drift_reference_slot
+        ));
+    }
+
+    let old_mark = runner.env.primary_profile(ASSET).mark_ewma_e6;
+    let target_mark = if move_up {
+        old_mark
+            .checked_mul(3)
+            .and_then(|value| value.checked_div(2))
+            .ok_or("INV-076 upward mark target overflow")?
+    } else {
+        old_mark.checked_div(2).unwrap_or(0).max(1)
+    };
+    let first_drift_slot = close_before
+        .drift_reference_slot
+        .checked_add(1)
+        .ok_or("INV-076 first drift slot overflow")?;
+    let second_drift_slot = first_drift_slot
+        .checked_add(1)
+        .ok_or("INV-076 second drift slot overflow")?;
+    if second_drift_slot > close_before.max_close_slot {
+        return Err(format!(
+            "INV-076 drift matrix crossed close expiry: second={second_drift_slot}, max={}",
+            close_before.max_close_slot
+        ));
+    }
+
+    runner.env.warp_to_slot(first_drift_slot);
+    let before_push = runner.snapshot();
+    let pushed = runner
+        .env
+        .push_auth_mark(ASSET as u16, first_drift_slot, target_mark)
+        .map_err(|error| format!("INV-076 authenticated same-asset mark push: {error}"))?;
+    runner.coverage.mark_updates += 1;
+    runner.coverage.observe_success(None, &pushed);
+    runner.assert_portfolio_frame(&before_push, &[])?;
+    runner.assert_no_token_side_effects(&before_push)?;
+    if runner.env.primary_profile(ASSET).mark_ewma_e6 != target_mark
+        || runner.env.primary_market_state().1.assets[ASSET].slot_last
+            != close_before.drift_reference_slot
+    {
+        return Err("INV-076 mark push did not stage target without engine accrual".into());
+    }
+
+    let close_account_before_drift = runner.env.primary_portfolio_data(CLOSE_LOSER);
+    for drift_slot in [first_drift_slot, second_drift_slot] {
+        runner.env.warp_to_slot(drift_slot);
+        let before_accrual = runner.snapshot();
+        let accrued = runner
+            .env
+            .crank(
+                KEEPER,
+                drift_slot,
+                vec![CrankObservationHint {
+                    asset_index: ASSET as u16,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| {
+                format!("INV-076 flat-keeper same-asset accrual at slot {drift_slot}: {error}")
+            })?;
+        runner.coverage.observe_success(None, &accrued);
+        runner.assert_portfolio_frame(&before_accrual, &[KEEPER])?;
+        runner.assert_no_token_side_effects(&before_accrual)?;
+        runner.assert_global_invariants()?;
+        let (_, accrued_group) = runner.env.primary_market_state();
+        if accrued_group.mode != MarketModeV16::Live
+            || accrued_group.assets[ASSET].slot_last != drift_slot
+            || runner.env.primary_portfolio_data(CLOSE_LOSER) != close_account_before_drift
+        {
+            return Err(format!(
+                "INV-076 market-only same-asset accrual changed close scope or failed to advance: mode={:?}, asset_slot={}, expected_slot={drift_slot}",
+                accrued_group.mode, accrued_group.assets[ASSET].slot_last
+            ));
+        }
+    }
+
+    let (_, drifted_group) = runner.env.primary_market_state();
+    let drifted_asset = drifted_group.assets[ASSET];
+    if drifted_asset.slot_last <= close_before.drift_reference_slot
+        || drifted_asset.effective_price == asset_before.effective_price
+    {
+        return Err(format!(
+            "INV-076 same-asset price path was vacuous: before={asset_before:?}, after={drifted_asset:?}"
+        ));
+    }
+    let funding_moved = drifted_asset.f_long_num != asset_before.f_long_num
+        || drifted_asset.f_short_num != asset_before.f_short_num;
+    if funding_moved != funding_enabled {
+        return Err(format!(
+            "INV-076 funding partition was vacuous or leaked across the disabled control: enabled={funding_enabled}, before={asset_before:?}, after={drifted_asset:?}"
+        ));
+    }
+
+    let vault_before_progress = runner.env.token_amount(runner.env.vault);
+    runner
+        .execute_crank(CLOSE_LOSER, HintMode::Empty, true)
+        .map_err(CrankFailure::into_message)?;
+    runner.assert_global_invariants()?;
+    let (_, progressed_group) = runner.env.primary_market_state();
+    let close_after = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-076 progressed close decode: {error:?}"))?;
+    assert_close_residual_partition("INV-076 post-drift progress", &close_after)?;
+    if progressed_group.mode != MarketModeV16::Live
+        || close_after.residual_remaining >= close_before.residual_remaining
+        || runner.env.token_amount(runner.env.vault) != vault_before_progress
+    {
+        return Err(format!(
+            "INV-076 flat close did not make value-neutral Live progress after same-asset drift: mode={:?}, before={close_before:?}, after={close_after:?}",
+            progressed_group.mode
+        ));
+    }
+
+    let destination_before = (0..PRIMARY_ACTOR_COUNT)
+        .map(|actor| {
+            u128::from(
+                runner
+                    .env
+                    .token_amount(runner.env.actors[actor].destination_token),
+            )
+        })
+        .collect::<Vec<_>>();
+    runner.run_direct_user_exit_campaign()?;
+    runner.assert_global_invariants()?;
+    if runner.env.primary_market_state().1.mode != MarketModeV16::Live
+        || runner
+            .positions
+            .iter()
+            .any(|positions| positions.iter().any(|position| *position != 0))
+        || (0..PRIMARY_ACTOR_COUNT)
+            .any(|actor| runner.env.primary_portfolio(actor).capital.get() != 0)
+    {
+        return Err("INV-076 post-drift close progress left a position or capital locked".into());
+    }
+    let total_owner_payout = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+        let after = u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        );
+        let payout = after
+            .checked_sub(destination_before[actor])
+            .ok_or("INV-076 terminal destination decreased")?;
+        total
+            .checked_add(payout)
+            .ok_or("INV-076 owner payout sum overflow")
+    })?;
+    if total_owner_payout == 0 {
+        return Err("INV-076 owner-exit campaign paid no funded participant".into());
+    }
+
+    let mut route_worlds = [0; 4];
+    route_worlds[route.index()] = 1;
+    let mut direction_worlds = [0; 2];
+    direction_worlds[usize::from(move_up)] = 1;
+    Ok(SameAssetCloseDriftProgressEvidence {
+        world_count: 1,
+        route_worlds,
+        direction_worlds,
+        funding_enabled_worlds: u64::from(funding_enabled),
+        same_asset_slot_advances: 1,
+        funding_index_move_worlds: u64::from(funding_moved),
+        live_close_progresses: 1,
+        owner_exit_worlds: 1,
+        minimum_initial_residual: close_before.residual_remaining,
+        total_owner_payout,
+        coverage: runner.coverage,
+    })
+}
+
+pub fn run_same_asset_close_drift_progress_probe(
+) -> Result<SameAssetCloseDriftProgressEvidence, String> {
+    let worlds = [
+        (TradeRoute::NoCpi, true, false),
+        (TradeRoute::Cpi, false, false),
+        (TradeRoute::BatchNoCpi, true, true),
+        (TradeRoute::BatchCpi, false, true),
+    ];
+    let mut aggregate: Option<SameAssetCloseDriftProgressEvidence> = None;
+    for (world, (route, move_up, funding_enabled)) in worlds.into_iter().enumerate() {
+        let evidence = run_same_asset_close_drift_progress_world(
+            route,
+            move_up,
+            funding_enabled,
+            0x96 + world as u8,
+        )?;
+        if let Some(existing) = aggregate.as_mut() {
+            existing.world_count += evidence.world_count;
+            for (total, count) in existing.route_worlds.iter_mut().zip(evidence.route_worlds) {
+                *total += count;
+            }
+            for (total, count) in existing
+                .direction_worlds
+                .iter_mut()
+                .zip(evidence.direction_worlds)
+            {
+                *total += count;
+            }
+            existing.funding_enabled_worlds += evidence.funding_enabled_worlds;
+            existing.same_asset_slot_advances += evidence.same_asset_slot_advances;
+            existing.funding_index_move_worlds += evidence.funding_index_move_worlds;
+            existing.live_close_progresses += evidence.live_close_progresses;
+            existing.owner_exit_worlds += evidence.owner_exit_worlds;
+            existing.minimum_initial_residual = existing
+                .minimum_initial_residual
+                .min(evidence.minimum_initial_residual);
+            existing.total_owner_payout = existing
+                .total_owner_payout
+                .checked_add(evidence.total_owner_payout)
+                .ok_or("INV-076 aggregate payout overflow")?;
+            existing.coverage.merge(evidence.coverage);
+        } else {
+            aggregate = Some(evidence);
+        }
+    }
+    aggregate.ok_or_else(|| "INV-076 same-asset drift matrix produced no worlds".into())
 }
 
 pub fn run_concurrent_close_locality_probe() -> Result<ConcurrentCloseLocalityEvidence, String> {

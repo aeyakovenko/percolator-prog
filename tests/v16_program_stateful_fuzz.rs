@@ -214,6 +214,9 @@ mod inv_072_order_robust_crankability;
 #[path = "invariants/stateful/inv_074_scope_locality.rs"]
 mod inv_074_scope_locality;
 
+#[path = "invariants/stateful/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs"]
+mod inv_076_close_drift_residual_durability_and_finalization_atomicity;
+
 #[path = "invariants/stateful/inv_078_permissionless_recovery_coverage.rs"]
 mod inv_078_permissionless_recovery_coverage;
 
