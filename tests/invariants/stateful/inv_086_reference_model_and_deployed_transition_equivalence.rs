@@ -33,10 +33,38 @@
 //! The fifth portfolio carries 777 atoms of unrelated flat principal and must receive all of it
 //! before claim-snapshot capture in every world, making the same graph an INV-074 receipt-locality
 //! witness rather than merely a terminal accounting exercise.
+//! A separate public prefix composes the adjacent frontier directly: a flat bankrupt account has
+//! an active close with nonzero residual while three source-claim domains remain live;
+//! `ResolveMarket` must frame that close exactly, resolved continuations must finalize the same
+//! `close_id`, and only then may the claimant receive a genuinely partial payout receipt.
 //! This is finite reachability evidence, not equivalence over unbounded sequences.
 
 use super::*;
-use crate::support::fuzz_model::run_bounded_reference_equivalence_graph;
+use crate::support::fuzz_model::{
+    run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
+};
+
+#[test]
+fn active_close_composes_through_resolution_into_partial_receipt() {
+    let evidence = verify_close_to_partial_receipt_composition()
+        .expect("INV-086 close-to-partial-receipt composition");
+
+    assert_ne!(
+        evidence.active_close_residual, 0,
+        "the public prefix must carry value through the active close"
+    );
+    assert!(
+        evidence.source_claim_domain_count >= 3
+            && evidence.resolve_framed_close
+            && evidence.resolved_close_finalized,
+        "the close and independent claim domains must survive and compose: {evidence:?}"
+    );
+    assert!(
+        evidence.partial_receipt_face != 0
+            && evidence.partial_receipt_paid < evidence.partial_receipt_face,
+        "the terminal bridge must end at a nonvacuous partial receipt: {evidence:?}"
+    );
+}
 
 #[test]
 fn v16_program_bounded_reference_graph_exhausts_public_action_words() {

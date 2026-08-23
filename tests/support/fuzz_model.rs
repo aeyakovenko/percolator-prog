@@ -10666,6 +10666,16 @@ pub struct ResolvedClaimAliasEvidence {
     pub rejected_writable_downgrade_count: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloseToPartialReceiptEvidence {
+    pub active_close_residual: u128,
+    pub source_claim_domain_count: usize,
+    pub resolve_framed_close: bool,
+    pub resolved_close_finalized: bool,
+    pub partial_receipt_face: u128,
+    pub partial_receipt_paid: u128,
+}
+
 struct UnderfundedTerminalGraphEvidence {
     world_count: usize,
     transition_count: usize,
@@ -10783,29 +10793,26 @@ fn drain_bounded_terminal_subset(
     ))
 }
 
-fn build_underfunded_resolved_reference_seed(
-    landing: BoundedExpiryLanding,
-    reverse_tail: bool,
-    claim_first: bool,
-) -> Result<UnderfundedResolvedSeed, String> {
+fn build_underfunded_live_reference_prefix(
+    seed: [u8; 32],
+    include_close_bridge: bool,
+) -> Result<ScenarioRunner, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
     const BACKED_WINNER: usize = 2;
     const BACKED_LOSER: usize = 3;
     const PROVIDER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
     const BACKED_ASSET: usize = 1;
+    const BRIDGE_ASSET: usize = 2;
     const JUNIOR_DOMAIN: u16 = 1;
     const BACKED_DOMAIN: u16 = 3;
     const INITIAL_PRICE: u64 = 100;
     const WINNING_MARK: u64 = 150;
     const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const BRIDGE_SIZE_Q: i128 = 70 * POS_SCALE as i128;
     const SNAPSHOT_SLOT: u64 = 12;
     const EXPIRY_SLOT: u64 = 13;
 
-    let mut seed = [0x8a; 32];
-    seed[0] ^= landing.seed_tag();
-    seed[1] ^= u8::from(reverse_tail);
-    seed[2] ^= u8::from(claim_first);
     let mut runner = ScenarioRunner::new_unprefixed_with_market_config(
         seed,
         MarketConfig {
@@ -10848,11 +10855,26 @@ fn build_underfunded_resolved_reference_seed(
         true,
     )?;
     runner.assert_global_invariants()?;
+    if include_close_bridge {
+        runner.execute_trade(
+            TradeRoute::NoCpi,
+            JUNIOR_WINNER,
+            PROVIDER,
+            vec![(BRIDGE_ASSET, BRIDGE_SIZE_Q)],
+            0,
+            0,
+            true,
+        )?;
+        runner.assert_global_invariants()?;
+    }
 
     for (offset, mark) in (105..=WINNING_MARK).step_by(5).enumerate() {
         let slot = 2 + u64::try_from(offset).expect("bounded INV-086 mark sequence");
         bounded_reference_push_mark(&mut runner, 0, slot, mark)?;
         bounded_reference_push_mark(&mut runner, BACKED_ASSET as u16, slot, mark)?;
+        if include_close_bridge {
+            bounded_reference_push_mark(&mut runner, BRIDGE_ASSET as u16, slot, mark)?;
+        }
         for actor in [JUNIOR_LOSER, JUNIOR_WINNER, BACKED_LOSER, BACKED_WINNER] {
             runner
                 .execute_crank(actor, HintMode::Complete, false)
@@ -10881,6 +10903,43 @@ fn build_underfunded_resolved_reference_seed(
         true,
     )?;
     runner.assert_global_invariants()?;
+    if include_close_bridge {
+        // Keep the bridge loser stale until this terminal reduction. The trade's own refresh then
+        // observes the deficit while its pre-refresh one-leg attribution is still unambiguous.
+        runner.execute_trade(
+            TradeRoute::NoCpi,
+            JUNIOR_WINNER,
+            PROVIDER,
+            vec![(BRIDGE_ASSET, -BRIDGE_SIZE_Q)],
+            0,
+            0,
+            true,
+        )?;
+        runner.assert_global_invariants()?;
+    }
+
+    Ok(runner)
+}
+
+fn build_underfunded_resolved_reference_seed(
+    landing: BoundedExpiryLanding,
+    reverse_tail: bool,
+    claim_first: bool,
+) -> Result<UnderfundedResolvedSeed, String> {
+    const JUNIOR_WINNER: usize = 0;
+    const JUNIOR_LOSER: usize = 1;
+    const BACKED_LOSER: usize = 3;
+    const PROVIDER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
+    const JUNIOR_DOMAIN: u16 = 1;
+    const BACKED_DOMAIN: u16 = 3;
+    const SNAPSHOT_SLOT: u64 = 12;
+    const EXPIRY_SLOT: u64 = 13;
+
+    let mut seed = [0x8a; 32];
+    seed[0] ^= landing.seed_tag();
+    seed[1] ^= u8::from(reverse_tail);
+    seed[2] ^= u8::from(claim_first);
+    let mut runner = build_underfunded_live_reference_prefix(seed, false)?;
 
     let before_resolution = runner.env.primary_market_state().1;
     if before_resolution.source_credit[JUNIOR_DOMAIN as usize].positive_claim_bound_num == 0
@@ -10959,6 +11018,137 @@ fn build_underfunded_resolved_reference_seed(
         engine_vault_at_resolution,
         spl_vault_at_resolution,
         destinations_at_resolution,
+    })
+}
+
+pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialReceiptEvidence, String>
+{
+    const JUNIOR_WINNER: usize = 0;
+    const JUNIOR_LOSER: usize = 1;
+    const BACKED_LOSER: usize = 3;
+    const CLOSE_LOSER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
+    const SNAPSHOT_SLOT: u64 = 12;
+
+    let mut runner = build_underfunded_live_reference_prefix([0x8b; 32], true)?;
+    let close_before = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-086 close bridge pre-resolution decode: {error:?}"))?;
+    if !close_before.active
+        || close_before.finalized
+        || close_before.canceled
+        || close_before.asset_index != 2
+        || close_before.residual_remaining == 0
+        || close_before.residual_remaining != close_before.gross_loss_at_close_start
+        || runner.positions[CLOSE_LOSER]
+            .iter()
+            .any(|position| *position != 0)
+    {
+        return Err(format!(
+            "INV-086 public bridge did not start from a flat, value-bearing close: close={close_before:?}, positions={:?}",
+            runner.positions[CLOSE_LOSER]
+        ));
+    }
+    let source_claim_domain_count = runner
+        .env
+        .primary_market_state()
+        .1
+        .source_credit
+        .iter()
+        .filter(|source| source.positive_claim_bound_num != 0)
+        .count();
+    if source_claim_domain_count < 3 {
+        return Err(format!(
+            "INV-086 close bridge did not retain the independent underfunded claims: domains={source_claim_domain_count}"
+        ));
+    }
+
+    runner.env.warp_to_slot(SNAPSHOT_SLOT);
+    runner.execute_resolve_market()?;
+    runner.assert_global_invariants()?;
+    let close_after_resolve = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-086 close bridge post-resolution decode: {error:?}"))?;
+    if close_after_resolve != close_before {
+        return Err(format!(
+            "INV-086 ResolveMarket rewrote the active close: before={close_before:?}, after={close_after_resolve:?}"
+        ));
+    }
+
+    let blocker_payout = drain_bounded_terminal_subset(
+        &mut runner,
+        &[JUNIOR_LOSER, BACKED_LOSER, CLOSE_LOSER],
+        "INV-086 close-to-receipt blockers",
+    )?;
+    if blocker_payout != 0 || runner.env.primary_market_state().1.payout_snapshot_captured {
+        return Err(format!(
+            "INV-086 negative close blockers moved {blocker_payout} atoms or captured the payout snapshot"
+        ));
+    }
+    let completed_close = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-086 close bridge completion decode: {error:?}"))?;
+    let resolved_close_finalized = completed_close.active
+        && completed_close.finalized
+        && !completed_close.canceled
+        && completed_close.close_id == close_before.close_id
+        && completed_close.residual_remaining == 0;
+    if !resolved_close_finalized {
+        return Err(format!(
+            "INV-086 resolved continuation did not finish the same close: {completed_close:?}"
+        ));
+    }
+
+    for step in 0..8 {
+        let receipt = runner
+            .env
+            .primary_portfolio(JUNIOR_WINNER)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("INV-086 close bridge receipt decode: {error:?}"))?;
+        if receipt.present {
+            break;
+        }
+        let result = runner.execute_terminal_route(JUNIOR_WINNER, TerminalRoute::Close)?;
+        if !result.landed || !result.mutated {
+            return Err(format!(
+                "INV-086 close-to-receipt route stopped at step {step}: {result:?}"
+            ));
+        }
+        runner.assert_global_invariants()?;
+    }
+    let receipt = runner
+        .env
+        .primary_portfolio(JUNIOR_WINNER)
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .map_err(|error| format!("INV-086 close bridge final receipt decode: {error:?}"))?;
+    if !runner.env.primary_market_state().1.payout_snapshot_captured
+        || !receipt.present
+        || receipt.finalized
+        || receipt.terminal_positive_claim_face == 0
+        || receipt.paid_effective >= receipt.terminal_positive_claim_face
+    {
+        return Err(format!(
+            "INV-086 resolved close did not compose into a genuine partial receipt: {receipt:?}"
+        ));
+    }
+
+    Ok(CloseToPartialReceiptEvidence {
+        active_close_residual: close_before.residual_remaining,
+        source_claim_domain_count,
+        resolve_framed_close: close_after_resolve == close_before,
+        resolved_close_finalized,
+        partial_receipt_face: receipt.terminal_positive_claim_face,
+        partial_receipt_paid: receipt.paid_effective,
     })
 }
 
