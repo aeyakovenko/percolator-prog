@@ -4472,17 +4472,22 @@ pub mod oracle_v16 {
         feeds[2] != [0u8; 32] && feeds[2] != feeds[0] && feeds[2] != feeds[1]
     }
 
-    pub fn read_pyth_price_e6(
-        price_ai: &AccountInfo,
+    pub fn oracle_publish_time_is_fresh(
+        publish_time: i64,
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+    ) -> bool {
+        let age = now_unix_ts.saturating_sub(publish_time);
+        age >= 0 && age as u64 <= max_staleness_secs
+    }
+
+    fn read_pyth_price_e6_from_bytes(
+        data: &[u8],
         expected_feed_id: &[u8; 32],
         now_unix_ts: i64,
         max_staleness_secs: u64,
         conf_bps: u16,
     ) -> Result<(u64, i64), ProgramError> {
-        if *price_ai.owner != PYTH_RECEIVER_PROGRAM_ID {
-            return Err(ProgramError::IllegalOwner);
-        }
-        let data = price_ai.try_borrow_data()?;
         if data.len() < PRICE_UPDATE_V2_MIN_LEN {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -4502,8 +4507,7 @@ pub mod oracle_v16 {
         if msg.price <= 0 || msg.exponent < -MAX_EXPO_ABS || msg.exponent > MAX_EXPO_ABS {
             return Err(PercolatorError::OracleInvalid.into());
         }
-        let age = now_unix_ts.saturating_sub(msg.publish_time);
-        if age < 0 || age as u64 > max_staleness_secs {
+        if !oracle_publish_time_is_fresh(msg.publish_time, now_unix_ts, max_staleness_secs) {
             return Err(PercolatorError::OracleStale.into());
         }
         let price_u = msg.price as u128;
@@ -4582,22 +4586,17 @@ pub mod oracle_v16 {
         Ok(out as u64)
     }
 
-    pub fn read_switchboard_price_e6(
-        price_ai: &AccountInfo,
+    fn read_switchboard_price_e6_from_bytes(
+        account_key: &Pubkey,
+        data: &[u8],
         expected_feed_key: &[u8; 32],
         now_unix_ts: i64,
         max_staleness_secs: u64,
         conf_bps: u16,
     ) -> Result<(u64, i64), ProgramError> {
-        if *price_ai.owner != SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID
-            && *price_ai.owner != SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID
-        {
-            return Err(ProgramError::IllegalOwner);
-        }
-        if price_ai.key.to_bytes() != *expected_feed_key {
+        if account_key.to_bytes() != *expected_feed_key {
             return Err(PercolatorError::InvalidOracleKey.into());
         }
-        let data = price_ai.try_borrow_data()?;
         if data.len() < SWITCHBOARD_PULL_FEED_MIN_LEN {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -4633,8 +4632,9 @@ pub mod oracle_v16 {
             &data,
             SB_OFF_SUBMISSION_TIMESTAMPS + submission_idx * core::mem::size_of::<i64>(),
         )?;
-        let age = now_unix_ts.saturating_sub(publish_time);
-        if publish_time <= 0 || age < 0 || age as u64 > max_staleness_secs {
+        if publish_time <= 0
+            || !oracle_publish_time_is_fresh(publish_time, now_unix_ts, max_staleness_secs)
+        {
             return Err(PercolatorError::OracleStale.into());
         }
         let value_u = value as u128;
@@ -4648,19 +4648,16 @@ pub mod oracle_v16 {
         Ok((out as u64, publish_time))
     }
 
-    pub fn read_chainlink_price_e6(
-        price_ai: &AccountInfo,
+    fn read_chainlink_price_e6_from_bytes(
+        account_key: &Pubkey,
+        data: &[u8],
         expected_feed_key: &[u8; 32],
         now_unix_ts: i64,
         max_staleness_secs: u64,
     ) -> Result<(u64, i64), ProgramError> {
-        if *price_ai.owner != CHAINLINK_STORE_PROGRAM_ID {
-            return Err(ProgramError::IllegalOwner);
-        }
-        if price_ai.key.to_bytes() != *expected_feed_key {
+        if account_key.to_bytes() != *expected_feed_key {
             return Err(PercolatorError::InvalidOracleKey.into());
         }
-        let data = price_ai.try_borrow_data()?;
         if data.len() < CHAINLINK_FEED_MIN_LEN {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -4683,11 +4680,51 @@ pub mod oracle_v16 {
         {
             return Err(PercolatorError::OracleInvalid.into());
         }
-        let age = now_unix_ts.saturating_sub(publish_time);
-        if age < 0 || age as u64 > max_staleness_secs {
+        if !oracle_publish_time_is_fresh(publish_time, now_unix_ts, max_staleness_secs) {
             return Err(PercolatorError::OracleStale.into());
         }
         scale_decimal_to_e6(answer, decimals as u32).map(|p| (p, publish_time))
+    }
+
+    pub fn read_oracle_price_e6_from_bytes(
+        owner: &Pubkey,
+        account_key: &Pubkey,
+        data: &[u8],
+        expected_feed_id: &[u8; 32],
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+        conf_bps: u16,
+    ) -> Result<(u64, i64), ProgramError> {
+        if *owner == PYTH_RECEIVER_PROGRAM_ID {
+            read_pyth_price_e6_from_bytes(
+                data,
+                expected_feed_id,
+                now_unix_ts,
+                max_staleness_secs,
+                conf_bps,
+            )
+        } else if *owner == SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID
+            || *owner == SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID
+        {
+            read_switchboard_price_e6_from_bytes(
+                account_key,
+                data,
+                expected_feed_id,
+                now_unix_ts,
+                max_staleness_secs,
+                conf_bps,
+            )
+        } else if *owner == CHAINLINK_STORE_PROGRAM_ID {
+            read_chainlink_price_e6_from_bytes(
+                account_key,
+                data,
+                expected_feed_id,
+                now_unix_ts,
+                max_staleness_secs,
+            )
+        } else {
+            Err(ProgramError::IllegalOwner)
+        }
     }
 
     pub fn read_oracle_price_e6(
@@ -4697,29 +4734,16 @@ pub mod oracle_v16 {
         max_staleness_secs: u64,
         conf_bps: u16,
     ) -> Result<(u64, i64), ProgramError> {
-        if *price_ai.owner == PYTH_RECEIVER_PROGRAM_ID {
-            read_pyth_price_e6(
-                price_ai,
-                expected_feed_id,
-                now_unix_ts,
-                max_staleness_secs,
-                conf_bps,
-            )
-        } else if *price_ai.owner == SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID
-            || *price_ai.owner == SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID
-        {
-            read_switchboard_price_e6(
-                price_ai,
-                expected_feed_id,
-                now_unix_ts,
-                max_staleness_secs,
-                conf_bps,
-            )
-        } else if *price_ai.owner == CHAINLINK_STORE_PROGRAM_ID {
-            read_chainlink_price_e6(price_ai, expected_feed_id, now_unix_ts, max_staleness_secs)
-        } else {
-            Err(ProgramError::IllegalOwner)
-        }
+        let data = price_ai.try_borrow_data()?;
+        read_oracle_price_e6_from_bytes(
+            price_ai.owner,
+            price_ai.key,
+            &data,
+            expected_feed_id,
+            now_unix_ts,
+            max_staleness_secs,
+            conf_bps,
+        )
     }
 
     fn compose_price_e6(

@@ -2779,6 +2779,160 @@ struct EpochMatrixLeg {
     price_e6: u64,
 }
 
+fn parse_oracle_through_account_info(
+    owner: Pubkey,
+    key: Pubkey,
+    data: &[u8],
+    expected_feed: &[u8; 32],
+    now_unix_ts: i64,
+    max_staleness_secs: u64,
+    conf_bps: u16,
+) -> Result<(u64, i64), solana_program::program_error::ProgramError> {
+    let mut lamports = 1u64;
+    let mut owned_data = data.to_vec();
+    let account = solana_program::account_info::AccountInfo::new(
+        &key,
+        false,
+        false,
+        &mut lamports,
+        &mut owned_data,
+        &owner,
+        false,
+        0,
+    );
+    oracle_v16::read_oracle_price_e6(
+        &account,
+        expected_feed,
+        now_unix_ts,
+        max_staleness_secs,
+        conf_bps,
+    )
+}
+
+#[test]
+fn host_oracle_accountinfo_delegation_matches_pure_parser_on_single_byte_corpus() {
+    const PRICE_E6: u64 = 1_500_000;
+    const PUBLISH_TIME: i64 = 100;
+    const NOW: i64 = 120;
+    const MAX_STALENESS: u64 = 60;
+    const CONF_BPS: u16 = 100;
+
+    let pyth_key = Pubkey::new_unique();
+    let pyth_feed = [0x41u8; 32];
+    let switchboard_key = Pubkey::new_unique();
+    let chainlink_key = Pubkey::new_unique();
+    let fixtures = [
+        (
+            oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+            pyth_key,
+            pyth_feed,
+            make_pyth_data(&pyth_feed, PRICE_E6 as i64, -6, 1, PUBLISH_TIME),
+        ),
+        (
+            oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+            switchboard_key,
+            switchboard_key.to_bytes(),
+            make_switchboard_data(
+                &[0x42u8; 32],
+                i128::from(PRICE_E6) * 1_000_000_000_000,
+                1,
+                PUBLISH_TIME,
+                3,
+                1,
+                1,
+            ),
+        ),
+        (
+            oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+            chainlink_key,
+            chainlink_key.to_bytes(),
+            make_chainlink_data(1, 6, 1, 1, 1, PUBLISH_TIME as u32, i128::from(PRICE_E6)),
+        ),
+    ];
+
+    let mut compared_words = 0usize;
+    for (fixture_index, (owner, key, expected_feed, data)) in fixtures.iter().enumerate() {
+        let pure = oracle_v16::read_oracle_price_e6_from_bytes(
+            owner,
+            key,
+            data,
+            expected_feed,
+            NOW,
+            MAX_STALENESS,
+            CONF_BPS,
+        );
+        let account = parse_oracle_through_account_info(
+            *owner,
+            *key,
+            data,
+            expected_feed,
+            NOW,
+            MAX_STALENESS,
+            CONF_BPS,
+        );
+        assert_eq!(pure, Ok((PRICE_E6, PUBLISH_TIME)));
+        assert_eq!(account, pure, "valid fixture {fixture_index}");
+        compared_words += 1;
+
+        for prefix_len in 0..data.len() {
+            let prefix = &data[..prefix_len];
+            let pure = oracle_v16::read_oracle_price_e6_from_bytes(
+                owner,
+                key,
+                prefix,
+                expected_feed,
+                NOW,
+                MAX_STALENESS,
+                CONF_BPS,
+            );
+            let account = parse_oracle_through_account_info(
+                *owner,
+                *key,
+                prefix,
+                expected_feed,
+                NOW,
+                MAX_STALENESS,
+                CONF_BPS,
+            );
+            assert_eq!(
+                account, pure,
+                "prefix fixture {fixture_index} length {prefix_len}"
+            );
+            compared_words += 1;
+        }
+
+        for byte_index in 0..data.len() {
+            let mut mutated = data.clone();
+            mutated[byte_index] ^= 1u8 << (byte_index % 8);
+            let pure = oracle_v16::read_oracle_price_e6_from_bytes(
+                owner,
+                key,
+                &mutated,
+                expected_feed,
+                NOW,
+                MAX_STALENESS,
+                CONF_BPS,
+            );
+            let account = parse_oracle_through_account_info(
+                *owner,
+                *key,
+                &mutated,
+                expected_feed,
+                NOW,
+                MAX_STALENESS,
+                CONF_BPS,
+            );
+            assert_eq!(
+                account, pure,
+                "single-byte fixture {fixture_index} offset {byte_index}"
+            );
+            compared_words += 1;
+        }
+    }
+    assert_eq!(compared_words, 2 * (134 + 3_208 + 248) + fixtures.len());
+    println!("oracle AccountInfo/pure parser equivalence: {compared_words} words");
+}
+
 fn write_epoch_matrix_leg(
     env: &mut V16CuEnv,
     leg: EpochMatrixLeg,
