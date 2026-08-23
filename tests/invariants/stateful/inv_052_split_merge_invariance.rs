@@ -67,6 +67,15 @@
 //! aggregate only by the stated fee/maintenance-floor envelope. Splitting cannot reduce the fee or
 //! increase current coalition value; the extra open quantity permitted by one additional
 //! maintenance floor is explicitly bounded from the configured health slope.
+//! `v16_program_public_source_lien_expiry_is_split_merge_invariant` constructs the same
+//! source-backed risk increase as one portfolio or two proportional portfolios through all four
+//! public trade routes, then normalizes the live lien at exact and late authenticated expiry and
+//! exits both owners in both orders. Account, source, and bucket ledgers must attribute the same
+//! backing; splitting may add at most one conservative rounding atom but may never reserve less.
+//! User payout, OI, stock, custody, token supply, and public exit remain exact. This finding-blind
+//! probe failed on engine `3b76b794`: the aggregate route reserved 2,623 effective quote atoms,
+//! while the split route reserved 2,622. Engine `ba7a84b7` ceils the canonical margin requirement
+//! and routes liquidation planning through that same helper.
 //!
 //! Guarantee boundary: target publication order and target lifetime are identical across the
 //! compared executions. Reordering authenticated observations is a different economic history,
@@ -78,7 +87,7 @@
 
 use super::*;
 use crate::support::{
-    fuzz_model::{execute_trade_route, TradeRoute},
+    fuzz_model::{assert_public_encumbrance_census, execute_trade_route, TradeRoute},
     v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
@@ -217,6 +226,30 @@ struct LiquidationPartitionEconomics {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LiquidationPartitionOutcome {
     economics: LiquidationPartitionEconomics,
+    max_compute_units: u64,
+    public_steps: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceLienPartitionEconomics {
+    peak_local: [u128; 11],
+    peak_source: [u128; 11],
+    peak_bucket: percolator::BackingBucketV16,
+    final_local: [u128; 11],
+    final_source: [u128; 11],
+    final_bucket: percolator::BackingBucketV16,
+    target_payout: u128,
+    target_value_before_withdrawal: i128,
+    oi_q: [u128; 2],
+    c_tot_plus_insurance: u128,
+    vault: u128,
+    spl_vault: u128,
+    token_supply: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceLienPartitionOutcome {
+    economics: SourceLienPartitionEconomics,
     max_compute_units: u64,
     public_steps: usize,
 }
@@ -2017,6 +2050,382 @@ fn run_liquidation_partition(
     })
 }
 
+fn source_credit_amounts(source: percolator::SourceCreditStateV16) -> [u128; 11] {
+    [
+        source.positive_claim_bound_num,
+        source.exact_positive_claim_num,
+        source.fresh_reserved_backing_num,
+        source.spent_backing_num,
+        source.provider_receivable_num,
+        source.valid_liened_backing_num,
+        source.impaired_liened_backing_num,
+        source.insurance_credit_reserved_num,
+        source.valid_liened_insurance_num,
+        source.impaired_liened_insurance_num,
+        source.credit_rate_num,
+    ]
+}
+
+fn source_lien_partition_local_totals(
+    env: &V16Svm,
+    actors: &[usize],
+    domain: usize,
+) -> Result<[u128; 11], String> {
+    let mut totals = [0u128; 11];
+    for actor in actors {
+        for source in env.primary_portfolio(*actor).source_domains {
+            if source.source_claim_market_id.get() == 0 || source.domain.get() as usize != domain {
+                continue;
+            }
+            let values = [
+                source.source_claim_bound_num.get(),
+                source.source_claim_liened_num.get(),
+                source.source_claim_counterparty_liened_num.get(),
+                source.source_claim_insurance_liened_num.get(),
+                source.source_lien_effective_reserved.get(),
+                source.source_lien_counterparty_backing_num.get(),
+                source.source_lien_insurance_backing_num.get(),
+                source.source_claim_impaired_num.get(),
+                source.source_lien_impaired_effective_reserved.get(),
+                source.source_lien_capital_at_risk_fee_revenue.get(),
+                source
+                    .source_lien_impaired_capital_at_risk_fee_revenue
+                    .get(),
+            ];
+            for (total, value) in totals.iter_mut().zip(values) {
+                *total = total
+                    .checked_add(value)
+                    .ok_or_else(|| "source-lien partition local sum overflow".to_string())?;
+            }
+        }
+    }
+    Ok(totals)
+}
+
+fn crank_source_lien_partition_to_fixed_point(
+    env: &mut V16Svm,
+    actor: usize,
+    slot: u64,
+    observations: Vec<CrankObservationHint>,
+    max_compute_units: &mut u64,
+) -> Result<(), String> {
+    for step in 0..8 {
+        match env
+            .crank_if_actionable(actor, slot, observations.clone())
+            .map_err(|error| {
+                format!("source-lien partition crank actor {actor} step {step}: {error}")
+            })? {
+            Some(success) => {
+                *max_compute_units = (*max_compute_units).max(success.compute_units);
+            }
+            None => return Ok(()),
+        }
+    }
+    Err(format!(
+        "source-lien partition actor {actor} did not reach a fixed point in eight cranks"
+    ))
+}
+
+fn run_source_lien_partition(
+    split: bool,
+    reverse_exit_order: bool,
+    route: TradeRoute,
+    landing_slot: u64,
+) -> Result<SourceLienPartitionOutcome, String> {
+    const PRICE: u64 = 100;
+    const WINNING_MARK: u64 = 105;
+    const SOURCE_DOMAIN: usize = 1;
+    const EXPIRY_SLOT: u64 = 3;
+    const TOTAL_OPEN_Q: i128 = 1_000 * POS_SCALE as i128;
+    const TOTAL_INCREASE_Q: i128 = 50 * POS_SCALE as i128;
+    const TARGETS: [usize; 2] = [0, 2];
+    const COUNTERPARTIES: [usize; 2] = [1, 3];
+    const KEEPER: usize = 4;
+
+    if landing_slot < EXPIRY_SLOT {
+        return Err(format!(
+            "source-lien partition landing {landing_slot} precedes expiry {EXPIRY_SLOT}"
+        ));
+    }
+    let route_discriminator = match route {
+        TradeRoute::NoCpi => 0,
+        TradeRoute::Cpi => 1,
+        TradeRoute::BatchNoCpi => 2,
+        TradeRoute::BatchCpi => 3,
+    };
+    let mut seed = [0x52; 32];
+    seed[0] ^= u8::from(split);
+    seed[1] ^= u8::from(reverse_exit_order) << 1;
+    seed[2] ^= route_discriminator;
+    seed[3] ^= landing_slot as u8;
+    let actor_deposits = if split {
+        [26_251, 500_000, 26_251, 500_000, 0]
+    } else {
+        [52_502, 1_000_000, 0, 0, 0]
+    };
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 10,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 5_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 0,
+            actor_deposits,
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let active_targets: &[usize] = if split { &TARGETS } else { &[TARGETS[0]] };
+    let active_counterparties: &[usize] = if split {
+        &COUNTERPARTIES
+    } else {
+        &[COUNTERPARTIES[0]]
+    };
+    let pairs: &[(usize, usize, i128, i128)] = if split {
+        &[
+            (
+                TARGETS[0],
+                COUNTERPARTIES[0],
+                TOTAL_OPEN_Q / 2,
+                TOTAL_INCREASE_Q / 2,
+            ),
+            (
+                TARGETS[1],
+                COUNTERPARTIES[1],
+                TOTAL_OPEN_Q / 2,
+                TOTAL_INCREASE_Q / 2,
+            ),
+        ]
+    } else {
+        &[(
+            TARGETS[0],
+            COUNTERPARTIES[0],
+            TOTAL_OPEN_Q,
+            TOTAL_INCREASE_Q,
+        )]
+    };
+    let observations = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    let mut max_compute_units = 0u64;
+    env.begin_public_trace();
+
+    let backing = env
+        .top_up_backing_bucket(SOURCE_DOMAIN as u16, 100_000, EXPIRY_SLOT)
+        .map_err(|error| format!("fund source-lien partition: {error}"))?;
+    max_compute_units = max_compute_units.max(backing.compute_units);
+    for &(target, counterparty, open_q, _) in pairs {
+        let open = execute_trade_route(&mut env, route, target, counterparty, 0, open_q, PRICE, 0)
+            .map_err(|error| format!("open source-lien partition via {route:?}: {error}"))?;
+        max_compute_units = max_compute_units.max(open.compute_units);
+    }
+
+    env.warp_to_slot(2);
+    let mark = env
+        .push_auth_mark(0, 2, WINNING_MARK)
+        .map_err(|error| format!("publish source-lien partition winning mark: {error}"))?;
+    max_compute_units = max_compute_units.max(mark.compute_units);
+    crank_source_lien_partition_to_fixed_point(
+        &mut env,
+        KEEPER,
+        2,
+        observations.clone(),
+        &mut max_compute_units,
+    )?;
+    for actor in active_counterparties
+        .iter()
+        .chain(active_targets.iter())
+        .copied()
+    {
+        crank_source_lien_partition_to_fixed_point(
+            &mut env,
+            actor,
+            2,
+            observations.clone(),
+            &mut max_compute_units,
+        )?;
+    }
+    let expected_pnl = if split { 2_500 } else { 5_000 };
+    for actor in active_targets.iter().copied() {
+        if env.primary_portfolio(actor).pnl.get() != expected_pnl {
+            return Err(format!(
+                "source-lien partition target {actor} earned {}, expected {expected_pnl}",
+                env.primary_portfolio(actor).pnl.get()
+            ));
+        }
+    }
+    for &(target, counterparty, _, increase_q) in pairs {
+        let increase = execute_trade_route(
+            &mut env,
+            route,
+            target,
+            counterparty,
+            0,
+            increase_q,
+            WINNING_MARK,
+            0,
+        )
+        .map_err(|error| format!("create source-lien partition via {route:?}: {error}"))?;
+        max_compute_units = max_compute_units.max(increase.compute_units);
+    }
+    assert_public_encumbrance_census("INV-052 source-lien partition at peak", &env)?;
+    let peak_group = env.primary_market_state().1;
+    let peak_local = source_lien_partition_local_totals(&env, active_targets, SOURCE_DOMAIN)?;
+    let peak_source = source_credit_amounts(peak_group.source_credit[SOURCE_DOMAIN]);
+    let peak_bucket = peak_group.source_backing_buckets[SOURCE_DOMAIN];
+    if peak_local[2] == 0
+        || peak_local[5] == 0
+        || peak_local[5] != peak_source[5]
+        || peak_local[5] != peak_bucket.valid_liened_backing_num
+    {
+        return Err(format!(
+            "source-lien partition did not create one exactly attributed live lien: local={peak_local:?}, source={peak_source:?}, bucket={peak_bucket:?}"
+        ));
+    }
+
+    env.warp_to_slot(landing_slot);
+    let expiry_mark = env
+        .push_auth_mark(0, landing_slot, WINNING_MARK)
+        .map_err(|error| format!("authenticate source-lien partition expiry: {error}"))?;
+    max_compute_units = max_compute_units.max(expiry_mark.compute_units);
+    let expiry_actor = if reverse_exit_order {
+        *active_targets
+            .last()
+            .ok_or_else(|| "source-lien partition has no expiry target".to_string())?
+    } else {
+        active_targets[0]
+    };
+    crank_source_lien_partition_to_fixed_point(
+        &mut env,
+        expiry_actor,
+        landing_slot,
+        observations.clone(),
+        &mut max_compute_units,
+    )?;
+    if env.primary_market_state().1.source_backing_buckets[SOURCE_DOMAIN].status
+        != percolator::BackingBucketStatusV16::Impaired
+    {
+        return Err(format!(
+            "source-lien partition did not normalize at authenticated slot {landing_slot}: {:?}",
+            env.primary_market_state().1.source_backing_buckets[SOURCE_DOMAIN]
+        ));
+    }
+
+    let mut exit_order = active_targets.to_vec();
+    if reverse_exit_order {
+        exit_order.reverse();
+    }
+    for actor in exit_order.iter().copied() {
+        let exposure_q = liquidation_partition_basis_q(&env, actor, 0)?;
+        if exposure_q == 0 {
+            return Err(format!(
+                "source-lien partition target {actor} had no exposure at expiry"
+            ));
+        }
+        let reduce = env
+            .rebalance_reduce(actor, 0, exposure_q)
+            .map_err(|error| format!("reduce expired source-lien target {actor}: {error}"))?;
+        max_compute_units = max_compute_units.max(reduce.compute_units);
+        if liquidation_partition_basis_q(&env, actor, 0)? != 0 {
+            return Err(format!(
+                "source-lien partition target {actor} retained exposure after full reduction"
+            ));
+        }
+    }
+    for actor in exit_order.iter().copied() {
+        crank_source_lien_partition_to_fixed_point(
+            &mut env,
+            actor,
+            landing_slot,
+            observations.clone(),
+            &mut max_compute_units,
+        )?;
+    }
+    let target_value_before_withdrawal =
+        liquidation_partition_portfolio_value(&env, active_targets)?;
+    for actor in exit_order.iter().copied() {
+        let capital = env.primary_portfolio(actor).capital.get();
+        if capital == 0 {
+            return Err(format!(
+                "source-lien partition target {actor} retained no funded exit"
+            ));
+        }
+        let withdrawal = env
+            .withdraw_primary(actor, capital)
+            .map_err(|error| format!("withdraw source-lien target {actor}: {error}"))?;
+        max_compute_units = max_compute_units.max(withdrawal.compute_units);
+    }
+    assert_public_encumbrance_census("INV-052 source-lien partition after exits", &env)?;
+
+    let final_group = env.primary_market_state().1;
+    let final_local = source_lien_partition_local_totals(&env, active_targets, SOURCE_DOMAIN)?;
+    let final_source = source_credit_amounts(final_group.source_credit[SOURCE_DOMAIN]);
+    let final_bucket = final_group.source_backing_buckets[SOURCE_DOMAIN];
+    let target_payout = active_targets.iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(u128::from(
+            env.token_amount(env.actors[*actor].destination_token),
+        ))
+        .ok_or_else(|| "source-lien partition payout sum overflow".to_string())
+    })?;
+    let c_tot_plus_insurance = final_group
+        .c_tot
+        .checked_add(final_group.insurance)
+        .ok_or_else(|| "source-lien partition stock overflow".to_string())?;
+    if final_group.assets[0].oi_eff_long_q != 0
+        || final_group.assets[0].oi_eff_short_q != 0
+        || target_payout == 0
+        || final_group.vault != u128::from(env.token_amount(env.vault))
+        || env.token_supply_observed() != supply_before
+        || max_compute_units >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "source-lien partition escaped exit/OI/custody/CU frame: group={final_group:?}, payout={target_payout}, CU={max_compute_units}"
+        ));
+    }
+    let trace = env.finish_public_trace();
+    if trace.out_of_band_economic_mutations != 0
+        || trace.steps.iter().any(|step| {
+            !step.succeeded
+                && (step.rejected_exact_writable_rollback != Some(true)
+                    || step.rejected_no_program_lamport_delta != Some(true)
+                    || step.token_deltas.iter().any(|(_, delta)| *delta != 0))
+        })
+    {
+        return Err(format!(
+            "source-lien partition trace escaped public exact-rollback semantics: {trace:?}"
+        ));
+    }
+
+    Ok(SourceLienPartitionOutcome {
+        economics: SourceLienPartitionEconomics {
+            peak_local,
+            peak_source,
+            peak_bucket,
+            final_local,
+            final_source,
+            final_bucket,
+            target_payout,
+            target_value_before_withdrawal,
+            oi_q: [
+                final_group.assets[0].oi_eff_long_q,
+                final_group.assets[0].oi_eff_short_q,
+            ],
+            c_tot_plus_insurance,
+            vault: final_group.vault,
+            spl_vault: u128::from(env.token_amount(env.vault)),
+            token_supply: env.token_supply_observed(),
+        },
+        max_compute_units,
+        public_steps: trace.steps.len(),
+    })
+}
+
 fn run_target_history(
     seed: [u8; 32],
     episodes: &[TargetEpisode],
@@ -2540,6 +2949,133 @@ fn v16_program_public_liquidation_split_and_order_are_conservative() {
             );
         } else {
             canonical_split = Some(split.economics);
+        }
+    }
+}
+
+#[test]
+fn v16_program_public_source_lien_expiry_is_split_merge_invariant() {
+    const ROUTES: [TradeRoute; 4] = [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ];
+    let mut canonical_aggregate = None;
+    let mut canonical_split = None;
+
+    for landing_slot in [3u64, 4] {
+        for route in ROUTES {
+            let aggregate = run_source_lien_partition(false, false, route, landing_slot)
+                .unwrap_or_else(|error| {
+                    panic!("aggregate source lien via {route:?} at {landing_slot}: {error}")
+                });
+            let split = run_source_lien_partition(true, false, route, landing_slot).unwrap_or_else(
+                |error| panic!("split source lien via {route:?} at {landing_slot}: {error}"),
+            );
+            let reversed = run_source_lien_partition(true, true, route, landing_slot)
+                .unwrap_or_else(|error| {
+                    panic!("reversed split source lien via {route:?} at {landing_slot}: {error}")
+                });
+
+            assert_eq!(
+                split.economics, reversed.economics,
+                "reversing expired source-lien owner exits changed economics via {route:?} at {landing_slot}"
+            );
+            assert!(
+                split.economics.peak_local[5] >= aggregate.economics.peak_local[5],
+                "partitioning lowered account-attributed source backing via {route:?} at {landing_slot}: aggregate={}, split={}",
+                aggregate.economics.peak_local[5],
+                split.economics.peak_local[5]
+            );
+            assert!(
+                split.economics.peak_local[5] - aggregate.economics.peak_local[5]
+                    <= BOUND_SCALE,
+                "partitioning added more than one conservative rounding atom via {route:?} at {landing_slot}"
+            );
+            assert_eq!(
+                split.economics.peak_local[5], split.economics.peak_source[5],
+                "split account/source live-lien attribution diverged via {route:?} at {landing_slot}"
+            );
+            assert_eq!(
+                split.economics.peak_local[5],
+                split.economics.peak_bucket.valid_liened_backing_num,
+                "split account/bucket live-lien attribution diverged via {route:?} at {landing_slot}"
+            );
+            assert_eq!(split.economics.final_local[8], 0);
+            assert_eq!(
+                split.economics.final_local[5],
+                split.economics.final_source[6],
+                "split account/source impaired-lien provenance diverged via {route:?} at {landing_slot}"
+            );
+            assert_eq!(
+                split.economics.final_local[5],
+                split.economics.final_bucket.impaired_liened_backing_num,
+                "split account/bucket impaired-lien provenance diverged via {route:?} at {landing_slot}"
+            );
+            assert!(
+                split.economics.final_source[6] >= aggregate.economics.final_source[6],
+                "partitioning lowered impaired source backing via {route:?} at {landing_slot}"
+            );
+            assert!(
+                split.economics.final_source[6] - aggregate.economics.final_source[6]
+                    <= BOUND_SCALE,
+                "partitioning added more than one impaired rounding atom via {route:?} at {landing_slot}"
+            );
+            assert_eq!(
+                (
+                    aggregate.economics.target_payout,
+                    aggregate.economics.target_value_before_withdrawal,
+                    aggregate.economics.oi_q,
+                    aggregate.economics.c_tot_plus_insurance,
+                    aggregate.economics.vault,
+                    aggregate.economics.spl_vault,
+                    aggregate.economics.token_supply,
+                ),
+                (
+                    split.economics.target_payout,
+                    split.economics.target_value_before_withdrawal,
+                    split.economics.oi_q,
+                    split.economics.c_tot_plus_insurance,
+                    split.economics.vault,
+                    split.economics.spl_vault,
+                    split.economics.token_supply,
+                ),
+                "partitioning changed user value, OI, stock, or custody via {route:?} at {landing_slot}"
+            );
+            assert!(aggregate.economics.peak_local[2] > 0);
+            assert!(aggregate.economics.peak_local[5] > 0);
+            assert_eq!(
+                aggregate.economics.peak_local[5],
+                aggregate.economics.peak_source[5]
+            );
+            assert_eq!(
+                aggregate.economics.peak_local[5],
+                aggregate.economics.peak_bucket.valid_liened_backing_num
+            );
+            assert_eq!(aggregate.economics.oi_q, [0, 0]);
+            assert_eq!(aggregate.economics.vault, aggregate.economics.spl_vault);
+            assert!(aggregate.max_compute_units < TX_CU_LIMIT);
+            assert!(split.max_compute_units < TX_CU_LIMIT);
+            assert!(reversed.max_compute_units < TX_CU_LIMIT);
+            assert!(aggregate.public_steps > 0 && split.public_steps > aggregate.public_steps);
+
+            if let Some(canonical) = canonical_aggregate.as_ref() {
+                assert_eq!(
+                    &aggregate.economics, canonical,
+                    "aggregate source-lien economics changed by route/expiry landing {route:?}/{landing_slot}"
+                );
+            } else {
+                canonical_aggregate = Some(aggregate.economics);
+            }
+            if let Some(canonical) = canonical_split.as_ref() {
+                assert_eq!(
+                    &split.economics, canonical,
+                    "split source-lien economics changed by route/expiry landing {route:?}/{landing_slot}"
+                );
+            } else {
+                canonical_split = Some(split.economics);
+            }
         }
     }
 }
