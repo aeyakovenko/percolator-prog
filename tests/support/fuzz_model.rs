@@ -7076,6 +7076,7 @@ pub struct CloseResetOverlapEvidence {
     pub simultaneous_class_worlds: u64,
     pub close_priority_worlds: u64,
     pub reset_completion_worlds: u64,
+    pub recovery_worlds: u64,
     pub owner_exit_worlds: u64,
     pub total_owner_payout: u128,
     pub coverage: Coverage,
@@ -8865,6 +8866,7 @@ fn run_close_reset_overlap_world(
     close_winner_side: SideV16,
     reset_reducer_long: bool,
     order: CloseResetLandingOrder,
+    enter_recovery: bool,
     seed_byte: u8,
 ) -> Result<CloseResetOverlapWorld, String> {
     const CLOSE_WINNER: usize = 0;
@@ -8876,7 +8878,7 @@ fn run_close_reset_overlap_world(
     const RESET_ASSET: usize = 1;
 
     let case = format!(
-        "INV-071/074/082 close-reset overlap {route:?}/{close_winner_side:?}/reset_long={reset_reducer_long}/{order:?}"
+        "INV-071/074/082 close-reset overlap {route:?}/{close_winner_side:?}/reset_long={reset_reducer_long}/{order:?}/recovery={enter_recovery}"
     );
     let config = MarketConfig {
         max_price_move_bps_per_slot: 500,
@@ -8899,6 +8901,12 @@ fn run_close_reset_overlap_world(
                 .token_amount(runner.env.actors[actor].destination_token),
         )
     });
+    if enter_recovery {
+        runner.run_safety_prefix(&[Action::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: 1,
+        }])?;
+    }
     let reset_q = if reset_reducer_long {
         POS_SCALE as i128
     } else {
@@ -8919,6 +8927,12 @@ fn run_close_reset_overlap_world(
     match order {
         CloseResetLandingOrder::ResetThenClose => {
             enter_public_reset_pending(&mut runner, RESET_REDUCER, RESET_ASSET, &case)?;
+            if enter_recovery {
+                runner.run_safety_prefix(&[Action::ShutdownAsset {
+                    asset: RESET_ASSET as u8,
+                    dt: 1,
+                }])?;
+            }
             create_public_cancellable_close_via_route_and_side(
                 &mut runner,
                 CLOSE_WINNER as u8,
@@ -8940,6 +8954,12 @@ fn run_close_reset_overlap_world(
                 close_winner_side,
             )?;
             enter_public_reset_pending(&mut runner, RESET_REDUCER, RESET_ASSET, &case)?;
+            if enter_recovery {
+                runner.run_safety_prefix(&[Action::ShutdownAsset {
+                    asset: RESET_ASSET as u8,
+                    dt: 1,
+                }])?;
+            }
         }
     }
 
@@ -8962,6 +8982,7 @@ fn run_close_reset_overlap_world(
         || close_before.canceled
         || close_before.residual_remaining == 0
         || reset_mode_before != SideModeV16::ResetPending
+        || (reset_asset_before.lifecycle == AssetLifecycleV16::Recovery) != enter_recovery
         || close_rank_before.close_work == 0
         || !reset_rank_before.account_actionable()
         || (reset_rank_before.market_locks == 0 && reset_rank_before.stale_legs == 0)
@@ -9006,6 +9027,7 @@ fn run_close_reset_overlap_world(
     };
     if (close_after.active && !close_after.finalized && close_after.residual_remaining != 0)
         || reset_mode_after == SideModeV16::ResetPending
+        || (reset_asset_after.lifecycle == AssetLifecycleV16::Recovery) != enter_recovery
         || runner.coverage.crank_rank_component_reduced[3] == 0
         || runner.coverage.crank_rank_component_reduced[2] == 0
     {
@@ -9074,6 +9096,7 @@ fn run_close_reset_overlap_world(
             simultaneous_class_worlds: 1,
             close_priority_worlds: 1,
             reset_completion_worlds: 1,
+            recovery_worlds: u64::from(enter_recovery),
             owner_exit_worlds: 1,
             total_owner_payout,
             coverage: runner.coverage,
@@ -9081,7 +9104,9 @@ fn run_close_reset_overlap_world(
     })
 }
 
-pub fn run_close_reset_overlap_probe() -> Result<CloseResetOverlapEvidence, String> {
+fn run_close_reset_overlap_probe_for_lifecycle(
+    enter_recovery: bool,
+) -> Result<CloseResetOverlapEvidence, String> {
     let mut aggregate: Option<CloseResetOverlapEvidence> = None;
     for (route_index, route) in [
         TradeRoute::NoCpi,
@@ -9105,6 +9130,7 @@ pub fn run_close_reset_overlap_probe() -> Result<CloseResetOverlapEvidence, Stri
                     close_winner_side,
                     reset_reducer_long,
                     CloseResetLandingOrder::ResetThenClose,
+                    enter_recovery,
                     seed_byte,
                 )?;
                 let close_first = run_close_reset_overlap_world(
@@ -9112,6 +9138,7 @@ pub fn run_close_reset_overlap_probe() -> Result<CloseResetOverlapEvidence, Stri
                     close_winner_side,
                     reset_reducer_long,
                     CloseResetLandingOrder::CloseThenReset,
+                    enter_recovery,
                     seed_byte,
                 )?;
                 let reset_first_economics = (
@@ -9164,6 +9191,7 @@ pub fn run_close_reset_overlap_probe() -> Result<CloseResetOverlapEvidence, Stri
                         total.simultaneous_class_worlds += evidence.simultaneous_class_worlds;
                         total.close_priority_worlds += evidence.close_priority_worlds;
                         total.reset_completion_worlds += evidence.reset_completion_worlds;
+                        total.recovery_worlds += evidence.recovery_worlds;
                         total.owner_exit_worlds += evidence.owner_exit_worlds;
                         total.total_owner_payout = total
                             .total_owner_payout
@@ -9178,6 +9206,14 @@ pub fn run_close_reset_overlap_probe() -> Result<CloseResetOverlapEvidence, Stri
         }
     }
     aggregate.ok_or_else(|| "INV-071/074/082 close-reset matrix produced no worlds".into())
+}
+
+pub fn run_close_reset_overlap_probe() -> Result<CloseResetOverlapEvidence, String> {
+    run_close_reset_overlap_probe_for_lifecycle(false)
+}
+
+pub fn run_close_recovery_overlap_probe() -> Result<CloseResetOverlapEvidence, String> {
+    run_close_reset_overlap_probe_for_lifecycle(true)
 }
 
 fn cure_primary_close_with_bounded_deposit(

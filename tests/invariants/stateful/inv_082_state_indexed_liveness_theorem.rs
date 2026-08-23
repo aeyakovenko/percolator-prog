@@ -46,11 +46,17 @@
 //! encumbrance, custody, supply, and CU checks. This closes one concrete
 //! close-plus-lifecycle composition cell without claiming exhaustive
 //! reachability over the remaining lifecycle graph.
+//!
+//! The adjacent Recovery matrix uses the same public worlds but shuts down the
+//! reset asset before or after close creation. This preserves a prior-epoch
+//! reset prerequisite inside Recovery while the independent close remains
+//! active. It therefore checks the Recovery classifier/dispatcher boundary,
+//! not merely another ResetPending quantity.
 
 use super::*;
 use crate::support::fuzz_model::{
-    run_bounded_public_liveness_graph, run_close_reset_overlap_probe,
-    run_multileg_loss_stale_progress_regression,
+    run_bounded_public_liveness_graph, run_close_recovery_overlap_probe,
+    run_close_reset_overlap_probe, run_multileg_loss_stale_progress_regression,
 };
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{AssetLifecycleV16, POS_SCALE};
@@ -147,6 +153,7 @@ fn v16_program_close_and_reset_overlap_has_bounded_terminal_schedule() {
     assert_eq!(evidence.simultaneous_class_worlds, 32, "{evidence:?}");
     assert_eq!(evidence.close_priority_worlds, 32, "{evidence:?}");
     assert_eq!(evidence.reset_completion_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.recovery_worlds, 0, "{evidence:?}");
     assert_eq!(evidence.owner_exit_worlds, 32, "{evidence:?}");
     assert_ne!(evidence.total_owner_payout, 0, "{evidence:?}");
     assert_ne!(
@@ -156,6 +163,36 @@ fn v16_program_close_and_reset_overlap_has_bounded_terminal_schedule() {
     assert_ne!(
         evidence.coverage.crank_rank_component_reduced[2], 0,
         "ResetPending work must have a strict public reducing edge: {evidence:?}"
+    );
+}
+
+#[test]
+fn v16_program_close_and_recovery_reset_overlap_has_bounded_terminal_schedule() {
+    let evidence = run_close_recovery_overlap_probe()
+        .expect("INV-071/074/082 close-plus-Recovery/reset public liveness matrix");
+
+    assert_eq!(evidence.world_count, 32, "{evidence:?}");
+    assert_eq!(evidence.route_worlds, [8; 4], "{evidence:?}");
+    assert_eq!(evidence.close_orientation_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.reset_orientation_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.landing_order_worlds, [16; 2], "{evidence:?}");
+    assert_eq!(evidence.simultaneous_class_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.close_priority_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.reset_completion_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.recovery_worlds, 32, "{evidence:?}");
+    assert_eq!(evidence.owner_exit_worlds, 32, "{evidence:?}");
+    assert_ne!(evidence.total_owner_payout, 0, "{evidence:?}");
+    assert_ne!(
+        evidence.coverage.crank_rank_component_reduced[3], 0,
+        "close work must remain higher-priority in Recovery: {evidence:?}"
+    );
+    assert_ne!(
+        evidence.coverage.crank_rank_component_reduced[2], 0,
+        "Recovery reset work must have a strict public reducing edge: {evidence:?}"
+    );
+    assert_eq!(
+        evidence.coverage.lifecycle_updates, 32,
+        "every world must publicly enter Recovery: {evidence:?}"
     );
 }
 
