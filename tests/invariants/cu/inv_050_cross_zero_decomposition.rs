@@ -15,9 +15,11 @@
 //!
 //! Guarantee boundary: the matrix covers all four trade routes and both OI preflight branches for
 //! one nonzero partial-ADL shape, scalar quantity boundaries, and all four routes in the two
-//! publicly reachable exit-only lifecycle modes. Simultaneous/cross-asset pending-obligation
-//! epochs and lifecycle modes that cannot retain live exposure remain separate coverage
-//! obligations.
+//! publicly reachable exit-only lifecycle modes. A second matrix composes opposite-side active
+//! close barriers on two assets at once, then covers both assets through every route while framing
+//! both close ledgers, retaining both account-local obligation classes, and restoring withdrawal.
+//! Interior full-domain generation and lifecycle modes that cannot retain live exposure remain
+//! separate coverage obligations.
 
 use super::*;
 
@@ -54,17 +56,51 @@ fn try_adl_cross_zero_route(
     price: u64,
     matcher: Option<(Pubkey, Pubkey, Pubkey)>,
 ) -> Result<u64, String> {
+    try_adl_cross_zero_route_on_asset(
+        env,
+        route,
+        0,
+        taker_owner,
+        taker,
+        lp_owner,
+        lp,
+        size_q,
+        price,
+        matcher,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_adl_cross_zero_route_on_asset(
+    env: &mut V16CuEnv,
+    route: AdlCrossZeroRoute,
+    asset_index: u16,
+    taker_owner: &Keypair,
+    taker: Pubkey,
+    lp_owner: &Keypair,
+    lp: Pubkey,
+    size_q: i128,
+    price: u64,
+    matcher: Option<(Pubkey, Pubkey, Pubkey)>,
+) -> Result<u64, String> {
     match route {
-        AdlCrossZeroRoute::TradeNoCpi => {
-            env.try_trade_asset_with_cu(0, taker_owner, taker, lp_owner, lp, size_q, price, 0)
-        }
+        AdlCrossZeroRoute::TradeNoCpi => env.try_trade_asset_with_cu(
+            asset_index,
+            taker_owner,
+            taker,
+            lp_owner,
+            lp,
+            size_q,
+            price,
+            0,
+        ),
         AdlCrossZeroRoute::BatchTradeNoCpi => env.send(
             env.batch_trade_no_cpi_ix(
                 taker,
                 lp,
                 vec![BatchTradeLeg {
-                    asset_index: 0,
-                    market_id: env.asset_market_id(0),
+                    asset_index,
+                    market_id: env.asset_market_id(asset_index),
                     size_q,
                     exec_price: price,
                     fee_bps: 0,
@@ -89,7 +125,7 @@ fn try_adl_cross_zero_route(
                 matcher_program,
                 matcher_context,
                 matcher_delegate,
-                0,
+                asset_index,
                 size_q,
                 0,
             )
@@ -101,8 +137,8 @@ fn try_adl_cross_zero_route(
                     taker,
                     lp,
                     vec![BatchTradeCpiLeg {
-                        asset_index: 0,
-                        market_id: env.asset_market_id(0),
+                        asset_index,
+                        market_id: env.asset_market_id(asset_index),
                         size_q,
                         fee_bps: 0,
                         limit_price: 0,
@@ -382,6 +418,464 @@ fn v16_program_post_liquidation_cross_zero_rejects_basis_reissue_on_all_routes()
     for route in AdlCrossZeroRoute::ALL {
         run_partial_liquidation_cross_zero_world(route, false);
         run_partial_liquidation_cross_zero_world(route, true);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_public_active_close_on_asset(
+    env: &mut V16CuEnv,
+    asset_index: u16,
+    winner_owner: &Keypair,
+    winner: Pubkey,
+    loser_owner: &Keypair,
+    loser: Pubkey,
+    keeper: Pubkey,
+    winner_side: SideV16,
+) -> CloseProgressLedgerV16 {
+    const MOVE_STEPS: usize = 20;
+
+    let catchup_slot = env.svm.get_sysvar::<Clock>().slot;
+    let catchup_cu = env.crank_steps_after_market_catchup(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: catchup_slot,
+            observations: crank_observations(asset_index),
+        },
+        1,
+    );
+    if catchup_cu != 0 {
+        assert_cu_within(
+            &format!("asset {asset_index} pre-close market catch-up"),
+            catchup_cu,
+            CRANK_CU_LIMIT,
+        );
+    }
+    assert_eq!(
+        env.market_state().1.assets[asset_index as usize].slot_last,
+        catchup_slot,
+        "the close fixture starts from a current asset"
+    );
+
+    for _ in 0..MOVE_STEPS {
+        let current_slot = env.svm.get_sysvar::<Clock>().slot;
+        let next_slot = current_slot.checked_add(1).expect("fixture slot overflow");
+        let market_data = env.svm.get_account(&env.market).unwrap().data;
+        let profile = state::read_asset_oracle_profile(&market_data, asset_index as usize).unwrap();
+        let next_mark = match winner_side {
+            SideV16::Long => {
+                profile
+                    .mark_ewma_e6
+                    .checked_mul(10_500)
+                    .expect("fixture mark overflow")
+                    / 10_000
+            }
+            SideV16::Short => (profile.mark_ewma_e6.saturating_mul(9_500) / 10_000).max(1),
+        };
+        env.svm.warp_to_slot(next_slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, next_slot, next_mark);
+        let crank_cu = env
+            .send_crank_if_actionable(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: next_slot,
+                    observations: crank_observations(asset_index),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(keeper, false),
+                ],
+                &[],
+            )
+            .expect("each authenticated mark step must produce bounded market progress");
+        assert_cu_within(
+            &format!("asset {asset_index} adverse mark crank"),
+            crank_cu,
+            CRANK_CU_LIMIT,
+        );
+    }
+
+    let winner_leg = active_leg_for_asset(&env.portfolio_state(winner), asset_index as usize);
+    assert_eq!(winner_leg.side, winner_side);
+    let close_q = winner_leg
+        .basis_pos_q
+        .checked_neg()
+        .expect("fixture reduction negation overflow");
+    let exec_price = env.market_state().1.assets[asset_index as usize].effective_price;
+    let reduction_cu = env.trade_asset_with_cu(
+        asset_index,
+        winner_owner,
+        winner,
+        loser_owner,
+        loser,
+        close_q,
+        exec_price,
+        0,
+    );
+    assert_cu_within(
+        &format!("asset {asset_index} bankruptcy close creation"),
+        reduction_cu,
+        TRADE_CU_LIMIT,
+    );
+
+    let close = close_progress(&env.portfolio_state(loser));
+    let retained = active_leg_for_asset(&env.portfolio_state(winner), asset_index as usize);
+    assert!(close.active && !close.canceled && !close.finalized);
+    assert_eq!(close.asset_index, u32::from(asset_index));
+    assert_eq!(close.domain_side, winner_side);
+    assert!(close.residual_remaining > 0);
+    assert_eq!(close.residual_remaining, close.gross_loss_at_close_start);
+    assert_eq!(retained.basis_pos_q, 0);
+    assert!(retained.loss_weight > 0);
+    close
+}
+
+fn cure_public_close_with_bounded_deposit(env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey) {
+    const MAX_CURE_SOURCE: u64 = 100_000_000_000;
+
+    let source = env.token_account(owner.pubkey(), MAX_CURE_SOURCE);
+    let mut amount = 1_000_000u128;
+    loop {
+        let portfolio_id = env.portfolio_id(portfolio);
+        let position_epoch = env.portfolio_position_epoch(portfolio);
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::CureAndCancelClose {
+                portfolio_id,
+                position_epoch,
+                optional_deposit: amount,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        );
+        match result {
+            Ok(cu) => {
+                assert_cu_within("simultaneous barrier cure", cu, CUSTODY_CU_LIMIT);
+                assert!(close_progress(&env.portfolio_state(portfolio)).canceled);
+                return;
+            }
+            Err(error)
+                if error.contains("Custom(14)") || error.contains("custom program error: 0xe") =>
+            {
+                amount = amount
+                    .checked_mul(2)
+                    .filter(|next| *next <= u128::from(MAX_CURE_SOURCE))
+                    .unwrap_or_else(|| {
+                        panic!("no bounded public cure amount; last error: {error}")
+                    });
+            }
+            Err(error) => panic!("public simultaneous-barrier cure failed: {error}"),
+        }
+    }
+}
+
+fn release_zero_basis_obligation(env: &mut V16CuEnv, portfolio: Pubkey, asset_index: u16) {
+    const RELEASE_BOUND: usize = 8;
+
+    let next_slot = env.market_state().1.assets[asset_index as usize]
+        .slot_last
+        .checked_add(1)
+        .expect("release slot overflow");
+    if env.svm.get_sysvar::<Clock>().slot < next_slot {
+        env.svm.warp_to_slot(next_slot);
+    }
+    for _ in 0..RELEASE_BOUND {
+        let portfolio_state = env.portfolio_state(portfolio);
+        let owns_obligation = portfolio_state
+            .legs
+            .iter()
+            .filter_map(|leg| leg.try_to_runtime().ok())
+            .any(|leg| {
+                leg.active
+                    && leg.asset_index == u32::from(asset_index)
+                    && leg.basis_pos_q == 0
+                    && leg.loss_weight != 0
+            });
+        if !owns_obligation {
+            break;
+        }
+        let current_slot = env.svm.get_sysvar::<Clock>().slot;
+        let cu = env
+            .send_crank_if_actionable(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: current_slot,
+                    observations: crank_observations(asset_index),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            )
+            .expect("the real obligation owner must expose bounded progress");
+        assert_cu_within(
+            "simultaneous barrier obligation release",
+            cu,
+            CRANK_CU_LIMIT,
+        );
+    }
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(portfolio),
+        asset_index as usize
+    ));
+}
+
+fn run_simultaneous_cross_asset_barrier_world(route: AdlCrossZeroRoute) {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const CLOSE_Q: i128 = 3 * POS_SCALE as i128 / 4;
+    const AUXILIARY_Q: i128 = POS_SCALE as i128 / 4;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: INITIAL_PRICE,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_bankrupt_close_lifetime_slots: 1_000,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+
+    let close0_winner_owner = Keypair::new();
+    let close0_loser_owner = Keypair::new();
+    let close1_winner_owner = Keypair::new();
+    let close1_loser_owner = Keypair::new();
+    let auxiliary_long_owner = Keypair::new();
+    let auxiliary_short_owner = Keypair::new();
+    let keeper_owner = Keypair::new();
+    let close0_winner = env.create_portfolio(&close0_winner_owner);
+    let close0_loser = env.create_portfolio(&close0_loser_owner);
+    let close1_winner = env.create_portfolio(&close1_winner_owner);
+    let close1_loser = env.create_portfolio(&close1_loser_owner);
+    let auxiliary_long = env.create_portfolio(&auxiliary_long_owner);
+    let auxiliary_short = env.create_portfolio(&auxiliary_short_owner);
+    let keeper = env.create_portfolio(&keeper_owner);
+    for (owner, portfolio, amount) in [
+        (&close0_winner_owner, close0_winner, 1_000_000),
+        (&close0_loser_owner, close0_loser, 161_600),
+        (&close1_winner_owner, close1_winner, 1_000_000),
+        (&close1_loser_owner, close1_loser, 161_600),
+        (&auxiliary_long_owner, auxiliary_long, 10_000_000),
+        (&auxiliary_short_owner, auxiliary_short, 10_000_000),
+        (&keeper_owner, keeper, 1),
+    ] {
+        env.deposit(owner, portfolio, amount);
+    }
+
+    env.trade_asset_with_cu(
+        0,
+        &close0_winner_owner,
+        close0_winner,
+        &close0_loser_owner,
+        close0_loser,
+        CLOSE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &close1_winner_owner,
+        close1_winner,
+        &close1_loser_owner,
+        close1_loser,
+        -CLOSE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    for asset_index in [0, 1] {
+        env.trade_asset_with_cu(
+            asset_index,
+            &auxiliary_long_owner,
+            auxiliary_long,
+            &auxiliary_short_owner,
+            auxiliary_short,
+            AUXILIARY_Q,
+            INITIAL_PRICE,
+            0,
+        );
+    }
+
+    let close0 = create_public_active_close_on_asset(
+        &mut env,
+        0,
+        &close0_winner_owner,
+        close0_winner,
+        &close0_loser_owner,
+        close0_loser,
+        keeper,
+        SideV16::Long,
+    );
+    let close1 = create_public_active_close_on_asset(
+        &mut env,
+        1,
+        &close1_winner_owner,
+        close1_winner,
+        &close1_loser_owner,
+        close1_loser,
+        keeper,
+        SideV16::Short,
+    );
+    assert_eq!(close_progress(&env.portfolio_state(close0_loser)), close0);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+    for asset_index in [0usize, 1] {
+        let asset = env.market_state().1.assets[asset_index];
+        assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+        assert!(
+            asset.pending_obligation_count_long > 0 || asset.pending_obligation_count_short > 0
+        );
+    }
+
+    let current_slot = env.svm.get_sysvar::<Clock>().slot;
+    let catchup_cu = env.crank_steps_after_market_catchup(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: current_slot,
+            observations: crank_observations(0),
+        },
+        1,
+    );
+    assert_cu_within(
+        "cross-asset barrier market catch-up",
+        catchup_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(env.market_state().1.assets[0].slot_last, current_slot);
+    assert_eq!(close_progress(&env.portfolio_state(close0_loser)), close0);
+    assert_eq!(close_progress(&env.portfolio_state(close1_loser)), close1);
+
+    let matcher = route.uses_cpi().then(|| {
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let (context, delegate, _) =
+            env.init_auth_matcher_context(matcher_program, &auxiliary_short_owner, auxiliary_short);
+        (matcher_program, context, delegate)
+    });
+
+    for asset_index in [0u16, 1] {
+        let price = env.market_state().1.assets[asset_index as usize].effective_price;
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let auxiliary_long_before = env.svm.get_account(&auxiliary_long).unwrap();
+        let auxiliary_short_before = env.svm.get_account(&auxiliary_short).unwrap();
+        let matcher_before = matcher.map(|(_, context, _)| env.svm.get_account(&context).unwrap());
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm.expire_blockhash();
+        let error = try_adl_cross_zero_route_on_asset(
+            &mut env,
+            route,
+            asset_index,
+            &auxiliary_long_owner,
+            auxiliary_long,
+            &auxiliary_short_owner,
+            auxiliary_short,
+            -(AUXILIARY_Q + 1),
+            price,
+            matcher,
+        )
+        .expect_err("a simultaneous domain barrier must reject cross-zero basis reissue");
+        assert!(
+            error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+            "{route:?} asset {asset_index} must reach EngineLockActive: {error}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(
+            env.svm.get_account(&auxiliary_long).unwrap(),
+            auxiliary_long_before
+        );
+        assert_eq!(
+            env.svm.get_account(&auxiliary_short).unwrap(),
+            auxiliary_short_before
+        );
+        if let (Some((_, context, _)), Some(before)) = (matcher, matcher_before) {
+            assert_eq!(env.svm.get_account(&context).unwrap(), before);
+        }
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        assert_eq!(close_progress(&env.portfolio_state(close0_loser)), close0);
+        assert_eq!(close_progress(&env.portfolio_state(close1_loser)), close1);
+
+        env.svm.expire_blockhash();
+        let exit_cu = try_adl_cross_zero_route_on_asset(
+            &mut env,
+            route,
+            asset_index,
+            &auxiliary_long_owner,
+            auxiliary_long,
+            &auxiliary_short_owner,
+            auxiliary_short,
+            -AUXILIARY_Q,
+            price,
+            matcher,
+        )
+        .expect("the exact same-side pair exit must remain live under simultaneous barriers");
+        assert_cu_within(
+            &format!("{route:?} simultaneous barrier asset {asset_index} exit"),
+            exit_cu,
+            MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+        );
+        let (barrier_account, detached_account, barrier_side) = if asset_index == 0 {
+            (auxiliary_long, auxiliary_short, SideV16::Long)
+        } else {
+            (auxiliary_short, auxiliary_long, SideV16::Short)
+        };
+        let retained =
+            active_leg_for_asset(&env.portfolio_state(barrier_account), asset_index as usize);
+        assert_eq!(retained.side, barrier_side);
+        assert_eq!(retained.basis_pos_q, 0);
+        assert!(retained.loss_weight > 0);
+        assert!(!has_active_leg_for_asset(
+            &env.portfolio_state(detached_account),
+            asset_index as usize
+        ));
+        let group = env.market_state().1;
+        assert_eq!(group.assets[asset_index as usize].oi_eff_long_q, 0);
+        assert_eq!(group.assets[asset_index as usize].oi_eff_short_q, 0);
+        assert_eq!(close_progress(&env.portfolio_state(close0_loser)), close0);
+        assert_eq!(close_progress(&env.portfolio_state(close1_loser)), close1);
+    }
+
+    cure_public_close_with_bounded_deposit(&mut env, &close0_loser_owner, close0_loser);
+    cure_public_close_with_bounded_deposit(&mut env, &close1_loser_owner, close1_loser);
+    release_zero_basis_obligation(&mut env, close0_winner, 0);
+    release_zero_basis_obligation(&mut env, auxiliary_long, 0);
+    release_zero_basis_obligation(&mut env, close1_winner, 1);
+    release_zero_basis_obligation(&mut env, auxiliary_short, 1);
+    let group = env.market_state().1;
+    for asset in &group.assets[..2] {
+        assert_eq!(asset.pending_obligation_count_long, 0);
+        assert_eq!(asset.pending_obligation_count_short, 0);
+    }
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+    assert!(group.vault >= group.c_tot + group.insurance);
+    for (owner, portfolio) in [
+        (&auxiliary_long_owner, auxiliary_long),
+        (&auxiliary_short_owner, auxiliary_short),
+    ] {
+        env.svm.expire_blockhash();
+        let (destination, withdraw_cu) = env.withdraw_with_cu(owner, portfolio, 1);
+        assert_cu_within(
+            "post-barrier owner withdrawal",
+            withdraw_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(env.token_amount(destination), 1);
+    }
+}
+
+#[test]
+fn v16_program_simultaneous_cross_asset_barriers_preserve_all_route_exits() {
+    for route in AdlCrossZeroRoute::ALL {
+        run_simultaneous_cross_asset_barrier_world(route);
     }
 }
 
