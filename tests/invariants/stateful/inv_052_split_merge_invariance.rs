@@ -68,14 +68,16 @@
 //! increase current coalition value; the extra open quantity permitted by one additional
 //! maintenance floor is explicitly bounded from the configured health slope.
 //! `v16_program_public_source_lien_expiry_is_split_merge_invariant` constructs the same
-//! source-backed risk increase as one portfolio or two proportional portfolios through all four
-//! public trade routes, then normalizes the live lien at exact and late authenticated expiry and
-//! exits both owners in both orders. Account, source, and bucket ledgers must attribute the same
-//! backing; splitting may add at most one conservative rounding atom but may never reserve less.
-//! User payout, OI, stock, custody, token supply, and public exit remain exact. This finding-blind
-//! probe failed on engine `3b76b794`: the aggregate route reserved 2,623 effective quote atoms,
-//! while the split route reserved 2,622. Engine `ba7a84b7` ceils the canonical margin requirement
-//! and routes liquidation planning through that same helper.
+//! source-backed risk increase as one portfolio, two equal portfolios with distinct counterparties,
+//! or three asymmetric portfolios sharing one counterparty through all four public trade routes.
+//! The three-way shape splits exposure 333/333/334 and the lien-creating increase 16/17/17. The
+//! test normalizes the live lien at exact and late authenticated expiry and exits every owner in
+//! both orders. Account, source, and bucket ledgers must attribute the same backing; an N-way split
+//! may add at most N-1 conservative rounding atoms but may never reserve less. User payout, OI,
+//! stock, custody, token supply, and public exit remain exact. This finding-blind probe originally
+//! failed on engine `3b76b794`: the aggregate route reserved 2,623 effective quote atoms, while the
+//! two-way route reserved 2,622. Engine `ba7a84b7` ceils the canonical margin requirement and routes
+//! liquidation planning through that same helper.
 //!
 //! Guarantee boundary: target publication order and target lifetime are identical across the
 //! compared executions. Reordering authenticated observations is a different economic history,
@@ -283,6 +285,31 @@ struct SourceLienPartitionOutcome {
     economics: SourceLienPartitionEconomics,
     max_compute_units: u64,
     public_steps: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceLienPartition {
+    Aggregate,
+    EqualTwo,
+    AsymmetricThree,
+}
+
+impl SourceLienPartition {
+    fn parts(self) -> u128 {
+        match self {
+            Self::Aggregate => 1,
+            Self::EqualTwo => 2,
+            Self::AsymmetricThree => 3,
+        }
+    }
+
+    fn seed_discriminator(self) -> u8 {
+        match self {
+            Self::Aggregate => 0,
+            Self::EqualTwo => 1,
+            Self::AsymmetricThree => 2,
+        }
+    }
 }
 
 fn normalize_funding_counter_pair(
@@ -2253,7 +2280,7 @@ fn crank_source_lien_partition_to_fixed_point(
 }
 
 fn run_source_lien_partition(
-    split: bool,
+    partition: SourceLienPartition,
     reverse_exit_order: bool,
     route: TradeRoute,
     landing_slot: u64,
@@ -2264,8 +2291,23 @@ fn run_source_lien_partition(
     const EXPIRY_SLOT: u64 = 3;
     const TOTAL_OPEN_Q: i128 = 1_000 * POS_SCALE as i128;
     const TOTAL_INCREASE_Q: i128 = 50 * POS_SCALE as i128;
-    const TARGETS: [usize; 2] = [0, 2];
-    const COUNTERPARTIES: [usize; 2] = [1, 3];
+    const AGGREGATE_TARGETS: [usize; 1] = [0];
+    const EQUAL_TWO_TARGETS: [usize; 2] = [0, 2];
+    const ASYMMETRIC_THREE_TARGETS: [usize; 3] = [0, 2, 3];
+    const AGGREGATE_COUNTERPARTIES: [usize; 1] = [1];
+    const EQUAL_TWO_COUNTERPARTIES: [usize; 2] = [1, 3];
+    const ASYMMETRIC_THREE_COUNTERPARTIES: [usize; 1] = [1];
+    const AGGREGATE_PAIRS: [(usize, usize, i128, i128); 1] =
+        [(0, 1, TOTAL_OPEN_Q, TOTAL_INCREASE_Q)];
+    const EQUAL_TWO_PAIRS: [(usize, usize, i128, i128); 2] = [
+        (0, 1, TOTAL_OPEN_Q / 2, TOTAL_INCREASE_Q / 2),
+        (2, 3, TOTAL_OPEN_Q / 2, TOTAL_INCREASE_Q / 2),
+    ];
+    const ASYMMETRIC_THREE_PAIRS: [(usize, usize, i128, i128); 3] = [
+        (0, 1, 333 * POS_SCALE as i128, 16 * POS_SCALE as i128),
+        (2, 1, 333 * POS_SCALE as i128, 17 * POS_SCALE as i128),
+        (3, 1, 334 * POS_SCALE as i128, 17 * POS_SCALE as i128),
+    ];
     const KEEPER: usize = 4;
 
     if landing_slot < EXPIRY_SLOT {
@@ -2280,14 +2322,14 @@ fn run_source_lien_partition(
         TradeRoute::BatchCpi => 3,
     };
     let mut seed = [0x52; 32];
-    seed[0] ^= u8::from(split);
+    seed[0] ^= partition.seed_discriminator();
     seed[1] ^= u8::from(reverse_exit_order) << 1;
     seed[2] ^= route_discriminator;
     seed[3] ^= landing_slot as u8;
-    let actor_deposits = if split {
-        [26_251, 500_000, 26_251, 500_000, 0]
-    } else {
-        [52_502, 1_000_000, 0, 0, 0]
+    let actor_deposits = match partition {
+        SourceLienPartition::Aggregate => [52_502, 1_000_000, 0, 0, 0],
+        SourceLienPartition::EqualTwo => [26_251, 500_000, 26_251, 500_000, 0],
+        SourceLienPartition::AsymmetricThree => [17_501, 1_000_000, 17_501, 17_500, 0],
     };
     let mut env = V16Svm::new(
         seed,
@@ -2306,34 +2348,20 @@ fn run_source_lien_partition(
         },
     );
     let supply_before = env.token_supply_observed();
-    let active_targets: &[usize] = if split { &TARGETS } else { &[TARGETS[0]] };
-    let active_counterparties: &[usize] = if split {
-        &COUNTERPARTIES
-    } else {
-        &[COUNTERPARTIES[0]]
+    let active_targets: &[usize] = match partition {
+        SourceLienPartition::Aggregate => &AGGREGATE_TARGETS,
+        SourceLienPartition::EqualTwo => &EQUAL_TWO_TARGETS,
+        SourceLienPartition::AsymmetricThree => &ASYMMETRIC_THREE_TARGETS,
     };
-    let pairs: &[(usize, usize, i128, i128)] = if split {
-        &[
-            (
-                TARGETS[0],
-                COUNTERPARTIES[0],
-                TOTAL_OPEN_Q / 2,
-                TOTAL_INCREASE_Q / 2,
-            ),
-            (
-                TARGETS[1],
-                COUNTERPARTIES[1],
-                TOTAL_OPEN_Q / 2,
-                TOTAL_INCREASE_Q / 2,
-            ),
-        ]
-    } else {
-        &[(
-            TARGETS[0],
-            COUNTERPARTIES[0],
-            TOTAL_OPEN_Q,
-            TOTAL_INCREASE_Q,
-        )]
+    let active_counterparties: &[usize] = match partition {
+        SourceLienPartition::Aggregate => &AGGREGATE_COUNTERPARTIES,
+        SourceLienPartition::EqualTwo => &EQUAL_TWO_COUNTERPARTIES,
+        SourceLienPartition::AsymmetricThree => &ASYMMETRIC_THREE_COUNTERPARTIES,
+    };
+    let pairs: &[(usize, usize, i128, i128)] = match partition {
+        SourceLienPartition::Aggregate => &AGGREGATE_PAIRS,
+        SourceLienPartition::EqualTwo => &EQUAL_TWO_PAIRS,
+        SourceLienPartition::AsymmetricThree => &ASYMMETRIC_THREE_PAIRS,
     };
     let observations = vec![CrankObservationHint {
         asset_index: 0,
@@ -2377,12 +2405,12 @@ fn run_source_lien_partition(
             &mut max_compute_units,
         )?;
     }
-    let expected_pnl = if split { 2_500 } else { 5_000 };
-    for actor in active_targets.iter().copied() {
-        if env.primary_portfolio(actor).pnl.get() != expected_pnl {
+    for &(target, _, open_q, _) in pairs {
+        let expected_pnl = open_q / POS_SCALE as i128 * i128::from(WINNING_MARK - PRICE);
+        if env.primary_portfolio(target).pnl.get() != expected_pnl {
             return Err(format!(
-                "source-lien partition target {actor} earned {}, expected {expected_pnl}",
-                env.primary_portfolio(actor).pnl.get()
+                "source-lien partition target {target} earned {}, expected {expected_pnl}",
+                env.primary_portfolio(target).pnl.get()
             ));
         }
     }
@@ -3087,6 +3115,86 @@ fn v16_program_public_liquidation_split_and_order_are_conservative() {
     }
 }
 
+fn assert_source_lien_partition_equivalent(
+    partition: SourceLienPartition,
+    aggregate: &SourceLienPartitionOutcome,
+    candidate: &SourceLienPartitionOutcome,
+    reversed: &SourceLienPartitionOutcome,
+    route: TradeRoute,
+    landing_slot: u64,
+) {
+    assert_ne!(partition, SourceLienPartition::Aggregate);
+    assert_eq!(
+        candidate.economics, reversed.economics,
+        "reversing {partition:?} expired source-lien owner exits changed economics via {route:?} at {landing_slot}"
+    );
+
+    let rounding_budget = (partition.parts() - 1) * BOUND_SCALE;
+    assert!(
+        candidate.economics.peak_local[5] >= aggregate.economics.peak_local[5],
+        "{partition:?} lowered account-attributed source backing via {route:?} at {landing_slot}: aggregate={}, partitioned={}",
+        aggregate.economics.peak_local[5],
+        candidate.economics.peak_local[5]
+    );
+    assert!(
+        candidate.economics.peak_local[5] - aggregate.economics.peak_local[5]
+            <= rounding_budget,
+        "{partition:?} added more than {rounding_budget} conservative rounding atoms via {route:?} at {landing_slot}"
+    );
+    assert_eq!(
+        candidate.economics.peak_local[5], candidate.economics.peak_source[5],
+        "{partition:?} account/source live-lien attribution diverged via {route:?} at {landing_slot}"
+    );
+    assert_eq!(
+        candidate.economics.peak_local[5],
+        candidate.economics.peak_bucket.valid_liened_backing_num,
+        "{partition:?} account/bucket live-lien attribution diverged via {route:?} at {landing_slot}"
+    );
+    assert_eq!(candidate.economics.final_local[8], 0);
+    assert_eq!(
+        candidate.economics.final_local[5], candidate.economics.final_source[6],
+        "{partition:?} account/source impaired-lien provenance diverged via {route:?} at {landing_slot}"
+    );
+    assert_eq!(
+        candidate.economics.final_local[5],
+        candidate.economics.final_bucket.impaired_liened_backing_num,
+        "{partition:?} account/bucket impaired-lien provenance diverged via {route:?} at {landing_slot}"
+    );
+    assert!(
+        candidate.economics.final_source[6] >= aggregate.economics.final_source[6],
+        "{partition:?} lowered impaired source backing via {route:?} at {landing_slot}"
+    );
+    assert!(
+        candidate.economics.final_source[6] - aggregate.economics.final_source[6]
+            <= rounding_budget,
+        "{partition:?} added more than {rounding_budget} impaired rounding atoms via {route:?} at {landing_slot}"
+    );
+    assert_eq!(
+        (
+            aggregate.economics.target_payout,
+            aggregate.economics.target_value_before_withdrawal,
+            aggregate.economics.oi_q,
+            aggregate.economics.c_tot_plus_insurance,
+            aggregate.economics.vault,
+            aggregate.economics.spl_vault,
+            aggregate.economics.token_supply,
+        ),
+        (
+            candidate.economics.target_payout,
+            candidate.economics.target_value_before_withdrawal,
+            candidate.economics.oi_q,
+            candidate.economics.c_tot_plus_insurance,
+            candidate.economics.vault,
+            candidate.economics.spl_vault,
+            candidate.economics.token_supply,
+        ),
+        "{partition:?} changed user value, OI, stock, or custody via {route:?} at {landing_slot}"
+    );
+    assert!(candidate.max_compute_units < TX_CU_LIMIT);
+    assert!(reversed.max_compute_units < TX_CU_LIMIT);
+    assert!(candidate.public_steps > aggregate.public_steps);
+}
+
 #[test]
 fn v16_program_public_source_lien_expiry_is_split_merge_invariant() {
     const ROUTES: [TradeRoute; 4] = [
@@ -3096,86 +3204,72 @@ fn v16_program_public_source_lien_expiry_is_split_merge_invariant() {
         TradeRoute::BatchCpi,
     ];
     let mut canonical_aggregate = None;
-    let mut canonical_split = None;
+    let mut canonical_equal_two = None;
+    let mut canonical_asymmetric_three = None;
 
     for landing_slot in [3u64, 4] {
         for route in ROUTES {
-            let aggregate = run_source_lien_partition(false, false, route, landing_slot)
-                .unwrap_or_else(|error| {
-                    panic!("aggregate source lien via {route:?} at {landing_slot}: {error}")
-                });
-            let split = run_source_lien_partition(true, false, route, landing_slot).unwrap_or_else(
-                |error| panic!("split source lien via {route:?} at {landing_slot}: {error}"),
-            );
-            let reversed = run_source_lien_partition(true, true, route, landing_slot)
-                .unwrap_or_else(|error| {
-                    panic!("reversed split source lien via {route:?} at {landing_slot}: {error}")
-                });
+            let aggregate = run_source_lien_partition(
+                SourceLienPartition::Aggregate,
+                false,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!("aggregate source lien via {route:?} at {landing_slot}: {error}")
+            });
+            let equal_two = run_source_lien_partition(
+                SourceLienPartition::EqualTwo,
+                false,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!("equal-two source lien via {route:?} at {landing_slot}: {error}")
+            });
+            let equal_two_reversed = run_source_lien_partition(
+                SourceLienPartition::EqualTwo,
+                true,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!("reversed equal-two source lien via {route:?} at {landing_slot}: {error}")
+            });
+            let asymmetric_three = run_source_lien_partition(
+                SourceLienPartition::AsymmetricThree,
+                false,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!("asymmetric-three source lien via {route:?} at {landing_slot}: {error}")
+            });
+            let asymmetric_three_reversed = run_source_lien_partition(
+                SourceLienPartition::AsymmetricThree,
+                true,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!("reversed asymmetric-three source lien via {route:?} at {landing_slot}: {error}")
+            });
 
-            assert_eq!(
-                split.economics, reversed.economics,
-                "reversing expired source-lien owner exits changed economics via {route:?} at {landing_slot}"
+            assert_source_lien_partition_equivalent(
+                SourceLienPartition::EqualTwo,
+                &aggregate,
+                &equal_two,
+                &equal_two_reversed,
+                route,
+                landing_slot,
             );
-            assert!(
-                split.economics.peak_local[5] >= aggregate.economics.peak_local[5],
-                "partitioning lowered account-attributed source backing via {route:?} at {landing_slot}: aggregate={}, split={}",
-                aggregate.economics.peak_local[5],
-                split.economics.peak_local[5]
-            );
-            assert!(
-                split.economics.peak_local[5] - aggregate.economics.peak_local[5]
-                    <= BOUND_SCALE,
-                "partitioning added more than one conservative rounding atom via {route:?} at {landing_slot}"
-            );
-            assert_eq!(
-                split.economics.peak_local[5], split.economics.peak_source[5],
-                "split account/source live-lien attribution diverged via {route:?} at {landing_slot}"
-            );
-            assert_eq!(
-                split.economics.peak_local[5],
-                split.economics.peak_bucket.valid_liened_backing_num,
-                "split account/bucket live-lien attribution diverged via {route:?} at {landing_slot}"
-            );
-            assert_eq!(split.economics.final_local[8], 0);
-            assert_eq!(
-                split.economics.final_local[5],
-                split.economics.final_source[6],
-                "split account/source impaired-lien provenance diverged via {route:?} at {landing_slot}"
-            );
-            assert_eq!(
-                split.economics.final_local[5],
-                split.economics.final_bucket.impaired_liened_backing_num,
-                "split account/bucket impaired-lien provenance diverged via {route:?} at {landing_slot}"
-            );
-            assert!(
-                split.economics.final_source[6] >= aggregate.economics.final_source[6],
-                "partitioning lowered impaired source backing via {route:?} at {landing_slot}"
-            );
-            assert!(
-                split.economics.final_source[6] - aggregate.economics.final_source[6]
-                    <= BOUND_SCALE,
-                "partitioning added more than one impaired rounding atom via {route:?} at {landing_slot}"
-            );
-            assert_eq!(
-                (
-                    aggregate.economics.target_payout,
-                    aggregate.economics.target_value_before_withdrawal,
-                    aggregate.economics.oi_q,
-                    aggregate.economics.c_tot_plus_insurance,
-                    aggregate.economics.vault,
-                    aggregate.economics.spl_vault,
-                    aggregate.economics.token_supply,
-                ),
-                (
-                    split.economics.target_payout,
-                    split.economics.target_value_before_withdrawal,
-                    split.economics.oi_q,
-                    split.economics.c_tot_plus_insurance,
-                    split.economics.vault,
-                    split.economics.spl_vault,
-                    split.economics.token_supply,
-                ),
-                "partitioning changed user value, OI, stock, or custody via {route:?} at {landing_slot}"
+            assert_source_lien_partition_equivalent(
+                SourceLienPartition::AsymmetricThree,
+                &aggregate,
+                &asymmetric_three,
+                &asymmetric_three_reversed,
+                route,
+                landing_slot,
             );
             assert!(aggregate.economics.peak_local[2] > 0);
             assert!(aggregate.economics.peak_local[5] > 0);
@@ -3190,9 +3284,7 @@ fn v16_program_public_source_lien_expiry_is_split_merge_invariant() {
             assert_eq!(aggregate.economics.oi_q, [0, 0]);
             assert_eq!(aggregate.economics.vault, aggregate.economics.spl_vault);
             assert!(aggregate.max_compute_units < TX_CU_LIMIT);
-            assert!(split.max_compute_units < TX_CU_LIMIT);
-            assert!(reversed.max_compute_units < TX_CU_LIMIT);
-            assert!(aggregate.public_steps > 0 && split.public_steps > aggregate.public_steps);
+            assert!(aggregate.public_steps > 0);
 
             if let Some(canonical) = canonical_aggregate.as_ref() {
                 assert_eq!(
@@ -3202,13 +3294,21 @@ fn v16_program_public_source_lien_expiry_is_split_merge_invariant() {
             } else {
                 canonical_aggregate = Some(aggregate.economics);
             }
-            if let Some(canonical) = canonical_split.as_ref() {
+            if let Some(canonical) = canonical_equal_two.as_ref() {
                 assert_eq!(
-                    &split.economics, canonical,
-                    "split source-lien economics changed by route/expiry landing {route:?}/{landing_slot}"
+                    &equal_two.economics, canonical,
+                    "equal-two source-lien economics changed by route/expiry landing {route:?}/{landing_slot}"
                 );
             } else {
-                canonical_split = Some(split.economics);
+                canonical_equal_two = Some(equal_two.economics);
+            }
+            if let Some(canonical) = canonical_asymmetric_three.as_ref() {
+                assert_eq!(
+                    &asymmetric_three.economics, canonical,
+                    "asymmetric-three source-lien economics changed by route/expiry landing {route:?}/{landing_slot}"
+                );
+            } else {
+                canonical_asymmetric_three = Some(asymmetric_three.economics);
             }
         }
     }
