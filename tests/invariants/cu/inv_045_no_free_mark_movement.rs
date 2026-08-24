@@ -10,6 +10,9 @@
 //! the SVM ceiling, converts the exact released PnL, and reconciles terminal custody. These tests
 //! exercise the deployed public wrapper with real SBF/LiteSVM account construction and assert
 //! economic state, token, rollback, liveness, or compute outcomes appropriate to the invariant.
+//! A second maximum-shape composition crosses stale HybridAfterHours pricing, delegated batch CPI,
+//! and terminal resolution so the maximum-shape guarantee is not specific to the no-CPI/DrainOnly
+//! route.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -1462,6 +1465,186 @@ fn v16_program_max_shape_ewma_movement_is_paid_and_drain_only_exit_stays_bounded
         ("DrainOnly refresh", drain_refresh_cu),
         ("DrainOnly extreme-price close", close_cu),
         ("released PnL conversion", convert_cu),
+    ] {
+        assert!(cu < 1_400_000, "{label} consumed {cu} CU");
+    }
+}
+
+#[test]
+fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value() {
+    const ASSET_COUNT: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const MARK: u64 = 1_000_000;
+    const DEPOSIT: u128 = 100_000_000;
+    // Hybrid becomes stale two slots after configuration. The one-slot price cap is 10_000 and
+    // EWMA alpha is 2/(2 + halflife=1), so floor(10_000 * 2/3) = 6_666.
+    const EXPECTED_MARK: u64 = 1_006_666;
+    const EXPECTED_FEE_PER_ASSET: u128 = 13_534;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: ASSET_COUNT,
+        initial_price: MARK,
+        max_trading_fee_bps: 100,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    set_test_clock(&mut env, 1, 100);
+    for asset_index in 0..ASSET_COUNT {
+        let mut feed = [0u8; 32];
+        feed[0] = u8::try_from(asset_index).unwrap().checked_add(1).unwrap();
+        feed[31] = 0xa5;
+        let oracle = env.set_pyth_price_with_conf(&feed, MARK as i64, -6, 0, 100);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            asset_index,
+            1,
+            0,
+            [feed, [0; 32], [0; 32]],
+            &[oracle],
+            1,
+            100,
+            0,
+            0,
+            1,
+            0,
+        )
+        .unwrap_or_else(|error| {
+            panic!("configure maximum-shape Hybrid asset {asset_index}: {error}")
+        });
+    }
+
+    let matcher_program = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher_program,
+        &std::fs::read(matcher_program_path()).expect("read matcher BPF"),
+    );
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, DEPOSIT);
+    env.deposit(&lp_owner, lp, DEPOSIT);
+    let vault_before = env.token_amount(env.vault);
+    let (matcher_context, matcher_delegate, _) = env
+        .init_matcher_context_with_passive_spread_authorized(
+            matcher_program,
+            &lp_owner,
+            lp,
+            9_000,
+            9_000,
+        );
+
+    set_test_clock(&mut env, 3, 102);
+    let legs = (0..ASSET_COUNT)
+        .map(|asset_index| BatchTradeCpiLeg {
+            asset_index,
+            market_id: env.asset_market_id(asset_index),
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let open_cu = env
+        .send(
+            env.batch_trade_cpi_ix(taker, lp, legs),
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(lp, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(matcher_context, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
+            ],
+            &[&taker_owner],
+        )
+        .expect("maximum-shape stale-Hybrid paid batch CPI");
+
+    let after_open = env.market_state().1;
+    let movement_fees = EXPECTED_FEE_PER_ASSET * u128::from(ASSET_COUNT);
+    let mark_move_bps =
+        (u128::from(EXPECTED_MARK - MARK) * 10_000 + u128::from(MARK) - 1) / u128::from(MARK);
+    let fee_supported_move_bps = EXPECTED_FEE_PER_ASSET * 10_000 / (2 * u128::from(MARK));
+    assert_eq!(mark_move_bps, 67, "the stale-Hybrid move is nontrivial");
+    assert!(
+        mark_move_bps <= fee_supported_move_bps,
+        "each asset's {mark_move_bps}-bps movement exceeds its {fee_supported_move_bps}-bps collected-fee support"
+    );
+    assert_eq!(after_open.vault as u64, vault_before);
+    assert_eq!(after_open.insurance, movement_fees);
+    assert_eq!(after_open.c_tot + after_open.insurance, after_open.vault);
+    assert_eq!(
+        after_open.insurance_domain_budget.iter().sum::<u128>(),
+        0,
+        "Hybrid movement fees are terminal protocol stock, not withdrawable domain insurance"
+    );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(taker))),
+        u32::from(ASSET_COUNT)
+    );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(lp))),
+        u32::from(ASSET_COUNT)
+    );
+    for asset_index in 0..ASSET_COUNT as usize {
+        let profile = state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            asset_index,
+        )
+        .unwrap();
+        assert_eq!(
+            profile.oracle_mode,
+            percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS
+        );
+        assert_eq!(profile.mark_ewma_e6, EXPECTED_MARK);
+        assert_eq!(after_open.assets[asset_index].effective_price, MARK);
+        assert_eq!(after_open.assets[asset_index].oi_eff_long_q, POS_SCALE);
+        assert_eq!(after_open.assets[asset_index].oi_eff_short_q, POS_SCALE);
+    }
+
+    let resolve_cu = env.resolve();
+    let (resolved_cfg, resolved_group) = env.market_state();
+    assert_eq!(resolved_group.mode, percolator::MarketModeV16::Resolved);
+    let permissionless_slot = resolved_group
+        .resolved_slot
+        .checked_add(resolved_cfg.force_close_delay_slots)
+        .expect("maximum-shape resolved close slot overflow");
+    set_test_clock(
+        &mut env,
+        permissionless_slot,
+        102 + resolved_cfg.force_close_delay_slots as i64,
+    );
+    let (payouts, resolved_close_cu) = drain_resolved_cohort_with_cu_limit(
+        &mut env,
+        &[(&taker_owner, taker), (&lp_owner, lp)],
+        "INV-045 maximum-shape Hybrid resolved close",
+        1_375_000,
+    );
+    let remaining_vault = env.token_amount(env.vault);
+    assert_eq!(
+        payouts.iter().sum::<u128>() + u128::from(remaining_vault),
+        u128::from(vault_before),
+        "resolved payouts plus terminal protocol stock conserve exact SPL custody"
+    );
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.vault as u64, remaining_vault);
+    assert_eq!(terminal.vault, movement_fees);
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(
+        payouts.iter().sum::<u128>(),
+        2 * DEPOSIT - movement_fees,
+        "the two-account cohort exits with every non-fee atom"
+    );
+
+    println!(
+        "INV-045 max-shape stale-Hybrid batch-CPI open={open_cu} resolve={resolve_cu} \
+         resolved-close={resolved_close_cu}"
+    );
+    for (label, cu) in [
+        ("stale-Hybrid batch CPI open", open_cu),
+        ("maximum-shape resolve", resolve_cu),
+        ("maximum-shape resolved close", resolved_close_cu),
     ] {
         assert!(cu < 1_400_000, "{label} consumed {cu} CU");
     }

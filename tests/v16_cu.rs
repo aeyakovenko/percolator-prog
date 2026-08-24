@@ -4819,13 +4819,23 @@ fn drain_resolved_cohort(
     actors: &[(&Keypair, Pubkey)],
     label: &str,
 ) -> Vec<u128> {
+    drain_resolved_cohort_with_cu_limit(env, actors, label, CUSTODY_CU_LIMIT).0
+}
+
+fn drain_resolved_cohort_with_cu_limit(
+    env: &mut V16CuEnv,
+    actors: &[(&Keypair, Pubkey)],
+    label: &str,
+    cu_limit: u64,
+) -> (Vec<u128>, u64) {
     let mut payouts = vec![0u128; actors.len()];
+    let mut max_cu = 0;
     for round in 0..64 {
         if actors
             .iter()
             .all(|(_, portfolio)| resolved_portfolio_is_terminal(env, *portfolio))
         {
-            return payouts;
+            return (payouts, max_cu);
         }
 
         let mut progressed = false;
@@ -4839,7 +4849,8 @@ fn drain_resolved_cohort(
             let (destination, result) = env.try_close_resolved_with_cu(owner, *portfolio);
             match result {
                 Ok(cu) => {
-                    assert_cu_within(label, cu, CUSTODY_CU_LIMIT);
+                    assert_cu_within(label, cu, cu_limit);
+                    max_cu = max_cu.max(cu);
                     let paid = env.token_amount(destination) as u128;
                     payouts[index] = payouts[index]
                         .checked_add(paid)
