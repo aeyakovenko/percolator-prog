@@ -732,7 +732,7 @@ fn v16_program_wrapper_security_control_roster_has_source_edges_and_witnesses() 
             &[
                 "cfg.liquidation_cranker_fee_share_bps = cranker_share_bps;",
                 "cfg.liquidation_cranker_fee_share_bps != 0",
-                ".checked_mul(cfg.liquidation_cranker_fee_share_bps as u128)",
+                "policy_v16::fee_share_floor(\n                        retained_fee,\n                        cfg.liquidation_cranker_fee_share_bps,",
             ],
             "v16_program_liquidation_cranker_share_policy_is_enforced_at_public_crank",
         ),
@@ -740,7 +740,7 @@ fn v16_program_wrapper_security_control_roster_has_source_edges_and_witnesses() 
             "maintenance cranker share",
             &[
                 "cfg.maintenance_cranker_fee_share_bps = cranker_share_bps;",
-                ".checked_mul(cfg_pre.maintenance_cranker_fee_share_bps as u128)",
+                "policy_v16::fee_share_floor(\n                        charged,\n                        cfg_pre.maintenance_cranker_fee_share_bps,",
                 "credit_maintenance_fee_to_active_market_budgets_view",
             ],
             "v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist",
@@ -758,7 +758,7 @@ fn v16_program_wrapper_security_control_roster_has_source_edges_and_witnesses() 
             "fee redirect policy",
             &[
                 "cfg.fee_redirect_to_market_0_bps = redirect_bps;",
-                "fee_share_floor(amount, cfg.fee_redirect_to_market_0_bps)",
+                "policy_v16::fee_share_floor(amount, cfg.fee_redirect_to_market_0_bps)",
             ],
             "v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist",
         ),

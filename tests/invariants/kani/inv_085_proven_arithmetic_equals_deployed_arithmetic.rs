@@ -3,16 +3,17 @@
 //! Normative obligation: proof/reference arithmetic must match the arithmetic
 //! that ships in the wrapper.
 //!
-//! Evidence in this file (P): five symbolic bounded Kani proofs compare deployed
-//! price movement, dt clamping, premium funding, fee-weighted EWMA, and
-//! fee-supported mark movement against independent widened formulas. Every
-//! branch-bearing proof has constructive covers and no new explicit assumption.
+//! Evidence in this file (P): twelve symbolic bounded Kani proofs compare deployed
+//! price movement, dt clamping, premium funding, fee-weighted EWMA,
+//! fee-supported mark movement, and every canonical wrapper-owned fee/notional
+//! adapter against independent widened formulas. Every branch-bearing proof has
+//! constructive covers and no new explicit assumption.
 //!
 //! Guarantee boundary: premium funding uses the complete 8-bit input product;
 //! EWMA and fee-supported movement use complete 3-bit products because the
 //! 8-bit EWMA division circuit exceeded the isolated five-minute budget. This
-//! does not prove every full-width multiply/divide, BPF lowering, processor
-//! adapter, or engine arithmetic path equivalent to a bigint model.
+//! does not prove every full-width multiply/divide, BPF lowering, composite
+//! provider scale, or engine arithmetic path equivalent to a bigint model.
 
 use super::*;
 
@@ -120,6 +121,78 @@ fn inv085_ref_collected_fee_supported_mark(
         u64::try_from(supported_move_bps).unwrap_or(u64::MAX),
         1,
     ))
+}
+
+fn inv085_ref_fee_share_floor(amount: u8, share_bps: u8) -> u128 {
+    u128::from(amount) * u128::from(share_bps) / 10_000
+}
+
+fn inv085_ref_permissionless_market_init_fee(base_fee: u8, asset_index: u8) -> u128 {
+    let mut fee = u128::from(base_fee);
+    let mut doublings = usize::from(asset_index) / 32;
+    while doublings != 0 {
+        fee *= 2;
+        doublings -= 1;
+    }
+    fee
+}
+
+fn inv085_ref_risk_notional_ceil(size_q: u8, price: u8) -> u128 {
+    let numerator = u128::from(size_q) * u128::from(price);
+    let denominator = percolator::POS_SCALE;
+    numerator / denominator + u128::from(numerator % denominator != 0)
+}
+
+fn inv085_ref_ceil_div(num: u8, den: u8) -> Option<u128> {
+    if den == 0 {
+        return None;
+    }
+    let numerator = u128::from(num);
+    let denominator = u128::from(den);
+    Some(numerator / denominator + u128::from(numerator % denominator != 0))
+}
+
+fn inv085_ref_two_sided_fee(notional: u8, fee_bps: u8) -> u128 {
+    let product = u128::from(notional) * u128::from(fee_bps);
+    let one_side = product / 10_000 + u128::from(product % 10_000 != 0);
+    one_side * 2
+}
+
+fn inv085_ref_fee_bps_for_two_sided_fee(
+    notional: u8,
+    required_paid: u8,
+    min_fee_bps: u8,
+    max_fee_bps: u8,
+) -> Option<u64> {
+    if min_fee_bps > max_fee_bps {
+        return None;
+    }
+    if required_paid == 0 || notional == 0 {
+        return Some(u64::from(min_fee_bps));
+    }
+    let mut selected = max_fee_bps;
+    let mut candidate = min_fee_bps;
+    while candidate <= max_fee_bps {
+        if inv085_ref_two_sided_fee(notional, candidate) >= u128::from(required_paid) {
+            selected = candidate;
+            break;
+        }
+        if candidate == u8::MAX {
+            break;
+        }
+        candidate += 1;
+    }
+    Some(u64::from(selected))
+}
+
+fn inv085_ref_batch_leg_fee(abs_size_q: u8, exec_price: u8, fee_bps: u8) -> u128 {
+    if abs_size_q == 0 || fee_bps == 0 {
+        return 0;
+    }
+    let notional = inv085_ref_risk_notional_ceil(abs_size_q, exec_price);
+    let product = notional * u128::from(fee_bps);
+    let denominator = u128::from(percolator::MAX_MARGIN_BPS);
+    product / denominator + u128::from(product % denominator != 0)
 }
 
 #[kani::proof]
@@ -268,4 +341,126 @@ fn kani_v16_inv085_collected_fee_mark_matches_widened_reference_for_small_symbol
         "one side cannot fund a downward move"
     );
     assert_eq!(deployed, reference);
+}
+
+#[kani::proof]
+fn kani_v16_inv085_fee_share_matches_widened_reference_for_complete_u8_domain() {
+    let amount: u8 = kani::any();
+    let share_bps: u8 = kani::any();
+    let deployed = policy_v16::fee_share_floor(u128::from(amount), u16::from(share_bps));
+
+    kani::cover!(amount == 0 && share_bps > 0, "zero amount");
+    kani::cover!(amount > 0 && share_bps == 0, "zero share");
+    kani::cover!(amount > 0 && share_bps > 0, "positive fee share");
+    assert_eq!(
+        deployed,
+        Some(inv085_ref_fee_share_floor(amount, share_bps))
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(9)]
+fn kani_v16_inv085_market_init_fee_matches_repeated_doubling_for_complete_u8_domain() {
+    let base_fee: u8 = kani::any();
+    let asset_index: u8 = kani::any();
+    let deployed = policy_v16::permissionless_market_init_fee_for_asset(
+        u128::from(base_fee),
+        usize::from(asset_index),
+    );
+
+    kani::cover!(base_fee == 0 && asset_index >= 32, "zero fee remains zero");
+    kani::cover!(base_fee > 0 && asset_index < 32, "base tier");
+    kani::cover!(base_fee > 0 && asset_index >= 224, "seventh doubling tier");
+    assert_eq!(
+        deployed,
+        Some(inv085_ref_permissionless_market_init_fee(
+            base_fee,
+            asset_index
+        ))
+    );
+}
+
+#[kani::proof]
+fn kani_v16_inv085_risk_notional_matches_widened_reference_for_complete_u8_domain() {
+    let size_q: u8 = kani::any();
+    let price: u8 = kani::any();
+    let deployed = policy_v16::risk_notional_ceil(u128::from(size_q), u64::from(price));
+
+    kani::cover!(size_q == 0 && price > 0, "zero position size");
+    kani::cover!(size_q > 0 && price == 0, "zero price");
+    kani::cover!(size_q > 0 && price > 0, "positive rounded notional");
+    assert_eq!(deployed, Some(inv085_ref_risk_notional_ceil(size_q, price)));
+}
+
+#[kani::proof]
+fn kani_v16_inv085_ceil_div_matches_quotient_remainder_for_complete_u8_domain() {
+    let num: u8 = kani::any();
+    let den: u8 = kani::any();
+    let deployed = policy_v16::ceil_div_u128(u128::from(num), u128::from(den));
+
+    kani::cover!(den == 0, "zero denominator rejects");
+    kani::cover!(den > 0 && num % den == 0, "exact quotient");
+    kani::cover!(den > 0 && num % den != 0, "rounded quotient");
+    assert_eq!(deployed, inv085_ref_ceil_div(num, den));
+}
+
+#[kani::proof]
+fn kani_v16_inv085_two_sided_fee_matches_widened_reference_for_complete_u8_domain() {
+    let notional: u8 = kani::any();
+    let fee_bps: u8 = kani::any();
+    let deployed = policy_v16::two_sided_trade_fee_paid(u128::from(notional), u64::from(fee_bps));
+
+    kani::cover!(notional == 0 && fee_bps > 0, "zero notional");
+    kani::cover!(notional > 0 && fee_bps == 0, "zero fee rate");
+    kani::cover!(notional > 0 && fee_bps > 0, "two charged sides");
+    assert_eq!(deployed, Some(inv085_ref_two_sided_fee(notional, fee_bps)));
+}
+
+#[kani::proof]
+#[kani::unwind(10)]
+fn kani_v16_inv085_fee_rate_search_matches_exhaustive_complete_three_bit_domain() {
+    let notional = kani::any::<u8>() & 7;
+    let required_paid = kani::any::<u8>() & 7;
+    let min_fee_bps = kani::any::<u8>() & 7;
+    let max_fee_bps = kani::any::<u8>() & 7;
+    let deployed = policy_v16::fee_bps_for_two_sided_fee_paid(
+        u128::from(notional),
+        u128::from(required_paid),
+        u64::from(min_fee_bps),
+        u64::from(max_fee_bps),
+    );
+
+    kani::cover!(min_fee_bps > max_fee_bps, "invalid bounds reject");
+    kani::cover!(notional == 0 && min_fee_bps <= max_fee_bps, "zero notional");
+    kani::cover!(
+        notional > 0 && required_paid > 0 && min_fee_bps < max_fee_bps,
+        "positive bounded search"
+    );
+    assert_eq!(
+        deployed,
+        inv085_ref_fee_bps_for_two_sided_fee(notional, required_paid, min_fee_bps, max_fee_bps,)
+    );
+}
+
+#[kani::proof]
+fn kani_v16_inv085_batch_leg_fee_matches_widened_reference_for_complete_u8_domain() {
+    let abs_size_q: u8 = kani::any();
+    let exec_price: u8 = kani::any();
+    let fee_bps: u8 = kani::any();
+    let deployed = policy_v16::batch_leg_fee(
+        u128::from(abs_size_q),
+        u64::from(exec_price),
+        u64::from(fee_bps),
+    );
+
+    kani::cover!(abs_size_q == 0 && fee_bps > 0, "zero leg size");
+    kani::cover!(abs_size_q > 0 && fee_bps == 0, "zero leg fee");
+    kani::cover!(
+        abs_size_q > 0 && exec_price > 0 && fee_bps > 0,
+        "charged leg"
+    );
+    assert_eq!(
+        deployed,
+        Some(inv085_ref_batch_leg_fee(abs_size_q, exec_price, fee_bps))
+    );
 }

@@ -3,13 +3,14 @@
 //! Normative obligation: arithmetic used by proofs, reference models, and the
 //! deployed wrapper must agree on adversarial boundary partitions.
 //!
-//! Evidence in this file (executable arithmetic differential): deployed policy
-//! and oracle movement helpers are compared against independent widened integer
-//! oracles over fixed boundaries and 16,384 deterministic full-width words. A
-//! separate 512-word corpus compares the dynamic-fee fixed-point search against
-//! an exhaustive fee scan. This does not close the full wide-arithmetic proof
-//! gap, but it gives INV-085 an invariant-owned corpus instead of relying only
-//! on routes that happen to touch arithmetic.
+//! Evidence in this file (executable arithmetic differential): a source-derived
+//! roster owns all multiply/divide-bearing production functions and keeps every
+//! wrapper fee/notional adapter in one pure policy module. Deployed policy and
+//! oracle helpers are compared against independent widened integer oracles over
+//! fixed boundaries and 16,384 deterministic full-width words. Separate 512- and
+//! 1,024-word corpora compare dynamic-fee and fee-rate searches with exhaustive
+//! scans. Full relational provider scaling, host/SBF boundary equivalence, and
+//! bigint equivalence remain open.
 
 use super::*;
 
@@ -60,7 +61,11 @@ fn inv_085_ceil_div_u128_oracle(num: u128, den: u128) -> Option<u128> {
     if den == 0 {
         return None;
     }
-    Some(num.checked_add(den.checked_sub(1)?)? / den)
+    let increment = den - 1;
+    if num > u128::MAX - increment {
+        return None;
+    }
+    Some((num + increment) / den)
 }
 
 fn inv_085_two_sided_trade_fee_paid_oracle(notional: u128, fee_bps: u64) -> Option<u128> {
@@ -73,6 +78,97 @@ fn inv_085_two_sided_trade_fee_paid_oracle(notional: u128, fee_bps: u64) -> Opti
         return None;
     }
     Some(paid)
+}
+
+fn inv_085_two_sided_trade_fee_paid_uncapped_oracle(notional: u128, fee_bps: u64) -> Option<u128> {
+    if notional == 0 || fee_bps == 0 {
+        return Some(0);
+    }
+    let fee_bps = u128::from(fee_bps);
+    if notional > u128::MAX / fee_bps {
+        return None;
+    }
+    let one_side = inv_085_ceil_div_u128_oracle(notional * fee_bps, 10_000)?;
+    if one_side > u128::MAX / 2 {
+        return None;
+    }
+    Some(one_side * 2)
+}
+
+fn inv_085_fee_share_floor_oracle(amount: u128, share_bps: u16) -> Option<u128> {
+    if amount == 0 || share_bps == 0 {
+        return Some(0);
+    }
+    let share_bps = u128::from(share_bps);
+    if amount > u128::MAX / share_bps {
+        return None;
+    }
+    Some(amount * share_bps / 10_000)
+}
+
+fn inv_085_market_init_fee_oracle(base_fee: u128, asset_index: usize) -> Option<u128> {
+    if base_fee == 0 {
+        return Some(0);
+    }
+    let doublings = asset_index / 32;
+    if doublings >= u128::BITS as usize {
+        return None;
+    }
+    let mut fee = base_fee;
+    for _ in 0..doublings {
+        fee = fee.checked_mul(2)?;
+    }
+    Some(fee)
+}
+
+fn inv_085_risk_notional_ceil_oracle(size_q: u128, price: u64) -> Option<u128> {
+    let price = u128::from(price);
+    if price != 0 && size_q > u128::MAX / price {
+        return None;
+    }
+    let numerator = size_q * price;
+    let increment = percolator::POS_SCALE - 1;
+    if numerator > u128::MAX - increment {
+        return None;
+    }
+    Some((numerator + increment) / percolator::POS_SCALE)
+}
+
+fn inv_085_batch_leg_fee_oracle(abs_size_q: u128, exec_price: u64, fee_bps: u64) -> Option<u128> {
+    if abs_size_q == 0 || fee_bps == 0 {
+        return Some(0);
+    }
+    let notional = inv_085_risk_notional_ceil_oracle(abs_size_q, exec_price)?;
+    if notional == 0 {
+        return Some(0);
+    }
+    let fee_bps = u128::from(fee_bps);
+    if notional > u128::MAX / fee_bps {
+        return None;
+    }
+    let product = notional * fee_bps;
+    let denominator = u128::from(percolator::MAX_MARGIN_BPS);
+    Some(product / denominator + u128::from(product % denominator != 0))
+}
+
+fn inv_085_fee_bps_exhaustive_oracle(
+    notional: u128,
+    required_paid: u128,
+    min_fee_bps: u64,
+    max_fee_bps: u64,
+) -> Option<u64> {
+    if min_fee_bps > max_fee_bps {
+        return None;
+    }
+    if required_paid == 0 || notional == 0 {
+        return Some(min_fee_bps);
+    }
+    for candidate in min_fee_bps..=max_fee_bps {
+        if inv_085_two_sided_trade_fee_paid_uncapped_oracle(notional, candidate)? >= required_paid {
+            return Some(candidate);
+        }
+    }
+    Some(max_fee_bps)
 }
 
 fn inv_085_ewma_update_oracle(
@@ -469,6 +565,115 @@ fn v16_program_policy_arithmetic_matches_independent_full_width_corpus() {
             ),
             "fee-supported mark diverged at corpus word {index}"
         );
+
+        let amount = inv_085_boundary_u128(&mut state, index + 13);
+        let share_bps = inv_085_boundary_u64(&mut state, index + 14) as u16;
+        assert_eq!(
+            percolator_prog::policy_v16::fee_share_floor(amount, share_bps),
+            inv_085_fee_share_floor_oracle(amount, share_bps),
+            "fee share diverged at corpus word {index}"
+        );
+
+        let asset_index = (inv_085_boundary_u64(&mut state, index + 15) % 5_783) as usize;
+        assert_eq!(
+            percolator_prog::policy_v16::permissionless_market_init_fee_for_asset(
+                amount,
+                asset_index,
+            ),
+            inv_085_market_init_fee_oracle(amount, asset_index),
+            "market-init fee diverged at corpus word {index}"
+        );
+
+        let size_q = inv_085_boundary_u128(&mut state, index + 16);
+        let price = inv_085_boundary_u64(&mut state, index + 17);
+        let fee_bps = inv_085_boundary_u64(&mut state, index + 18);
+        assert_eq!(
+            percolator_prog::policy_v16::risk_notional_ceil(size_q, price),
+            inv_085_risk_notional_ceil_oracle(size_q, price),
+            "risk notional diverged at corpus word {index}"
+        );
+        assert_eq!(
+            percolator_prog::policy_v16::trade_fee_notional_ceil(size_q, price),
+            if size_q == 0 || price == 0 {
+                Some(0)
+            } else {
+                inv_085_risk_notional_ceil_oracle(size_q, price)
+            },
+            "trade-fee notional diverged at corpus word {index}"
+        );
+        assert_eq!(
+            percolator_prog::policy_v16::two_sided_trade_fee_paid(size_q, fee_bps),
+            inv_085_two_sided_trade_fee_paid_uncapped_oracle(size_q, fee_bps),
+            "two-sided fee diverged at corpus word {index}"
+        );
+        assert_eq!(
+            percolator_prog::policy_v16::batch_leg_fee(size_q, price, fee_bps),
+            inv_085_batch_leg_fee_oracle(size_q, price, fee_bps),
+            "batch-leg fee diverged at corpus word {index}"
+        );
+
+        let denominator = inv_085_boundary_u128(&mut state, index + 19);
+        assert_eq!(
+            percolator_prog::policy_v16::ceil_div_u128(amount, denominator),
+            inv_085_ceil_div_u128_oracle(amount, denominator),
+            "ceil division diverged at corpus word {index}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_market_init_fee_matches_repeated_doubling_at_supported_and_overflow_edges() {
+    let cases = [
+        (0, 0usize),
+        (0, usize::MAX),
+        (1, 0),
+        (1, 31),
+        (1, 32),
+        (3, 63),
+        (u128::MAX, 31),
+        (u128::MAX, 32),
+        (1, 4_095),
+        (1, 4_096),
+        (1, 5_782),
+        (1, usize::MAX),
+    ];
+    for (base_fee, asset_index) in cases {
+        assert_eq!(
+            percolator_prog::policy_v16::permissionless_market_init_fee_for_asset(
+                base_fee,
+                asset_index,
+            ),
+            inv_085_market_init_fee_oracle(base_fee, asset_index),
+            "market-init fee diverged for base {base_fee}, asset {asset_index}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_two_sided_fee_rate_search_matches_exhaustive_generated_inputs() {
+    const CASES: usize = 1_024;
+    let mut state = 0x8500_fee5_ea2c_0001;
+
+    for index in 0..CASES {
+        let notional = u128::from(inv_085_splitmix64(&mut state) % 1_000_001);
+        let required_paid = u128::from(inv_085_splitmix64(&mut state) % 2_001);
+        let bound_a = inv_085_splitmix64(&mut state) % 10_001;
+        let bound_b = inv_085_splitmix64(&mut state) % 10_001;
+        let (min_fee_bps, max_fee_bps) = if index % 8 == 0 {
+            (bound_a.max(bound_b), bound_a.min(bound_b))
+        } else {
+            (bound_a.min(bound_b), bound_a.max(bound_b))
+        };
+        assert_eq!(
+            percolator_prog::policy_v16::fee_bps_for_two_sided_fee_paid(
+                notional,
+                required_paid,
+                min_fee_bps,
+                max_fee_bps,
+            ),
+            inv_085_fee_bps_exhaustive_oracle(notional, required_paid, min_fee_bps, max_fee_bps,),
+            "two-sided fee-rate search diverged at generated word {index}"
+        );
     }
 }
 
@@ -516,6 +721,153 @@ fn v16_program_dynamic_externality_fee_matches_exhaustive_search_on_generated_in
         assert_eq!(
             deployed, reference,
             "dynamic fee search diverged at generated word {index}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned() {
+    struct ArithmeticOwner {
+        function: &'static str,
+        class: &'static str,
+        evidence: &'static str,
+    }
+
+    const ROWS: &[ArithmeticOwner] = &[
+        ArithmeticOwner { function: "accrue_asset_to_not_atomic", class: "ENGINE_HOST_FACADE", evidence: "engine-owned host serialization model" },
+        ArithmeticOwner { function: "market_view_mut", class: "STRUCTURAL", evidence: "INV-015" },
+        ArithmeticOwner { function: "market_from_wire_boxed", class: "STRUCTURAL", evidence: "INV-015" },
+        ArithmeticOwner { function: "write_market_wire", class: "STRUCTURAL", evidence: "INV-025" },
+        ArithmeticOwner { function: "read_pyth_price_e6_from_bytes", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
+        ArithmeticOwner { function: "scale_decimal_to_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
+        ArithmeticOwner { function: "compose_price_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
+        ArithmeticOwner { function: "clamp_toward_engine_dt", class: "ORACLE", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "fee_share_floor", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "permissionless_market_init_fee_for_asset", class: "POLICY", evidence: "v16_program_market_init_fee_matches_repeated_doubling_at_supported_and_overflow_edges" },
+        ArithmeticOwner { function: "risk_notional_ceil", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "batch_leg_fee", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "price_move_bps_ceil", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "collected_fee_supported_mark", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "premium_funding_rate_e9", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "two_sided_trade_fee_paid", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "ewma_effective_alpha_bps", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "ewma_update", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "dynamic_fee_bps_with_externality_floor", class: "POLICY", evidence: "v16_program_dynamic_externality_fee_matches_exhaustive_search_on_generated_inputs" },
+        ArithmeticOwner { function: "domain_authorities_from_view", class: "STRUCTURAL", evidence: "INV-034" },
+        ArithmeticOwner { function: "require_domain_accepts_live_topup_view", class: "STRUCTURAL", evidence: "INV-034" },
+        ArithmeticOwner { function: "debit_terminal_insurance_asset_for_authority_view", class: "STRUCTURAL", evidence: "INV-064" },
+        ArithmeticOwner { function: "handle_batch_execute_zero_copy", class: "STRUCTURAL", evidence: "INV-077" },
+        ArithmeticOwner { function: "handle_batch_trade_cpi", class: "STRUCTURAL", evidence: "INV-077" },
+        ArithmeticOwner { function: "handle_top_up_insurance_domain", class: "STRUCTURAL", evidence: "INV-034" },
+        ArithmeticOwner { function: "backing_domain_parts_view", class: "STRUCTURAL", evidence: "INV-034" },
+        ArithmeticOwner { function: "verify_domain_withdrawal_preflight", class: "STRUCTURAL", evidence: "INV-034" },
+        ArithmeticOwner { function: "handle_top_up_backing_bucket", class: "STRUCTURAL", evidence: "INV-034" },
+        ArithmeticOwner { function: "handle_withdraw_insurance_asset", class: "STRUCTURAL", evidence: "INV-064" },
+        ArithmeticOwner { function: "hybrid_trade_fee_quote_view", class: "COMPOSITE", evidence: "v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered" },
+    ];
+
+    const RISK_MARKERS: &[&str] = &[
+        ".checked_mul(",
+        ".checked_div(",
+        ".saturating_mul(",
+        ".wrapping_mul(",
+        ".abs_diff(",
+        "10u128.pow(",
+        "/ 10_000",
+        "/ percolator::",
+        "% den",
+        "% denominator",
+    ];
+    const CANONICAL_ADAPTERS: &[&str] = &[
+        "fee_share_floor",
+        "permissionless_market_init_fee_for_asset",
+        "risk_notional_ceil",
+        "trade_fee_notional_ceil",
+        "ceil_div_u128",
+        "two_sided_trade_fee_paid",
+        "fee_bps_for_two_sided_fee_paid",
+        "batch_leg_fee",
+    ];
+    const REMOVED_PROCESSOR_COPIES: &[&str] = &[
+        "two_sided_trade_fee_paid_view",
+        "ceil_div_u128_view",
+        "fee_bps_for_two_sided_fee_paid_view",
+    ];
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    let mut current_function = "<module>";
+    let mut actual = std::collections::BTreeSet::new();
+    for line in production.lines() {
+        let trimmed = line.trim_start();
+        if let Some(fn_offset) = trimmed.find("fn ") {
+            let prefix = &trimmed[..fn_offset];
+            if prefix.is_empty() || prefix.starts_with("pub") {
+                let rest = &trimmed[fn_offset + 3..];
+                let end = rest
+                    .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .unwrap_or(rest.len());
+                current_function = &rest[..end];
+            }
+        }
+        if RISK_MARKERS.iter().any(|marker| line.contains(marker)) {
+            actual.insert(current_function.to_owned());
+        }
+    }
+
+    let witness_sources = [
+        include_str!("inv_085_proven_arithmetic_equals_deployed_arithmetic.rs"),
+        include_str!("inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
+        include_str!("inv_045_no_free_mark_movement.rs"),
+    ];
+    let mut expected = std::collections::BTreeSet::new();
+    for row in ROWS {
+        assert!(
+            expected.insert(row.function.to_owned()),
+            "duplicate arithmetic owner for {}",
+            row.function
+        );
+        match row.class {
+            "ORACLE" | "POLICY" | "COMPOSITE" => assert!(
+                witness_sources
+                    .iter()
+                    .any(|source| source.contains(&format!("fn {}", row.evidence))),
+                "{} lacks executable arithmetic evidence {}",
+                row.function,
+                row.evidence
+            ),
+            "STRUCTURAL" => assert!(row.evidence.starts_with("INV-")),
+            "ENGINE_HOST_FACADE" => {
+                assert_eq!(row.evidence, "engine-owned host serialization model")
+            }
+            other => panic!("unknown arithmetic ownership class {other}"),
+        }
+    }
+    assert_eq!(
+        actual, expected,
+        "every multiply/divide-bearing production function needs one arithmetic owner"
+    );
+
+    let policy_source = production
+        .split("pub mod policy_v16 {")
+        .nth(1)
+        .expect("policy module exists")
+        .split("pub mod processor {")
+        .next()
+        .expect("policy module terminates before processor");
+    for adapter in CANONICAL_ADAPTERS {
+        assert!(
+            policy_source.contains(&format!("fn {adapter}")),
+            "canonical arithmetic adapter {adapter} escaped policy_v16"
+        );
+    }
+    for removed in REMOVED_PROCESSOR_COPIES {
+        assert!(
+            !production.contains(&format!("fn {removed}")),
+            "processor arithmetic copy {removed} must stay removed"
         );
     }
 }

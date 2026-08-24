@@ -5124,6 +5124,102 @@ pub mod policy_v16 {
             || recovery_active
     }
 
+    pub fn fee_share_floor(amount: u128, share_bps: u16) -> Option<u128> {
+        if amount == 0 || share_bps == 0 {
+            return Some(0);
+        }
+        amount
+            .checked_mul(u128::from(share_bps))
+            .map(|value| value / 10_000)
+    }
+
+    pub fn permissionless_market_init_fee_for_asset(
+        base_fee: u128,
+        asset_index: usize,
+    ) -> Option<u128> {
+        if base_fee == 0 {
+            return Some(0);
+        }
+        let mut fee = base_fee;
+        let mut doublings = asset_index / 32;
+        while doublings != 0 {
+            fee = fee.checked_mul(2)?;
+            doublings -= 1;
+        }
+        Some(fee)
+    }
+
+    pub fn risk_notional_ceil(size_q: u128, price: u64) -> Option<u128> {
+        let numerator = size_q.checked_mul(u128::from(price))?;
+        Some(numerator.checked_add(percolator::POS_SCALE - 1)? / percolator::POS_SCALE)
+    }
+
+    pub fn trade_fee_notional_ceil(size_q: u128, price: u64) -> Option<u128> {
+        if size_q == 0 || price == 0 {
+            return Some(0);
+        }
+        risk_notional_ceil(size_q, price)
+    }
+
+    pub fn ceil_div_u128(num: u128, den: u128) -> Option<u128> {
+        if den == 0 {
+            return None;
+        }
+        Some(num.checked_add(den.checked_sub(1)?)? / den)
+    }
+
+    pub fn two_sided_trade_fee_paid(notional: u128, fee_bps: u64) -> Option<u128> {
+        if notional == 0 || fee_bps == 0 {
+            return Some(0);
+        }
+        let one_side = ceil_div_u128(notional.checked_mul(u128::from(fee_bps))?, 10_000)?;
+        one_side.checked_mul(2)
+    }
+
+    pub fn fee_bps_for_two_sided_fee_paid(
+        notional: u128,
+        required_paid: u128,
+        min_fee_bps: u64,
+        max_fee_bps: u64,
+    ) -> Option<u64> {
+        if min_fee_bps > max_fee_bps {
+            return None;
+        }
+        if required_paid == 0 || notional == 0 {
+            return Some(min_fee_bps);
+        }
+        if two_sided_trade_fee_paid(notional, min_fee_bps)? >= required_paid {
+            return Some(min_fee_bps);
+        }
+        if two_sided_trade_fee_paid(notional, max_fee_bps)? < required_paid {
+            return Some(max_fee_bps);
+        }
+        let mut lo = min_fee_bps;
+        let mut hi = max_fee_bps;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if two_sided_trade_fee_paid(notional, mid)? >= required_paid {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        Some(lo)
+    }
+
+    pub fn batch_leg_fee(abs_size_q: u128, exec_price: u64, fee_bps: u64) -> Option<u128> {
+        if abs_size_q == 0 || fee_bps == 0 {
+            return Some(0);
+        }
+        let notional = trade_fee_notional_ceil(abs_size_q, exec_price)?;
+        if notional == 0 {
+            return Some(0);
+        }
+        let product = notional.checked_mul(u128::from(fee_bps))?;
+        let denominator = u128::from(percolator::MAX_MARGIN_BPS);
+        Some((product / denominator) + u128::from(product % denominator != 0))
+    }
+
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
             return Some(0);
@@ -5197,18 +5293,7 @@ pub mod policy_v16 {
     }
 
     fn two_sided_trade_fee_paid_cap(notional: u128, fee_bps: u64) -> Option<u64> {
-        if notional == 0 || fee_bps == 0 {
-            return Some(0);
-        }
-        let one_side = notional.checked_mul(fee_bps as u128)?.checked_add(9_999)? / 10_000;
-        u64::try_from(one_side.checked_mul(2)?).ok()
-    }
-
-    fn ceil_div_u128(num: u128, den: u128) -> Option<u128> {
-        if den == 0 {
-            return None;
-        }
-        Some(num.checked_add(den.checked_sub(1)?)? / den)
+        u64::try_from(two_sided_trade_fee_paid(notional, fee_bps)?).ok()
     }
 
     fn ewma_effective_alpha_bps(alpha_bps: u128, fee_paid: u64, mark_min_fee: u64) -> u128 {
@@ -5362,25 +5447,6 @@ pub mod processor {
             1 => Ok(SideV16::Short),
             _ => Err(PercolatorError::InvalidInstruction.into()),
         }
-    }
-
-    #[inline(always)]
-    fn permissionless_market_init_fee_for_asset(
-        base_fee: u128,
-        asset_index: usize,
-    ) -> Result<u128, ProgramError> {
-        let mut fee = base_fee;
-        if fee == 0 {
-            return Ok(0);
-        }
-        let mut doublings = asset_index / 32;
-        while doublings != 0 {
-            fee = fee
-                .checked_mul(2)
-                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-            doublings -= 1;
-        }
-        Ok(fee)
     }
 
     fn permissionless_resolve_matured_now_view(
@@ -6212,7 +6278,8 @@ pub mod processor {
         let redirect = if asset_index == 0 {
             0
         } else {
-            fee_share_floor(amount, cfg.fee_redirect_to_market_0_bps)?
+            policy_v16::fee_share_floor(amount, cfg.fee_redirect_to_market_0_bps)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
         };
         let domain_amount = amount
             .checked_sub(redirect)
@@ -6350,7 +6417,8 @@ pub mod processor {
         let redirect = if asset_index == 0 {
             0
         } else {
-            fee_share_floor(amount, cfg.fee_redirect_to_market_0_bps)?
+            policy_v16::fee_share_floor(amount, cfg.fee_redirect_to_market_0_bps)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
         };
         accumulate_domain_budget_credit(
             credits,
@@ -6382,7 +6450,8 @@ pub mod processor {
         let redirect = if asset_index == 0 {
             0
         } else {
-            fee_share_floor(amount, cfg.fee_redirect_to_market_0_bps)?
+            policy_v16::fee_share_floor(amount, cfg.fee_redirect_to_market_0_bps)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
         };
         let domain_amount = amount
             .checked_sub(redirect)
@@ -7755,30 +7824,6 @@ pub mod processor {
         Ok(())
     }
 
-    /// Reconstruct the exact per-leg fee the engine charges for one leg, so wrapper-side
-    /// per-asset/per-domain fee accounting can be split out of the engine's AGGREGATE batch
-    /// outcome. Mirrors engine `trade_fee_notional_ceil` + `checked_fee_bps` (ceil) on the
-    /// fast u128 path; extreme sizes that would need the engine's U256 widening error out (the
-    /// batch then rejects rather than mis-accounting — see the aggregate cross-check below).
-    fn batch_leg_fee(
-        abs_size_q: u128,
-        exec_price: u64,
-        fee_bps: u64,
-    ) -> Result<u128, ProgramError> {
-        if abs_size_q == 0 || fee_bps == 0 {
-            return Ok(0);
-        }
-        let notional = trade_fee_notional_ceil(abs_size_q, exec_price)?;
-        if notional == 0 {
-            return Ok(0);
-        }
-        let product = notional
-            .checked_mul(fee_bps as u128)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let den = percolator::MAX_MARGIN_BPS as u128;
-        Ok((product / den) + u128::from(product % den != 0))
-    }
-
     /// Atomic multi-leg batch trade. `account_a` (taker) is the long side, `account_b` (LP) the
     /// short side; each leg's SIGNED `size_q` decides that leg's direction, so one batch can carry
     /// a mixed long/short spread. The engine settles both accounts ONCE, applies every leg, then
@@ -8089,7 +8134,8 @@ pub mod processor {
                     .get(leg_index)
                     .ok_or(PercolatorError::InvalidInstruction)?;
                 let requested_fee_leg =
-                    batch_leg_fee(*abs_size, *fee_basis_price, fee_quote.fee_bps)?;
+                    policy_v16::batch_leg_fee(*abs_size, *fee_basis_price, fee_quote.fee_bps)
+                        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                 let fee_a = requested_fee_leg.min(remaining_fee_a);
                 let fee_b = requested_fee_leg.min(remaining_fee_b);
                 remaining_fee_a = remaining_fee_a
@@ -11111,10 +11157,11 @@ pub mod processor {
                             cfg_pre.maintenance_fee_per_slot,
                         )
                         .map_err(map_v16_error)?;
-                    let reward = charged
-                        .checked_mul(cfg_pre.maintenance_cranker_fee_share_bps as u128)
-                        .ok_or(PercolatorError::EngineArithmeticOverflow)?
-                        / 10_000;
+                    let reward = policy_v16::fee_share_floor(
+                        charged,
+                        cfg_pre.maintenance_cranker_fee_share_bps,
+                    )
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                     if reward != 0 {
                         group
                             .credit_account_from_insurance_not_atomic(&mut portfolio, reward)
@@ -11152,10 +11199,11 @@ pub mod processor {
                             cfg_pre.maintenance_fee_per_slot,
                         )
                         .map_err(map_v16_error)?;
-                    let reward = charged
-                        .checked_mul(cfg_pre.maintenance_cranker_fee_share_bps as u128)
-                        .ok_or(PercolatorError::EngineArithmeticOverflow)?
-                        / 10_000;
+                    let reward = policy_v16::fee_share_floor(
+                        charged,
+                        cfg_pre.maintenance_cranker_fee_share_bps,
+                    )
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                     if reward != 0 {
                         group
                             .credit_account_from_insurance_not_atomic(&mut cranker, reward)
@@ -11864,10 +11912,11 @@ pub mod processor {
             let init_fee = if is_asset_authority {
                 0
             } else {
-                let fee = permissionless_market_init_fee_for_asset(
+                let fee = policy_v16::permissionless_market_init_fee_for_asset(
                     cfg_pre.permissionless_market_init_fee,
                     asset_index,
-                )?;
+                )
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                 if fee == 0 || fee > max_init_fee {
                     return Err(PercolatorError::Unauthorized.into());
                 }
@@ -11909,10 +11958,11 @@ pub mod processor {
                     let still_asset_authority =
                         cfg.marketauth != [0u8; 32] && cfg.marketauth == authority.key.to_bytes();
                     if !still_asset_authority {
-                        let expected_fee = permissionless_market_init_fee_for_asset(
+                        let expected_fee = policy_v16::permissionless_market_init_fee_for_asset(
                             cfg.permissionless_market_init_fee,
                             asset_index,
-                        )?;
+                        )
+                        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                         if expected_fee == 0
                             || expected_fee > max_init_fee
                             || expected_fee != init_fee
@@ -13898,10 +13948,11 @@ pub mod processor {
                     cranker
                         .validate_with_market(&group.as_view())
                         .map_err(map_v16_error)?;
-                    let reward = retained_fee
-                        .checked_mul(cfg.liquidation_cranker_fee_share_bps as u128)
-                        .ok_or(PercolatorError::EngineArithmeticOverflow)?
-                        / 10_000;
+                    let reward = policy_v16::fee_share_floor(
+                        retained_fee,
+                        cfg.liquidation_cranker_fee_share_bps,
+                    )
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                     let reward = core::cmp::min(reward, retained_fee);
                     if reward != 0 {
                         group
@@ -14570,16 +14621,6 @@ pub mod processor {
         Ok(total)
     }
 
-    fn fee_share_floor(amount: u128, share_bps: u16) -> Result<u128, ProgramError> {
-        if amount == 0 || share_bps == 0 {
-            return Ok(0);
-        }
-        amount
-            .checked_mul(share_bps as u128)
-            .map(|v| v / 10_000)
-            .ok_or(PercolatorError::EngineArithmeticOverflow.into())
-    }
-
     fn charge_account_backing_domain_fees_view(
         group: &mut state::MarketViewMutV16<'_>,
         account: &mut percolator::PortfolioV16ViewMut<'_>,
@@ -14686,23 +14727,6 @@ pub mod processor {
                 != 0
     }
 
-    fn risk_notional_ceil(size_q: u128, price: u64) -> Result<u128, ProgramError> {
-        let num = size_q
-            .checked_mul(price as u128)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        Ok(num
-            .checked_add(percolator::POS_SCALE - 1)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?
-            / percolator::POS_SCALE)
-    }
-
-    fn trade_fee_notional_ceil(size_q: u128, price: u64) -> Result<u128, ProgramError> {
-        if size_q == 0 || price == 0 {
-            return Ok(0);
-        }
-        risk_notional_ceil(size_q, price)
-    }
-
     // Per-asset accrual dt, mirroring the engine's
     // `segment_dt = min(now - asset.slot_last, max_accrual_dt_slots)` in
     // `accrue_asset_to_not_atomic`. The crank price clamp MUST use this, not the
@@ -14734,62 +14758,6 @@ pub mod processor {
         post_trade_mark_e6: u64,
         base_fee_paid: u128,
         mark_externality_notional: u128,
-    }
-
-    fn two_sided_trade_fee_paid_view(notional: u128, fee_bps: u64) -> Result<u128, ProgramError> {
-        if notional == 0 || fee_bps == 0 {
-            return Ok(0);
-        }
-        let one_side = notional
-            .checked_mul(fee_bps as u128)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?
-            .checked_add(9_999)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?
-            / 10_000;
-        one_side
-            .checked_mul(2)
-            .ok_or(PercolatorError::EngineArithmeticOverflow.into())
-    }
-
-    fn ceil_div_u128_view(num: u128, den: u128) -> Result<u128, ProgramError> {
-        if den == 0 {
-            return Err(PercolatorError::EngineArithmeticOverflow.into());
-        }
-        Ok(num
-            .checked_add(
-                den.checked_sub(1)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?,
-            )
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?
-            / den)
-    }
-
-    fn fee_bps_for_two_sided_fee_paid_view(
-        notional: u128,
-        required_paid: u128,
-        min_fee_bps: u64,
-        max_fee_bps: u64,
-    ) -> Result<u64, ProgramError> {
-        if required_paid == 0 || notional == 0 {
-            return Ok(min_fee_bps);
-        }
-        if two_sided_trade_fee_paid_view(notional, min_fee_bps)? >= required_paid {
-            return Ok(min_fee_bps);
-        }
-        if two_sided_trade_fee_paid_view(notional, max_fee_bps)? < required_paid {
-            return Ok(max_fee_bps);
-        }
-        let mut lo = min_fee_bps;
-        let mut hi = max_fee_bps;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if two_sided_trade_fee_paid_view(notional, mid)? >= required_paid {
-                hi = mid;
-            } else {
-                lo = mid + 1;
-            }
-        }
-        Ok(lo)
     }
 
     fn profile_updates_mark_from_trade_view(
@@ -14893,12 +14861,14 @@ pub mod processor {
         }
         let asset = group.markets[asset_index].engine.asset;
         let effective_price = asset.effective_price.get();
-        let trade_notional = trade_fee_notional_ceil(size_q_abs, accepted_exec_price)?;
+        let trade_notional = policy_v16::trade_fee_notional_ceil(size_q_abs, accepted_exec_price)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         let max_side_oi_q = core::cmp::max(asset.oi_eff_long_q.get(), asset.oi_eff_short_q.get());
         // The trade rewrites the stored target. Value existing OI at the larger target/effective
         // price so circuit-breaker lag cannot make displacement of a pending rebound underpriced.
         let externality_price = core::cmp::max(effective_price, profile.mark_ewma_e6);
-        let max_side_notional = risk_notional_ceil(max_side_oi_q, externality_price)?;
+        let max_side_notional = policy_v16::risk_notional_ceil(max_side_oi_q, externality_price)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         let mark_externality_notional = core::cmp::max(max_side_notional, trade_notional)
             .checked_mul(2)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
@@ -14919,8 +14889,11 @@ pub mod processor {
         if candidate_mark > percolator::MAX_ORACLE_PRICE {
             return Err(PercolatorError::OracleInvalid.into());
         }
-        let base_fee_paid = two_sided_trade_fee_paid_view(trade_notional, base)?;
-        let max_fee_paid = two_sided_trade_fee_paid_view(trade_notional, max_trading_fee_bps)?;
+        let base_fee_paid = policy_v16::two_sided_trade_fee_paid(trade_notional, base)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let max_fee_paid =
+            policy_v16::two_sided_trade_fee_paid(trade_notional, max_trading_fee_bps)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         let available_externality_fee = max_fee_paid.saturating_sub(base_fee_paid);
         let candidate_move_bps =
             policy_v16::price_move_bps_ceil(profile.mark_ewma_e6, candidate_mark)
@@ -14947,21 +14920,23 @@ pub mod processor {
         let actual_move_bps =
             policy_v16::price_move_bps_ceil(profile.mark_ewma_e6, post_trade_mark_e6)
                 .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let mark_fee_paid = ceil_div_u128_view(
+        let mark_fee_paid = policy_v16::ceil_div_u128(
             mark_externality_notional
                 .checked_mul(actual_move_bps as u128)
                 .ok_or(PercolatorError::EngineArithmeticOverflow)?,
             10_000,
-        )?;
+        )
+        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         let required_fee_paid = base_fee_paid
             .checked_add(mark_fee_paid)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let fee_bps = fee_bps_for_two_sided_fee_paid_view(
+        let fee_bps = policy_v16::fee_bps_for_two_sided_fee_paid(
             trade_notional,
             required_fee_paid,
             base,
             max_trading_fee_bps,
-        )?;
+        )
+        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         Ok(HybridTradeFeeQuote {
             fee_bps,
             post_trade_mark_e6,

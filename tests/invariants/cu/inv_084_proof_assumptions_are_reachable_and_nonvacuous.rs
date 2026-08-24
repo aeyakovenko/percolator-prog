@@ -6,7 +6,7 @@
 //!
 //! Evidence in this file (I/P roster): the source audit discovers mounted Kani
 //! modules from `kani/v16_kani.rs`, extracts every `kani::assume` tuple, and
-//! compares it exactly with the manifest. It also derives all 128 direct and 36
+//! compares it exactly with the manifest. It also derives all 135 direct and 36
 //! generated harnesses, classifies symbolic-total, branch-witnessed, explicitly
 //! constrained, and concrete-exact proofs, and rejects missing claims, covers,
 //! proof attributes, or public counterparts. A public LiteSVM composition reaches
@@ -416,9 +416,9 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
 fn v16_program_every_mounted_kani_harness_has_a_nonvacuity_disposition() {
     use std::collections::{BTreeMap, BTreeSet};
 
-    const EXPECTED_DIRECT_HARNESSES: usize = 128;
+    const EXPECTED_DIRECT_HARNESSES: usize = 135;
     const EXPECTED_GENERATED_HARNESSES: usize = 36;
-    const EXPECTED_TOTAL_HARNESSES: usize = 164;
+    const EXPECTED_TOTAL_HARNESSES: usize = 171;
     const CONCRETE_PUBLIC_EVIDENCE: [(&str, &str); 3] = [
         (
             "tests/invariants/kani/inv_020_authenticated_clock_slot_and_oracle_provenance.rs",
@@ -560,11 +560,11 @@ fn v16_program_every_mounted_kani_harness_has_a_nonvacuity_disposition() {
     category_counts.insert("GENERATED_SYMBOLIC_TOTAL", generated_harnesses.len());
 
     let expected_categories = BTreeMap::from([
-        ("BRANCH_WITNESSED", 23usize),
+        ("BRANCH_WITNESSED", 26usize),
         ("CONCRETE_EXACT", 28),
         ("EXPLICIT_ASSUMPTION", 10),
         ("GENERATED_SYMBOLIC_TOTAL", 36),
-        ("SYMBOLIC_TOTAL", 67),
+        ("SYMBOLIC_TOTAL", 71),
     ]);
     assert_eq!(
         category_counts, expected_categories,
