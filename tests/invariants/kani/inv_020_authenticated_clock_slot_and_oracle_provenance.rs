@@ -46,11 +46,11 @@ fn kani_v16_oracle_freshness_matches_full_width_elapsed_time() {
     let publish_time: i64 = kani::any();
     let now_unix_ts: i64 = kani::any();
     let max_staleness_secs: u64 = kani::any();
-    let age = now_unix_ts.saturating_sub(publish_time);
+    let age = i128::from(now_unix_ts) - i128::from(publish_time);
 
     assert_eq!(
         oracle_publish_time_is_fresh(publish_time, now_unix_ts, max_staleness_secs),
-        age >= 0 && age as u64 <= max_staleness_secs
+        age >= 0 && age as u128 <= u128::from(max_staleness_secs)
     );
 }
 

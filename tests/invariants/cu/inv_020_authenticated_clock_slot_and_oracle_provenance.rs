@@ -10,17 +10,21 @@
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //! The all-provider matrices additionally cross legal composite transforms, coherent rewind,
 //! exact freshness boundaries, a real adverse-price liquidation with a subsequent owner trade
-//! exit, and composite shutdown/forced-exit/restart with old-provenance rejection and fresh trading.
-//! An independent typed parser model covers 726 valid-layout boundary words, while an independent
-//! overflow-free confidence oracle compares all 65,536 basis-point settings across wide carry and
-//! overflow operands.
+//! exit, composite shutdown/forced-exit/restart with old-provenance rejection and fresh trading,
+//! and every single provider through DrainOnly, Recovery, and Resolved value-bearing routes.
+//! An independent typed parser model covers 726 boundary words, 15,552 structural/semantic
+//! combinations, and 12,288 seeded valid layouts. An independent overflow-free confidence oracle
+//! compares all 65,536 basis-point settings across wide carry and overflow operands.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter. The bounded reference does
-//! not exhaust every valid provider byte layout or the full provider-by-lifecycle Cartesian product.
+//! not mathematically exhaust every provider byte string, every multi-provider/lifecycle product,
+//! or the solver-bound relational wide-product theorem.
 
 use super::*;
+use rand::{Rng, SeedableRng};
+use rand_xorshift::XorShiftRng;
 
 #[test]
 fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
@@ -3220,6 +3224,12 @@ fn assert_pure_oracle_parser_matches_reference(
     assert_eq!(parsed, expected, "{label}");
 }
 
+fn take_axis<T: Copy>(word: &mut usize, axis: &[T]) -> T {
+    let value = axis[*word % axis.len()];
+    *word /= axis.len();
+    value
+}
+
 #[test]
 fn host_oracle_valid_layout_boundaries_match_independent_typed_reference() {
     const NOW: i64 = 100;
@@ -3587,6 +3597,331 @@ fn host_oracle_valid_layout_boundaries_match_independent_typed_reference() {
     println!("independent valid-layout oracle reference: {compared} boundary words");
 }
 
+#[test]
+fn host_oracle_structural_cartesian_matches_independent_error_precedence() {
+    const NOW: i64 = 100;
+    const MAX_STALENESS: u64 = 60;
+    const PRICE: u64 = 1_500_000;
+    let pyth_key = Pubkey::new_unique();
+    let pyth_feed = [0x91; 32];
+    let pyth_other_feed = [0x92; 32];
+    let pyth_case_count: usize = 2 * 2 * 2 * 2 * 3 * 3 * 2 * 2;
+    for case in 0..pyth_case_count {
+        let mut word = case;
+        let discriminator_valid = take_axis(&mut word, &[false, true]);
+        let verification_full = take_axis(&mut word, &[false, true]);
+        let feed_matches = take_axis(&mut word, &[false, true]);
+        let price = take_axis(&mut word, &[0, PRICE as i64]);
+        let exponent = take_axis(&mut word, &[-19, -6, 19]);
+        let publish_time = take_axis(&mut word, &[0, 40, 101]);
+        let confidence = take_axis(&mut word, &[0, 15_001]);
+        let conf_bps = take_axis(&mut word, &[0, 100]);
+        assert_eq!(word, 0);
+        let observation = ReferencePythObservation {
+            feed_id: pyth_feed,
+            price,
+            exponent,
+            confidence,
+            publish_time,
+        };
+        let mut data = make_pyth_data(
+            &observation.feed_id,
+            observation.price,
+            observation.exponent,
+            observation.confidence,
+            observation.publish_time,
+        );
+        if !discriminator_valid {
+            data[0] ^= u8::MAX;
+        }
+        if !verification_full {
+            data[40] = 0;
+        }
+        let expected_feed = if feed_matches {
+            pyth_feed
+        } else {
+            pyth_other_feed
+        };
+        let expected = if !discriminator_valid || !verification_full {
+            Err(PercolatorError::OracleInvalid.into())
+        } else {
+            reference_pyth_observation(observation, expected_feed, NOW, MAX_STALENESS, conf_bps)
+        };
+        assert_pure_oracle_parser_matches_reference(
+            "Pyth structural Cartesian",
+            oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+            pyth_key,
+            &data,
+            &expected_feed,
+            NOW,
+            MAX_STALENESS,
+            conf_bps,
+            expected,
+        );
+    }
+
+    let switchboard_key = Pubkey::new_from_array([0xA1; 32]);
+    let switchboard_other_feed = [0xA2; 32];
+    let switchboard_case_count: usize = 2 * 2 * 2 * 2 * 3 * 2 * 2 * 3 * 2 * 3 * 2 * 2;
+    for case in 0..switchboard_case_count {
+        let mut word = case;
+        let key_matches = take_axis(&mut word, &[false, true]);
+        let discriminator_valid = take_axis(&mut word, &[false, true]);
+        let feed_hash = take_axis(&mut word, &[[0; 32], [0xA3; 32]]);
+        let account_update_time = take_axis(&mut word, &[0, NOW]);
+        let (num_samples, min_sample_size) = take_axis(&mut word, &[(3, 1), (1, 0), (0, 1)]);
+        let submission_idx = take_axis(&mut word, &[31, 32]);
+        let result_slot = take_axis(&mut word, &[0, 1]);
+        let publish_time = take_axis(&mut word, &[0, 40, 101]);
+        let value = take_axis(
+            &mut word,
+            &[0, i128::from(PRICE) * REFERENCE_SWITCHBOARD_SCALE as i128],
+        );
+        let std_dev = take_axis(&mut word, &[-1, 0, REFERENCE_SWITCHBOARD_SCALE as i128]);
+        let max_staleness_secs = take_axis(&mut word, &[0, MAX_STALENESS]);
+        let conf_bps = take_axis(&mut word, &[0, 100]);
+        assert_eq!(word, 0);
+        let observation = ReferenceSwitchboardObservation {
+            feed_hash,
+            value,
+            std_dev,
+            account_update_time,
+            publish_time,
+            num_samples,
+            min_sample_size,
+            submission_idx,
+            result_slot,
+        };
+        let mut data = make_reference_switchboard_data(observation);
+        if !discriminator_valid {
+            data[0] ^= u8::MAX;
+        }
+        let expected_feed = if key_matches {
+            switchboard_key.to_bytes()
+        } else {
+            switchboard_other_feed
+        };
+        let expected = if !key_matches {
+            Err(PercolatorError::InvalidOracleKey.into())
+        } else if !discriminator_valid {
+            Err(PercolatorError::OracleInvalid.into())
+        } else {
+            reference_switchboard_observation(observation, NOW, max_staleness_secs, conf_bps)
+        };
+        assert_pure_oracle_parser_matches_reference(
+            "Switchboard structural Cartesian",
+            oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+            switchboard_key,
+            &data,
+            &expected_feed,
+            NOW,
+            max_staleness_secs,
+            conf_bps,
+            expected,
+        );
+    }
+
+    let chainlink_key = Pubkey::new_from_array([0xB1; 32]);
+    let chainlink_other_feed = [0xB2; 32];
+    let chainlink_case_count: usize = 2 * 2 * 2 * 2 * 3 * 2 * 3 * 2 * 2;
+    for case in 0..chainlink_case_count {
+        let mut word = case;
+        let key_matches = take_axis(&mut word, &[false, true]);
+        let discriminator_valid = take_axis(&mut word, &[false, true]);
+        let version = take_axis(&mut word, &[0, 1]);
+        let latest_round_id = take_axis(&mut word, &[0, 1]);
+        let live_length = take_axis(&mut word, &[0, 1, 2]);
+        let result_slot = take_axis(&mut word, &[0, 1]);
+        let publish_time = take_axis(&mut word, &[0, 40, 101]);
+        let answer = take_axis(&mut word, &[0, i128::from(PRICE)]);
+        let decimals = take_axis(&mut word, &[6, 19]);
+        assert_eq!(word, 0);
+        let observation = ReferenceChainlinkObservation {
+            version,
+            decimals,
+            latest_round_id,
+            live_length,
+            result_slot,
+            publish_time,
+            answer,
+        };
+        let mut data = make_chainlink_data(
+            observation.version,
+            observation.decimals,
+            observation.latest_round_id,
+            observation.live_length,
+            observation.result_slot,
+            observation.publish_time,
+            observation.answer,
+        );
+        if !discriminator_valid {
+            data[0] ^= u8::MAX;
+        }
+        let expected_feed = if key_matches {
+            chainlink_key.to_bytes()
+        } else {
+            chainlink_other_feed
+        };
+        let expected = if !key_matches {
+            Err(PercolatorError::InvalidOracleKey.into())
+        } else if !discriminator_valid {
+            Err(PercolatorError::OracleInvalid.into())
+        } else {
+            reference_chainlink_observation(observation, NOW, MAX_STALENESS)
+        };
+        assert_pure_oracle_parser_matches_reference(
+            "Chainlink structural Cartesian",
+            oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+            chainlink_key,
+            &data,
+            &expected_feed,
+            NOW,
+            MAX_STALENESS,
+            0,
+            expected,
+        );
+    }
+
+    assert_eq!(pyth_case_count, 576);
+    assert_eq!(switchboard_case_count, 13_824);
+    assert_eq!(chainlink_case_count, 1_152);
+    println!(
+        "independent structural oracle Cartesian: {} words",
+        pyth_case_count + switchboard_case_count + chainlink_case_count
+    );
+}
+
+#[test]
+fn host_oracle_generated_valid_layouts_match_independent_typed_reference() {
+    const CASES_PER_PROVIDER: usize = 4_096;
+    let mut rng = XorShiftRng::from_seed(*b"INV020-PARSER-01");
+    let pyth_key = Pubkey::new_from_array([0xC1; 32]);
+    let switchboard_key = Pubkey::new_from_array([0xC2; 32]);
+    let chainlink_key = Pubkey::new_from_array([0xC3; 32]);
+
+    for case in 0..CASES_PER_PROVIDER {
+        let now_unix_ts: i64 = rng.gen();
+        let max_staleness_secs: u64 = rng.gen();
+        let conf_bps: u16 = rng.gen();
+        let mut feed_id: [u8; 32] = rng.gen();
+        feed_id[0] |= 1;
+        let pyth = ReferencePythObservation {
+            feed_id,
+            price: rng.gen(),
+            exponent: if case % 4 == 0 {
+                rng.gen()
+            } else {
+                rng.gen_range(-18..=18)
+            },
+            confidence: rng.gen(),
+            publish_time: rng.gen(),
+        };
+        let pyth_data = make_pyth_data(
+            &pyth.feed_id,
+            pyth.price,
+            pyth.exponent,
+            pyth.confidence,
+            pyth.publish_time,
+        );
+        let pyth_label = format!(
+            "Pyth generated valid layout case={case} price={} exponent={} confidence={} publish_time={} now={} max_staleness={} conf_bps={conf_bps}",
+            pyth.price,
+            pyth.exponent,
+            pyth.confidence,
+            pyth.publish_time,
+            now_unix_ts,
+            max_staleness_secs,
+        );
+        assert_pure_oracle_parser_matches_reference(
+            &pyth_label,
+            oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+            pyth_key,
+            &pyth_data,
+            &pyth.feed_id,
+            now_unix_ts,
+            max_staleness_secs,
+            conf_bps,
+            reference_pyth_observation(
+                pyth,
+                pyth.feed_id,
+                now_unix_ts,
+                max_staleness_secs,
+                conf_bps,
+            ),
+        );
+
+        let mut feed_hash: [u8; 32] = rng.gen();
+        feed_hash[0] |= 1;
+        let switchboard = ReferenceSwitchboardObservation {
+            feed_hash,
+            value: rng.gen(),
+            std_dev: rng.gen(),
+            account_update_time: rng.gen(),
+            publish_time: rng.gen(),
+            num_samples: 3,
+            min_sample_size: 1,
+            submission_idx: (rng.gen::<u8>() % 32),
+            result_slot: rng.gen(),
+        };
+        let switchboard_data = make_reference_switchboard_data(switchboard);
+        assert_pure_oracle_parser_matches_reference(
+            "Switchboard generated valid layout",
+            oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+            switchboard_key,
+            &switchboard_data,
+            &switchboard_key.to_bytes(),
+            now_unix_ts,
+            max_staleness_secs,
+            conf_bps,
+            reference_switchboard_observation(
+                switchboard,
+                now_unix_ts,
+                max_staleness_secs,
+                conf_bps,
+            ),
+        );
+
+        let chainlink = ReferenceChainlinkObservation {
+            version: rng.gen(),
+            decimals: if case % 4 == 0 {
+                rng.gen()
+            } else {
+                rng.gen_range(0..=18)
+            },
+            latest_round_id: rng.gen(),
+            live_length: if case % 4 == 0 { rng.gen() } else { 1 },
+            result_slot: rng.gen(),
+            publish_time: rng.gen(),
+            answer: rng.gen(),
+        };
+        let chainlink_data = make_chainlink_data(
+            chainlink.version,
+            chainlink.decimals,
+            chainlink.latest_round_id,
+            chainlink.live_length,
+            chainlink.result_slot,
+            chainlink.publish_time,
+            chainlink.answer,
+        );
+        assert_pure_oracle_parser_matches_reference(
+            "Chainlink generated valid layout",
+            oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+            chainlink_key,
+            &chainlink_data,
+            &chainlink_key.to_bytes(),
+            now_unix_ts,
+            max_staleness_secs,
+            0,
+            reference_chainlink_observation(chainlink, now_unix_ts, max_staleness_secs),
+        );
+    }
+
+    println!(
+        "independent generated valid-layout oracle reference: {} words",
+        CASES_PER_PROVIDER * 3
+    );
+}
+
 fn write_epoch_matrix_leg(
     env: &mut V16CuEnv,
     leg: EpochMatrixLeg,
@@ -3672,6 +4007,39 @@ fn new_epoch_matrix_leg(
     };
     write_epoch_matrix_leg(env, leg, price_e6, publish_time, result_slot);
     leg
+}
+
+#[test]
+fn host_oracle_signed_elapsed_time_does_not_saturate() {
+    const NOW_UNIX_TS: i64 = 100;
+    const PUBLISH_TIME: i64 = i64::MIN;
+    const EXACT_AGE: u64 = i64::MAX as u64 + 101;
+    let account_key = Pubkey::new_unique();
+    let feed = [0xD1; 32];
+    let data = make_pyth_data(&feed, 1_000_000, -6, 0, PUBLISH_TIME);
+
+    assert_pure_oracle_parser_matches_reference(
+        "Pyth true age above large u64 freshness bound",
+        oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+        account_key,
+        &data,
+        &feed,
+        NOW_UNIX_TS,
+        EXACT_AGE - 1,
+        0,
+        Err(PercolatorError::OracleStale.into()),
+    );
+    assert_pure_oracle_parser_matches_reference(
+        "Pyth true age exactly at large u64 freshness bound",
+        oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+        account_key,
+        &data,
+        &feed,
+        NOW_UNIX_TS,
+        EXACT_AGE,
+        0,
+        Ok((1_000_000, PUBLISH_TIME)),
+    );
 }
 
 fn composite_epoch_matrix_cases() -> Vec<EpochMatrixCase> {
@@ -4611,4 +4979,256 @@ fn v16_program_composite_profile_shutdown_restart_clears_old_provenance() {
     assert_eq!(terminal_group.assets[0].oi_eff_short_q, 0);
     assert_eq!(terminal_group.vault as u64, vault_before);
     assert_eq!(env.token_amount(env.vault), vault_before);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProviderLifecycleScenario {
+    DrainOnly,
+    Recovery,
+    Resolved,
+}
+
+#[test]
+fn v16_program_each_provider_composes_through_every_value_bearing_lifecycle() {
+    const PRICE_E6: u64 = 1_000_000;
+    const UPDATED_PRICE_E6: u64 = 1_010_000;
+    const PROVIDERS: [EpochMatrixProvider; 3] = [
+        EpochMatrixProvider::Pyth,
+        EpochMatrixProvider::Switchboard,
+        EpochMatrixProvider::Chainlink,
+    ];
+    const SCENARIOS: [ProviderLifecycleScenario; 3] = [
+        ProviderLifecycleScenario::DrainOnly,
+        ProviderLifecycleScenario::Recovery,
+        ProviderLifecycleScenario::Resolved,
+    ];
+
+    let mut worlds = 0usize;
+    let mut max_oracle_cu = 0u64;
+    for (provider_index, provider) in PROVIDERS.into_iter().enumerate() {
+        for (scenario_index, scenario) in SCENARIOS.into_iter().enumerate() {
+            let world = provider_index * SCENARIOS.len() + scenario_index;
+            let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+                initial_price: PRICE_E6,
+                ..V16CuMarketParams::default()
+            });
+            env.configure_permissionless_resolve_with_cu(100, 5);
+            set_test_clock(&mut env, 1, 100);
+            let leg = new_epoch_matrix_leg(&mut env, provider, 40_000 + world, 0, PRICE_E6, 100, 1);
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                1,
+                0,
+                [leg.feed, [0; 32], [0; 32]],
+                &[leg.account],
+                1,
+                100,
+                0,
+                0,
+                3,
+                100,
+            )
+            .unwrap_or_else(|error| {
+                panic!("provider lifecycle world {world} failed configuration: {error}")
+            });
+
+            let long_owner = Keypair::new();
+            let short_owner = Keypair::new();
+            let keeper_owner = Keypair::new();
+            let long = env.create_portfolio(&long_owner);
+            let short = env.create_portfolio(&short_owner);
+            let keeper = env.create_portfolio(&keeper_owner);
+            env.deposit(&long_owner, long, 2_000_000);
+            env.deposit(&short_owner, short, 2_000_000);
+            env.trade_asset_with_cu(
+                0,
+                &long_owner,
+                long,
+                &short_owner,
+                short,
+                POS_SCALE as i128,
+                PRICE_E6,
+                0,
+            );
+            let vault_before = env.token_amount(env.vault);
+
+            set_test_clock(&mut env, 2, 101);
+            write_epoch_matrix_leg(&mut env, leg, UPDATED_PRICE_E6, 101, 2);
+            let oracle_cu = try_epoch_matrix_crank(&mut env, keeper, 2, &[leg.account])
+                .unwrap_or_else(|error| {
+                    panic!("provider lifecycle world {world} failed observation: {error}")
+                });
+            max_oracle_cu = max_oracle_cu.max(oracle_cu);
+            let active_profile = state::read_asset_oracle_profile(
+                &env.svm.get_account(&env.market).unwrap().data,
+                0,
+            )
+            .unwrap();
+            assert_eq!(active_profile.oracle_target_price_e6, UPDATED_PRICE_E6);
+            assert_eq!(active_profile.oracle_target_publish_time, 101);
+
+            match scenario {
+                ProviderLifecycleScenario::DrainOnly => {
+                    set_test_clock(&mut env, 3, 102);
+                    env.update_asset_lifecycle_as_admin_with_cu(
+                        processor::ASSET_ACTION_DRAIN_ONLY,
+                        0,
+                        0,
+                        0,
+                    );
+                    write_epoch_matrix_leg(&mut env, leg, UPDATED_PRICE_E6, 102, 3);
+                    let drain_cu = try_epoch_matrix_crank(&mut env, keeper, 3, &[leg.account])
+                        .unwrap_or_else(|error| {
+                            panic!("provider lifecycle world {world} failed DrainOnly accrual: {error}")
+                        });
+                    max_oracle_cu = max_oracle_cu.max(drain_cu);
+                    assert_eq!(
+                        env.market_state().1.assets[0].lifecycle,
+                        AssetLifecycleV16::DrainOnly
+                    );
+                    let exit_price = env.market_state().1.assets[0].effective_price;
+                    env.trade_asset_with_cu(
+                        0,
+                        &long_owner,
+                        long,
+                        &short_owner,
+                        short,
+                        -(POS_SCALE as i128),
+                        exit_price,
+                        0,
+                    );
+                    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+                        let capital = env.portfolio_state(portfolio).capital.get();
+                        env.withdraw(owner, portfolio, capital);
+                    }
+                    let (_, terminal_group) = env.market_state();
+                    assert_eq!(terminal_group.vault as u64, env.token_amount(env.vault));
+                }
+                ProviderLifecycleScenario::Recovery => {
+                    set_test_clock(&mut env, 3, 102);
+                    env.update_asset_lifecycle_as_admin_with_cu(
+                        processor::ASSET_ACTION_SHUTDOWN,
+                        0,
+                        3,
+                        0,
+                    );
+                    let recovery_before = env.svm.get_account(&env.market).unwrap();
+                    write_epoch_matrix_leg(&mut env, leg, UPDATED_PRICE_E6 + 1, 102, 3);
+                    let keeper_before = env.svm.get_account(&keeper).unwrap();
+                    let error = try_epoch_matrix_crank(&mut env, keeper, 3, &[leg.account])
+                        .expect_err("Recovery must not consume a retired provider profile");
+                    assert!(
+                        error.contains("Custom(21)")
+                            || error.contains("Custom(22)")
+                            || error.contains("Custom(19)"),
+                        "provider lifecycle world {world} returned unexpected Recovery tail error: {error}"
+                    );
+                    assert_eq!(env.svm.get_account(&env.market).unwrap(), recovery_before);
+                    assert_eq!(env.svm.get_account(&keeper).unwrap(), keeper_before);
+
+                    set_test_clock(&mut env, 8, 107);
+                    for _ in 0..8 {
+                        if !has_active_leg_for_asset(&env.portfolio_state(long), 0)
+                            && !has_active_leg_for_asset(&env.portfolio_state(short), 0)
+                        {
+                            break;
+                        }
+                        for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+                            if !has_active_leg_for_asset(&env.portfolio_state(portfolio), 0) {
+                                continue;
+                            }
+                            let market_before = env.svm.get_account(&env.market).unwrap();
+                            let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+                            env.forfeit_recovery_leg_with_cu(
+                                owner,
+                                portfolio,
+                                0,
+                                percolator::MAX_VAULT_TVL,
+                            );
+                            assert!(
+                                env.svm.get_account(&env.market).unwrap() != market_before
+                                    || env.svm.get_account(&portfolio).unwrap() != portfolio_before,
+                                "provider lifecycle world {world} accepted a no-op Recovery continuation"
+                            );
+                        }
+                    }
+                    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+                    assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
+                    let old_generation = env.asset_market_id(0);
+                    let admin = Keypair::from_bytes(&env.admin.to_bytes()).expect("clone admin");
+                    set_test_clock(&mut env, 9, 108);
+                    env.try_restart_asset_oracle_with_authority(&admin, 0, 9, PRICE_E6)
+                        .unwrap_or_else(|error| {
+                            panic!("provider lifecycle world {world} failed restart: {error}")
+                        });
+                    assert_ne!(env.asset_market_id(0), old_generation);
+                    env.trade_asset_with_cu(
+                        0,
+                        &long_owner,
+                        long,
+                        &short_owner,
+                        short,
+                        POS_SCALE as i128,
+                        PRICE_E6,
+                        0,
+                    );
+                    env.trade_asset_with_cu(
+                        0,
+                        &long_owner,
+                        long,
+                        &short_owner,
+                        short,
+                        -(POS_SCALE as i128),
+                        PRICE_E6,
+                        0,
+                    );
+                    assert_eq!(env.token_amount(env.vault), vault_before);
+                }
+                ProviderLifecycleScenario::Resolved => {
+                    env.resolve();
+                    let (resolved_cfg, resolved_group) = env.market_state();
+                    let permissionless_slot = resolved_group
+                        .resolved_slot
+                        .checked_add(resolved_cfg.force_close_delay_slots)
+                        .expect("provider lifecycle permissionless slot overflow");
+                    set_test_clock(
+                        &mut env,
+                        permissionless_slot,
+                        101 + resolved_cfg.force_close_delay_slots as i64,
+                    );
+                    let resolved_profile = state::read_asset_oracle_profile(
+                        &env.svm.get_account(&env.market).unwrap().data,
+                        0,
+                    )
+                    .unwrap();
+                    assert_eq!(resolved_profile.oracle_target_price_e6, UPDATED_PRICE_E6);
+                    assert_eq!(resolved_profile.oracle_target_publish_time, 101);
+                    let payouts = drain_resolved_cohort(
+                        &mut env,
+                        &[
+                            (&long_owner, long),
+                            (&short_owner, short),
+                            (&keeper_owner, keeper),
+                        ],
+                        "provider lifecycle resolved payout",
+                    );
+                    let remaining_vault = env.token_amount(env.vault);
+                    assert_eq!(
+                        payouts.iter().sum::<u128>() + u128::from(remaining_vault),
+                        u128::from(vault_before)
+                    );
+                    assert_eq!(env.market_state().1.vault as u64, remaining_vault);
+                }
+            }
+            worlds += 1;
+        }
+    }
+
+    assert_eq!(worlds, PROVIDERS.len() * SCENARIOS.len());
+    assert_cu_within(
+        "single-provider lifecycle oracle ingestion",
+        max_oracle_cu,
+        CRANK_CU_LIMIT,
+    );
+    println!("single-provider lifecycle Cartesian: {worlds} worlds, oracle max {max_oracle_cu} CU");
 }

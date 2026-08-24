@@ -4477,8 +4477,8 @@ pub mod oracle_v16 {
         now_unix_ts: i64,
         max_staleness_secs: u64,
     ) -> bool {
-        let age = now_unix_ts.saturating_sub(publish_time);
-        age >= 0 && age as u64 <= max_staleness_secs
+        let age = i128::from(now_unix_ts) - i128::from(publish_time);
+        age >= 0 && age as u128 <= u128::from(max_staleness_secs)
     }
 
     fn mul_u128_by_u16_wide(value: u128, multiplier: u16) -> (u128, u128) {
