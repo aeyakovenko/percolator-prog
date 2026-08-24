@@ -6,14 +6,23 @@
 //!
 //! Evidence in this file (I/C): oversized batch leg vectors at the public decode
 //! boundary reject as instruction data errors rather than allocating a large
-//! vector or panicking the SBF program. The machine-readable roster in
-//! `tests/invariants/inv_083_boundary_roster.tsv` names the current
-//! invariant-owned boundary corpus. Other boundary cases are distributed in
-//! INV-011, INV-058, INV-077, and the instruction-decoder Kani owner.
+//! vector or panicking the SBF program. The machine-readable class roster and
+//! source-locked caller-input inventory assign all 206 fields across 53 public
+//! input types to 20 semantic boundary profiles, per-field public evidence, and
+//! profile-level boundary evidence. InitMarket's complete validation predicate
+//! is exercised through public exact-rollback failures and live retries. Other
+//! boundary cases remain distributed across their economic invariant owners and
+//! the full-width instruction-decoder Kani proofs.
+//!
+//! Guarantee boundary: this closes the current public input surface. A new input
+//! type or field, changed profile count, scalar validation predicate, or wider
+//! supported shape reopens INV-083. Deployed wide-arithmetic equivalence remains
+//! separately owned by INV-085.
 
 use super::*;
 
 const INV_083_BOUNDARY_ROSTER: &str = include_str!("../inv_083_boundary_roster.tsv");
+const INV_083_CALLER_INPUT_ROSTER: &str = include_str!("../inv_023_caller_input_roster.tsv");
 const INV_083_BOUNDARY_ROSTER_HEADER: &str =
     "class\tinvariant\towner_file\ttest_function\tboundary_value\tcoverage_note";
 const INV_083_REQUIRED_BOUNDARY_CLASSES: &[&str] = &[
@@ -30,10 +39,260 @@ const INV_083_REQUIRED_BOUNDARY_CLASSES: &[&str] = &[
     "near-overflow",
 ];
 
+#[derive(Clone, Copy)]
+struct Inv083BoundaryProfile {
+    name: &'static str,
+    evidence: &'static str,
+}
+
+const INV_083_BOUNDARY_PROFILES: &[Inv083BoundaryProfile] = &[
+    Inv083BoundaryProfile { name: "amount", evidence: "tests/invariants/cu/inv_083_boundary_completeness.rs#v16_attack_large_amount_deposit_withdraw_exact" },
+    Inv083BoundaryProfile { name: "authenticated-time", evidence: "tests/invariants/cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs#v16_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot" },
+    Inv083BoundaryProfile { name: "basis-points", evidence: "tests/invariants/cu/inv_083_boundary_completeness.rs#v16_attack_init_market_rejects_grief_config_without_burning_market_account" },
+    Inv083BoundaryProfile { name: "bitmask", evidence: "tests/invariants/cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs#v16_program_hybrid_oracle_rejects_duplicate_or_malformed_leg_config" },
+    Inv083BoundaryProfile { name: "count", evidence: "tests/invariants/cu/inv_083_boundary_completeness.rs#v16_attack_init_market_rejects_grief_config_without_burning_market_account" },
+    Inv083BoundaryProfile { name: "duration", evidence: "tests/invariants/cu/inv_083_boundary_completeness.rs#v16_attack_init_market_rejects_grief_config_without_burning_market_account" },
+    Inv083BoundaryProfile { name: "enum", evidence: "tests/invariants/cu/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_attack_finalize_reset_side_requires_empty_side_counts" },
+    Inv083BoundaryProfile { name: "expiry", evidence: "tests/invariants/cu/inv_028_source_domain_realizability_cap.rs#v16_attack_backing_bucket_topup_withdraw_input_gates" },
+    Inv083BoundaryProfile { name: "identity", evidence: "tests/invariants/cu/inv_002_asset_generation_binding.rs#v16_program_asset_generation_field_and_guard_roster_is_source_complete" },
+    Inv083BoundaryProfile { name: "ignored", evidence: "tests/invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs#v16_attack_close_resolved_ignores_spoofed_fee_rate_param" },
+    Inv083BoundaryProfile { name: "index", evidence: "tests/invariants/cu/inv_083_boundary_completeness.rs#v16_attack_out_of_range_asset_index_rejected" },
+    Inv083BoundaryProfile { name: "key", evidence: "tests/invariants/cu/inv_089_activation_reactivation_and_initialization_equivalence.rs#v16_program_reuse_rejects_every_zero_authority_before_mutation" },
+    Inv083BoundaryProfile { name: "no-data", evidence: "tests/invariants/public_sbf/inv_022_instruction_decoding_and_schema_upgrade_safety.rs#host_instruction_canonical_corpus_roundtrips_and_rejects_truncation_or_trailing_bytes" },
+    Inv083BoundaryProfile { name: "price", evidence: "tests/invariants/cu/inv_083_boundary_completeness.rs#v16_attack_mark_input_bounds_reject_atomically" },
+    Inv083BoundaryProfile { name: "rate", evidence: "tests/invariants/cu/inv_083_boundary_completeness.rs#v16_attack_init_market_rejects_grief_config_without_burning_market_account" },
+    Inv083BoundaryProfile { name: "ratio", evidence: "tests/invariants/cu/inv_083_boundary_completeness.rs#v16_attack_init_market_rejects_grief_config_without_burning_market_account" },
+    Inv083BoundaryProfile { name: "replay", evidence: "tests/invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs#v16_control_sequences_accept_gaps_reject_replays_and_keep_lanes_independent" },
+    Inv083BoundaryProfile { name: "scale", evidence: "tests/invariants/cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs#v16_program_hybrid_oracle_rejects_duplicate_or_malformed_leg_config" },
+    Inv083BoundaryProfile { name: "shape", evidence: "tests/invariants/cu/inv_083_boundary_completeness.rs#v16_program_batch_decode_oversized_vectors_reject_before_allocation" },
+    Inv083BoundaryProfile { name: "signed-quantity", evidence: "tests/invariants/cu/inv_083_boundary_completeness.rs#v16_attack_extreme_size_trade_rejected_no_panic" },
+];
+
+fn inv_083_boundary_profile(type_name: &str, field: &str, classification: &str) -> &'static str {
+    if field == "-" {
+        return "no-data";
+    }
+    match classification {
+        "IDENTITY_BINDING" => return "identity",
+        "REPLAY_GUARD" => return "replay",
+        "AUTHENTICATED_TIME" => return "authenticated-time",
+        "IGNORED_LEGACY" => return "ignored",
+        "BOUNDED_WORK" => return "amount",
+        _ => {}
+    }
+
+    if matches!(
+        field,
+        "new_pubkey"
+            | "primary_mint"
+            | "secondary_mint"
+            | "insurance_authority"
+            | "insurance_operator"
+            | "backing_bucket_authority"
+            | "oracle_authority"
+            | "oracle_leg_feeds"
+    ) {
+        return "key";
+    }
+    if field == "observations" || field == "legs" {
+        return "shape";
+    }
+    if field == "asset_index" || field == "domain" {
+        return "index";
+    }
+    if matches!(field, "action" | "kind" | "side" | "enabled" | "invert") {
+        return "enum";
+    }
+    if field == "oracle_leg_flags" {
+        return "bitmask";
+    }
+    if field == "size_q" {
+        return "signed-quantity";
+    }
+    if field == "expiry_slot" {
+        return "expiry";
+    }
+    if field.contains("price")
+        || matches!(
+            field,
+            "exec_price" | "limit_price" | "mark_e6" | "initial_mark_e6"
+        )
+    {
+        return "price";
+    }
+    if field.ends_with("_bps") || field.contains("_bps_") {
+        return "basis-points";
+    }
+    if matches!(field, "h_min" | "h_max") {
+        return "ratio";
+    }
+    if field == "unit_scale" {
+        return "scale";
+    }
+    if matches!(
+        field,
+        "max_portfolio_assets"
+            | "oracle_leg_count"
+            | "oracle_accounts"
+            | "max_account_b_settlement_chunks"
+            | "max_bankrupt_close_chunks"
+    ) {
+        return "count";
+    }
+    if field.ends_with("_slots") || field.ends_with("_secs") {
+        return "duration";
+    }
+    if matches!(
+        field,
+        "maintenance_fee_per_slot" | "max_abs_funding_e9_per_slot"
+    ) {
+        return "rate";
+    }
+    if field == "mark_min_fee"
+        || field == "min_init_fee"
+        || field == "max_init_fee"
+        || field == "optional_deposit"
+        || field.contains("amount")
+        || field.ends_with("_cap")
+        || field.ends_with("_abs")
+        || field.ends_with("_req")
+        || field.ends_with("_atoms")
+    {
+        return "amount";
+    }
+
+    panic!("unclassified INV-083 boundary field {type_name}.{field} ({classification})");
+}
+
 fn inv_083_source_contains_test(source: &str, test_function: &str) -> bool {
     let top_level = format!("#[test]\nfn {test_function}(");
     let indented = format!("#[test]\n    fn {test_function}(");
     source.contains(&top_level) || source.contains(&indented)
+}
+
+#[test]
+fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const HEADER: &str = "type\tfields\tclassification\tevidence";
+    const EXPECTED_FIELD_COUNT: usize = 206;
+    const EXPECTED_TYPE_COUNT: usize = 53;
+
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let profile_names = INV_083_BOUNDARY_PROFILES
+        .iter()
+        .map(|profile| profile.name)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(profile_names.len(), INV_083_BOUNDARY_PROFILES.len());
+
+    let mut saw_header = false;
+    let mut subjects = BTreeSet::new();
+    let mut types = BTreeSet::new();
+    let mut profile_counts = BTreeMap::<&str, usize>::new();
+    let mut field_evidence_sources = BTreeMap::<String, String>::new();
+    for (line_index, line) in INV_083_CALLER_INPUT_ROSTER.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !saw_header {
+            assert_eq!(line, HEADER, "INV-023 caller-input roster header changed");
+            saw_header = true;
+            continue;
+        }
+        let columns = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(
+            columns.len(),
+            4,
+            "line {}: malformed caller-input roster row",
+            line_index + 1
+        );
+        let type_name = columns[0];
+        let classification = columns[2];
+        let (evidence_file, evidence_test) = columns[3]
+            .split_once('#')
+            .expect("field evidence is path#test");
+        let evidence_source = field_evidence_sources
+            .entry(evidence_file.to_owned())
+            .or_insert_with(|| {
+                std::fs::read_to_string(manifest.join(evidence_file))
+                    .unwrap_or_else(|error| panic!("read {evidence_file}: {error}"))
+            });
+        assert!(
+            evidence_source.contains(&format!("fn {evidence_test}(")),
+            "{type_name} boundary owner is missing executable evidence {}",
+            columns[3]
+        );
+        types.insert(type_name);
+        for field in columns[1].split(',') {
+            let profile = inv_083_boundary_profile(type_name, field, classification);
+            assert!(
+                profile_names.contains(profile),
+                "{type_name}.{field} maps to unknown boundary profile {profile}"
+            );
+            assert!(
+                subjects.insert(format!("{type_name}.{field}")),
+                "duplicate boundary subject {type_name}.{field}"
+            );
+            *profile_counts.entry(profile).or_default() += 1;
+        }
+    }
+    assert!(saw_header);
+    assert_eq!(
+        subjects.len(),
+        EXPECTED_FIELD_COUNT,
+        "public input field count changed; classify every new or removed field deliberately"
+    );
+    assert_eq!(
+        types.len(),
+        EXPECTED_TYPE_COUNT,
+        "public input type count changed; classify every new or removed type deliberately"
+    );
+    assert_eq!(
+        profile_counts.keys().copied().collect::<BTreeSet<_>>(),
+        profile_names,
+        "every boundary profile must own at least one current public input field"
+    );
+    let expected_profile_counts = BTreeMap::from([
+        ("amount", 24),
+        ("authenticated-time", 12),
+        ("basis-points", 17),
+        ("bitmask", 1),
+        ("count", 5),
+        ("duration", 9),
+        ("enum", 5),
+        ("expiry", 1),
+        ("identity", 50),
+        ("ignored", 1),
+        ("index", 24),
+        ("key", 9),
+        ("no-data", 4),
+        ("price", 12),
+        ("rate", 2),
+        ("ratio", 2),
+        ("replay", 20),
+        ("scale", 1),
+        ("shape", 3),
+        ("signed-quantity", 4),
+    ]);
+    assert_eq!(
+        profile_counts, expected_profile_counts,
+        "public input boundary profile changed; review every added, removed, or reclassified field"
+    );
+
+    for profile in INV_083_BOUNDARY_PROFILES {
+        let (owner_file, test_function) = profile
+            .evidence
+            .split_once('#')
+            .expect("boundary profile evidence is path#test");
+        let source = std::fs::read_to_string(manifest.join(owner_file))
+            .unwrap_or_else(|error| panic!("read {owner_file}: {error}"));
+        assert!(
+            inv_083_source_contains_test(&source, test_function),
+            "boundary profile {} lacks executable evidence {}",
+            profile.name,
+            profile.evidence
+        );
+    }
 }
 
 #[test]
@@ -1025,32 +1284,110 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
         state::portfolio_account_len_for_market_slots(valid.max_portfolio_assets as usize)
             .expect("portfolio len");
 
-    let mut zero_portfolios = V16CuMarketParams::default();
-    zero_portfolios.max_portfolio_assets = 0;
-    let mut over_portfolio_cap = V16CuMarketParams::default();
-    over_portfolio_cap.max_portfolio_assets =
-        percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS + 1;
-    let mut impossible_bound = V16CuMarketParams::default();
-    impossible_bound.h_max = (BOUND_SCALE + 1) as u64;
-    let mut zero_oracle = V16CuMarketParams::default();
-    zero_oracle.initial_price = 0;
-    let mut over_oracle = V16CuMarketParams::default();
-    over_oracle.initial_price = percolator::MAX_ORACLE_PRICE + 1;
-    let mut fee_floor_dos = V16CuMarketParams::default();
-    fee_floor_dos.max_trading_fee_bps = 99;
-    fee_floor_dos.trade_fee_base_bps = 100;
-    let mut maintenance_drain = V16CuMarketParams::default();
-    maintenance_drain.maintenance_fee_per_slot = percolator::MAX_PROTOCOL_FEE_ABS + 1;
+    macro_rules! invalid_case {
+        ($label:literal, $field:ident, $value:expr) => {{
+            let mut params = V16CuMarketParams::default();
+            params.$field = $value;
+            ($label, params)
+        }};
+    }
 
-    for (label, params) in [
-        ("zero portfolio cap", zero_portfolios),
-        ("portfolio cap above wrapper limit", over_portfolio_cap),
-        ("h_max above bound scale", impossible_bound),
-        ("zero initial oracle price", zero_oracle),
-        ("initial oracle price above max", over_oracle),
-        ("trade fee floor above max fee", fee_floor_dos),
-        ("maintenance fee above protocol cap", maintenance_drain),
-    ] {
+    let mut h_min_above_h_max = V16CuMarketParams::default();
+    h_min_above_h_max.h_min = 11;
+    h_min_above_h_max.h_max = 10;
+    let mut equal_nonzero_requirements = V16CuMarketParams::default();
+    equal_nonzero_requirements.min_nonzero_mm_req = 2;
+    equal_nonzero_requirements.min_nonzero_im_req = 2;
+    let mut maintenance_above_initial = V16CuMarketParams::default();
+    maintenance_above_initial.maintenance_margin_bps = 10_000;
+    maintenance_above_initial.initial_margin_bps = 9_999;
+    let mut fee_floor_above_max = V16CuMarketParams::default();
+    fee_floor_above_max.max_trading_fee_bps = 99;
+    fee_floor_above_max.trade_fee_base_bps = 100;
+    let mut minimum_liquidation_above_cap = V16CuMarketParams::default();
+    minimum_liquidation_above_cap.min_liquidation_abs = 1;
+    minimum_liquidation_above_cap.liquidation_fee_cap = 0;
+    let mut funding_lifetime_below_accrual = V16CuMarketParams::default();
+    funding_lifetime_below_accrual.max_accrual_dt_slots = 2;
+    funding_lifetime_below_accrual.min_funding_lifetime_slots = 1;
+
+    let invalid_cases = vec![
+        invalid_case!("zero portfolio cap", max_portfolio_assets, 0),
+        invalid_case!(
+            "portfolio cap above wrapper limit",
+            max_portfolio_assets,
+            percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS + 1
+        ),
+        invalid_case!("zero h_max", h_max, 0),
+        ("h_min above h_max", h_min_above_h_max),
+        invalid_case!("h_max above bound scale", h_max, (BOUND_SCALE + 1) as u64),
+        invalid_case!("zero initial oracle price", initial_price, 0),
+        invalid_case!(
+            "initial oracle price above max",
+            initial_price,
+            percolator::MAX_ORACLE_PRICE + 1
+        ),
+        invalid_case!("zero maintenance requirement", min_nonzero_mm_req, 0),
+        (
+            "maintenance and initial requirements equal",
+            equal_nonzero_requirements,
+        ),
+        (
+            "maintenance margin above initial margin",
+            maintenance_above_initial,
+        ),
+        invalid_case!("initial margin above maximum", initial_margin_bps, 10_001),
+        invalid_case!(
+            "maximum trading fee above maximum",
+            max_trading_fee_bps,
+            10_001
+        ),
+        ("trade fee floor above maximum fee", fee_floor_above_max),
+        invalid_case!("liquidation fee above maximum", liquidation_fee_bps, 10_001),
+        (
+            "minimum liquidation above fee cap",
+            minimum_liquidation_above_cap,
+        ),
+        invalid_case!(
+            "liquidation fee cap above protocol maximum",
+            liquidation_fee_cap,
+            percolator::MAX_PROTOCOL_FEE_ABS + 1
+        ),
+        invalid_case!("zero price movement bound", max_price_move_bps_per_slot, 0),
+        invalid_case!("zero accrual horizon", max_accrual_dt_slots, 0),
+        invalid_case!(
+            "funding rate above maximum",
+            max_abs_funding_e9_per_slot,
+            10_001
+        ),
+        (
+            "funding lifetime below accrual horizon",
+            funding_lifetime_below_accrual,
+        ),
+        invalid_case!(
+            "zero account B chunk count",
+            max_account_b_settlement_chunks,
+            0
+        ),
+        invalid_case!(
+            "zero bankrupt close chunk count",
+            max_bankrupt_close_chunks,
+            0
+        ),
+        invalid_case!(
+            "zero bankrupt close lifetime",
+            max_bankrupt_close_lifetime_slots,
+            0
+        ),
+        invalid_case!("zero public B chunk", public_b_chunk_atoms, 0),
+        invalid_case!(
+            "maintenance fee above protocol cap",
+            maintenance_fee_per_slot,
+            percolator::MAX_PROTOCOL_FEE_ABS + 1
+        ),
+    ];
+
+    for (label, params) in invalid_cases {
         let market = Keypair::new();
         system_create_account_for_test(
             &mut env.svm,
