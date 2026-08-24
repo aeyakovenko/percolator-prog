@@ -13,7 +13,9 @@
 //! ceiling, a bounded successful progress path, or atomic rejection before an attacker-controlled
 //! shape can strand a required exit route. A dedicated 14-leg/28-source Recovery test leaves one
 //! K/F cohort unsettled, freezes its asset, and proves the sole public crank settles committed
-//! state without accruing the frozen asset or exceeding the CU ceiling.
+//! state without accruing the frozen asset or exceeding the CU ceiling. A separate flat-account
+//! route fills all 28 historical source slots, requires the automatic crank to release every
+//! obsolete source lien without an oracle tail, and then converts and withdraws the complete claim.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -137,6 +139,141 @@ fn v16_program_max_source_conversion_and_owner_exit_are_bounded() {
     assert!(terminal.vault >= terminal.c_tot + terminal.insurance);
     println!(
         "INV-077 28-source exit CU: convert={convert_cu}, withdraw={withdraw_cu}, close={close_cu}"
+    );
+}
+
+#[test]
+fn v16_program_max_source_flat_lien_release_and_owner_exit_are_bounded() {
+    let (mut env, taker_owner, lp_owner, taker, lp, slot) =
+        setup_max_source_live_pair_with_seeded_lien();
+    let mut max_flatten_cu = 0;
+    for asset_index in (0..MAX_SOURCE_LIVE_ASSETS).rev() {
+        let lp_state = env.portfolio_state(lp);
+        let basis = active_leg_for_asset(&lp_state, usize::from(asset_index)).basis_pos_q;
+        assert_ne!(basis, 0, "asset {asset_index} must retain a real leg");
+        env.svm.expire_blockhash();
+        let cu = env.trade_asset_with_cu(
+            asset_index,
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            basis,
+            100,
+            0,
+        );
+        assert_cu_within("seeded max-source flatten", cu, 1_375_000);
+        max_flatten_cu = max_flatten_cu.max(cu);
+    }
+
+    let flat = env.portfolio_state(lp);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&flat)));
+    assert_eq!(
+        flat.source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+    );
+    let positive_pnl = flat.pnl.get();
+    assert!(
+        positive_pnl > 0,
+        "flat max-source LP must retain positive PnL"
+    );
+    let positive_pnl = positive_pnl as u128;
+    assert_eq!(positive_pnl, 28_000);
+    let lien_domains_before = flat
+        .source_domains
+        .iter()
+        .filter(|source| source.source_claim_liened_num.get() != 0)
+        .count();
+    assert_eq!(
+        lien_domains_before, 2,
+        "both seeded source-side liens must survive until flat"
+    );
+    assert_eq!(
+        flat.source_domains
+            .iter()
+            .map(|source| source.source_lien_effective_reserved.get())
+            .sum::<u128>(),
+        2_000,
+        "both seeded liens must preserve their effective reservation"
+    );
+
+    let market_before_release = env.svm.get_account(&env.market).unwrap();
+    let lp_before_release = env.svm.get_account(&lp).unwrap();
+    let release_cu = env
+        .crank_if_actionable(
+            lp,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: vec![],
+            },
+        )
+        .expect("flat max-source liens must have one permissionless release step");
+    assert_cu_within("28-source-domain ReleaseSourceLiens", release_cu, 1_375_000);
+    assert_ne!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_release
+    );
+    assert_ne!(env.svm.get_account(&lp).unwrap(), lp_before_release);
+
+    let released = env.portfolio_state(lp);
+    assert_eq!(released.pnl.get(), positive_pnl as i128);
+    assert!(released.source_domains.iter().all(|source| {
+        source.source_claim_liened_num.get() == 0
+            && source.source_claim_counterparty_liened_num.get() == 0
+            && source.source_claim_insurance_liened_num.get() == 0
+            && source.source_lien_effective_reserved.get() == 0
+            && source.source_lien_counterparty_backing_num.get() == 0
+            && source.source_lien_insurance_backing_num.get() == 0
+    }));
+
+    env.svm.expire_blockhash();
+    let convert_cu = env
+        .send(
+            env.convert_released_pnl_ix(lp, positive_pnl),
+            vec![
+                AccountMeta::new(lp_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lp, false),
+            ],
+            &[&lp_owner],
+        )
+        .expect("released max-source PnL must remain exactly convertible");
+    assert_cu_within(
+        "post-release 28-source-domain ConvertReleasedPnl",
+        convert_cu,
+        1_375_000,
+    );
+    let converted = env.portfolio_state(lp);
+    assert_eq!(converted.pnl.get(), 0);
+    assert_eq!(converted.reserved_pnl.get(), 0);
+
+    env.svm.expire_blockhash();
+    let (destination, withdraw_cu) = env.withdraw_with_cu(&lp_owner, lp, converted.capital.get());
+    assert_cu_within(
+        "post-release max-source withdrawal",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(destination),
+        converted.capital.get() as u64
+    );
+    env.svm.expire_blockhash();
+    let close_cu = env.close_portfolio_with_cu(&lp_owner, lp);
+    assert_cu_within(
+        "post-release max-source portfolio close",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.materialized_portfolio_count, 1);
+    assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+    assert!(terminal.vault >= terminal.c_tot + terminal.insurance);
+    println!(
+        "INV-077 max-source lien release CU: flatten={max_flatten_cu}, release={release_cu}, convert={convert_cu}, withdraw={withdraw_cu}, close={close_cu}"
     );
 }
 

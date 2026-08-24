@@ -7922,6 +7922,7 @@ fn setup_max_source_live_pair(
         maintenance_fee_per_slot,
         retained_active_assets,
         MAX_SOURCE_LIVE_ASSETS,
+        false,
     )
 }
 
@@ -7933,6 +7934,17 @@ fn setup_max_source_live_pair_with_spare_auth_mark_asset(
         maintenance_fee_per_slot,
         retained_active_assets,
         MAX_SOURCE_LIVE_ASSETS + 1,
+        false,
+    )
+}
+
+fn setup_max_source_live_pair_with_seeded_lien() -> (V16CuEnv, Keypair, Keypair, Pubkey, Pubkey, u64)
+{
+    setup_max_source_live_pair_with_configured_assets(
+        0,
+        MAX_SOURCE_LIVE_ASSETS,
+        MAX_SOURCE_LIVE_ASSETS,
+        true,
     )
 }
 
@@ -7940,6 +7952,7 @@ fn setup_max_source_live_pair_with_configured_assets(
     maintenance_fee_per_slot: u128,
     retained_active_assets: u16,
     configured_auth_mark_assets: u16,
+    seed_source_lien: bool,
 ) -> (V16CuEnv, Keypair, Keypair, Pubkey, Pubkey, u64) {
     const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
     const PRICE_LOW: u64 = 100;
@@ -7985,6 +7998,11 @@ fn setup_max_source_live_pair_with_configured_assets(
     env.deposit(&lp_owner, lp, 2_000_000);
     let (matcher_ctx, matcher_delegate, _) =
         env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    if seed_source_lien {
+        for domain in [0u16, 1] {
+            env.top_up_backing_bucket(domain, 1_000, 1_000);
+        }
+    }
 
     let cpi_fill = |env: &mut V16CuEnv, asset_index: u16, size_q: i128| {
         env.svm.expire_blockhash();
@@ -8071,6 +8089,34 @@ fn setup_max_source_live_pair_with_configured_assets(
                     },
                 );
             }
+            drive_both_current(&mut env, slot);
+        }
+        if seed_source_lien && asset_index == 0 {
+            const SEEDED_LIEN_Q: i128 = 20 * POS_SCALE as i128;
+            cpi_fill(&mut env, asset_index, -MAX_SOURCE_LIVE_SIZE_Q);
+            let capital = env.portfolio_state(lp).capital.get();
+            env.withdraw_with_cu(&lp_owner, lp, capital);
+            cpi_fill(&mut env, asset_index, SEEDED_LIEN_Q);
+            let seeded = env.portfolio_state(lp);
+            let seeded_lien_domains = seeded
+                .source_domains
+                .iter()
+                .filter(|source| source.source_claim_liened_num.get() != 0)
+                .count();
+            assert_eq!(
+                seeded_lien_domains, 2,
+                "public max-source fixture failed to seed both source-side liens"
+            );
+            assert_eq!(
+                seeded
+                    .source_domains
+                    .iter()
+                    .map(|source| source.source_lien_effective_reserved.get())
+                    .sum::<u128>(),
+                2_000,
+                "two source-side liens must reserve the exact margin credit"
+            );
+            env.deposit(&lp_owner, lp, capital);
             drive_both_current(&mut env, slot);
         }
     }
