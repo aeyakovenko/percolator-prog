@@ -10,9 +10,10 @@
 //! the SVM ceiling, converts the exact released PnL, and reconciles terminal custody. These tests
 //! exercise the deployed public wrapper with real SBF/LiteSVM account construction and assert
 //! economic state, token, rollback, liveness, or compute outcomes appropriate to the invariant.
-//! A second maximum-shape composition crosses stale HybridAfterHours pricing, delegated batch CPI,
-//! and terminal resolution so the maximum-shape guarantee is not specific to the no-CPI/DrainOnly
-//! route.
+//! Two further maximum-shape compositions cross stale HybridAfterHours pricing and delegated batch
+//! CPI into either terminal resolution or Recovery. The Recovery branch refreshes both complete
+//! certificates permissionlessly, closes all legs atomically at raw price one, and returns every
+//! non-fee atom, so the maximum-shape guarantee is not specific to no-CPI/DrainOnly or Resolved.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -1340,21 +1341,10 @@ fn v16_program_max_shape_ewma_movement_is_paid_and_drain_only_exit_stays_bounded
             0,
         );
     }
-    let cert_current = |env: &V16CuEnv, portfolio: Pubkey| {
-        let group = env.market_state().1;
-        let account = env.portfolio_state(portfolio);
-        let cert = health_cert(&account);
-        cert.valid
-            && cert.cert_oracle_epoch == group.oracle_epoch
-            && cert.cert_funding_epoch == group.funding_epoch
-            && cert.cert_risk_epoch == group.risk_epoch
-            && cert.cert_asset_set_epoch == group.asset_set_epoch
-            && cert.active_bitmap_at_cert == active_bitmap(&account)
-    };
     let mut drain_refresh_cu = 0;
     for _ in 0..(u32::from(ASSET_COUNT) * 2 + 4) {
         for portfolio in [long, short] {
-            if !cert_current(&env, portfolio) {
+            if !portfolio_certificate_is_current(&env, portfolio) {
                 drain_refresh_cu = drain_refresh_cu.max(env.crank(
                     portfolio,
                     ProgInstruction::PermissionlessCrank {
@@ -1364,12 +1354,15 @@ fn v16_program_max_shape_ewma_movement_is_paid_and_drain_only_exit_stays_bounded
                 ));
             }
         }
-        if cert_current(&env, long) && cert_current(&env, short) {
+        if portfolio_certificate_is_current(&env, long)
+            && portfolio_certificate_is_current(&env, short)
+        {
             break;
         }
     }
     assert!(
-        cert_current(&env, long) && cert_current(&env, short),
+        portfolio_certificate_is_current(&env, long)
+            && portfolio_certificate_is_current(&env, short),
         "permissionless refresh must reach a two-account certificate fixed point"
     );
     let fee_stock_before_exit = env.market_state().1.insurance;
@@ -1470,19 +1463,45 @@ fn v16_program_max_shape_ewma_movement_is_paid_and_drain_only_exit_stays_bounded
     }
 }
 
-#[test]
-fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value() {
-    const ASSET_COUNT: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
-    const MARK: u64 = 1_000_000;
-    const DEPOSIT: u128 = 100_000_000;
-    // Hybrid becomes stale two slots after configuration. The one-slot price cap is 10_000 and
-    // EWMA alpha is 2/(2 + halflife=1), so floor(10_000 * 2/3) = 6_666.
-    const EXPECTED_MARK: u64 = 1_006_666;
-    const EXPECTED_FEE_PER_ASSET: u128 = 13_534;
+const MAX_SHAPE_HYBRID_ASSET_COUNT: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+const MAX_SHAPE_HYBRID_MARK: u64 = 1_000_000;
+const MAX_SHAPE_HYBRID_DEPOSIT: u128 = 100_000_000;
+// Hybrid becomes stale two slots after configuration. The one-slot price cap is 10_000 and EWMA
+// alpha is 2/(2 + halflife=1), so floor(10_000 * 2/3) = 6_666.
+const MAX_SHAPE_HYBRID_EXPECTED_MARK: u64 = 1_006_666;
+const MAX_SHAPE_HYBRID_FEE_PER_ASSET: u128 = 13_534;
+
+fn portfolio_certificate_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
+    let group = env.market_state().1;
+    let account = env.portfolio_state(portfolio);
+    let cert = health_cert(&account);
+    cert.valid
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch
+        && cert.active_bitmap_at_cert == active_bitmap(&account)
+}
+
+struct MaxShapePaidHybridFixture {
+    env: V16CuEnv,
+    taker_owner: Keypair,
+    lp_owner: Keypair,
+    taker: Pubkey,
+    lp: Pubkey,
+    oracle_accounts: Vec<Pubkey>,
+    vault_before: u64,
+    movement_fees: u128,
+    open_cu: u64,
+}
+
+fn setup_max_shape_paid_hybrid_cpi() -> MaxShapePaidHybridFixture {
+    let asset_count = MAX_SHAPE_HYBRID_ASSET_COUNT;
+    let mark = MAX_SHAPE_HYBRID_MARK;
 
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
-        max_portfolio_assets: ASSET_COUNT,
-        initial_price: MARK,
+        max_portfolio_assets: asset_count,
+        initial_price: mark,
         max_trading_fee_bps: 100,
         max_price_move_bps_per_slot: 100,
         max_accrual_dt_slots: 1,
@@ -1490,11 +1509,12 @@ fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value(
     });
     env.configure_permissionless_resolve_with_cu(100, 5);
     set_test_clock(&mut env, 1, 100);
-    for asset_index in 0..ASSET_COUNT {
+    let mut oracle_accounts = Vec::with_capacity(usize::from(asset_count));
+    for asset_index in 0..asset_count {
         let mut feed = [0u8; 32];
         feed[0] = u8::try_from(asset_index).unwrap().checked_add(1).unwrap();
         feed[31] = 0xa5;
-        let oracle = env.set_pyth_price_with_conf(&feed, MARK as i64, -6, 0, 100);
+        let oracle = env.set_pyth_price_with_conf(&feed, mark as i64, -6, 0, 100);
         env.try_configure_hybrid_asset_with_conf_filter_cu(
             asset_index,
             1,
@@ -1511,6 +1531,7 @@ fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value(
         .unwrap_or_else(|error| {
             panic!("configure maximum-shape Hybrid asset {asset_index}: {error}")
         });
+        oracle_accounts.push(oracle);
     }
 
     let matcher_program = Pubkey::new_unique();
@@ -1522,8 +1543,8 @@ fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value(
     let lp_owner = Keypair::new();
     let taker = env.create_portfolio(&taker_owner);
     let lp = env.create_portfolio(&lp_owner);
-    env.deposit(&taker_owner, taker, DEPOSIT);
-    env.deposit(&lp_owner, lp, DEPOSIT);
+    env.deposit(&taker_owner, taker, MAX_SHAPE_HYBRID_DEPOSIT);
+    env.deposit(&lp_owner, lp, MAX_SHAPE_HYBRID_DEPOSIT);
     let vault_before = env.token_amount(env.vault);
     let (matcher_context, matcher_delegate, _) = env
         .init_matcher_context_with_passive_spread_authorized(
@@ -1535,7 +1556,7 @@ fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value(
         );
 
     set_test_clock(&mut env, 3, 102);
-    let legs = (0..ASSET_COUNT)
+    let legs = (0..asset_count)
         .map(|asset_index| BatchTradeCpiLeg {
             asset_index,
             market_id: env.asset_market_id(asset_index),
@@ -1562,10 +1583,11 @@ fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value(
         .expect("maximum-shape stale-Hybrid paid batch CPI");
 
     let after_open = env.market_state().1;
-    let movement_fees = EXPECTED_FEE_PER_ASSET * u128::from(ASSET_COUNT);
+    let movement_fees = MAX_SHAPE_HYBRID_FEE_PER_ASSET * u128::from(asset_count);
     let mark_move_bps =
-        (u128::from(EXPECTED_MARK - MARK) * 10_000 + u128::from(MARK) - 1) / u128::from(MARK);
-    let fee_supported_move_bps = EXPECTED_FEE_PER_ASSET * 10_000 / (2 * u128::from(MARK));
+        (u128::from(MAX_SHAPE_HYBRID_EXPECTED_MARK - mark) * 10_000 + u128::from(mark) - 1)
+            / u128::from(mark);
+    let fee_supported_move_bps = MAX_SHAPE_HYBRID_FEE_PER_ASSET * 10_000 / (2 * u128::from(mark));
     assert_eq!(mark_move_bps, 67, "the stale-Hybrid move is nontrivial");
     assert!(
         mark_move_bps <= fee_supported_move_bps,
@@ -1581,13 +1603,13 @@ fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value(
     );
     assert_eq!(
         percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(taker))),
-        u32::from(ASSET_COUNT)
+        u32::from(asset_count)
     );
     assert_eq!(
         percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(lp))),
-        u32::from(ASSET_COUNT)
+        u32::from(asset_count)
     );
-    for asset_index in 0..ASSET_COUNT as usize {
+    for asset_index in 0..asset_count as usize {
         let profile = state::read_asset_oracle_profile(
             &env.svm.get_account(&env.market).unwrap().data,
             asset_index,
@@ -1597,11 +1619,38 @@ fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value(
             profile.oracle_mode,
             percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS
         );
-        assert_eq!(profile.mark_ewma_e6, EXPECTED_MARK);
-        assert_eq!(after_open.assets[asset_index].effective_price, MARK);
+        assert_eq!(profile.mark_ewma_e6, MAX_SHAPE_HYBRID_EXPECTED_MARK);
+        assert_eq!(after_open.assets[asset_index].effective_price, mark);
         assert_eq!(after_open.assets[asset_index].oi_eff_long_q, POS_SCALE);
         assert_eq!(after_open.assets[asset_index].oi_eff_short_q, POS_SCALE);
     }
+
+    MaxShapePaidHybridFixture {
+        env,
+        taker_owner,
+        lp_owner,
+        taker,
+        lp,
+        oracle_accounts,
+        vault_before,
+        movement_fees,
+        open_cu,
+    }
+}
+
+#[test]
+fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value() {
+    let MaxShapePaidHybridFixture {
+        mut env,
+        taker_owner,
+        lp_owner,
+        taker,
+        lp,
+        oracle_accounts: _,
+        vault_before,
+        movement_fees,
+        open_cu,
+    } = setup_max_shape_paid_hybrid_cpi();
 
     let resolve_cu = env.resolve();
     let (resolved_cfg, resolved_group) = env.market_state();
@@ -1633,7 +1682,7 @@ fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value(
     assert_eq!(terminal.c_tot, 0);
     assert_eq!(
         payouts.iter().sum::<u128>(),
-        2 * DEPOSIT - movement_fees,
+        2 * MAX_SHAPE_HYBRID_DEPOSIT - movement_fees,
         "the two-account cohort exits with every non-fee atom"
     );
 
@@ -1645,6 +1694,177 @@ fn v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value(
         ("stale-Hybrid batch CPI open", open_cu),
         ("maximum-shape resolve", resolve_cu),
         ("maximum-shape resolved close", resolved_close_cu),
+    ] {
+        assert!(cu < 1_400_000, "{label} consumed {cu} CU");
+    }
+}
+
+#[test]
+fn v16_program_max_shape_paid_hybrid_recovery_allows_atomic_owner_exit() {
+    let MaxShapePaidHybridFixture {
+        mut env,
+        taker_owner,
+        lp_owner,
+        taker,
+        lp,
+        oracle_accounts,
+        vault_before,
+        movement_fees,
+        open_cu,
+    } = setup_max_shape_paid_hybrid_cpi();
+
+    set_test_clock(&mut env, 4, 200);
+    let mut fallback_cu = 0;
+    for (asset_index, oracle) in oracle_accounts.iter().copied().enumerate() {
+        for portfolio in [taker, lp] {
+            fallback_cu = fallback_cu.max(env.crank_with_oracle_tail(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 4,
+                    observations: crank_observations(asset_index as u16),
+                },
+                &[oracle],
+            ));
+        }
+    }
+    let mut shutdown_cu = 0;
+    for asset_index in 0..MAX_SHAPE_HYBRID_ASSET_COUNT {
+        shutdown_cu = shutdown_cu.max(env.update_asset_lifecycle_as_admin_with_cu(
+            processor::ASSET_ACTION_SHUTDOWN,
+            asset_index,
+            4,
+            0,
+        ));
+    }
+    let recovery = env.market_state().1;
+    assert_eq!(recovery.mode, percolator::MarketModeV16::Live);
+    for asset_index in 0..MAX_SHAPE_HYBRID_ASSET_COUNT as usize {
+        assert_eq!(
+            recovery.assets[asset_index].lifecycle,
+            AssetLifecycleV16::Recovery
+        );
+        assert_eq!(
+            recovery.assets[asset_index].effective_price,
+            MAX_SHAPE_HYBRID_EXPECTED_MARK
+        );
+        let profile = state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            asset_index,
+        )
+        .unwrap();
+        assert_eq!(profile.mark_ewma_e6, MAX_SHAPE_HYBRID_EXPECTED_MARK);
+    }
+
+    let mut recovery_refresh_cu = 0;
+    for _ in 0..(u32::from(MAX_SHAPE_HYBRID_ASSET_COUNT) * 2 + 4) {
+        for portfolio in [taker, lp] {
+            if !portfolio_certificate_is_current(&env, portfolio) {
+                recovery_refresh_cu = recovery_refresh_cu.max(env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 4,
+                        observations: vec![],
+                    },
+                ));
+            }
+        }
+        if portfolio_certificate_is_current(&env, taker)
+            && portfolio_certificate_is_current(&env, lp)
+        {
+            break;
+        }
+    }
+    assert!(
+        portfolio_certificate_is_current(&env, taker) && portfolio_certificate_is_current(&env, lp),
+        "permissionless refresh must make both maximum-shape Recovery certificates current"
+    );
+
+    let close_legs = (0..MAX_SHAPE_HYBRID_ASSET_COUNT)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            market_id: env.asset_market_id(asset_index),
+            size_q: -(POS_SCALE as i128),
+            exec_price: 1,
+            fee_bps: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            env.batch_trade_no_cpi_ix(taker, lp, close_legs),
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(lp_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(lp, false),
+            ],
+            &[&taker_owner, &lp_owner],
+        )
+        .expect("maximum-shape Recovery extreme-price owner reduction");
+
+    let after_close = env.market_state().1;
+    assert_eq!(after_close.insurance, movement_fees);
+    for asset_index in 0..MAX_SHAPE_HYBRID_ASSET_COUNT as usize {
+        assert_eq!(after_close.assets[asset_index].oi_eff_long_q, 0);
+        assert_eq!(after_close.assets[asset_index].oi_eff_short_q, 0);
+        let profile = state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            asset_index,
+        )
+        .unwrap();
+        assert_eq!(profile.mark_ewma_e6, MAX_SHAPE_HYBRID_EXPECTED_MARK);
+    }
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(taker)
+    )));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(lp)
+    )));
+
+    let released_pnl = u128::from(
+        (MAX_SHAPE_HYBRID_EXPECTED_MARK - MAX_SHAPE_HYBRID_MARK)
+            * u64::from(MAX_SHAPE_HYBRID_ASSET_COUNT),
+    );
+    assert_eq!(env.portfolio_state(taker).pnl.get(), released_pnl as i128);
+    assert_eq!(env.portfolio_state(lp).pnl.get(), 0);
+    let convert_cu = env.convert_released_pnl_with_cu(&taker_owner, taker, released_pnl);
+    let taker_capital = env.portfolio_state(taker).capital.get();
+    let lp_capital = env.portfolio_state(lp).capital.get();
+    assert_eq!(
+        taker_capital + lp_capital,
+        2 * MAX_SHAPE_HYBRID_DEPOSIT - movement_fees
+    );
+
+    let taker_destination = env.withdraw(&taker_owner, taker, taker_capital);
+    let lp_destination = env.withdraw(&lp_owner, lp, lp_capital);
+    assert_eq!(
+        u128::from(env.token_amount(taker_destination))
+            + u128::from(env.token_amount(lp_destination)),
+        2 * MAX_SHAPE_HYBRID_DEPOSIT - movement_fees
+    );
+    env.close_portfolio_with_cu(&taker_owner, taker);
+    env.close_portfolio_with_cu(&lp_owner, lp);
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.vault, movement_fees);
+    assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+    assert_eq!(
+        terminal.vault as u64,
+        vault_before - (2 * MAX_SHAPE_HYBRID_DEPOSIT) as u64 + movement_fees as u64
+    );
+
+    println!(
+        "INV-045 max-shape paid-Hybrid Recovery open={open_cu} fallback={fallback_cu} \
+         shutdown={shutdown_cu} refresh={recovery_refresh_cu} owner-close={close_cu} \
+         convert={convert_cu}"
+    );
+    for (label, cu) in [
+        ("stale-Hybrid batch CPI open", open_cu),
+        ("maximum-shape stale-fallback accrual", fallback_cu),
+        ("maximum-shape Recovery shutdown", shutdown_cu),
+        ("maximum-shape Recovery refresh", recovery_refresh_cu),
+        ("maximum-shape Recovery owner close", close_cu),
+        ("Recovery released-PnL conversion", convert_cu),
     ] {
         assert!(cu < 1_400_000, "{label} consumed {cu} CU");
     }
