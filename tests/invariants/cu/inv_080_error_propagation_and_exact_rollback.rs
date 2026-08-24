@@ -2,17 +2,158 @@
 //!
 //! Normative obligation: Every engine error aborts the instruction and commits no persistent bytes, tokens, or lamports.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): partial oracle error retry
-//! safety plus stale-window, raw-account realloc, and terminal-top-up error paths that would otherwise realloc legacy
-//! accounts, debit engine state, burn receipts, or move SPL tokens before rejection. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Evidence in this file (I/C plus invariant-specific M assertions): a source-complete engine-error
+//! disposition and dispatcher/entrypoint composition roster; multi-instruction aborts before later
+//! SPL and matcher-CPI consumers; partial oracle error retry safety; and stale-window, raw-account
+//! realloc, terminal-top-up, and token-CPI error paths that would otherwise mutate persistent
+//! economic state. These tests exercise the deployed public wrapper with real SBF/LiteSVM account
+//! construction and assert exact rollback plus retry liveness.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
+    struct ErrorDisposition {
+        source_arm: &'static str,
+        disposition: &'static str,
+        witness: &'static str,
+    }
+
+    const ROWS: &[ErrorDisposition] = &[
+        ErrorDisposition {
+            source_arm: "Err(V16Error::LockActive) => false,",
+            disposition: "optional deregistration keeps the live user account",
+            witness: "v16_attack_sync_maintenance_cannot_close_empty_live_victim_portfolio",
+        },
+        ErrorDisposition {
+            source_arm: "Err(V16Error::NonProgress) if market_accrual_performed => None,",
+            disposition: "the wrapper already committed authenticated market progress",
+            witness: "v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value",
+        },
+        ErrorDisposition {
+            source_arm: "Err(V16Error::NonProgress) => {",
+            disposition: "an unaccompanied fixed point returns an instruction error",
+            witness: "v16_regression_crank_idempotent_at_settlement_fixed_point",
+        },
+    ];
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    let actual = production
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("Err(V16Error::") && line.contains("=>"))
+        .collect::<Vec<_>>();
+    let expected = ROWS.iter().map(|row| row.source_arm).collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "every explicit engine-error arm needs a reviewed INV-080 disposition"
+    );
+    assert_eq!(
+        production
+            .matches("Err(err) => return Err(map_v16_error(err)),")
+            .count(),
+        2,
+        "both explicit engine catch-all arms must continue to propagate"
+    );
+    assert_eq!(
+        production.matches("map_err(map_v16_error)").count(),
+        141,
+        "engine-result mapping drift requires an INV-080 disposition review"
+    );
+    assert!(
+        !production.contains("Err(_) =>"),
+        "the wrapper must not silently discard an unclassified error"
+    );
+
+    let witnesses = [
+        include_str!("inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs"),
+        include_str!("inv_071_crank_progress.rs"),
+    ];
+    for row in ROWS {
+        assert!(!row.disposition.is_empty());
+        assert!(
+            witnesses
+                .iter()
+                .any(|source| source.contains(&format!("fn {}", row.witness))),
+            "engine-error disposition lacks public witness {}",
+            row.witness
+        );
+    }
+}
+
+#[test]
+fn v16_program_dispatch_and_entrypoints_preserve_every_handler_error() {
+    let production = include_str!("../../../src/v16_program.rs");
+    let dispatcher = production
+        .split("    pub fn process_instruction<'a>(\n")
+        .nth(1)
+        .expect("processor dispatcher exists")
+        .split("    #[inline(never)]\n    fn handle_init_market")
+        .next()
+        .expect("dispatcher ends before the first handler");
+    assert!(
+        dispatcher.contains("match Instruction::decode(instruction_data)?"),
+        "decode errors must propagate before dispatch"
+    );
+
+    let mut handlers = std::collections::BTreeSet::new();
+    let mut remaining = dispatcher;
+    while let Some(start) = remaining.find("handle_") {
+        remaining = &remaining[start..];
+        let end = remaining
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .unwrap_or(remaining.len());
+        handlers.insert(&remaining[..end]);
+        remaining = &remaining[end..];
+    }
+    assert_eq!(
+        handlers.len(),
+        50,
+        "all 50 public variants must return one distinct handler result"
+    );
+    assert_eq!(
+        dispatcher.matches("Instruction::").count(),
+        51,
+        "the dispatcher must contain decode plus exactly 50 variant arms"
+    );
+    for forbidden in ["Ok(())", ".ok()", "is_err()", "unwrap_or", "let _ ="] {
+        assert!(
+            !dispatcher.contains(forbidden),
+            "dispatcher must not coerce a handler result through {forbidden}"
+        );
+    }
+
+    let standard_entrypoint = production
+        .split("#[cfg(all(not(feature = \"no-entrypoint\"), not(feature = \"anchor-v2\")))]")
+        .nth(1)
+        .expect("standard entrypoint exists")
+        .split("#[cfg(all(not(feature = \"no-entrypoint\"), feature = \"anchor-v2\"))]")
+        .next()
+        .expect("standard entrypoint has a bounded source region");
+    assert!(standard_entrypoint.contains(
+        "match process_instruction(&program_id, &accounts, &instruction_data) {\n            Ok(()) => SUCCESS,\n            Err(error) => error.into(),\n        }"
+    ));
+
+    let anchor_entrypoint = production
+        .split("#[cfg(all(not(feature = \"no-entrypoint\"), feature = \"anchor-v2\"))]")
+        .nth(1)
+        .expect("anchor-v2 entrypoint exists");
+    assert!(anchor_entrypoint.contains(
+        "process_with_legacy_account_infos(&program_id, accounts, instruction_data)\n            .map_err(map_legacy_error)"
+    ));
+    assert!(
+        !anchor_entrypoint.contains("unwrap_or(Ok(()))"),
+        "the compatibility entrypoint must not turn an adapter error into success"
+    );
+}
 
 #[test]
 fn v16_engine_error_aborts_before_later_valid_instruction_can_commit() {
@@ -114,6 +255,113 @@ fn v16_engine_error_aborts_before_later_valid_instruction_can_commit() {
     .expect("the later deposit is independently valid after the aborted transaction");
     assert_eq!(env.portfolio_state(depositing_portfolio).capital.get(), 7);
     assert_eq!(env.token_amount(deposit_source), 0);
+}
+
+#[test]
+fn v16_engine_error_aborts_before_later_cpi_return_consumer_can_execute() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let withdrawing_owner = Keypair::new();
+    let withdrawing_portfolio = env.create_portfolio(&withdrawing_owner);
+    env.deposit(&withdrawing_owner, withdrawing_portfolio, 10);
+    let withdraw_destination = env.token_account(withdrawing_owner.pubkey(), 0);
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_portfolio = env.create_portfolio(&taker);
+    let lp_portfolio = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_portfolio, 1_000_000);
+    env.deposit(&lp, lp_portfolio, 1_000_000);
+    let matcher_program = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher_program,
+        &std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF"),
+    );
+    let (matcher_context, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &lp, lp_portfolio);
+
+    let over_withdraw = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(withdrawing_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(withdrawing_portfolio, false),
+            AccountMeta::new(withdraw_destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: env.withdraw_ix(withdrawing_portfolio, 11).encode(),
+    };
+    let trade = env.trade_cpi_ix(taker_portfolio, lp_portfolio, 0, POS_SCALE as i128, 0, 0);
+    let trade_accounts = vec![
+        AccountMeta::new(taker.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(taker_portfolio, false),
+        AccountMeta::new(lp_portfolio, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(matcher_context, false),
+        AccountMeta::new_readonly(matcher_delegate, false),
+    ];
+    let later_cpi_trade = Instruction {
+        program_id: env.program_id,
+        accounts: trade_accounts.clone(),
+        data: trade.clone().encode(),
+    };
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let withdrawing_before = env.svm.get_account(&withdrawing_portfolio).unwrap();
+    let taker_before = env.svm.get_account(&taker_portfolio).unwrap();
+    let lp_before = env.svm.get_account(&lp_portfolio).unwrap();
+    let context_before = env.svm.get_account(&matcher_context).unwrap();
+    let destination_before = env.svm.get_account(&withdraw_destination).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), over_withdraw, later_cpi_trade],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &withdrawing_owner, &taker],
+        env.svm.latest_blockhash(),
+    );
+    let error = env
+        .svm
+        .send_transaction(tx)
+        .expect_err("the first engine error must abort before the CPI consumer");
+    assert!(
+        matches!(
+            &error.err,
+            TransactionError::InstructionError(2, InstructionError::Custom(code)) if *code != 0
+        ),
+        "the over-withdraw must remain the transaction's first program error: {:?}",
+        error.err
+    );
+    for (key, before) in [
+        (env.market, market_before),
+        (withdrawing_portfolio, withdrawing_before),
+        (taker_portfolio, taker_before),
+        (lp_portfolio, lp_before),
+        (matcher_context, context_before),
+        (withdraw_destination, destination_before),
+        (env.vault, vault_before),
+    ] {
+        assert_eq!(
+            env.svm.get_account(&key).unwrap(),
+            before,
+            "aborted transaction must roll back account {key}"
+        );
+    }
+
+    env.svm.expire_blockhash();
+    env.send(trade, trade_accounts, &[&taker])
+        .expect("the CPI trade remains independently executable after rollback");
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(taker_portfolio), 0).basis_pos_q,
+        POS_SCALE as i128
+    );
 }
 
 #[test]
