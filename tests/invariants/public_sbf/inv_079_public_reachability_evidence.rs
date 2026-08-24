@@ -119,7 +119,8 @@ fn v16_public_trace_terminal_classifier_requires_complete_economic_evidence() {
                 bounded_exit_succeeded: true,
                 terminal_receipt_created: false,
                 authorized_forfeit: false,
-                all_required_exit_routes_attempted: false,
+                required_exit_routes: 0,
+                attempted_exit_routes: 0,
                 honest_continuation_failed: false,
             })
             .expect("complete public exit evidence classifies"),
@@ -138,7 +139,8 @@ fn v16_public_trace_terminal_classifier_requires_complete_economic_evidence() {
         bounded_exit_succeeded: false,
         terminal_receipt_created: false,
         authorized_forfeit: false,
-        all_required_exit_routes_attempted: false,
+        required_exit_routes: 0,
+        attempted_exit_routes: 0,
         honest_continuation_failed: false,
     };
     assert_eq!(
@@ -162,6 +164,8 @@ fn v16_public_trace_terminal_classifier_requires_complete_economic_evidence() {
             .classify_terminal(PublicTerminalObservation {
                 funded_value_remaining: 1,
                 unresolved_obligation: 1,
+                required_exit_routes: 0b11,
+                attempted_exit_routes: 0b01,
                 honest_continuation_failed: true,
                 ..rejection
             })
@@ -214,7 +218,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 24,
+        consumers, 25,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }

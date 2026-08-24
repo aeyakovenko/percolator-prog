@@ -12,18 +12,19 @@
 //! `v16_program_cross_domain_rounding_exit_matrix_preserves_bounded_exit` independently constructs
 //! two fractional source domains in both asset orders, reverses one source, and requires a bounded
 //! public exit while preserving exact rollback for every rejected prefix.
-//! `v16_program_flat_source_lien_route_matrix_discovers_backed_claim_lock` flattens all exposure
-//! while retaining a real source lien, then requires full/partial conversion, close, later honest
-//! cranks, and CPI/no-CPI single/batch reopen-and-flatten escapes all to leave the backed PnL claim
-//! uncollectible before accepting a finding.
+//! `v16_program_flat_source_lien_route_matrix_preserves_bounded_claim_exit` flattens all exposure
+//! while retaining a real source lien, proves conversion and close reject atomically before the
+//! lien is released, traverses each CPI/no-CPI single/batch trade family from an independent world,
+//! and then requires the sole public crank to release the obsolete encumbrance before complete
+//! conversion, withdrawal, and portfolio close.
 //! `v16_program_reciprocal_cross_asset_cycle_cannot_mint_credit` runs all four trade families in
 //! both close orders. Full recertification must net each portfolio's equal winner/loser legs before
 //! any source claim becomes usable; neither the reciprocal exposures nor unattached backing may
 //! admit a risk increase, and the complete cycle returns every user balance and source ledger.
 //!
 //! Guarantee boundary: the reversal matrix certifies the fixed source-lien unwind across all six
-//! wrapper routes. Cross-domain fractional support now has a public progress regression; the
-//! remaining flat-lien test retains its separate counterexample.
+//! wrapper routes. Cross-domain fractional support and flat backed claims both have public progress
+//! regressions with exact rollback and terminal custody reconciliation.
 
 use super::*;
 use crate::support::fuzz_model::execute_trade_route;
@@ -289,11 +290,11 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_flat_source_lien_route_matrix_discovers_backed_claim_lock(
+    fn v16_program_flat_source_lien_route_matrix_preserves_bounded_claim_exit(
         seed in any::<[u8; 32]>(),
         provider_withdrawal in prop::sample::select(vec![50u128]),
     ) {
-        let discoveries = discover_flat_source_lien_claim_locks(seed, provider_withdrawal);
+        let discoveries = discover_flat_source_lien_bounded_exits(seed, provider_withdrawal);
         prop_assert!(
             discoveries.is_ok(),
             "flat source-lien setup failed: {}",
@@ -307,8 +308,8 @@ proptest! {
         );
         for discovery in discoveries {
             prop_assert!(
-                discovery.is_persistent_backed_claim_lock(),
-                "flat source lien retained a terminal claim route: {:?}",
+                discovery.preserves_bounded_backed_claim_exit(),
+                "flat source lien lost its bounded terminal claim route: {:?}",
                 discovery
             );
         }

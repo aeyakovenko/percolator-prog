@@ -157,7 +157,8 @@ pub struct PublicTerminalObservation {
     pub bounded_exit_succeeded: bool,
     pub terminal_receipt_created: bool,
     pub authorized_forfeit: bool,
-    pub all_required_exit_routes_attempted: bool,
+    pub required_exit_routes: u64,
+    pub attempted_exit_routes: u64,
     pub honest_continuation_failed: bool,
 }
 
@@ -284,12 +285,14 @@ impl PublicTraceEvidence {
             });
         }
 
-        if observation.honest_continuation_failed || observation.all_required_exit_routes_attempted
-        {
+        if observation.honest_continuation_failed {
+            let complete_exit_coverage = observation.required_exit_routes != 0
+                && observation.attempted_exit_routes & observation.required_exit_routes
+                    == observation.required_exit_routes;
             if observation.funded_value_remaining == 0
                 || observation.unresolved_obligation == 0
                 || !observation.honest_continuation_failed
-                || !observation.all_required_exit_routes_attempted
+                || !complete_exit_coverage
                 || !any_rejection
                 || observation.bounded_exit_succeeded
                 || observation.terminal_receipt_created

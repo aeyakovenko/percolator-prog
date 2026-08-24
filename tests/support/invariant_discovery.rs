@@ -1,6 +1,6 @@
 use super::v16_svm::{
-    MarketConfig, PublicTraceEvidence, V16Svm, EXIT_MAKER_DEPOSIT, INITIAL_PRICE,
-    PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
+    MarketConfig, PublicTerminalClassification, PublicTerminalObservation, PublicTraceEvidence,
+    V16Svm, EXIT_MAKER_DEPOSIT, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
 };
 use percolator::{
     BackingBucketStatusV16, MarketModeV16, SideModeV16, ADL_ONE, BOUND_SCALE, POS_SCALE,
@@ -1551,40 +1551,104 @@ impl FlatSourceLienEscapeRoute {
             Self::BatchCpi => 3,
         }
     }
+
+    fn evidence_bit(self) -> u64 {
+        1u64 << self.discriminator()
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FlatSourceLienDiscovery {
     pub escape_route: FlatSourceLienEscapeRoute,
     pub provider_withdrawal: u128,
     pub flat_position_q: u128,
     pub positive_pnl: i128,
     pub source_claim_liened_num: u128,
-    pub conversion_attempts: u8,
-    pub conversion_rejections: u8,
-    pub later_honest_crank_released_lien: bool,
-    pub close_rejected: bool,
-    pub round_trip_completed: bool,
-    pub round_trip_released_claim: bool,
+    pub pre_crank_conversion_rejected: bool,
+    pub pre_crank_close_rejected: bool,
+    pub route_round_trip_completed: bool,
+    pub crank_attempts: u8,
+    pub crank_successes_mutated: bool,
+    pub crank_released_lien: bool,
+    pub converted_pnl: u128,
+    pub capital_withdrawal_succeeded: bool,
+    pub close_succeeded: bool,
+    pub attempted_exit_routes: u64,
+    pub required_exit_routes: u64,
+    pub remaining_funded_value: u128,
+    pub remaining_lien_num: u128,
     pub exact_rollback: bool,
     pub canonical_vault_liquidity: u128,
     pub token_supply_conserved: bool,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
+}
+
+impl std::fmt::Debug for FlatSourceLienDiscovery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FlatSourceLienDiscovery")
+            .field("escape_route", &self.escape_route)
+            .field("provider_withdrawal", &self.provider_withdrawal)
+            .field("flat_position_q", &self.flat_position_q)
+            .field("positive_pnl", &self.positive_pnl)
+            .field("source_claim_liened_num", &self.source_claim_liened_num)
+            .field(
+                "pre_crank_conversion_rejected",
+                &self.pre_crank_conversion_rejected,
+            )
+            .field("pre_crank_close_rejected", &self.pre_crank_close_rejected)
+            .field(
+                "route_round_trip_completed",
+                &self.route_round_trip_completed,
+            )
+            .field("crank_attempts", &self.crank_attempts)
+            .field("crank_successes_mutated", &self.crank_successes_mutated)
+            .field("crank_released_lien", &self.crank_released_lien)
+            .field("converted_pnl", &self.converted_pnl)
+            .field(
+                "capital_withdrawal_succeeded",
+                &self.capital_withdrawal_succeeded,
+            )
+            .field("close_succeeded", &self.close_succeeded)
+            .field("attempted_exit_routes", &self.attempted_exit_routes)
+            .field("required_exit_routes", &self.required_exit_routes)
+            .field("remaining_funded_value", &self.remaining_funded_value)
+            .field("remaining_lien_num", &self.remaining_lien_num)
+            .field("exact_rollback", &self.exact_rollback)
+            .field("canonical_vault_liquidity", &self.canonical_vault_liquidity)
+            .field("token_supply_conserved", &self.token_supply_conserved)
+            .field("terminal_classification", &self.terminal_classification)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FlatSourceLienDiscovery {
-    pub fn is_persistent_backed_claim_lock(&self) -> bool {
+    pub fn preserves_bounded_backed_claim_exit(&self) -> bool {
         self.provider_withdrawal != 0
             && self.flat_position_q == 0
             && self.positive_pnl > 0
             && self.source_claim_liened_num != 0
-            && self.conversion_attempts >= 3
-            && self.conversion_rejections == self.conversion_attempts
-            && !self.later_honest_crank_released_lien
-            && self.close_rejected
-            && !self.round_trip_released_claim
+            && self.pre_crank_conversion_rejected
+            && self.pre_crank_close_rejected
+            && self.route_round_trip_completed
+            && self.crank_attempts > 0
+            && self.crank_attempts <= 4
+            && self.crank_successes_mutated
+            && self.crank_released_lien
+            && self.converted_pnl == self.positive_pnl as u128
+            && self.capital_withdrawal_succeeded
+            && self.close_succeeded
+            && self.required_exit_routes != 0
+            && self.attempted_exit_routes & self.required_exit_routes == self.required_exit_routes
+            && self.remaining_funded_value == 0
+            && self.remaining_lien_num == 0
             && self.exact_rollback
-            && self.canonical_vault_liquidity >= self.positive_pnl as u128
             && self.token_supply_conserved
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
     }
 }
 
@@ -11552,7 +11616,7 @@ pub fn discover_cross_domain_rounding_exit_locks(
         .collect()
 }
 
-fn discover_one_flat_source_lien_claim_lock(
+fn discover_one_flat_source_lien_bounded_exit(
     mut seed: [u8; 32],
     provider_withdrawal: u128,
     escape_route: FlatSourceLienEscapeRoute,
@@ -11563,7 +11627,10 @@ fn discover_one_flat_source_lien_claim_lock(
     const ASSET0_SIZE_Q: i128 = 20 * POS_SCALE as i128;
     const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
-    const CONVERSION_ATTEMPTS: u8 = 3;
+    const CRANK_EXIT_BIT: u64 = 1 << 4;
+    const CONVERT_EXIT_BIT: u64 = 1 << 5;
+    const CLOSE_EXIT_BIT: u64 = 1 << 6;
+    const WITHDRAW_EXIT_BIT: u64 = 1 << 7;
 
     seed[0] ^= 0x6b;
     seed[1] ^= provider_withdrawal as u8;
@@ -11583,6 +11650,7 @@ fn discover_one_flat_source_lien_claim_lock(
         },
     );
     let supply_before = env.token_supply_observed();
+    env.begin_public_trace();
     let oracle_accounts = [
         env.primary_profile(0).oracle_leg_count,
         env.primary_profile(1).oracle_leg_count,
@@ -11656,150 +11724,210 @@ fn discover_one_flat_source_lien_claim_lock(
         ));
     }
 
-    let before_crank_lien = source_claim_liened_num;
-    let _ = env.crank(WINNER, 3, observation(0));
-    let after_crank_lien: u128 = env
-        .primary_portfolio(WINNER)
-        .source_domains
-        .iter()
-        .map(|source| source.source_claim_liened_num.get())
-        .sum();
-    let mut later_honest_crank_released_lien = after_crank_lien < before_crank_lien;
-    let mut conversion_rejections = 0u8;
     let mut exact_rollback = true;
-    for amount in [positive_pnl as u128, 1] {
-        let before = fingerprint(&env);
-        match env.convert_released_pnl(WINNER, amount) {
-            Ok(_) => {}
-            Err(_) => {
-                conversion_rejections = conversion_rejections.saturating_add(1);
-                exact_rollback &= fingerprint(&env) == before;
-            }
-        }
+    let mut attempted_exit_routes = CONVERT_EXIT_BIT;
+    let before_conversion = fingerprint(&env);
+    let pre_crank_conversion_rejected = env
+        .convert_released_pnl(WINNER, positive_pnl as u128)
+        .is_err();
+    if pre_crank_conversion_rejected {
+        exact_rollback &= fingerprint(&env) == before_conversion;
     }
 
-    env.warp_to_slot(4);
-    env.push_auth_mark(0, 4, 105)
-        .map_err(|error| format!("publish later flat-lien winning mark: {error}"))?;
-    env.push_auth_mark(1, 4, 95)
-        .map_err(|error| format!("publish later flat-lien adverse mark: {error}"))?;
-    for (actor, asset_index) in [(COUNTERPARTY, 0), (COUNTERPARTY, 1), (WINNER, 0)] {
-        let _ = env.crank(actor, 4, observation(asset_index));
-    }
-    let later_lien: u128 = env
-        .primary_portfolio(WINNER)
-        .source_domains
-        .iter()
-        .map(|source| source.source_claim_liened_num.get())
-        .sum();
-    later_honest_crank_released_lien |= later_lien < after_crank_lien;
-    let before_later_conversion = fingerprint(&env);
-    match env.convert_released_pnl(WINNER, positive_pnl as u128) {
-        Ok(_) => {}
-        Err(_) => {
-            conversion_rejections = conversion_rejections.saturating_add(1);
-            exact_rollback &= fingerprint(&env) == before_later_conversion;
-        }
-    }
-
+    attempted_exit_routes |= CLOSE_EXIT_BIT;
     let before_close = fingerprint(&env);
-    let close_rejected = env.close_primary_portfolio(WINNER).is_err();
-    if close_rejected {
+    let pre_crank_close_rejected = env.close_primary_portfolio(WINNER).is_err();
+    if pre_crank_close_rejected {
         exact_rollback &= fingerprint(&env) == before_close;
     }
 
-    let mut round_trip_completed = false;
-    let mut round_trip_released_claim = false;
-    if close_rejected {
-        let route_trade = |env: &mut V16Svm, size_q: i128| {
-            let market_id = env.primary_market_state().1.assets[0].market_id;
-            match escape_route {
-                FlatSourceLienEscapeRoute::TradeNoCpi => {
-                    env.trade_no_cpi(WINNER, COUNTERPARTY, 0, size_q, 105, 0)
-                }
-                FlatSourceLienEscapeRoute::BatchNoCpi => env.batch_trade_no_cpi(
-                    WINNER,
-                    COUNTERPARTY,
-                    vec![BatchTradeLeg {
-                        asset_index: 0,
-                        market_id,
-                        size_q,
-                        exec_price: 105,
-                        fee_bps: 0,
-                    }],
-                ),
-                FlatSourceLienEscapeRoute::TradeCpi => {
-                    env.trade_cpi(WINNER, COUNTERPARTY, 0, size_q, 0, 0)
-                }
-                FlatSourceLienEscapeRoute::BatchCpi => env.batch_trade_cpi(
-                    WINNER,
-                    COUNTERPARTY,
-                    vec![BatchTradeCpiLeg {
-                        asset_index: 0,
-                        market_id,
-                        size_q,
-                        fee_bps: 0,
-                        limit_price: 0,
-                    }],
-                ),
+    if matches!(
+        escape_route,
+        FlatSourceLienEscapeRoute::TradeCpi | FlatSourceLienEscapeRoute::BatchCpi
+    ) {
+        env.ensure_primary_matcher_enabled(COUNTERPARTY)
+            .map_err(|error| format!("refresh flat source-lien matcher authorization: {error}"))?;
+    }
+    let route_trade = |env: &mut V16Svm, size_q: i128| {
+        let market_id = env.primary_market_state().1.assets[0].market_id;
+        match escape_route {
+            FlatSourceLienEscapeRoute::TradeNoCpi => {
+                env.trade_no_cpi(WINNER, COUNTERPARTY, 0, size_q, 105, 0)
             }
-        };
-        let before_open = fingerprint(&env);
-        let open = route_trade(&mut env, POS_SCALE as i128);
-        if open.is_err() {
-            exact_rollback &= fingerprint(&env) == before_open;
-        } else {
-            let before_flatten = fingerprint(&env);
-            let flatten = route_trade(&mut env, -(POS_SCALE as i128));
-            if flatten.is_err() {
-                exact_rollback &= fingerprint(&env) == before_flatten;
-            } else {
-                round_trip_completed = true;
-                let _ = env.crank(WINNER, 4, observation(0));
-                let after_round_trip = env.primary_portfolio(WINNER);
-                let lien_after_round_trip: u128 = after_round_trip
+            FlatSourceLienEscapeRoute::BatchNoCpi => env.batch_trade_no_cpi(
+                WINNER,
+                COUNTERPARTY,
+                vec![BatchTradeLeg {
+                    asset_index: 0,
+                    market_id,
+                    size_q,
+                    exec_price: 105,
+                    fee_bps: 0,
+                }],
+            ),
+            FlatSourceLienEscapeRoute::TradeCpi => {
+                env.trade_cpi(WINNER, COUNTERPARTY, 0, size_q, 0, 0)
+            }
+            FlatSourceLienEscapeRoute::BatchCpi => env.batch_trade_cpi(
+                WINNER,
+                COUNTERPARTY,
+                vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    market_id,
+                    size_q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            ),
+        }
+    };
+    attempted_exit_routes |= escape_route.evidence_bit();
+    let before_open = fingerprint(&env);
+    let open = route_trade(&mut env, POS_SCALE as i128);
+    if open.is_err() {
+        exact_rollback &= fingerprint(&env) == before_open;
+    }
+    let route_round_trip_completed = if open.is_ok() {
+        let before_flatten = fingerprint(&env);
+        let flatten = route_trade(&mut env, -(POS_SCALE as i128));
+        if flatten.is_err() {
+            exact_rollback &= fingerprint(&env) == before_flatten;
+        }
+        flatten.is_ok()
+    } else {
+        false
+    };
+
+    attempted_exit_routes |= CRANK_EXIT_BIT;
+    let mut crank_attempts = 0u8;
+    let mut crank_successes_mutated = true;
+    let mut crank_released_lien = false;
+    while crank_attempts < 4 && !crank_released_lien {
+        crank_attempts += 1;
+        let before = fingerprint(&env);
+        match env.crank(WINNER, 3, observation(0)) {
+            Ok(_) => {
+                let after = fingerprint(&env);
+                crank_successes_mutated &= after != before;
+                let lien_after: u128 = env
+                    .primary_portfolio(WINNER)
                     .source_domains
                     .iter()
                     .map(|source| source.source_claim_liened_num.get())
                     .sum();
-                round_trip_released_claim = lien_after_round_trip < source_claim_liened_num;
-                if after_round_trip.pnl.get() > 0 {
-                    round_trip_released_claim |= env
-                        .convert_released_pnl(WINNER, after_round_trip.pnl.get() as u128)
-                        .is_ok();
-                }
+                crank_released_lien = lien_after < source_claim_liened_num;
+            }
+            Err(_) => {
+                exact_rollback &= fingerprint(&env) == before;
+                break;
             }
         }
     }
+
+    let convertible_pnl = env.primary_portfolio(WINNER).pnl.get().max(0) as u128;
+    let converted_pnl =
+        if convertible_pnl != 0 && env.convert_released_pnl(WINNER, convertible_pnl).is_ok() {
+            convertible_pnl
+        } else {
+            0
+        };
+
+    attempted_exit_routes |= WITHDRAW_EXIT_BIT;
+    let capital_to_withdraw = env.primary_portfolio(WINNER).capital.get();
+    let before_withdraw = fingerprint(&env);
+    let capital_withdrawal_succeeded =
+        capital_to_withdraw != 0 && env.withdraw_primary(WINNER, capital_to_withdraw).is_ok();
+    if !capital_withdrawal_succeeded {
+        exact_rollback &= fingerprint(&env) == before_withdraw;
+    }
+
+    let before_final_close = fingerprint(&env);
+    let close_succeeded = env.close_primary_portfolio(WINNER).is_ok();
+    if !close_succeeded {
+        exact_rollback &= fingerprint(&env) == before_final_close;
+    }
+
+    let (remaining_funded_value, remaining_lien_num) = if close_succeeded {
+        (0, 0)
+    } else {
+        let remaining = env.primary_portfolio(WINNER);
+        let positive = remaining.pnl.get().max(0) as u128;
+        let funded = remaining
+            .capital
+            .get()
+            .checked_add(positive)
+            .ok_or_else(|| "flat source-lien remaining value overflow".to_string())?;
+        let lien = remaining
+            .source_domains
+            .iter()
+            .map(|source| source.source_claim_liened_num.get())
+            .try_fold(0u128, |sum, value| {
+                sum.checked_add(value)
+                    .ok_or_else(|| "flat source-lien remaining lien overflow".to_string())
+            })?;
+        (funded, lien)
+    };
     let canonical_vault_liquidity = u128::from(env.token_amount(env.vault));
     if env.primary_market_state().1.vault != canonical_vault_liquidity {
         return Err("flat source-lien vault diverged from SPL custody".into());
     }
+    let required_exit_routes = escape_route.evidence_bit()
+        | CRANK_EXIT_BIT
+        | CONVERT_EXIT_BIT
+        | WITHDRAW_EXIT_BIT
+        | CLOSE_EXIT_BIT;
+    let honest_continuation_failed = !close_succeeded
+        && attempted_exit_routes & required_exit_routes == required_exit_routes
+        && (remaining_funded_value != 0 || remaining_lien_num != 0);
+    let public_trace = env.finish_public_trace();
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: 0,
+            unauthorized_gain_atoms: 0,
+            funded_value_remaining: remaining_funded_value,
+            unresolved_obligation: remaining_lien_num,
+            bounded_exit_succeeded: close_succeeded,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes,
+            attempted_exit_routes,
+            honest_continuation_failed,
+        })
+        .map_err(|error| format!("flat source-lien terminal evidence is invalid: {error}"))?;
     Ok(FlatSourceLienDiscovery {
         escape_route,
         provider_withdrawal,
         flat_position_q,
         positive_pnl,
         source_claim_liened_num,
-        conversion_attempts: CONVERSION_ATTEMPTS,
-        conversion_rejections,
-        later_honest_crank_released_lien,
-        close_rejected,
-        round_trip_completed,
-        round_trip_released_claim,
+        pre_crank_conversion_rejected,
+        pre_crank_close_rejected,
+        route_round_trip_completed,
+        crank_attempts,
+        crank_successes_mutated,
+        crank_released_lien,
+        converted_pnl,
+        capital_withdrawal_succeeded,
+        close_succeeded,
+        attempted_exit_routes,
+        required_exit_routes,
+        remaining_funded_value,
+        remaining_lien_num,
         exact_rollback,
         canonical_vault_liquidity,
         token_supply_conserved: env.token_supply_observed() == supply_before,
+        terminal_classification,
+        public_trace,
     })
 }
 
-pub fn discover_flat_source_lien_claim_locks(
+pub fn discover_flat_source_lien_bounded_exits(
     seed: [u8; 32],
     provider_withdrawal: u128,
 ) -> Result<Vec<FlatSourceLienDiscovery>, String> {
     FlatSourceLienEscapeRoute::ALL
         .into_iter()
-        .map(|route| discover_one_flat_source_lien_claim_lock(seed, provider_withdrawal, route))
+        .map(|route| discover_one_flat_source_lien_bounded_exit(seed, provider_withdrawal, route))
         .collect()
 }
 

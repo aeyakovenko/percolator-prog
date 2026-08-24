@@ -60,7 +60,7 @@ use support::invariant_discovery::{
     discover_composite_rounding_violations, discover_cross_domain_b_violation,
     discover_cross_domain_backing_violation, discover_cross_domain_insurance_violation,
     discover_cross_domain_rounding_exit_locks, discover_cross_route_insurance_top_up_retry,
-    discover_fee_consent_violations, discover_flat_source_lien_claim_locks,
+    discover_fee_consent_violations, discover_flat_source_lien_bounded_exits,
     discover_funded_role_seizures, discover_intent_retries, discover_intent_retry,
     discover_mark_movement_reserve_violations, discover_market_incarnation_replays,
     discover_multi_segment_accrual_ordering_violations, discover_observation_omission_violation,
