@@ -4,9 +4,11 @@
 //! valid nonzero authorities, valid initial price, authenticated slot, fresh asset
 //! generation, empty backing/source-credit ledgers, fresh replay watermarks, and no
 //! stale-authority carryover. Full persisted-slot differentials compose public trade, oracle,
-//! backing, insurance-spend, owner-forfeit, and provider-settlement history through retirement and
-//! both reuse branches, normalizing only the expected program-assigned generation IDs. These tests
-//! exercise public wrapper routes against real SBF.
+//! backing, insurance-spend, owner-forfeit, provider-settlement, claim, certificate, and
+//! maximum-portfolio-shape history through retirement and both reuse branches, normalizing only
+//! the expected program-assigned generation IDs. Unsupported shape rejects atomically without
+//! poisoning the reused slot, and the replacement becomes tradable as soon as one bounded leg is
+//! closed. These tests exercise public wrapper routes against real SBF.
 
 use super::*;
 
@@ -334,6 +336,171 @@ fn v16_program_reuse_matches_fresh_activation_envelope_and_drops_old_authority()
             &[&new_creator],
         )
         .expect("new authority controls the reused slot");
+}
+
+#[test]
+fn v16_program_privileged_reuse_matches_fresh_after_public_position_and_sequence_history() {
+    const ASSET_INDEX: u16 = 1;
+    const OLD_PRICE: u64 = 100;
+    const REUSED_PRICE: u64 = 250;
+
+    let shared_marketauth = Keypair::new();
+    let replacement_domain_authority = Keypair::new();
+    let mut fresh = V16CuEnv::new();
+    fresh.update_asset_authority_with_cu(&shared_marketauth);
+    fresh.admin = shared_marketauth.insecure_clone();
+    fresh.svm.warp_to_slot(5);
+    fresh.activate_asset_with_authorities(
+        ASSET_INDEX,
+        5,
+        REUSED_PRICE,
+        replacement_domain_authority.pubkey(),
+        replacement_domain_authority.pubkey(),
+        replacement_domain_authority.pubkey(),
+        replacement_domain_authority.pubkey(),
+    );
+
+    let prior_domain_authority = Keypair::new();
+    let mut reused = V16CuEnv::new();
+    reused.update_asset_authority_with_cu(&shared_marketauth);
+    reused.admin = shared_marketauth.insecure_clone();
+    reused.svm.warp_to_slot(1);
+    reused.activate_asset_with_authorities(
+        ASSET_INDEX,
+        1,
+        OLD_PRICE,
+        prior_domain_authority.pubkey(),
+        prior_domain_authority.pubkey(),
+        prior_domain_authority.pubkey(),
+        prior_domain_authority.pubkey(),
+    );
+    let old_market_id = reused.asset_market_id(ASSET_INDEX);
+    reused.configure_auth_mark_for_asset_with_authority(
+        ASSET_INDEX,
+        &prior_domain_authority,
+        1,
+        OLD_PRICE,
+    );
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = reused.create_portfolio(&long_owner);
+    let short = reused.create_portfolio(&short_owner);
+    reused.deposit(&long_owner, long, 10_000);
+    reused.deposit(&short_owner, short, 10_000);
+    reused.trade_asset_with_cu(
+        ASSET_INDEX,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        OLD_PRICE,
+        0,
+    );
+    reused.svm.warp_to_slot(2);
+    reused.svm.expire_blockhash();
+    reused
+        .send(
+            ProgInstruction::PushAuthMark {
+                market_id: old_market_id,
+                asset_index: ASSET_INDEX,
+                now_slot: 2,
+                mark_e6: OLD_PRICE,
+                observation_sequence: u64::MAX,
+            },
+            vec![
+                AccountMeta::new(prior_domain_authority.pubkey(), true),
+                AccountMeta::new(reused.market, false),
+            ],
+            &[&prior_domain_authority],
+        )
+        .expect("old privileged generation installs a maximum oracle watermark");
+    reused.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(ASSET_INDEX),
+        },
+    );
+    reused.trade_asset_with_cu(
+        ASSET_INDEX,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -(POS_SCALE as i128),
+        OLD_PRICE,
+        0,
+    );
+    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+        let capital = reused.portfolio_state(portfolio).capital.get();
+        let destination = reused.withdraw(owner, portfolio, capital);
+        assert_eq!(reused.token_amount(destination), 10_000);
+        reused.close_portfolio_with_cu(owner, portfolio);
+    }
+
+    reused.svm.warp_to_slot(3);
+    reused.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_RETIRE,
+        ASSET_INDEX,
+        3,
+        0,
+    );
+    reused.svm.warp_to_slot(5);
+    reused.activate_asset_with_authorities(
+        ASSET_INDEX,
+        5,
+        REUSED_PRICE,
+        replacement_domain_authority.pubkey(),
+        replacement_domain_authority.pubkey(),
+        replacement_domain_authority.pubkey(),
+        replacement_domain_authority.pubkey(),
+    );
+    let replacement_market_id = reused.asset_market_id(ASSET_INDEX);
+    assert_ne!(replacement_market_id, old_market_id);
+    assert_eq!(
+        reused.control_sequences(ASSET_INDEX as usize),
+        state::AssetControlSequencesV16::default(),
+        "privileged reactivation must reset every old-generation replay lane"
+    );
+    assert_eq!(
+        normalized_persisted_asset_slot(&reused, ASSET_INDEX as usize),
+        normalized_persisted_asset_slot(&fresh, ASSET_INDEX as usize),
+        "privileged reactivation after public position and sequence history must produce a fresh persisted slot"
+    );
+
+    reused.svm.warp_to_slot(6);
+    let market_before_old_authority = reused.svm.get_account(&reused.market).unwrap();
+    reused.svm.expire_blockhash();
+    let stale_authority = reused.send(
+        ProgInstruction::ConfigureAuthMark {
+            market_id: replacement_market_id,
+            observation_sequence: 1,
+            asset_index: ASSET_INDEX,
+            now_slot: 6,
+            initial_mark_e6: 300,
+        },
+        vec![
+            AccountMeta::new(prior_domain_authority.pubkey(), true),
+            AccountMeta::new(reused.market, false),
+        ],
+        &[&prior_domain_authority],
+    );
+    assert!(
+        stale_authority.is_err(),
+        "the prior privileged generation's oracle authority must stay revoked"
+    );
+    assert_eq!(
+        reused.svm.get_account(&reused.market).unwrap(),
+        market_before_old_authority
+    );
+    reused.configure_auth_mark_for_asset_with_authority(
+        ASSET_INDEX,
+        &replacement_domain_authority,
+        6,
+        300,
+    );
 }
 
 #[test]
@@ -1046,59 +1213,88 @@ fn v16_attack_permissionless_append_zero_authority_rolls_back_realloc_and_fee() 
     let (_, group_before) = env.market_state();
     let activation_market_id = group_before.next_market_id;
 
-    env.svm.expire_blockhash();
-    let rejected = env.send(
-        ProgInstruction::UpdateAssetLifecycle {
-            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
-            asset_index: 1,
-            market_id: activation_market_id,
-            now_slot: 1,
-            initial_price: 100,
-            max_init_fee: u128::MAX,
-            insurance_authority: [0u8; 32],
-            insurance_operator: creator.pubkey().to_bytes(),
-            backing_bucket_authority: creator.pubkey().to_bytes(),
-            oracle_authority: creator.pubkey().to_bytes(),
-        },
-        vec![
-            AccountMeta::new(creator.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(source, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&creator],
-    );
-    assert!(
-        rejected.is_err(),
-        "permissionless append with a zero authority must reject"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "rejected append rolls back the pre-write market realloc"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.vault).unwrap(),
-        vault_before,
-        "vault token account unchanged"
-    );
-    assert_eq!(
-        env.token_amount(source),
-        FEE as u64,
-        "fee was not pulled by rejected append"
-    );
-    let (_, rejected_group) = env.market_state();
-    assert_eq!(
-        rejected_group.config.max_market_slots,
-        group_before.config.max_market_slots
-    );
-    assert_eq!(rejected_group.insurance, group_before.insurance);
-    assert_eq!(rejected_group.vault, group_before.vault);
-    assert_eq!(
-        rejected_group.insurance_domain_budget,
-        group_before.insurance_domain_budget
-    );
+    let valid_authority = creator.pubkey().to_bytes();
+    for (label, insurance, operator, backing, oracle) in [
+        (
+            "zero insurance authority",
+            [0u8; 32],
+            valid_authority,
+            valid_authority,
+            valid_authority,
+        ),
+        (
+            "zero insurance operator",
+            valid_authority,
+            [0u8; 32],
+            valid_authority,
+            valid_authority,
+        ),
+        (
+            "zero backing authority",
+            valid_authority,
+            valid_authority,
+            [0u8; 32],
+            valid_authority,
+        ),
+        (
+            "zero oracle authority",
+            valid_authority,
+            valid_authority,
+            valid_authority,
+            [0u8; 32],
+        ),
+    ] {
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                market_id: activation_market_id,
+                now_slot: 1,
+                initial_price: 100,
+                max_init_fee: u128::MAX,
+                insurance_authority: insurance,
+                insurance_operator: operator,
+                backing_bucket_authority: backing,
+                oracle_authority: oracle,
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&creator],
+        );
+        assert!(rejected.is_err(), "{label} must reject");
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} must roll back the pre-write market realloc"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label} must leave the vault token account unchanged"
+        );
+        assert_eq!(
+            env.token_amount(source),
+            FEE as u64,
+            "{label} must not pull the fee"
+        );
+        let (_, rejected_group) = env.market_state();
+        assert_eq!(
+            rejected_group.config.max_market_slots,
+            group_before.config.max_market_slots
+        );
+        assert_eq!(rejected_group.insurance, group_before.insurance);
+        assert_eq!(rejected_group.vault, group_before.vault);
+        assert_eq!(
+            rejected_group.insurance_domain_budget,
+            group_before.insurance_domain_budget
+        );
+    }
 
     let valid_source = env.token_account(creator.pubkey(), FEE as u64);
     env.svm.expire_blockhash();
@@ -2143,5 +2339,268 @@ fn v16_program_reused_slot_matches_fresh_after_public_claim_and_stale_certificat
         reused.market_state().1.vault as u64,
         reused.token_amount(reused.vault),
         "the fresh generation preserves custody after prior claim and certificate history"
+    );
+}
+
+#[test]
+fn v16_program_reused_slot_rejects_fifteenth_leg_then_admits_replacement_at_cap() {
+    const PORTFOLIO_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const REUSED_ASSET: u16 = PORTFOLIO_CAP;
+    const MARKET_CAPACITY: usize = PORTFOLIO_CAP as usize + 1;
+    const OLD_PRICE: u64 = 100;
+    const REUSED_PRICE: u64 = 250;
+    const CAPITAL: u128 = 1_000_000;
+
+    let params = V16CuMarketParams {
+        max_portfolio_assets: PORTFOLIO_CAP,
+        initial_price: OLD_PRICE,
+        ..V16CuMarketParams::default()
+    };
+    let replacement_authority = Keypair::new();
+
+    // InitMarket configures slots 0..13. The comparison market takes the same append path for slot
+    // 14 at the same authenticated slot. Only the reused market has prior generation history.
+    let mut fresh = V16CuEnv::new_with_init_params_and_market_capacity(params, MARKET_CAPACITY);
+    fresh.update_market_init_fee_policy_with_cu(1);
+    fresh.svm.warp_to_slot(4);
+    fresh.activate_permissionless_asset_with_fee(
+        &replacement_authority,
+        REUSED_ASSET,
+        4,
+        REUSED_PRICE,
+        replacement_authority.pubkey(),
+        replacement_authority.pubkey(),
+        replacement_authority.pubkey(),
+        replacement_authority.pubkey(),
+        1,
+    );
+
+    let prior_authority = Keypair::new();
+    let mut reused = V16CuEnv::new_with_init_params_and_market_capacity(params, MARKET_CAPACITY);
+    reused.update_market_init_fee_policy_with_cu(1);
+    reused.svm.warp_to_slot(1);
+    reused.activate_permissionless_asset_with_fee(
+        &prior_authority,
+        REUSED_ASSET,
+        1,
+        OLD_PRICE,
+        prior_authority.pubkey(),
+        prior_authority.pubkey(),
+        prior_authority.pubkey(),
+        prior_authority.pubkey(),
+        1,
+    );
+    let old_market_id = reused.asset_market_id(REUSED_ASSET);
+
+    // Give the retired slot real public position/OI/certificate history before clearing it.
+    let history_long_owner = Keypair::new();
+    let history_short_owner = Keypair::new();
+    let history_long = reused.create_portfolio(&history_long_owner);
+    let history_short = reused.create_portfolio(&history_short_owner);
+    reused.deposit(&history_long_owner, history_long, 10_000);
+    reused.deposit(&history_short_owner, history_short, 10_000);
+    reused.trade_asset_with_cu(
+        REUSED_ASSET,
+        &history_long_owner,
+        history_long,
+        &history_short_owner,
+        history_short,
+        POS_SCALE as i128,
+        OLD_PRICE,
+        0,
+    );
+    reused.trade_asset_with_cu(
+        REUSED_ASSET,
+        &history_long_owner,
+        history_long,
+        &history_short_owner,
+        history_short,
+        -(POS_SCALE as i128),
+        OLD_PRICE,
+        0,
+    );
+    for (owner, portfolio) in [
+        (&history_long_owner, history_long),
+        (&history_short_owner, history_short),
+    ] {
+        let capital = reused.portfolio_state(portfolio).capital.get();
+        let destination = reused.withdraw(owner, portfolio, capital);
+        assert_eq!(reused.token_amount(destination), 10_000);
+        reused.close_portfolio_with_cu(owner, portfolio);
+    }
+
+    reused.svm.warp_to_slot(2);
+    reused.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_RETIRE,
+        REUSED_ASSET,
+        2,
+        0,
+    );
+    reused.svm.warp_to_slot(4);
+    reused.activate_permissionless_asset_with_fee(
+        &replacement_authority,
+        REUSED_ASSET,
+        4,
+        REUSED_PRICE,
+        replacement_authority.pubkey(),
+        replacement_authority.pubkey(),
+        replacement_authority.pubkey(),
+        replacement_authority.pubkey(),
+        1,
+    );
+    let replacement_market_id = reused.asset_market_id(REUSED_ASSET);
+    assert_ne!(replacement_market_id, old_market_id);
+    assert_eq!(
+        normalized_persisted_asset_slot(&reused, REUSED_ASSET as usize),
+        normalized_persisted_asset_slot(&fresh, REUSED_ASSET as usize),
+        "the prior position/OI/certificate generation must normalize to a fresh fifteenth market slot"
+    );
+
+    let full_long_owner = Keypair::new();
+    let full_short_owner = Keypair::new();
+    let full_long = reused.create_portfolio(&full_long_owner);
+    let full_short = reused.create_portfolio(&full_short_owner);
+    reused.deposit(&full_long_owner, full_long, CAPITAL);
+    reused.deposit(&full_short_owner, full_short, CAPITAL);
+    for asset_index in 0..PORTFOLIO_CAP {
+        reused.trade_asset_with_cu(
+            asset_index,
+            &full_long_owner,
+            full_long,
+            &full_short_owner,
+            full_short,
+            POS_SCALE as i128,
+            OLD_PRICE,
+            0,
+        );
+    }
+    for portfolio in [full_long, full_short] {
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&reused.portfolio_state(portfolio))),
+            u32::from(PORTFOLIO_CAP),
+            "the control must publicly fill every supported portfolio slot"
+        );
+        assert!(!has_active_leg_for_asset(
+            &reused.portfolio_state(portfolio),
+            REUSED_ASSET as usize
+        ));
+    }
+
+    let market_before_reject = reused.svm.get_account(&reused.market).unwrap();
+    let long_before_reject = reused.svm.get_account(&full_long).unwrap();
+    let short_before_reject = reused.svm.get_account(&full_short).unwrap();
+    let vault_before_reject = reused.svm.get_account(&reused.vault).unwrap();
+    let rejected = reused.try_trade_asset_with_cu(
+        REUSED_ASSET,
+        &full_long_owner,
+        full_long,
+        &full_short_owner,
+        full_short,
+        POS_SCALE as i128,
+        REUSED_PRICE,
+        0,
+    );
+    assert!(
+        rejected.is_err(),
+        "a replacement-generation fifteenth leg must reject at the configured portfolio cap"
+    );
+    assert_eq!(
+        reused.svm.get_account(&reused.market).unwrap(),
+        market_before_reject,
+        "unsupported shape must not mutate market or reused-slot state"
+    );
+    assert_eq!(
+        reused.svm.get_account(&full_long).unwrap(),
+        long_before_reject
+    );
+    assert_eq!(
+        reused.svm.get_account(&full_short).unwrap(),
+        short_before_reject
+    );
+    assert_eq!(
+        reused.svm.get_account(&reused.vault).unwrap(),
+        vault_before_reject
+    );
+
+    // Free one canonical slot through a normal owner trade. The exact same replacement generation
+    // must then become the fourteenth leg, proving rejection did not consume or poison it.
+    let displaced_asset = PORTFOLIO_CAP - 1;
+    reused.trade_asset_with_cu(
+        displaced_asset,
+        &full_long_owner,
+        full_long,
+        &full_short_owner,
+        full_short,
+        -(POS_SCALE as i128),
+        OLD_PRICE,
+        0,
+    );
+    reused.trade_asset_with_cu(
+        REUSED_ASSET,
+        &full_long_owner,
+        full_long,
+        &full_short_owner,
+        full_short,
+        POS_SCALE as i128,
+        REUSED_PRICE,
+        0,
+    );
+    for portfolio in [full_long, full_short] {
+        let state = reused.portfolio_state(portfolio);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&state)),
+            u32::from(PORTFOLIO_CAP)
+        );
+        assert!(!has_active_leg_for_asset(&state, displaced_asset as usize));
+        assert_eq!(
+            active_leg_for_asset(&state, REUSED_ASSET as usize).market_id,
+            replacement_market_id,
+            "the newly admitted leg must bind the replacement generation"
+        );
+    }
+
+    for asset_index in 0..displaced_asset {
+        reused.trade_asset_with_cu(
+            asset_index,
+            &full_long_owner,
+            full_long,
+            &full_short_owner,
+            full_short,
+            -(POS_SCALE as i128),
+            OLD_PRICE,
+            0,
+        );
+    }
+    reused.trade_asset_with_cu(
+        REUSED_ASSET,
+        &full_long_owner,
+        full_long,
+        &full_short_owner,
+        full_short,
+        -(POS_SCALE as i128),
+        REUSED_PRICE,
+        0,
+    );
+    for (owner, portfolio) in [
+        (&full_long_owner, full_long),
+        (&full_short_owner, full_short),
+    ] {
+        let state = reused.portfolio_state(portfolio);
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(&state)));
+        assert_eq!(state.pnl.get(), 0);
+        assert_eq!(state.capital.get(), CAPITAL);
+        let destination = reused.withdraw(owner, portfolio, CAPITAL);
+        assert_eq!(reused.token_amount(destination), CAPITAL as u64);
+        reused.close_portfolio_with_cu(owner, portfolio);
+    }
+    for asset_index in 0..=REUSED_ASSET as usize {
+        let asset = reused.market_state().1.assets[asset_index];
+        assert_eq!(asset.oi_eff_long_q, 0);
+        assert_eq!(asset.oi_eff_short_q, 0);
+    }
+    assert_eq!(
+        reused.market_state().1.vault as u64,
+        reused.token_amount(reused.vault),
+        "max-shape rejection and replacement-generation exit preserve engine/SPL custody"
     );
 }
