@@ -163,9 +163,17 @@ fn v16_attack_batch_subatom_fee_reconstruction_uses_ceil_notional() {
     .expect("sub-atom BatchTradeNoCpi must execute with matching fee reconstruction");
 
     let (_, group) = env.market_state();
+    let expected_fee_per_side =
+        percolator_prog::policy_v16::batch_leg_fee(sub_atom_size.unsigned_abs(), 100, 1)
+            .expect("canonical batch fee arithmetic");
+    assert_eq!(
+        group.insurance - before_insurance,
+        expected_fee_per_side * 2,
+        "deployed batch accounting must charge the canonical ceil fee to both sides"
+    );
     assert!(
-        group.insurance > before_insurance,
-        "sub-atom batch leg must pay a nonzero fee"
+        expected_fee_per_side > 0,
+        "the rounding edge is non-vacuous"
     );
     assert_eq!(group.vault, 2_000_000, "no value created by sub-atom batch");
     assert_eq!(

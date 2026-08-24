@@ -3310,10 +3310,12 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
     let (_, group) = state::read_market(&market_data).unwrap();
     let payer = state::read_portfolio(&payer_data).unwrap();
     let cranker = state::read_portfolio(&cranker_data).unwrap();
+    let expected_reward = percolator_prog::policy_v16::fee_share_floor(580, 4_000)
+        .expect("canonical maintenance reward arithmetic");
     assert_eq!(payer.last_fee_slot.get(), 10);
     assert_eq!(payer.capital.get(), 100_000_000 - 580);
-    assert_eq!(cranker.capital.get(), 232);
-    assert_eq!(group.insurance, 348);
+    assert_eq!(cranker.capital.get(), expected_reward);
+    assert_eq!(group.insurance, 580 - expected_reward);
     assert_domain_budget_remaining_total_consistent(&group, "maintenance fee with cranker share");
 }
 

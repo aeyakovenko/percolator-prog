@@ -1280,8 +1280,9 @@ fn v16_program_liquidation_cranker_reward_bounded_by_fee() {
     );
     assert_eq!(
         cranker_reward,
-        total_fee * 5_000 / 10_000,
-        "50% cranker share uses the production floor rule"
+        percolator_prog::policy_v16::fee_share_floor(total_fee as u128, 5_000)
+            .expect("canonical liquidation reward arithmetic") as i128,
+        "deployed liquidation reward uses the canonical host floor"
     );
     assert_eq!(
         ins_delta,

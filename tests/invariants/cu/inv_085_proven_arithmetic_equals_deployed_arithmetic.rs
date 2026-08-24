@@ -9,8 +9,9 @@
 //! oracle helpers are compared against independent widened integer oracles over
 //! fixed boundaries and 16,384 deterministic full-width words. Separate 512- and
 //! 1,024-word corpora compare dynamic-fee and fee-rate searches with exhaustive
-//! scans. Full relational provider scaling, host/SBF boundary equivalence, and
-//! bigint equivalence remain open.
+//! scans. Public LiteSVM witnesses additionally bind the host policy to deployed
+//! activation, fee-share, batch-rounding, and Hybrid quote results. Full
+//! relational provider scaling and bigint equivalence remain open.
 
 use super::*;
 
@@ -673,6 +674,300 @@ fn v16_program_two_sided_fee_rate_search_matches_exhaustive_generated_inputs() {
             ),
             inv_085_fee_bps_exhaustive_oracle(notional, required_paid, min_fee_bps, max_fee_bps,),
             "two-sided fee-rate search diverged at generated word {index}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_public_sbf_activation_first_fee_tier_matches_host_policy() {
+    const BASE_FEE: u128 = 3;
+    const ASSET_INDEX: u16 = 32;
+
+    let mut env =
+        V16CuEnv::new_with_init_params_and_market_capacity(V16CuMarketParams::default(), 33);
+    env.update_market_init_fee_policy_with_cu(BASE_FEE);
+    for asset_index in 1..=ASSET_INDEX {
+        let slot = u64::from(asset_index);
+        env.svm.warp_to_slot(slot);
+        env.activate_asset(asset_index, slot, 100);
+    }
+    env.svm.warp_to_slot(33);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        ASSET_INDEX,
+        33,
+        0,
+    );
+
+    let expected_fee = percolator_prog::policy_v16::permissionless_market_init_fee_for_asset(
+        BASE_FEE,
+        usize::from(ASSET_INDEX),
+    )
+    .expect("first activation tier is representable");
+    assert_eq!(
+        expected_fee,
+        BASE_FEE * 2,
+        "index 32 is the first doubled tier"
+    );
+
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    let before = env.market_state().1;
+    env.svm.warp_to_slot(34);
+    let (source, _) = env.activate_permissionless_asset_with_fee(
+        &creator,
+        ASSET_INDEX,
+        34,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        expected_fee,
+    );
+    let after = env.market_state().1;
+
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(after.vault - before.vault, expected_fee);
+    assert_eq!(after.insurance - before.insurance, expected_fee);
+    assert_eq!(
+        after.assets[usize::from(ASSET_INDEX)].lifecycle,
+        AssetLifecycleV16::Active
+    );
+}
+
+#[test]
+fn v16_program_public_sbf_hybrid_quote_matches_host_policy_with_live_oi() {
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 37;
+    const TRADE_SLOT: u64 = 5;
+    const PASSIVE_SIZE_Q: i128 = (10_000u128 * POS_SCALE) as i128;
+    const TRADE_SIZE_Q: i128 = (1_000u128 * POS_SCALE) as i128;
+    const RAW_PRICE: u64 = 1_900_000;
+    const MARK_MIN_FEE: u64 = 100_000_000;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: MAX_FEE_BPS,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, MARK_MIN_FEE);
+
+    let passive_long_owner = Keypair::new();
+    let passive_short_owner = Keypair::new();
+    let passive_long = env.create_portfolio(&passive_long_owner);
+    let passive_short = env.create_portfolio(&passive_short_owner);
+    env.deposit(&passive_long_owner, passive_long, 20_000_000_000);
+    env.deposit(&passive_short_owner, passive_short, 20_000_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &passive_long_owner,
+        passive_long,
+        &passive_short_owner,
+        passive_short,
+        PASSIVE_SIZE_Q,
+        MARK,
+        0,
+    );
+
+    let trader_a = Keypair::new();
+    let trader_b = Keypair::new();
+    let account_a = env.create_portfolio(&trader_a);
+    let account_b = env.create_portfolio(&trader_b);
+    env.deposit(&trader_a, account_a, 4_000_000_000);
+    env.deposit(&trader_b, account_b, 4_000_000_000);
+    env.svm.warp_to_slot(TRADE_SLOT);
+
+    let (cfg_before, group_before) = env.market_state();
+    let asset_before = group_before.assets[0];
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(
+        cfg_before.mark_ewma_e6,
+        RAW_PRICE,
+        CAP_BPS,
+        TRADE_SLOT - cfg_before.mark_ewma_last_slot,
+    );
+    let trade_notional = percolator_prog::policy_v16::trade_fee_notional_ceil(
+        TRADE_SIZE_Q.unsigned_abs(),
+        accepted_price,
+    )
+    .expect("trade notional");
+    let max_side_oi_q = asset_before.oi_eff_long_q.max(asset_before.oi_eff_short_q);
+    let max_side_notional = percolator_prog::policy_v16::risk_notional_ceil(
+        max_side_oi_q,
+        asset_before.effective_price.max(cfg_before.mark_ewma_e6),
+    )
+    .expect("live OI notional");
+    assert!(
+        max_side_notional > trade_notional,
+        "the public fixture must exercise the live-OI externality branch"
+    );
+    let externality_notional = max_side_notional
+        .max(trade_notional)
+        .checked_mul(2)
+        .expect("two-sided externality notional");
+    let candidate_mark = percolator_prog::policy_v16::ewma_update(
+        cfg_before.mark_ewma_e6,
+        accepted_price,
+        cfg_before.mark_ewma_halflife_slots,
+        cfg_before.mark_ewma_last_slot,
+        TRADE_SLOT,
+        MARK_MIN_FEE,
+        MARK_MIN_FEE,
+    );
+    let base_fee_paid = percolator_prog::policy_v16::two_sided_trade_fee_paid(
+        trade_notional,
+        cfg_before.trade_fee_base_bps,
+    )
+    .expect("base fee");
+    let max_fee_paid =
+        percolator_prog::policy_v16::two_sided_trade_fee_paid(trade_notional, MAX_FEE_BPS)
+            .expect("maximum fee");
+    let candidate_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(cfg_before.mark_ewma_e6, candidate_mark)
+            .expect("candidate movement");
+    let fee_supported_move_bps = u64::try_from(
+        max_fee_paid
+            .saturating_sub(base_fee_paid)
+            .checked_mul(10_000)
+            .expect("fee support numerator")
+            / externality_notional,
+    )
+    .unwrap_or(u64::MAX);
+    let quoted_move_bps = candidate_move_bps
+        .min(MAX_FEE_BPS)
+        .min(fee_supported_move_bps);
+    let expected_mark = oracle_v16::clamp_toward_engine_dt(
+        cfg_before.mark_ewma_e6,
+        candidate_mark,
+        quoted_move_bps,
+        1,
+    );
+    let actual_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(cfg_before.mark_ewma_e6, expected_mark)
+            .expect("actual movement");
+    let mark_fee_paid = percolator_prog::policy_v16::ceil_div_u128(
+        externality_notional
+            .checked_mul(u128::from(actual_move_bps))
+            .expect("mark fee numerator"),
+        10_000,
+    )
+    .expect("mark fee");
+    let required_fee_paid = base_fee_paid
+        .checked_add(mark_fee_paid)
+        .expect("required fee");
+    let expected_fee_bps = percolator_prog::policy_v16::fee_bps_for_two_sided_fee_paid(
+        trade_notional,
+        required_fee_paid,
+        cfg_before.trade_fee_base_bps,
+        MAX_FEE_BPS,
+    )
+    .expect("fee-rate search");
+    let expected_fee_paid =
+        percolator_prog::policy_v16::two_sided_trade_fee_paid(trade_notional, expected_fee_bps)
+            .expect("selected two-sided fee");
+    assert!(expected_mark > MARK && expected_fee_bps > 0 && expected_fee_bps < MAX_FEE_BPS);
+
+    let insurance_before = group_before.insurance;
+    env.trade_asset_with_cu(
+        0,
+        &trader_a,
+        account_a,
+        &trader_b,
+        account_b,
+        TRADE_SIZE_Q,
+        RAW_PRICE,
+        0,
+    );
+    let (cfg_after, group_after) = env.market_state();
+    assert_eq!(cfg_after.mark_ewma_e6, expected_mark);
+    assert_eq!(group_after.insurance - insurance_before, expected_fee_paid);
+}
+
+#[test]
+fn v16_program_public_sbf_arithmetic_evidence_roster_is_complete() {
+    struct PublicEvidence {
+        adapter: &'static str,
+        witness: &'static str,
+        source: &'static str,
+    }
+
+    const THIS_SOURCE: &str =
+        include_str!("inv_085_proven_arithmetic_equals_deployed_arithmetic.rs");
+    const ROWS: &[PublicEvidence] = &[
+        PublicEvidence {
+            adapter: "fee_share_floor",
+            witness: "v16_attack_fee_redirect_split_lands_correctly",
+            source: include_str!("inv_036_fee_destination_and_policy_version_integrity.rs"),
+        },
+        PublicEvidence {
+            adapter: "fee_share_floor",
+            witness: "v16_program_liquidation_cranker_reward_bounded_by_fee",
+            source: include_str!("inv_061_deterministic_bounded_liquidation.rs"),
+        },
+        PublicEvidence {
+            adapter: "fee_share_floor",
+            witness: "v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded",
+            source: include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
+        },
+        PublicEvidence {
+            adapter: "permissionless_market_init_fee_for_asset",
+            witness: "v16_program_public_sbf_activation_first_fee_tier_matches_host_policy",
+            source: THIS_SOURCE,
+        },
+        PublicEvidence {
+            adapter: "batch_leg_fee",
+            witness: "v16_attack_batch_subatom_fee_reconstruction_uses_ceil_notional",
+            source: include_str!("inv_038_rounding_and_ratio_conservation.rs"),
+        },
+        PublicEvidence {
+            adapter: "trade_fee_notional_ceil",
+            witness: "v16_program_public_sbf_hybrid_quote_matches_host_policy_with_live_oi",
+            source: THIS_SOURCE,
+        },
+        PublicEvidence {
+            adapter: "risk_notional_ceil",
+            witness: "v16_program_public_sbf_hybrid_quote_matches_host_policy_with_live_oi",
+            source: THIS_SOURCE,
+        },
+        PublicEvidence {
+            adapter: "two_sided_trade_fee_paid",
+            witness: "v16_program_public_sbf_hybrid_quote_matches_host_policy_with_live_oi",
+            source: THIS_SOURCE,
+        },
+        PublicEvidence {
+            adapter: "ceil_div_u128",
+            witness: "v16_program_public_sbf_hybrid_quote_matches_host_policy_with_live_oi",
+            source: THIS_SOURCE,
+        },
+        PublicEvidence {
+            adapter: "fee_bps_for_two_sided_fee_paid",
+            witness: "v16_program_public_sbf_hybrid_quote_matches_host_policy_with_live_oi",
+            source: THIS_SOURCE,
+        },
+    ];
+
+    for row in ROWS {
+        let marker = format!("fn {}", row.witness);
+        let witness_tail = row
+            .source
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("missing public SBF arithmetic witness {}", row.witness))
+            .1;
+        let witness_body = witness_tail
+            .split("\n#[test]")
+            .next()
+            .unwrap_or(witness_tail);
+        assert!(
+            witness_body.contains(&format!("policy_v16::{}", row.adapter)),
+            "{} must compare deployed SBF output with host adapter {}",
+            row.witness,
+            row.adapter
         );
     }
 }

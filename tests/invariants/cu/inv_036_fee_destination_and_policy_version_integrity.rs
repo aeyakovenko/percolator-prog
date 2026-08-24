@@ -851,19 +851,21 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
         ins0 + total_fee,
         "insurance += total fee"
     );
-    // the redirect share (20%) landed in market 0's domains; the rest (80%) stayed local in market 1.
-    // each side: redirect = floor(fee_side * 2000/10000); allow +-1 per side for flooring.
-    assert!(
-        total_to_mkt0 >= total_fee * 2 / 10 - 2 && total_to_mkt0 <= total_fee * 2 / 10 + 2,
-        "~20% of fee redirected to market 0 (got {} of {})",
-        total_to_mkt0,
-        total_fee
+    // Bind the deployed SBF split to the exact canonical host floor independently for each side.
+    // Summing first and applying 20% would be wrong when both side-local products have residue.
+    assert_eq!(
+        g0d,
+        percolator_prog::policy_v16::fee_share_floor(g0d + g2d, 2_000)
+            .expect("long-side redirect arithmetic"),
+        "asset-1 long-domain redirect uses the canonical floor"
     );
-    assert!(
-        total_to_mkt1 >= total_fee * 8 / 10 - 2,
-        "~80% of fee stayed local in market 1 (got {})",
-        total_to_mkt1
+    assert_eq!(
+        g1d,
+        percolator_prog::policy_v16::fee_share_floor(g1d + g3d, 2_000)
+            .expect("short-side redirect arithmetic"),
+        "asset-1 short-domain redirect uses the canonical floor"
     );
+    assert_eq!(total_to_mkt1, total_fee - total_to_mkt0);
     let (_, g) = env.market_state();
     assert_eq!(
         g.vault as u64,
@@ -1412,6 +1414,11 @@ fn v16_attack_permissionless_create_fee_funds_asset0_insurance() {
     const FEE: u128 = 40;
     let mut env = V16CuEnv::new();
     env.update_market_init_fee_policy_with_cu(FEE);
+    assert_eq!(
+        percolator_prog::policy_v16::permissionless_market_init_fee_for_asset(FEE, 1),
+        Some(FEE),
+        "the host policy predicts the exact deployed asset-1 activation fee"
+    );
     env.svm.warp_to_slot(1);
     let (_, before) = env.market_state();
     let stranger = Keypair::new();
