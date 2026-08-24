@@ -11,7 +11,9 @@
 //! The all-provider matrices additionally cross legal composite transforms, coherent rewind,
 //! exact freshness boundaries, a real adverse-price liquidation with a subsequent owner trade
 //! exit, composite shutdown/forced-exit/restart with old-provenance rejection and fresh trading,
-//! and every single provider through DrainOnly, Recovery, and Resolved value-bearing routes.
+//! every single provider through DrainOnly, Recovery, and Resolved value-bearing routes, and six
+//! multi-provider formulas through those lifecycles with denominator, expiry, and malformed-tail
+//! controls.
 //! An independent typed parser model covers 726 boundary words, 15,552 structural/semantic
 //! combinations, and 12,288 seeded valid layouts. An independent overflow-free confidence oracle
 //! compares all 65,536 basis-point settings across wide carry and overflow operands.
@@ -19,8 +21,8 @@
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter. The bounded reference does
-//! not mathematically exhaust every provider byte string, every multi-provider/lifecycle product,
-//! or the solver-bound relational wide-product theorem.
+//! not mathematically exhaust every provider byte string, every provider-order/transform/lifecycle
+//! product, or the solver-bound relational wide-product theorem.
 
 use super::*;
 use rand::{Rng, SeedableRng};
@@ -5231,4 +5233,429 @@ fn v16_program_each_provider_composes_through_every_value_bearing_lifecycle() {
         CRANK_CU_LIMIT,
     );
     println!("single-provider lifecycle Cartesian: {worlds} worlds, oracle max {max_oracle_cu} CU");
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CompositeLifecycleCase {
+    providers: [EpochMatrixProvider; 3],
+    count: u8,
+    flags: u8,
+    initial_prices_e6: [u64; 3],
+    updated_prices_e6: [u64; 3],
+}
+
+fn composite_lifecycle_cases() -> [CompositeLifecycleCase; 6] {
+    [
+        CompositeLifecycleCase {
+            providers: [
+                EpochMatrixProvider::Pyth,
+                EpochMatrixProvider::Switchboard,
+                EpochMatrixProvider::Pyth,
+            ],
+            count: 2,
+            flags: 0,
+            initial_prices_e6: [500_000, 2_000_000, 0],
+            updated_prices_e6: [505_000, 2_000_000, 0],
+        },
+        CompositeLifecycleCase {
+            providers: [
+                EpochMatrixProvider::Chainlink,
+                EpochMatrixProvider::Pyth,
+                EpochMatrixProvider::Pyth,
+            ],
+            count: 2,
+            flags: ORACLE_LEG_FLAG_DIVIDE_LEG2,
+            initial_prices_e6: [2_000_000, 2_000_000, 0],
+            updated_prices_e6: [2_020_000, 2_000_000, 0],
+        },
+        CompositeLifecycleCase {
+            providers: [
+                EpochMatrixProvider::Pyth,
+                EpochMatrixProvider::Switchboard,
+                EpochMatrixProvider::Chainlink,
+            ],
+            count: 3,
+            flags: 0,
+            initial_prices_e6: [250_000, 2_000_000, 2_000_000],
+            updated_prices_e6: [252_500, 2_000_000, 2_000_000],
+        },
+        CompositeLifecycleCase {
+            providers: [
+                EpochMatrixProvider::Switchboard,
+                EpochMatrixProvider::Chainlink,
+                EpochMatrixProvider::Pyth,
+            ],
+            count: 3,
+            flags: ORACLE_LEG_FLAG_DIVIDE_LEG2,
+            initial_prices_e6: [1_000_000, 2_000_000, 2_000_000],
+            updated_prices_e6: [1_010_000, 2_000_000, 2_000_000],
+        },
+        CompositeLifecycleCase {
+            providers: [
+                EpochMatrixProvider::Chainlink,
+                EpochMatrixProvider::Pyth,
+                EpochMatrixProvider::Switchboard,
+            ],
+            count: 3,
+            flags: ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            initial_prices_e6: [1_000_000, 2_000_000, 2_000_000],
+            updated_prices_e6: [1_010_000, 2_000_000, 2_000_000],
+        },
+        CompositeLifecycleCase {
+            providers: [
+                EpochMatrixProvider::Pyth,
+                EpochMatrixProvider::Chainlink,
+                EpochMatrixProvider::Switchboard,
+            ],
+            count: 3,
+            flags: ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            initial_prices_e6: [4_000_000, 2_000_000, 2_000_000],
+            updated_prices_e6: [4_040_000, 2_000_000, 2_000_000],
+        },
+    ]
+}
+
+#[test]
+fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundaries() {
+    const INITIAL_TARGET_E6: u64 = 1_000_000;
+    const UPDATED_TARGET_E6: u64 = 1_010_000;
+    const SCENARIOS: [ProviderLifecycleScenario; 3] = [
+        ProviderLifecycleScenario::DrainOnly,
+        ProviderLifecycleScenario::Recovery,
+        ProviderLifecycleScenario::Resolved,
+    ];
+
+    let cases = composite_lifecycle_cases();
+    let mut worlds = 0usize;
+    let mut malformed_rejections = 0usize;
+    let mut stale_rejections = 0usize;
+    let mut max_oracle_cu = 0u64;
+    for (case_index, case) in cases.into_iter().enumerate() {
+        for (scenario_index, scenario) in SCENARIOS.into_iter().enumerate() {
+            let world = case_index * SCENARIOS.len() + scenario_index;
+            let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+                initial_price: INITIAL_TARGET_E6,
+                ..V16CuMarketParams::default()
+            });
+            env.configure_permissionless_resolve_with_cu(100, 5);
+            set_test_clock(&mut env, 10, 100);
+            let legs: Vec<EpochMatrixLeg> = (0..case.count as usize)
+                .map(|leg_index| {
+                    new_epoch_matrix_leg(
+                        &mut env,
+                        case.providers[leg_index],
+                        50_000 + world,
+                        leg_index,
+                        case.initial_prices_e6[leg_index],
+                        40,
+                        10,
+                    )
+                })
+                .collect();
+            let mut feeds = [[0u8; 32]; 3];
+            for (index, leg) in legs.iter().enumerate() {
+                feeds[index] = leg.feed;
+            }
+            let oracle_accounts: Vec<Pubkey> = legs.iter().map(|leg| leg.account).collect();
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                case.count,
+                case.flags,
+                feeds,
+                &oracle_accounts,
+                10,
+                100,
+                0,
+                0,
+                3,
+                100,
+            )
+            .unwrap_or_else(|error| {
+                panic!("composite lifecycle world {world} failed configuration: {error}")
+            });
+            assert_eq!(
+                env.market_state().0.oracle_target_price_e6,
+                INITIAL_TARGET_E6
+            );
+
+            let long_owner = Keypair::new();
+            let short_owner = Keypair::new();
+            let keeper_owner = Keypair::new();
+            let long = env.create_portfolio(&long_owner);
+            let short = env.create_portfolio(&short_owner);
+            let keeper = env.create_portfolio(&keeper_owner);
+            env.deposit(&long_owner, long, 2_000_000);
+            env.deposit(&short_owner, short, 2_000_000);
+            env.trade_asset_with_cu(
+                0,
+                &long_owner,
+                long,
+                &short_owner,
+                short,
+                POS_SCALE as i128,
+                INITIAL_TARGET_E6,
+                0,
+            );
+            let vault_before = env.token_amount(env.vault);
+
+            set_test_clock(&mut env, 11, 160);
+            for (leg_index, leg) in legs.iter().enumerate() {
+                write_epoch_matrix_leg(&mut env, *leg, case.updated_prices_e6[leg_index], 100, 11);
+            }
+            let malformed_index = world % legs.len();
+            let valid_provider = env
+                .svm
+                .get_account(&legs[malformed_index].account)
+                .expect("composite provider account exists");
+            let mut malformed_provider = valid_provider.clone();
+            malformed_provider.data[0] ^= u8::MAX;
+            env.svm
+                .set_account(legs[malformed_index].account, malformed_provider)
+                .unwrap();
+            let market_before_malformed = env.svm.get_account(&env.market).unwrap();
+            let long_before_malformed = env.svm.get_account(&long).unwrap();
+            let short_before_malformed = env.svm.get_account(&short).unwrap();
+            let keeper_before_malformed = env.svm.get_account(&keeper).unwrap();
+            let vault_before_malformed = env.svm.get_account(&env.vault).unwrap();
+            let malformed = try_epoch_matrix_crank(&mut env, keeper, 11, &oracle_accounts)
+                .expect_err("a malformed selected composite provider must reject");
+            assert!(
+                malformed.contains("Custom(26)"),
+                "composite lifecycle world {world} returned the wrong malformed-provider error: {malformed}"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before_malformed
+            );
+            assert_eq!(env.svm.get_account(&long).unwrap(), long_before_malformed);
+            assert_eq!(env.svm.get_account(&short).unwrap(), short_before_malformed);
+            assert_eq!(
+                env.svm.get_account(&keeper).unwrap(),
+                keeper_before_malformed
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before_malformed
+            );
+            env.svm
+                .set_account(legs[malformed_index].account, valid_provider)
+                .unwrap();
+            malformed_rejections += 1;
+
+            let exact_expiry_cu = try_epoch_matrix_crank(&mut env, keeper, 11, &oracle_accounts)
+                .unwrap_or_else(|error| {
+                    panic!("composite lifecycle world {world} rejected exact freshness: {error}")
+                });
+            max_oracle_cu = max_oracle_cu.max(exact_expiry_cu);
+            let exact_profile = env.market_state().0;
+            assert_eq!(exact_profile.oracle_target_price_e6, UPDATED_TARGET_E6);
+            assert_eq!(exact_profile.oracle_target_publish_time, 100);
+
+            set_test_clock(&mut env, 12, 161);
+            let market_before_stale = env.svm.get_account(&env.market).unwrap();
+            let keeper_before_stale = env.svm.get_account(&keeper).unwrap();
+            let stale = try_epoch_matrix_crank(&mut env, keeper, 12, &oracle_accounts)
+                .expect_err("a composite report one second beyond freshness must reject");
+            assert!(
+                stale.contains("Custom(27)"),
+                "composite lifecycle world {world} returned the wrong stale error: {stale}"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before_stale
+            );
+            assert_eq!(env.svm.get_account(&keeper).unwrap(), keeper_before_stale);
+            stale_rejections += 1;
+
+            for (leg_index, leg) in legs.iter().enumerate() {
+                write_epoch_matrix_leg(&mut env, *leg, case.updated_prices_e6[leg_index], 101, 12);
+            }
+            let refreshed_cu = try_epoch_matrix_crank(&mut env, keeper, 12, &oracle_accounts)
+                .unwrap_or_else(|error| {
+                    panic!("composite lifecycle world {world} failed fresh retry: {error}")
+                });
+            max_oracle_cu = max_oracle_cu.max(refreshed_cu);
+            let refreshed_profile = env.market_state().0;
+            assert_eq!(refreshed_profile.oracle_target_price_e6, UPDATED_TARGET_E6);
+            assert_eq!(refreshed_profile.oracle_target_publish_time, 101);
+
+            match scenario {
+                ProviderLifecycleScenario::DrainOnly => {
+                    set_test_clock(&mut env, 13, 162);
+                    env.update_asset_lifecycle_as_admin_with_cu(
+                        processor::ASSET_ACTION_DRAIN_ONLY,
+                        0,
+                        0,
+                        0,
+                    );
+                    for (leg_index, leg) in legs.iter().enumerate() {
+                        write_epoch_matrix_leg(
+                            &mut env,
+                            *leg,
+                            case.updated_prices_e6[leg_index],
+                            102,
+                            13,
+                        );
+                    }
+                    let drain_cu = try_epoch_matrix_crank(&mut env, keeper, 13, &oracle_accounts)
+                        .unwrap_or_else(|error| {
+                            panic!("composite lifecycle world {world} failed DrainOnly accrual: {error}")
+                        });
+                    max_oracle_cu = max_oracle_cu.max(drain_cu);
+                    let exit_price = env.market_state().1.assets[0].effective_price;
+                    env.trade_asset_with_cu(
+                        0,
+                        &long_owner,
+                        long,
+                        &short_owner,
+                        short,
+                        -(POS_SCALE as i128),
+                        exit_price,
+                        0,
+                    );
+                    let mut withdrawn = 0u128;
+                    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+                        let capital = env.portfolio_state(portfolio).capital.get();
+                        withdrawn += capital;
+                        env.withdraw(owner, portfolio, capital);
+                    }
+                    let remaining_vault = env.token_amount(env.vault);
+                    let (_, group) = env.market_state();
+                    assert_eq!(
+                        withdrawn + u128::from(remaining_vault),
+                        u128::from(vault_before)
+                    );
+                    assert_eq!(group.vault as u64, remaining_vault);
+                    assert_eq!(group.c_tot, 0);
+                }
+                ProviderLifecycleScenario::Recovery => {
+                    set_test_clock(&mut env, 13, 162);
+                    env.update_asset_lifecycle_as_admin_with_cu(
+                        processor::ASSET_ACTION_SHUTDOWN,
+                        0,
+                        13,
+                        0,
+                    );
+                    let recovery_before = env.svm.get_account(&env.market).unwrap();
+                    let keeper_before = env.svm.get_account(&keeper).unwrap();
+                    let error = try_epoch_matrix_crank(&mut env, keeper, 13, &oracle_accounts)
+                        .expect_err("Recovery must not consume a retired composite profile");
+                    assert!(
+                        error.contains("Custom(21)")
+                            || error.contains("Custom(22)")
+                            || error.contains("Custom(19)"),
+                        "composite lifecycle world {world} returned unexpected Recovery tail error: {error}"
+                    );
+                    assert_eq!(env.svm.get_account(&env.market).unwrap(), recovery_before);
+                    assert_eq!(env.svm.get_account(&keeper).unwrap(), keeper_before);
+
+                    set_test_clock(&mut env, 18, 167);
+                    for _ in 0..8 {
+                        if !has_active_leg_for_asset(&env.portfolio_state(long), 0)
+                            && !has_active_leg_for_asset(&env.portfolio_state(short), 0)
+                        {
+                            break;
+                        }
+                        for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+                            if has_active_leg_for_asset(&env.portfolio_state(portfolio), 0) {
+                                env.forfeit_recovery_leg_with_cu(
+                                    owner,
+                                    portfolio,
+                                    0,
+                                    percolator::MAX_VAULT_TVL,
+                                );
+                            }
+                        }
+                    }
+                    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+                    assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
+                    let old_generation = env.asset_market_id(0);
+                    let admin = Keypair::from_bytes(&env.admin.to_bytes()).expect("clone admin");
+                    set_test_clock(&mut env, 19, 168);
+                    env.try_restart_asset_oracle_with_authority(&admin, 0, 19, INITIAL_TARGET_E6)
+                        .unwrap_or_else(|error| {
+                            panic!("composite lifecycle world {world} failed restart: {error}")
+                        });
+                    assert_ne!(env.asset_market_id(0), old_generation);
+                    env.trade_asset_with_cu(
+                        0,
+                        &long_owner,
+                        long,
+                        &short_owner,
+                        short,
+                        POS_SCALE as i128,
+                        INITIAL_TARGET_E6,
+                        0,
+                    );
+                    env.trade_asset_with_cu(
+                        0,
+                        &long_owner,
+                        long,
+                        &short_owner,
+                        short,
+                        -(POS_SCALE as i128),
+                        INITIAL_TARGET_E6,
+                        0,
+                    );
+                    let mut withdrawn = 0u128;
+                    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+                        let capital = env.portfolio_state(portfolio).capital.get();
+                        withdrawn += capital;
+                        env.withdraw(owner, portfolio, capital);
+                    }
+                    let remaining_vault = env.token_amount(env.vault);
+                    let (_, group) = env.market_state();
+                    assert_eq!(
+                        withdrawn + u128::from(remaining_vault),
+                        u128::from(vault_before)
+                    );
+                    assert_eq!(group.vault as u64, remaining_vault);
+                    assert_eq!(group.c_tot, 0);
+                }
+                ProviderLifecycleScenario::Resolved => {
+                    env.resolve();
+                    let (resolved_cfg, resolved_group) = env.market_state();
+                    let permissionless_slot = resolved_group
+                        .resolved_slot
+                        .checked_add(resolved_cfg.force_close_delay_slots)
+                        .expect("composite lifecycle permissionless slot overflow");
+                    set_test_clock(
+                        &mut env,
+                        permissionless_slot,
+                        161 + resolved_cfg.force_close_delay_slots as i64,
+                    );
+                    let payouts = drain_resolved_cohort(
+                        &mut env,
+                        &[
+                            (&long_owner, long),
+                            (&short_owner, short),
+                            (&keeper_owner, keeper),
+                        ],
+                        "composite lifecycle resolved payout",
+                    );
+                    let remaining_vault = env.token_amount(env.vault);
+                    let (_, group) = env.market_state();
+                    assert_eq!(
+                        payouts.iter().sum::<u128>() + u128::from(remaining_vault),
+                        u128::from(vault_before)
+                    );
+                    assert_eq!(group.vault as u64, remaining_vault);
+                    assert_eq!(group.c_tot, 0);
+                }
+            }
+            worlds += 1;
+        }
+    }
+
+    assert_eq!(worlds, composite_lifecycle_cases().len() * SCENARIOS.len());
+    assert_eq!(malformed_rejections, worlds);
+    assert_eq!(stale_rejections, worlds);
+    assert_cu_within(
+        "composite provider-role lifecycle oracle ingestion",
+        max_oracle_cu,
+        CRANK_CU_LIMIT,
+    );
+    println!(
+        "composite provider-role lifecycle matrix: {worlds} worlds, oracle max {max_oracle_cu} CU"
+    );
 }
