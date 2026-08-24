@@ -4,11 +4,12 @@
 //! deployed wrapper must agree on adversarial boundary partitions.
 //!
 //! Evidence in this file (executable arithmetic differential): deployed policy
-//! and oracle movement helpers are compared against small independent widened
-//! integer oracles over zero, one, max-minus-one, max, overflow-to-None, and
-//! saturation cases. This does not close the full wide-arithmetic proof gap, but
-//! it gives INV-085 an invariant-owned executable corpus instead of relying only
-//! on route tests that happen to touch arithmetic.
+//! and oracle movement helpers are compared against independent widened integer
+//! oracles over fixed boundaries and 16,384 deterministic full-width words. A
+//! separate 512-word corpus compares the dynamic-fee fixed-point search against
+//! an exhaustive fee scan. This does not close the full wide-arithmetic proof
+//! gap, but it gives INV-085 an invariant-owned corpus instead of relying only
+//! on routes that happen to touch arithmetic.
 
 use super::*;
 
@@ -190,6 +191,58 @@ fn inv_085_dynamic_fee_bps_bruteforce_oracle(
     None
 }
 
+fn inv_085_splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut value = *state;
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn inv_085_next_u128(state: &mut u64) -> u128 {
+    (u128::from(inv_085_splitmix64(state)) << 64) | u128::from(inv_085_splitmix64(state))
+}
+
+fn inv_085_boundary_u64(state: &mut u64, index: usize) -> u64 {
+    const BOUNDARIES: [u64; 10] = [
+        0,
+        1,
+        2,
+        9_999,
+        10_000,
+        1_000_000,
+        u32::MAX as u64,
+        u64::MAX / 2,
+        u64::MAX - 1,
+        u64::MAX,
+    ];
+    if index % 3 == 0 {
+        BOUNDARIES[(index / 3) % BOUNDARIES.len()]
+    } else {
+        inv_085_splitmix64(state)
+    }
+}
+
+fn inv_085_boundary_u128(state: &mut u64, index: usize) -> u128 {
+    const BOUNDARIES: [u128; 10] = [
+        0,
+        1,
+        2,
+        9_999,
+        10_000,
+        u64::MAX as u128,
+        u64::MAX as u128 + 1,
+        u128::MAX / 2,
+        u128::MAX - 1,
+        u128::MAX,
+    ];
+    if index % 3 == 0 {
+        BOUNDARIES[(index / 3) % BOUNDARIES.len()]
+    } else {
+        inv_085_next_u128(state)
+    }
+}
+
 #[test]
 fn v16_program_price_move_bps_matches_widened_oracle_on_boundaries() {
     let cases = [
@@ -336,6 +389,133 @@ fn v16_program_dynamic_externality_fee_matches_bruteforce_oracle_on_boundaries()
                 min_externality_bps,
             ),
             "dynamic_fee_bps_with_externality_floor({base_fee_bps}, {old_mark_e6}, {clamped_exec_e6}, {halflife_slots}, {last_mark_slot}, {now_slot}, {trade_notional}, {mark_externality_notional}, {mark_min_fee}, {min_externality_bps}) diverged"
+        );
+    }
+}
+
+#[test]
+fn v16_program_policy_arithmetic_matches_independent_full_width_corpus() {
+    const CASES: usize = 16_384;
+    let mut state = 0x8500_5eed_cafe_f00d;
+
+    for index in 0..CASES {
+        let old = inv_085_boundary_u64(&mut state, index);
+        let new = inv_085_boundary_u64(&mut state, index + 1);
+        let cap = inv_085_boundary_u64(&mut state, index + 2);
+        let dt = inv_085_boundary_u64(&mut state, index + 3);
+        assert_eq!(
+            percolator_prog::policy_v16::price_move_bps_ceil(old, new),
+            inv_085_price_move_bps_ceil_oracle(old, new),
+            "price movement diverged at corpus word {index}"
+        );
+        assert_eq!(
+            oracle_v16::clamp_toward_engine_dt(old, new, cap, dt),
+            inv_085_clamp_toward_oracle(old, new, cap, dt),
+            "dt clamp diverged at corpus word {index}"
+        );
+        assert_eq!(
+            percolator_prog::policy_v16::premium_funding_rate_e9(old, new, cap),
+            inv_085_premium_funding_rate_oracle(old, new, cap),
+            "premium funding diverged at corpus word {index}"
+        );
+
+        let halflife = inv_085_boundary_u64(&mut state, index + 4);
+        let last_slot = inv_085_boundary_u64(&mut state, index + 5);
+        let now_slot = inv_085_boundary_u64(&mut state, index + 6);
+        let fee_paid = inv_085_boundary_u64(&mut state, index + 7);
+        let mark_min_fee = inv_085_boundary_u64(&mut state, index + 8);
+        assert_eq!(
+            percolator_prog::policy_v16::ewma_update(
+                old,
+                new,
+                halflife,
+                last_slot,
+                now_slot,
+                fee_paid,
+                mark_min_fee,
+            ),
+            inv_085_ewma_update_oracle(
+                old,
+                new,
+                halflife,
+                last_slot,
+                now_slot,
+                fee_paid,
+                mark_min_fee,
+            ),
+            "EWMA diverged at corpus word {index}"
+        );
+
+        let base_fee = inv_085_boundary_u128(&mut state, index + 9);
+        let externality_notional = inv_085_boundary_u128(&mut state, index + 10);
+        let fee_a = inv_085_boundary_u128(&mut state, index + 11);
+        let fee_b = inv_085_boundary_u128(&mut state, index + 12);
+        assert_eq!(
+            percolator_prog::policy_v16::collected_fee_supported_mark(
+                old,
+                new,
+                base_fee,
+                externality_notional,
+                fee_a,
+                fee_b,
+            ),
+            inv_085_collected_fee_supported_mark_oracle(
+                old,
+                new,
+                base_fee,
+                externality_notional,
+                fee_a,
+                fee_b,
+            ),
+            "fee-supported mark diverged at corpus word {index}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_dynamic_externality_fee_matches_exhaustive_search_on_generated_inputs() {
+    const CASES: usize = 512;
+    let mut state = 0x8500_d1ff_e2e0_0001;
+
+    for index in 0..CASES {
+        let base_fee_bps = inv_085_splitmix64(&mut state) % 10_001;
+        let old_mark_e6 = inv_085_splitmix64(&mut state) % 1_000_001;
+        let clamped_exec_e6 = inv_085_splitmix64(&mut state) % 1_000_001;
+        let halflife_slots = inv_085_splitmix64(&mut state) % 1_001;
+        let last_mark_slot = inv_085_splitmix64(&mut state) % 1_001;
+        let now_slot = inv_085_splitmix64(&mut state) % 1_001;
+        let trade_notional = u128::from(inv_085_splitmix64(&mut state) % 1_000_001);
+        let mark_externality_notional = u128::from(inv_085_splitmix64(&mut state) % 10_000_001);
+        let mark_min_fee = inv_085_splitmix64(&mut state) % 10_001;
+        let min_externality_bps = inv_085_splitmix64(&mut state) % 10_001;
+
+        let deployed = percolator_prog::policy_v16::dynamic_fee_bps_with_externality_floor(
+            base_fee_bps,
+            old_mark_e6,
+            clamped_exec_e6,
+            halflife_slots,
+            last_mark_slot,
+            now_slot,
+            trade_notional,
+            mark_externality_notional,
+            mark_min_fee,
+            min_externality_bps,
+        );
+        let reference = inv_085_dynamic_fee_bps_bruteforce_oracle(
+            base_fee_bps,
+            old_mark_e6,
+            clamped_exec_e6,
+            halflife_slots,
+            last_mark_slot,
+            now_slot,
+            trade_notional,
+            mark_externality_notional,
+            mark_min_fee,
+            min_externality_bps,
+        );
+        assert_eq!(
+            deployed, reference,
+            "dynamic fee search diverged at generated word {index}"
         );
     }
 }

@@ -4132,6 +4132,35 @@ fn composite_epoch_matrix_cases() -> Vec<EpochMatrixCase> {
     cases
 }
 
+fn reference_composite_price_e6(prices_e6: &[u64], flags: u8, invert: u8, unit_scale: u32) -> u64 {
+    let mut numerator = u128::from(prices_e6[0]);
+    let mut denominator = 1u128;
+    for (leg_index, price) in prices_e6.iter().copied().enumerate().skip(1) {
+        let divides = match leg_index {
+            1 => flags & ORACLE_LEG_FLAG_DIVIDE_LEG2 != 0,
+            2 => flags & ORACLE_LEG_FLAG_DIVIDE_LEG3 != 0,
+            _ => unreachable!("the deployed composite cap is three legs"),
+        };
+        if divides {
+            numerator = numerator.checked_mul(1_000_000).unwrap();
+            denominator = denominator.checked_mul(u128::from(price)).unwrap();
+        } else {
+            numerator = numerator.checked_mul(u128::from(price)).unwrap();
+            denominator = denominator.checked_mul(1_000_000).unwrap();
+        }
+    }
+    if invert != 0 {
+        let uninverted_numerator = numerator;
+        numerator = denominator.checked_mul(1_000_000_000_000).unwrap();
+        denominator = uninverted_numerator;
+    }
+    let mut result = numerator / denominator;
+    if unit_scale > 1 {
+        result /= u128::from(unit_scale);
+    }
+    u64::try_from(result).unwrap()
+}
+
 fn try_epoch_matrix_crank(
     env: &mut V16CuEnv,
     keeper_portfolio: Pubkey,
@@ -4215,9 +4244,19 @@ fn v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms() 
             .unwrap_or_else(|error| panic!("matrix config {case_index} {case:?}: {error}"));
         max_config_cu = max_config_cu.max(config_cu);
         let baseline = env.market_state().0;
+        let expected_price = reference_composite_price_e6(
+            &PRICES_E6[..case.count as usize],
+            case.flags,
+            case.invert,
+            case.unit_scale,
+        );
         assert!(
             baseline.oracle_target_price_e6 > 0,
             "case {case_index} {case:?}"
+        );
+        assert_eq!(
+            baseline.oracle_target_price_e6, expected_price,
+            "case {case_index} {case:?} landed the wrong composed E6 price"
         );
         assert_eq!(baseline.oracle_target_publish_time, initial_time);
         assert_eq!(baseline.oracle_leg_count, case.count);
