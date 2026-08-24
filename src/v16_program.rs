@@ -4481,6 +4481,27 @@ pub mod oracle_v16 {
         age >= 0 && age as u64 <= max_staleness_secs
     }
 
+    fn mul_u128_by_u16_wide(value: u128, multiplier: u16) -> (u128, u128) {
+        // Compare confidence products exactly without overflowing the deployed u128 domain.
+        let mask = u64::MAX as u128;
+        let multiplier = multiplier as u128;
+        let low_product = (value & mask) * multiplier;
+        let high_product = (value >> 64) * multiplier;
+        let shifted_high = (high_product & mask) << 64;
+        let (low, carry) = low_product.overflowing_add(shifted_high);
+        let high = (high_product >> 64) + carry as u128;
+        (high, low)
+    }
+
+    pub fn oracle_confidence_is_too_wide(uncertainty: u128, value: u128, conf_bps: u16) -> bool {
+        if conf_bps == 0 {
+            return false;
+        }
+        let lhs = mul_u128_by_u16_wide(uncertainty, 10_000);
+        let rhs = mul_u128_by_u16_wide(value, conf_bps);
+        lhs.0 > rhs.0 || (lhs.0 == rhs.0 && lhs.1 > rhs.1)
+    }
+
     fn read_pyth_price_e6_from_bytes(
         data: &[u8],
         expected_feed_id: &[u8; 32],
@@ -4511,7 +4532,7 @@ pub mod oracle_v16 {
             return Err(PercolatorError::OracleStale.into());
         }
         let price_u = msg.price as u128;
-        if conf_bps != 0 && (msg.conf as u128).saturating_mul(10_000) > price_u * conf_bps as u128 {
+        if oracle_confidence_is_too_wide(msg.conf as u128, price_u, conf_bps) {
             return Err(PercolatorError::OracleConfTooWide.into());
         }
         let scale = msg.exponent + 6;
@@ -4638,7 +4659,7 @@ pub mod oracle_v16 {
             return Err(PercolatorError::OracleStale.into());
         }
         let value_u = value as u128;
-        if conf_bps != 0 && (std_dev as u128).saturating_mul(10_000) > value_u * conf_bps as u128 {
+        if oracle_confidence_is_too_wide(std_dev as u128, value_u, conf_bps) {
             return Err(PercolatorError::OracleConfTooWide.into());
         }
         let out = value_u / SWITCHBOARD_RESULT_SCALE;

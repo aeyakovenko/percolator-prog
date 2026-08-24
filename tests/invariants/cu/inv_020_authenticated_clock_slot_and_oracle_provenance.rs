@@ -11,11 +11,14 @@
 //! The all-provider matrices additionally cross legal composite transforms, coherent rewind,
 //! exact freshness boundaries, a real adverse-price liquidation with a subsequent owner trade
 //! exit, and composite shutdown/forced-exit/restart with old-provenance rejection and fresh trading.
+//! An independent typed parser model covers 726 valid-layout boundary words, while an independent
+//! overflow-free confidence oracle compares all 65,536 basis-point settings across wide carry and
+//! overflow operands.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter. These public fixtures do
-//! not prove byte-parser equivalence or the full provider-by-lifecycle Cartesian product.
+//! plus every additional verification method required by the charter. The bounded reference does
+//! not exhaust every valid provider byte layout or the full provider-by-lifecycle Cartesian product.
 
 use super::*;
 
@@ -1055,6 +1058,32 @@ fn v16_program_switchboard_wide_std_dev_rejected_without_mutation() {
         env.svm.get_account(&env.market).unwrap().data,
         before,
         "rejected wide-std-dev Switchboard config must not mutate the market"
+    );
+
+    let extreme = env.set_switchboard_price(i128::MAX, i128::MAX, 1_000);
+    let before_extreme = env.svm.get_account(&env.market).unwrap().data;
+    let extreme_rejected = env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [extreme.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[extreme],
+        10,
+        1_000,
+        0,
+        0,
+        3,
+        100,
+    );
+    let err = extreme_rejected.expect_err("full-width confidence products must reject cleanly");
+    assert!(
+        err.contains("Custom(28)"),
+        "full-width Switchboard confidence must reject as OracleConfTooWide, got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_extreme,
+        "full-width confidence rejection must roll back the market"
     );
 
     let tight = env.set_switchboard_price(value, 1, 1_000);
@@ -2931,6 +2960,631 @@ fn host_oracle_accountinfo_delegation_matches_pure_parser_on_single_byte_corpus(
     }
     assert_eq!(compared_words, 2 * (134 + 3_208 + 248) + fixtures.len());
     println!("oracle AccountInfo/pure parser equivalence: {compared_words} words");
+}
+
+type OracleParseResult = Result<(u64, i64), solana_program::program_error::ProgramError>;
+const REFERENCE_SWITCHBOARD_SCALE: u128 = 1_000_000_000_000;
+
+fn reference_publish_time_is_fresh(
+    publish_time: i64,
+    now_unix_ts: i64,
+    max_staleness_secs: u64,
+) -> bool {
+    let age = i128::from(now_unix_ts) - i128::from(publish_time);
+    age >= 0 && age as u128 <= u128::from(max_staleness_secs)
+}
+
+fn reference_confidence_is_too_wide(uncertainty: u128, value: u128, conf_bps: u16) -> bool {
+    if conf_bps == 0 {
+        return false;
+    }
+    // uncertainty * 10_000 > value * conf_bps, evaluated without a wide product.
+    let conf_bps = u128::from(conf_bps);
+    let quotient = value / 10_000;
+    let remainder = value % 10_000;
+    let Some(base) = quotient.checked_mul(conf_bps) else {
+        return false;
+    };
+    let tail = remainder * conf_bps / 10_000;
+    let Some(floor_threshold) = base.checked_add(tail) else {
+        return false;
+    };
+    uncertainty > floor_threshold
+}
+
+#[test]
+fn host_oracle_confidence_comparison_exhausts_bps_for_wide_boundary_pairs() {
+    let middle = 1u128 << 64;
+    let scale = REFERENCE_SWITCHBOARD_SCALE;
+    let cases = [
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
+        (9_999, 10_000),
+        (10_000, 9_999),
+        (middle - 1, middle - 1),
+        (middle - 1, middle),
+        (middle, middle - 1),
+        (middle, middle),
+        (middle + 1, middle),
+        (middle, middle + 1),
+        (scale - 1, scale),
+        (scale, scale - 1),
+        (u128::from(percolator::MAX_ORACLE_PRICE) * scale, scale),
+        (scale, u128::from(percolator::MAX_ORACLE_PRICE) * scale),
+        (u128::MAX - 1, u128::MAX),
+        (u128::MAX, u128::MAX - 1),
+        (u128::MAX, 1),
+        (1, u128::MAX),
+    ];
+    let mut compared = 0usize;
+    for conf_bps in 0..=u16::MAX {
+        for (uncertainty, value) in cases {
+            assert_eq!(
+                oracle_v16::oracle_confidence_is_too_wide(uncertainty, value, conf_bps),
+                reference_confidence_is_too_wide(uncertainty, value, conf_bps),
+                "confidence mismatch for uncertainty={uncertainty}, value={value}, bps={conf_bps}"
+            );
+            compared += 1;
+        }
+    }
+    assert_eq!(compared, 20 * (usize::from(u16::MAX) + 1));
+}
+
+fn reference_scale_decimal_to_e6(mantissa: i128, scale: u32) -> OracleParseResult {
+    if mantissa <= 0 || scale > 18 {
+        return Err(PercolatorError::OracleInvalid.into());
+    }
+    let mantissa = mantissa as u128;
+    let out = if scale >= 6 {
+        mantissa / 10u128.pow(scale - 6)
+    } else {
+        mantissa
+            .checked_mul(10u128.pow(6 - scale))
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?
+    };
+    if out == 0 || out > u128::from(percolator::MAX_ORACLE_PRICE) {
+        return Err(PercolatorError::OracleInvalid.into());
+    }
+    Ok((out as u64, 0))
+}
+
+#[derive(Clone, Copy)]
+struct ReferencePythObservation {
+    feed_id: [u8; 32],
+    price: i64,
+    exponent: i32,
+    confidence: u64,
+    publish_time: i64,
+}
+
+fn reference_pyth_observation(
+    observation: ReferencePythObservation,
+    expected_feed_id: [u8; 32],
+    now_unix_ts: i64,
+    max_staleness_secs: u64,
+    conf_bps: u16,
+) -> OracleParseResult {
+    if observation.feed_id != expected_feed_id {
+        return Err(PercolatorError::InvalidOracleKey.into());
+    }
+    if observation.price <= 0 || !(-18..=18).contains(&observation.exponent) {
+        return Err(PercolatorError::OracleInvalid.into());
+    }
+    if !reference_publish_time_is_fresh(observation.publish_time, now_unix_ts, max_staleness_secs) {
+        return Err(PercolatorError::OracleStale.into());
+    }
+    let price = observation.price as u128;
+    if reference_confidence_is_too_wide(u128::from(observation.confidence), price, conf_bps) {
+        return Err(PercolatorError::OracleConfTooWide.into());
+    }
+    let scale = observation.exponent + 6;
+    let out = if scale >= 0 {
+        price
+            .checked_mul(10u128.pow(scale as u32))
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?
+    } else {
+        price / 10u128.pow((-scale) as u32)
+    };
+    if out == 0 || out > u128::from(percolator::MAX_ORACLE_PRICE) {
+        return Err(PercolatorError::OracleInvalid.into());
+    }
+    Ok((out as u64, observation.publish_time))
+}
+
+#[derive(Clone, Copy)]
+struct ReferenceSwitchboardObservation {
+    feed_hash: [u8; 32],
+    value: i128,
+    std_dev: i128,
+    account_update_time: i64,
+    publish_time: i64,
+    num_samples: u8,
+    min_sample_size: u8,
+    submission_idx: u8,
+    result_slot: u64,
+}
+
+fn make_reference_switchboard_data(observation: ReferenceSwitchboardObservation) -> Vec<u8> {
+    let mut data = make_switchboard_data(
+        &observation.feed_hash,
+        observation.value,
+        observation.std_dev,
+        observation.publish_time,
+        observation.num_samples,
+        observation.min_sample_size,
+        observation.result_slot,
+    );
+    data[2216..2224].copy_from_slice(&observation.account_update_time.to_le_bytes());
+    data[2361] = observation.submission_idx;
+    if usize::from(observation.submission_idx) < 32 {
+        let offset = 2952 + usize::from(observation.submission_idx) * 8;
+        data[offset..offset + 8].copy_from_slice(&observation.publish_time.to_le_bytes());
+    }
+    data
+}
+
+fn reference_switchboard_observation(
+    observation: ReferenceSwitchboardObservation,
+    now_unix_ts: i64,
+    max_staleness_secs: u64,
+    conf_bps: u16,
+) -> OracleParseResult {
+    if observation.feed_hash == [0; 32]
+        || observation.min_sample_size == 0
+        || observation.num_samples < observation.min_sample_size
+        || observation.submission_idx >= 32
+        || observation.result_slot == 0
+        || observation.account_update_time <= 0
+        || observation.value <= 0
+        || observation.std_dev < 0
+    {
+        return Err(PercolatorError::OracleInvalid.into());
+    }
+    if observation.publish_time <= 0
+        || !reference_publish_time_is_fresh(
+            observation.publish_time,
+            now_unix_ts,
+            max_staleness_secs,
+        )
+    {
+        return Err(PercolatorError::OracleStale.into());
+    }
+    let value = observation.value as u128;
+    if reference_confidence_is_too_wide(observation.std_dev as u128, value, conf_bps) {
+        return Err(PercolatorError::OracleConfTooWide.into());
+    }
+    let out = value / REFERENCE_SWITCHBOARD_SCALE;
+    if out == 0 || out > u128::from(percolator::MAX_ORACLE_PRICE) {
+        return Err(PercolatorError::OracleInvalid.into());
+    }
+    Ok((out as u64, observation.publish_time))
+}
+
+#[derive(Clone, Copy)]
+struct ReferenceChainlinkObservation {
+    version: u8,
+    decimals: u8,
+    latest_round_id: u32,
+    live_length: u32,
+    result_slot: u64,
+    publish_time: u32,
+    answer: i128,
+}
+
+fn reference_chainlink_observation(
+    observation: ReferenceChainlinkObservation,
+    now_unix_ts: i64,
+    max_staleness_secs: u64,
+) -> OracleParseResult {
+    let publish_time = i64::from(observation.publish_time);
+    if observation.version == 0
+        || observation.latest_round_id == 0
+        || observation.live_length != 1
+        || observation.result_slot == 0
+        || publish_time <= 0
+    {
+        return Err(PercolatorError::OracleInvalid.into());
+    }
+    if !reference_publish_time_is_fresh(publish_time, now_unix_ts, max_staleness_secs) {
+        return Err(PercolatorError::OracleStale.into());
+    }
+    reference_scale_decimal_to_e6(observation.answer, u32::from(observation.decimals))
+        .map(|(price, _)| (price, publish_time))
+}
+
+fn assert_pure_oracle_parser_matches_reference(
+    label: &str,
+    owner: Pubkey,
+    account_key: Pubkey,
+    data: &[u8],
+    expected_feed_id: &[u8; 32],
+    now_unix_ts: i64,
+    max_staleness_secs: u64,
+    conf_bps: u16,
+    expected: OracleParseResult,
+) {
+    let parsed = std::panic::catch_unwind(|| {
+        oracle_v16::read_oracle_price_e6_from_bytes(
+            &owner,
+            &account_key,
+            data,
+            expected_feed_id,
+            now_unix_ts,
+            max_staleness_secs,
+            conf_bps,
+        )
+    })
+    .unwrap_or_else(|_| panic!("{label}: production parser panicked"));
+    assert_eq!(parsed, expected, "{label}");
+}
+
+#[test]
+fn host_oracle_valid_layout_boundaries_match_independent_typed_reference() {
+    const NOW: i64 = 100;
+    const MAX_STALENESS: u64 = 60;
+    const PRICE: u64 = 1_500_000;
+    let feed_id = [0x61; 32];
+    let pyth_key = Pubkey::new_unique();
+    let base_pyth = ReferencePythObservation {
+        feed_id,
+        price: PRICE as i64,
+        exponent: -6,
+        confidence: 1,
+        publish_time: NOW,
+    };
+    let mut compared = 0usize;
+
+    for price in [i64::MIN, -1, 0, 1, 999_999, 1_000_000, i64::MAX] {
+        for exponent in [-19, -18, -7, -6, -5, 0, 12, 18, 19] {
+            let observation = ReferencePythObservation {
+                price,
+                exponent,
+                ..base_pyth
+            };
+            let data = make_pyth_data(
+                &observation.feed_id,
+                observation.price,
+                observation.exponent,
+                observation.confidence,
+                observation.publish_time,
+            );
+            assert_pure_oracle_parser_matches_reference(
+                "Pyth price/exponent boundary",
+                oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+                pyth_key,
+                &data,
+                &feed_id,
+                NOW,
+                MAX_STALENESS,
+                100,
+                reference_pyth_observation(observation, feed_id, NOW, MAX_STALENESS, 100),
+            );
+            compared += 1;
+        }
+    }
+    for confidence in [0, 1, 14_999, 15_000, 15_001, u64::MAX] {
+        for conf_bps in [0, 1, 99, 100, 10_000, u16::MAX] {
+            let observation = ReferencePythObservation {
+                confidence,
+                ..base_pyth
+            };
+            let data = make_pyth_data(
+                &observation.feed_id,
+                observation.price,
+                observation.exponent,
+                observation.confidence,
+                observation.publish_time,
+            );
+            assert_pure_oracle_parser_matches_reference(
+                "Pyth confidence boundary",
+                oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+                pyth_key,
+                &data,
+                &feed_id,
+                NOW,
+                MAX_STALENESS,
+                conf_bps,
+                reference_pyth_observation(observation, feed_id, NOW, MAX_STALENESS, conf_bps),
+            );
+            compared += 1;
+        }
+    }
+    for publish_time in [i64::MIN, -1, 0, 39, 40, 100, 101, i64::MAX] {
+        for max_staleness_secs in [0, 60, 61, u64::MAX] {
+            let observation = ReferencePythObservation {
+                publish_time,
+                ..base_pyth
+            };
+            let data = make_pyth_data(
+                &observation.feed_id,
+                observation.price,
+                observation.exponent,
+                observation.confidence,
+                observation.publish_time,
+            );
+            assert_pure_oracle_parser_matches_reference(
+                "Pyth timestamp boundary",
+                oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+                pyth_key,
+                &data,
+                &feed_id,
+                NOW,
+                max_staleness_secs,
+                100,
+                reference_pyth_observation(observation, feed_id, NOW, max_staleness_secs, 100),
+            );
+            compared += 1;
+        }
+    }
+    let wrong_feed = [0x62; 32];
+    let wrong_pyth = ReferencePythObservation {
+        feed_id: wrong_feed,
+        ..base_pyth
+    };
+    assert_pure_oracle_parser_matches_reference(
+        "Pyth feed identity boundary",
+        oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+        pyth_key,
+        &make_pyth_data(
+            &wrong_pyth.feed_id,
+            wrong_pyth.price,
+            wrong_pyth.exponent,
+            wrong_pyth.confidence,
+            wrong_pyth.publish_time,
+        ),
+        &feed_id,
+        NOW,
+        MAX_STALENESS,
+        100,
+        reference_pyth_observation(wrong_pyth, feed_id, NOW, MAX_STALENESS, 100),
+    );
+    compared += 1;
+
+    let switchboard_key = Pubkey::new_unique();
+    let switchboard_feed = switchboard_key.to_bytes();
+    let base_switchboard = ReferenceSwitchboardObservation {
+        feed_hash: [0x71; 32],
+        value: i128::from(PRICE) * REFERENCE_SWITCHBOARD_SCALE as i128,
+        std_dev: 1,
+        account_update_time: NOW,
+        publish_time: NOW,
+        num_samples: 3,
+        min_sample_size: 1,
+        submission_idx: 0,
+        result_slot: 1,
+    };
+    for value in [
+        i128::MIN,
+        -1,
+        0,
+        1,
+        REFERENCE_SWITCHBOARD_SCALE as i128 - 1,
+        REFERENCE_SWITCHBOARD_SCALE as i128,
+        i128::from(percolator::MAX_ORACLE_PRICE) * REFERENCE_SWITCHBOARD_SCALE as i128,
+        (i128::from(percolator::MAX_ORACLE_PRICE) + 1) * REFERENCE_SWITCHBOARD_SCALE as i128,
+        i128::MAX,
+    ] {
+        for std_dev in [i128::MIN, -1, 0, 1, 14_999, 15_000, 15_001, i128::MAX] {
+            for conf_bps in [0, 1, 99, 100, 10_000, u16::MAX] {
+                let observation = ReferenceSwitchboardObservation {
+                    value,
+                    std_dev,
+                    ..base_switchboard
+                };
+                let data = make_reference_switchboard_data(observation);
+                assert_pure_oracle_parser_matches_reference(
+                    "Switchboard value/confidence boundary",
+                    oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+                    switchboard_key,
+                    &data,
+                    &switchboard_feed,
+                    NOW,
+                    MAX_STALENESS,
+                    conf_bps,
+                    reference_switchboard_observation(observation, NOW, MAX_STALENESS, conf_bps),
+                );
+                compared += 1;
+            }
+        }
+    }
+    for publish_time in [i64::MIN, -1, 0, 39, 40, 100, 101, i64::MAX] {
+        for max_staleness_secs in [0, 60, 61, u64::MAX] {
+            let observation = ReferenceSwitchboardObservation {
+                publish_time,
+                ..base_switchboard
+            };
+            let data = make_reference_switchboard_data(observation);
+            assert_pure_oracle_parser_matches_reference(
+                "Switchboard timestamp boundary",
+                oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+                switchboard_key,
+                &data,
+                &switchboard_feed,
+                NOW,
+                max_staleness_secs,
+                100,
+                reference_switchboard_observation(observation, NOW, max_staleness_secs, 100),
+            );
+            compared += 1;
+        }
+    }
+    for (
+        feed_hash,
+        account_update_time,
+        num_samples,
+        min_sample_size,
+        submission_idx,
+        result_slot,
+    ) in [
+        ([0; 32], NOW, 3, 1, 0, 1),
+        ([0x71; 32], 0, 3, 1, 0, 1),
+        ([0x71; 32], NOW, 3, 0, 0, 1),
+        ([0x71; 32], NOW, 0, 1, 0, 1),
+        ([0x71; 32], NOW, 3, 1, 31, 1),
+        ([0x71; 32], NOW, 3, 1, 32, 1),
+        ([0x71; 32], NOW, 3, 1, u8::MAX, 1),
+        ([0x71; 32], NOW, 3, 1, 0, 0),
+        ([0x71; 32], NOW, 3, 1, 0, u64::MAX),
+    ] {
+        let observation = ReferenceSwitchboardObservation {
+            feed_hash,
+            account_update_time,
+            num_samples,
+            min_sample_size,
+            submission_idx,
+            result_slot,
+            ..base_switchboard
+        };
+        let data = make_reference_switchboard_data(observation);
+        assert_pure_oracle_parser_matches_reference(
+            "Switchboard structural boundary",
+            oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+            switchboard_key,
+            &data,
+            &switchboard_feed,
+            NOW,
+            MAX_STALENESS,
+            100,
+            reference_switchboard_observation(observation, NOW, MAX_STALENESS, 100),
+        );
+        compared += 1;
+    }
+    let switchboard_data = make_reference_switchboard_data(base_switchboard);
+    assert_pure_oracle_parser_matches_reference(
+        "Switchboard devnet owner boundary",
+        oracle_v16::SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID,
+        switchboard_key,
+        &switchboard_data,
+        &switchboard_feed,
+        NOW,
+        MAX_STALENESS,
+        100,
+        reference_switchboard_observation(base_switchboard, NOW, MAX_STALENESS, 100),
+    );
+    compared += 1;
+
+    let chainlink_key = Pubkey::new_unique();
+    let chainlink_feed = chainlink_key.to_bytes();
+    let base_chainlink = ReferenceChainlinkObservation {
+        version: 1,
+        decimals: 6,
+        latest_round_id: 1,
+        live_length: 1,
+        result_slot: 1,
+        publish_time: NOW as u32,
+        answer: i128::from(PRICE),
+    };
+    for answer in [
+        i128::MIN,
+        -1,
+        0,
+        1,
+        999_999,
+        1_000_000,
+        i128::from(percolator::MAX_ORACLE_PRICE),
+        i128::from(percolator::MAX_ORACLE_PRICE) + 1,
+        i128::MAX,
+    ] {
+        for decimals in [0, 1, 5, 6, 7, 12, 17, 18, 19, u8::MAX] {
+            let observation = ReferenceChainlinkObservation {
+                answer,
+                decimals,
+                ..base_chainlink
+            };
+            let data = make_chainlink_data(
+                observation.version,
+                observation.decimals,
+                observation.latest_round_id,
+                observation.live_length,
+                observation.result_slot,
+                observation.publish_time,
+                observation.answer,
+            );
+            assert_pure_oracle_parser_matches_reference(
+                "Chainlink answer/decimal boundary",
+                oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                chainlink_key,
+                &data,
+                &chainlink_feed,
+                NOW,
+                MAX_STALENESS,
+                0,
+                reference_chainlink_observation(observation, NOW, MAX_STALENESS),
+            );
+            compared += 1;
+        }
+    }
+    for publish_time in [0, 39, 40, 100, 101, u32::MAX] {
+        for max_staleness_secs in [0, 60, 61, u64::MAX] {
+            let observation = ReferenceChainlinkObservation {
+                publish_time,
+                ..base_chainlink
+            };
+            let data = make_chainlink_data(
+                observation.version,
+                observation.decimals,
+                observation.latest_round_id,
+                observation.live_length,
+                observation.result_slot,
+                observation.publish_time,
+                observation.answer,
+            );
+            assert_pure_oracle_parser_matches_reference(
+                "Chainlink timestamp boundary",
+                oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                chainlink_key,
+                &data,
+                &chainlink_feed,
+                NOW,
+                max_staleness_secs,
+                0,
+                reference_chainlink_observation(observation, NOW, max_staleness_secs),
+            );
+            compared += 1;
+        }
+    }
+    for (version, latest_round_id, live_length, result_slot) in [
+        (0, 1, 1, 1),
+        (1, 0, 1, 1),
+        (1, 1, 0, 1),
+        (1, 1, 2, 1),
+        (1, 1, 1, 0),
+        (u8::MAX, u32::MAX, 1, u64::MAX),
+    ] {
+        let observation = ReferenceChainlinkObservation {
+            version,
+            latest_round_id,
+            live_length,
+            result_slot,
+            ..base_chainlink
+        };
+        let data = make_chainlink_data(
+            observation.version,
+            observation.decimals,
+            observation.latest_round_id,
+            observation.live_length,
+            observation.result_slot,
+            observation.publish_time,
+            observation.answer,
+        );
+        assert_pure_oracle_parser_matches_reference(
+            "Chainlink structural boundary",
+            oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+            chainlink_key,
+            &data,
+            &chainlink_feed,
+            NOW,
+            MAX_STALENESS,
+            0,
+            reference_chainlink_observation(observation, NOW, MAX_STALENESS),
+        );
+        compared += 1;
+    }
+
+    assert_eq!(compared, 726);
+    println!("independent valid-layout oracle reference: {compared} boundary words");
 }
 
 fn write_epoch_matrix_leg(

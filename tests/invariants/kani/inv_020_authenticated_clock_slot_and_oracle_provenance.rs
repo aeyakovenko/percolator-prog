@@ -5,14 +5,17 @@
 //! two- or three-leg timestamp disagreement.
 //!
 //! Evidence in this file (P): Kani exhausts all full-width `i64` timestamp triples through the
-//! exact production predicate. Public SBF tests separately bind this predicate to account parsing,
-//! rollback/ignore semantics, terminal payout, and owner exit.
+//! exact production predicate and proves full-width confidence comparison totality plus zero-side
+//! semantics. Independent host arithmetic covers the relational product semantics; public SBF
+//! tests bind these predicates to account parsing, rollback/ignore semantics, terminal payout,
+//! and owner exit.
 
 use percolator_prog::{
     error::PercolatorError,
     oracle_v16::{
-        oracle_publish_time_is_fresh, oracle_publish_times_are_coherent,
-        read_oracle_price_e6_from_bytes, CHAINLINK_STORE_PROGRAM_ID, PYTH_RECEIVER_PROGRAM_ID,
+        oracle_confidence_is_too_wide, oracle_publish_time_is_fresh,
+        oracle_publish_times_are_coherent, read_oracle_price_e6_from_bytes,
+        CHAINLINK_STORE_PROGRAM_ID, PYTH_RECEIVER_PROGRAM_ID,
         SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID, SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
     },
 };
@@ -49,6 +52,17 @@ fn kani_v16_oracle_freshness_matches_full_width_elapsed_time() {
         oracle_publish_time_is_fresh(publish_time, now_unix_ts, max_staleness_secs),
         age >= 0 && age as u64 <= max_staleness_secs
     );
+}
+
+#[kani::proof]
+fn kani_v16_oracle_confidence_is_total_at_full_width() {
+    let uncertainty: u128 = kani::any();
+    let value: u128 = kani::any();
+    let conf_bps: u16 = kani::any();
+    let is_too_wide = oracle_confidence_is_too_wide(uncertainty, value, conf_bps);
+
+    assert!(!is_too_wide || (conf_bps != 0 && uncertainty != 0));
+    assert!(value != 0 || uncertainty == 0 || conf_bps == 0 || is_too_wide);
 }
 
 #[kani::proof]
