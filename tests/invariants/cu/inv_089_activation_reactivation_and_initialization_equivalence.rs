@@ -3,9 +3,10 @@
 //! Retired-slot reuse must apply the same safety envelope as fresh activation:
 //! valid nonzero authorities, valid initial price, authenticated slot, fresh asset
 //! generation, empty backing/source-credit ledgers, fresh replay watermarks, and no
-//! stale-authority carryover. A full persisted-slot differential composes public trade, oracle,
-//! and backing history through retirement and both reuse branches, normalizing only the expected
-//! program-assigned generation IDs. These tests exercise public wrapper routes against real SBF.
+//! stale-authority carryover. Full persisted-slot differentials compose public trade, oracle,
+//! backing, insurance-spend, owner-forfeit, and provider-settlement history through retirement and
+//! both reuse branches, normalizing only the expected program-assigned generation IDs. These tests
+//! exercise public wrapper routes against real SBF.
 
 use super::*;
 
@@ -1616,4 +1617,236 @@ fn v16_program_reused_slot_matches_fresh_persisted_state_after_public_history() 
         assert_eq!(reused.token_amount(destination), 10_000);
         reused.close_portfolio_with_cu(owner, portfolio);
     }
+}
+
+#[test]
+fn v16_program_reused_slot_matches_fresh_after_public_insurance_spend() {
+    const ASSET_INDEX: u16 = 1;
+    const LONG_DOMAIN: u16 = 2;
+    const INITIAL_PRICE: u64 = 100;
+    const REUSED_PRICE: u64 = 250;
+
+    let next_creator = Keypair::new();
+    let mut fresh = V16CuEnv::new();
+    fresh.update_market_init_fee_policy_with_cu(1);
+    fresh.configure_permissionless_resolve_with_cu(100, 1);
+    fresh.svm.warp_to_slot(8);
+    fresh.activate_permissionless_asset_with_fee(
+        &next_creator,
+        ASSET_INDEX,
+        8,
+        REUSED_PRICE,
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        1,
+    );
+
+    let old_creator = Keypair::new();
+    let mut reused = V16CuEnv::new();
+    reused.update_market_init_fee_policy_with_cu(1);
+    reused.configure_permissionless_resolve_with_cu(100, 1);
+    reused.svm.warp_to_slot(1);
+    reused.activate_permissionless_asset_with_fee(
+        &old_creator,
+        ASSET_INDEX,
+        1,
+        INITIAL_PRICE,
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        1,
+    );
+    reused.configure_auth_mark_for_asset_with_authority(
+        ASSET_INDEX,
+        &old_creator,
+        1,
+        INITIAL_PRICE,
+    );
+    reused.top_up_insurance_domain_with_authority(&old_creator, LONG_DOMAIN, 400);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = reused.create_portfolio(&long_owner);
+    let short = reused.create_portfolio(&short_owner);
+    reused.deposit(&long_owner, long, 1_000_000);
+    reused.deposit(&short_owner, short, 200);
+    reused.trade_asset_with_cu(
+        ASSET_INDEX,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (2 * POS_SCALE) as i128,
+        INITIAL_PRICE,
+        0,
+    );
+
+    reused.svm.warp_to_slot(2);
+    reused.push_auth_mark_for_asset_with_authority(ASSET_INDEX, &old_creator, 2, 1_000);
+    reused.svm.warp_to_slot(4);
+    reused.crank_steps(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(ASSET_INDEX),
+        },
+        4,
+    );
+    let spent = reused.market_state().1.insurance_domain_spent[LONG_DOMAIN as usize];
+    assert_eq!(
+        spent, 400,
+        "public liquidation must consume the exact real domain insurance budget"
+    );
+    assert_eq!(
+        reused.market_state().0.force_close_delay_slots,
+        1,
+        "dynamic activation and liquidation must preserve the configured recovery delay"
+    );
+    assert!(
+        has_active_leg_for_asset(&reused.portfolio_state(long), ASSET_INDEX as usize),
+        "the insured bankruptcy must leave the winning ResetPending leg available for owner cleanup"
+    );
+    reused.forfeit_recovery_leg_with_cu(&long_owner, long, ASSET_INDEX, u128::MAX);
+    reused.finalize_reset_side_with_cu(ASSET_INDEX, 0);
+
+    reused.svm.warp_to_slot(5);
+    reused.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_SHUTDOWN,
+        ASSET_INDEX,
+        5,
+        0,
+    );
+    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+        if has_active_leg_for_asset(&reused.portfolio_state(portfolio), ASSET_INDEX as usize) {
+            reused.forfeit_recovery_leg_with_cu(owner, portfolio, ASSET_INDEX, u128::MAX);
+        }
+    }
+
+    let mut owner_withdrawn = 0u128;
+    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+        let account = reused.portfolio_state(portfolio);
+        assert!(
+            !has_active_leg_for_asset(&account, ASSET_INDEX as usize),
+            "owner Recovery cleanup must remove every old-generation leg"
+        );
+        assert_eq!(
+            account.pnl.get(),
+            0,
+            "owner Recovery cleanup must settle or explicitly forfeit the old-generation PnL"
+        );
+        let capital = reused.portfolio_state(portfolio).capital.get();
+        if capital != 0 {
+            let destination = reused.withdraw(owner, portfolio, capital);
+            owner_withdrawn += reused.token_amount(destination) as u128;
+        }
+        reused.close_portfolio_with_cu(owner, portfolio);
+    }
+    assert_eq!(
+        owner_withdrawn, 1_000_000,
+        "the solvent owner recovers all senior capital while the bankrupt owner has none"
+    );
+
+    let backing_domain = LONG_DOMAIN + 1;
+    let backing = reused.market_state().1.source_backing_buckets[backing_domain as usize]
+        .fresh_unliened_backing_num
+        / BOUND_SCALE;
+    assert_eq!(
+        backing, 200,
+        "the bankrupt trader's settled principal must remain explicitly attributed before retirement"
+    );
+    let backing_destination =
+        withdraw_backing_with_authority(&mut reused, &old_creator, backing_domain, backing);
+    assert_eq!(
+        reused.token_amount(backing_destination),
+        backing as u64,
+        "the configured domain authority receives exactly the remaining attributed backing"
+    );
+
+    reused.svm.warp_to_slot(7);
+    reused.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_RETIRE,
+        ASSET_INDEX,
+        7,
+        0,
+    );
+    assert_eq!(
+        reused.market_state().1.insurance_domain_spent[LONG_DOMAIN as usize],
+        0,
+        "retirement must clear the historical spent counter"
+    );
+    reused.svm.warp_to_slot(8);
+    reused.activate_permissionless_asset_with_fee(
+        &next_creator,
+        ASSET_INDEX,
+        8,
+        REUSED_PRICE,
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        1,
+    );
+
+    assert_eq!(
+        normalized_persisted_asset_slot(&reused, ASSET_INDEX as usize),
+        normalized_persisted_asset_slot(&fresh, ASSET_INDEX as usize),
+        "public insurance spend, claim cleanup, retirement, and reuse must leave exactly a fresh persisted slot"
+    );
+
+    let replacement_market_id = reused.asset_market_id(ASSET_INDEX);
+    let replacement_long_owner = Keypair::new();
+    let replacement_short_owner = Keypair::new();
+    let replacement_long = reused.create_portfolio(&replacement_long_owner);
+    let replacement_short = reused.create_portfolio(&replacement_short_owner);
+    reused.deposit(&replacement_long_owner, replacement_long, 10_000);
+    reused.deposit(&replacement_short_owner, replacement_short, 10_000);
+    reused.trade_asset_with_cu(
+        ASSET_INDEX,
+        &replacement_long_owner,
+        replacement_long,
+        &replacement_short_owner,
+        replacement_short,
+        POS_SCALE as i128,
+        REUSED_PRICE,
+        0,
+    );
+    assert_eq!(
+        active_leg_for_asset(
+            &reused.portfolio_state(replacement_long),
+            ASSET_INDEX as usize
+        )
+        .market_id,
+        replacement_market_id,
+        "replacement positions must bind only the fresh asset generation"
+    );
+    reused.trade_asset_with_cu(
+        ASSET_INDEX,
+        &replacement_long_owner,
+        replacement_long,
+        &replacement_short_owner,
+        replacement_short,
+        -(POS_SCALE as i128),
+        REUSED_PRICE,
+        0,
+    );
+    for (owner, portfolio) in [
+        (&replacement_long_owner, replacement_long),
+        (&replacement_short_owner, replacement_short),
+    ] {
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(
+            &reused.portfolio_state(portfolio)
+        )));
+        let capital = reused.portfolio_state(portfolio).capital.get();
+        let destination = reused.withdraw(owner, portfolio, capital);
+        assert_eq!(reused.token_amount(destination), 10_000);
+        reused.close_portfolio_with_cu(owner, portfolio);
+    }
+    assert_eq!(
+        reused.market_state().1.vault as u64,
+        reused.token_amount(reused.vault),
+        "replacement-generation exits preserve engine/SPL custody equality"
+    );
 }
