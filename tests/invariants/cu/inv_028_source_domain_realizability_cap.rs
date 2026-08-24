@@ -12,10 +12,12 @@
 //! roll back market, portfolios, and SPL custody exactly.
 //! `v16_program_expired_source_lien_route_matrix_preserves_bounded_owner_exit` creates a source
 //! lien by ordinary risk increase and crosses its authenticated expiry at both equal and late
-//! boundaries. One permissionless crank must normalize the global bucket without moving custody;
-//! one full owner reduction must then clear the exposure and preserve withdrawal of all remaining
-//! senior capital. This is the fixed-pin certification for the funded lock originally discovered
-//! by this route family.
+//! boundaries. One permissionless crank normalizes the global bucket without moving custody; one
+//! full owner reduction clears the exposure and preserves withdrawal of all remaining senior
+//! capital. The still-funded 5,000-atom claim must reject live conversion with exact rollback,
+//! accept one mutating refresh, and then terminate through configured permissionless resolution:
+//! exact 5,000/995,000 payouts, zero impaired lien state, and both portfolios dematerialized. This
+//! prevents a principal-only exit assertion from hiding a retained-claim lock.
 //! `v16_program_shared_expiry_progress_matrix_preserves_terminal_progress` constructs one public
 //! four-portfolio world containing a live source lien and a prospective adverse K/F delta. A
 //! lien-free winner expires their shared bucket, after which the prospective loser is tested
@@ -718,7 +720,146 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
         vault_before_withdrawal - env.token_amount(env.vault),
         remaining_capital as u64
     );
-    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+    let after_principal = env.portfolio_state(portfolio);
+    assert_eq!(after_principal.capital.get(), 0);
+    assert_eq!(after_principal.pnl.get(), 5_000);
+    assert!(
+        after_principal.source_domains[0]
+            .source_claim_liened_num
+            .get()
+            > 0
+    );
+    let market_before_conversion = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before_conversion = env.svm.get_account(&portfolio).unwrap();
+    let vault_before_conversion = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let conversion = env.send(
+        env.convert_released_pnl_ix(portfolio, after_principal.pnl.get() as u128),
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    let conversion_error = conversion
+        .expect_err("an impaired source claim must not convert before public reconciliation");
+    assert!(
+        conversion_error.contains("Custom(19)")
+            && !conversion_error.contains("ProgramFailedToComplete")
+            && !conversion_error.contains("exceeded CUs"),
+        "the unreconciled claim must fail stale, not exhaust compute: {conversion_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_conversion
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before_conversion
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_conversion
+    );
+
+    let market_before_progress = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before_progress = env.svm.get_account(&portfolio).unwrap();
+    let progress = env
+        .crank_if_actionable(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations: crank_observations(0),
+            },
+        )
+        .expect("one permissionless continuation must refresh the flat impaired claim");
+    assert_cu_within("flat impaired source refresh", progress, 1_400_000);
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before_progress
+            || env.svm.get_account(&portfolio).unwrap() != portfolio_before_progress,
+        "the successful impaired-source continuation must mutate liveness state"
+    );
+
+    let market_before_locked_conversion = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before_locked_conversion = env.svm.get_account(&portfolio).unwrap();
+    let vault_before_locked_conversion = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let conversion_after_progress = env.send(
+        env.convert_released_pnl_ix(portfolio, after_principal.pnl.get() as u128),
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    let locked_error = conversion_after_progress
+        .expect_err("an impaired claim must remain locked until terminal reconciliation");
+    assert!(
+        locked_error.contains("Custom(21)")
+            && !locked_error.contains("ProgramFailedToComplete")
+            && !locked_error.contains("exceeded CUs"),
+        "the refreshed impaired claim must fail locked, not exhaust compute: {locked_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_locked_conversion
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before_locked_conversion
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_locked_conversion
+    );
+
+    let resolve_slot = now_slot + 10_001;
+    let resolve_cu = env.resolve_stale_permissionless_with_cu(resolve_slot);
+    assert_cu_within(
+        "flat impaired source permissionless resolve",
+        resolve_cu,
+        1_400_000,
+    );
+    env.svm.warp_to_slot(resolve_slot + 1);
+    let (payouts, close_cu) = drain_resolved_cohort_with_cu_limit(
+        &mut env,
+        &[(&owner, portfolio), (&counterparty_owner, counterparty)],
+        "flat impaired source terminal cohort",
+        1_400_000,
+    );
+    assert_cu_within("flat impaired source terminal close", close_cu, 1_400_000);
+    assert_eq!(
+        payouts,
+        vec![5_000, 995_000],
+        "terminal reconciliation must pay the retained claim exactly without charging the provider bucket"
+    );
+    for source in env.portfolio_state(portfolio).source_domains {
+        assert!(!source.is_occupied());
+    }
+    let terminal_market = env.market_state().1;
+    assert_eq!(
+        terminal_market.source_backing_buckets[1].impaired_liened_backing_num,
+        0
+    );
+    assert_eq!(
+        terminal_market.source_backing_buckets[1].consumed_liened_backing_num, 0,
+        "the resolved user transfer must not consume provider backing"
+    );
+    assert_eq!(
+        terminal_market.source_credit[1].impaired_liened_backing_num,
+        0
+    );
+    assert_eq!(
+        terminal_market.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Expired
+    );
+    for (account_owner, account) in [(&owner, portfolio), (&counterparty_owner, counterparty)] {
+        let close_cu = env.close_portfolio_with_cu(account_owner, account);
+        assert_cu_within("flat impaired source portfolio close", close_cu, 1_400_000);
+    }
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
 }
 
 #[test]
