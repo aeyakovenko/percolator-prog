@@ -78,6 +78,18 @@ fn kani_v16_position_epoch_control_is_monotonic_and_preserves_matcher_state() {
     let trade_fee_cap_bps = config.trade_fee_cap_bps();
     let result = state::next_portfolio_position_control(control);
 
+    kani::cover!(result.is_ok(), "a valid episode advances");
+    kani::cover!(
+        trade_fee_cap_bps > 10_000 && result.is_err(),
+        "an invalid packed fee cap rejects"
+    );
+    kani::cover!(
+        trade_fee_cap_bps <= 10_000
+            && epoch == state::PortfolioMatcherConfigV16::position_epoch_max()
+            && result.is_err(),
+        "an exhausted episode rejects"
+    );
+
     if trade_fee_cap_bps > 10_000 || epoch == state::PortfolioMatcherConfigV16::position_epoch_max()
     {
         assert!(result.is_err());
@@ -125,6 +137,9 @@ fn kani_v16_matcher_fee_cap_update_is_bounded_and_preserves_other_control_fields
     let matcher_enabled = config.enabled();
     let result = config.set_trade_fee_cap_bps(trade_fee_cap_bps);
 
+    kani::cover!(result.is_ok(), "an in-range fee cap is accepted");
+    kani::cover!(result.is_err(), "an over-limit fee cap is rejected");
+
     if trade_fee_cap_bps > 10_000 {
         assert!(result.is_err());
         assert_eq!(config.control, control);
@@ -147,6 +162,19 @@ fn kani_v16_position_epoch_sync_policy_is_total_and_exact() {
     let epoch = config.position_epoch();
     let result =
         state::next_portfolio_position_control_for_matcher_sync(control, matcher_synchronized);
+
+    kani::cover!(
+        result.is_ok() && matcher_synchronized,
+        "a synchronized matcher episode advances"
+    );
+    kani::cover!(
+        result.is_ok() && !matcher_synchronized,
+        "an unsynchronized mutation advances and disables"
+    );
+    kani::cover!(
+        result.is_err(),
+        "invalid or exhausted packed control rejects"
+    );
 
     if config.trade_fee_cap_bps() > 10_000
         || epoch == state::PortfolioMatcherConfigV16::position_epoch_max()

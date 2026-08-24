@@ -19,6 +19,8 @@ fn kani_v16_top_up_intent_accepts_only_a_strictly_newer_watermark() {
     let proposed: u64 = kani::any();
 
     let accepted = state::require_newer_control_sequence(current, proposed).is_ok();
+    kani::cover!(accepted, "a strictly newer intent is accepted");
+    kani::cover!(!accepted, "a stale intent is rejected");
     assert_eq!(accepted, proposed > current);
     if accepted {
         assert!(state::require_newer_control_sequence(proposed, proposed).is_err());
@@ -30,8 +32,12 @@ fn kani_v16_top_up_intent_accepts_only_a_strictly_newer_watermark() {
 fn kani_v16_owner_sequence_success_consumes_exactly_once() {
     let current: u64 = kani::any();
     let expected: u64 = kani::any();
+    let result = state::next_portfolio_matcher_sequence(current, expected);
 
-    match state::next_portfolio_matcher_sequence(current, expected) {
+    kani::cover!(result.is_ok(), "the current sequence advances");
+    kani::cover!(result.is_err(), "mismatch or exhaustion rejects");
+
+    match result {
         Ok(next) => {
             assert_eq!(current, expected);
             assert_eq!(next, current + 1);
@@ -95,6 +101,11 @@ fn kani_v16_successful_trade_episode_advance_invalidates_old_pair() {
         Ok(next) => next,
         Err(_) => return,
     };
+    kani::cover!(
+        state::next_portfolio_position_control(control_a).is_ok()
+            && state::next_portfolio_position_control(control_b).is_ok(),
+        "both trade episodes can advance"
+    );
     let cfg_a = state::PortfolioMatcherConfigV16 {
         control: control_a,
         ..state::PortfolioMatcherConfigV16::default()

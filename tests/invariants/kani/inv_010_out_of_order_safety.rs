@@ -20,6 +20,9 @@ fn kani_v16_matcher_sequence_accepts_only_current_expected_value() {
     let expected: u64 = kani::any();
     let result = state::next_portfolio_matcher_sequence(current, expected);
 
+    kani::cover!(result.is_ok(), "the exact current request advances");
+    kani::cover!(result.is_err(), "stale or exhausted requests reject");
+
     if current != expected || current == u64::MAX {
         assert!(result.is_err());
     } else {

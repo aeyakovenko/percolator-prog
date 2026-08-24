@@ -16,6 +16,8 @@ fn kani_v16_account_fees_map_to_the_signed_trade_sides() {
     kani::assume(size_q != 0);
 
     let mapped = account_fees_to_trade_sides(size_q, fee_a, fee_b).unwrap();
+    kani::cover!(size_q > 0, "long-side fee attribution is reachable");
+    kani::cover!(size_q < 0, "short-side fee attribution is reachable");
     if size_q > 0 {
         assert_eq!(mapped, (fee_a, fee_b));
     } else {

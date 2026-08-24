@@ -337,6 +337,15 @@ fn kani_v16_pyth_confidence_routing_has_no_zero_cost_rejection() {
         conf_bps,
     );
 
+    kani::cover!(
+        result == Err(PercolatorError::OracleConfTooWide.into()),
+        "nonzero configured confidence can reject"
+    );
+    kani::cover!(
+        (conf_bps == 0 || confidence == 0) && result == Ok((1_000_000, 1)),
+        "zero-cost confidence routing remains live"
+    );
+
     if result == Err(PercolatorError::OracleConfTooWide.into()) {
         assert!(conf_bps != 0 && confidence != 0);
     }
@@ -477,6 +486,19 @@ fn kani_v16_switchboard_confidence_routing_has_no_zero_cost_rejection() {
         publish_time: 1,
     };
     let result = validate_switchboard_observation_e6(observation, 1, 0, conf_bps);
+
+    kani::cover!(
+        std_dev < 0 && result == Err(PercolatorError::OracleInvalid.into()),
+        "negative deviation rejects"
+    );
+    kani::cover!(
+        result == Err(PercolatorError::OracleConfTooWide.into()),
+        "nonzero configured confidence can reject"
+    );
+    kani::cover!(
+        std_dev >= 0 && (conf_bps == 0 || std_dev == 0) && result == Ok((1_000_000, 1)),
+        "zero-cost confidence routing remains live"
+    );
 
     if std_dev < 0 {
         assert_eq!(result, Err(PercolatorError::OracleInvalid.into()));

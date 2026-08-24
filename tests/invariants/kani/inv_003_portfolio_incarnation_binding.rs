@@ -12,6 +12,9 @@ fn kani_v16_successful_portfolio_id_allocation_is_nonzero_and_strict() {
     let next: u64 = kani::any();
     let allocation = kani_allocate_portfolio_id(next);
 
+    kani::cover!(allocation.is_ok(), "a portfolio ID can be allocated");
+    kani::cover!(allocation.is_err(), "an exhausted allocator rejects");
+
     if let Ok((portfolio_id, following)) = allocation {
         assert_ne!(portfolio_id, 0);
         assert!(following > portfolio_id);

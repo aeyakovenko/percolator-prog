@@ -6,8 +6,10 @@
 //!
 //! Evidence in this file (I/P roster): the source audit discovers mounted Kani
 //! modules from `kani/v16_kani.rs`, extracts every `kani::assume` tuple, and
-//! compares it exactly with the manifest. It also validates the Kani witness and
-//! public-route evidence named by every row. A public LiteSVM composition reaches
+//! compares it exactly with the manifest. It also derives all 125 direct and 36
+//! generated harnesses, classifies symbolic-total, branch-witnessed, explicitly
+//! constrained, and concrete-exact proofs, and rejects missing claims, covers,
+//! proof attributes, or public counterparts. A public LiteSVM composition reaches
 //! matcher cap/toggle, nonzero incarnation, sequence, episode, and nonzero trade
 //! domains while excluded toggles, caps, and zero-size trades roll back exactly.
 
@@ -24,6 +26,33 @@ struct Inv084Assumption {
     owner_invariant: String,
     owning_proof: String,
     predicate: String,
+}
+
+#[derive(Clone, Debug)]
+struct Inv084Function {
+    file: String,
+    name: String,
+    body: String,
+    proof: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Inv084FunctionFacts {
+    symbolic: bool,
+    assumption: bool,
+    claim: bool,
+    cover: bool,
+    branch_limited_claim: bool,
+}
+
+impl Inv084FunctionFacts {
+    fn merge(&mut self, other: Self) {
+        self.symbolic |= other.symbolic;
+        self.assumption |= other.assumption;
+        self.claim |= other.claim;
+        self.cover |= other.cover;
+        self.branch_limited_claim |= other.branch_limited_claim;
+    }
 }
 
 fn inv_084_mounted_kani_files() -> std::collections::BTreeSet<String> {
@@ -105,6 +134,182 @@ fn inv_084_source_assumptions(
         );
     }
     assumptions
+}
+
+fn inv_084_matching_brace(source: &str, open: usize) -> usize {
+    let mut depth = 0usize;
+    for (relative, byte) in source.as_bytes()[open..].iter().copied().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1).expect("unmatched closing brace");
+                if depth == 0 {
+                    return open + relative;
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated function body")
+}
+
+fn inv_084_top_level_functions(
+    file: &str,
+    source: &str,
+) -> std::collections::BTreeMap<String, Inv084Function> {
+    let mut functions = std::collections::BTreeMap::new();
+    let mut offset = 0usize;
+
+    for line in source.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix("fn ") {
+            let name_end = rest
+                .find(|byte: char| !(byte == '_' || byte.is_ascii_alphanumeric()))
+                .expect("top-level function must have a signature");
+            let name = &rest[..name_end];
+            let open = offset
+                + source[offset..]
+                    .find('{')
+                    .unwrap_or_else(|| panic!("{file}::{name} lacks a body"));
+            let close = inv_084_matching_brace(source, open);
+            let prefix = &source[..offset];
+            let proof_attribute = prefix.rfind("#[kani::proof]");
+            let previous_function = prefix.rfind("\nfn ");
+            let proof = proof_attribute.is_some_and(|attribute| {
+                previous_function.is_none_or(|previous| attribute > previous)
+            });
+            assert!(
+                functions
+                    .insert(
+                        name.to_owned(),
+                        Inv084Function {
+                            file: file.to_owned(),
+                            name: name.to_owned(),
+                            body: source[open..=close].to_owned(),
+                            proof,
+                        },
+                    )
+                    .is_none(),
+                "duplicate function {file}::{name}"
+            );
+        }
+        offset += line.len();
+    }
+    functions
+}
+
+fn inv_084_is_word_at(source: &[u8], index: usize, word: &[u8]) -> bool {
+    let Some(candidate) = source.get(index..index + word.len()) else {
+        return false;
+    };
+    if candidate != word {
+        return false;
+    }
+    let is_identifier = |byte: u8| byte == b'_' || byte.is_ascii_alphanumeric();
+    source
+        .get(index.wrapping_sub(1))
+        .is_none_or(|byte| !is_identifier(*byte))
+        && source
+            .get(index + word.len())
+            .is_none_or(|byte| !is_identifier(*byte))
+}
+
+fn inv_084_block_contains_claim(source: &str, keyword: &[u8]) -> bool {
+    let bytes = source.as_bytes();
+    for index in 0..bytes.len() {
+        if !inv_084_is_word_at(bytes, index, keyword) {
+            continue;
+        }
+        let tail = &source[index + keyword.len()..];
+        let Some(open_relative) = tail.find('{') else {
+            continue;
+        };
+        if tail
+            .find(';')
+            .is_some_and(|semicolon| semicolon < open_relative)
+        {
+            continue;
+        }
+        let open = index + keyword.len() + open_relative;
+        let close = inv_084_matching_brace(source, open);
+        let block = &source[open + 1..close];
+        if block.contains("assert") || block.contains("panic!") || block.contains("return") {
+            return true;
+        }
+    }
+    false
+}
+
+fn inv_084_direct_function_facts(body: &str) -> Inv084FunctionFacts {
+    Inv084FunctionFacts {
+        symbolic: body.contains("kani::any"),
+        assumption: body.contains("kani::assume("),
+        claim: body.contains("assert")
+            || body.contains("unreachable!")
+            || body.contains("panic!")
+            || body.contains(".unwrap()")
+            || body.contains(".expect("),
+        cover: body.contains("kani::cover!"),
+        branch_limited_claim: body.contains("return;")
+            || body.contains("=> return")
+            || inv_084_block_contains_claim(body, b"if")
+            || inv_084_block_contains_claim(body, b"else"),
+    }
+}
+
+fn inv_084_transitive_function_facts(
+    function: &str,
+    functions: &std::collections::BTreeMap<String, Inv084Function>,
+    visiting: &mut std::collections::BTreeSet<String>,
+    cache: &mut std::collections::BTreeMap<String, Inv084FunctionFacts>,
+) -> Inv084FunctionFacts {
+    if let Some(facts) = cache.get(function) {
+        return *facts;
+    }
+    assert!(
+        visiting.insert(function.to_owned()),
+        "recursive proof helper {function} requires an explicit disposition"
+    );
+    let body = &functions
+        .get(function)
+        .unwrap_or_else(|| panic!("missing function {function}"))
+        .body;
+    let mut facts = inv_084_direct_function_facts(body);
+    for helper in functions.keys() {
+        if helper == function {
+            continue;
+        }
+        if body.contains(&format!("{helper}(")) || body.contains(&format!("{helper}::<")) {
+            facts.merge(inv_084_transitive_function_facts(
+                helper, functions, visiting, cache,
+            ));
+        }
+    }
+    visiting.remove(function);
+    cache.insert(function.to_owned(), facts);
+    facts
+}
+
+fn inv_084_generated_trade_decoder_harnesses(source: &str) -> std::collections::BTreeSet<String> {
+    let mut generated = std::collections::BTreeSet::new();
+    for macro_name in ["prove_nocpi_trade_field!(", "prove_cpi_trade_field!("] {
+        let mut tail = source;
+        while let Some(start) = tail.find(macro_name) {
+            tail = &tail[start + macro_name.len()..];
+            let end = tail
+                .find(");")
+                .unwrap_or_else(|| panic!("unterminated {macro_name} invocation"));
+            let arguments = tail[..end].split(',').map(str::trim).collect::<Vec<_>>();
+            assert_eq!(arguments.len(), 4, "{macro_name} must keep four arguments");
+            for name in &arguments[..2] {
+                assert!(
+                    name.starts_with("kani_v16_") && generated.insert((*name).to_owned()),
+                    "invalid or duplicate generated harness {name}"
+                );
+            }
+            tail = &tail[end + 2..];
+        }
+    }
+    generated
 }
 
 #[test]
@@ -204,6 +409,170 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
     assert_eq!(
         actual, expected,
         "assumption inventory differs from the actual mounted Kani sources"
+    );
+}
+
+#[test]
+fn v16_program_every_mounted_kani_harness_has_a_nonvacuity_disposition() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const EXPECTED_DIRECT_HARNESSES: usize = 125;
+    const EXPECTED_GENERATED_HARNESSES: usize = 36;
+    const EXPECTED_TOTAL_HARNESSES: usize = 161;
+    const CONCRETE_PUBLIC_EVIDENCE: [(&str, &str); 3] = [
+        (
+            "tests/invariants/kani/inv_020_authenticated_clock_slot_and_oracle_provenance.rs",
+            "tests/invariants/cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs#host_oracle_valid_layout_boundaries_match_independent_typed_reference",
+        ),
+        (
+            "tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs",
+            "tests/invariants/cu/inv_022_instruction_decoding_and_schema_upgrade_safety.rs#v16_program_deployed_decoder_bit_mutation_matrix_is_total_canonical_and_atomic",
+        ),
+        (
+            "tests/invariants/kani/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs",
+            "tests/invariants/cu/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs#v16_program_explicit_kani_guard_domains_are_publicly_reachable_and_fail_closed",
+        ),
+    ];
+
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mounted_files = inv_084_mounted_kani_files();
+    let root_functions = inv_084_top_level_functions("kani/v16_kani.rs", INV_084_KANI_ROOT);
+    let concrete_evidence = CONCRETE_PUBLIC_EVIDENCE
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let mut direct_harnesses = BTreeSet::new();
+    let mut generated_harnesses = BTreeSet::new();
+    let mut category_counts = BTreeMap::<&str, usize>::new();
+
+    for file in &mounted_files {
+        let source = std::fs::read_to_string(manifest.join(file))
+            .unwrap_or_else(|error| panic!("read mounted Kani module {file}: {error}"));
+        let local_functions = inv_084_top_level_functions(file, &source);
+        let mut all_functions = root_functions.clone();
+        for (name, function) in &local_functions {
+            assert!(
+                all_functions
+                    .insert(name.clone(), function.clone())
+                    .is_none(),
+                "root/local helper collision for {file}::{name}"
+            );
+        }
+
+        let assumptions = inv_084_source_assumptions(file, &source)
+            .into_iter()
+            .map(|assumption| assumption.owning_proof)
+            .collect::<BTreeSet<_>>();
+        let mut cache = BTreeMap::new();
+        for function in local_functions
+            .values()
+            .filter(|function| function.name.starts_with("kani"))
+        {
+            assert!(
+                function.proof,
+                "{}#{} is named as a harness but lacks its own #[kani::proof] attribute",
+                function.file, function.name
+            );
+            assert!(
+                direct_harnesses.insert(format!("{}#{}", function.file, function.name)),
+                "duplicate direct Kani harness {}#{}",
+                function.file,
+                function.name
+            );
+            let facts = inv_084_transitive_function_facts(
+                &function.name,
+                &all_functions,
+                &mut BTreeSet::new(),
+                &mut cache,
+            );
+            assert!(
+                facts.claim,
+                "{}#{} has no direct or helper assertion/panic claim",
+                function.file, function.name
+            );
+            assert_eq!(
+                facts.assumption,
+                assumptions.contains(&function.name),
+                "{}#{} assumption ownership differs from the exact source inventory",
+                function.file,
+                function.name
+            );
+            if facts.branch_limited_claim {
+                assert!(
+                    facts.cover,
+                    "{}#{} makes a branch-limited claim without a constructive Kani cover",
+                    function.file, function.name
+                );
+            }
+
+            let category = if facts.assumption {
+                "EXPLICIT_ASSUMPTION"
+            } else if !facts.symbolic {
+                let evidence = concrete_evidence.get(file.as_str()).unwrap_or_else(|| {
+                    panic!(
+                        "{}#{} is a concrete fixture without module-level public evidence",
+                        function.file, function.name
+                    )
+                });
+                let (evidence_file, evidence_function) = evidence
+                    .split_once('#')
+                    .expect("concrete evidence must be path#function");
+                let evidence_source = std::fs::read_to_string(manifest.join(evidence_file))
+                    .unwrap_or_else(|error| panic!("read {evidence_file}: {error}"));
+                assert!(
+                    evidence_source.contains(&format!("fn {evidence_function}(")),
+                    "concrete fixture evidence {evidence} is absent"
+                );
+                "CONCRETE_EXACT"
+            } else if facts.branch_limited_claim {
+                "BRANCH_WITNESSED"
+            } else {
+                "SYMBOLIC_TOTAL"
+            };
+            *category_counts.entry(category).or_default() += 1;
+        }
+
+        generated_harnesses.extend(inv_084_generated_trade_decoder_harnesses(&source));
+    }
+
+    assert_eq!(direct_harnesses.len(), EXPECTED_DIRECT_HARNESSES);
+    assert_eq!(generated_harnesses.len(), EXPECTED_GENERATED_HARNESSES);
+    assert!(
+        generated_harnesses.iter().all(|name| direct_harnesses
+            .iter()
+            .all(|direct| !direct.ends_with(&format!("#{name}")))),
+        "generated and direct Kani harness names must be disjoint"
+    );
+    assert_eq!(
+        direct_harnesses.len() + generated_harnesses.len(),
+        EXPECTED_TOTAL_HARNESSES,
+        "the source-derived harness roster must equal `cargo kani list`"
+    );
+    let generated_source =
+        std::fs::read_to_string(manifest.join(
+            "tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs",
+        ))
+        .expect("read generated trade-decoder proof source");
+    assert!(generated_source.contains("fields.$field = kani::any::<$ty>()"));
+    assert!(generated_source.contains("assert_single_nocpi_trade_decoder_preserves(fields)"));
+    assert!(generated_source.contains("assert_batch_nocpi_trade_decoder_preserves(fields)"));
+    assert!(generated_source.contains("assert_single_cpi_trade_decoder_preserves(fields)"));
+    assert!(generated_source.contains("assert_batch_cpi_trade_decoder_preserves(fields)"));
+    category_counts.insert("GENERATED_SYMBOLIC_TOTAL", generated_harnesses.len());
+
+    let expected_categories = BTreeMap::from([
+        ("BRANCH_WITNESSED", 20usize),
+        ("CONCRETE_EXACT", 28),
+        ("EXPLICIT_ASSUMPTION", 10),
+        ("GENERATED_SYMBOLIC_TOTAL", 36),
+        ("SYMBOLIC_TOTAL", 67),
+    ]);
+    assert_eq!(
+        category_counts, expected_categories,
+        "every harness category change requires a deliberate nonvacuity review"
+    );
+    assert_eq!(
+        category_counts.values().sum::<usize>(),
+        EXPECTED_TOTAL_HARNESSES
     );
 }
 

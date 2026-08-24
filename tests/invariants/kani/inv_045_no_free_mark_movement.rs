@@ -27,6 +27,9 @@ fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
     } else {
         rate as u128
     };
+    kani::cover!(cap == 0 || mark == index, "zero premium has zero rate");
+    kani::cover!(cap > 0 && mark > index, "positive premium is reachable");
+    kani::cover!(cap > 0 && mark < index, "negative premium is reachable");
     assert!(abs_rate <= cap as u128);
 
     if cap == 0 || mark == index {

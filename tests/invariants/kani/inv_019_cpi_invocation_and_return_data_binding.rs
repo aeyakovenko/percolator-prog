@@ -95,4 +95,5 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
     }
     // Ensure the accept path is reachable (non-vacuity of the accept assertions).
     kani::cover!(result.is_ok());
+    kani::cover!(result.is_err());
 }
