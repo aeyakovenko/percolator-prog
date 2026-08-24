@@ -5085,6 +5085,25 @@ pub mod oracle_v16 {
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
 
+    fn mul_div_u128_by_u64(
+        value: u128,
+        multiplier: u64,
+        denominator: u64,
+        round_up: bool,
+    ) -> Option<u128> {
+        if denominator == 0 {
+            return None;
+        }
+        let multiplier = u128::from(multiplier);
+        let denominator = u128::from(denominator);
+        let whole = value / denominator;
+        let residue_product = (value % denominator) * multiplier;
+        let quotient = whole
+            .checked_mul(multiplier)?
+            .checked_add(residue_product / denominator)?;
+        quotient.checked_add(u128::from(round_up && residue_product % denominator != 0))
+    }
+
     /// Convert engine fee results, which are reported in physical account order, into the
     /// economic long/short ordering used by the per-side insurance domains.
     pub fn account_fees_to_trade_sides(
@@ -5128,9 +5147,7 @@ pub mod policy_v16 {
         if amount == 0 || share_bps == 0 {
             return Some(0);
         }
-        amount
-            .checked_mul(u128::from(share_bps))
-            .map(|value| value / 10_000)
+        mul_div_u128_by_u64(amount, u64::from(share_bps), 10_000, false)
     }
 
     pub fn permissionless_market_init_fee_for_asset(
@@ -5150,8 +5167,7 @@ pub mod policy_v16 {
     }
 
     pub fn risk_notional_ceil(size_q: u128, price: u64) -> Option<u128> {
-        let numerator = size_q.checked_mul(u128::from(price))?;
-        Some(numerator.checked_add(percolator::POS_SCALE - 1)? / percolator::POS_SCALE)
+        mul_div_u128_by_u64(size_q, price, percolator::POS_SCALE as u64, true)
     }
 
     pub fn trade_fee_notional_ceil(size_q: u128, price: u64) -> Option<u128> {
@@ -5165,14 +5181,14 @@ pub mod policy_v16 {
         if den == 0 {
             return None;
         }
-        Some(num.checked_add(den.checked_sub(1)?)? / den)
+        (num / den).checked_add(u128::from(num % den != 0))
     }
 
     pub fn two_sided_trade_fee_paid(notional: u128, fee_bps: u64) -> Option<u128> {
         if notional == 0 || fee_bps == 0 {
             return Some(0);
         }
-        let one_side = ceil_div_u128(notional.checked_mul(u128::from(fee_bps))?, 10_000)?;
+        let one_side = mul_div_u128_by_u64(notional, fee_bps, 10_000, true)?;
         one_side.checked_mul(2)
     }
 
@@ -5215,9 +5231,7 @@ pub mod policy_v16 {
         if notional == 0 {
             return Some(0);
         }
-        let product = notional.checked_mul(u128::from(fee_bps))?;
-        let denominator = u128::from(percolator::MAX_MARGIN_BPS);
-        Some((product / denominator) + u128::from(product % denominator != 0))
+        mul_div_u128_by_u64(notional, fee_bps, percolator::MAX_MARGIN_BPS, true)
     }
 
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {

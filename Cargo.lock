@@ -2653,6 +2653,7 @@ dependencies = [
  "borsh 0.10.4",
  "bytemuck",
  "litesvm",
+ "num-bigint 0.4.6",
  "num-derive 0.4.2",
  "num-traits",
  "percolator",

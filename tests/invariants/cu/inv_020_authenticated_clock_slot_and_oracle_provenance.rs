@@ -25,6 +25,8 @@
 //! product, or the solver-bound relational wide-product theorem.
 
 use super::*;
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use rand::{Rng, SeedableRng};
 use rand_xorshift::XorShiftRng;
 
@@ -3042,14 +3044,15 @@ fn reference_scale_decimal_to_e6(mantissa: i128, scale: u32) -> OracleParseResul
     if mantissa <= 0 || scale > 18 {
         return Err(PercolatorError::OracleInvalid.into());
     }
-    let mantissa = mantissa as u128;
+    let mantissa = BigUint::from(mantissa as u128);
     let out = if scale >= 6 {
-        mantissa / 10u128.pow(scale - 6)
+        mantissa / BigUint::from(10u8).pow(scale - 6)
     } else {
-        mantissa
-            .checked_mul(10u128.pow(6 - scale))
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?
+        mantissa * BigUint::from(10u8).pow(6 - scale)
     };
+    let out = out
+        .to_u128()
+        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
     if out == 0 || out > u128::from(percolator::MAX_ORACLE_PRICE) {
         return Err(PercolatorError::OracleInvalid.into());
     }
@@ -3087,12 +3090,13 @@ fn reference_pyth_observation(
     }
     let scale = observation.exponent + 6;
     let out = if scale >= 0 {
-        price
-            .checked_mul(10u128.pow(scale as u32))
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?
+        BigUint::from(price) * BigUint::from(10u8).pow(scale as u32)
     } else {
-        price / 10u128.pow((-scale) as u32)
+        BigUint::from(price) / BigUint::from(10u8).pow((-scale) as u32)
     };
+    let out = out
+        .to_u128()
+        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
     if out == 0 || out > u128::from(percolator::MAX_ORACLE_PRICE) {
         return Err(PercolatorError::OracleInvalid.into());
     }
@@ -3161,7 +3165,9 @@ fn reference_switchboard_observation(
     if reference_confidence_is_too_wide(observation.std_dev as u128, value, conf_bps) {
         return Err(PercolatorError::OracleConfTooWide.into());
     }
-    let out = value / REFERENCE_SWITCHBOARD_SCALE;
+    let out = (BigUint::from(value) / BigUint::from(REFERENCE_SWITCHBOARD_SCALE))
+        .to_u128()
+        .expect("positive i128 divided by the Switchboard scale fits u128");
     if out == 0 || out > u128::from(percolator::MAX_ORACLE_PRICE) {
         return Err(PercolatorError::OracleInvalid.into());
     }
@@ -4133,8 +4139,8 @@ fn composite_epoch_matrix_cases() -> Vec<EpochMatrixCase> {
 }
 
 fn reference_composite_price_e6(prices_e6: &[u64], flags: u8, invert: u8, unit_scale: u32) -> u64 {
-    let mut numerator = u128::from(prices_e6[0]);
-    let mut denominator = 1u128;
+    let mut numerator = BigUint::from(prices_e6[0]);
+    let mut denominator = BigUint::from(1u8);
     for (leg_index, price) in prices_e6.iter().copied().enumerate().skip(1) {
         let divides = match leg_index {
             1 => flags & ORACLE_LEG_FLAG_DIVIDE_LEG2 != 0,
@@ -4142,23 +4148,23 @@ fn reference_composite_price_e6(prices_e6: &[u64], flags: u8, invert: u8, unit_s
             _ => unreachable!("the deployed composite cap is three legs"),
         };
         if divides {
-            numerator = numerator.checked_mul(1_000_000).unwrap();
-            denominator = denominator.checked_mul(u128::from(price)).unwrap();
+            numerator *= BigUint::from(1_000_000u64);
+            denominator *= BigUint::from(price);
         } else {
-            numerator = numerator.checked_mul(u128::from(price)).unwrap();
-            denominator = denominator.checked_mul(1_000_000).unwrap();
+            numerator *= BigUint::from(price);
+            denominator *= BigUint::from(1_000_000u64);
         }
     }
     if invert != 0 {
         let uninverted_numerator = numerator;
-        numerator = denominator.checked_mul(1_000_000_000_000).unwrap();
+        numerator = denominator * BigUint::from(1_000_000_000_000u64);
         denominator = uninverted_numerator;
     }
     let mut result = numerator / denominator;
     if unit_scale > 1 {
-        result /= u128::from(unit_scale);
+        result /= BigUint::from(unit_scale);
     }
-    u64::try_from(result).unwrap()
+    result.to_u64().unwrap()
 }
 
 fn try_epoch_matrix_crank(

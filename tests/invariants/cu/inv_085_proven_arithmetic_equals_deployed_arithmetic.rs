@@ -10,10 +10,65 @@
 //! fixed boundaries and 16,384 deterministic full-width words. Separate 512- and
 //! 1,024-word corpora compare dynamic-fee and fee-rate searches with exhaustive
 //! scans. Public LiteSVM witnesses additionally bind the host policy to deployed
-//! activation, fee-share, batch-rounding, and Hybrid quote results. Full
-//! relational provider scaling and bigint equivalence remain open.
+//! activation, fee-share, batch-rounding, and Hybrid quote results. Bigint
+//! references cover the canonical wrapper arithmetic and provider scaling;
+//! a universal symbolic relational provider-scale theorem remains open.
 
 use super::*;
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
+
+fn inv_085_big_to_u128(value: BigUint) -> Option<u128> {
+    value.to_u128()
+}
+
+fn inv_085_big_mul_div_floor(value: u128, multiplier: u64, denominator: u64) -> Option<u128> {
+    if denominator == 0 {
+        return None;
+    }
+    inv_085_big_to_u128(
+        BigUint::from(value) * BigUint::from(multiplier) / BigUint::from(denominator),
+    )
+}
+
+fn inv_085_big_mul_div_ceil(value: u128, multiplier: u64, denominator: u64) -> Option<u128> {
+    if denominator == 0 {
+        return None;
+    }
+    let denominator = BigUint::from(denominator);
+    let product = BigUint::from(value) * BigUint::from(multiplier);
+    inv_085_big_to_u128((&product + &denominator - BigUint::from(1u8)) / denominator)
+}
+
+fn inv_085_big_ceil_div(num: u128, den: u128) -> Option<u128> {
+    if den == 0 {
+        return None;
+    }
+    let den = BigUint::from(den);
+    inv_085_big_to_u128((BigUint::from(num) + &den - BigUint::from(1u8)) / den)
+}
+
+fn inv_085_big_two_sided_fee(notional: u128, fee_bps: u64) -> Option<u128> {
+    if notional == 0 || fee_bps == 0 {
+        return Some(0);
+    }
+    inv_085_big_mul_div_ceil(notional, fee_bps, 10_000)?.checked_mul(2)
+}
+
+fn inv_085_big_risk_notional(size_q: u128, price: u64) -> Option<u128> {
+    inv_085_big_mul_div_ceil(size_q, price, percolator::POS_SCALE as u64)
+}
+
+fn inv_085_big_batch_leg_fee(abs_size_q: u128, exec_price: u64, fee_bps: u64) -> Option<u128> {
+    if abs_size_q == 0 || fee_bps == 0 {
+        return Some(0);
+    }
+    let notional = inv_085_big_risk_notional(abs_size_q, exec_price)?;
+    if notional == 0 {
+        return Some(0);
+    }
+    inv_085_big_mul_div_ceil(notional, fee_bps, percolator::MAX_MARGIN_BPS)
+}
 
 fn inv_085_price_move_bps_ceil_oracle(old: u64, new: u64) -> Option<u64> {
     if old == 0 || old == new {
@@ -59,22 +114,11 @@ fn inv_085_premium_funding_rate_oracle(
 }
 
 fn inv_085_ceil_div_u128_oracle(num: u128, den: u128) -> Option<u128> {
-    if den == 0 {
-        return None;
-    }
-    let increment = den - 1;
-    if num > u128::MAX - increment {
-        return None;
-    }
-    Some((num + increment) / den)
+    inv_085_big_ceil_div(num, den)
 }
 
 fn inv_085_two_sided_trade_fee_paid_oracle(notional: u128, fee_bps: u64) -> Option<u128> {
-    if notional == 0 || fee_bps == 0 {
-        return Some(0);
-    }
-    let one_side = inv_085_ceil_div_u128_oracle(notional.checked_mul(fee_bps as u128)?, 10_000)?;
-    let paid = one_side.checked_mul(2)?;
+    let paid = inv_085_big_two_sided_fee(notional, fee_bps)?;
     if paid > u64::MAX as u128 {
         return None;
     }
@@ -82,29 +126,14 @@ fn inv_085_two_sided_trade_fee_paid_oracle(notional: u128, fee_bps: u64) -> Opti
 }
 
 fn inv_085_two_sided_trade_fee_paid_uncapped_oracle(notional: u128, fee_bps: u64) -> Option<u128> {
-    if notional == 0 || fee_bps == 0 {
-        return Some(0);
-    }
-    let fee_bps = u128::from(fee_bps);
-    if notional > u128::MAX / fee_bps {
-        return None;
-    }
-    let one_side = inv_085_ceil_div_u128_oracle(notional * fee_bps, 10_000)?;
-    if one_side > u128::MAX / 2 {
-        return None;
-    }
-    Some(one_side * 2)
+    inv_085_big_two_sided_fee(notional, fee_bps)
 }
 
 fn inv_085_fee_share_floor_oracle(amount: u128, share_bps: u16) -> Option<u128> {
     if amount == 0 || share_bps == 0 {
         return Some(0);
     }
-    let share_bps = u128::from(share_bps);
-    if amount > u128::MAX / share_bps {
-        return None;
-    }
-    Some(amount * share_bps / 10_000)
+    inv_085_big_mul_div_floor(amount, u64::from(share_bps), 10_000)
 }
 
 fn inv_085_market_init_fee_oracle(base_fee: u128, asset_index: usize) -> Option<u128> {
@@ -123,33 +152,11 @@ fn inv_085_market_init_fee_oracle(base_fee: u128, asset_index: usize) -> Option<
 }
 
 fn inv_085_risk_notional_ceil_oracle(size_q: u128, price: u64) -> Option<u128> {
-    let price = u128::from(price);
-    if price != 0 && size_q > u128::MAX / price {
-        return None;
-    }
-    let numerator = size_q * price;
-    let increment = percolator::POS_SCALE - 1;
-    if numerator > u128::MAX - increment {
-        return None;
-    }
-    Some((numerator + increment) / percolator::POS_SCALE)
+    inv_085_big_risk_notional(size_q, price)
 }
 
 fn inv_085_batch_leg_fee_oracle(abs_size_q: u128, exec_price: u64, fee_bps: u64) -> Option<u128> {
-    if abs_size_q == 0 || fee_bps == 0 {
-        return Some(0);
-    }
-    let notional = inv_085_risk_notional_ceil_oracle(abs_size_q, exec_price)?;
-    if notional == 0 {
-        return Some(0);
-    }
-    let fee_bps = u128::from(fee_bps);
-    if notional > u128::MAX / fee_bps {
-        return None;
-    }
-    let product = notional * fee_bps;
-    let denominator = u128::from(percolator::MAX_MARGIN_BPS);
-    Some(product / denominator + u128::from(product % denominator != 0))
+    inv_085_big_batch_leg_fee(abs_size_q, exec_price, fee_bps)
 }
 
 fn inv_085_fee_bps_exhaustive_oracle(
@@ -623,6 +630,91 @@ fn v16_program_policy_arithmetic_matches_independent_full_width_corpus() {
 }
 
 #[test]
+fn v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries() {
+    const VALUES: &[u128] = &[
+        0,
+        1,
+        2,
+        9_999,
+        10_000,
+        u64::MAX as u128,
+        u64::MAX as u128 + 1,
+        u128::MAX / 2,
+        u128::MAX - 1,
+        u128::MAX,
+    ];
+    const U64_FACTORS: &[u64] = &[0, 1, 2, 9_999, 10_000, u32::MAX as u64, u64::MAX];
+    const SHARE_BPS: &[u16] = &[0, 1, 9_999, 10_000, 10_001, u16::MAX];
+
+    for &value in VALUES {
+        for &share_bps in SHARE_BPS {
+            assert_eq!(
+                percolator_prog::policy_v16::fee_share_floor(value, share_bps),
+                inv_085_big_mul_div_floor(value, u64::from(share_bps), 10_000),
+                "fee-share bigint divergence for value={value}, share={share_bps}"
+            );
+        }
+        for &factor in U64_FACTORS {
+            assert_eq!(
+                percolator_prog::policy_v16::risk_notional_ceil(value, factor),
+                inv_085_big_risk_notional(value, factor),
+                "risk-notional bigint divergence for value={value}, price={factor}"
+            );
+            assert_eq!(
+                percolator_prog::policy_v16::two_sided_trade_fee_paid(value, factor),
+                inv_085_big_two_sided_fee(value, factor),
+                "two-sided-fee bigint divergence for value={value}, fee={factor}"
+            );
+            assert_eq!(
+                percolator_prog::policy_v16::batch_leg_fee(value, factor, factor),
+                inv_085_big_batch_leg_fee(value, factor, factor),
+                "batch-fee bigint divergence for value={value}, factor={factor}"
+            );
+        }
+        for &denominator in VALUES {
+            assert_eq!(
+                percolator_prog::policy_v16::ceil_div_u128(value, denominator),
+                inv_085_big_ceil_div(value, denominator),
+                "ceil-div bigint divergence for value={value}, denominator={denominator}"
+            );
+        }
+    }
+}
+
+#[test]
+fn v16_program_public_arithmetic_envelope_is_strictly_inside_u128() {
+    let max_risk_notional =
+        inv_085_big_risk_notional(percolator::MAX_TRADE_SIZE_Q, percolator::MAX_ORACLE_PRICE)
+            .expect("public max trade notional fits u128");
+    assert_eq!(
+        percolator_prog::policy_v16::risk_notional_ceil(
+            percolator::MAX_TRADE_SIZE_Q,
+            percolator::MAX_ORACLE_PRICE,
+        ),
+        Some(max_risk_notional)
+    );
+    let max_externality_notional = max_risk_notional
+        .checked_mul(2)
+        .expect("two-sided public externality fits");
+    let max_mark_fee = inv_085_big_mul_div_ceil(
+        max_externality_notional,
+        percolator::MAX_TRADING_FEE_BPS,
+        percolator::MAX_MARGIN_BPS,
+    )
+    .expect("public mark fee fits u128");
+    assert!(
+        max_risk_notional < u128::MAX / 1_000_000_000
+            && max_externality_notional < u128::MAX / 1_000_000_000
+            && max_mark_fee < u128::MAX / 1_000_000_000,
+        "public trade arithmetic retains at least nine decimal orders of u128 headroom"
+    );
+    assert_eq!(
+        percolator_prog::policy_v16::fee_share_floor(percolator::MAX_VAULT_TVL, 10_000),
+        Some(percolator::MAX_VAULT_TVL)
+    );
+}
+
+#[test]
 fn v16_program_market_init_fee_matches_repeated_doubling_at_supported_and_overflow_edges() {
     let cases = [
         (0, 0usize),
@@ -1037,10 +1129,9 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         ArithmeticOwner { function: "scale_decimal_to_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
         ArithmeticOwner { function: "compose_price_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
         ArithmeticOwner { function: "clamp_toward_engine_dt", class: "ORACLE", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
-        ArithmeticOwner { function: "fee_share_floor", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "mul_div_u128_by_u64", class: "POLICY", evidence: "v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries" },
         ArithmeticOwner { function: "permissionless_market_init_fee_for_asset", class: "POLICY", evidence: "v16_program_market_init_fee_matches_repeated_doubling_at_supported_and_overflow_edges" },
-        ArithmeticOwner { function: "risk_notional_ceil", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
-        ArithmeticOwner { function: "batch_leg_fee", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "ceil_div_u128", class: "POLICY", evidence: "v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries" },
         ArithmeticOwner { function: "price_move_bps_ceil", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
         ArithmeticOwner { function: "collected_fee_supported_mark", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
         ArithmeticOwner { function: "premium_funding_rate_e9", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
