@@ -4607,6 +4607,67 @@ pub mod oracle_v16 {
         Ok(out as u64)
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SwitchboardObservationV16 {
+        pub feed_hash: [u8; 32],
+        pub min_sample_size: u8,
+        pub account_update_time: i64,
+        pub value: i128,
+        pub std_dev: i128,
+        pub num_samples: u8,
+        pub result_slot: u64,
+        pub publish_time: i64,
+    }
+
+    pub fn read_switchboard_selected_publish_time(
+        submission_timestamps: &[u8],
+        submission_idx: u8,
+    ) -> Result<i64, ProgramError> {
+        if submission_idx as usize >= SB_SUBMISSION_CAP {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        read_i64_le(
+            submission_timestamps,
+            submission_idx as usize * core::mem::size_of::<i64>(),
+        )
+    }
+
+    pub fn validate_switchboard_observation_e6(
+        observation: SwitchboardObservationV16,
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+        conf_bps: u16,
+    ) -> Result<(u64, i64), ProgramError> {
+        if observation.feed_hash == [0u8; 32]
+            || observation.min_sample_size == 0
+            || observation.num_samples < observation.min_sample_size
+            || observation.result_slot == 0
+            || observation.account_update_time <= 0
+            || observation.value <= 0
+            || observation.std_dev < 0
+        {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        if observation.publish_time <= 0
+            || !oracle_publish_time_is_fresh(
+                observation.publish_time,
+                now_unix_ts,
+                max_staleness_secs,
+            )
+        {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        let value_u = observation.value as u128;
+        if oracle_confidence_is_too_wide(observation.std_dev as u128, value_u, conf_bps) {
+            return Err(PercolatorError::OracleConfTooWide.into());
+        }
+        let out = value_u / SWITCHBOARD_RESULT_SCALE;
+        if out == 0 || out > percolator::MAX_ORACLE_PRICE as u128 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        Ok((out as u64, observation.publish_time))
+    }
+
     fn read_switchboard_price_e6_from_bytes(
         account_key: &Pubkey,
         data: &[u8],
@@ -4632,41 +4693,31 @@ pub mod oracle_v16 {
         let value = read_i128_le(&data, SB_OFF_RESULT_VALUE)?;
         let std_dev = read_i128_le(&data, SB_OFF_RESULT_STD_DEV)?;
         let num_samples = data[SB_OFF_RESULT_NUM_SAMPLES];
-        let submission_idx = data[SB_OFF_RESULT_SUBMISSION_IDX] as usize;
+        let submission_idx = data[SB_OFF_RESULT_SUBMISSION_IDX];
         let result_slot = read_u64_le(&data, SB_OFF_RESULT_SLOT)?;
-        if feed_hash == [0u8; 32]
-            || min_sample_size == 0
-            || num_samples < min_sample_size
-            || submission_idx >= SB_SUBMISSION_CAP
-            || result_slot == 0
-            || account_update_time <= 0
-            || value <= 0
-            || std_dev < 0
-        {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
         // PullFeed.last_update_timestamp dates the account write. It can advance while the
         // aggregate CurrentResult remains unchanged, so it cannot establish price freshness.
         // submission_idx identifies the submission carrying CurrentResult.value; age that exact
         // observation instead and retain it as the monotonic provenance tracked by the profile.
-        let publish_time = read_i64_le(
-            &data,
-            SB_OFF_SUBMISSION_TIMESTAMPS + submission_idx * core::mem::size_of::<i64>(),
+        let publish_time = read_switchboard_selected_publish_time(
+            &data[SB_OFF_SUBMISSION_TIMESTAMPS..],
+            submission_idx,
         )?;
-        if publish_time <= 0
-            || !oracle_publish_time_is_fresh(publish_time, now_unix_ts, max_staleness_secs)
-        {
-            return Err(PercolatorError::OracleStale.into());
-        }
-        let value_u = value as u128;
-        if oracle_confidence_is_too_wide(std_dev as u128, value_u, conf_bps) {
-            return Err(PercolatorError::OracleConfTooWide.into());
-        }
-        let out = value_u / SWITCHBOARD_RESULT_SCALE;
-        if out == 0 || out > percolator::MAX_ORACLE_PRICE as u128 {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
-        Ok((out as u64, publish_time))
+        validate_switchboard_observation_e6(
+            SwitchboardObservationV16 {
+                feed_hash,
+                min_sample_size,
+                account_update_time,
+                value,
+                std_dev,
+                num_samples,
+                result_slot,
+                publish_time,
+            },
+            now_unix_ts,
+            max_staleness_secs,
+            conf_bps,
+        )
     }
 
     fn read_chainlink_price_e6_from_bytes(
