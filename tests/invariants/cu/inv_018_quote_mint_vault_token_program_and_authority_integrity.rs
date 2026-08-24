@@ -4242,6 +4242,16 @@ fn v16_public_backing_earnings_withdrawal_matches_spl_and_internal_quote_deltas(
         earned,
         "the provider ledger records the same exact withdrawal"
     );
+    assert_eq!(
+        ledger_after.total_earnings_atoms - ledger_before.total_earnings_atoms,
+        earned,
+        "the public fee route records the same generated earnings before withdrawal"
+    );
+    assert_eq!(
+        ledger_after.last_observed_bucket_earnings_atoms,
+        earnings_before - earned,
+        "the persisted earnings observation follows the public bucket withdrawal"
+    );
 }
 
 #[test]

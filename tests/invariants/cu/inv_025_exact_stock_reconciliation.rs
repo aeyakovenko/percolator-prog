@@ -75,15 +75,21 @@ fn v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks
     assert_eq!(env.market_state().1.insurance, 5_000);
     assert_exact_stock(&env, 65_000, "after insurance withdraw");
 
-    env.top_up_backing_bucket(0, 11_000, 100);
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 0, 11_000, 100);
     assert_domain_backing_mirror(&env, 0, 11_000, "after backing top-up");
     assert_exact_stock(&env, 76_000, "after backing top-up");
 
     let backing_dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
-    env.withdraw_backing_bucket_to_admin_token_with_cu(backing_dest, 0, 4_000);
+    env.withdraw_backing_bucket_with_ledger_to_admin_token_with_cu(ledger, backing_dest, 0, 4_000);
     assert_eq!(env.token_amount(backing_dest), 4_000);
     assert_domain_backing_mirror(&env, 0, 7_000, "after backing withdraw");
     assert_exact_stock(&env, 72_000, "after backing withdraw");
+    let ledger_state =
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_principal_atoms, 7_000);
+    assert_eq!(ledger_state.total_deposited_atoms, 11_000);
+    assert_eq!(ledger_state.total_principal_withdrawn_atoms, 4_000);
 
     let market_before = env.svm.get_account(&env.market).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
@@ -294,4 +300,97 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     let ledger_state = state::read_insurance_ledger(&ledger_data).unwrap();
     assert_eq!(ledger_state.cumulative_loss_atoms, 20);
     assert_eq!(ledger_state.last_observed_insurance_atoms, 110);
+}
+
+#[test]
+fn v16_program_insurance_ledger_profit_and_loss_follow_public_routes() {
+    const INITIAL_INSURANCE: u128 = 1_000;
+    const MARKET_INIT_FEE: u128 = 37;
+    const INITIAL_PRICE: u64 = 100;
+
+    let mut env = V16CuEnv::new();
+    let ledger = env.insurance_ledger_account();
+    env.top_up_insurance_with_ledger_with_cu(ledger, INITIAL_INSURANCE);
+    let read_ledger = |env: &V16CuEnv| {
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap()
+    };
+    assert_eq!(
+        read_ledger(&env).last_observed_insurance_atoms,
+        INITIAL_INSURANCE
+    );
+
+    // A permissionless asset-init fee is protocol earnings, not provider principal.
+    env.update_market_init_fee_policy_with_cu(MARKET_INIT_FEE);
+    env.svm.warp_to_slot(1);
+    let creator = Keypair::new();
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        INITIAL_PRICE,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        MARKET_INIT_FEE,
+    );
+    env.sync_insurance_ledger_with_cu(ledger);
+    let after_profit = read_ledger(&env);
+    assert_eq!(after_profit.cumulative_profit_atoms, MARKET_INIT_FEE);
+    assert_eq!(after_profit.cumulative_loss_atoms, 0);
+    assert_eq!(
+        after_profit.last_observed_insurance_atoms,
+        INITIAL_INSURANCE + MARKET_INIT_FEE,
+    );
+
+    // A publicly liquidated insolvent counterparty consumes real asset-0 insurance.
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 200);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (2 * POS_SCALE) as i128,
+        INITIAL_PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 1_000);
+    env.svm.warp_to_slot(4);
+    env.crank_steps(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(0),
+        },
+        4,
+    );
+    let insurance_after_loss = env.market_state().1.insurance;
+    assert!(
+        insurance_after_loss < after_profit.last_observed_insurance_atoms,
+        "public insolvency must spend nonzero insurance"
+    );
+    env.sync_insurance_ledger_with_cu(ledger);
+    let after_loss = read_ledger(&env);
+    assert_eq!(after_loss.cumulative_profit_atoms, MARKET_INIT_FEE);
+    assert_eq!(
+        after_loss.cumulative_loss_atoms,
+        after_profit.last_observed_insurance_atoms - insurance_after_loss,
+        "ledger loss equals the exact publicly consumed insurance stock"
+    );
+    assert_eq!(
+        after_loss.last_observed_insurance_atoms,
+        insurance_after_loss,
+    );
+    assert_eq!(
+        env.token_amount(env.vault) as u128,
+        env.market_state().1.vault
+    );
 }

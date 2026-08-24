@@ -536,23 +536,25 @@ pub mod state {
         pub permissionless_resolve_stale_slots: u64,
         pub force_close_delay_slots: u64,
         pub last_good_oracle_slot: u64,
-        pub insurance_withdraw_deposit_remaining: u128,
-        pub insurance_withdraw_max_bps: u16,
+        // Reserved wire space from the removed insurance-withdraw policy. These fields never had
+        // a public writer or complete withdrawal enforcement and must remain zero.
+        pub _reserved_insurance_withdraw_deposit_remaining: u128,
+        pub _reserved_insurance_withdraw_max_bps: u16,
         pub liquidation_cranker_fee_share_bps: u16,
         pub maintenance_cranker_fee_share_bps: u16,
         pub backing_trade_fee_bps_long: u16,
         pub unit_scale: u32,
         pub conf_filter_bps: u16,
         pub backing_trade_fee_bps_short: u16,
-        pub insurance_withdraw_deposits_only: u8,
+        pub _reserved_insurance_withdraw_deposits_only: u8,
         pub oracle_mode: u8,
         pub oracle_leg_count: u8,
         pub oracle_leg_flags: u8,
         pub invert: u8,
         pub _padding0: u8,
         pub free_market_slot_count: u16,
-        pub insurance_withdraw_cooldown_slots: u64,
-        pub last_insurance_withdraw_slot: u64,
+        pub _reserved_insurance_withdraw_cooldown_slots: u64,
+        pub _reserved_last_insurance_withdraw_slot: u64,
         pub max_staleness_secs: u64,
         pub hybrid_soft_stale_slots: u64,
         pub mark_ewma_e6: u64,
@@ -1271,11 +1273,12 @@ pub mod state {
         {
             return Err(ProgramError::InvalidAccountData);
         }
-        if !insurance_withdraw_policy_shape_ok(
-            config.insurance_withdraw_max_bps,
-            config.insurance_withdraw_deposits_only,
-            config.insurance_withdraw_cooldown_slots,
-        ) || config.liquidation_cranker_fee_share_bps > 10_000
+        if config._reserved_insurance_withdraw_deposit_remaining != 0
+            || config._reserved_insurance_withdraw_max_bps != 0
+            || config._reserved_insurance_withdraw_deposits_only != 0
+            || config._reserved_insurance_withdraw_cooldown_slots != 0
+            || config._reserved_last_insurance_withdraw_slot != 0
+            || config.liquidation_cranker_fee_share_bps > 10_000
             || config.maintenance_cranker_fee_share_bps > 10_000
             || !backing_trade_fee_policy_shape_ok(
                 config.backing_trade_fee_bps_long,
@@ -1363,21 +1366,6 @@ pub mod state {
         }
 
         Ok(())
-    }
-
-    #[inline]
-    pub(super) fn insurance_withdraw_policy_shape_ok(
-        max_bps: u16,
-        deposits_only: u8,
-        cooldown_slots: u64,
-    ) -> bool {
-        if max_bps > 10_000 || deposits_only > 1 {
-            return false;
-        }
-        if max_bps == 0 || deposits_only != 0 {
-            return true;
-        }
-        max_bps < 10_000 && cooldown_slots != 0
     }
 
     #[inline]
@@ -7228,23 +7216,23 @@ pub mod processor {
             permissionless_resolve_stale_slots: 0,
             force_close_delay_slots: 0,
             last_good_oracle_slot: init_slot,
-            insurance_withdraw_deposit_remaining: 0,
-            insurance_withdraw_max_bps: 0,
+            _reserved_insurance_withdraw_deposit_remaining: 0,
+            _reserved_insurance_withdraw_max_bps: 0,
             liquidation_cranker_fee_share_bps: 0,
             maintenance_cranker_fee_share_bps: 0,
             backing_trade_fee_bps_long: 0,
             backing_trade_fee_bps_short: 0,
             unit_scale: 0,
             conf_filter_bps: 0,
-            insurance_withdraw_deposits_only: 0,
+            _reserved_insurance_withdraw_deposits_only: 0,
             oracle_mode: constants::ORACLE_MODE_MANUAL,
             oracle_leg_count: 0,
             oracle_leg_flags: 0,
             invert: 0,
             _padding0: 0,
             free_market_slot_count: 0,
-            insurance_withdraw_cooldown_slots: 0,
-            last_insurance_withdraw_slot: 0,
+            _reserved_insurance_withdraw_cooldown_slots: 0,
+            _reserved_last_insurance_withdraw_slot: 0,
             max_staleness_secs: 0,
             hybrid_soft_stale_slots: 0,
             mark_ewma_e6: initial_price,
@@ -9525,10 +9513,9 @@ pub mod processor {
         verify_vault_token_account(vault_token, &vault_authority, &mint)?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(source_token, amount_u64)?;
-        let mut cfg_after = None;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
@@ -9569,13 +9556,6 @@ pub mod processor {
                     .checked_add(amount)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
             }
-            if cfg.insurance_withdraw_deposits_only != 0 {
-                cfg.insurance_withdraw_deposit_remaining = cfg
-                    .insurance_withdraw_deposit_remaining
-                    .checked_add(amount)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                cfg_after = Some(cfg);
-            }
             group.validate_shape().map_err(map_v16_error)?;
             if let (Some(data), Some((ledger, initialized))) =
                 (ledger_data.as_deref_mut(), ledger_state.as_ref())
@@ -9590,9 +9570,6 @@ pub mod processor {
             )?;
         }
         transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
-        if let Some(cfg) = cfg_after {
-            state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
-        }
         Ok(())
     }
 

@@ -3948,6 +3948,37 @@ impl V16CuEnv {
         .expect("withdraw backing bucket to admin token")
     }
 
+    fn withdraw_backing_bucket_with_ledger_to_admin_token_with_cu(
+        &mut self,
+        ledger: Pubkey,
+        dest: Pubkey,
+        domain: u16,
+        amount: u128,
+    ) -> u64 {
+        let market_id = self.asset_market_id(domain / 2);
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::WithdrawBackingBucket {
+                domain,
+                market_id,
+                amount,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("withdraw backing bucket with ledger to admin token")
+    }
+
     fn sync_backing_domain_ledger_with_cu(&mut self, ledger: Pubkey, domain: u16) -> u64 {
         send_tx(
             &mut self.svm,
@@ -6647,6 +6678,46 @@ fn run_backing_residual_counter_trade_path_case(path: BackingResidualCounterTrad
         synced.residual_recovered_atoms(),
         0,
         "{path:?} conversion is a rewardable residual receive, not a recovery"
+    );
+
+    let (refill_source, refill_cu) = env.top_up_backing_bucket_with_ledger_with_cu(
+        ledger,
+        WINNING_DOMAIN.into(),
+        EXPECTED_PNL,
+        10,
+    );
+    assert_cu_within(
+        &format!("{path:?} residual-counter refill"),
+        refill_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(refill_source), 0);
+    env.svm.expire_blockhash();
+    env.sync_backing_domain_ledger_with_cu(ledger, WINNING_DOMAIN.into());
+    let recovered = read_ledger(&env);
+    assert_eq!(
+        recovered.residual_received_atoms(),
+        EXPECTED_PNL,
+        "{path:?} provider refill cannot erase previously realized loss"
+    );
+    assert_eq!(
+        recovered.residual_recovered_atoms(),
+        EXPECTED_PNL,
+        "{path:?} provider refill records the exact public recovery delta"
+    );
+    assert_eq!(
+        recovered.last_observed_unavailable_principal_atoms, 0,
+        "{path:?} full refill clears the observed unavailable principal"
+    );
+    let (_, recovered_group) = env.market_state();
+    assert_eq!(
+        recovered_group.source_backing_buckets[WINNING_DOMAIN as usize].consumed_liened_backing_num,
+        0,
+        "{path:?} public refill clears the consumed backing receivable"
+    );
+    assert_eq!(
+        recovered_group.source_credit[WINNING_DOMAIN as usize].provider_receivable_num, 0,
+        "{path:?} source and provider recovery mirrors stay exact"
     );
 }
 // security.md sweep — F-TRADENOCPI-FEE fix regression: the TradeNoCpi fee is now billed on the asset

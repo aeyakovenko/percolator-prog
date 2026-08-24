@@ -7,10 +7,12 @@
 //!
 //! Evidence in this file (I/C): public LiteSVM tests cover two high-impact
 //! controls with writer/read/enforcement behavior: permissionless resolve timing
-//! policy and asset activation cooldown. The static rosters below also inventory
-//! every field in all six wrapper-owned persisted structs and require category-specific
-//! writer/read/validation edges. Engine-owned fields remain the engine proof boundary.
-//! Not every wrapper field yet has an independent public mutation witness.
+//! policy and asset activation cooldown. Five unwritable insurance-withdraw pseudo-controls are
+//! retained only as zero-validated reserved wire space, and a public top-up/withdrawal composition
+//! proves they are not hidden accounting state. The static rosters below also inventory every
+//! field in all six wrapper-owned persisted structs and require category-specific
+//! writer/read/validation edges plus exactly one named executable mutation witness for every
+//! non-padding field. Engine-owned fields remain the engine proof boundary.
 
 use super::*;
 
@@ -67,6 +69,13 @@ fn assert_source_edges(source: &str, class: &str, edges: &[&str]) {
             "{class} missing writer/read/validation edge: {edge}",
         );
     }
+}
+
+fn assert_named_witness(source: &str, label: &str, witness: &str) {
+    assert!(
+        source.contains(&format!("fn {witness}")),
+        "{label} missing executable public mutation witness {witness}",
+    );
 }
 
 #[test]
@@ -148,19 +157,19 @@ fn v16_program_wrapper_config_static_inventory_covers_every_persisted_field() {
             ],
         ),
         (
-            "insurance_withdraw_deposit_remaining",
-            "disabled-policy-derived-counter",
+            "_reserved_insurance_withdraw_deposit_remaining",
+            "layout-reserved",
             &[
-                "cfg.insurance_withdraw_deposit_remaining",
-                "insurance_withdraw_deposit_remaining: 0",
+                "_reserved_insurance_withdraw_deposit_remaining: 0",
+                "config._reserved_insurance_withdraw_deposit_remaining != 0",
             ],
         ),
         (
-            "insurance_withdraw_max_bps",
-            "disabled-policy-field",
+            "_reserved_insurance_withdraw_max_bps",
+            "layout-reserved",
             &[
-                "config.insurance_withdraw_max_bps",
-                "insurance_withdraw_max_bps: 0",
+                "_reserved_insurance_withdraw_max_bps: 0",
+                "config._reserved_insurance_withdraw_max_bps != 0",
             ],
         ),
         (
@@ -209,11 +218,11 @@ fn v16_program_wrapper_config_static_inventory_covers_every_persisted_field() {
             ],
         ),
         (
-            "insurance_withdraw_deposits_only",
-            "disabled-policy-field",
+            "_reserved_insurance_withdraw_deposits_only",
+            "layout-reserved",
             &[
-                "if cfg.insurance_withdraw_deposits_only != 0",
-                "insurance_withdraw_deposits_only: 0",
+                "_reserved_insurance_withdraw_deposits_only: 0",
+                "config._reserved_insurance_withdraw_deposits_only != 0",
             ],
         ),
         (
@@ -252,17 +261,20 @@ fn v16_program_wrapper_config_static_inventory_covers_every_persisted_field() {
             &["cfg.free_market_slot_count", "free_market_slot_count: 0"],
         ),
         (
-            "insurance_withdraw_cooldown_slots",
-            "disabled-policy-field",
+            "_reserved_insurance_withdraw_cooldown_slots",
+            "layout-reserved",
             &[
-                "config.insurance_withdraw_cooldown_slots",
-                "insurance_withdraw_cooldown_slots: 0",
+                "_reserved_insurance_withdraw_cooldown_slots: 0",
+                "config._reserved_insurance_withdraw_cooldown_slots != 0",
             ],
         ),
         (
-            "last_insurance_withdraw_slot",
-            "disabled-policy-field",
-            &["last_insurance_withdraw_slot: 0"],
+            "_reserved_last_insurance_withdraw_slot",
+            "layout-reserved",
+            &[
+                "_reserved_last_insurance_withdraw_slot: 0",
+                "config._reserved_last_insurance_withdraw_slot != 0",
+            ],
         ),
         (
             "max_staleness_secs",
@@ -423,8 +435,7 @@ fn v16_program_wrapper_config_static_inventory_covers_every_persisted_field() {
                     | "oracle-liveness-mirror"
                     | "oracle-profile-mirror"
                     | "derived-counter"
-                    | "disabled-policy-derived-counter"
-                    | "disabled-policy-field"
+                    | "layout-reserved"
                     | "layout-padding"
             ),
             "{field} has an unknown INV-087 inventory classification: {class}"
@@ -453,6 +464,68 @@ fn v16_program_wrapper_config_static_inventory_covers_every_persisted_field() {
             "WrapperConfigV16 inventory depends on executable witness {witness}"
         );
     }
+}
+
+fn assert_removed_insurance_policy_reserved_zero(cfg: &state::WrapperConfigV16) {
+    assert_eq!(cfg._reserved_insurance_withdraw_deposit_remaining, 0);
+    assert_eq!(cfg._reserved_insurance_withdraw_max_bps, 0);
+    assert_eq!(cfg._reserved_insurance_withdraw_deposits_only, 0);
+    assert_eq!(cfg._reserved_insurance_withdraw_cooldown_slots, 0);
+    assert_eq!(cfg._reserved_last_insurance_withdraw_slot, 0);
+}
+
+#[test]
+fn v16_program_removed_insurance_policy_is_zero_reserved_and_not_hidden_state() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let original_market_len = env.svm.get_account(&env.market).unwrap().data.len();
+    let (initial_cfg, _) = env.market_state();
+    assert_removed_insurance_policy_reserved_zero(&initial_cfg);
+
+    // Every nonzero reserved field fails before write and leaves canonical bytes unchanged.
+    for (label, field) in [
+        ("deposit remaining", 0u8),
+        ("maximum bps", 1),
+        ("deposits only", 2),
+        ("cooldown", 3),
+        ("last withdrawal slot", 4),
+    ] {
+        let mut invalid = initial_cfg;
+        match field {
+            0 => invalid._reserved_insurance_withdraw_deposit_remaining = 1,
+            1 => invalid._reserved_insurance_withdraw_max_bps = 1,
+            2 => invalid._reserved_insurance_withdraw_deposits_only = 1,
+            3 => invalid._reserved_insurance_withdraw_cooldown_slots = 1,
+            4 => invalid._reserved_last_insurance_withdraw_slot = 1,
+            _ => unreachable!(),
+        }
+        let mut candidate = env.svm.get_account(&env.market).unwrap().data;
+        let before = candidate.clone();
+        assert!(
+            state::write_wrapper_config(&mut candidate, &invalid).is_err(),
+            "nonzero reserved {label} must fail closed"
+        );
+        assert_eq!(candidate, before, "failed {label} write must be atomic");
+    }
+
+    let source = env.top_up_insurance(1_000);
+    assert_eq!(env.token_amount(source), 0);
+    assert_removed_insurance_policy_reserved_zero(&env.market_state().0);
+    let (destination, _) = env
+        .try_withdraw_insurance_asset_with_authority(&admin, 0, 1_000)
+        .expect("live insurance authority withdraws its exact top-up");
+    assert_eq!(env.token_amount(destination), 1_000);
+    assert_removed_insurance_policy_reserved_zero(&env.market_state().0);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data.len(),
+        original_market_len,
+        "renaming reserved bytes must preserve the deployed account layout"
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "public insurance round trip preserves engine/SPL custody"
+    );
 }
 
 #[test]
@@ -714,6 +787,418 @@ fn v16_program_wrapper_security_control_roster_has_source_edges_and_witnesses() 
             "{label} missing executable INV-087 witness {witness}"
         );
     }
+}
+
+#[test]
+fn v16_program_every_wrapper_persisted_security_field_has_a_named_mutation_witness() {
+    let local = include_str!("inv_087_no_phantom_controls_or_dead_security_fields.rs");
+    let inv_003 = include_str!("inv_003_portfolio_incarnation_binding.rs");
+    let inv_005 = include_str!("inv_005_authority_incarnation_binding.rs");
+    let inv_012 = include_str!("inv_012_capability_and_delegate_scope.rs");
+    let inv_018 = include_str!("inv_018_quote_mint_vault_token_program_and_authority_integrity.rs");
+    let inv_019 = include_str!("inv_019_cpi_invocation_and_return_data_binding.rs");
+    let inv_020 = include_str!("inv_020_authenticated_clock_slot_and_oracle_provenance.rs");
+    let inv_024 = include_str!("inv_024_attributed_quote_value_conservation.rs");
+    let inv_025 = include_str!("inv_025_exact_stock_reconciliation.rs");
+    let inv_034 = include_str!("inv_034_domain_and_instance_isolation.rs");
+    let inv_036 = include_str!("inv_036_fee_destination_and_policy_version_integrity.rs");
+    let inv_037 = include_str!("inv_037_exact_residual_partition.rs");
+    let inv_038 = include_str!("inv_038_rounding_and_ratio_conservation.rs");
+    let inv_045 = include_str!("inv_045_no_free_mark_movement.rs");
+    let inv_052 = include_str!("inv_052_split_merge_invariance.rs");
+    let inv_054 = include_str!("inv_054_certificate_epoch_completeness.rs");
+    let inv_077 = include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs");
+    let inv_078 = include_str!("inv_078_permissionless_recovery_coverage.rs");
+    let inv_089 = include_str!("inv_089_activation_reactivation_and_initialization_equivalence.rs");
+    let inv_008_stateful =
+        include_str!("../stateful/inv_008_intent_uniqueness_and_bounded_replay.rs");
+    let inv_014_stateful =
+        include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs");
+
+    // Each group names an executable test that changes or consumes the listed persisted fields
+    // through public instructions and checks their security effect. Padding is excluded; reserved
+    // wire fields are included because their required effect is fail-closed zero validation.
+    let groups: &[(&str, &str, &[&str], &str, &str)] = &[
+        (
+            "market authority",
+            "WrapperConfigV16",
+            &["marketauth"],
+            inv_005,
+            "v16_attack_update_authority_requires_new_authority_signature",
+        ),
+        (
+            "base-unit mint policy",
+            "WrapperConfigV16",
+            &["collateral_mint", "secondary_collateral_mint"],
+            inv_018,
+            "v16_attack_base_unit_mints_changeable_only_when_empty",
+        ),
+        (
+            "maintenance charge",
+            "WrapperConfigV16",
+            &["maintenance_fee_per_slot"],
+            inv_024,
+            "v16_attack_maintenance_fee_with_open_position_conserves",
+        ),
+        (
+            "permissionless activation fee",
+            "WrapperConfigV16",
+            &["permissionless_market_init_fee"],
+            inv_036,
+            "v16_attack_permissionless_create_fee_funds_asset0_insurance",
+        ),
+        (
+            "trade fee floor",
+            "WrapperConfigV16",
+            &["trade_fee_base_bps"],
+            local,
+            "v16_program_trade_fee_policy_is_an_enforced_public_admission_control",
+        ),
+        (
+            "permissionless resolve age",
+            "WrapperConfigV16",
+            &["permissionless_resolve_stale_slots"],
+            inv_020,
+            "v16_attack_permissionless_resolve_uses_authenticated_clock_slot",
+        ),
+        (
+            "force-close delay",
+            "WrapperConfigV16",
+            &["force_close_delay_slots"],
+            inv_078,
+            "v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot",
+        ),
+        (
+            "asset-zero oracle mirror",
+            "WrapperConfigV16",
+            &[
+                "last_good_oracle_slot",
+                "unit_scale",
+                "conf_filter_bps",
+                "oracle_mode",
+                "oracle_leg_count",
+                "oracle_leg_flags",
+                "invert",
+                "max_staleness_secs",
+                "hybrid_soft_stale_slots",
+                "mark_ewma_e6",
+                "mark_ewma_last_slot",
+                "mark_ewma_halflife_slots",
+                "mark_min_fee",
+                "oracle_target_price_e6",
+                "oracle_target_publish_time",
+                "oracle_leg_feeds",
+                "oracle_leg_prices_e6",
+                "oracle_leg_publish_times",
+            ],
+            inv_020,
+            "v16_program_composite_profile_shutdown_restart_clears_old_provenance",
+        ),
+        (
+            "removed insurance-policy wire reserve",
+            "WrapperConfigV16",
+            &[
+                "_reserved_insurance_withdraw_deposit_remaining",
+                "_reserved_insurance_withdraw_max_bps",
+                "_reserved_insurance_withdraw_deposits_only",
+                "_reserved_insurance_withdraw_cooldown_slots",
+                "_reserved_last_insurance_withdraw_slot",
+            ],
+            local,
+            "v16_program_removed_insurance_policy_is_zero_reserved_and_not_hidden_state",
+        ),
+        (
+            "liquidation reward share",
+            "WrapperConfigV16",
+            &["liquidation_cranker_fee_share_bps"],
+            local,
+            "v16_program_liquidation_cranker_share_policy_is_enforced_at_public_crank",
+        ),
+        (
+            "maintenance reward share",
+            "WrapperConfigV16",
+            &["maintenance_cranker_fee_share_bps"],
+            inv_077,
+            "v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded",
+        ),
+        (
+            "backing fee policy",
+            "WrapperConfigV16",
+            &[
+                "backing_trade_fee_bps_long",
+                "backing_trade_fee_bps_short",
+                "backing_trade_fee_policy_count",
+                "backing_trade_fee_insurance_share_bps_long",
+                "backing_trade_fee_insurance_share_bps_short",
+            ],
+            inv_038,
+            "v16_attack_backing_fee_split_conserves",
+        ),
+        (
+            "free asset slot count",
+            "WrapperConfigV16",
+            &["free_market_slot_count"],
+            inv_089,
+            "v16_program_reused_slot_matches_fresh_persisted_state_after_public_history",
+        ),
+        (
+            "market-zero fee redirect",
+            "WrapperConfigV16",
+            &["fee_redirect_to_market_0_bps"],
+            inv_036,
+            "v16_attack_fee_redirect_split_lands_correctly",
+        ),
+        (
+            "matcher request sequence",
+            "WrapperConfigV16",
+            &["matcher_req_seq"],
+            inv_019,
+            "v16_program_tradecpi_matcher_req_id_advances_monotonically_on_market",
+        ),
+        (
+            "portfolio incarnation allocator",
+            "WrapperConfigV16",
+            &["next_portfolio_id"],
+            inv_003,
+            "v16_portfolio_incarnation_id_separates_close_and_reuse",
+        ),
+        (
+            "asset oracle configuration and provenance",
+            "AssetOracleProfileV16",
+            &[
+                "oracle_mode",
+                "oracle_leg_count",
+                "oracle_leg_flags",
+                "invert",
+                "unit_scale",
+                "conf_filter_bps",
+                "max_staleness_secs",
+                "hybrid_soft_stale_slots",
+                "oracle_target_price_e6",
+                "oracle_target_publish_time",
+                "last_good_oracle_slot",
+                "oracle_leg_feeds",
+                "oracle_leg_prices_e6",
+                "oracle_leg_publish_times",
+            ],
+            inv_020,
+            "v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundaries",
+        ),
+        (
+            "asset backing fee mirror",
+            "AssetOracleProfileV16",
+            &[
+                "backing_trade_fee_bps_long",
+                "backing_trade_fee_bps_short",
+                "backing_trade_fee_insurance_share_bps_long",
+                "backing_trade_fee_insurance_share_bps_short",
+            ],
+            inv_038,
+            "v16_attack_backing_fee_split_conserves",
+        ),
+        (
+            "asset mark state",
+            "AssetOracleProfileV16",
+            &[
+                "mark_ewma_e6",
+                "mark_ewma_last_slot",
+                "mark_ewma_halflife_slots",
+                "mark_min_fee",
+            ],
+            inv_045,
+            "v16_program_ewma_mark_respects_per_slot_circuit_breaker",
+        ),
+        (
+            "asset movement remainder",
+            "AssetOracleProfileV16",
+            &["price_move_remainder_bps_num"],
+            inv_052,
+            "v16_program_target_change_resets_prior_price_movement_remainder",
+        ),
+        (
+            "asset authority tuple",
+            "AssetOracleProfileV16",
+            &[
+                "insurance_authority",
+                "insurance_operator",
+                "backing_bucket_authority",
+                "oracle_authority",
+                "asset_admin",
+            ],
+            inv_005,
+            "v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable",
+        ),
+        (
+            "funding mark checkpoints",
+            "AssetOracleProfileV16",
+            &[
+                "funding_mark_e6",
+                "funding_mark_pending_e6",
+                "funding_mark_pending_slot",
+            ],
+            inv_054,
+            "v16_attack_target_and_funding_epochs_invalidate_public_released_pnl_cert",
+        ),
+        (
+            "superseding retained controls",
+            "AssetControlSequencesV16",
+            &[
+                "oracle_observation",
+                "backing_fee_long",
+                "backing_fee_short",
+                "trade_fee",
+                "liquidation_fee",
+                "maintenance_fee",
+                "fee_redirect",
+                "market_init_fee",
+                "permissionless_resolve",
+            ],
+            inv_014_stateful,
+            "v16_program_superseded_control_matrix_rejects_stale_overwrites",
+        ),
+        (
+            "retryable top-up controls",
+            "AssetControlSequencesV16",
+            &["insurance_top_up", "backing_top_up"],
+            inv_008_stateful,
+            "v16_program_retry_operation_matrix_rejects_every_stale_retry",
+        ),
+        (
+            "backing ledger market identity",
+            "BackingDomainLedgerAccountV16",
+            &["market_group"],
+            inv_034,
+            "v16_attack_backing_ledger_market_binding_enforced",
+        ),
+        (
+            "backing ledger authority and domain identity",
+            "BackingDomainLedgerAccountV16",
+            &["authority", "domain"],
+            inv_034,
+            "v16_attack_backing_ledger_domain_binding_enforced",
+        ),
+        (
+            "backing principal ledger",
+            "BackingDomainLedgerAccountV16",
+            &[
+                "total_principal_atoms",
+                "total_deposited_atoms",
+                "total_principal_withdrawn_atoms",
+            ],
+            inv_025,
+            "v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks",
+        ),
+        (
+            "backing earnings ledger",
+            "BackingDomainLedgerAccountV16",
+            &[
+                "total_earnings_atoms",
+                "total_earnings_withdrawn_atoms",
+                "last_observed_bucket_earnings_atoms",
+            ],
+            inv_018,
+            "v16_public_backing_earnings_withdrawal_matches_spl_and_internal_quote_deltas",
+        ),
+        (
+            "backing loss and recovery ledger",
+            "BackingDomainLedgerAccountV16",
+            &[
+                "cumulative_loss_atoms",
+                "cumulative_recovery_atoms",
+                "last_observed_unavailable_principal_atoms",
+            ],
+            inv_037,
+            "v16_bpf_backing_residual_reward_counter_covers_all_trade_paths",
+        ),
+        (
+            "insurance ledger market identity",
+            "InsuranceLedgerAccountV16",
+            &["market_group"],
+            inv_034,
+            "v16_attack_insurance_ledger_market_binding_enforced",
+        ),
+        (
+            "insurance ledger authority identity",
+            "InsuranceLedgerAccountV16",
+            &["authority"],
+            inv_034,
+            "v16_attack_insurance_ledger_authority_binding_enforced",
+        ),
+        (
+            "insurance principal ledger",
+            "InsuranceLedgerAccountV16",
+            &["total_principal_atoms", "total_deposited_atoms"],
+            inv_025,
+            "v16_bpf_accounting_ledger_tags_are_bounded_and_update_state",
+        ),
+        (
+            "insurance withdrawal ledger",
+            "InsuranceLedgerAccountV16",
+            &["total_withdrawn_atoms"],
+            inv_005,
+            "v16_attack_live_asset_insurance_withdraw_uses_operator_not_authority",
+        ),
+        (
+            "insurance profit and loss ledger",
+            "InsuranceLedgerAccountV16",
+            &[
+                "cumulative_profit_atoms",
+                "cumulative_loss_atoms",
+                "last_observed_insurance_atoms",
+            ],
+            inv_025,
+            "v16_program_insurance_ledger_profit_and_loss_follow_public_routes",
+        ),
+        (
+            "portfolio matcher capability",
+            "PortfolioMatcherConfigV16",
+            &[
+                "matcher_program",
+                "matcher_context",
+                "matcher_delegate",
+                "control",
+            ],
+            inv_012,
+            "v16_program_tradecpi_requires_exact_lp_authorized_matcher_tuple",
+        ),
+    ];
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let mut witnessed = std::collections::BTreeSet::new();
+    for (label, struct_name, fields, witness_source, witness) in groups {
+        assert_named_witness(witness_source, label, witness);
+        let persisted = persisted_struct_fields_from_source(production, struct_name);
+        for field in *fields {
+            assert!(
+                persisted.contains(field),
+                "{label} names absent persisted field {struct_name}.{field}",
+            );
+            assert!(
+                witnessed.insert(format!("{struct_name}.{field}")),
+                "{struct_name}.{field} has duplicate mutation-witness ownership",
+            );
+        }
+    }
+
+    let mut expected = std::collections::BTreeSet::new();
+    for struct_name in [
+        "WrapperConfigV16",
+        "AssetOracleProfileV16",
+        "AssetControlSequencesV16",
+        "BackingDomainLedgerAccountV16",
+        "InsuranceLedgerAccountV16",
+        "PortfolioMatcherConfigV16",
+    ] {
+        for field in persisted_struct_fields_from_source(production, struct_name) {
+            if !field.starts_with("_padding") {
+                expected.insert(format!("{struct_name}.{field}"));
+            }
+        }
+    }
+    assert_eq!(
+        witnessed, expected,
+        "every non-padding wrapper-owned persisted field needs exactly one executable mutation witness",
+    );
 }
 
 #[test]
