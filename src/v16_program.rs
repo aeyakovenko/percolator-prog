@@ -12000,6 +12000,11 @@ pub mod processor {
                             asset_index,
                             &profile,
                         )?;
+                        write_control_sequences_to_view(
+                            &mut group,
+                            asset_index,
+                            &state::AssetControlSequencesV16::default(),
+                        )?;
                         group.validate_shape().map_err(map_v16_error)?;
                         reuse_cfg_after = Some(cfg);
                         reuse_activated = true;
@@ -12205,6 +12210,13 @@ pub mod processor {
                     profile.backing_bucket_authority = backing_bucket_authority;
                     profile.oracle_authority = oracle_authority;
                     profile.asset_admin = authority.key.to_bytes();
+                    if was_retired {
+                        write_control_sequences_to_view(
+                            &mut group,
+                            asset_index,
+                            &state::AssetControlSequencesV16::default(),
+                        )?;
+                    }
                     if asset_index == 0 {
                         mirror_manual_profile_to_base_config(&mut cfg, &profile, true);
                     }

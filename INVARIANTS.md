@@ -1141,11 +1141,13 @@ an independent full recomputation.
 **Statement.** Fresh activation and retired-slot reactivation apply the same nonzero-authority
 checks, generation increments, full recovery/price/rate envelope validation, zero-state
 requirements, configured hard bounds, `support_weight == FULL_SUPPORT_WEIGHT` for Active assets,
-fresh source-credit ledgers, and certificate invalidation. A reactivation route cannot create a
-state forbidden by initial activation.
+fresh source-credit ledgers, fresh per-generation replay watermarks, and certificate invalidation.
+A reactivation route cannot create a state forbidden by initial activation. A prior generation's
+maximum sequence value cannot poison any retained-operation lane in the replacement generation.
 
 **Required tests.** Differentially compare fresh activation and reuse with identical intended
-configuration; inject zero authorities, residual state, stale epochs, and unsupported N.
+configuration; inject zero authorities, residual state, stale epochs, exhausted replay watermarks,
+and unsupported N.
 **Verification:** P, F, I, M
 
 ---
