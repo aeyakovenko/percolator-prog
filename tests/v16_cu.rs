@@ -8363,6 +8363,9 @@ mod inv_082_state_indexed_liveness_theorem;
 #[path = "invariants/cu/inv_083_boundary_completeness.rs"]
 mod inv_083_boundary_completeness;
 
+#[path = "invariants/cu/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs"]
+mod inv_084_proof_assumptions_are_reachable_and_nonvacuous;
+
 #[path = "invariants/cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs"]
 mod inv_085_proven_arithmetic_equals_deployed_arithmetic;
 

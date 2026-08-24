@@ -4,13 +4,12 @@
 //! public route or separately proven satisfiable for the modeled transition.
 //! A harness must not make the exploit class impossible by assumption.
 //!
-//! Evidence in this file (P): a compile-time inventory covers every explicit
-//! Kani assumption in all mounted wrapper Kani owners. Source sentinels bind each
-//! inventory entry to its exact predicate and owning proof. A full-width
-//! symbolic partition then proves each current predicate has admitted and
-//! excluded models and pins boundary witnesses that kill common widening or
-//! dropped-clause mutations. Additional harnesses prove constructive valid
-//! witnesses for sequence, decoder, matcher-return, and mark-policy domains.
+//! Evidence in this file (P): full-width symbolic partitions prove each current
+//! predicate has admitted and excluded models and pin boundary witnesses that
+//! kill common widening or dropped-clause mutations. Additional harnesses prove
+//! constructive valid witnesses for sequence, matcher control, decoder,
+//! matcher-return, fee-side attribution, and mark-policy domains. A host-side
+//! source audit owns exact inventory completeness across every mounted module.
 //!
 //! Guarantee boundary: this inventories explicit assumption calls, not all
 //! implicit proof preconditions encoded as branches or concrete fixtures. It
@@ -22,348 +21,6 @@ use percolator::V16Error;
 use percolator_prog::error::{map_v16_error, PercolatorError};
 use percolator_prog::state;
 use solana_program::program_error::ProgramError;
-
-const INV084_ASSUME_TOKEN: &[u8] = b"kani\x3a\x3aassume";
-const INV084_INVENTORY: &str = include_str!("../kani_assumption_inventory.tsv");
-const INV084_KANI_ROOT: &str = include_str!("../../../kani/v16_kani.rs");
-const INV084_SRC_004: &str = include_str!("inv_004_position_episode_binding.rs");
-const INV084_SRC_010: &str = include_str!("inv_010_out_of_order_safety.rs");
-const INV084_SRC_014: &str = include_str!("inv_014_delayed_policy_and_policy_epoch_safety.rs");
-const INV084_SRC_019: &str = include_str!("inv_019_cpi_invocation_and_return_data_binding.rs");
-const INV084_SRC_022: &str =
-    include_str!("inv_022_instruction_decoding_and_schema_upgrade_safety.rs");
-const INV084_SRC_045: &str = include_str!("inv_045_no_free_mark_movement.rs");
-const INV084_SRC_052: &str = include_str!("inv_052_split_merge_invariance.rs");
-const INV084_SRC_080: &str = include_str!("inv_080_error_propagation_and_exact_rollback.rs");
-const INV084_SRC_084: &str =
-    include_str!("inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs");
-const INV084_SRC_085: &str =
-    include_str!("inv_085_proven_arithmetic_equals_deployed_arithmetic.rs");
-
-const INV084_FILE_004: &[u8] = b"tests/invariants/kani/inv_004_position_episode_binding.rs";
-const INV084_FILE_010: &[u8] = b"tests/invariants/kani/inv_010_out_of_order_safety.rs";
-const INV084_FILE_014: &[u8] =
-    b"tests/invariants/kani/inv_014_delayed_policy_and_policy_epoch_safety.rs";
-const INV084_FILE_019: &[u8] =
-    b"tests/invariants/kani/inv_019_cpi_invocation_and_return_data_binding.rs";
-const INV084_FILE_022: &[u8] =
-    b"tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs";
-const INV084_FILE_045: &[u8] = b"tests/invariants/kani/inv_045_no_free_mark_movement.rs";
-const INV084_FILE_052: &[u8] = b"tests/invariants/kani/inv_052_split_merge_invariance.rs";
-const INV084_FILE_080: &[u8] =
-    b"tests/invariants/kani/inv_080_error_propagation_and_exact_rollback.rs";
-const INV084_FILE_084: &[u8] =
-    b"tests/invariants/kani/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs";
-const INV084_FILE_085: &[u8] =
-    b"tests/invariants/kani/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs";
-
-const INV084_ASSUME_ENABLED: &[u8] = b"kani\x3a\x3aassume(enabled <= 1);";
-const INV084_ASSUME_FEED_INDEX: &[u8] = b"kani\x3a\x3aassume(feed_index < feeds.len());";
-const INV084_ASSUME_BYTE_INDEX: &[u8] = b"kani\x3a\x3aassume(byte_index < feeds[0].len());";
-const INV084_ASSUME_POSITIVE_MARKS: &[u8] = b"kani\x3a\x3aassume(old_mark > 0 && quoted_mark > 0);";
-const INV084_ASSUME_ENGINE_TAG: &[u8] = b"kani\x3a\x3aassume(tag < 12);";
-const INV084_ASSUME_DT_BOUND: &[u8] = b"kani\x3a\x3aassume(dt_raw <= 15);";
-
-const INV084_OWNER_MATCHER_TOGGLE: &[u8] = b"fn kani_v16_matcher_toggle_preserves_position_epoch(";
-const INV084_OWNER_HYBRID_DECODE: &[u8] =
-    b"fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields(";
-const INV084_OWNER_FEE_MARK_CLAMP: &[u8] =
-    b"fn kani_v16_fee_supported_mark_clamp_is_directional_and_zero_support_is_noop(";
-const INV084_OWNER_COLLECTED_BASE_FEE: &[u8] =
-    b"fn kani_v16_collected_base_fee_cannot_fund_mark_movement(";
-const INV084_OWNER_ONE_SIDED_FEE: &[u8] =
-    b"fn kani_v16_one_sided_externality_fee_cannot_fund_mark_movement(";
-const INV084_OWNER_ENGINE_ERROR: &[u8] =
-    b"fn kani_v16_inv080_every_engine_error_maps_to_instruction_error(";
-const INV084_OWNER_DT_CLAMP: &[u8] =
-    b"fn kani_v16_inv085_clamp_toward_matches_widened_reference_for_small_symbolic_domain(";
-
-const INV084_ROW_MATCHER_TOGGLE: &[u8] = b"tests/invariants/kani/inv_004_position_episode_binding.rs\t48\tINV-004\tkani_v16_matcher_toggle_preserves_position_epoch\tenabled <= 1\t";
-const INV084_ROW_FEED_INDEX: &[u8] = b"tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs\t1096\tINV-022\tkani_v16_configure_hybrid_oracle_decode_preserves_wire_fields\tfeed_index < feeds.len()\t";
-const INV084_ROW_BYTE_INDEX: &[u8] = b"tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs\t1097\tINV-022\tkani_v16_configure_hybrid_oracle_decode_preserves_wire_fields\tbyte_index < feeds[0].len()\t";
-const INV084_ROW_FEE_MARK_CLAMP: &[u8] = b"tests/invariants/kani/inv_045_no_free_mark_movement.rs\t46\tINV-045\tkani_v16_fee_supported_mark_clamp_is_directional_and_zero_support_is_noop\told_mark > 0 && quoted_mark > 0\t";
-const INV084_ROW_COLLECTED_BASE_FEE: &[u8] = b"tests/invariants/kani/inv_045_no_free_mark_movement.rs\t78\tINV-045\tkani_v16_collected_base_fee_cannot_fund_mark_movement\told_mark > 0 && quoted_mark > 0\t";
-const INV084_ROW_ONE_SIDED_FEE: &[u8] = b"tests/invariants/kani/inv_045_no_free_mark_movement.rs\t108\tINV-045\tkani_v16_one_sided_externality_fee_cannot_fund_mark_movement\told_mark > 0 && quoted_mark > 0\t";
-const INV084_ROW_ENGINE_ERROR: &[u8] = b"tests/invariants/kani/inv_080_error_propagation_and_exact_rollback.rs\t54\tINV-080\tkani_v16_inv080_every_engine_error_maps_to_instruction_error\ttag < 12\t";
-const INV084_ROW_DT_CLAMP: &[u8] = b"tests/invariants/kani/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs\t68\tINV-085\tkani_v16_inv085_clamp_toward_matches_widened_reference_for_small_symbolic_domain\tdt_raw <= 15\t";
-
-const fn inv084_bytes_eq_at(haystack: &[u8], offset: usize, needle: &[u8]) -> bool {
-    if offset + needle.len() > haystack.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < needle.len() {
-        if haystack[offset + i] != needle[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
-const fn inv084_count_token(haystack: &str, needle: &[u8]) -> usize {
-    let bytes = haystack.as_bytes();
-    let mut count = 0;
-    let mut i = 0;
-    while i + needle.len() <= bytes.len() {
-        if inv084_bytes_eq_at(bytes, i, needle) {
-            count += 1;
-            i += needle.len();
-        } else {
-            i += 1;
-        }
-    }
-    count
-}
-
-const fn inv084_line_contains_token(source: &str, target_line: usize, needle: &[u8]) -> bool {
-    let bytes = source.as_bytes();
-    let mut current_line = 1;
-    let mut line_start = 0;
-    let mut i = 0;
-    while i <= bytes.len() {
-        if i == bytes.len() || bytes[i] == b'\n' {
-            if current_line == target_line {
-                let mut offset = line_start;
-                while offset + needle.len() <= i {
-                    if inv084_bytes_eq_at(bytes, offset, needle) {
-                        return true;
-                    }
-                    offset += 1;
-                }
-                return false;
-            }
-            current_line += 1;
-            line_start = i + 1;
-        }
-        i += 1;
-    }
-    false
-}
-
-const fn inv084_line_is_empty(bytes: &[u8], start: usize, end: usize) -> bool {
-    let mut i = start;
-    while i < end {
-        if bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\r' {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
-const fn inv084_line_starts_with(bytes: &[u8], start: usize, end: usize, prefix: &[u8]) -> bool {
-    if start + prefix.len() > end {
-        return false;
-    }
-    inv084_bytes_eq_at(bytes, start, prefix)
-}
-
-const fn inv084_line_file_matches(bytes: &[u8], start: usize, end: usize, file: &[u8]) -> bool {
-    if start + file.len() >= end {
-        return false;
-    }
-    inv084_bytes_eq_at(bytes, start, file) && bytes[start + file.len()] == b'\t'
-}
-
-const fn inv084_line_ends_with(bytes: &[u8], start: usize, end: usize, suffix: &[u8]) -> bool {
-    if start + suffix.len() > end {
-        return false;
-    }
-    inv084_bytes_eq_at(bytes, end - suffix.len(), suffix)
-}
-
-const fn inv084_line_has_required_fields(bytes: &[u8], start: usize, end: usize) -> bool {
-    let mut fields = 0;
-    let mut field_start = start;
-    let mut i = start;
-    while i <= end {
-        if i == end || bytes[i] == b'\t' {
-            if i == field_start {
-                return false;
-            }
-            fields += 1;
-            field_start = i + 1;
-        }
-        i += 1;
-    }
-
-    fields == 7
-        && (inv084_line_ends_with(bytes, start, end, b"NONVACUITY_WITNESS")
-            || inv084_line_ends_with(bytes, start, end, b"ROUTE_ESTABLISHED")
-            || inv084_line_ends_with(bytes, start, end, b"SOLVER_BOUND_RATIONALE"))
-}
-
-const fn inv084_count_inventory_rows_for_file(file: &[u8]) -> usize {
-    let bytes = INV084_INVENTORY.as_bytes();
-    let mut rows = 0;
-    let mut start = 0;
-    let mut i = 0;
-    while i <= bytes.len() {
-        if i == bytes.len() || bytes[i] == b'\n' {
-            if !inv084_line_is_empty(bytes, start, i)
-                && !inv084_line_starts_with(bytes, start, i, b"file\tline\t")
-                && inv084_line_file_matches(bytes, start, i, file)
-            {
-                rows += 1;
-            }
-            start = i + 1;
-        }
-        i += 1;
-    }
-    rows
-}
-
-const fn inv084_count_inventory_rows() -> usize {
-    let bytes = INV084_INVENTORY.as_bytes();
-    let mut rows = 0;
-    let mut start = 0;
-    let mut i = 0;
-    while i <= bytes.len() {
-        if i == bytes.len() || bytes[i] == b'\n' {
-            if !inv084_line_is_empty(bytes, start, i)
-                && !inv084_line_starts_with(bytes, start, i, b"file\tline\t")
-            {
-                rows += 1;
-            }
-            start = i + 1;
-        }
-        i += 1;
-    }
-    rows
-}
-
-const fn inv084_inventory_rows_are_classified() -> bool {
-    let bytes = INV084_INVENTORY.as_bytes();
-    let mut start = 0;
-    let mut i = 0;
-    while i <= bytes.len() {
-        if i == bytes.len() || bytes[i] == b'\n' {
-            if !inv084_line_is_empty(bytes, start, i)
-                && !inv084_line_starts_with(bytes, start, i, b"file\tline\t")
-                && !inv084_line_has_required_fields(bytes, start, i)
-            {
-                return false;
-            }
-            start = i + 1;
-        }
-        i += 1;
-    }
-    true
-}
-
-const INV084_KANI_MODULES_MOUNTED: usize =
-    inv084_count_token(INV084_KANI_ROOT, b"#[path = \"../tests/invariants/kani/");
-
-const INV084_ASSUME_TOTAL: usize = inv084_count_token(INV084_SRC_004, INV084_ASSUME_TOKEN)
-    + inv084_count_token(INV084_SRC_010, INV084_ASSUME_TOKEN)
-    + inv084_count_token(INV084_SRC_014, INV084_ASSUME_TOKEN)
-    + inv084_count_token(INV084_SRC_019, INV084_ASSUME_TOKEN)
-    + inv084_count_token(INV084_SRC_022, INV084_ASSUME_TOKEN)
-    + inv084_count_token(INV084_SRC_045, INV084_ASSUME_TOKEN)
-    + inv084_count_token(INV084_SRC_052, INV084_ASSUME_TOKEN)
-    + inv084_count_token(INV084_SRC_080, INV084_ASSUME_TOKEN)
-    + inv084_count_token(INV084_SRC_084, INV084_ASSUME_TOKEN)
-    + inv084_count_token(INV084_SRC_085, INV084_ASSUME_TOKEN);
-
-const _: () = assert!(INV084_KANI_MODULES_MOUNTED == 17);
-const _: () = assert!(inv084_inventory_rows_are_classified());
-const _: () = assert!(inv084_count_inventory_rows() == INV084_ASSUME_TOTAL);
-const _: () = assert!(
-    inv084_count_inventory_rows_for_file(INV084_FILE_004)
-        == inv084_count_token(INV084_SRC_004, INV084_ASSUME_TOKEN)
-);
-const _: () = assert!(
-    inv084_count_inventory_rows_for_file(INV084_FILE_010)
-        == inv084_count_token(INV084_SRC_010, INV084_ASSUME_TOKEN)
-);
-const _: () = assert!(
-    inv084_count_inventory_rows_for_file(INV084_FILE_014)
-        == inv084_count_token(INV084_SRC_014, INV084_ASSUME_TOKEN)
-);
-const _: () = assert!(
-    inv084_count_inventory_rows_for_file(INV084_FILE_019)
-        == inv084_count_token(INV084_SRC_019, INV084_ASSUME_TOKEN)
-);
-const _: () = assert!(
-    inv084_count_inventory_rows_for_file(INV084_FILE_022)
-        == inv084_count_token(INV084_SRC_022, INV084_ASSUME_TOKEN)
-);
-const _: () = assert!(
-    inv084_count_inventory_rows_for_file(INV084_FILE_045)
-        == inv084_count_token(INV084_SRC_045, INV084_ASSUME_TOKEN)
-);
-const _: () = assert!(
-    inv084_count_inventory_rows_for_file(INV084_FILE_052)
-        == inv084_count_token(INV084_SRC_052, INV084_ASSUME_TOKEN)
-);
-const _: () = assert!(
-    inv084_count_inventory_rows_for_file(INV084_FILE_080)
-        == inv084_count_token(INV084_SRC_080, INV084_ASSUME_TOKEN)
-);
-const _: () = assert!(
-    inv084_count_inventory_rows_for_file(INV084_FILE_084)
-        == inv084_count_token(INV084_SRC_084, INV084_ASSUME_TOKEN)
-);
-const _: () = assert!(
-    inv084_count_inventory_rows_for_file(INV084_FILE_085)
-        == inv084_count_token(INV084_SRC_085, INV084_ASSUME_TOKEN)
-);
-const _: () = assert!(inv084_line_contains_token(
-    INV084_SRC_004,
-    48,
-    INV084_ASSUME_ENABLED
-));
-const _: () = assert!(inv084_line_contains_token(
-    INV084_SRC_022,
-    1096,
-    INV084_ASSUME_FEED_INDEX
-));
-const _: () = assert!(inv084_line_contains_token(
-    INV084_SRC_022,
-    1097,
-    INV084_ASSUME_BYTE_INDEX
-));
-const _: () = assert!(inv084_line_contains_token(
-    INV084_SRC_045,
-    46,
-    INV084_ASSUME_POSITIVE_MARKS
-));
-const _: () = assert!(inv084_line_contains_token(
-    INV084_SRC_045,
-    78,
-    INV084_ASSUME_POSITIVE_MARKS
-));
-const _: () = assert!(inv084_line_contains_token(
-    INV084_SRC_045,
-    108,
-    INV084_ASSUME_POSITIVE_MARKS
-));
-const _: () = assert!(inv084_line_contains_token(
-    INV084_SRC_080,
-    54,
-    INV084_ASSUME_ENGINE_TAG
-));
-const _: () = assert!(inv084_line_contains_token(
-    INV084_SRC_085,
-    68,
-    INV084_ASSUME_DT_BOUND
-));
-const _: () = assert!(inv084_count_token(INV084_SRC_004, INV084_OWNER_MATCHER_TOGGLE) == 1);
-const _: () = assert!(inv084_count_token(INV084_SRC_022, INV084_OWNER_HYBRID_DECODE) == 1);
-const _: () = assert!(inv084_count_token(INV084_SRC_045, INV084_OWNER_FEE_MARK_CLAMP) == 1);
-const _: () = assert!(inv084_count_token(INV084_SRC_045, INV084_OWNER_COLLECTED_BASE_FEE) == 1);
-const _: () = assert!(inv084_count_token(INV084_SRC_045, INV084_OWNER_ONE_SIDED_FEE) == 1);
-const _: () = assert!(inv084_count_token(INV084_SRC_080, INV084_OWNER_ENGINE_ERROR) == 1);
-const _: () = assert!(inv084_count_token(INV084_SRC_085, INV084_OWNER_DT_CLAMP) == 1);
-const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_MATCHER_TOGGLE) == 1);
-const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_FEED_INDEX) == 1);
-const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_BYTE_INDEX) == 1);
-const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_FEE_MARK_CLAMP) == 1);
-const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_COLLECTED_BASE_FEE) == 1);
-const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_ONE_SIDED_FEE) == 1);
-const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_ENGINE_ERROR) == 1);
-const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_DT_CLAMP) == 1);
 
 fn inv084_known_public_instruction_tag(tag: u8) -> bool {
     matches!(
@@ -412,6 +69,26 @@ const fn inv084_matcher_enabled_predicate(enabled: u8) -> bool {
     enabled <= 1
 }
 
+const fn inv084_matcher_fee_cap_predicate(trade_fee_cap_bps: u16) -> bool {
+    trade_fee_cap_bps <= 10_000
+}
+
+const fn inv084_position_epoch_predicate(position_epoch: u64) -> bool {
+    position_epoch < state::PortfolioMatcherConfigV16::position_epoch_max()
+}
+
+const fn inv084_portfolio_id_predicate(portfolio_id: u64) -> bool {
+    portfolio_id != 0
+}
+
+const fn inv084_sequence_predicate(sequence: u64) -> bool {
+    sequence < u64::MAX
+}
+
+const fn inv084_trade_size_predicate(size_q: i128) -> bool {
+    size_q != 0
+}
+
 const fn inv084_feed_index_predicate(feed_index: usize) -> bool {
     feed_index < 3
 }
@@ -434,6 +111,31 @@ const fn inv084_dt_solver_bound_predicate(dt_raw: u8) -> bool {
 
 #[kani::proof]
 fn kani_v16_inv084_explicit_assumptions_have_two_sided_mutation_witnesses() {
+    let trade_fee_cap_bps: u16 = kani::any();
+    let fee_cap_admitted = inv084_matcher_fee_cap_predicate(trade_fee_cap_bps);
+    assert_eq!(fee_cap_admitted, trade_fee_cap_bps <= 10_000);
+    kani::cover!(
+        trade_fee_cap_bps == 10_000 && fee_cap_admitted,
+        "fee-cap upper admitted model"
+    );
+    kani::cover!(
+        trade_fee_cap_bps == 10_001 && !fee_cap_admitted,
+        "fee-cap widening killer"
+    );
+
+    let position_epoch: u64 = kani::any();
+    let epoch_max = state::PortfolioMatcherConfigV16::position_epoch_max();
+    let epoch_admitted = inv084_position_epoch_predicate(position_epoch);
+    assert_eq!(epoch_admitted, position_epoch < epoch_max);
+    kani::cover!(
+        position_epoch == epoch_max - 1 && epoch_admitted,
+        "position-epoch upper admitted model"
+    );
+    kani::cover!(
+        position_epoch == epoch_max && !epoch_admitted,
+        "position-epoch exhaustion model"
+    );
+
     let enabled: u8 = kani::any();
     let enabled_admitted = inv084_matcher_enabled_predicate(enabled);
     assert_eq!(enabled_admitted, enabled == 0 || enabled == 1);
@@ -450,6 +152,37 @@ fn kani_v16_inv084_explicit_assumptions_have_two_sided_mutation_witnesses() {
     assert!(inv084_matcher_enabled_predicate(1));
     assert!(!inv084_matcher_enabled_predicate(2));
     assert!(!inv084_matcher_enabled_predicate(u8::MAX));
+
+    let portfolio_id: u64 = kani::any();
+    let portfolio_admitted = inv084_portfolio_id_predicate(portfolio_id);
+    assert_eq!(portfolio_admitted, portfolio_id != 0);
+    kani::cover!(
+        portfolio_id == 1 && portfolio_admitted,
+        "first portfolio id"
+    );
+    kani::cover!(
+        portfolio_id == 0 && !portfolio_admitted,
+        "reserved portfolio id"
+    );
+
+    let sequence: u64 = kani::any();
+    let sequence_admitted = inv084_sequence_predicate(sequence);
+    assert_eq!(sequence_admitted, sequence != u64::MAX);
+    kani::cover!(
+        sequence == u64::MAX - 1 && sequence_admitted,
+        "sequence upper admitted model"
+    );
+    kani::cover!(
+        sequence == u64::MAX && !sequence_admitted,
+        "sequence exhaustion model"
+    );
+
+    let size_q: i128 = kani::any();
+    let size_admitted = inv084_trade_size_predicate(size_q);
+    assert_eq!(size_admitted, size_q != 0);
+    kani::cover!(size_q == 1 && size_admitted, "positive trade model");
+    kani::cover!(size_q == -1 && size_admitted, "negative trade model");
+    kani::cover!(size_q == 0 && !size_admitted, "zero trade model");
 
     let feed_index: usize = kani::any();
     let feed_index_admitted = inv084_feed_index_predicate(feed_index);
@@ -529,6 +262,32 @@ fn kani_v16_inv084_explicit_assumptions_have_two_sided_mutation_witnesses() {
     assert!(inv084_dt_solver_bound_predicate(15));
     assert!(!inv084_dt_solver_bound_predicate(16));
     assert!(!inv084_dt_solver_bound_predicate(u8::MAX));
+}
+
+#[kani::proof]
+fn kani_v16_inv084_previously_uninventoried_guards_have_constructive_witnesses() {
+    let mut matcher = state::PortfolioMatcherConfigV16::default();
+    assert!(matcher.set_trade_fee_cap_bps(10_000).is_ok());
+    assert_eq!(matcher.trade_fee_cap_bps(), 10_000);
+    assert!(matcher.set_enabled(1).is_ok());
+    assert_eq!(matcher.enabled(), 1);
+    assert!(state::next_portfolio_position_control(matcher.control).is_ok());
+
+    let before_invalid_cap = matcher.control;
+    assert!(matcher.set_trade_fee_cap_bps(10_001).is_err());
+    assert_eq!(matcher.control, before_invalid_cap);
+
+    let exhausted_epoch_control = state::PortfolioMatcherConfigV16::position_epoch_max() << 1;
+    assert!(state::next_portfolio_position_control(exhausted_epoch_control).is_err());
+
+    assert!(state::next_portfolio_matcher_sequence(0, 0).is_ok());
+    assert!(state::next_portfolio_matcher_sequence(u64::MAX, u64::MAX).is_err());
+    assert!(inv084_portfolio_id_predicate(1));
+    assert!(!inv084_portfolio_id_predicate(0));
+
+    assert!(policy_v16::account_fees_to_trade_sides(1, 11, 22).is_some());
+    assert!(policy_v16::account_fees_to_trade_sides(-1, 11, 22).is_some());
+    assert!(policy_v16::account_fees_to_trade_sides(0, 11, 22).is_none());
 }
 
 #[kani::proof]
