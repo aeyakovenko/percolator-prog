@@ -4668,6 +4668,45 @@ pub mod oracle_v16 {
         Ok((out as u64, observation.publish_time))
     }
 
+    pub fn read_switchboard_observation_from_bytes(
+        data: &[u8],
+    ) -> Result<SwitchboardObservationV16, ProgramError> {
+        if data.len() < SWITCHBOARD_PULL_FEED_MIN_LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if data[..8] != SWITCHBOARD_PULL_FEED_DISCRIMINATOR {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let feed_hash: [u8; 32] = data[SB_OFF_FEED_HASH..SB_OFF_FEED_HASH + 32]
+            .try_into()
+            .unwrap();
+        let min_sample_size = data[SB_OFF_MIN_SAMPLE_SIZE];
+        let account_update_time = read_i64_le(data, SB_OFF_LAST_UPDATE_TIMESTAMP)?;
+        let value = read_i128_le(data, SB_OFF_RESULT_VALUE)?;
+        let std_dev = read_i128_le(data, SB_OFF_RESULT_STD_DEV)?;
+        let num_samples = data[SB_OFF_RESULT_NUM_SAMPLES];
+        let submission_idx = data[SB_OFF_RESULT_SUBMISSION_IDX];
+        let result_slot = read_u64_le(data, SB_OFF_RESULT_SLOT)?;
+        // PullFeed.last_update_timestamp dates the account write. It can advance while the
+        // aggregate CurrentResult remains unchanged, so it cannot establish price freshness.
+        // submission_idx identifies the submission carrying CurrentResult.value; age that exact
+        // observation instead and retain it as the monotonic provenance tracked by the profile.
+        let publish_time = read_switchboard_selected_publish_time(
+            &data[SB_OFF_SUBMISSION_TIMESTAMPS..],
+            submission_idx,
+        )?;
+        Ok(SwitchboardObservationV16 {
+            feed_hash,
+            min_sample_size,
+            account_update_time,
+            value,
+            std_dev,
+            num_samples,
+            result_slot,
+            publish_time,
+        })
+    }
+
     fn read_switchboard_price_e6_from_bytes(
         account_key: &Pubkey,
         data: &[u8],
@@ -4679,41 +4718,8 @@ pub mod oracle_v16 {
         if account_key.to_bytes() != *expected_feed_key {
             return Err(PercolatorError::InvalidOracleKey.into());
         }
-        if data.len() < SWITCHBOARD_PULL_FEED_MIN_LEN {
-            return Err(ProgramError::InvalidAccountData);
-        }
-        if data[..8] != SWITCHBOARD_PULL_FEED_DISCRIMINATOR {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
-        let feed_hash: [u8; 32] = data[SB_OFF_FEED_HASH..SB_OFF_FEED_HASH + 32]
-            .try_into()
-            .unwrap();
-        let min_sample_size = data[SB_OFF_MIN_SAMPLE_SIZE];
-        let account_update_time = read_i64_le(&data, SB_OFF_LAST_UPDATE_TIMESTAMP)?;
-        let value = read_i128_le(&data, SB_OFF_RESULT_VALUE)?;
-        let std_dev = read_i128_le(&data, SB_OFF_RESULT_STD_DEV)?;
-        let num_samples = data[SB_OFF_RESULT_NUM_SAMPLES];
-        let submission_idx = data[SB_OFF_RESULT_SUBMISSION_IDX];
-        let result_slot = read_u64_le(&data, SB_OFF_RESULT_SLOT)?;
-        // PullFeed.last_update_timestamp dates the account write. It can advance while the
-        // aggregate CurrentResult remains unchanged, so it cannot establish price freshness.
-        // submission_idx identifies the submission carrying CurrentResult.value; age that exact
-        // observation instead and retain it as the monotonic provenance tracked by the profile.
-        let publish_time = read_switchboard_selected_publish_time(
-            &data[SB_OFF_SUBMISSION_TIMESTAMPS..],
-            submission_idx,
-        )?;
         validate_switchboard_observation_e6(
-            SwitchboardObservationV16 {
-                feed_hash,
-                min_sample_size,
-                account_update_time,
-                value,
-                std_dev,
-                num_samples,
-                result_slot,
-                publish_time,
-            },
+            read_switchboard_observation_from_bytes(data)?,
             now_unix_ts,
             max_staleness_secs,
             conf_bps,

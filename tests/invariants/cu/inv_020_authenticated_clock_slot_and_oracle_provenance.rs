@@ -5240,11 +5240,15 @@ struct CompositeLifecycleCase {
     providers: [EpochMatrixProvider; 3],
     count: u8,
     flags: u8,
+    invert: u8,
+    unit_scale: u32,
     initial_prices_e6: [u64; 3],
     updated_prices_e6: [u64; 3],
+    initial_target_e6: u64,
+    updated_target_e6: u64,
 }
 
-fn composite_lifecycle_cases() -> [CompositeLifecycleCase; 6] {
+fn composite_lifecycle_cases() -> [CompositeLifecycleCase; 8] {
     [
         CompositeLifecycleCase {
             providers: [
@@ -5254,8 +5258,12 @@ fn composite_lifecycle_cases() -> [CompositeLifecycleCase; 6] {
             ],
             count: 2,
             flags: 0,
+            invert: 0,
+            unit_scale: 0,
             initial_prices_e6: [500_000, 2_000_000, 0],
             updated_prices_e6: [505_000, 2_000_000, 0],
+            initial_target_e6: 1_000_000,
+            updated_target_e6: 1_010_000,
         },
         CompositeLifecycleCase {
             providers: [
@@ -5265,8 +5273,12 @@ fn composite_lifecycle_cases() -> [CompositeLifecycleCase; 6] {
             ],
             count: 2,
             flags: ORACLE_LEG_FLAG_DIVIDE_LEG2,
+            invert: 0,
+            unit_scale: 0,
             initial_prices_e6: [2_000_000, 2_000_000, 0],
             updated_prices_e6: [2_020_000, 2_000_000, 0],
+            initial_target_e6: 1_000_000,
+            updated_target_e6: 1_010_000,
         },
         CompositeLifecycleCase {
             providers: [
@@ -5276,8 +5288,12 @@ fn composite_lifecycle_cases() -> [CompositeLifecycleCase; 6] {
             ],
             count: 3,
             flags: 0,
+            invert: 0,
+            unit_scale: 0,
             initial_prices_e6: [250_000, 2_000_000, 2_000_000],
             updated_prices_e6: [252_500, 2_000_000, 2_000_000],
+            initial_target_e6: 1_000_000,
+            updated_target_e6: 1_010_000,
         },
         CompositeLifecycleCase {
             providers: [
@@ -5287,8 +5303,12 @@ fn composite_lifecycle_cases() -> [CompositeLifecycleCase; 6] {
             ],
             count: 3,
             flags: ORACLE_LEG_FLAG_DIVIDE_LEG2,
+            invert: 0,
+            unit_scale: 0,
             initial_prices_e6: [1_000_000, 2_000_000, 2_000_000],
             updated_prices_e6: [1_010_000, 2_000_000, 2_000_000],
+            initial_target_e6: 1_000_000,
+            updated_target_e6: 1_010_000,
         },
         CompositeLifecycleCase {
             providers: [
@@ -5298,8 +5318,12 @@ fn composite_lifecycle_cases() -> [CompositeLifecycleCase; 6] {
             ],
             count: 3,
             flags: ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            invert: 0,
+            unit_scale: 0,
             initial_prices_e6: [1_000_000, 2_000_000, 2_000_000],
             updated_prices_e6: [1_010_000, 2_000_000, 2_000_000],
+            initial_target_e6: 1_000_000,
+            updated_target_e6: 1_010_000,
         },
         CompositeLifecycleCase {
             providers: [
@@ -5309,16 +5333,48 @@ fn composite_lifecycle_cases() -> [CompositeLifecycleCase; 6] {
             ],
             count: 3,
             flags: ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            invert: 0,
+            unit_scale: 0,
             initial_prices_e6: [4_000_000, 2_000_000, 2_000_000],
             updated_prices_e6: [4_040_000, 2_000_000, 2_000_000],
+            initial_target_e6: 1_000_000,
+            updated_target_e6: 1_010_000,
+        },
+        CompositeLifecycleCase {
+            providers: [
+                EpochMatrixProvider::Switchboard,
+                EpochMatrixProvider::Pyth,
+                EpochMatrixProvider::Chainlink,
+            ],
+            count: 3,
+            flags: ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            invert: 1,
+            unit_scale: 0,
+            initial_prices_e6: [8_000_000, 2_000_000, 2_000_000],
+            updated_prices_e6: [10_000_000, 2_000_000, 2_000_000],
+            initial_target_e6: 500_000,
+            updated_target_e6: 400_000,
+        },
+        CompositeLifecycleCase {
+            providers: [
+                EpochMatrixProvider::Chainlink,
+                EpochMatrixProvider::Switchboard,
+                EpochMatrixProvider::Pyth,
+            ],
+            count: 3,
+            flags: ORACLE_LEG_FLAG_DIVIDE_LEG2,
+            invert: 0,
+            unit_scale: 10,
+            initial_prices_e6: [10_000_000, 2_000_000, 2_000_000],
+            updated_prices_e6: [10_100_000, 2_000_000, 2_000_000],
+            initial_target_e6: 1_000_000,
+            updated_target_e6: 1_010_000,
         },
     ]
 }
 
 #[test]
 fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundaries() {
-    const INITIAL_TARGET_E6: u64 = 1_000_000;
-    const UPDATED_TARGET_E6: u64 = 1_010_000;
     const SCENARIOS: [ProviderLifecycleScenario; 3] = [
         ProviderLifecycleScenario::DrainOnly,
         ProviderLifecycleScenario::Recovery,
@@ -5334,7 +5390,7 @@ fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundarie
         for (scenario_index, scenario) in SCENARIOS.into_iter().enumerate() {
             let world = case_index * SCENARIOS.len() + scenario_index;
             let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
-                initial_price: INITIAL_TARGET_E6,
+                initial_price: case.initial_target_e6,
                 ..V16CuMarketParams::default()
             });
             env.configure_permissionless_resolve_with_cu(100, 5);
@@ -5365,8 +5421,8 @@ fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundarie
                 &oracle_accounts,
                 10,
                 100,
-                0,
-                0,
+                case.invert,
+                case.unit_scale,
                 3,
                 100,
             )
@@ -5375,7 +5431,7 @@ fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundarie
             });
             assert_eq!(
                 env.market_state().0.oracle_target_price_e6,
-                INITIAL_TARGET_E6
+                case.initial_target_e6
             );
 
             let long_owner = Keypair::new();
@@ -5393,7 +5449,7 @@ fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundarie
                 &short_owner,
                 short,
                 POS_SCALE as i128,
-                INITIAL_TARGET_E6,
+                case.initial_target_e6,
                 0,
             );
             let vault_before = env.token_amount(env.vault);
@@ -5448,7 +5504,7 @@ fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundarie
                 });
             max_oracle_cu = max_oracle_cu.max(exact_expiry_cu);
             let exact_profile = env.market_state().0;
-            assert_eq!(exact_profile.oracle_target_price_e6, UPDATED_TARGET_E6);
+            assert_eq!(exact_profile.oracle_target_price_e6, case.updated_target_e6);
             assert_eq!(exact_profile.oracle_target_publish_time, 100);
 
             set_test_clock(&mut env, 12, 161);
@@ -5476,7 +5532,10 @@ fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundarie
                 });
             max_oracle_cu = max_oracle_cu.max(refreshed_cu);
             let refreshed_profile = env.market_state().0;
-            assert_eq!(refreshed_profile.oracle_target_price_e6, UPDATED_TARGET_E6);
+            assert_eq!(
+                refreshed_profile.oracle_target_price_e6,
+                case.updated_target_e6
+            );
             assert_eq!(refreshed_profile.oracle_target_publish_time, 101);
 
             match scenario {
@@ -5572,10 +5631,15 @@ fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundarie
                     let old_generation = env.asset_market_id(0);
                     let admin = Keypair::from_bytes(&env.admin.to_bytes()).expect("clone admin");
                     set_test_clock(&mut env, 19, 168);
-                    env.try_restart_asset_oracle_with_authority(&admin, 0, 19, INITIAL_TARGET_E6)
-                        .unwrap_or_else(|error| {
-                            panic!("composite lifecycle world {world} failed restart: {error}")
-                        });
+                    env.try_restart_asset_oracle_with_authority(
+                        &admin,
+                        0,
+                        19,
+                        case.initial_target_e6,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("composite lifecycle world {world} failed restart: {error}")
+                    });
                     assert_ne!(env.asset_market_id(0), old_generation);
                     env.trade_asset_with_cu(
                         0,
@@ -5584,7 +5648,7 @@ fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundarie
                         &short_owner,
                         short,
                         POS_SCALE as i128,
-                        INITIAL_TARGET_E6,
+                        case.initial_target_e6,
                         0,
                     );
                     env.trade_asset_with_cu(
@@ -5594,7 +5658,7 @@ fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundarie
                         &short_owner,
                         short,
                         -(POS_SCALE as i128),
-                        INITIAL_TARGET_E6,
+                        case.initial_target_e6,
                         0,
                     );
                     let mut withdrawn = 0u128;

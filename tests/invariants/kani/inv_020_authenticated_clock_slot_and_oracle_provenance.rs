@@ -7,7 +7,8 @@
 //! Evidence in this file (P): Kani exhausts all full-width `i64` timestamp triples through the
 //! exact production predicate and proves full-width confidence comparison totality plus zero-side
 //! semantics. Canonical Pyth and Chainlink byte layouts compose symbolic price, freshness,
-//! identity, and structural fields through the shipping parser. Switchboard's selected timestamp
+//! identity, and structural fields through the shipping parser. Independent sparse-wire layouts
+//! bind every Switchboard field at the first and last timestamp offsets; the selected timestamp
 //! table and typed validation seam are proven separately, with concrete scale boundaries for all
 //! three providers. Independent host arithmetic covers the solver-bound relational product and
 //! division semantics; public SBF tests bind these predicates to account parsing, rollback/ignore
@@ -18,9 +19,10 @@ use percolator_prog::{
     oracle_v16::{
         oracle_confidence_is_too_wide, oracle_publish_time_is_fresh,
         oracle_publish_times_are_coherent, read_oracle_price_e6_from_bytes,
-        read_switchboard_selected_publish_time, validate_switchboard_observation_e6,
-        SwitchboardObservationV16, CHAINLINK_STORE_PROGRAM_ID, PYTH_RECEIVER_PROGRAM_ID,
-        SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID, SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+        read_switchboard_observation_from_bytes, read_switchboard_selected_publish_time,
+        validate_switchboard_observation_e6, SwitchboardObservationV16, CHAINLINK_STORE_PROGRAM_ID,
+        PYTH_RECEIVER_PROGRAM_ID, SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID,
+        SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
     },
 };
 use solana_program::{program_error::ProgramError, pubkey::Pubkey};
@@ -186,6 +188,73 @@ fn canonical_chainlink_bytes(decimals: u8, publish_time: u32, answer: i128) -> [
     data[208..212].copy_from_slice(&publish_time.to_le_bytes());
     data[216..232].copy_from_slice(&answer.to_le_bytes());
     data
+}
+
+const SB_SPEC_WIRE_LEN: usize = 3_208;
+const SB_SPEC_FEED_HASH: usize = 8 + 2_112;
+const SB_SPEC_MIN_SAMPLE_SIZE: usize = 8 + 2_207;
+const SB_SPEC_ACCOUNT_UPDATE_TIME: usize = 8 + 2_208;
+const SB_SPEC_RESULT_VALUE: usize = 8 + 2_256;
+const SB_SPEC_RESULT_STD_DEV: usize = 8 + 2_272;
+const SB_SPEC_RESULT_NUM_SAMPLES: usize = 8 + 2_352;
+const SB_SPEC_RESULT_SUBMISSION_IDX: usize = 8 + 2_353;
+const SB_SPEC_RESULT_SLOT: usize = 8 + 2_360;
+const SB_SPEC_SUBMISSION_TIMESTAMPS: usize = 8 + 2_944;
+
+fn canonical_switchboard_bytes(
+    observation: SwitchboardObservationV16,
+    submission_idx: usize,
+) -> [u8; SB_SPEC_WIRE_LEN] {
+    let mut data = [0u8; SB_SPEC_WIRE_LEN];
+    data[..8].copy_from_slice(&[196, 27, 108, 196, 10, 215, 219, 40]);
+    data[SB_SPEC_FEED_HASH..SB_SPEC_FEED_HASH + 32].copy_from_slice(&observation.feed_hash);
+    data[SB_SPEC_MIN_SAMPLE_SIZE] = observation.min_sample_size;
+    data[SB_SPEC_ACCOUNT_UPDATE_TIME..SB_SPEC_ACCOUNT_UPDATE_TIME + 8]
+        .copy_from_slice(&observation.account_update_time.to_le_bytes());
+    data[SB_SPEC_RESULT_VALUE..SB_SPEC_RESULT_VALUE + 16]
+        .copy_from_slice(&observation.value.to_le_bytes());
+    data[SB_SPEC_RESULT_STD_DEV..SB_SPEC_RESULT_STD_DEV + 16]
+        .copy_from_slice(&observation.std_dev.to_le_bytes());
+    data[SB_SPEC_RESULT_NUM_SAMPLES] = observation.num_samples;
+    data[SB_SPEC_RESULT_SUBMISSION_IDX] = submission_idx as u8;
+    data[SB_SPEC_RESULT_SLOT..SB_SPEC_RESULT_SLOT + 8]
+        .copy_from_slice(&observation.result_slot.to_le_bytes());
+    let timestamp_offset =
+        SB_SPEC_SUBMISSION_TIMESTAMPS + submission_idx * core::mem::size_of::<i64>();
+    data[timestamp_offset..timestamp_offset + 8]
+        .copy_from_slice(&observation.publish_time.to_le_bytes());
+    data
+}
+
+fn assert_switchboard_sparse_wire_roundtrip(submission_idx: usize) {
+    let observation = SwitchboardObservationV16 {
+        feed_hash: kani::any(),
+        min_sample_size: kani::any(),
+        account_update_time: kani::any(),
+        value: kani::any(),
+        std_dev: kani::any(),
+        num_samples: kani::any(),
+        result_slot: kani::any(),
+        publish_time: kani::any(),
+    };
+    let data = canonical_switchboard_bytes(observation, submission_idx);
+
+    assert_eq!(
+        read_switchboard_observation_from_bytes(&data),
+        Ok(observation)
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+fn kani_v16_switchboard_sparse_wire_first_timestamp_maps_every_typed_field() {
+    assert_switchboard_sparse_wire_roundtrip(0);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+fn kani_v16_switchboard_sparse_wire_last_timestamp_maps_every_typed_field() {
+    assert_switchboard_sparse_wire_roundtrip(31);
 }
 
 #[kani::proof]
