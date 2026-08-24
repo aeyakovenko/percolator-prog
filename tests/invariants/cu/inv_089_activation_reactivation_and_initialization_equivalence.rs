@@ -1850,3 +1850,298 @@ fn v16_program_reused_slot_matches_fresh_after_public_insurance_spend() {
         "replacement-generation exits preserve engine/SPL custody equality"
     );
 }
+
+#[test]
+fn v16_program_reused_slot_matches_fresh_after_public_claim_and_stale_certificate() {
+    const ASSET_INDEX: u16 = 1;
+    const SOURCE_DOMAIN: u16 = 3;
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const WINNING_PRICE: u64 = 1_050_000;
+    const REUSED_PRICE: u64 = 250;
+    const CLAIM: u128 = 50_000;
+    const INITIAL_BACKING: u128 = 75_000;
+    const CERT_INVALIDATION_TOPUP: u128 = 1;
+    const EXPIRY_SLOT: u64 = 10;
+
+    let next_creator = Keypair::new();
+    let mut fresh = V16CuEnv::new();
+    fresh.update_market_init_fee_policy_with_cu(1);
+    fresh.svm.warp_to_slot(6);
+    fresh.activate_permissionless_asset_with_fee(
+        &next_creator,
+        ASSET_INDEX,
+        6,
+        REUSED_PRICE,
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        1,
+    );
+
+    let old_creator = Keypair::new();
+    let mut reused = V16CuEnv::new();
+    reused.update_market_init_fee_policy_with_cu(1);
+    reused.svm.warp_to_slot(1);
+    reused.activate_permissionless_asset_with_fee(
+        &old_creator,
+        ASSET_INDEX,
+        1,
+        INITIAL_PRICE,
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        1,
+    );
+    let old_market_id = reused.asset_market_id(ASSET_INDEX);
+    reused.configure_auth_mark_for_asset_with_authority(
+        ASSET_INDEX,
+        &old_creator,
+        1,
+        INITIAL_PRICE,
+    );
+    reused.top_up_backing_bucket_with_authority(
+        &old_creator,
+        SOURCE_DOMAIN,
+        INITIAL_BACKING,
+        EXPIRY_SLOT,
+    );
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner = reused.create_portfolio(&winner_owner);
+    let loser = reused.create_portfolio(&loser_owner);
+    reused.deposit(&winner_owner, winner, 1_000_000);
+    reused.deposit(&loser_owner, loser, 1_000_000);
+    reused.trade_asset_with_cu(
+        ASSET_INDEX,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        POS_SCALE as i128,
+        INITIAL_PRICE,
+        0,
+    );
+    reused.svm.warp_to_slot(2);
+    reused.push_auth_mark_for_asset_with_authority(ASSET_INDEX, &old_creator, 2, WINNING_PRICE);
+    for portfolio in [loser, winner] {
+        reused.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(ASSET_INDEX),
+            },
+        );
+    }
+    reused.trade_asset_with_cu(
+        ASSET_INDEX,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        -(POS_SCALE as i128),
+        WINNING_PRICE,
+        0,
+    );
+    for portfolio in [loser, winner] {
+        for _ in 0..8 {
+            if reused
+                .crank_if_actionable(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 2,
+                        observations: crank_observations(ASSET_INDEX),
+                    },
+                )
+                .is_none()
+            {
+                break;
+            }
+        }
+    }
+
+    let winner_before_stale = reused.portfolio_state(winner);
+    let cert_before_stale = health_cert(&winner_before_stale);
+    let group_before_stale = reused.market_state().1;
+    assert_eq!(winner_before_stale.pnl.get(), CLAIM as i128);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &winner_before_stale
+    )));
+    assert!(cert_before_stale.valid);
+    assert_eq!(
+        cert_before_stale.cert_risk_epoch,
+        group_before_stale.risk_epoch
+    );
+
+    reused.top_up_backing_bucket_with_authority(
+        &old_creator,
+        SOURCE_DOMAIN,
+        CERT_INVALIDATION_TOPUP,
+        EXPIRY_SLOT,
+    );
+    let group_after_stale = reused.market_state().1;
+    assert!(group_after_stale.risk_epoch > cert_before_stale.cert_risk_epoch);
+    let market_before_reject = reused.svm.get_account(&reused.market).unwrap();
+    let winner_before_reject = reused.svm.get_account(&winner).unwrap();
+    let vault_before_reject = reused.svm.get_account(&reused.vault).unwrap();
+    reused.svm.expire_blockhash();
+    let stale_conversion = reused.send(
+        reused.convert_released_pnl_ix(winner, CLAIM),
+        vec![
+            AccountMeta::new(winner_owner.pubkey(), true),
+            AccountMeta::new(reused.market, false),
+            AccountMeta::new(winner, false),
+        ],
+        &[&winner_owner],
+    );
+    assert!(
+        stale_conversion.is_err(),
+        "the old-generation claim certificate must not authorize a favorable conversion after a source-risk write"
+    );
+    assert_eq!(
+        reused.svm.get_account(&reused.market).unwrap(),
+        market_before_reject
+    );
+    assert_eq!(
+        reused.svm.get_account(&winner).unwrap(),
+        winner_before_reject
+    );
+    assert_eq!(
+        reused.svm.get_account(&reused.vault).unwrap(),
+        vault_before_reject
+    );
+
+    reused.crank(
+        winner,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(ASSET_INDEX),
+        },
+    );
+    let refreshed_cert = health_cert(&reused.portfolio_state(winner));
+    assert!(refreshed_cert.valid);
+    assert_eq!(refreshed_cert.cert_risk_epoch, group_after_stale.risk_epoch);
+    reused.convert_released_pnl_with_cu(&winner_owner, winner, CLAIM);
+    assert_eq!(reused.portfolio_state(winner).pnl.get(), 0);
+
+    let expected_capital = [(winner, 1_000_000 + CLAIM), (loser, 1_000_000 - CLAIM)];
+    for (owner, portfolio) in [(&winner_owner, winner), (&loser_owner, loser)] {
+        let account = reused.portfolio_state(portfolio);
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+        assert_eq!(account.pnl.get(), 0);
+        let expected = expected_capital
+            .iter()
+            .find_map(|(key, amount)| (*key == portfolio).then_some(*amount))
+            .unwrap();
+        assert_eq!(account.capital.get(), expected);
+        let destination = reused.withdraw(owner, portfolio, expected);
+        assert_eq!(reused.token_amount(destination), expected as u64);
+        reused.close_portfolio_with_cu(owner, portfolio);
+    }
+
+    let source = reused.market_state().1.source_credit[SOURCE_DOMAIN as usize];
+    assert_eq!(source.provider_receivable_num, CLAIM * BOUND_SCALE);
+    assert_eq!(source.spent_backing_num, source.provider_receivable_num);
+    assert_eq!(
+        source.fresh_reserved_backing_num,
+        (INITIAL_BACKING + CERT_INVALIDATION_TOPUP) * BOUND_SCALE,
+        "conversion retains the provider's face while recording the consumed tranche as a receivable"
+    );
+    reused.top_up_backing_bucket_with_authority(&old_creator, SOURCE_DOMAIN, CLAIM, EXPIRY_SLOT);
+    let provider_ready = reused.market_state().1;
+    assert_eq!(
+        provider_ready.source_credit[SOURCE_DOMAIN as usize].provider_receivable_num,
+        0
+    );
+    let provider_principal = provider_ready.source_credit[SOURCE_DOMAIN as usize]
+        .fresh_reserved_backing_num
+        / BOUND_SCALE;
+    assert_eq!(
+        provider_principal,
+        INITIAL_BACKING + CERT_INVALIDATION_TOPUP + CLAIM
+    );
+    let provider_destination = withdraw_backing_with_authority(
+        &mut reused,
+        &old_creator,
+        SOURCE_DOMAIN,
+        provider_principal,
+    );
+    assert_eq!(
+        reused.token_amount(provider_destination),
+        provider_principal as u64
+    );
+
+    reused.svm.warp_to_slot(4);
+    reused.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_RETIRE,
+        ASSET_INDEX,
+        4,
+        0,
+    );
+    assert_eq!(
+        reused.market_state().1.source_credit[SOURCE_DOMAIN as usize],
+        percolator::SourceCreditStateV16::EMPTY,
+        "retirement may clear the historical spent-backing audit only after the provider is whole"
+    );
+    reused.svm.warp_to_slot(6);
+    reused.activate_permissionless_asset_with_fee(
+        &next_creator,
+        ASSET_INDEX,
+        6,
+        REUSED_PRICE,
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        next_creator.pubkey(),
+        1,
+    );
+    assert_ne!(reused.asset_market_id(ASSET_INDEX), old_market_id);
+    assert_eq!(
+        normalized_persisted_asset_slot(&reused, ASSET_INDEX as usize),
+        normalized_persisted_asset_slot(&fresh, ASSET_INDEX as usize),
+        "claim conversion, stale-certificate refresh, provider settlement, retirement, and reuse must leave exactly a fresh persisted slot"
+    );
+
+    let replacement_long_owner = Keypair::new();
+    let replacement_short_owner = Keypair::new();
+    let replacement_long = reused.create_portfolio(&replacement_long_owner);
+    let replacement_short = reused.create_portfolio(&replacement_short_owner);
+    reused.deposit(&replacement_long_owner, replacement_long, 10_000);
+    reused.deposit(&replacement_short_owner, replacement_short, 10_000);
+    reused.trade_asset_with_cu(
+        ASSET_INDEX,
+        &replacement_long_owner,
+        replacement_long,
+        &replacement_short_owner,
+        replacement_short,
+        POS_SCALE as i128,
+        REUSED_PRICE,
+        0,
+    );
+    reused.trade_asset_with_cu(
+        ASSET_INDEX,
+        &replacement_long_owner,
+        replacement_long,
+        &replacement_short_owner,
+        replacement_short,
+        -(POS_SCALE as i128),
+        REUSED_PRICE,
+        0,
+    );
+    for (owner, portfolio) in [
+        (&replacement_long_owner, replacement_long),
+        (&replacement_short_owner, replacement_short),
+    ] {
+        let capital = reused.portfolio_state(portfolio).capital.get();
+        let destination = reused.withdraw(owner, portfolio, capital);
+        assert_eq!(reused.token_amount(destination), 10_000);
+        reused.close_portfolio_with_cu(owner, portfolio);
+    }
+    assert_eq!(
+        reused.market_state().1.vault as u64,
+        reused.token_amount(reused.vault),
+        "the fresh generation preserves custody after prior claim and certificate history"
+    );
+}
