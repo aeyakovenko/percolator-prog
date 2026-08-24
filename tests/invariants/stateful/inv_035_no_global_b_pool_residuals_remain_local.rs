@@ -250,6 +250,9 @@ fn verify_ambiguous_multi_asset_resolution(
     }
 
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("domain-local residual trace must be public and rollback-exact");
     if trace.out_of_band_economic_mutations != 0
         || trace
             .steps

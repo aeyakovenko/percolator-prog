@@ -278,6 +278,9 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
     assert_eq!(env.all_primary_portfolio_data(), portfolios_before_refresh);
     assert_eq!(env.all_token_account_data(), tokens_before_refresh);
     let refresh_trace = env.finish_public_trace();
+    refresh_trace
+        .validate_public_execution()
+        .expect("credit refresh trace must be public and rollback-exact");
     assert_eq!(refresh_trace.out_of_band_economic_mutations, 0);
     assert_eq!(refresh_trace.steps.len(), 1);
     assert!(!refresh_trace.steps[0].succeeded);
@@ -326,6 +329,9 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
     .expect("independent rejected-route rate oracle");
 
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("credit expiry trace must be public and rollback-exact");
     assert_eq!(trace.out_of_band_economic_mutations, 0);
     assert_eq!(trace.steps.len(), 1);
     let rejected_step = &trace.steps[0];
@@ -380,6 +386,9 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
     assert_eq!(env.all_token_account_data(), tokens_before_reduction);
     assert_eq!(env.all_matcher_context_data(), matcher_before_reduction);
     let matched_trace = env.finish_public_trace();
+    matched_trace
+        .validate_public_execution()
+        .expect("matched credit trace must be public and rollback-exact");
     assert_eq!(matched_trace.out_of_band_economic_mutations, 0);
     assert_eq!(matched_trace.steps.len(), 1);
     assert!(!matched_trace.steps[0].succeeded);

@@ -124,6 +124,9 @@ fn v16_program_stale_refresh_scans_past_recovery_leg_for_pending_mark() {
     assert_ne!(env.primary_portfolio_data(0), before_portfolio_data);
     assert_eq!(env.all_token_account_data(), before_tokens);
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("full-health trace must be public and rollback-exact");
     assert_eq!(trace.out_of_band_economic_mutations, 0);
     assert_eq!(trace.steps.len(), 1);
     assert!(trace.steps[0].succeeded);

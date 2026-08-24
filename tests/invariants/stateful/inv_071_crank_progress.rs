@@ -579,6 +579,9 @@ fn verify_flat_negative_final_leg_progress(
     }
 
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("terminal crank trace must be public and rollback-exact");
     if trace.out_of_band_economic_mutations != 0
         || trace
             .steps

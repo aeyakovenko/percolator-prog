@@ -2194,11 +2194,9 @@ fn finish_portfolio_incarnation_discovery(
         ));
     }
     let public_trace = env.finish_public_trace();
-    if public_trace.out_of_band_economic_mutations != 0 {
-        return Err(format!(
-            "{kind:?} incarnation probe used out-of-band economic mutation"
-        ));
-    }
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("{kind:?} incarnation trace is invalid: {error}"))?;
 
     match result {
         Ok(success) => {
@@ -2633,6 +2631,9 @@ fn finish_market_incarnation_discovery(
         ));
     }
     let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("{kind:?} market-incarnation trace is invalid: {error}"))?;
 
     match result {
         Ok(success) => {

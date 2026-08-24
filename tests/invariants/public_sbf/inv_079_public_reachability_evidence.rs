@@ -2,7 +2,14 @@
 //!
 //! Normative obligation: Accepted LoF and DoS findings reproduce through valid public instructions and exact external effects.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_public_trace_schema_detects_out_of_band_economic_mutation`, `v16_program_fixed_blockers_remain_progressing`, `v16_program_open_lof_manifest_snapshot_is_structurally_honest`, `v16_open_security_finding_benchmark_is_complete_and_non_overclaiming`, `v16_invariant_charter_and_index_are_complete`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions):
+//! `v16_public_trace_schema_detects_out_of_band_economic_mutation`,
+//! `v16_public_trace_terminal_classifier_requires_complete_economic_evidence`,
+//! `v16_every_public_trace_consumer_validates_reachability_evidence`,
+//! `v16_program_fixed_blockers_remain_progressing`,
+//! `v16_program_open_lof_manifest_snapshot_is_structurally_honest`,
+//! `v16_open_security_finding_benchmark_is_complete_and_non_overclaiming`, and
+//! `v16_invariant_charter_and_index_are_complete`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,7 +18,9 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
-use crate::support::v16_svm::{MarketConfig, V16Svm};
+use crate::support::v16_svm::{
+    MarketConfig, PublicTerminalClassification, PublicTerminalObservation, V16Svm, USER_DEPOSIT,
+};
 use solana_sdk::signature::Signer;
 
 #[test]
@@ -39,6 +48,10 @@ fn v16_public_trace_schema_detects_out_of_band_economic_mutation() {
     assert_eq!(
         trace.out_of_band_economic_mutations, 1,
         "trace schema must reject hidden state-injection evidence"
+    );
+    assert!(
+        trace.validate_public_execution().is_err(),
+        "out-of-band mutation must invalidate normalized public evidence"
     );
     assert_eq!(trace.steps.len(), 2);
     let step = &trace.steps[0];
@@ -72,6 +85,138 @@ fn v16_public_trace_schema_detects_out_of_band_economic_mutation() {
             *delta == 0
         }
     }));
+}
+
+#[test]
+fn v16_public_trace_terminal_classifier_requires_complete_economic_evidence() {
+    let mut env = V16Svm::new([0x7a; 32], MarketConfig::default());
+    let actor = 0usize;
+    let observed_value = |env: &V16Svm| {
+        let portfolio = env.primary_portfolio(actor);
+        assert_eq!(portfolio.pnl.get(), 0, "flat classifier fixture has no PnL");
+        u128::from(env.token_amount(env.actors[actor].source_token))
+            + u128::from(env.token_amount(env.actors[actor].destination_token))
+            + portfolio.capital.get()
+    };
+
+    let value_before = observed_value(&env);
+    env.begin_public_trace();
+    env.withdraw_primary(actor, USER_DEPOSIT)
+        .expect("flat funded actor has a bounded public exit");
+    let exit_trace = env.finish_public_trace();
+    let value_after = observed_value(&env);
+    assert_eq!(
+        value_after, value_before,
+        "bounded exit preserves actor value"
+    );
+    assert_eq!(
+        exit_trace
+            .classify_terminal(PublicTerminalObservation {
+                victim_loss_atoms: 0,
+                unauthorized_gain_atoms: 0,
+                funded_value_remaining: 0,
+                unresolved_obligation: 0,
+                bounded_exit_succeeded: true,
+                terminal_receipt_created: false,
+                authorized_forfeit: false,
+                all_required_exit_routes_attempted: false,
+                honest_continuation_failed: false,
+            })
+            .expect("complete public exit evidence classifies"),
+        PublicTerminalClassification::BoundedExit
+    );
+
+    env.begin_public_trace();
+    env.withdraw_primary(actor, 1)
+        .expect_err("the empty portfolio cannot withdraw another atom");
+    let rejected_trace = env.finish_public_trace();
+    let rejection = PublicTerminalObservation {
+        victim_loss_atoms: 0,
+        unauthorized_gain_atoms: 0,
+        funded_value_remaining: 0,
+        unresolved_obligation: 0,
+        bounded_exit_succeeded: false,
+        terminal_receipt_created: false,
+        authorized_forfeit: false,
+        all_required_exit_routes_attempted: false,
+        honest_continuation_failed: false,
+    };
+    assert_eq!(
+        rejected_trace
+            .classify_terminal(rejection)
+            .expect("exact rejected route classifies"),
+        PublicTerminalClassification::AtomicRejection
+    );
+
+    assert!(
+        rejected_trace
+            .classify_terminal(PublicTerminalObservation {
+                victim_loss_atoms: 1,
+                ..rejection
+            })
+            .is_err(),
+        "a rejected transaction cannot be promoted to loss of funds"
+    );
+    assert!(
+        rejected_trace
+            .classify_terminal(PublicTerminalObservation {
+                funded_value_remaining: 1,
+                unresolved_obligation: 1,
+                honest_continuation_failed: true,
+                ..rejection
+            })
+            .is_err(),
+        "one rejected route cannot be promoted to persistent DoS"
+    );
+}
+
+#[test]
+fn v16_every_public_trace_consumer_validates_reachability_evidence() {
+    const FINISH: &str = concat!("finish_public_", "trace()");
+    const VALIDATE: &str = concat!("validate_public_", "execution()");
+    const CLASSIFY: &str = concat!("classify_", "terminal(");
+    let mut pending = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")];
+    let mut sources = Vec::new();
+    while let Some(path) = pending.pop() {
+        for entry in std::fs::read_dir(&path).unwrap_or_else(|error| {
+            panic!("read test source directory {}: {error}", path.display())
+        }) {
+            let entry = entry.expect("read test source entry");
+            let file_type = entry.file_type().expect("read test source file type");
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file()
+                && entry.path().extension().and_then(|value| value.to_str()) == Some("rs")
+            {
+                sources.push(entry.path());
+            }
+        }
+    }
+    sources.sort();
+    let mut consumers = 0usize;
+    for path in sources {
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read test source {}: {error}", path.display()));
+        let lines: Vec<&str> = source.lines().collect();
+        for (line_index, line) in lines.iter().enumerate() {
+            if !line.contains(FINISH) {
+                continue;
+            }
+            consumers += 1;
+            let end = (line_index + 31).min(lines.len());
+            let validation_window = lines[line_index + 1..end].join("\n");
+            assert!(
+                validation_window.contains(VALIDATE) || validation_window.contains(CLASSIFY),
+                "{} public trace at source line {} is consumed without normalized public-reachability validation",
+                path.display(),
+                line_index + 1
+            );
+        }
+    }
+    assert_eq!(
+        consumers, 24,
+        "public-trace consumer inventory changed; inspect every new or removed consumer"
+    );
 }
 
 #[test]

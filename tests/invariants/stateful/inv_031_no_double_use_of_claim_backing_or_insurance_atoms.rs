@@ -235,6 +235,9 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
     }
 
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("claim/backing retry trace must be public and rollback-exact");
     let rejected = trace
         .steps
         .iter()

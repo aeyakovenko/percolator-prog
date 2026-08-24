@@ -190,6 +190,9 @@ fn run_reciprocal_cross_asset_credit_cycle(route: TradeRoute, close_asset_one_fi
     );
 
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("source-domain trace must be public and rollback-exact");
     assert_eq!(trace.out_of_band_economic_mutations, 0);
     let rejected = trace
         .steps

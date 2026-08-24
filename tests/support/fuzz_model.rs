@@ -2819,13 +2819,30 @@ impl ScenarioRunner {
                 if reduced_effective_q == 0 {
                     return Err("successful rebalance exit made no effective progress".into());
                 }
+                let matching_reduce_q = size_before
+                    .unsigned_abs()
+                    .min(old_leg.basis_pos_q.unsigned_abs())
+                    .min(old_effective_q)
+                    .min(group_before.assets[asset].oi_eff_long_q)
+                    .min(group_before.assets[asset].oi_eff_short_q);
+                if matching_reduce_q == 0 {
+                    return Err("successful rebalance exit had no matching OI capacity".into());
+                }
                 self.apply_account_oi_transition(
                     &account_before,
                     &account_after,
                     &group_before,
                     false,
                     "owner rebalance exit",
-                )?;
+                )
+                .map_err(|error| {
+                    format!(
+                        "{error}; rebalance account transition raw={size_before}->{size_after}, \
+                         effective={old_effective_q}->{new_effective_q}, before_asset={:?}, \
+                         after_asset={:?}",
+                        group_before.assets[asset], group_after.assets[asset]
+                    )
+                })?;
                 self.apply_unilateral_matching_oi_reduction(
                     asset,
                     if size_before > 0 {
@@ -2833,9 +2850,17 @@ impl ScenarioRunner {
                     } else {
                         SideV16::Short
                     },
-                    reduced_effective_q,
+                    matching_reduce_q,
                     "owner rebalance exit",
-                )?;
+                )
+                .map_err(|error| {
+                    format!(
+                        "{error}; rebalance matching transition raw={size_before}->{size_after}, \
+                         effective={old_effective_q}->{new_effective_q}, \
+                         matching_reduce={matching_reduce_q}, before_asset={:?}, after_asset={:?}",
+                        group_before.assets[asset], group_after.assets[asset]
+                    )
+                })?;
                 self.positions[user][asset] = size_after;
                 self.protocol_positions[asset] = self.protocol_positions[asset]
                     .checked_sub(user_delta)

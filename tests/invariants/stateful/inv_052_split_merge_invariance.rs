@@ -484,6 +484,9 @@ fn run_rebalance_partition(
         return Err("RebalanceReduce moved SPL custody".to_string());
     }
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("rebalance partition trace must be public and rollback-exact");
     if trace.out_of_band_economic_mutations != 0 || trace.steps.iter().any(|step| !step.succeeded) {
         return Err("rebalance partition used a rejected or out-of-band step".to_string());
     }
@@ -614,6 +617,9 @@ fn run_insurance_withdrawal_partition(
     }
 
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("insurance partition trace must be public and rollback-exact");
     let successful_steps = 2 + parts.len();
     if trace.out_of_band_economic_mutations != 0
         || trace.steps.len() != successful_steps + 1
@@ -755,6 +761,9 @@ fn run_terminal_insurance_withdrawal_partition(
     }
 
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("terminal insurance trace must be public and rollback-exact");
     let successful_steps = 2 + 2 * PRIMARY_ACTOR_COUNT + parts.len();
     if trace.out_of_band_economic_mutations != 0
         || trace.steps.len() != successful_steps + 1
@@ -970,6 +979,9 @@ fn run_backing_conversion_partition(
     }
 
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("backing conversion trace must be public and rollback-exact");
     let failed_steps: Vec<_> = trace.steps.iter().filter(|step| !step.succeeded).collect();
     if trace.out_of_band_economic_mutations != 0
         || failed_steps.len() != rejected_caps.len() + 1
@@ -1792,6 +1804,9 @@ pub(super) fn run_resolved_claim_partition(
         ));
     }
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("resolved claim trace must be public and rollback-exact");
     let rejected_steps = trace.steps.iter().filter(|step| !step.succeeded).count();
     if trace.out_of_band_economic_mutations != 0 || rejected_steps != usize::from(split_claim) {
         return Err(format!(
@@ -2168,6 +2183,9 @@ fn run_liquidation_partition(
         ));
     }
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("liquidation partition trace must be public and rollback-exact");
     if trace.out_of_band_economic_mutations != 0 || trace.steps.iter().any(|step| !step.succeeded) {
         return Err(format!(
             "liquidation partition did not use an all-successful public trace: {trace:?}"
@@ -2543,6 +2561,9 @@ fn run_source_lien_partition(
         ));
     }
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("source-lien partition trace must be public and rollback-exact");
     if trace.out_of_band_economic_mutations != 0
         || trace.steps.iter().any(|step| {
             !step.succeeded
@@ -2796,6 +2817,9 @@ fn run_target_history(
     let post_suffix = canonical_prefix_snapshot(&env)?;
 
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("target-history trace must be public and rollback-exact");
     if trace.out_of_band_economic_mutations != 0 {
         return Err(format!(
             "target history used {} out-of-band economic mutations",
@@ -3375,6 +3399,9 @@ fn v16_program_unilateral_rebalance_adl_keeps_followup_price_settlement_zero_sum
     assert!(long_crank.compute_units < TX_CU_LIMIT);
 
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("ADL settlement trace must be public and rollback-exact");
     assert_eq!(trace.out_of_band_economic_mutations, 0);
     assert!(trace.steps.iter().all(|step| step.succeeded));
     assert_eq!(trace.steps.len(), 6);

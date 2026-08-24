@@ -148,6 +148,196 @@ pub struct PublicTraceEvidence {
     pub out_of_band_economic_mutations: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublicTerminalObservation {
+    pub victim_loss_atoms: u128,
+    pub unauthorized_gain_atoms: u128,
+    pub funded_value_remaining: u128,
+    pub unresolved_obligation: u128,
+    pub bounded_exit_succeeded: bool,
+    pub terminal_receipt_created: bool,
+    pub authorized_forfeit: bool,
+    pub all_required_exit_routes_attempted: bool,
+    pub honest_continuation_failed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicTerminalClassification {
+    LossOfFunds {
+        victim_loss_atoms: u128,
+        unauthorized_gain_atoms: u128,
+    },
+    PersistentFundedLock {
+        funded_value_remaining: u128,
+        unresolved_obligation: u128,
+    },
+    BoundedExit,
+    AtomicRejection,
+    Progressing,
+}
+
+impl PublicTraceEvidence {
+    pub fn validate_public_execution(&self) -> Result<(), String> {
+        if self.out_of_band_economic_mutations != 0 {
+            return Err(format!(
+                "public trace contains {} out-of-band economic mutations",
+                self.out_of_band_economic_mutations
+            ));
+        }
+        if self.steps.is_empty() {
+            return Err("public trace contains no transactions".to_string());
+        }
+        if !self
+            .steps
+            .iter()
+            .any(|step| step.program_id == percolator_prog::id())
+        {
+            return Err("public trace contains no wrapper instruction".to_string());
+        }
+        for (index, step) in self.steps.iter().enumerate() {
+            if ![
+                percolator_prog::id(),
+                solana_sdk::system_program::ID,
+                spl_token::ID,
+                associated_token_program_id(),
+            ]
+            .contains(&step.program_id)
+            {
+                return Err(format!(
+                    "public trace step {index} targets a non-construction program {}",
+                    step.program_id
+                ));
+            }
+            if step.program_id == percolator_prog::id() && step.instruction_data.is_empty() {
+                return Err(format!(
+                    "wrapper trace step {index} has no instruction payload"
+                ));
+            }
+            if step.accounts.is_empty() {
+                return Err(format!("public trace step {index} has no account metas"));
+            }
+            if step.transaction_signers.is_empty()
+                || !step.transaction_signers.contains(&step.fee_payer)
+            {
+                return Err(format!(
+                    "public trace step {index} lacks an authenticated fee payer"
+                ));
+            }
+            if step.succeeded {
+                let compute_units = step
+                    .compute_units
+                    .ok_or_else(|| format!("successful trace step {index} lacks CU evidence"))?;
+                if compute_units > TX_CU_LIMIT {
+                    return Err(format!(
+                        "successful trace step {index} exceeds the CU limit: {compute_units}"
+                    ));
+                }
+                if step.rejected_exact_writable_rollback.is_some()
+                    || step.rejected_no_program_lamport_delta.is_some()
+                {
+                    return Err(format!(
+                        "successful trace step {index} carries rejection-only evidence"
+                    ));
+                }
+            } else {
+                if step.compute_units.is_some()
+                    || step.rejected_exact_writable_rollback != Some(true)
+                    || step.rejected_no_program_lamport_delta != Some(true)
+                {
+                    return Err(format!(
+                        "rejected trace step {index} lacks exact rollback evidence"
+                    ));
+                }
+                if step.token_deltas.iter().any(|(_, delta)| *delta != 0) {
+                    return Err(format!(
+                        "rejected trace step {index} changed an SPL token balance"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn classify_terminal(
+        &self,
+        observation: PublicTerminalObservation,
+    ) -> Result<PublicTerminalClassification, String> {
+        self.validate_public_execution()?;
+        let wrapper_steps = || {
+            self.steps
+                .iter()
+                .filter(|step| step.program_id == percolator_prog::id())
+        };
+        let any_success = wrapper_steps().any(|step| step.succeeded);
+        let any_rejection = wrapper_steps().any(|step| !step.succeeded);
+
+        if observation.victim_loss_atoms != 0 || observation.unauthorized_gain_atoms != 0 {
+            if observation.authorized_forfeit {
+                return Err("authorized forfeit cannot be classified as loss of funds".to_string());
+            }
+            if !any_success {
+                return Err("loss of funds requires a successful public transition".to_string());
+            }
+            return Ok(PublicTerminalClassification::LossOfFunds {
+                victim_loss_atoms: observation.victim_loss_atoms,
+                unauthorized_gain_atoms: observation.unauthorized_gain_atoms,
+            });
+        }
+
+        if observation.honest_continuation_failed || observation.all_required_exit_routes_attempted
+        {
+            if observation.funded_value_remaining == 0
+                || observation.unresolved_obligation == 0
+                || !observation.honest_continuation_failed
+                || !observation.all_required_exit_routes_attempted
+                || !any_rejection
+                || observation.bounded_exit_succeeded
+                || observation.terminal_receipt_created
+                || observation.authorized_forfeit
+            {
+                return Err(
+                    "persistent-lock classification requires funded work, complete failed exit coverage, and no terminal disposition"
+                        .to_string(),
+                );
+            }
+            return Ok(PublicTerminalClassification::PersistentFundedLock {
+                funded_value_remaining: observation.funded_value_remaining,
+                unresolved_obligation: observation.unresolved_obligation,
+            });
+        }
+
+        if observation.bounded_exit_succeeded
+            || observation.terminal_receipt_created
+            || observation.authorized_forfeit
+        {
+            if observation.funded_value_remaining != 0 || observation.unresolved_obligation != 0 {
+                return Err(
+                    "terminal disposition left funded value or an unresolved obligation"
+                        .to_string(),
+                );
+            }
+            if !any_success {
+                return Err("bounded exit requires a successful public transition".to_string());
+            }
+            return Ok(PublicTerminalClassification::BoundedExit);
+        }
+
+        if wrapper_steps().all(|step| !step.succeeded) {
+            if observation.funded_value_remaining != 0 || observation.unresolved_obligation != 0 {
+                return Err(
+                    "atomic rejection cannot dispose of funded value or obligations".to_string(),
+                );
+            }
+            return Ok(PublicTerminalClassification::AtomicRejection);
+        }
+
+        if any_success {
+            return Ok(PublicTerminalClassification::Progressing);
+        }
+        Err("trace has neither a successful nor rejected transition".to_string())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TraceAccountState {
     lamports: u64,

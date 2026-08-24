@@ -348,6 +348,9 @@ fn run_fully_backed_pnl_seniority_control(route: TradeRoute) {
     assert!(final_group.vault >= final_group.c_tot + final_group.insurance);
     assert_eq!(env.token_supply_observed(), supply_before);
     let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("protected-principal trace must be public and rollback-exact");
     assert_eq!(trace.out_of_band_economic_mutations, 0);
     assert!(trace
         .steps

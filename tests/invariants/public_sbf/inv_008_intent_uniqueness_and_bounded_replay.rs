@@ -146,6 +146,9 @@ fn v16_program_same_transaction_cross_route_retry_is_atomic_and_exact_once() {
         assert_eq!(env.token_supply_observed(), supply_before);
 
         let trace = env.finish_public_trace();
+        trace
+            .validate_public_execution()
+            .expect("retry-order trace must be public and rollback-exact");
         assert_eq!(trace.out_of_band_economic_mutations, 0);
         assert_eq!(trace.steps.len(), 3);
         assert!(!trace.steps[0].succeeded);
