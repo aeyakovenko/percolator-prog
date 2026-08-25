@@ -5,8 +5,9 @@
 //! Evidence in this file (F over public I routes):
 //! `v16_program_superseded_control_matrix_rejects_stale_overwrites` generates retained controls,
 //! installs a distinct newer authorized value, then applies the stale bytes. The matrix covers
-//! matcher consent, every mark mode, both backing sides, and every market-wide fee/resolve lane.
-//! Every stale request must reject with an exact whole-account rollback.
+//! matcher consent, every mark mode, both backing sides, and every market-wide fee/resolve lane in
+//! both retained-higher/current-lower and retained-lower/current-higher payload orders. Every stale
+//! request must reject with an exact whole-account rollback.
 //! `v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` varies fresh-signed,
 //! retained, unsigned-LP, and activation routes and compares each affected signer's actual debit
 //! with the fee terms that signer authorized. The fresh-signed live control proves a policy update
@@ -42,17 +43,21 @@ proptest! {
     fn v16_program_superseded_control_matrix_rejects_stale_overwrites(
         seed in any::<[u8; 32]>()
     ) {
-        let discoveries = discover_superseded_intents(seed)
+        let discoveries = discover_bidirectional_superseded_intents(seed)
             .map_err(TestCaseError::fail)?;
-        prop_assert_eq!(discoveries.len(), SupersededIntentKind::ALL.len());
-        for (expected, discovery) in SupersededIntentKind::ALL.into_iter().zip(&discoveries) {
-            prop_assert_eq!(discovery.kind, expected);
-        }
-        for discovery in discoveries {
-            prop_assert!(!discovery.accepted_stale_intent, "{:?} accepted stale signed bytes", discovery.kind);
-            prop_assert!(!discovery.overwrote_newer_state, "{:?} overwrote the newer state", discovery.kind);
-            prop_assert_eq!(discovery.compute_units, None, "{:?} unexpectedly committed", discovery.kind);
-            prop_assert!(!discovery.is_violation(), "{:?} violated INV-014", discovery.kind);
+        prop_assert_eq!(
+            discoveries.len(),
+            SupersededIntentKind::ALL.len() * SupersessionPayloadOrder::ALL.len()
+        );
+        for (index, discovery) in discoveries.into_iter().enumerate() {
+            let order_index = index / SupersededIntentKind::ALL.len();
+            let kind_index = index % SupersededIntentKind::ALL.len();
+            prop_assert_eq!(discovery.payload_order, SupersessionPayloadOrder::ALL[order_index]);
+            prop_assert_eq!(discovery.kind, SupersededIntentKind::ALL[kind_index]);
+            prop_assert!(!discovery.accepted_stale_intent, "{:?}/{:?} accepted stale signed bytes", discovery.kind, discovery.payload_order);
+            prop_assert!(!discovery.overwrote_newer_state, "{:?}/{:?} overwrote the newer state", discovery.kind, discovery.payload_order);
+            prop_assert_eq!(discovery.compute_units, None, "{:?}/{:?} unexpectedly committed", discovery.kind, discovery.payload_order);
+            prop_assert!(!discovery.is_violation(), "{:?}/{:?} violated INV-014", discovery.kind, discovery.payload_order);
         }
     }
 }
