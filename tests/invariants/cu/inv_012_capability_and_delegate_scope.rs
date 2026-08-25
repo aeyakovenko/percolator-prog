@@ -5,7 +5,8 @@
 //! that matcher must invalidate the capability; a fill through the configured matcher may retain
 //! it for the participating LP only.
 //!
-//! Evidence in this file (SVM/CU): owner/delegate and tuple-substitution tests cover the original
+//! Evidence in this file (SVM/CU plus a production-source roster): owner/delegate and
+//! tuple-substitution tests cover the original
 //! authorization boundary. The issue-406 matrix reaches partial permissionless liquidation,
 //! force-close plus asset retirement/reuse, direct/batch no-CPI fills, and direct/batch CPI fills
 //! through public instructions. It observes the real external matcher inventory, proves stale
@@ -13,14 +14,80 @@
 //! same fill. Direct and batch controls distinguish the synchronized LP from a taker's unrelated
 //! matcher and assert that invalidation preserves the signed fee cap.
 //!
-//! Guarantee boundary: this does not prove general capability domain separation, authority epochs,
-//! expiry, allowed-operation/asset sets, or complete generation binding. Those remain explicit in
-//! AUDIT-012.
+//! INV-016 exhausts the complete delegate PDA seed tuple. INV-002/003/004 independently compose
+//! asset generation, portfolio incarnation, and position episode checks around both CPI routes.
+//! The capability authorizes only CPI trade matching, so a separate operation set is structurally
+//! inapplicable; per-leg asset scope is carried by the generation-bound trade request.
+//!
+//! Guarantee boundary: the deployed capability has no expiry or matcher-config incarnation bound
+//! into a retained CPI request. Those are schema requirements and remain explicit in AUDIT-012.
 
 use super::*;
 
 fn issue406_matcher_inventory(data: &[u8]) -> i128 {
     i128::from_le_bytes(data[160..176].try_into().unwrap())
+}
+
+fn inv012_function_body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start = source
+        .find(start)
+        .unwrap_or_else(|| panic!("missing production function {start}"));
+    let tail = &source[start..];
+    let end = tail
+        .find(end)
+        .unwrap_or_else(|| panic!("missing production successor {end}"));
+    &tail[..end]
+}
+
+#[test]
+fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
+    let source = include_str!("../../../src/v16_program.rs");
+    let single = inv012_function_body(
+        source,
+        "fn handle_trade_cpi<'a>(",
+        "fn handle_set_matcher_config<'a>(",
+    );
+    let batch = inv012_function_body(
+        source,
+        "fn handle_batch_trade_cpi<'a>(",
+        "fn handle_permissionless_crank<'a>(",
+    );
+    let config = inv012_function_body(
+        source,
+        "fn handle_set_matcher_config<'a>(",
+        "fn invoke_matcher_batch<'a>(",
+    );
+
+    for (route, body) in [("TradeCpi", single), ("BatchTradeCpi", batch)] {
+        assert_eq!(
+            body.matches("expect_portfolio_position_binding(").count(),
+            2,
+            "{route} must bind both portfolio incarnations and position episodes"
+        );
+        assert!(body.contains("derive_matcher_delegate("));
+        assert!(body.contains("matcher_tail_start_or_verify_lp_config("));
+        assert!(body.contains("account_a_header.portfolio_account_id"));
+        assert!(body.contains("account_b_header.portfolio_account_id"));
+    }
+    assert!(single.contains("market_id != expected_market_id"));
+    assert!(batch.contains("AssetGenerationMismatch"));
+    assert!(batch.contains("leg.market_id != *market_id"));
+    assert!(config.contains("portfolio_id != current_portfolio_id"));
+    assert!(config.contains("expected_sequence != current_sequence"));
+    assert!(config.contains("derive_matcher_delegate("));
+
+    assert_eq!(
+        source
+            .matches("matcher_tail_start_or_verify_lp_config(")
+            .count(),
+        2,
+        "only the two current CPI trade routes may consume matcher capability"
+    );
+    assert_eq!(
+        source.matches("authorizes_matcher_tuple(").count(),
+        2,
+        "the typed predicate must have one definition and one production consumer"
+    );
 }
 
 fn issue406_signed_trade_invalidates_both_matchers(batch: bool) {

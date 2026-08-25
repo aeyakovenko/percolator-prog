@@ -747,6 +747,19 @@ pub mod state {
         }
 
         #[inline]
+        pub fn authorizes_matcher_tuple(
+            &self,
+            matcher_program: &[u8; 32],
+            matcher_context: &[u8; 32],
+            matcher_delegate: &[u8; 32],
+        ) -> bool {
+            self.enabled() == 1
+                && self.matcher_program == *matcher_program
+                && self.matcher_context == *matcher_context
+                && self.matcher_delegate == *matcher_delegate
+        }
+
+        #[inline]
         pub const fn position_epoch_max() -> u64 {
             Self::POSITION_EPOCH_MAX
         }
@@ -8766,11 +8779,11 @@ pub mod processor {
         matcher_delegate_key: &Pubkey,
     ) -> Result<(usize, u16), ProgramError> {
         let cfg = state::read_portfolio_matcher_config(&account_b_ai.try_borrow_data()?)?;
-        if cfg.enabled() != 1
-            || cfg.matcher_program != matcher_prog_key.to_bytes()
-            || cfg.matcher_context != matcher_ctx_key.to_bytes()
-            || cfg.matcher_delegate != matcher_delegate_key.to_bytes()
-        {
+        if !cfg.authorizes_matcher_tuple(
+            &matcher_prog_key.to_bytes(),
+            &matcher_ctx_key.to_bytes(),
+            &matcher_delegate_key.to_bytes(),
+        ) {
             return Err(PercolatorError::Unauthorized.into());
         }
         Ok((7, cfg.trade_fee_cap_bps()))

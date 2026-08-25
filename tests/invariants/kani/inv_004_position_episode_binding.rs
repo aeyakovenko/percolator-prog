@@ -10,6 +10,8 @@
 //!
 //! Guarantee boundary: this is a local wrapper-layout proof. Public-route episode coverage and
 //! exact rollback are exercised independently by the INV-004 stateful LiteSVM matrices.
+//! The final harness is cross-owned by INV-012 and proves the exact production matcher-capability
+//! tuple predicate; its public composition lives in INV-012's SVM/CU module.
 
 use super::*;
 use percolator_prog::state;
@@ -195,4 +197,34 @@ fn kani_v16_position_epoch_sync_policy_is_total_and_exact() {
             assert_eq!(next_config.enabled(), 0);
         }
     }
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+fn kani_v16_inv012_matcher_capability_authorizes_only_the_exact_enabled_tuple() {
+    let stored_program: [u8; 32] = kani::any();
+    let stored_context: [u8; 32] = kani::any();
+    let stored_delegate: [u8; 32] = kani::any();
+    let requested_program: [u8; 32] = kani::any();
+    let requested_context: [u8; 32] = kani::any();
+    let requested_delegate: [u8; 32] = kani::any();
+    let control: u64 = kani::any();
+    let config = state::PortfolioMatcherConfigV16 {
+        matcher_program: stored_program,
+        matcher_context: stored_context,
+        matcher_delegate: stored_delegate,
+        control,
+    };
+
+    assert_eq!(
+        config.authorizes_matcher_tuple(
+            &requested_program,
+            &requested_context,
+            &requested_delegate,
+        ),
+        config.enabled() == 1
+            && stored_program == requested_program
+            && stored_context == requested_context
+            && stored_delegate == requested_delegate
+    );
 }
