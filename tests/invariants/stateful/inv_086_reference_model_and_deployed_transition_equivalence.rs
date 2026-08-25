@@ -19,7 +19,7 @@
 //! and authority changes, account substitution rejection, normal exits,
 //! liquidation, and CU ceilings.
 //!
-//! A separate bounded graph exhausts every action word through depth two over
+//! A separate bounded graph exhausts every action word through depth three over
 //! thirteen wrapper actions, including authority resolution and resolved close. Its
 //! normalized node includes every portfolio's PnL, escrow, close ledger, payout receipt,
 //! and account status plus the market payout snapshot, per-domain source credit,
@@ -78,11 +78,11 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
         .expect("INV-086 bounded deployed/reference graph");
 
     assert_eq!(
-        evidence.word_count, 183,
-        "must exhaust 13^0 + 13^1 + 13^2 words"
+        evidence.word_count, 2_380,
+        "must exhaust 13^0 + 13^1 + 13^2 + 13^3 words"
     );
     assert_eq!(
-        evidence.transition_count, 351,
+        evidence.transition_count, 6_942,
         "must replay every edge in every bounded word"
     );
     assert!(
@@ -90,11 +90,16 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
         "bounded graph collapsed to vacuous state coverage: {evidence:?}"
     );
     assert!(
+        evidence.unique_node_count > evidence.depth_two_unique_node_count
+            && evidence.unique_edge_count > evidence.depth_two_unique_edge_count,
+        "third actions must discover normalized states and edges beyond depth two: {evidence:?}"
+    );
+    assert!(
         evidence
             .action_attempts
             .iter()
-            .all(|attempts| *attempts == 27),
-        "every action must occupy every first/second word position: {evidence:?}"
+            .all(|attempts| *attempts == 534),
+        "every action must occupy every first/second/third word position: {evidence:?}"
     );
     assert!(
         evidence
@@ -102,6 +107,13 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
             .iter()
             .all(|changes| *changes != 0),
         "every action class must produce a real normalized state transition: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .third_position_state_changes
+            .iter()
+            .all(|changes| *changes != 0),
+        "every action class must produce a real third-position state transition: {evidence:?}"
     );
     assert_eq!(
         evidence.underfunded_terminal_world_count, 12,

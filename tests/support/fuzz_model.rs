@@ -10307,10 +10307,13 @@ struct BoundedReferenceNode {
 pub struct BoundedReferenceGraphEvidence {
     pub word_count: usize,
     pub transition_count: usize,
+    pub depth_two_unique_node_count: usize,
+    pub depth_two_unique_edge_count: usize,
     pub unique_node_count: usize,
     pub unique_edge_count: usize,
     pub action_attempts: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
     pub action_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+    pub third_position_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
     pub underfunded_terminal_world_count: usize,
     pub underfunded_terminal_transition_count: usize,
     pub underfunded_terminal_unique_node_count: usize,
@@ -11591,14 +11594,42 @@ fn run_underfunded_terminal_reference_subgraph() -> Result<UnderfundedTerminalGr
 pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraphEvidence, String> {
     type Edge = (BoundedReferenceNode, u8, BoundedReferenceNode);
 
-    fn replay_word(
-        word: &[(usize, Action)],
-        nodes: &mut BTreeSet<BoundedReferenceNode>,
-        edges: &mut BTreeSet<Edge>,
-        action_attempts: &mut [u64; BOUNDED_REFERENCE_ACTION_COUNT],
-        action_state_changes: &mut [u64; BOUNDED_REFERENCE_ACTION_COUNT],
-        coverage: &mut Coverage,
-    ) -> Result<(), String> {
+    #[derive(Default)]
+    struct GraphAccumulator {
+        nodes: BTreeSet<BoundedReferenceNode>,
+        edges: BTreeSet<Edge>,
+        action_attempts: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+        action_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+        third_position_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+        coverage: Coverage,
+    }
+
+    impl GraphAccumulator {
+        fn merge(&mut self, other: Self) {
+            self.nodes.extend(other.nodes);
+            self.edges.extend(other.edges);
+            for (total, count) in self.action_attempts.iter_mut().zip(other.action_attempts) {
+                *total += count;
+            }
+            for (total, count) in self
+                .action_state_changes
+                .iter_mut()
+                .zip(other.action_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .third_position_state_changes
+                .iter_mut()
+                .zip(other.third_position_state_changes)
+            {
+                *total += count;
+            }
+            self.coverage.merge(other.coverage);
+        }
+    }
+
+    fn replay_word(word: &[(usize, Action)], graph: &mut GraphAccumulator) -> Result<(), String> {
         let scenario = Scenario {
             seed: [0x86; 32],
             config: SmallMarketConfig {
@@ -11611,75 +11642,114 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
         };
         let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
         let mut before = runner.bounded_reference_node()?;
-        nodes.insert(before.clone());
-        for (action_index, action) in word {
-            runner.run_safety_prefix(std::slice::from_ref(action))?;
-            let after = runner.bounded_reference_node()?;
-            action_attempts[*action_index] += 1;
+        graph.nodes.insert(before.clone());
+        for (position, (action_index, action)) in word.iter().enumerate() {
+            runner
+                .run_safety_prefix(std::slice::from_ref(action))
+                .map_err(|error| {
+                    format!("INV-086 public word {word:?} failed at position {position}: {error}")
+                })?;
+            let after = runner.bounded_reference_node().map_err(|error| {
+                format!(
+                    "INV-086 public word {word:?} produced an invalid node at position {position}: {error}"
+                )
+            })?;
+            graph.action_attempts[*action_index] += 1;
             if after != before {
-                action_state_changes[*action_index] += 1;
+                graph.action_state_changes[*action_index] += 1;
+                if position == 2 {
+                    graph.third_position_state_changes[*action_index] += 1;
+                }
             }
-            nodes.insert(after.clone());
-            edges.insert((before, *action_index as u8, after.clone()));
+            graph.nodes.insert(after.clone());
+            graph
+                .edges
+                .insert((before, *action_index as u8, after.clone()));
             before = after;
         }
-        coverage.merge(runner.coverage);
+        graph.coverage.merge(runner.coverage);
         Ok(())
     }
 
-    let actions = bounded_reference_actions();
-    let mut nodes = BTreeSet::new();
-    let mut edges = BTreeSet::new();
-    let mut action_attempts = [0u64; BOUNDED_REFERENCE_ACTION_COUNT];
-    let mut action_state_changes = [0u64; BOUNDED_REFERENCE_ACTION_COUNT];
-    let mut coverage = Coverage::default();
-    let mut word_count = 0usize;
-    let mut transition_count = 0usize;
+    fn replay_words(words: &[Vec<(usize, Action)>]) -> Result<GraphAccumulator, String> {
+        let worker_count = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(8)
+            .min(words.len().max(1));
+        let chunk_size = words.len().div_ceil(worker_count);
 
-    replay_word(
-        &[],
-        &mut nodes,
-        &mut edges,
-        &mut action_attempts,
-        &mut action_state_changes,
-        &mut coverage,
-    )?;
-    word_count += 1;
-    for (first_index, first) in actions.iter().enumerate() {
-        replay_word(
-            &[(first_index, first.clone())],
-            &mut nodes,
-            &mut edges,
-            &mut action_attempts,
-            &mut action_state_changes,
-            &mut coverage,
-        )?;
-        word_count += 1;
-        transition_count += 1;
-        for (second_index, second) in actions.iter().enumerate() {
-            replay_word(
-                &[(first_index, first.clone()), (second_index, second.clone())],
-                &mut nodes,
-                &mut edges,
-                &mut action_attempts,
-                &mut action_state_changes,
-                &mut coverage,
-            )?;
-            word_count += 1;
-            transition_count += 2;
-        }
+        std::thread::scope(|scope| {
+            let handles = words
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || -> Result<GraphAccumulator, String> {
+                        let mut graph = GraphAccumulator::default();
+                        for word in chunk {
+                            replay_word(word, &mut graph)?;
+                        }
+                        Ok(graph)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut graph = GraphAccumulator::default();
+            for handle in handles {
+                let worker = handle
+                    .join()
+                    .map_err(|_| "INV-086 public graph worker panicked".to_string())??;
+                graph.merge(worker);
+            }
+            Ok(graph)
+        })
     }
 
+    let actions = bounded_reference_actions();
+    let mut depth_two_words = vec![vec![]];
+    for (first_index, first) in actions.iter().enumerate() {
+        depth_two_words.push(vec![(first_index, first.clone())]);
+    }
+    for (first_index, first) in actions.iter().enumerate() {
+        for (second_index, second) in actions.iter().enumerate() {
+            depth_two_words.push(vec![
+                (first_index, first.clone()),
+                (second_index, second.clone()),
+            ]);
+        }
+    }
+    let mut graph = replay_words(&depth_two_words)?;
+    let depth_two_unique_node_count = graph.nodes.len();
+    let depth_two_unique_edge_count = graph.edges.len();
+
+    let mut depth_three_words = Vec::with_capacity(BOUNDED_REFERENCE_ACTION_COUNT.pow(3));
+    for (first_index, first) in actions.iter().enumerate() {
+        for (second_index, second) in actions.iter().enumerate() {
+            for (third_index, third) in actions.iter().enumerate() {
+                depth_three_words.push(vec![
+                    (first_index, first.clone()),
+                    (second_index, second.clone()),
+                    (third_index, third.clone()),
+                ]);
+            }
+        }
+    }
+    graph.merge(replay_words(&depth_three_words)?);
+    let word_count = depth_two_words.len() + depth_three_words.len();
+    let transition_count = depth_two_words.iter().map(Vec::len).sum::<usize>()
+        + depth_three_words.iter().map(Vec::len).sum::<usize>();
+
     let underfunded = run_underfunded_terminal_reference_subgraph()?;
-    coverage.merge(underfunded.coverage);
+    graph.coverage.merge(underfunded.coverage);
 
     Ok(BoundedReferenceGraphEvidence {
         word_count,
         transition_count,
-        unique_node_count: nodes.len(),
-        unique_edge_count: edges.len(),
-        action_attempts,
-        action_state_changes,
+        depth_two_unique_node_count,
+        depth_two_unique_edge_count,
+        unique_node_count: graph.nodes.len(),
+        unique_edge_count: graph.edges.len(),
+        action_attempts: graph.action_attempts,
+        action_state_changes: graph.action_state_changes,
+        third_position_state_changes: graph.third_position_state_changes,
         underfunded_terminal_world_count: underfunded.world_count,
         underfunded_terminal_transition_count: underfunded.transition_count,
         underfunded_terminal_unique_node_count: underfunded.unique_node_count,
@@ -11687,7 +11757,7 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
         partial_receipt_seed_count: underfunded.partial_receipt_seed_count,
         value_moving_claim_world_count: underfunded.value_moving_claim_world_count,
         expiry_normalization_world_count: underfunded.expiry_normalization_world_count,
-        coverage,
+        coverage: graph.coverage,
     })
 }
 
