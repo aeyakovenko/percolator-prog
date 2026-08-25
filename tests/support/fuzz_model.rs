@@ -3779,6 +3779,18 @@ impl ScenarioRunner {
                     "actor {actor} {route:?} rewrote or rolled back its receipt: {before:?} -> {after:?}"
                 ));
             }
+            if before.present && matches!(route, TerminalRoute::Claim) {
+                let paid_delta = after
+                    .paid_effective
+                    .checked_sub(before.paid_effective)
+                    .ok_or("terminal receipt paid amount rolled back")?;
+                if paid_delta != route_payout {
+                    return Err(format!(
+                        "actor {actor} Claim receipt delta {paid_delta} != public payout \
+                         {route_payout}: {before:?} -> {after:?}"
+                    ));
+                }
+            }
             if !before.present {
                 let ledger_before = group_before.resolved_payout_ledger;
                 let exact_before = if group_before.payout_snapshot_captured {
@@ -10738,6 +10750,19 @@ type BoundedTerminalEdge = (BoundedReferenceNode, u8, BoundedReferenceNode);
 const UNDERFUNDED_TERMINAL_UNRELATED_ACTOR: usize = 4;
 const UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL: u128 = 777;
 
+#[derive(Clone, Copy)]
+struct UnderfundedBackingPlan {
+    backed_atoms: u128,
+    extra_backing: Option<(u16, u128, u64)>,
+    extra_backed_trade: bool,
+}
+
+const DEFAULT_UNDERFUNDED_BACKING_PLAN: UnderfundedBackingPlan = UnderfundedBackingPlan {
+    backed_atoms: 1_500,
+    extra_backing: None,
+    extra_backed_trade: false,
+};
+
 struct UnderfundedResolvedSeed {
     runner: ScenarioRunner,
     stale_resolve_rejected: bool,
@@ -10765,6 +10790,20 @@ pub struct ResolvedClaimQuoteDeltaEvidence {
     pub receipt_replacement_count: u64,
     pub replaced_bound_num: u128,
     pub exact_receipt_num: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedReceiptSplitTopupEvidence {
+    pub receipt_face: u128,
+    pub initial_paid: u128,
+    pub first_paid: u128,
+    pub second_paid: u128,
+    pub first_payout: u128,
+    pub second_payout: u128,
+    pub exact_noop_retries: usize,
+    pub terminal_actor_count: usize,
+    pub final_engine_vault: u128,
+    pub final_spl_vault: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10915,6 +10954,7 @@ fn drain_bounded_terminal_subset(
 fn build_underfunded_live_reference_prefix(
     seed: [u8; 32],
     include_close_bridge: bool,
+    backing_plan: UnderfundedBackingPlan,
 ) -> Result<ScenarioRunner, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
@@ -10928,6 +10968,7 @@ fn build_underfunded_live_reference_prefix(
     const INITIAL_PRICE: u64 = 100;
     const WINNING_MARK: u64 = 150;
     const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const EXTRA_BACKED_SIZE_Q: i128 = 4 * POS_SCALE as i128;
     const BRIDGE_SIZE_Q: i128 = 70 * POS_SCALE as i128;
     const SNAPSHOT_SLOT: u64 = 12;
     const EXPIRY_SLOT: u64 = 13;
@@ -10953,7 +10994,16 @@ fn build_underfunded_live_reference_prefix(
     )?;
 
     bounded_reference_top_up_backing(&mut runner, JUNIOR_DOMAIN, 1, SNAPSHOT_SLOT, true)?;
-    bounded_reference_top_up_backing(&mut runner, BACKED_DOMAIN, 1_500, EXPIRY_SLOT, false)?;
+    bounded_reference_top_up_backing(
+        &mut runner,
+        BACKED_DOMAIN,
+        backing_plan.backed_atoms,
+        EXPIRY_SLOT,
+        false,
+    )?;
+    if let Some((domain, amount, expiry_slot)) = backing_plan.extra_backing {
+        bounded_reference_top_up_backing(&mut runner, domain, amount, expiry_slot, false)?;
+    }
     runner.execute_trade(
         TradeRoute::NoCpi,
         JUNIOR_WINNER,
@@ -10974,6 +11024,18 @@ fn build_underfunded_live_reference_prefix(
         true,
     )?;
     runner.assert_global_invariants()?;
+    if backing_plan.extra_backed_trade {
+        runner.execute_trade(
+            TradeRoute::NoCpi,
+            BACKED_WINNER,
+            JUNIOR_LOSER,
+            vec![(BRIDGE_ASSET, EXTRA_BACKED_SIZE_Q)],
+            0,
+            0,
+            true,
+        )?;
+        runner.assert_global_invariants()?;
+    }
     if include_close_bridge {
         runner.execute_trade(
             TradeRoute::NoCpi,
@@ -10991,7 +11053,7 @@ fn build_underfunded_live_reference_prefix(
         let slot = 2 + u64::try_from(offset).expect("bounded INV-086 mark sequence");
         bounded_reference_push_mark(&mut runner, 0, slot, mark)?;
         bounded_reference_push_mark(&mut runner, BACKED_ASSET as u16, slot, mark)?;
-        if include_close_bridge {
+        if include_close_bridge || backing_plan.extra_backed_trade {
             bounded_reference_push_mark(&mut runner, BRIDGE_ASSET as u16, slot, mark)?;
         }
         for actor in [JUNIOR_LOSER, JUNIOR_WINNER, BACKED_LOSER, BACKED_WINNER] {
@@ -11022,6 +11084,18 @@ fn build_underfunded_live_reference_prefix(
         true,
     )?;
     runner.assert_global_invariants()?;
+    if backing_plan.extra_backed_trade {
+        runner.execute_trade(
+            TradeRoute::NoCpi,
+            BACKED_WINNER,
+            JUNIOR_LOSER,
+            vec![(BRIDGE_ASSET, -EXTRA_BACKED_SIZE_Q)],
+            0,
+            0,
+            true,
+        )?;
+        runner.assert_global_invariants()?;
+    }
     if include_close_bridge {
         // Keep the bridge loser stale until this terminal reduction. The trade's own refresh then
         // observes the deficit while its pre-refresh one-leg attribution is still unambiguous.
@@ -11102,6 +11176,7 @@ fn build_underfunded_resolved_reference_seed(
     reverse_tail: bool,
     claim_first: bool,
     authority_handoff_first: Option<bool>,
+    backing_plan: UnderfundedBackingPlan,
 ) -> Result<UnderfundedResolvedSeed, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
@@ -11116,7 +11191,7 @@ fn build_underfunded_resolved_reference_seed(
     seed[0] ^= landing.seed_tag();
     seed[1] ^= u8::from(reverse_tail);
     seed[2] ^= u8::from(claim_first);
-    let mut runner = build_underfunded_live_reference_prefix(seed, false)?;
+    let mut runner = build_underfunded_live_reference_prefix(seed, false, backing_plan)?;
 
     let before_resolution = runner.env.primary_market_state().1;
     if before_resolution.source_credit[JUNIOR_DOMAIN as usize].positive_claim_bound_num == 0
@@ -11212,7 +11287,11 @@ pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialRec
     const CLOSE_LOSER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
     const SNAPSHOT_SLOT: u64 = 12;
 
-    let mut runner = build_underfunded_live_reference_prefix([0x8b; 32], true)?;
+    let mut runner = build_underfunded_live_reference_prefix(
+        [0x8b; 32],
+        true,
+        DEFAULT_UNDERFUNDED_BACKING_PLAN,
+    )?;
     let close_before = runner
         .env
         .primary_portfolio(CLOSE_LOSER)
@@ -11391,6 +11470,7 @@ fn run_underfunded_terminal_world(
         reverse_tail,
         claim_first,
         authority_handoff_first,
+        DEFAULT_UNDERFUNDED_BACKING_PLAN,
     )?;
     let seeded = runner.bounded_reference_node()?;
     let partial_receipt_seeded = seeded.payout_receipts[JUNIOR_WINNER].flags == [true, false];
@@ -11578,6 +11658,214 @@ pub fn verify_resolved_claim_quote_delta() -> Result<ResolvedClaimQuoteDeltaEvid
     })
 }
 
+fn require_resolved_claim_retry_noop(
+    runner: &mut ScenarioRunner,
+    actor: usize,
+    label: &str,
+) -> Result<(), String> {
+    let before = runner.snapshot();
+    let result = runner.execute_terminal_route(actor, TerminalRoute::Claim)?;
+    if !result.landed || result.mutated || result.payout != 0 || runner.snapshot() != before {
+        return Err(format!(
+            "{label} was not an exact landed no-op: result={result:?}"
+        ));
+    }
+    runner.assert_global_invariants()
+}
+
+pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopupEvidence, String> {
+    const CLAIMANT: usize = 0;
+    const BACKED_WINNER: usize = 2;
+    const BACKED_DOMAIN: usize = 3;
+    const EXTRA_DOMAIN: usize = 5;
+    const FIRST_RELEASE_SLOT: u64 = 13;
+    const SECOND_RELEASE_SLOT: u64 = 14;
+    const RELEASE_ATOMS: u128 = 100;
+
+    let backing_plan = UnderfundedBackingPlan {
+        backed_atoms: RELEASE_ATOMS,
+        extra_backing: Some((
+            u16::try_from(EXTRA_DOMAIN).map_err(|_| "extra domain exceeds u16")?,
+            RELEASE_ATOMS,
+            SECOND_RELEASE_SLOT,
+        )),
+        extra_backed_trade: true,
+    };
+    let UnderfundedResolvedSeed { mut runner, .. } = build_underfunded_resolved_reference_seed(
+        BoundedExpiryLanding::Before,
+        false,
+        true,
+        None,
+        backing_plan,
+    )?;
+    let read_receipt = |runner: &ScenarioRunner| {
+        runner
+            .env
+            .primary_portfolio(CLAIMANT)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("INV-068 claimant receipt decode: {error:?}"))
+    };
+    let independent_residual = |group: &MarketGroupV16| {
+        let fresh_backing_num = group.source_credit.iter().try_fold(0u128, |total, source| {
+            total.checked_add(source.fresh_reserved_backing_num)
+        });
+        let fresh_backing_num =
+            fresh_backing_num.ok_or_else(|| "INV-068 fresh-backing sum overflow".to_string())?;
+        let senior = group
+            .c_tot
+            .checked_add(group.insurance)
+            .and_then(|value| value.checked_add(group.backing_provider_earnings_total))
+            .and_then(|value| value.checked_add(fresh_backing_num / BOUND_SCALE))
+            .ok_or_else(|| "INV-068 independent senior-stock overflow".to_string())?;
+        group
+            .vault
+            .checked_sub(senior)
+            .ok_or_else(|| "INV-068 senior stocks exceed vault custody".to_string())
+    };
+    let initial = read_receipt(&runner)?;
+    if !initial.present
+        || initial.finalized
+        || initial.terminal_positive_claim_face == 0
+        || initial.paid_effective >= initial.terminal_positive_claim_face
+    {
+        return Err(format!(
+            "INV-068 public prefix did not create a pending haircut receipt: {initial:?}"
+        ));
+    }
+
+    require_resolved_claim_retry_noop(&mut runner, CLAIMANT, "INV-068 initial retry")?;
+    let mut exact_noop_retries = 1usize;
+
+    runner.env.warp_to_slot(FIRST_RELEASE_SLOT);
+    let before_first_release = runner.env.primary_market_state().1;
+    if before_first_release.source_backing_buckets[BACKED_DOMAIN].status
+        != BackingBucketStatusV16::Fresh
+    {
+        return Err("INV-068 first backing bucket was not fresh before expiry".into());
+    }
+    let first_release = runner.execute_terminal_route(BACKED_WINNER, TerminalRoute::Close)?;
+    let after_first_release = runner.env.primary_market_state().1;
+    let first_released_residual = independent_residual(&after_first_release)?
+        .checked_sub(independent_residual(&before_first_release)?)
+        .ok_or("INV-068 first route reduced junior residual")?;
+    if !first_release.landed
+        || !first_release.mutated
+        || first_release.payout != 0
+        || first_released_residual == 0
+        || after_first_release.source_backing_buckets[BACKED_DOMAIN].status
+            == BackingBucketStatusV16::Fresh
+        || after_first_release.payout_snapshot
+            != before_first_release
+                .payout_snapshot
+                .checked_add(first_released_residual)
+                .ok_or("INV-068 first payout snapshot overflow")?
+    {
+        return Err(format!(
+            "INV-068 first public expiry did not credit its exact stock-partition release: \
+             result={first_release:?}, snapshot={}->{}, bucket={:?}",
+            before_first_release.payout_snapshot,
+            after_first_release.payout_snapshot,
+            after_first_release.source_backing_buckets[BACKED_DOMAIN],
+        ));
+    }
+    runner.assert_global_invariants()?;
+
+    let first_topup = runner.execute_terminal_route(CLAIMANT, TerminalRoute::Claim)?;
+    let after_first = read_receipt(&runner)?;
+    if !first_topup.landed
+        || first_topup.payout == 0
+        || !after_first.present
+        || after_first.finalized
+        || after_first
+            .paid_effective
+            .checked_sub(initial.paid_effective)
+            != Some(first_topup.payout)
+    {
+        return Err(format!(
+            "INV-068 first top-up was not a partial exact payment: \
+             result={first_topup:?}, {initial:?}->{after_first:?}"
+        ));
+    }
+    require_resolved_claim_retry_noop(&mut runner, CLAIMANT, "INV-068 first top-up retry")?;
+    exact_noop_retries += 1;
+
+    runner.env.warp_to_slot(SECOND_RELEASE_SLOT);
+    let before_second_release = runner.env.primary_market_state().1;
+    if before_second_release.source_backing_buckets[EXTRA_DOMAIN].status
+        != BackingBucketStatusV16::Fresh
+    {
+        return Err("INV-068 second backing bucket was not fresh before expiry".into());
+    }
+    let second_release = runner.execute_terminal_route(BACKED_WINNER, TerminalRoute::Close)?;
+    let after_second_release = runner.env.primary_market_state().1;
+    let second_released_residual = independent_residual(&after_second_release)?
+        .checked_sub(independent_residual(&before_second_release)?)
+        .ok_or("INV-068 second close reduced junior residual")?;
+    if !second_release.landed
+        || !second_release.mutated
+        || second_release.payout != 0
+        || second_released_residual == 0
+        || after_second_release.source_backing_buckets[EXTRA_DOMAIN].status
+            == BackingBucketStatusV16::Fresh
+        || after_second_release.payout_snapshot
+            != before_second_release
+                .payout_snapshot
+                .checked_add(second_released_residual)
+                .ok_or("INV-068 second payout snapshot overflow")?
+    {
+        return Err(format!(
+            "INV-068 second public expiry did not credit its exact stock-partition release: \
+             result={second_release:?}, snapshot={}->{}, bucket={:?}",
+            before_second_release.payout_snapshot,
+            after_second_release.payout_snapshot,
+            after_second_release.source_backing_buckets[EXTRA_DOMAIN],
+        ));
+    }
+    runner.assert_global_invariants()?;
+
+    let second_topup = runner.execute_terminal_route(CLAIMANT, TerminalRoute::Claim)?;
+    let after_second = read_receipt(&runner)?;
+    if !second_topup.landed
+        || second_topup.payout == 0
+        || !after_second.present
+        || after_second.finalized
+        || after_second
+            .paid_effective
+            .checked_sub(after_first.paid_effective)
+            != Some(second_topup.payout)
+    {
+        return Err(format!(
+            "INV-068 second top-up was not a partial exact payment: \
+             result={second_topup:?}, {after_first:?}->{after_second:?}"
+        ));
+    }
+    require_resolved_claim_retry_noop(&mut runner, CLAIMANT, "INV-068 second top-up retry")?;
+    exact_noop_retries += 1;
+
+    runner.run_terminal_payout_campaign()?;
+    runner.assert_global_invariants()?;
+    let terminal_actor_count = (0..PRIMARY_ACTOR_COUNT)
+        .map(|actor| runner.portfolio_is_economically_terminal(actor))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|terminal| *terminal)
+        .count();
+    let final_group = runner.env.primary_market_state().1;
+    Ok(ResolvedReceiptSplitTopupEvidence {
+        receipt_face: initial.terminal_positive_claim_face,
+        initial_paid: initial.paid_effective,
+        first_paid: after_first.paid_effective,
+        second_paid: after_second.paid_effective,
+        first_payout: first_topup.payout,
+        second_payout: second_topup.payout,
+        exact_noop_retries,
+        terminal_actor_count,
+        final_engine_vault: final_group.vault,
+        final_spl_vault: u128::from(runner.env.token_amount(runner.env.vault)),
+    })
+}
+
 pub fn verify_underfunded_authority_resolve_claim_orders(
 ) -> Result<AuthorityResolvedClaimEvidence, String> {
     let mut partial_receipt_count = 0usize;
@@ -11616,8 +11904,13 @@ pub fn verify_underfunded_authority_resolve_claim_orders(
 fn build_value_moving_resolved_claim_runner() -> Result<ScenarioRunner, String> {
     const BACKED_WINNER: usize = 2;
 
-    let UnderfundedResolvedSeed { mut runner, .. } =
-        build_underfunded_resolved_reference_seed(BoundedExpiryLanding::Before, false, true, None)?;
+    let UnderfundedResolvedSeed { mut runner, .. } = build_underfunded_resolved_reference_seed(
+        BoundedExpiryLanding::Before,
+        false,
+        true,
+        None,
+        DEFAULT_UNDERFUNDED_BACKING_PLAN,
+    )?;
     drain_bounded_terminal_subset(
         &mut runner,
         &[BACKED_WINNER],
