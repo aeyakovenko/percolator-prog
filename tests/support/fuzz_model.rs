@@ -10767,6 +10767,8 @@ struct UnderfundedResolvedSeed {
     runner: ScenarioRunner,
     stale_resolve_rejected: bool,
     stale_policy_rejected: bool,
+    terminal_policy_rejected: bool,
+    fresh_policy_rejected: bool,
     engine_vault_at_resolution: u128,
     spl_vault_at_resolution: u128,
     destinations_at_resolution: [u128; PRIMARY_ACTOR_COUNT],
@@ -10777,6 +10779,8 @@ struct UnderfundedTerminalWorld {
     transition_count: usize,
     stale_resolve_rejected: bool,
     stale_policy_rejected: bool,
+    terminal_policy_rejected: bool,
+    fresh_policy_rejected: bool,
     partial_receipt_seeded: bool,
     value_moving_claim: bool,
     claim_payout_atoms: u128,
@@ -10825,8 +10829,12 @@ pub struct AuthorityResolvedClaimEvidence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorityPolicyResolvedClaimEvidence {
     pub world_count: usize,
+    pub policy_kind_count: usize,
+    pub boundary_count: usize,
     pub stale_resolve_rejection_count: usize,
     pub stale_policy_rejection_count: usize,
+    pub terminal_policy_rejection_count: usize,
+    pub fresh_policy_rejection_count: usize,
     pub partial_receipt_count: usize,
     pub value_moving_claim_count: usize,
     pub claim_payout_atoms: u128,
@@ -10837,6 +10845,186 @@ enum UnderfundedAuthorityOperation {
     Policy,
     Handoff,
     Resolve,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnderfundedPolicyKind {
+    TradeFee,
+    FeeRedirect,
+    MarketInitFee,
+    LiquidationFee,
+    MaintenanceFee,
+    Resolve,
+    BackingFeeLong,
+    BackingFeeShort,
+}
+
+impl UnderfundedPolicyKind {
+    const ALL: [Self; 8] = [
+        Self::TradeFee,
+        Self::FeeRedirect,
+        Self::MarketInitFee,
+        Self::LiquidationFee,
+        Self::MaintenanceFee,
+        Self::Resolve,
+        Self::BackingFeeLong,
+        Self::BackingFeeShort,
+    ];
+
+    fn sequence(self, env: &V16Svm) -> u64 {
+        let sequences = env.primary_control_sequences(0);
+        match self {
+            Self::TradeFee => sequences.trade_fee,
+            Self::FeeRedirect => sequences.fee_redirect,
+            Self::MarketInitFee => sequences.market_init_fee,
+            Self::LiquidationFee => sequences.liquidation_fee,
+            Self::MaintenanceFee => sequences.maintenance_fee,
+            Self::Resolve => sequences.permissionless_resolve,
+            Self::BackingFeeLong => sequences.backing_fee_long,
+            Self::BackingFeeShort => sequences.backing_fee_short,
+        }
+    }
+
+    fn instruction(
+        self,
+        env: &V16Svm,
+        boundary: UnderfundedPolicyBoundary,
+        fresh: bool,
+    ) -> ProgInstruction {
+        let policy_sequence = self.sequence(env) + 1;
+        let bps = boundary.bps(fresh);
+        match self {
+            Self::TradeFee => ProgInstruction::UpdateTradeFeePolicy {
+                trade_fee_base_bps: u64::from(bps),
+                policy_sequence,
+            },
+            Self::FeeRedirect => ProgInstruction::UpdateFeeRedirectPolicy {
+                redirect_bps: bps,
+                policy_sequence,
+            },
+            Self::MarketInitFee => ProgInstruction::UpdateMarketInitFeePolicy {
+                min_init_fee: boundary.init_fee(fresh),
+                policy_sequence,
+            },
+            Self::LiquidationFee => ProgInstruction::UpdateLiquidationFeePolicy {
+                cranker_share_bps: bps,
+                policy_sequence,
+            },
+            Self::MaintenanceFee => ProgInstruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps: bps,
+                policy_sequence,
+            },
+            Self::Resolve => {
+                let (stale_slots, force_close_delay_slots) = boundary.resolve_slots(fresh);
+                ProgInstruction::ConfigurePermissionlessResolve {
+                    asset_generation_frontier: env.primary_market_state().1.next_market_id,
+                    stale_slots,
+                    force_close_delay_slots,
+                    policy_sequence,
+                }
+            }
+            Self::BackingFeeLong | Self::BackingFeeShort => {
+                ProgInstruction::UpdateBackingFeePolicy {
+                    domain: u16::from(self == Self::BackingFeeShort),
+                    market_id: env.primary_market_state().1.assets[0].market_id,
+                    fee_bps: bps,
+                    insurance_share_bps: bps,
+                    policy_sequence,
+                }
+            }
+        }
+    }
+
+    fn current_value(self, env: &V16Svm) -> [u128; 2] {
+        let (cfg, _) = env.primary_market_state();
+        match self {
+            Self::TradeFee => [u128::from(cfg.trade_fee_base_bps), 0],
+            Self::FeeRedirect => [u128::from(cfg.fee_redirect_to_market_0_bps), 0],
+            Self::MarketInitFee => [cfg.permissionless_market_init_fee, 0],
+            Self::LiquidationFee => [u128::from(cfg.liquidation_cranker_fee_share_bps), 0],
+            Self::MaintenanceFee => [u128::from(cfg.maintenance_cranker_fee_share_bps), 0],
+            Self::Resolve => [
+                u128::from(cfg.permissionless_resolve_stale_slots),
+                u128::from(cfg.force_close_delay_slots),
+            ],
+            Self::BackingFeeLong => [
+                u128::from(cfg.backing_trade_fee_bps_long),
+                u128::from(cfg.backing_trade_fee_insurance_share_bps_long),
+            ],
+            Self::BackingFeeShort => [
+                u128::from(cfg.backing_trade_fee_bps_short),
+                u128::from(cfg.backing_trade_fee_insurance_share_bps_short),
+            ],
+        }
+    }
+
+    fn requested_value(self, boundary: UnderfundedPolicyBoundary, fresh: bool) -> [u128; 2] {
+        let bps = u128::from(boundary.bps(fresh));
+        match self {
+            Self::TradeFee | Self::FeeRedirect | Self::LiquidationFee | Self::MaintenanceFee => {
+                [bps, 0]
+            }
+            Self::MarketInitFee => [boundary.init_fee(fresh), 0],
+            Self::Resolve => {
+                let (stale_slots, force_close_delay_slots) = boundary.resolve_slots(fresh);
+                [u128::from(stale_slots), u128::from(force_close_delay_slots)]
+            }
+            Self::BackingFeeLong | Self::BackingFeeShort => [bps, bps],
+        }
+    }
+
+    const fn requires_live_market(self) -> bool {
+        matches!(
+            self,
+            Self::Resolve | Self::BackingFeeLong | Self::BackingFeeShort
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnderfundedPolicyBoundary {
+    Low,
+    Midpoint,
+    Maximum,
+}
+
+impl UnderfundedPolicyBoundary {
+    const ALL: [Self; 3] = [Self::Low, Self::Midpoint, Self::Maximum];
+
+    fn bps(self, fresh: bool) -> u16 {
+        match (self, fresh) {
+            (Self::Low, false) => 1,
+            (Self::Low, true) => 2,
+            (Self::Midpoint, false) => 5_000,
+            (Self::Midpoint, true) => 5_001,
+            (Self::Maximum, false) => 10_000,
+            (Self::Maximum, true) => 9_999,
+        }
+    }
+
+    fn init_fee(self, fresh: bool) -> u128 {
+        match (self, fresh) {
+            (Self::Low, false) => 1,
+            (Self::Low, true) => 2,
+            (Self::Midpoint, false) => u32::MAX as u128,
+            (Self::Midpoint, true) => u32::MAX as u128 + 1,
+            (Self::Maximum, false) => u64::MAX as u128,
+            (Self::Maximum, true) => u64::MAX as u128 - 1,
+        }
+    }
+
+    fn resolve_slots(self, fresh: bool) -> (u64, u64) {
+        let stale_max = percolator_prog::constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS;
+        let delay_max = percolator_prog::constants::MAX_FORCE_CLOSE_DELAY_SLOTS;
+        match (self, fresh) {
+            (Self::Low, false) => (1, 1),
+            (Self::Low, true) => (2, 2),
+            (Self::Midpoint, false) => (stale_max / 2, delay_max / 2),
+            (Self::Midpoint, true) => (stale_max / 2 + 1, delay_max / 2 + 1),
+            (Self::Maximum, false) => (stale_max, delay_max),
+            (Self::Maximum, true) => (stale_max - 1, delay_max - 1),
+        }
+    }
 }
 
 impl UnderfundedAuthorityOperation {
@@ -10853,7 +11041,11 @@ impl UnderfundedAuthorityOperation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UnderfundedAuthorityPlan {
     HandoffResolve(bool),
-    PolicyHandoffResolve([UnderfundedAuthorityOperation; 3]),
+    PolicyHandoffResolve {
+        policy_kind: UnderfundedPolicyKind,
+        boundary: UnderfundedPolicyBoundary,
+        order: [UnderfundedAuthorityOperation; 3],
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11214,19 +11406,22 @@ fn execute_authority_ordered_resolve(
 
 fn execute_authority_policy_ordered_resolve(
     runner: &mut ScenarioRunner,
+    policy_kind: UnderfundedPolicyKind,
+    boundary: UnderfundedPolicyBoundary,
     order: [UnderfundedAuthorityOperation; 3],
-) -> Result<(bool, bool), String> {
+) -> Result<(bool, bool, bool, bool), String> {
     const INCOMING_AUTHORITY: usize = 2;
-    const OLD_REDIRECT_BPS: u16 = 333;
-    const FRESH_REDIRECT_BPS: u16 = 334;
 
-    let initial_policy_sequence = runner.env.primary_control_sequences(0).fee_redirect;
-    let retained_policy = runner.env.build_retained_market_control_from_admin(
-        ProgInstruction::UpdateFeeRedirectPolicy {
-            redirect_bps: OLD_REDIRECT_BPS,
-            policy_sequence: initial_policy_sequence + 1,
-        },
-    );
+    let initial_policy_sequence = policy_kind.sequence(&runner.env);
+    let initial_policy_value = policy_kind.current_value(&runner.env);
+    let retained_policy =
+        runner
+            .env
+            .build_retained_market_control_from_admin(policy_kind.instruction(
+                &runner.env,
+                boundary,
+                false,
+            ));
     let retained_handoff = runner
         .env
         .build_retained_market_authority_handoff_from_admin(INCOMING_AUTHORITY);
@@ -11236,6 +11431,7 @@ fn execute_authority_policy_ordered_resolve(
     let mut policy_landed = false;
     let mut stale_resolve_rejected = false;
     let mut stale_policy_rejected = false;
+    let mut terminal_policy_rejected = false;
 
     for operation in order {
         match operation {
@@ -11250,15 +11446,30 @@ fn execute_authority_policy_ordered_resolve(
                 if handoff_landed {
                     let before = runner.snapshot();
                     if runner.env.land_retained(retained_policy.clone()).is_ok() {
-                        return Err("INV-010 old authority policy landed after handoff".into());
+                        return Err(format!(
+                            "INV-010 old authority policy landed after handoff: kind={policy_kind:?}, boundary={boundary:?}, order={order:?}"
+                        ));
                     }
                     runner.assert_snapshot_unchanged(&before)?;
                     stale_policy_rejected = true;
+                } else if policy_kind.requires_live_market() && resolve_landed {
+                    let before = runner.snapshot();
+                    if runner.env.land_retained(retained_policy.clone()).is_ok() {
+                        return Err(format!(
+                            "INV-010 terminal live-only policy request landed: kind={policy_kind:?}, boundary={boundary:?}, order={order:?}"
+                        ));
+                    }
+                    runner.assert_snapshot_unchanged(&before)?;
+                    terminal_policy_rejected = true;
                 } else {
                     runner
                         .env
                         .land_retained(retained_policy.clone())
-                        .map_err(|error| format!("INV-010 retained pre-handoff policy: {error}"))?;
+                        .map_err(|error| {
+                            format!(
+                                "INV-010 retained pre-handoff policy: kind={policy_kind:?}, boundary={boundary:?}, order={order:?}, error={error}"
+                            )
+                        })?;
                     policy_landed = true;
                 }
             }
@@ -11266,7 +11477,9 @@ fn execute_authority_policy_ordered_resolve(
                 if handoff_landed {
                     let before = runner.snapshot();
                     if runner.env.land_retained(retained_resolve.clone()).is_ok() {
-                        return Err("INV-010 old authority resolved after handoff".into());
+                        return Err(format!(
+                            "INV-010 old authority resolved after handoff: kind={policy_kind:?}, boundary={boundary:?}, order={order:?}"
+                        ));
                     }
                     runner.assert_snapshot_unchanged(&before)?;
                     stale_resolve_rejected = true;
@@ -11275,7 +11488,9 @@ fn execute_authority_policy_ordered_resolve(
                         .env
                         .land_retained(retained_resolve.clone())
                         .map_err(|error| {
-                            format!("INV-010 retained pre-handoff resolve: {error}")
+                            format!(
+                                "INV-010 retained pre-handoff resolve: kind={policy_kind:?}, boundary={boundary:?}, order={order:?}, error={error}"
+                            )
                         })?;
                     resolve_landed = true;
                 }
@@ -11284,18 +11499,33 @@ fn execute_authority_policy_ordered_resolve(
         runner.assert_global_invariants()?;
     }
 
-    let current_policy_sequence = runner.env.primary_control_sequences(0).fee_redirect;
     let fresh_policy = runner.env.build_retained_market_control_for_actor(
         INCOMING_AUTHORITY,
-        ProgInstruction::UpdateFeeRedirectPolicy {
-            redirect_bps: FRESH_REDIRECT_BPS,
-            policy_sequence: current_policy_sequence + 1,
-        },
+        policy_kind.instruction(&runner.env, boundary, true),
     );
-    runner
-        .env
-        .land_retained(fresh_policy)
-        .map_err(|error| format!("INV-010 incoming-authority fresh policy: {error}"))?;
+    let fresh_policy_must_reject = (policy_kind.requires_live_market() && resolve_landed)
+        || (policy_kind == UnderfundedPolicyKind::Resolve
+            && policy_landed
+            && boundary == UnderfundedPolicyBoundary::Low);
+    let mut fresh_policy_landed = false;
+    let mut fresh_policy_rejected = false;
+    if fresh_policy_must_reject {
+        let before = runner.snapshot();
+        if runner.env.land_retained(fresh_policy).is_ok() {
+            return Err(format!(
+                "INV-010 inadmissible fresh live-only policy request landed: kind={policy_kind:?}, boundary={boundary:?}, order={order:?}, resolved={resolve_landed}, old_policy={policy_landed}"
+            ));
+        }
+        runner.assert_snapshot_unchanged(&before)?;
+        fresh_policy_rejected = true;
+    } else {
+        runner.env.land_retained(fresh_policy).map_err(|error| {
+            format!(
+                "INV-010 incoming-authority fresh policy: kind={policy_kind:?}, boundary={boundary:?}, order={order:?}, error={error}"
+            )
+        })?;
+        fresh_policy_landed = true;
+    }
 
     if !resolve_landed {
         let frontier = runner.env.primary_market_state().1.next_market_id;
@@ -11308,7 +11538,11 @@ fn execute_authority_policy_ordered_resolve(
         runner
             .env
             .land_retained(fresh_resolve)
-            .map_err(|error| format!("INV-010 incoming-authority fresh resolve: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "INV-010 incoming-authority fresh resolve: kind={policy_kind:?}, boundary={boundary:?}, order={order:?}, error={error}"
+                )
+            })?;
     }
 
     runner.assert_global_invariants()?;
@@ -11317,18 +11551,40 @@ fn execute_authority_policy_ordered_resolve(
         .pubkey()
         .to_bytes();
     let (cfg, group) = runner.env.primary_market_state();
+    let expected_policy_sequence =
+        initial_policy_sequence + u64::from(policy_landed) + u64::from(fresh_policy_landed);
+    let expected_policy_value = if fresh_policy_landed {
+        policy_kind.requested_value(boundary, true)
+    } else if policy_landed {
+        policy_kind.requested_value(boundary, false)
+    } else {
+        initial_policy_value
+    };
     if !handoff_landed
         || cfg.marketauth != incoming_key
-        || cfg.fee_redirect_to_market_0_bps != FRESH_REDIRECT_BPS
+        || policy_kind.current_value(&runner.env) != expected_policy_value
+        || policy_kind.sequence(&runner.env) != expected_policy_sequence
         || group.mode != MarketModeV16::Resolved
-        || policy_landed == stale_policy_rejected
+        || usize::from(resolve_landed) + usize::from(stale_resolve_rejected) != 1
+        || usize::from(policy_landed)
+            + usize::from(stale_policy_rejected)
+            + usize::from(terminal_policy_rejected)
+            != 1
     {
         return Err(format!(
-            "INV-010 triple composition mismatch: order={order:?}, handoff={handoff_landed}, old_policy={policy_landed}, stale_policy={stale_policy_rejected}, stale_resolve={stale_resolve_rejected}, authority={:?}, redirect={}, mode={:?}",
-            cfg.marketauth, cfg.fee_redirect_to_market_0_bps, group.mode
+            "INV-010 triple composition mismatch: kind={policy_kind:?}, boundary={boundary:?}, order={order:?}, handoff={handoff_landed}, old_policy={policy_landed}, stale_policy={stale_policy_rejected}, terminal_policy={terminal_policy_rejected}, fresh_policy={fresh_policy_landed}, fresh_rejected={fresh_policy_rejected}, stale_resolve={stale_resolve_rejected}, authority={:?}, policy_sequence={}, expected_sequence={expected_policy_sequence}, policy_value={:?}, expected_value={expected_policy_value:?}, mode={:?}",
+            cfg.marketauth,
+            policy_kind.sequence(&runner.env),
+            policy_kind.current_value(&runner.env),
+            group.mode
         ));
     }
-    Ok((stale_resolve_rejected, stale_policy_rejected))
+    Ok((
+        stale_resolve_rejected,
+        stale_policy_rejected,
+        terminal_policy_rejected,
+        fresh_policy_rejected,
+    ))
 }
 
 fn build_underfunded_resolved_reference_seed(
@@ -11365,17 +11621,26 @@ fn build_underfunded_resolved_reference_seed(
     }
 
     runner.env.warp_to_slot(SNAPSHOT_SLOT);
-    let (stale_resolve_rejected, stale_policy_rejected) = match authority_plan {
+    let (
+        stale_resolve_rejected,
+        stale_policy_rejected,
+        terminal_policy_rejected,
+        fresh_policy_rejected,
+    ) = match authority_plan {
         Some(UnderfundedAuthorityPlan::HandoffResolve(handoff_first)) => (
             execute_authority_ordered_resolve(&mut runner, handoff_first)?,
             false,
+            false,
+            false,
         ),
-        Some(UnderfundedAuthorityPlan::PolicyHandoffResolve(order)) => {
-            execute_authority_policy_ordered_resolve(&mut runner, order)?
-        }
+        Some(UnderfundedAuthorityPlan::PolicyHandoffResolve {
+            policy_kind,
+            boundary,
+            order,
+        }) => execute_authority_policy_ordered_resolve(&mut runner, policy_kind, boundary, order)?,
         None => {
             runner.execute_resolve_market()?;
-            (false, false)
+            (false, false, false, false)
         }
     };
     runner.assert_global_invariants()?;
@@ -11441,6 +11706,8 @@ fn build_underfunded_resolved_reference_seed(
         runner,
         stale_resolve_rejected,
         stale_policy_rejected,
+        terminal_policy_rejected,
+        fresh_policy_rejected,
         engine_vault_at_resolution,
         spl_vault_at_resolution,
         destinations_at_resolution,
@@ -11631,6 +11898,8 @@ fn run_underfunded_terminal_world(
         mut runner,
         stale_resolve_rejected,
         stale_policy_rejected,
+        terminal_policy_rejected,
+        fresh_policy_rejected,
         engine_vault_at_resolution,
         spl_vault_at_resolution,
         destinations_at_resolution,
@@ -11791,6 +12060,8 @@ fn run_underfunded_terminal_world(
             transition_count,
             stale_resolve_rejected,
             stale_policy_rejected,
+            terminal_policy_rejected,
+            fresh_policy_rejected,
             partial_receipt_seeded,
             value_moving_claim: claim_payout != 0,
             claim_payout_atoms: claim_payout,
@@ -12275,44 +12546,63 @@ pub fn verify_underfunded_authority_policy_resolve_claim_orders(
     let mut canonical = None;
     let mut stale_resolve_rejection_count = 0usize;
     let mut stale_policy_rejection_count = 0usize;
+    let mut terminal_policy_rejection_count = 0usize;
+    let mut fresh_policy_rejection_count = 0usize;
     let mut partial_receipt_count = 0usize;
     let mut value_moving_claim_count = 0usize;
     let mut claim_payout_atoms = 0u128;
 
-    for order in UnderfundedAuthorityOperation::PERMUTATIONS {
-        let mut nodes = BTreeSet::new();
-        let mut edges = BTreeSet::new();
-        let (world, _) = run_underfunded_terminal_world(
-            BoundedExpiryLanding::Before,
-            false,
-            true,
-            Some(UnderfundedAuthorityPlan::PolicyHandoffResolve(order)),
-            &mut nodes,
-            &mut edges,
-        )?;
-        if let Some(expected) = &canonical {
-            if world.outcome != *expected {
-                return Err(format!(
-                    "INV-010 triple landing order changed terminal economics: order={order:?}, expected={expected:?}, actual={:?}",
-                    world.outcome
-                ));
+    for policy_kind in UnderfundedPolicyKind::ALL {
+        for boundary in UnderfundedPolicyBoundary::ALL {
+            for order in UnderfundedAuthorityOperation::PERMUTATIONS {
+                let mut nodes = BTreeSet::new();
+                let mut edges = BTreeSet::new();
+                let (world, _) = run_underfunded_terminal_world(
+                    BoundedExpiryLanding::Before,
+                    false,
+                    true,
+                    Some(UnderfundedAuthorityPlan::PolicyHandoffResolve {
+                        policy_kind,
+                        boundary,
+                        order,
+                    }),
+                    &mut nodes,
+                    &mut edges,
+                )?;
+                if let Some(expected) = &canonical {
+                    if world.outcome != *expected {
+                        return Err(format!(
+                            "INV-010 triple landing order changed terminal economics: kind={policy_kind:?}, boundary={boundary:?}, order={order:?}, expected={expected:?}, actual={:?}",
+                            world.outcome
+                        ));
+                    }
+                } else {
+                    canonical = Some(world.outcome.clone());
+                }
+                stale_resolve_rejection_count += usize::from(world.stale_resolve_rejected);
+                stale_policy_rejection_count += usize::from(world.stale_policy_rejected);
+                terminal_policy_rejection_count += usize::from(world.terminal_policy_rejected);
+                fresh_policy_rejection_count += usize::from(world.fresh_policy_rejected);
+                partial_receipt_count += usize::from(world.partial_receipt_seeded);
+                value_moving_claim_count += usize::from(world.value_moving_claim);
+                claim_payout_atoms = claim_payout_atoms
+                    .checked_add(world.claim_payout_atoms)
+                    .ok_or("INV-010 triple claim payout overflow")?;
             }
-        } else {
-            canonical = Some(world.outcome.clone());
         }
-        stale_resolve_rejection_count += usize::from(world.stale_resolve_rejected);
-        stale_policy_rejection_count += usize::from(world.stale_policy_rejected);
-        partial_receipt_count += usize::from(world.partial_receipt_seeded);
-        value_moving_claim_count += usize::from(world.value_moving_claim);
-        claim_payout_atoms = claim_payout_atoms
-            .checked_add(world.claim_payout_atoms)
-            .ok_or("INV-010 triple claim payout overflow")?;
     }
 
+    let world_count = UnderfundedPolicyKind::ALL.len()
+        * UnderfundedPolicyBoundary::ALL.len()
+        * UnderfundedAuthorityOperation::PERMUTATIONS.len();
     Ok(AuthorityPolicyResolvedClaimEvidence {
-        world_count: UnderfundedAuthorityOperation::PERMUTATIONS.len(),
+        world_count,
+        policy_kind_count: UnderfundedPolicyKind::ALL.len(),
+        boundary_count: UnderfundedPolicyBoundary::ALL.len(),
         stale_resolve_rejection_count,
         stale_policy_rejection_count,
+        terminal_policy_rejection_count,
+        fresh_policy_rejection_count,
         partial_receipt_count,
         value_moving_claim_count,
         claim_payout_atoms,
