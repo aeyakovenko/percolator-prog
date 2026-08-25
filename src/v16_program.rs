@@ -849,6 +849,11 @@ pub mod state {
         Ok(())
     }
 
+    #[cfg(kani)]
+    pub fn kani_check_header(data: &[u8], kind: u8) -> Result<(), ProgramError> {
+        check_header(data, kind)
+    }
+
     #[inline]
     pub fn check_portfolio_kind(data: &[u8]) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)

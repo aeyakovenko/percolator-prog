@@ -2932,6 +2932,37 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_backing_bucket_top_up(
+        &mut self,
+        domain: u16,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        let asset_index = domain as usize / 2;
+        let market_id = self.primary_market_state().1.assets[asset_index].market_id;
+        let intent_id =
+            next_control_sequence(self.primary_control_sequences(asset_index).backing_top_up);
+        self.build_program_transaction(
+            ProgInstruction::TopUpBackingBucket {
+                intent_id,
+                domain,
+                market_id,
+                amount,
+                expiry_slot,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.provider_source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(self.backing_domain_ledger, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn top_up_backing_bucket_without_ledger(
         &mut self,
         domain: u16,

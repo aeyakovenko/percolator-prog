@@ -29,6 +29,10 @@ enum AuxiliaryMalformedCase {
 
 #[derive(Clone, Copy, Debug)]
 enum OracleProfileMalformedCase {
+    InvalidMode,
+    InvalidLegCount,
+    InvalidLegFlags,
+    InvalidInvert,
     RemainderOutOfRange,
     ReservedByteNonzero,
 }
@@ -241,6 +245,10 @@ fn v16_program_initialized_auxiliary_ledger_malformed_matrix_rejects_exactly() {
 #[test]
 fn v16_program_oracle_remainder_wire_bounds_reject_malformed_profiles_exactly() {
     for case in [
+        OracleProfileMalformedCase::InvalidMode,
+        OracleProfileMalformedCase::InvalidLegCount,
+        OracleProfileMalformedCase::InvalidLegFlags,
+        OracleProfileMalformedCase::InvalidInvert,
         OracleProfileMalformedCase::RemainderOutOfRange,
         OracleProfileMalformedCase::ReservedByteNonzero,
     ] {
@@ -250,6 +258,26 @@ fn v16_program_oracle_remainder_wire_bounds_reject_malformed_profiles_exactly() 
         let mut malformed_market = env.svm.get_account(&env.market).unwrap();
         let profile_offset = inv015_asset_zero_profile_offset();
         match case {
+            OracleProfileMalformedCase::InvalidMode => {
+                let offset = profile_offset
+                    + core::mem::offset_of!(state::AssetOracleProfileV16, oracle_mode);
+                malformed_market.data[offset] = u8::MAX;
+            }
+            OracleProfileMalformedCase::InvalidLegCount => {
+                let offset = profile_offset
+                    + core::mem::offset_of!(state::AssetOracleProfileV16, oracle_leg_count);
+                malformed_market.data[offset] = u8::MAX;
+            }
+            OracleProfileMalformedCase::InvalidLegFlags => {
+                let offset = profile_offset
+                    + core::mem::offset_of!(state::AssetOracleProfileV16, oracle_leg_flags);
+                malformed_market.data[offset] = u8::MAX;
+            }
+            OracleProfileMalformedCase::InvalidInvert => {
+                let offset =
+                    profile_offset + core::mem::offset_of!(state::AssetOracleProfileV16, invert);
+                malformed_market.data[offset] = 2;
+            }
             OracleProfileMalformedCase::RemainderOutOfRange => {
                 let offset = profile_offset
                     + core::mem::offset_of!(

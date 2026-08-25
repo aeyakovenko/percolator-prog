@@ -34,6 +34,9 @@ mod inv_013_destructive_consent_scope;
 #[path = "../tests/invariants/kani/inv_014_delayed_policy_and_policy_epoch_safety.rs"]
 mod inv_014_delayed_policy_and_policy_epoch_safety;
 
+#[path = "../tests/invariants/kani/inv_015_account_ownership_layout_discriminator_and_length_validity.rs"]
+mod inv_015_account_ownership_layout_discriminator_and_length_validity;
+
 fn assert_rejects_trailing_byte(ix: Instruction, extra: u8) {
     let mut data = ix.encode();
     data.push(extra);
