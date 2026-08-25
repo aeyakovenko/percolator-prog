@@ -11,6 +11,11 @@
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //! `v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing` closes the retained
 //! partial-payout retry gap across every public trade route and requires exact rejection rollback.
+//! `v16_program_live_source_lien_route_pairs_preserve_single_backing_ownership` crosses every
+//! ordered pair of public trade routes and both source sides. It grows a real live source lien in
+//! multiple strict steps, requires exact account/source/bucket ownership after every mutation,
+//! proves the alternate route cannot bypass the same admission frontier, and then requires bounded
+//! release of the exact backing atoms.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -18,10 +23,12 @@
 
 use super::*;
 use crate::support::{
-    fuzz_model::execute_trade_route,
+    fuzz_model::{
+        assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
+    },
     v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT},
 };
-use percolator::POS_SCALE;
+use percolator::{BackingBucketStatusV16, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -44,6 +51,363 @@ fn economic_snapshot(env: &V16Svm) -> EconomicSnapshot {
         token_accounts: env.all_token_account_data(),
         matcher_contexts: env.all_matcher_context_data(),
         lamports: env.all_economic_account_lamports(),
+    }
+}
+
+fn counterparty_lien_backing(env: &V16Svm, actor: usize, source_domain: usize) -> u128 {
+    env.primary_portfolio(actor)
+        .source_domains
+        .iter()
+        .find(|source| source.is_occupied() && source.domain.get() as usize == source_domain)
+        .map(|source| source.source_lien_counterparty_backing_num.get())
+        .unwrap_or(0)
+}
+
+fn assert_inv_031_censuses(label: &str, env: &V16Svm) -> Result<(), String> {
+    assert_public_stock_census(label, env)?;
+    assert_public_encumbrance_census(label, env)
+}
+
+fn portfolio_certificate_is_current(env: &V16Svm, actor: usize) -> bool {
+    let (_, group) = env.primary_market_state();
+    let account = env.primary_portfolio(actor);
+    let Ok(cert) = account.health_cert.try_to_runtime() else {
+        return false;
+    };
+    cert.valid
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch
+        && cert.active_bitmap_at_cert == account.active_bitmap.map(|word| word.get())
+}
+
+fn recertify_lien_world_actor(label: &str, env: &mut V16Svm, actor: usize) -> Result<(), String> {
+    for step in 0..8 {
+        if portfolio_certificate_is_current(env, actor) {
+            return Ok(());
+        }
+        env.crank(actor, 2, vec![])
+            .map_err(|error| format!("{label} recertify actor {actor} step {step}: {error}"))?;
+        assert_inv_031_censuses(&format!("{label} recertify actor {actor} step {step}"), env)?;
+    }
+    Err(format!(
+        "{label} actor {actor} did not reach a certificate fixed point"
+    ))
+}
+
+fn verify_live_lien_route_pair_preserves_single_ownership(
+    first_route: TradeRoute,
+    retry_route: TradeRoute,
+    winner_long: bool,
+) -> Result<(), String> {
+    const WINNER: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const MARKET_CRANKER: usize = 4;
+    const WINNING_ASSET: u16 = 0;
+    const ADVERSE_ASSET: u16 = 1;
+    const START_PRICE: u64 = 100;
+    const WINNING_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const ADVERSE_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const RISK_INCREMENT_Q: i128 = (POS_SCALE / 10) as i128;
+    const BACKING_ATOMS: u128 = 6;
+
+    let direction = if winner_long { 1i128 } else { -1i128 };
+    let winning_mark = if winner_long { 105 } else { 95 };
+    let adverse_mark = if winner_long { 95 } else { 105 };
+    let source_domain = if winner_long { 1usize } else { 0usize };
+    let label =
+        format!("INV-031 first={first_route:?} retry={retry_route:?} winner_long={winner_long}");
+    let route_index = |route| match route {
+        TradeRoute::NoCpi => 0u8,
+        TradeRoute::Cpi => 1,
+        TradeRoute::BatchNoCpi => 2,
+        TradeRoute::BatchCpi => 3,
+    };
+    let mut seed = [0x31; 32];
+    seed[0] ^= route_index(first_route);
+    seed[1] ^= route_index(retry_route) << 2;
+    seed[2] ^= u8::from(winner_long);
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: START_PRICE,
+            h_max: 4,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 0,
+            actor_deposits: [313, 1_000, 1, 1, 1],
+            actor_token_balances: [313, 1_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    env.begin_public_trace();
+    env.top_up_backing_bucket(source_domain as u16, BACKING_ATOMS, 100)
+        .map_err(|error| format!("{label} backing top-up: {error}"))?;
+    execute_trade_route(
+        &mut env,
+        first_route,
+        WINNER,
+        COUNTERPARTY,
+        WINNING_ASSET,
+        direction * WINNING_SIZE_Q,
+        START_PRICE,
+        0,
+    )
+    .map_err(|error| format!("{label} winning-leg open: {error}"))?;
+    execute_trade_route(
+        &mut env,
+        first_route,
+        WINNER,
+        COUNTERPARTY,
+        ADVERSE_ASSET,
+        direction * ADVERSE_SIZE_Q,
+        START_PRICE,
+        0,
+    )
+    .map_err(|error| format!("{label} adverse-leg open: {error}"))?;
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(WINNING_ASSET, 2, winning_mark)
+        .map_err(|error| format!("{label} winning mark: {error}"))?;
+    env.push_auth_mark(ADVERSE_ASSET, 2, adverse_mark)
+        .map_err(|error| format!("{label} adverse mark: {error}"))?;
+    let observations = [WINNING_ASSET, ADVERSE_ASSET]
+        .into_iter()
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
+        })
+        .collect::<Vec<_>>();
+    for actor in [MARKET_CRANKER, COUNTERPARTY, WINNER] {
+        env.crank(actor, 2, observations.clone())
+            .map_err(|error| format!("{label} settle actor {actor}: {error}"))?;
+    }
+    if env.primary_portfolio(WINNER).pnl.get() != 50 {
+        return Err(format!(
+            "{label} did not create the expected source-backed claim: {}",
+            env.primary_portfolio(WINNER).pnl.get()
+        ));
+    }
+    assert_inv_031_censuses(&format!("{label} before lien"), &env)?;
+    let (_, before_reservations) = env.primary_market_state();
+    let backing_before_reservations =
+        before_reservations.source_backing_buckets[source_domain].fresh_unliened_backing_num;
+    let mut accepted_increments = 0u128;
+    let mut lien_growth_steps = 0usize;
+    let mut prior_lien = 0u128;
+    let mut canonical_frontier_reached = false;
+    for step in 0..128 {
+        let before_attempt = economic_snapshot(&env);
+        match execute_trade_route(
+            &mut env,
+            first_route,
+            WINNER,
+            COUNTERPARTY,
+            ADVERSE_ASSET,
+            direction * RISK_INCREMENT_Q,
+            adverse_mark,
+            0,
+        ) {
+            Ok(_) => {
+                accepted_increments = accepted_increments
+                    .checked_add(1)
+                    .ok_or_else(|| format!("{label} accepted-increment count overflow"))?;
+                let current_lien = counterparty_lien_backing(&env, WINNER, source_domain);
+                if current_lien > prior_lien {
+                    lien_growth_steps += 1;
+                }
+                if current_lien < prior_lien {
+                    return Err(format!(
+                        "{label} risk increase {step} released live lien ownership: {prior_lien} -> {current_lien}"
+                    ));
+                }
+                let (_, current) = env.primary_market_state();
+                if current.source_credit[source_domain].valid_liened_backing_num != current_lien
+                    || current.source_backing_buckets[source_domain].valid_liened_backing_num
+                        != current_lien
+                {
+                    return Err(format!(
+                        "{label} risk increase {step} did not singly attribute its lien: account={current_lien}, source={:?}, bucket={:?}",
+                        current.source_credit[source_domain],
+                        current.source_backing_buckets[source_domain]
+                    ));
+                }
+                prior_lien = current_lien;
+                assert_inv_031_censuses(&format!("{label} reservation increment {step}"), &env)?;
+                recertify_lien_world_actor(&label, &mut env, COUNTERPARTY)?;
+                recertify_lien_world_actor(&label, &mut env, WINNER)?;
+            }
+            Err(error) => {
+                if !error.contains("Custom(21)") && !error.contains("custom program error: 0x15") {
+                    return Err(format!(
+                        "{label} canonical-route frontier rejected for an unrelated reason: {error}"
+                    ));
+                }
+                if economic_snapshot(&env) != before_attempt {
+                    return Err(format!(
+                        "{label} canonical-route frontier did not roll back exactly"
+                    ));
+                }
+                canonical_frontier_reached = true;
+                break;
+            }
+        }
+    }
+    let (_, frontier_group) = env.primary_market_state();
+    let frontier_account = env.primary_portfolio(WINNER);
+    let frontier_source = frontier_account
+        .source_domains
+        .iter()
+        .find(|source| source.is_occupied() && source.domain.get() as usize == source_domain)
+        .ok_or_else(|| format!("{label} frontier account lost its source attribution"))?;
+    if !canonical_frontier_reached
+        || accepted_increments == 0
+        || lien_growth_steps < 2
+        || prior_lien == 0
+    {
+        return Err(format!(
+            "{label} did not reach a nonvacuous live-lien admission frontier: accepted={accepted_increments}, lien_steps={lien_growth_steps}, lien={prior_lien}, source={frontier_source:?}, bucket={:?}",
+            frontier_group.source_backing_buckets[source_domain]
+        ));
+    }
+
+    if matches!(retry_route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+        env.ensure_primary_matcher_enabled(COUNTERPARTY)
+            .map_err(|error| format!("{label} prepare alternate matcher capability: {error}"))?;
+        assert_inv_031_censuses(&format!("{label} alternate matcher prepared"), &env)?;
+    }
+    let before_retry = economic_snapshot(&env);
+    let retry = execute_trade_route(
+        &mut env,
+        retry_route,
+        WINNER,
+        COUNTERPARTY,
+        ADVERSE_ASSET,
+        direction * RISK_INCREMENT_Q,
+        adverse_mark,
+        0,
+    );
+    let retry_error =
+        retry.expect_err("an alternate route must not bypass the canonical live-lien frontier");
+    if !retry_error.contains("Custom(21)") && !retry_error.contains("custom program error: 0x15") {
+        return Err(format!(
+            "{label} alternate-route reservation rejected for an unrelated reason: {retry_error}"
+        ));
+    }
+    if economic_snapshot(&env) != before_retry {
+        return Err(format!(
+            "{label} rejected alternate-route reservation did not roll back every economic account"
+        ));
+    }
+    assert_inv_031_censuses(&format!("{label} after rejected alternate reuse"), &env)?;
+
+    execute_trade_route(
+        &mut env,
+        first_route,
+        WINNER,
+        COUNTERPARTY,
+        ADVERSE_ASSET,
+        -direction
+            * (ADVERSE_SIZE_Q
+                + i128::try_from(accepted_increments)
+                    .map_err(|_| format!("{label} accepted-increment conversion overflow"))?
+                    * RISK_INCREMENT_Q),
+        adverse_mark,
+        0,
+    )
+    .map_err(|error| format!("{label} flatten adverse leg: {error}"))?;
+    execute_trade_route(
+        &mut env,
+        first_route,
+        WINNER,
+        COUNTERPARTY,
+        WINNING_ASSET,
+        -direction * WINNING_SIZE_Q,
+        winning_mark,
+        0,
+    )
+    .map_err(|error| format!("{label} flatten winning leg: {error}"))?;
+
+    let mut release_steps = 0usize;
+    for step in 0..16 {
+        if counterparty_lien_backing(&env, WINNER, source_domain) == 0 {
+            break;
+        }
+        let before = economic_snapshot(&env);
+        match env.crank(WINNER, 2, observations.clone()) {
+            Ok(_) => {
+                release_steps += 1;
+                if economic_snapshot(&env) == before {
+                    return Err(format!("{label} release crank {step} committed a no-op"));
+                }
+                assert_inv_031_censuses(&format!("{label} release step {step}"), &env)?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "{label} lien remained but release crank {step} rejected: {error}"
+                ));
+            }
+        }
+    }
+    let (_, released) = env.primary_market_state();
+    if release_steps == 0
+        || counterparty_lien_backing(&env, WINNER, source_domain) != 0
+        || released.source_credit[source_domain].valid_liened_backing_num != 0
+        || released.source_backing_buckets[source_domain].valid_liened_backing_num != 0
+        || released.source_backing_buckets[source_domain].fresh_unliened_backing_num
+            != backing_before_reservations
+        || released.source_backing_buckets[source_domain].status != BackingBucketStatusV16::Fresh
+    {
+        return Err(format!(
+            "{label} bounded release did not return the exact backing atom ownership: steps={release_steps}, source={:?}, bucket={:?}",
+            released.source_credit[source_domain],
+            released.source_backing_buckets[source_domain]
+        ));
+    }
+    assert_inv_031_censuses(&format!("{label} after release"), &env)?;
+
+    let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .map_err(|error| format!("{label} invalid public trace: {error}"))?;
+    if trace.out_of_band_economic_mutations != 0
+        || trace.steps.iter().filter(|step| !step.succeeded).count() != 2
+    {
+        return Err(format!(
+            "{label} route-pair trace did not isolate both rollback-exact frontier rejections: {trace:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn v16_program_live_source_lien_route_pairs_preserve_single_backing_ownership() {
+    for first_route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        for retry_route in [
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ] {
+            for winner_long in [false, true] {
+                verify_live_lien_route_pair_preserves_single_ownership(
+                    first_route,
+                    retry_route,
+                    winner_long,
+                )
+                .unwrap_or_else(|error| panic!("{error}"));
+            }
+        }
     }
 }
 
