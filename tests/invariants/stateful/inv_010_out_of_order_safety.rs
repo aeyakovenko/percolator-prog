@@ -21,14 +21,21 @@
 //! a reduction landing last recertifies against the deposited capital, while a deposit landing last
 //! conservatively invalidates the older certificate. Both orders leave fresh complete position and
 //! capital exits.
+//! `v16_program_authority_handoff_and_retained_policy_obey_both_landing_orders` crosses a retained
+//! market-authority handoff with all eight market/asset-0 policy lanes at low, midpoint, and maximum
+//! valid values. Policy-first permits both authorized requests; handoff-first makes the old
+//! authority's policy reject with an exact economic snapshot. In all 48 worlds the incoming
+//! authority installs a fresh lane-specific policy and a funded user retains a complete SPL exit.
 //!
 //! Guarantee boundary: this fixed-pin regression covers the portfolio-scoped matcher capability.
-//! Other retained policy domains are owned by INV-014 and require their own scope-local sequences.
+//! The authority/policy composition covers the market-authority and inherited asset-0 insurance
+//! authority roles. Resolve and claim transitions remain to be crossed with authority changes.
 
 use super::*;
 use crate::support::v16_svm::{MarketConfig, V16Svm, USER_DEPOSIT};
 use percolator::{HealthCertV16Account, PortfolioAccountV16Account, POS_SCALE};
-use solana_sdk::{pubkey::Pubkey, transaction::Transaction};
+use percolator_prog::ix::Instruction as ProgInstruction;
+use solana_sdk::{pubkey::Pubkey, signature::Signer, transaction::Transaction};
 
 const LP: usize = 0;
 const TAKER: usize = 1;
@@ -45,6 +52,186 @@ enum PortfolioLandingOperation {
     Deposit,
     Withdraw,
     Disable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthorityPolicyKind {
+    TradeFee,
+    FeeRedirect,
+    MarketInitFee,
+    LiquidationFee,
+    MaintenanceFee,
+    Resolve,
+    BackingFeeLong,
+    BackingFeeShort,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PolicyBoundary {
+    Low,
+    Midpoint,
+    Maximum,
+}
+
+impl PolicyBoundary {
+    const ALL: [Self; 3] = [Self::Low, Self::Midpoint, Self::Maximum];
+
+    fn bps(self, fresh: bool) -> u16 {
+        match (self, fresh) {
+            (Self::Low, false) => 1,
+            (Self::Low, true) => 2,
+            (Self::Midpoint, false) => 5_000,
+            (Self::Midpoint, true) => 5_001,
+            (Self::Maximum, false) => 10_000,
+            (Self::Maximum, true) => 9_999,
+        }
+    }
+
+    fn init_fee(self, fresh: bool) -> u128 {
+        match (self, fresh) {
+            (Self::Low, false) => 1,
+            (Self::Low, true) => 2,
+            (Self::Midpoint, false) => u32::MAX as u128,
+            (Self::Midpoint, true) => u32::MAX as u128 + 1,
+            (Self::Maximum, false) => u64::MAX as u128,
+            (Self::Maximum, true) => u64::MAX as u128 - 1,
+        }
+    }
+
+    fn resolve_slots(self, fresh: bool) -> (u64, u64) {
+        let stale_max = percolator_prog::constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS;
+        let delay_max = percolator_prog::constants::MAX_FORCE_CLOSE_DELAY_SLOTS;
+        match (self, fresh) {
+            (Self::Low, false) => (1, 1),
+            (Self::Low, true) => (2, 2),
+            (Self::Midpoint, false) => (stale_max / 2, delay_max / 2),
+            (Self::Midpoint, true) => (stale_max / 2 + 1, delay_max / 2 + 1),
+            (Self::Maximum, false) => (stale_max, delay_max),
+            (Self::Maximum, true) => (stale_max - 1, delay_max - 1),
+        }
+    }
+}
+
+impl AuthorityPolicyKind {
+    const ALL: [Self; 8] = [
+        Self::TradeFee,
+        Self::FeeRedirect,
+        Self::MarketInitFee,
+        Self::LiquidationFee,
+        Self::MaintenanceFee,
+        Self::Resolve,
+        Self::BackingFeeLong,
+        Self::BackingFeeShort,
+    ];
+
+    fn sequence(self, env: &V16Svm) -> u64 {
+        let sequences = env.primary_control_sequences(0);
+        match self {
+            Self::TradeFee => sequences.trade_fee,
+            Self::FeeRedirect => sequences.fee_redirect,
+            Self::MarketInitFee => sequences.market_init_fee,
+            Self::LiquidationFee => sequences.liquidation_fee,
+            Self::MaintenanceFee => sequences.maintenance_fee,
+            Self::Resolve => sequences.permissionless_resolve,
+            Self::BackingFeeLong => sequences.backing_fee_long,
+            Self::BackingFeeShort => sequences.backing_fee_short,
+        }
+    }
+
+    fn instruction(self, env: &V16Svm, boundary: PolicyBoundary, fresh: bool) -> ProgInstruction {
+        let policy_sequence = self.sequence(env) + 1;
+        let bps = boundary.bps(fresh);
+        match self {
+            Self::TradeFee => ProgInstruction::UpdateTradeFeePolicy {
+                trade_fee_base_bps: u64::from(bps),
+                policy_sequence,
+            },
+            Self::FeeRedirect => ProgInstruction::UpdateFeeRedirectPolicy {
+                redirect_bps: bps,
+                policy_sequence,
+            },
+            Self::MarketInitFee => ProgInstruction::UpdateMarketInitFeePolicy {
+                min_init_fee: boundary.init_fee(fresh),
+                policy_sequence,
+            },
+            Self::LiquidationFee => ProgInstruction::UpdateLiquidationFeePolicy {
+                cranker_share_bps: bps,
+                policy_sequence,
+            },
+            Self::MaintenanceFee => ProgInstruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps: bps,
+                policy_sequence,
+            },
+            Self::Resolve => {
+                let (stale_slots, force_close_delay_slots) = boundary.resolve_slots(fresh);
+                ProgInstruction::ConfigurePermissionlessResolve {
+                    asset_generation_frontier: env.primary_market_state().1.next_market_id,
+                    stale_slots,
+                    force_close_delay_slots,
+                    policy_sequence,
+                }
+            }
+            Self::BackingFeeLong | Self::BackingFeeShort => {
+                ProgInstruction::UpdateBackingFeePolicy {
+                    domain: u16::from(self == Self::BackingFeeShort),
+                    market_id: env.primary_market_state().1.assets[0].market_id,
+                    fee_bps: bps,
+                    insurance_share_bps: bps,
+                    policy_sequence,
+                }
+            }
+        }
+    }
+
+    fn assert_value(self, env: &V16Svm, boundary: PolicyBoundary, fresh: bool) {
+        let (cfg, _) = env.primary_market_state();
+        let bps = boundary.bps(fresh);
+        match self {
+            Self::TradeFee => assert_eq!(cfg.trade_fee_base_bps, u64::from(bps)),
+            Self::FeeRedirect => assert_eq!(cfg.fee_redirect_to_market_0_bps, bps),
+            Self::MarketInitFee => {
+                assert_eq!(cfg.permissionless_market_init_fee, boundary.init_fee(fresh))
+            }
+            Self::LiquidationFee => assert_eq!(cfg.liquidation_cranker_fee_share_bps, bps),
+            Self::MaintenanceFee => assert_eq!(cfg.maintenance_cranker_fee_share_bps, bps),
+            Self::Resolve => {
+                let (stale_slots, force_close_delay_slots) = boundary.resolve_slots(fresh);
+                assert_eq!(cfg.permissionless_resolve_stale_slots, stale_slots);
+                assert_eq!(cfg.force_close_delay_slots, force_close_delay_slots);
+            }
+            Self::BackingFeeLong => {
+                assert_eq!(cfg.backing_trade_fee_bps_long, bps);
+                assert_eq!(cfg.backing_trade_fee_insurance_share_bps_long, bps);
+            }
+            Self::BackingFeeShort => {
+                assert_eq!(cfg.backing_trade_fee_bps_short, bps);
+                assert_eq!(cfg.backing_trade_fee_insurance_share_bps_short, bps);
+            }
+        }
+    }
+
+    fn assert_initial_value(self, env: &V16Svm) {
+        let (cfg, _) = env.primary_market_state();
+        match self {
+            Self::TradeFee => assert_eq!(cfg.trade_fee_base_bps, 0),
+            Self::FeeRedirect => assert_eq!(cfg.fee_redirect_to_market_0_bps, 0),
+            Self::MarketInitFee => assert_eq!(cfg.permissionless_market_init_fee, 0),
+            Self::LiquidationFee => assert_eq!(cfg.liquidation_cranker_fee_share_bps, 0),
+            Self::MaintenanceFee => assert_eq!(cfg.maintenance_cranker_fee_share_bps, 0),
+            Self::Resolve => {
+                assert_eq!(cfg.permissionless_resolve_stale_slots, 0);
+                assert_eq!(cfg.force_close_delay_slots, 0);
+            }
+            Self::BackingFeeLong => {
+                assert_eq!(cfg.backing_trade_fee_bps_long, 0);
+                assert_eq!(cfg.backing_trade_fee_insurance_share_bps_long, 0);
+            }
+            Self::BackingFeeShort => {
+                assert_eq!(cfg.backing_trade_fee_bps_short, 0);
+                assert_eq!(cfg.backing_trade_fee_insurance_share_bps_short, 0);
+            }
+        }
+    }
 }
 
 impl PortfolioLandingOperation {
@@ -506,6 +693,85 @@ fn v16_program_deposit_and_owner_reduction_commute_across_independent_bindings()
             reduction_first.0,
             deposit_amount,
         );
+    }
+}
+
+fn run_authority_policy_order(
+    seed: [u8; 32],
+    policy_kind: AuthorityPolicyKind,
+    boundary: PolicyBoundary,
+    handoff_first: bool,
+) {
+    const INCOMING_AUTHORITY: usize = 2;
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply = env.token_supply_observed();
+    let initial_sequence = policy_kind.sequence(&env);
+    let old_policy_instruction = policy_kind.instruction(&env, boundary, false);
+    let retained_policy = env.build_retained_market_control_from_admin(old_policy_instruction);
+    let retained_handoff =
+        env.build_retained_market_authority_handoff_from_admin(INCOMING_AUTHORITY);
+
+    if handoff_first {
+        env.land_retained(retained_handoff)
+            .expect("the current authority's handoff must land");
+        let before_stale_policy = snapshot(&env);
+        env.land_retained(retained_policy)
+            .expect_err("the former authority's retained policy must reject after handoff");
+        assert_eq!(
+            snapshot(&env),
+            before_stale_policy,
+            "the superseded authority policy must roll back every economic account"
+        );
+        assert_eq!(policy_kind.sequence(&env), initial_sequence);
+        policy_kind.assert_initial_value(&env);
+    } else {
+        env.land_retained(retained_policy)
+            .expect("the retained policy is authorized before the handoff");
+        assert_eq!(policy_kind.sequence(&env), initial_sequence + 1);
+        policy_kind.assert_value(&env, boundary, false);
+        env.land_retained(retained_handoff)
+            .expect("the authority handoff remains live after a policy update");
+    }
+
+    let incoming_key = env.actors[INCOMING_AUTHORITY].signer.pubkey().to_bytes();
+    let (cfg_after_handoff, _) = env.primary_market_state();
+    assert_eq!(cfg_after_handoff.marketauth, incoming_key);
+    assert_eq!(
+        env.primary_profile(0).insurance_authority,
+        incoming_key,
+        "asset-0's inherited policy authority must rotate atomically"
+    );
+
+    let fresh_policy_instruction = policy_kind.instruction(&env, boundary, true);
+    let fresh_policy =
+        env.build_retained_market_control_for_actor(INCOMING_AUTHORITY, fresh_policy_instruction);
+    env.land_retained(fresh_policy)
+        .expect("the incoming authority must retain a fresh policy path");
+    policy_kind.assert_value(&env, boundary, true);
+    assert_eq!(
+        policy_kind.sequence(&env),
+        initial_sequence + if handoff_first { 1 } else { 2 }
+    );
+
+    let capital = env.primary_portfolio(LP).capital.get();
+    env.withdraw_primary(LP, capital)
+        .expect("policy/handoff landing order must not block a funded user exit");
+    assert_eq!(env.primary_portfolio(LP).capital.get(), 0);
+    assert_eq!(env.token_supply_observed(), supply);
+}
+
+#[test]
+fn v16_program_authority_handoff_and_retained_policy_obey_both_landing_orders() {
+    for (kind_index, policy_kind) in AuthorityPolicyKind::ALL.into_iter().enumerate() {
+        for (boundary_index, boundary) in PolicyBoundary::ALL.into_iter().enumerate() {
+            for handoff_first in [false, true] {
+                let mut seed = [0xc1; 32];
+                seed[0] = kind_index as u8;
+                seed[1] = boundary_index as u8;
+                seed[2] = u8::from(handoff_first);
+                run_authority_policy_order(seed, policy_kind, boundary, handoff_first);
+            }
+        }
     }
 }
 

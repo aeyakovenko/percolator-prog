@@ -2244,6 +2244,37 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_market_control_for_actor(
+        &mut self,
+        actor_index: usize,
+        instruction: ProgInstruction,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.build_program_transaction(
+            instruction,
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn build_retained_market_control_from_admin(
+        &mut self,
+        instruction: ProgInstruction,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            instruction,
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn update_fee_redirect_policy(&mut self, redirect_bps: u16) -> Result<TxSuccess, String> {
         let policy_sequence = next_control_sequence(self.primary_control_sequences(0).fee_redirect);
         let authority = copy_keypair(&self.admin);
