@@ -5,14 +5,15 @@
 //!
 //! Evidence in this file (F over public I routes):
 //! `v16_program_position_episode_matrix_rejects_stale_consent_atomically` creates each old
-//! episode, retains owner-signed consent, completes the episode through public transitions, then
-//! creates a fresh episode at the same market/asset/portfolio IDs. The stale request must reject
-//! with exact market, portfolio, vault, and SPL-supply rollback while preserving the replacement
-//! exposure. A request built against the current episode must still land and change that exposure,
-//! proving the rejection is neither vacuous nor a blanket risk-reduction DoS. No program-owned
-//! bytes are injected. `v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not`
-//! also proves that the episode is packed into the matcher-control word: matcher revoke/re-enable
-//! preserves it, the separate matcher-sequence tail, and the deployed portfolio account length.
+//! reduction, Recovery-forfeit, and released-PnL conversion episode, retains owner-signed consent,
+//! completes the episode through public transitions, then creates a fresh episode at the same
+//! market/asset/portfolio IDs. The stale request must reject with exact market, portfolio, vault,
+//! and SPL-supply rollback while preserving the replacement exposure or released PnL. A request
+//! built against the current episode must still land and change that state, proving the rejection
+//! is neither vacuous nor a blanket risk-reduction DoS. No program-owned bytes are injected.
+//! `v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not` also proves that
+//! the episode is packed into the matcher-control word: matcher revoke/re-enable preserves it, the
+//! separate matcher-sequence tail, and the deployed portfolio account length.
 //!
 //! `v16_program_cure_consent_cannot_cross_close_episodes_in_one_portfolio` additionally creates
 //! two independent close episodes without replacing the portfolio account. A cure retained from

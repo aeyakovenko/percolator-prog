@@ -94,15 +94,21 @@ pub enum TerminalGenerationKind {
 pub enum PositionEpisodeKind {
     RebalanceReduce,
     RecoveryForfeit,
+    ReleasedPnlConversion,
 }
 
 impl PositionEpisodeKind {
-    pub const ALL: [Self; 2] = [Self::RebalanceReduce, Self::RecoveryForfeit];
+    pub const ALL: [Self; 3] = [
+        Self::RebalanceReduce,
+        Self::RecoveryForfeit,
+        Self::ReleasedPnlConversion,
+    ];
 
     fn discriminator(self) -> u8 {
         match self {
             Self::RebalanceReduce => 0,
             Self::RecoveryForfeit => 1,
+            Self::ReleasedPnlConversion => 2,
         }
     }
 }
@@ -3464,6 +3470,115 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
     })
 }
 
+fn discover_released_pnl_position_episode(
+    seed: [u8; 32],
+) -> Result<PositionEpisodeDiscovery, String> {
+    const SUBJECT: usize = 1;
+    const FIRST_COUNTERPARTY: usize = 0;
+    const SECOND_COUNTERPARTY: usize = 3;
+    const PRICE: u64 = 100;
+    const TARGET_CAPITAL: u128 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 10,
+            min_nonzero_mm_req: 1,
+            min_nonzero_im_req: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1; PRIMARY_ACTOR_COUNT],
+            actor_token_balances: [3_000_000; PRIMARY_ACTOR_COUNT],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.top_up_backing_bucket(1, 500, 1_000)
+        .map_err(|error| format!("fund conversion-episode backing: {error}"))?;
+
+    let first_released = create_released_pnl(
+        &mut env,
+        SUBJECT,
+        FIRST_COUNTERPARTY,
+        TARGET_CAPITAL - 1,
+        TARGET_CAPITAL - 1,
+        2,
+        PRICE,
+    )?;
+    let signed_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let signed_position_epoch = env.primary_portfolio_position_epoch(SUBJECT);
+    let retained = env.build_retained_convert_released_pnl(SUBJECT, u128::MAX);
+    env.convert_released_pnl(SUBJECT, first_released)
+        .map_err(|error| format!("consume first released-PnL episode: {error}"))?;
+
+    create_released_pnl(
+        &mut env,
+        SUBJECT,
+        SECOND_COUNTERPARTY,
+        TARGET_CAPITAL,
+        TARGET_CAPITAL - 1,
+        3,
+        PRICE + 5,
+    )?;
+    let portfolio_id_unchanged = env.primary_portfolio_id(SUBJECT) == signed_portfolio_id;
+    let episode_advanced = env.primary_portfolio_position_epoch(SUBJECT) > signed_position_epoch;
+    let replacement_before = env.primary_portfolio(SUBJECT).pnl.get();
+    if replacement_before <= 0 {
+        return Err(format!(
+            "replacement conversion episode has no released PnL: {replacement_before}"
+        ));
+    }
+
+    let market_before = env.market_data(false);
+    let portfolio_before = env.primary_portfolio_data(SUBJECT);
+    let vault_before = env.svm.get_account(&env.vault);
+    let supply_before_replay = env.token_supply_observed();
+    let stale_intent_rejected = env.land_retained(retained).is_err();
+    let exact_rollback = env.market_data(false) == market_before
+        && env.primary_portfolio_data(SUBJECT) == portfolio_before
+        && env.svm.get_account(&env.vault) == vault_before
+        && env.token_supply_observed() == supply_before_replay;
+    let replacement_after_stale = env.primary_portfolio(SUBJECT).pnl.get();
+    let replacement_exposure_preserved = replacement_after_stale == replacement_before;
+
+    if !stale_intent_rejected {
+        return Ok(PositionEpisodeDiscovery {
+            kind: PositionEpisodeKind::ReleasedPnlConversion,
+            stale_intent_rejected,
+            exact_rollback,
+            fresh_intent_landed: false,
+            portfolio_id_unchanged,
+            episode_advanced,
+            replacement_exposure_preserved,
+            fresh_intent_changed_exposure: false,
+            token_supply_preserved: env.token_supply_observed() == supply_before,
+        });
+    }
+
+    let capital_before = env.primary_portfolio(SUBJECT).capital.get();
+    let current = env.build_retained_convert_released_pnl(SUBJECT, u128::MAX);
+    let fresh_intent_landed = env.land_retained(current).is_ok();
+    let replacement_after_fresh = env.primary_portfolio(SUBJECT);
+    let fresh_intent_changed_exposure = fresh_intent_landed
+        && replacement_after_fresh.pnl.get() < replacement_before
+        && replacement_after_fresh.capital.get() > capital_before;
+    Ok(PositionEpisodeDiscovery {
+        kind: PositionEpisodeKind::ReleasedPnlConversion,
+        stale_intent_rejected,
+        exact_rollback,
+        fresh_intent_landed,
+        portfolio_id_unchanged,
+        episode_advanced,
+        replacement_exposure_preserved,
+        fresh_intent_changed_exposure,
+        token_supply_preserved: env.token_supply_observed() == supply_before,
+    })
+}
+
 pub fn discover_position_episode_replays(
     mut seed: [u8; 32],
 ) -> Result<Vec<PositionEpisodeDiscovery>, String> {
@@ -3480,6 +3595,9 @@ pub fn discover_position_episode_replays(
                 }
                 PositionEpisodeKind::RecoveryForfeit => {
                     discover_recovery_position_episode(scenario_seed)
+                }
+                PositionEpisodeKind::ReleasedPnlConversion => {
+                    discover_released_pnl_position_episode(scenario_seed)
                 }
             }
         })

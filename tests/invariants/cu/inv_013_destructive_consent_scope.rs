@@ -13,10 +13,12 @@
 //! request must still reduce exposure, proving this is not a blanket user-exit
 //! DoS.
 //!
-//! Guarantee boundary: this is the public SVM owner for reduction destructive
-//! consent. Market-generation and portfolio-generation destructive replay
-//! matrices are owned by INV-001 and INV-003; the broader fuzzed position
-//! episode matrix is owned by INV-004.
+//! Guarantee boundary: this is the public SVM owner for reduction destructive consent.
+//! INV-004's finding-blind episode matrix additionally owns Recovery forfeit, released-PnL
+//! conversion, and close/cure episodes. INV-002 owns asset-generation shutdown/resolve scope;
+//! INV-001 and INV-005 retain the reproduced market-generation and authority-epoch ABA gaps.
+//! Permissionless liquidation, abandoned-asset close, reset finalization, and terminal payout
+//! derive their action from current state and therefore carry no retained user consent.
 
 use super::*;
 

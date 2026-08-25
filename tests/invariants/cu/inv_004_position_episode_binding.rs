@@ -6,12 +6,12 @@
 //! the same portfolio/asset must not let the old signed request touch the new
 //! exposure.
 //!
-//! Evidence in this file (I/F plus a production-source roster): this deterministic LiteSVM wrapper witness runs
-//! the shared public-route position-episode matrix. For rebalance-reduce and
-//! recovery-forfeit, it requires stale retained consent to reject with exact
-//! market, portfolio, vault, and SPL-supply rollback; it also requires freshly
-//! signed current consent to land and change exposure so the guard is not a
-//! blanket risk-reduction DoS.
+//! Evidence in this file (I/F plus a production-source roster): this deterministic LiteSVM wrapper
+//! witness runs the shared public-route position-episode matrix. For rebalance-reduce,
+//! recovery-forfeit, and released-PnL conversion, it requires stale retained consent to reject
+//! with exact market, portfolio, vault, and SPL-supply rollback; it also requires freshly signed
+//! current consent to land and change exposure or released PnL so the guard is not a blanket
+//! risk-reduction DoS.
 //!
 //! The source roster requires all five single-account and four paired-trade episode-bound
 //! instruction families to encode and dispatch their position epochs, consume the shared exact
