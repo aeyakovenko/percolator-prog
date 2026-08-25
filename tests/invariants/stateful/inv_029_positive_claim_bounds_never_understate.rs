@@ -23,12 +23,31 @@
 //! Each conversion additionally proves exact account, domain, and aggregate bound deltas while SPL
 //! custody remains unchanged. The shared stateful runner applies the same census after every
 //! successful generated public action across single/batch and CPI/no-CPI routes.
+//! `v16_program_partial_receipt_exactly_replaces_its_prior_claim_bound` reuses the independent
+//! underfunded terminal lifecycle. Its shared transition oracle observes a genuine partial receipt
+//! and proves the terminal ledger adds exactly `terminal_positive_claim_face * BOUND_SCALE`,
+//! removes at least `prior_bound_contribution_num`, and leaves the unreceipted pool equal to the
+//! independently scanned bound of every remaining positive-PnL portfolio. The latter equality
+//! permits a same-call source-bound refinement without permitting another claimant's bound to be
+//! erased. Once a snapshot exists, total terminal claim mass may not increase.
 //!
 //! Guarantee boundary: this is a complete census only for the bounded test world, whose portfolio
 //! count is checked against the market's materialized-portfolio counter. It does not replace a
 //! production whole-state enumeration proof or the charter's resolved/recovery claim model.
 
 use super::*;
+
+#[test]
+fn v16_program_partial_receipt_exactly_replaces_its_prior_claim_bound() {
+    let evidence = verify_resolved_claim_quote_delta()
+        .expect("public underfunded exact-receipt replacement lifecycle");
+    assert!(evidence.partial_receipt_seeded);
+    assert!(evidence.claim_payout_atoms > 0);
+    assert!(evidence.receipt_replacement_count > 0);
+    assert!(evidence.exact_receipt_num > 0);
+    assert!(evidence.replaced_bound_num >= evidence.exact_receipt_num);
+    assert_eq!(evidence.final_engine_vault, evidence.final_spl_vault);
+}
 
 #[test]
 fn v16_program_claim_bound_boundary_partition_exhausts_public_lifecycle_grid() {

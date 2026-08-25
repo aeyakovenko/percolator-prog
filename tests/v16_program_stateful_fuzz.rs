@@ -46,8 +46,8 @@ use support::fuzz_model::{
     verify_counterparty_encumbrance_route_matrix, verify_cpi_backing_fee_consent,
     verify_cpi_base_fee_consent, verify_cpi_caller_fee_protection,
     verify_exact_stock_reconciliation_lifecycle, verify_positive_claim_bound_attribution_lifecycle,
-    verify_source_credit_rate_lifecycle, verify_terminal_dust_payout_protection,
-    verify_trade_fee_market_generation_nonextraction,
+    verify_resolved_claim_quote_delta, verify_source_credit_rate_lifecycle,
+    verify_terminal_dust_payout_protection, verify_trade_fee_market_generation_nonextraction,
     verify_underfunded_authority_resolve_claim_orders, Action, AssetGenerationConfigPath, HintMode,
     Scenario, SmallMarketConfig, SubstitutionKind, TradeRoute,
 };

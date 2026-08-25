@@ -1425,6 +1425,9 @@ pub struct Coverage {
     pub resolved_claim_successes: u64,
     pub resolved_claim_mutations: u64,
     pub resolved_payout_atoms: u128,
+    pub resolved_receipt_replacements: u64,
+    pub resolved_receipt_replaced_bound_num: u128,
+    pub resolved_receipt_exact_claim_num: u128,
     pub deposits: u64,
     pub withdrawals: u64,
     pub token_frame_checks: u64,
@@ -1487,6 +1490,9 @@ impl Default for Coverage {
             resolved_claim_successes: 0,
             resolved_claim_mutations: 0,
             resolved_payout_atoms: 0,
+            resolved_receipt_replacements: 0,
+            resolved_receipt_replaced_bound_num: 0,
+            resolved_receipt_exact_claim_num: 0,
             deposits: 0,
             withdrawals: 0,
             token_frame_checks: 0,
@@ -1623,6 +1629,9 @@ impl Coverage {
         self.resolved_claim_successes += other.resolved_claim_successes;
         self.resolved_claim_mutations += other.resolved_claim_mutations;
         self.resolved_payout_atoms += other.resolved_payout_atoms;
+        self.resolved_receipt_replacements += other.resolved_receipt_replacements;
+        self.resolved_receipt_replaced_bound_num += other.resolved_receipt_replaced_bound_num;
+        self.resolved_receipt_exact_claim_num += other.resolved_receipt_exact_claim_num;
         self.deposits += other.deposits;
         self.withdrawals += other.withdrawals;
         self.token_frame_checks += other.token_frame_checks;
@@ -3708,6 +3717,7 @@ impl ScenarioRunner {
             route,
             receipt_before,
             receipt_after,
+            &group_before,
             &group_after,
             payout,
         )?;
@@ -3737,11 +3747,12 @@ impl ScenarioRunner {
     }
 
     fn assert_receipt_transition(
-        &self,
+        &mut self,
         actor: usize,
         route: TerminalRoute,
         before: percolator::ResolvedPayoutReceiptV16,
         after: percolator::ResolvedPayoutReceiptV16,
+        group_before: &MarketGroupV16,
         group_after: &MarketGroupV16,
         route_payout: u128,
     ) -> Result<(), String> {
@@ -3767,6 +3778,83 @@ impl ScenarioRunner {
                 return Err(format!(
                     "actor {actor} {route:?} rewrote or rolled back its receipt: {before:?} -> {after:?}"
                 ));
+            }
+            if !before.present {
+                let ledger_before = group_before.resolved_payout_ledger;
+                let exact_before = if group_before.payout_snapshot_captured {
+                    ledger_before.terminal_claim_exact_receipts_num
+                } else {
+                    0
+                };
+                let unreceipted_before = if group_before.payout_snapshot_captured {
+                    ledger_before.terminal_claim_bound_unreceipted_num
+                } else {
+                    group_before.pnl_pos_bound_tot_num
+                };
+                let ledger_after = group_after.resolved_payout_ledger;
+                let expected_exact_after = exact_before
+                    .checked_add(exact_num)
+                    .ok_or("terminal exact-receipt ledger overflow")?;
+                if ledger_after.terminal_claim_exact_receipts_num != expected_exact_after {
+                    return Err(format!(
+                        "actor {actor} {route:?} did not add the exact receipt face: \
+                         exact {exact_before}->{}, expected {expected_exact_after}; \
+                         receipt={after:?}",
+                        ledger_after.terminal_claim_exact_receipts_num,
+                    ));
+                }
+                if ledger_after.terminal_claim_bound_unreceipted_num
+                    != group_after.pnl_pos_bound_tot_num
+                {
+                    return Err(format!(
+                        "actor {actor} {route:?} left an incorrect unreceipted claim pool: \
+                         ledger={}, independent remaining portfolio bound={}",
+                        ledger_after.terminal_claim_bound_unreceipted_num,
+                        group_after.pnl_pos_bound_tot_num,
+                    ));
+                }
+                if group_before.payout_snapshot_captured {
+                    let removed_unreceipted = unreceipted_before
+                        .checked_sub(ledger_after.terminal_claim_bound_unreceipted_num)
+                        .ok_or("terminal receipt increased the unreceipted claim pool")?;
+                    if removed_unreceipted < after.prior_bound_contribution_num {
+                        return Err(format!(
+                            "actor {actor} {route:?} removed only {removed_unreceipted} from the \
+                             unreceipted pool for prior contribution {}; receipt={after:?}",
+                            after.prior_bound_contribution_num,
+                        ));
+                    }
+                    let total_before = exact_before
+                        .checked_add(unreceipted_before)
+                        .ok_or("terminal pre-receipt claim total overflow")?;
+                    let total_after = ledger_after
+                        .terminal_claim_exact_receipts_num
+                        .checked_add(ledger_after.terminal_claim_bound_unreceipted_num)
+                        .ok_or("terminal post-receipt claim total overflow")?;
+                    if total_after > total_before {
+                        return Err(format!(
+                            "actor {actor} {route:?} receipt increased terminal claim mass: \
+                             {total_before}->{total_after}"
+                        ));
+                    }
+                }
+                if exact_num != 0 {
+                    self.coverage.resolved_receipt_replacements = self
+                        .coverage
+                        .resolved_receipt_replacements
+                        .checked_add(1)
+                        .ok_or("terminal receipt replacement count overflow")?;
+                    self.coverage.resolved_receipt_replaced_bound_num = self
+                        .coverage
+                        .resolved_receipt_replaced_bound_num
+                        .checked_add(after.prior_bound_contribution_num)
+                        .ok_or("terminal replaced-bound coverage overflow")?;
+                    self.coverage.resolved_receipt_exact_claim_num = self
+                        .coverage
+                        .resolved_receipt_exact_claim_num
+                        .checked_add(exact_num)
+                        .ok_or("terminal exact-receipt coverage overflow")?;
+                }
             }
         } else if before.present {
             let ledger = group_after.resolved_payout_ledger;
@@ -10674,6 +10762,9 @@ pub struct ResolvedClaimQuoteDeltaEvidence {
     pub claim_payout_atoms: u128,
     pub final_engine_vault: u128,
     pub final_spl_vault: u128,
+    pub receipt_replacement_count: u64,
+    pub replaced_bound_num: u128,
+    pub exact_receipt_num: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11462,7 +11553,7 @@ fn run_underfunded_terminal_world(
 pub fn verify_resolved_claim_quote_delta() -> Result<ResolvedClaimQuoteDeltaEvidence, String> {
     let mut nodes = BTreeSet::new();
     let mut edges = BTreeSet::new();
-    let (world, _) = run_underfunded_terminal_world(
+    let (world, coverage) = run_underfunded_terminal_world(
         BoundedExpiryLanding::Before,
         false,
         true,
@@ -11481,6 +11572,9 @@ pub fn verify_resolved_claim_quote_delta() -> Result<ResolvedClaimQuoteDeltaEvid
         claim_payout_atoms: world.claim_payout_atoms,
         final_engine_vault: world.outcome.final_engine_vault,
         final_spl_vault: world.outcome.final_spl_vault,
+        receipt_replacement_count: coverage.resolved_receipt_replacements,
+        replaced_bound_num: coverage.resolved_receipt_replaced_bound_num,
+        exact_receipt_num: coverage.resolved_receipt_exact_claim_num,
     })
 }
 
