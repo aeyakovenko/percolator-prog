@@ -1334,19 +1334,36 @@ impl V16Svm {
     }
 
     pub fn close_primary_slab(&mut self) -> Result<TxSuccess, String> {
-        let admin = copy_keypair(&self.admin);
+        let authority = copy_keypair(&self.admin);
+        self.close_primary_slab_with_authority(authority, self.market_admin_destination_token)
+    }
+
+    pub fn close_primary_slab_for_actor(
+        &mut self,
+        actor_index: usize,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        let destination_token = self.actors[actor_index].destination_token;
+        self.close_primary_slab_with_authority(authority, destination_token)
+    }
+
+    fn close_primary_slab_with_authority(
+        &mut self,
+        authority: Keypair,
+        destination_token: Pubkey,
+    ) -> Result<TxSuccess, String> {
         self.send_program(
             ProgInstruction::CloseSlab,
             vec![
-                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
                 AccountMeta::new(self.vault, false),
                 AccountMeta::new_readonly(self.vault_authority, false),
-                AccountMeta::new(self.market_admin_destination_token, false),
+                AccountMeta::new(destination_token, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new(self.mint, false),
             ],
-            &[admin],
+            &[authority],
         )
     }
 

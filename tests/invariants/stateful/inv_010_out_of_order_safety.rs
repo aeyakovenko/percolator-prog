@@ -26,14 +26,19 @@
 //! valid values. Policy-first permits both authorized requests; handoff-first makes the old
 //! authority's policy reject with an exact economic snapshot. In all 48 worlds the incoming
 //! authority installs a fresh lane-specific policy and a funded user retains a complete SPL exit.
+//! `v16_program_authority_handoff_and_resolve_obey_both_landing_orders` composes authority handoff
+//! with terminal resolution in both orders. It proves stale-authority resolve rollback, fresh
+//! incoming-authority resolution, exact five-user payouts in forward and reverse claimant order,
+//! claim-retry fixed points, terminal portfolio closure, and `CloseSlab` by the rotated authority.
 //!
 //! Guarantee boundary: this fixed-pin regression covers the portfolio-scoped matcher capability.
 //! The authority/policy composition covers the market-authority and inherited asset-0 insurance
-//! authority roles. Resolve and claim transitions remain to be crossed with authority changes.
+//! authority roles. Full-funded resolve/claim composition is covered; underfunded partial-receipt
+//! authority permutations remain.
 
 use super::*;
-use crate::support::v16_svm::{MarketConfig, V16Svm, USER_DEPOSIT};
-use percolator::{HealthCertV16Account, PortfolioAccountV16Account, POS_SCALE};
+use crate::support::v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
+use percolator::{HealthCertV16Account, MarketModeV16, PortfolioAccountV16Account, POS_SCALE};
 use percolator_prog::ix::Instruction as ProgInstruction;
 use solana_sdk::{pubkey::Pubkey, signature::Signer, transaction::Transaction};
 
@@ -772,6 +777,105 @@ fn v16_program_authority_handoff_and_retained_policy_obey_both_landing_orders() 
                 run_authority_policy_order(seed, policy_kind, boundary, handoff_first);
             }
         }
+    }
+}
+
+fn run_authority_resolve_order(seed: [u8; 32], handoff_first: bool) {
+    const INCOMING_AUTHORITY: usize = 2;
+    let config = MarketConfig::default();
+    let mut env = V16Svm::new(seed, config);
+    let supply = env.token_supply_observed();
+    let retained_resolve = env.build_retained_resolve_market();
+    let retained_handoff =
+        env.build_retained_market_authority_handoff_from_admin(INCOMING_AUTHORITY);
+
+    if handoff_first {
+        env.land_retained(retained_handoff)
+            .expect("the current authority's handoff must land before resolution");
+        let before_stale_resolve = snapshot(&env);
+        env.land_retained(retained_resolve)
+            .expect_err("the former authority's retained resolution must reject after handoff");
+        assert_eq!(
+            snapshot(&env),
+            before_stale_resolve,
+            "a superseded authority's resolution must roll back every economic account"
+        );
+        let frontier = env.primary_market_state().1.next_market_id;
+        let fresh_resolve = env.build_retained_market_control_for_actor(
+            INCOMING_AUTHORITY,
+            ProgInstruction::ResolveMarket {
+                asset_generation_frontier: frontier,
+            },
+        );
+        env.land_retained(fresh_resolve)
+            .expect("the incoming authority must retain a fresh resolve route");
+    } else {
+        env.land_retained(retained_resolve)
+            .expect("the current authority's retained resolution must land");
+        env.land_retained(retained_handoff)
+            .expect("authority rotation must remain live after resolution");
+    }
+
+    let incoming_key = env.actors[INCOMING_AUTHORITY].signer.pubkey().to_bytes();
+    let (cfg, resolved) = env.primary_market_state();
+    assert_eq!(cfg.marketauth, incoming_key);
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+
+    let claimant_order: Vec<_> = if handoff_first {
+        (0..PRIMARY_ACTOR_COUNT).rev().collect()
+    } else {
+        (0..PRIMARY_ACTOR_COUNT).collect()
+    };
+    for actor in claimant_order.iter().copied() {
+        let destination = env.actors[actor].destination_token;
+        let destination_before = env.token_amount(destination);
+        let vault_before = env.token_amount(env.vault);
+        env.close_resolved_primary(actor)
+            .unwrap_or_else(|error| panic!("resolved claimant {actor} must close: {error}"));
+        let destination_after = env.token_amount(destination);
+        let vault_after = env.token_amount(env.vault);
+        assert_eq!(
+            destination_after - destination_before,
+            u64::try_from(config.actor_deposits[actor]).unwrap()
+        );
+        assert_eq!(
+            vault_before - vault_after,
+            destination_after - destination_before
+        );
+
+        let fixed_point = snapshot(&env);
+        let _ = env.claim_resolved_payout_topup_primary(actor);
+        assert_eq!(
+            snapshot(&env),
+            fixed_point,
+            "a terminal claimant retry must not pay twice"
+        );
+    }
+    for actor in claimant_order {
+        env.close_primary_portfolio(actor)
+            .unwrap_or_else(|error| panic!("terminal portfolio {actor} must close: {error}"));
+    }
+
+    let terminal = env.primary_market_state().1;
+    assert_eq!(terminal.vault, 0);
+    assert_eq!(terminal.insurance, 0);
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.materialized_portfolio_count, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(env.token_supply_observed(), supply);
+    env.close_primary_slab_for_actor(INCOMING_AUTHORITY)
+        .expect("a fully paid authority/resolve world must close the slab");
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn v16_program_authority_handoff_and_resolve_obey_both_landing_orders() {
+    for handoff_first in [false, true] {
+        let mut seed = [0xc2; 32];
+        seed[0] = u8::from(handoff_first);
+        run_authority_resolve_order(seed, handoff_first);
     }
 }
 
