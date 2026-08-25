@@ -12,7 +12,9 @@
 //! signed integral-ratio and 18 non-integral rounding worlds spanning 1/255,
 //! midpoint, and 254/255 boundaries while rotating every route class. An
 //! independent ceil-notional/ceil-fee oracle bounds two-fill fragmentation to
-//! four atoms.
+//! four atoms. Twelve more worlds execute the public maximum-minus-one and
+//! maximum admitted quantities in both directions at 1/255, 127/255, and
+//! 254/255, retaining the same replay, residual, accounting, and CU oracle.
 
 use super::*;
 
@@ -31,8 +33,9 @@ impl PartialRetryRoute {
     const ALL: [Self; 4] = [Self::NoCpi, Self::BatchNoCpi, Self::Cpi, Self::BatchCpi];
 }
 
-fn setup_hostile_partial_env(
+fn setup_hostile_partial_env_with_deposit(
     asset_count: u16,
+    deposit_atoms: u128,
 ) -> (
     V16CuEnv,
     Keypair,
@@ -57,8 +60,8 @@ fn setup_hostile_partial_env(
     let lp = Keypair::new();
     let taker_account = env.create_portfolio(&taker);
     let lp_account = env.create_portfolio(&lp);
-    env.deposit(&taker, taker_account, 1_000_000);
-    env.deposit(&lp, lp_account, 1_000_000);
+    env.deposit(&taker, taker_account, deposit_atoms);
+    env.deposit(&lp, lp_account, deposit_atoms);
     let ctx = Pubkey::new_unique();
     let delegate = matcher_delegate_key(
         &env.program_id,
@@ -103,6 +106,21 @@ fn setup_hostile_partial_env(
         ctx,
         delegate,
     )
+}
+
+fn setup_hostile_partial_env(
+    asset_count: u16,
+) -> (
+    V16CuEnv,
+    Keypair,
+    Keypair,
+    Pubkey,
+    Pubkey,
+    Pubkey,
+    Pubkey,
+    Pubkey,
+) {
+    setup_hostile_partial_env_with_deposit(asset_count, 1_000_000)
 }
 
 fn set_hostile_matcher_mode(env: &mut V16CuEnv, ctx: Pubkey, matcher_program: Pubkey, mode: u8) {
@@ -417,12 +435,13 @@ fn v16_program_tradecpi_flagged_partial_accounts_actual_fill_and_requires_fresh_
     assert_eq!(after_retry.c_tot + after_retry.insurance, after_retry.vault);
 }
 
-fn run_partial_fill_route_case(
+fn run_partial_fill_route_case_with_deposit(
     total_q: i128,
     partial_q: i128,
     ratio_numerator: Option<u8>,
     stale_route: PartialRetryRoute,
     residual_route: PartialRetryRoute,
+    deposit_atoms: u128,
 ) {
     let total_abs_q = total_q.unsigned_abs();
     assert!(partial_q != 0 && partial_q.signum() == total_q.signum());
@@ -434,7 +453,7 @@ fn run_partial_fill_route_case(
     assert!(expected_fee_atoms - aggregate_fee_atoms <= 4);
 
     let (mut env, taker, lp, taker_account, lp_account, matcher, ctx, delegate) =
-        setup_hostile_partial_env(1);
+        setup_hostile_partial_env_with_deposit(1, deposit_atoms);
     let stale_ix = retained_partial_retry_ix(&env, stale_route, taker_account, lp_account, total_q);
     let (_, market_before) = env.market_state();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
@@ -570,6 +589,23 @@ fn run_partial_fill_route_case(
     assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
 }
 
+fn run_partial_fill_route_case(
+    total_q: i128,
+    partial_q: i128,
+    ratio_numerator: Option<u8>,
+    stale_route: PartialRetryRoute,
+    residual_route: PartialRetryRoute,
+) {
+    run_partial_fill_route_case_with_deposit(
+        total_q,
+        partial_q,
+        ratio_numerator,
+        stale_route,
+        residual_route,
+        1_000_000,
+    );
+}
+
 fn run_partial_fill_route_matrix(total_q: i128, partial_q: i128, ratio_numerator: Option<u8>) {
     for stale_route in PartialRetryRoute::ALL {
         for residual_route in PartialRetryRoute::ALL {
@@ -624,6 +660,33 @@ fn v16_program_nonintegral_partial_ratios_preserve_rounding_and_cross_route_budg
                     Some(numerator),
                     PartialRetryRoute::ALL[case_index % PartialRetryRoute::ALL.len()],
                     PartialRetryRoute::ALL[(case_index * 3 + 1) % PartialRetryRoute::ALL.len()],
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn v16_program_public_max_quantity_partial_fills_preserve_exact_cumulative_budget() {
+    const MAX_SHAPE_DEPOSIT_ATOMS: u128 = 20_000_000_000;
+    let public_max_q = percolator::MAX_TRADE_SIZE_Q;
+    for (width_index, total_abs_q) in [public_max_q - 1, public_max_q].into_iter().enumerate() {
+        for (direction_index, direction) in [-1i128, 1].into_iter().enumerate() {
+            for (ratio_index, numerator) in [1u8, 127, 254].into_iter().enumerate() {
+                let numerator_u128 = u128::from(numerator);
+                let partial_abs_q = (total_abs_q / 255) * numerator_u128
+                    + ((total_abs_q % 255) * numerator_u128) / 255;
+                assert!(partial_abs_q > 0 && partial_abs_q < total_abs_q);
+                let case_index = width_index * 6 + direction_index * 3 + ratio_index;
+                run_partial_fill_route_case_with_deposit(
+                    direction * i128::try_from(total_abs_q).expect("public max quantity fits i128"),
+                    direction
+                        * i128::try_from(partial_abs_q)
+                            .expect("matcher-selected public quantity fits i128"),
+                    Some(numerator),
+                    PartialRetryRoute::ALL[case_index % PartialRetryRoute::ALL.len()],
+                    PartialRetryRoute::ALL[(case_index * 3 + 1) % PartialRetryRoute::ALL.len()],
+                    MAX_SHAPE_DEPOSIT_ATOMS,
                 );
             }
         }
