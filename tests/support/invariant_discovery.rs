@@ -863,6 +863,18 @@ pub struct IntentReplayDiscovery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundledIntentReplayDiscovery {
+    pub kind: RetryIntentKind,
+    pub bundle_rejected: bool,
+    pub bundle_exact_rollback: bool,
+    pub standalone_compute_units: u64,
+    pub standalone_mutated: bool,
+    pub duplicate_rejected: bool,
+    pub duplicate_exact_rollback: bool,
+    pub token_supply_conserved: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeeConsentDiscovery {
     pub kind: FeeConsentKind,
     pub accepted_unconsented_terms: bool,
@@ -4152,15 +4164,14 @@ fn retained_retry_pair(env: &mut V16Svm, kind: RetryIntentKind) -> (Transaction,
     (build(env), build(env))
 }
 
-pub fn discover_intent_retry(
+fn prepare_intent_retry_environment(
     mut seed: [u8; 32],
     kind: RetryIntentKind,
-) -> Result<IntentReplayDiscovery, String> {
+) -> Result<V16Svm, String> {
     const AUTHORITY: usize = 2;
     seed[0] ^= 0xe1;
     seed[1] ^= kind.discriminator();
     let mut env = V16Svm::new(seed, MarketConfig::default());
-    let supply_before = env.token_supply_observed();
 
     match kind {
         RetryIntentKind::ConvertReleasedPnl => {
@@ -4196,6 +4207,15 @@ pub fn discover_intent_retry(
         }
         _ => {}
     }
+    Ok(env)
+}
+
+pub fn discover_intent_retry(
+    seed: [u8; 32],
+    kind: RetryIntentKind,
+) -> Result<IntentReplayDiscovery, String> {
+    let mut env = prepare_intent_retry_environment(seed, kind)?;
+    let supply_before = env.token_supply_observed();
 
     let (intended, retry) = retained_retry_pair(&mut env, kind);
     let first = env
@@ -4266,6 +4286,66 @@ pub fn discover_intent_retry(
             })
         }
     }
+}
+
+pub fn discover_same_transaction_intent_retry(
+    seed: [u8; 32],
+    kind: RetryIntentKind,
+) -> Result<BundledIntentReplayDiscovery, String> {
+    let mut env = prepare_intent_retry_environment(seed, kind)?;
+    let supply_before = env.token_supply_observed();
+    let (intended, duplicate) = retained_retry_pair(&mut env, kind);
+    let bundle = env.bundle_retained_transactions(&[intended.clone(), duplicate.clone()]);
+    let before_bundle = fingerprint(&env);
+    env.begin_public_trace();
+    let bundled_result = env.land_retained(bundle);
+    let bundle_exact_rollback = fingerprint(&env) == before_bundle;
+
+    let before_standalone = fingerprint(&env);
+    let standalone = env
+        .land_retained(intended)
+        .map_err(|error| format!("{kind:?} standalone after bundle rollback rejected: {error}"))?;
+    let standalone_mutated = fingerprint(&env) != before_standalone;
+
+    let before_duplicate = fingerprint(&env);
+    let duplicate_result = env.land_retained(duplicate);
+    let duplicate_exact_rollback = fingerprint(&env) == before_duplicate;
+    let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .map_err(|error| format!("{kind:?} bundled retry trace invalid: {error}"))?;
+    if trace.out_of_band_economic_mutations != 0
+        || trace.steps.len() != 3
+        || trace.steps[0].succeeded
+        || !trace.steps[1].succeeded
+        || trace.steps[2].succeeded
+        || trace.steps[0].rejected_exact_writable_rollback != Some(true)
+        || trace.steps[2].rejected_exact_writable_rollback != Some(true)
+    {
+        return Err(format!(
+            "{kind:?} bundled retry did not produce reject/success/reject public trace: {trace:?}"
+        ));
+    }
+
+    Ok(BundledIntentReplayDiscovery {
+        kind,
+        bundle_rejected: bundled_result.is_err(),
+        bundle_exact_rollback,
+        standalone_compute_units: standalone.compute_units,
+        standalone_mutated,
+        duplicate_rejected: duplicate_result.is_err(),
+        duplicate_exact_rollback,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+    })
+}
+
+pub fn discover_same_transaction_intent_retries(
+    seed: [u8; 32],
+) -> Result<Vec<BundledIntentReplayDiscovery>, String> {
+    RetryIntentKind::ALL
+        .into_iter()
+        .map(|kind| discover_same_transaction_intent_retry(seed, kind))
+        .collect()
 }
 
 pub fn discover_cross_route_insurance_top_up_retry(

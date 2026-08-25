@@ -6,8 +6,9 @@
 //! fixed-pin tests reject stale trade/deposit/withdraw retries exactly and land a newly bound
 //! operation; the PR344/351 tests require both authority-top-up routes to reject stale retries;
 //! `v16_program_same_transaction_cross_route_retry_is_atomic_and_exact_once` bundles the direct
-//! and domain insurance variants in both orders, proves whole-transaction rollback, then proves
-//! exactly one standalone variant can land; PR362 and the
+//! and domain insurance variants in both orders, while the all-family matrix duplicates each of
+//! the eleven retained intents in one transaction. Both prove whole-transaction rollback, then
+//! prove exactly one standalone request can land; PR362 and the
 //! issue387/389 tests cover generation/position-bound activation, conversion, and reduction.
 //! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
@@ -15,8 +16,8 @@
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter. The bundled test covers the
-//! shared insurance lane, not every retained family or successful partial-fill partition.
+//! plus every additional verification method required by the charter. Cross-entrypoint bundles
+//! beyond the shared insurance lane and successful partial-fill partitions remain open.
 
 use super::*;
 use crate::support::v16_svm::{MarketConfig, V16Svm};
@@ -156,6 +157,36 @@ fn v16_program_same_transaction_cross_route_retry_is_atomic_and_exact_once() {
         assert!(!trace.steps[2].succeeded);
         assert_eq!(trace.steps[0].rejected_exact_writable_rollback, Some(true));
         assert_eq!(trace.steps[2].rejected_exact_writable_rollback, Some(true));
+    }
+}
+
+#[test]
+fn v16_program_every_retained_family_is_atomic_when_duplicated_in_one_transaction() {
+    let discoveries = discover_same_transaction_intent_retries([0x59; 32])
+        .expect("finding-blind same-transaction retry matrix");
+    assert_eq!(discoveries.len(), RetryIntentKind::ALL.len());
+    for (expected, discovery) in RetryIntentKind::ALL.into_iter().zip(discoveries) {
+        assert_eq!(discovery.kind, expected);
+        assert!(
+            discovery.bundle_rejected,
+            "{expected:?} bundle landed twice"
+        );
+        assert!(
+            discovery.bundle_exact_rollback,
+            "{expected:?} bundle rejection committed an economic mutation"
+        );
+        assert!(
+            discovery.standalone_mutated && discovery.standalone_compute_units < 1_400_000,
+            "{expected:?} did not retain one bounded standalone execution: {discovery:?}"
+        );
+        assert!(
+            discovery.duplicate_rejected && discovery.duplicate_exact_rollback,
+            "{expected:?} standalone execution did not consume the duplicate exactly: {discovery:?}"
+        );
+        assert!(
+            discovery.token_supply_conserved,
+            "{expected:?} replay matrix changed SPL supply"
+        );
     }
 }
 

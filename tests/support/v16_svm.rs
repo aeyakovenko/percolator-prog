@@ -19,7 +19,10 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use spl_token::state::{Account as TokenAccount, AccountState, Mint};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 pub const ASSET_COUNT: usize = 3;
 pub const USER_COUNT: usize = 4;
@@ -4402,6 +4405,72 @@ impl V16Svm {
                 }
             })
             .map_err(|err| format!("{err:?}"))
+    }
+
+    pub fn bundle_retained_transactions(&mut self, transactions: &[Transaction]) -> Transaction {
+        assert!(
+            transactions.len() >= 2,
+            "retained bundle needs at least two transactions"
+        );
+        let mut instructions = Vec::new();
+        let mut required_signers = BTreeSet::new();
+        for transaction in transactions {
+            let message = &transaction.message;
+            let required = message.header.num_required_signatures as usize;
+            required_signers.extend(message.account_keys[..required].iter().copied());
+            let writable_signed = required
+                .checked_sub(message.header.num_readonly_signed_accounts as usize)
+                .expect("message signed-account header");
+            let writable_unsigned_end = message
+                .account_keys
+                .len()
+                .checked_sub(message.header.num_readonly_unsigned_accounts as usize)
+                .expect("message unsigned-account header");
+            for compiled in &message.instructions {
+                let program_id = message.account_keys[compiled.program_id_index as usize];
+                if program_id == solana_sdk::compute_budget::id() {
+                    continue;
+                }
+                let accounts = compiled
+                    .accounts
+                    .iter()
+                    .map(|raw_index| {
+                        let index = *raw_index as usize;
+                        AccountMeta {
+                            pubkey: message.account_keys[index],
+                            is_signer: index < required,
+                            is_writable: if index < required {
+                                index < writable_signed
+                            } else {
+                                index < writable_unsigned_end
+                            },
+                        }
+                    })
+                    .collect();
+                instructions.push(Instruction {
+                    program_id,
+                    accounts,
+                    data: compiled.data.clone(),
+                });
+            }
+        }
+
+        required_signers.remove(&self.payer.pubkey());
+        let mut signers = Vec::new();
+        for candidate in [&self.admin, &self.foreign_admin]
+            .into_iter()
+            .chain(self.actors.iter().map(|actor| &actor.signer))
+            .chain(core::iter::once(&self.foreign_actor.signer))
+        {
+            if required_signers.remove(&candidate.pubkey()) {
+                signers.push(copy_keypair(candidate));
+            }
+        }
+        assert!(
+            required_signers.is_empty(),
+            "retained bundle contains an unknown signer: {required_signers:?}"
+        );
+        self.build_transaction_instructions(instructions, &signers)
     }
 
     fn trace_account_state(&self, key: Pubkey) -> Option<TraceAccountState> {

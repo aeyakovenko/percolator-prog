@@ -8,6 +8,9 @@
 //! the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! A second generated probe duplicates a randomly selected retained family inside one atomic
+//! transaction, requires bundle-wide rollback, then lands exactly one standalone request and
+//! rejects the remaining duplicate without state or SPL-supply drift.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -136,6 +139,24 @@ proptest! {
         prop_assert!(!discovery.duplicated_economic_effect);
         prop_assert_eq!(discovery.retry_compute_units, None);
         prop_assert!(discovery.fresh_compute_units.is_some());
+    }
+
+    #[test]
+    fn v16_program_same_transaction_retry_atomicity_fuzz(
+        seed in any::<[u8; 32]>(),
+        kind_index in 0usize..RetryIntentKind::ALL.len(),
+    ) {
+        let kind = RetryIntentKind::ALL[kind_index];
+        let discovery = discover_same_transaction_intent_retry(seed, kind)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discovery.kind, kind);
+        prop_assert!(discovery.bundle_rejected);
+        prop_assert!(discovery.bundle_exact_rollback);
+        prop_assert!(discovery.standalone_mutated);
+        prop_assert!(discovery.standalone_compute_units < 1_400_000);
+        prop_assert!(discovery.duplicate_rejected);
+        prop_assert!(discovery.duplicate_exact_rollback);
+        prop_assert!(discovery.token_supply_conserved);
     }
 
     #[test]
