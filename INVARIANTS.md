@@ -899,12 +899,19 @@ conversion.
 
 ### INV-068 - Receipt uniqueness and monotonic top-ups
 
-**Statement.** A receipt binds market, asset/source domain, portfolio incarnation, position/claim
-episode, exact face, snapshot, and receipt ID. Cumulative payout is monotonic and never exceeds final
-entitlement; replacing a bound with an exact claim preserves the prior upper-bound constraint.
+**Statement.** A receipt binds market, portfolio incarnation, exact face, snapshot, and its claim
+episode. Asset/source-domain and explicit receipt-ID fields are required for transferable,
+domain-local, or concurrently addressable receipts. The deployed v16 market-wide embedded receipt
+is equivalent only while all of the following hold: exactly one receipt can inhabit a portfolio;
+the receipt is neither caller-selected nor transferable; its face and snapshot are derived from the
+current resolved market; a nonfinal receipt prevents portfolio dematerialization; and Resolved mode
+prevents portfolio, asset-generation, and Recovery episode reuse until the receipt is finalized or
+terminally cleared. Cumulative payout is monotonic and never exceeds final entitlement; replacing a
+bound with an exact claim preserves the prior upper-bound constraint.
 
 **Required tests.** Duplicate receipts, altered face, stale snapshot, split top-ups, cross-portfolio
-substitution, and asset-slot reuse.
+substitution, premature close, terminal close, and either asset/episode reuse rejection or explicit
+generation binding.
 **Verification:** P, F, I
 
 ### INV-069 - Terminal normalization and retirement

@@ -9,6 +9,11 @@
 //! Before paying, a one-field account matrix substitutes owner, resolved foreign market, portfolio,
 //! destination, vault, and vault authority. Every cell must reject with an exact full-economic-state
 //! frame, while the canonical receipt remains claimable.
+//! Fresh public portfolio-close attempts at receipt creation and after each partial top-up must also
+//! reject exactly. Once terminal settlement finalizes or clears the receipt, close must succeed with
+//! exact custody, and the same account address cannot be reinitialized inside the resolved market.
+//! Both the generic asset-lifecycle route and the dedicated restart route must reject exactly while
+//! a receipt episode exists, excluding Recovery and asset-generation reuse from that episode.
 //!
 //! The shared route oracle also requires receipt face/prior-bound identity to remain immutable,
 //! cumulative paid value to be monotonic, every claim delta to equal its external token delta, and
@@ -33,6 +38,10 @@ fn v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries(
         evidence.second_payout
     );
     assert_eq!(evidence.identity_substitutions_rejected, 6);
+    assert_eq!(evidence.premature_close_rejections, 3);
+    assert!(evidence.terminal_close_succeeded);
+    assert!(evidence.resolved_reinit_rejected);
+    assert_eq!(evidence.resolved_lifecycle_rejections, 2);
     assert_eq!(evidence.exact_noop_retries, 3);
     assert_eq!(evidence.terminal_actor_count, 5);
     assert_eq!(evidence.final_engine_vault, evidence.final_spl_vault);

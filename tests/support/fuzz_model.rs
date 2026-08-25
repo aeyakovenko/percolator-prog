@@ -10801,6 +10801,10 @@ pub struct ResolvedReceiptSplitTopupEvidence {
     pub first_payout: u128,
     pub second_payout: u128,
     pub identity_substitutions_rejected: usize,
+    pub premature_close_rejections: usize,
+    pub terminal_close_succeeded: bool,
+    pub resolved_reinit_rejected: bool,
+    pub resolved_lifecycle_rejections: usize,
     pub exact_noop_retries: usize,
     pub terminal_actor_count: usize,
     pub final_engine_vault: u128,
@@ -11728,6 +11732,60 @@ fn require_resolved_claim_identity_substitutions(
     Ok(substitutions.len())
 }
 
+fn require_nonfinal_receipt_blocks_portfolio_close(
+    runner: &mut ScenarioRunner,
+    actor: usize,
+    label: &str,
+) -> Result<(), String> {
+    let receipt = runner.env.primary_portfolio(actor).resolved_payout_receipt;
+    let receipt = receipt
+        .try_to_runtime()
+        .map_err(|error| format!("{label} receipt decode: {error:?}"))?;
+    if !receipt.present || receipt.finalized {
+        return Err(format!(
+            "{label} did not start from a nonfinal receipt: {receipt:?}"
+        ));
+    }
+
+    let before = runner.snapshot();
+    if runner.env.close_primary_portfolio(actor).is_ok() {
+        return Err(format!(
+            "{label} unexpectedly dematerialized a live receipt"
+        ));
+    }
+    runner.assert_snapshot_unchanged(&before)?;
+    runner.assert_global_invariants()
+}
+
+fn require_resolved_receipt_blocks_lifecycle_reentry(
+    runner: &mut ScenarioRunner,
+) -> Result<usize, String> {
+    let group = runner.env.primary_market_state().1;
+    if group.mode != MarketModeV16::Resolved {
+        return Err("INV-068 lifecycle exclusion did not start in Resolved mode".into());
+    }
+    let slot = runner.env.current_slot().max(1);
+    let price = group.assets[0].effective_price.max(1);
+    let mut rejected = 0usize;
+
+    let before_shutdown = runner.snapshot();
+    if runner.env.shutdown_asset(0, slot).is_ok() {
+        return Err("INV-068 changed an asset lifecycle during a receipt episode".into());
+    }
+    runner.assert_snapshot_unchanged(&before_shutdown)?;
+    rejected += 1;
+
+    let before_restart = runner.snapshot();
+    if runner.env.restart_asset_oracle(0, slot, price).is_ok() {
+        return Err("INV-068 restarted an asset generation during a receipt episode".into());
+    }
+    runner.assert_snapshot_unchanged(&before_restart)?;
+    runner.assert_global_invariants()?;
+    rejected += 1;
+
+    Ok(rejected)
+}
+
 pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopupEvidence, String> {
     const CLAIMANT: usize = 0;
     const BACKED_WINNER: usize = 2;
@@ -11789,6 +11847,15 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
         ));
     }
 
+    require_nonfinal_receipt_blocks_portfolio_close(
+        &mut runner,
+        CLAIMANT,
+        "INV-068 initial partial receipt close",
+    )?;
+    let mut premature_close_rejections = 1usize;
+    let resolved_lifecycle_rejections =
+        require_resolved_receipt_blocks_lifecycle_reentry(&mut runner)?;
+
     require_resolved_claim_retry_noop(&mut runner, CLAIMANT, "INV-068 initial retry")?;
     let mut exact_noop_retries = 1usize;
 
@@ -11845,6 +11912,12 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
              result={first_topup:?}, {initial:?}->{after_first:?}"
         ));
     }
+    require_nonfinal_receipt_blocks_portfolio_close(
+        &mut runner,
+        CLAIMANT,
+        "INV-068 first top-up partial receipt close",
+    )?;
+    premature_close_rejections += 1;
     require_resolved_claim_retry_noop(&mut runner, CLAIMANT, "INV-068 first top-up retry")?;
     exact_noop_retries += 1;
 
@@ -11898,6 +11971,12 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
              result={second_topup:?}, {after_first:?}->{after_second:?}"
         ));
     }
+    require_nonfinal_receipt_blocks_portfolio_close(
+        &mut runner,
+        CLAIMANT,
+        "INV-068 second top-up partial receipt close",
+    )?;
+    premature_close_rejections += 1;
     require_resolved_claim_retry_noop(&mut runner, CLAIMANT, "INV-068 second top-up retry")?;
     exact_noop_retries += 1;
 
@@ -11909,6 +11988,68 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
         .into_iter()
         .filter(|terminal| *terminal)
         .count();
+    let terminal_receipt = read_receipt(&runner)?;
+    if terminal_receipt.present && !terminal_receipt.finalized {
+        return Err(format!(
+            "INV-068 terminal campaign retained a nonfinal receipt: {terminal_receipt:?}"
+        ));
+    }
+    let (before_close_cfg, before_close_group) = runner.env.primary_market_state();
+    let before_close_market_lamports = runner.env.account_lamports(runner.env.market);
+    let claimant_portfolio = runner.env.actors[CLAIMANT].portfolio;
+    let before_close_portfolio_lamports = runner.env.account_lamports(claimant_portfolio);
+    if before_close_portfolio_lamports == 0 {
+        return Err("INV-068 terminal close control had no portfolio rent to transfer".into());
+    }
+    let before_close_tokens = runner.env.all_token_account_data();
+    runner
+        .env
+        .close_primary_portfolio(CLAIMANT)
+        .map_err(|error| format!("INV-068 close terminal receipt portfolio: {error}"))?;
+    let (after_close_cfg, after_close_group) = runner.env.primary_market_state();
+    let expected_materialized_count = before_close_group
+        .materialized_portfolio_count
+        .checked_sub(1)
+        .ok_or("INV-068 terminal close materialized-count underflow")?;
+    let mut normalized_after_close_group = after_close_group.clone();
+    normalized_after_close_group.materialized_portfolio_count =
+        before_close_group.materialized_portfolio_count;
+    let terminal_close_succeeded = after_close_cfg == before_close_cfg
+        && normalized_after_close_group == before_close_group
+        && after_close_group.materialized_portfolio_count == expected_materialized_count
+        && runner.env.account_lamports(claimant_portfolio) == 0
+        && runner.env.account_lamports(runner.env.market)
+            == before_close_market_lamports
+                .checked_add(before_close_portfolio_lamports)
+                .ok_or("INV-068 terminal close lamport overflow")?
+        && runner.env.all_token_account_data() == before_close_tokens;
+    if !terminal_close_succeeded {
+        return Err("INV-068 terminal receipt portfolio did not close with exact custody".into());
+    }
+
+    runner
+        .env
+        .fund_closed_primary_portfolio(CLAIMANT, 1_000_000_000)
+        .map_err(|error| format!("INV-068 re-fund closed receipt portfolio: {error}"))?;
+    let revived = runner
+        .env
+        .svm
+        .get_account(&claimant_portfolio)
+        .ok_or("INV-068 funded receipt portfolio account was not recreated")?;
+    if revived.owner != runner.env.program_id || !revived.data.is_empty() {
+        return Err(format!(
+            "INV-068 funded closed portfolio has unexpected owner/shape: owner={}, len={}",
+            revived.owner,
+            revived.data.len()
+        ));
+    }
+    let before_reinit = runner.snapshot();
+    let resolved_reinit_rejected = runner.env.reinitialize_primary_portfolio(CLAIMANT).is_err();
+    if !resolved_reinit_rejected {
+        return Err("INV-068 recreated a portfolio inside the resolved market episode".into());
+    }
+    runner.assert_snapshot_unchanged(&before_reinit)?;
+
     let final_group = runner.env.primary_market_state().1;
     Ok(ResolvedReceiptSplitTopupEvidence {
         receipt_face: initial.terminal_positive_claim_face,
@@ -11918,6 +12059,10 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
         first_payout: first_topup.payout,
         second_payout: second_topup.payout,
         identity_substitutions_rejected,
+        premature_close_rejections,
+        terminal_close_succeeded,
+        resolved_reinit_rejected,
+        resolved_lifecycle_rejections,
         exact_noop_retries,
         terminal_actor_count,
         final_engine_vault: final_group.vault,
