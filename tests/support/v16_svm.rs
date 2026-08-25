@@ -1333,6 +1333,21 @@ impl V16Svm {
         )
     }
 
+    pub fn resolve_foreign_market(&mut self) -> Result<TxSuccess, String> {
+        let admin = copy_keypair(&self.foreign_admin);
+        let asset_generation_frontier = self.foreign_market_state().1.next_market_id;
+        self.send_program(
+            ProgInstruction::ResolveMarket {
+                asset_generation_frontier,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.foreign_market, false),
+            ],
+            &[admin],
+        )
+    }
+
     pub fn close_primary_slab(&mut self) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
         self.close_primary_slab_with_authority(authority, self.market_admin_destination_token)

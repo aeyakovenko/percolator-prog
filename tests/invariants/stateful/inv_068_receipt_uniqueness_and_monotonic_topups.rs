@@ -6,6 +6,9 @@
 //! receipt by exactly the SPL/vault payout after each release; an immediate retry after the
 //! initial payment and both top-ups must land as an exact no-op. The shared terminal campaign then
 //! proves the split schedule does not strand any funded portfolio.
+//! Before paying, a one-field account matrix substitutes owner, resolved foreign market, portfolio,
+//! destination, vault, and vault authority. Every cell must reject with an exact full-economic-state
+//! frame, while the canonical receipt remains claimable.
 //!
 //! The shared route oracle also requires receipt face/prior-bound identity to remain immutable,
 //! cumulative paid value to be monotonic, every claim delta to equal its external token delta, and
@@ -29,6 +32,7 @@ fn v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries(
         evidence.second_paid - evidence.first_paid,
         evidence.second_payout
     );
+    assert_eq!(evidence.identity_substitutions_rejected, 6);
     assert_eq!(evidence.exact_noop_retries, 3);
     assert_eq!(evidence.terminal_actor_count, 5);
     assert_eq!(evidence.final_engine_vault, evidence.final_spl_vault);

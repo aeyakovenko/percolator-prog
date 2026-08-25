@@ -10800,6 +10800,7 @@ pub struct ResolvedReceiptSplitTopupEvidence {
     pub second_paid: u128,
     pub first_payout: u128,
     pub second_payout: u128,
+    pub identity_substitutions_rejected: usize,
     pub exact_noop_retries: usize,
     pub terminal_actor_count: usize,
     pub final_engine_vault: u128,
@@ -11673,6 +11674,60 @@ fn require_resolved_claim_retry_noop(
     runner.assert_global_invariants()
 }
 
+fn require_resolved_claim_identity_substitutions(
+    runner: &mut ScenarioRunner,
+    claimant: usize,
+    other: usize,
+) -> Result<usize, String> {
+    runner
+        .env
+        .resolve_foreign_market()
+        .map_err(|error| format!("INV-068 resolve foreign substitution control: {error}"))?;
+    runner.assert_global_invariants()?;
+
+    let claimant_owner = runner.env.actors[claimant].signer.pubkey();
+    let claimant_portfolio = runner.env.actors[claimant].portfolio;
+    let claimant_destination = runner.env.actors[claimant].destination_token;
+    let other_owner = runner.env.actors[other].signer.pubkey();
+    let other_portfolio = runner.env.actors[other].portfolio;
+    let other_destination = runner.env.actors[other].destination_token;
+    let substitutions = [
+        ("owner", 0usize, other_owner),
+        ("market", 1, runner.env.foreign_market),
+        ("portfolio", 2, other_portfolio),
+        ("destination", 3, other_destination),
+        ("vault", 4, runner.env.foreign_vault),
+        ("vault authority", 5, runner.env.foreign_vault_authority),
+    ];
+
+    for (label, account_index, substitute) in substitutions {
+        let mut accounts = vec![
+            AccountMeta::new_readonly(claimant_owner, false),
+            AccountMeta::new(runner.env.market, false),
+            AccountMeta::new(claimant_portfolio, false),
+            AccountMeta::new(claimant_destination, false),
+            AccountMeta::new(runner.env.vault, false),
+            AccountMeta::new_readonly(runner.env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        accounts[account_index].pubkey = substitute;
+        let before = runner.snapshot();
+        if runner
+            .env
+            .claim_resolved_payout_topup_primary_with_accounts(accounts)
+            .is_ok()
+        {
+            return Err(format!(
+                "INV-068 one-field {label} substitution unexpectedly claimed a receipt"
+            ));
+        }
+        runner.assert_snapshot_unchanged(&before)?;
+        runner.assert_global_invariants()?;
+    }
+
+    Ok(substitutions.len())
+}
+
 pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopupEvidence, String> {
     const CLAIMANT: usize = 0;
     const BACKED_WINNER: usize = 2;
@@ -11771,6 +11826,9 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
     }
     runner.assert_global_invariants()?;
 
+    let identity_substitutions_rejected =
+        require_resolved_claim_identity_substitutions(&mut runner, CLAIMANT, 1)?;
+
     let first_topup = runner.execute_terminal_route(CLAIMANT, TerminalRoute::Claim)?;
     let after_first = read_receipt(&runner)?;
     if !first_topup.landed
@@ -11859,6 +11917,7 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
         second_paid: after_second.paid_effective,
         first_payout: first_topup.payout,
         second_payout: second_topup.payout,
+        identity_substitutions_rejected,
         exact_noop_retries,
         terminal_actor_count,
         final_engine_vault: final_group.vault,
