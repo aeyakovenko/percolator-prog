@@ -12,7 +12,7 @@ use percolator_prog::{
         MARKET_GROUP_OFF, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
         ORACLE_MODE_EWMA_MARK, ORACLE_MODE_MANUAL,
     },
-    ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
+    ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     state::{self, MarketGroupV16, PortfolioAccountV16},
 };
 use proptest::prelude::*;
@@ -10652,6 +10652,7 @@ const UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL: u128 = 777;
 
 struct UnderfundedResolvedSeed {
     runner: ScenarioRunner,
+    stale_resolve_rejected: bool,
     engine_vault_at_resolution: u128,
     spl_vault_at_resolution: u128,
     destinations_at_resolution: [u128; PRIMARY_ACTOR_COUNT],
@@ -10660,6 +10661,7 @@ struct UnderfundedResolvedSeed {
 struct UnderfundedTerminalWorld {
     outcome: BoundedTerminalEconomicOutcome,
     transition_count: usize,
+    stale_resolve_rejected: bool,
     partial_receipt_seeded: bool,
     value_moving_claim: bool,
     claim_payout_atoms: u128,
@@ -10672,6 +10674,15 @@ pub struct ResolvedClaimQuoteDeltaEvidence {
     pub claim_payout_atoms: u128,
     pub final_engine_vault: u128,
     pub final_spl_vault: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorityResolvedClaimEvidence {
+    pub world_count: usize,
+    pub stale_resolve_rejection_count: usize,
+    pub partial_receipt_count: usize,
+    pub value_moving_claim_count: usize,
+    pub claim_payout_atoms: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10938,10 +10949,68 @@ fn build_underfunded_live_reference_prefix(
     Ok(runner)
 }
 
+fn execute_authority_ordered_resolve(
+    runner: &mut ScenarioRunner,
+    handoff_first: bool,
+) -> Result<bool, String> {
+    const INCOMING_AUTHORITY: usize = 2;
+    let retained_resolve = runner.env.build_retained_resolve_market();
+    let retained_handoff = runner
+        .env
+        .build_retained_market_authority_handoff_from_admin(INCOMING_AUTHORITY);
+
+    if handoff_first {
+        runner
+            .env
+            .land_retained(retained_handoff)
+            .map_err(|error| format!("INV-010 underfunded authority handoff: {error}"))?;
+        let before_stale_resolve = runner.snapshot();
+        if runner.env.land_retained(retained_resolve).is_ok() {
+            return Err("INV-010 old authority resolved after handoff".into());
+        }
+        runner.assert_snapshot_unchanged(&before_stale_resolve)?;
+        let frontier = runner.env.primary_market_state().1.next_market_id;
+        let fresh_resolve = runner.env.build_retained_market_control_for_actor(
+            INCOMING_AUTHORITY,
+            ProgInstruction::ResolveMarket {
+                asset_generation_frontier: frontier,
+            },
+        );
+        runner
+            .env
+            .land_retained(fresh_resolve)
+            .map_err(|error| format!("INV-010 fresh incoming-authority resolve: {error}"))?;
+    } else {
+        runner
+            .env
+            .land_retained(retained_resolve)
+            .map_err(|error| format!("INV-010 retained pre-handoff resolve: {error}"))?;
+        runner
+            .env
+            .land_retained(retained_handoff)
+            .map_err(|error| format!("INV-010 post-resolve authority handoff: {error}"))?;
+    }
+
+    runner.assert_global_invariants()?;
+    let incoming_key = runner.env.actors[INCOMING_AUTHORITY]
+        .signer
+        .pubkey()
+        .to_bytes();
+    let (cfg, group) = runner.env.primary_market_state();
+    if cfg.marketauth != incoming_key || group.mode != MarketModeV16::Resolved {
+        return Err(format!(
+            "INV-010 authority/resolve composition ended in wrong state: authority={:?}, mode={:?}",
+            cfg.marketauth, group.mode
+        ));
+    }
+    Ok(handoff_first)
+}
+
 fn build_underfunded_resolved_reference_seed(
     landing: BoundedExpiryLanding,
     reverse_tail: bool,
     claim_first: bool,
+    authority_handoff_first: Option<bool>,
 ) -> Result<UnderfundedResolvedSeed, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
@@ -10970,7 +11039,12 @@ fn build_underfunded_resolved_reference_seed(
     }
 
     runner.env.warp_to_slot(SNAPSHOT_SLOT);
-    runner.execute_resolve_market()?;
+    let stale_resolve_rejected = if let Some(handoff_first) = authority_handoff_first {
+        execute_authority_ordered_resolve(&mut runner, handoff_first)?
+    } else {
+        runner.execute_resolve_market()?;
+        false
+    };
     runner.assert_global_invariants()?;
     let engine_vault_at_resolution = runner.env.primary_market_state().1.vault;
     let spl_vault_at_resolution = u128::from(runner.env.token_amount(runner.env.vault));
@@ -11032,6 +11106,7 @@ fn build_underfunded_resolved_reference_seed(
     runner.env.warp_to_slot(landing.slot(EXPIRY_SLOT));
     Ok(UnderfundedResolvedSeed {
         runner,
+        stale_resolve_rejected,
         engine_vault_at_resolution,
         spl_vault_at_resolution,
         destinations_at_resolution,
@@ -11202,6 +11277,7 @@ fn run_underfunded_terminal_world(
     landing: BoundedExpiryLanding,
     reverse_tail: bool,
     claim_first: bool,
+    authority_handoff_first: Option<bool>,
     nodes: &mut BTreeSet<BoundedReferenceNode>,
     edges: &mut BTreeSet<BoundedTerminalEdge>,
 ) -> Result<(UnderfundedTerminalWorld, Coverage), String> {
@@ -11215,10 +11291,16 @@ fn run_underfunded_terminal_world(
 
     let UnderfundedResolvedSeed {
         mut runner,
+        stale_resolve_rejected,
         engine_vault_at_resolution,
         spl_vault_at_resolution,
         destinations_at_resolution,
-    } = build_underfunded_resolved_reference_seed(landing, reverse_tail, claim_first)?;
+    } = build_underfunded_resolved_reference_seed(
+        landing,
+        reverse_tail,
+        claim_first,
+        authority_handoff_first,
+    )?;
     let seeded = runner.bounded_reference_node()?;
     let partial_receipt_seeded = seeded.payout_receipts[JUNIOR_WINNER].flags == [true, false];
     if !partial_receipt_seeded {
@@ -11367,6 +11449,7 @@ fn run_underfunded_terminal_world(
         UnderfundedTerminalWorld {
             outcome,
             transition_count,
+            stale_resolve_rejected,
             partial_receipt_seeded,
             value_moving_claim: claim_payout != 0,
             claim_payout_atoms: claim_payout,
@@ -11383,6 +11466,7 @@ pub fn verify_resolved_claim_quote_delta() -> Result<ResolvedClaimQuoteDeltaEvid
         BoundedExpiryLanding::Before,
         false,
         true,
+        None,
         &mut nodes,
         &mut edges,
     )?;
@@ -11400,11 +11484,46 @@ pub fn verify_resolved_claim_quote_delta() -> Result<ResolvedClaimQuoteDeltaEvid
     })
 }
 
+pub fn verify_underfunded_authority_resolve_claim_orders(
+) -> Result<AuthorityResolvedClaimEvidence, String> {
+    let mut partial_receipt_count = 0usize;
+    let mut stale_resolve_rejection_count = 0usize;
+    let mut value_moving_claim_count = 0usize;
+    let mut claim_payout_atoms = 0u128;
+
+    for handoff_first in [false, true] {
+        let mut nodes = BTreeSet::new();
+        let mut edges = BTreeSet::new();
+        let (world, _) = run_underfunded_terminal_world(
+            BoundedExpiryLanding::Before,
+            handoff_first,
+            true,
+            Some(handoff_first),
+            &mut nodes,
+            &mut edges,
+        )?;
+        stale_resolve_rejection_count += usize::from(world.stale_resolve_rejected);
+        partial_receipt_count += usize::from(world.partial_receipt_seeded);
+        value_moving_claim_count += usize::from(world.value_moving_claim);
+        claim_payout_atoms = claim_payout_atoms
+            .checked_add(world.claim_payout_atoms)
+            .ok_or("INV-010 authority/claim payout overflow")?;
+    }
+
+    Ok(AuthorityResolvedClaimEvidence {
+        world_count: 2,
+        stale_resolve_rejection_count,
+        partial_receipt_count,
+        value_moving_claim_count,
+        claim_payout_atoms,
+    })
+}
+
 fn build_value_moving_resolved_claim_runner() -> Result<ScenarioRunner, String> {
     const BACKED_WINNER: usize = 2;
 
     let UnderfundedResolvedSeed { mut runner, .. } =
-        build_underfunded_resolved_reference_seed(BoundedExpiryLanding::Before, false, true)?;
+        build_underfunded_resolved_reference_seed(BoundedExpiryLanding::Before, false, true, None)?;
     drain_bounded_terminal_subset(
         &mut runner,
         &[BACKED_WINNER],
@@ -11516,6 +11635,7 @@ fn run_underfunded_terminal_reference_subgraph() -> Result<UnderfundedTerminalGr
                     landing,
                     reverse_tail,
                     claim_first,
+                    None,
                     &mut nodes,
                     &mut edges,
                 )?;

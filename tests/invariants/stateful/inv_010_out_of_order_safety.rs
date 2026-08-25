@@ -30,11 +30,15 @@
 //! with terminal resolution in both orders. It proves stale-authority resolve rollback, fresh
 //! incoming-authority resolution, exact five-user payouts in forward and reverse claimant order,
 //! claim-retry fixed points, terminal portfolio closure, and `CloseSlab` by the rotated authority.
+//! `v16_program_underfunded_claims_survive_both_authority_resolve_orders` injects the same two
+//! authority orders into the shared independent underfunded terminal model. Both worlds create a
+//! genuine partial receipt, execute a value-moving claim, and converge under the model's exact
+//! position, OI, source-credit, encumbrance, stock, custody, and rollback oracles.
 //!
 //! Guarantee boundary: this fixed-pin regression covers the portfolio-scoped matcher capability.
 //! The authority/policy composition covers the market-authority and inherited asset-0 insurance
-//! authority roles. Full-funded resolve/claim composition is covered; underfunded partial-receipt
-//! authority permutations remain.
+//! authority roles. Full-funded and underfunded resolve/claim composition is covered. Higher-arity
+//! authority + policy + terminal permutations and larger economic topologies remain.
 
 use super::*;
 use crate::support::v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
@@ -877,6 +881,17 @@ fn v16_program_authority_handoff_and_resolve_obey_both_landing_orders() {
         seed[0] = u8::from(handoff_first);
         run_authority_resolve_order(seed, handoff_first);
     }
+}
+
+#[test]
+fn v16_program_underfunded_claims_survive_both_authority_resolve_orders() {
+    let evidence = verify_underfunded_authority_resolve_claim_orders()
+        .expect("underfunded authority/resolve/claim composition");
+    assert_eq!(evidence.world_count, 2);
+    assert_eq!(evidence.stale_resolve_rejection_count, 1);
+    assert_eq!(evidence.partial_receipt_count, evidence.world_count);
+    assert_eq!(evidence.value_moving_claim_count, evidence.world_count);
+    assert!(evidence.claim_payout_atoms > 0);
 }
 
 proptest! {
