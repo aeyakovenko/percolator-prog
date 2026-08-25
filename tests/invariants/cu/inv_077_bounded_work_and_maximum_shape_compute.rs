@@ -142,6 +142,50 @@ fn v16_program_max_source_conversion_and_owner_exit_are_bounded() {
     );
 }
 
+fn release_all_source_liens_with_cu(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    now_slot: u64,
+    expected_domains: usize,
+) -> (usize, u64) {
+    let lien_count = |env: &V16CuEnv| {
+        env.portfolio_state(portfolio)
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_liened_num.get() != 0)
+            .count()
+    };
+    assert_eq!(lien_count(env), expected_domains);
+    let mut max_cu = 0;
+    for call in 0..expected_domains {
+        let before_count = lien_count(env);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+        let cu = env
+            .crank_if_actionable(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: vec![],
+                },
+            )
+            .unwrap_or_else(|| {
+                panic!("source-lien release chunk {call}/{expected_domains} made no progress")
+            });
+        assert_cu_within("chunked source-lien release", cu, 1_375_000);
+        assert_eq!(
+            lien_count(env),
+            before_count - 1,
+            "every accepted release crank must remove exactly one source lien"
+        );
+        assert_ne!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_ne!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+        max_cu = max_cu.max(cu);
+    }
+    assert_eq!(lien_count(env), 0);
+    (expected_domains, max_cu)
+}
+
 #[test]
 fn v16_program_max_source_flat_lien_release_and_owner_exit_are_bounded() {
     let (mut env, taker_owner, lp_owner, taker, lp, slot) =
@@ -200,23 +244,7 @@ fn v16_program_max_source_flat_lien_release_and_owner_exit_are_bounded() {
         "both seeded liens must preserve their effective reservation"
     );
 
-    let market_before_release = env.svm.get_account(&env.market).unwrap();
-    let lp_before_release = env.svm.get_account(&lp).unwrap();
-    let release_cu = env
-        .crank_if_actionable(
-            lp,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: slot,
-                observations: vec![],
-            },
-        )
-        .expect("flat max-source liens must have one permissionless release step");
-    assert_cu_within("28-source-domain ReleaseSourceLiens", release_cu, 1_375_000);
-    assert_ne!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before_release
-    );
-    assert_ne!(env.svm.get_account(&lp).unwrap(), lp_before_release);
+    let (release_calls, release_cu) = release_all_source_liens_with_cu(&mut env, lp, slot, 2);
 
     let released = env.portfolio_state(lp);
     assert_eq!(released.pnl.get(), positive_pnl as i128);
@@ -273,7 +301,339 @@ fn v16_program_max_source_flat_lien_release_and_owner_exit_are_bounded() {
     assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
     assert!(terminal.vault >= terminal.c_tot + terminal.insurance);
     println!(
-        "INV-077 max-source lien release CU: flatten={max_flatten_cu}, release={release_cu}, convert={convert_cu}, withdraw={withdraw_cu}, close={close_cu}"
+        "INV-077 max-source lien release CU: flatten={max_flatten_cu}, release_calls={release_calls}, release={release_cu}, convert={convert_cu}, withdraw={withdraw_cu}, close={close_cu}"
+    );
+}
+
+#[test]
+fn v16_program_sequential_all_source_lien_mutation_shape_is_bounded() {
+    const PRICE_LOW: u64 = 100;
+    const PRICE_HIGH: u64 = 101;
+    const LIEN_PER_SOURCE_Q: i128 = 10 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: MAX_SOURCE_LIVE_ASSETS,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        70,
+    );
+    let mut slot = 0u64;
+    for asset_index in 0..MAX_SOURCE_LIVE_ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+    }
+
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 2_000_000);
+    env.deposit(&lp_owner, lp, 2_000_000);
+
+    let cert_current = |env: &V16CuEnv, portfolio: Pubkey| {
+        let group = env.market_state().1;
+        let state = env.portfolio_state(portfolio);
+        let cert = health_cert(&state);
+        cert.valid
+            && cert.cert_oracle_epoch == group.oracle_epoch
+            && cert.cert_funding_epoch == group.funding_epoch
+            && cert.cert_risk_epoch == group.risk_epoch
+            && cert.cert_asset_set_epoch == group.asset_set_epoch
+            && cert.active_bitmap_at_cert == active_bitmap(&state)
+    };
+    let drive_both_current = |env: &mut V16CuEnv, now_slot: u64| {
+        for _ in 0..8 {
+            for portfolio in [taker, lp] {
+                if !cert_current(env, portfolio) {
+                    env.crank(
+                        portfolio,
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot,
+                            observations: vec![],
+                        },
+                    );
+                }
+            }
+            if cert_current(env, taker) && cert_current(env, lp) {
+                return;
+            }
+        }
+        panic!("sequential-lien accounts did not reach a certificate fixed point");
+    };
+    let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
+        for portfolio in [taker, lp] {
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+        drive_both_current(env, now_slot);
+    };
+    let direct_fill = |env: &mut V16CuEnv, asset_index: u16, size_q: i128, exec_price: u64| {
+        env.svm.expire_blockhash();
+        env.try_trade_asset_with_cu(
+            asset_index,
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            size_q,
+            exec_price,
+            0,
+        )
+    };
+
+    let mut max_seed_cu = 0;
+    let mut max_flatten_cu = 0;
+    let mut source_count = 0u16;
+    for asset_index in 0..MAX_SOURCE_LIVE_ASSETS {
+        for domain in [asset_index * 2, asset_index * 2 + 1] {
+            env.top_up_backing_bucket(domain, 1_000, 1_000);
+        }
+        for (open_q, open_price, target_price, close_q, side) in [
+            (
+                -MAX_SOURCE_LIVE_SIZE_Q,
+                PRICE_LOW,
+                PRICE_HIGH,
+                MAX_SOURCE_LIVE_SIZE_Q,
+                "long",
+            ),
+            (
+                MAX_SOURCE_LIVE_SIZE_Q,
+                PRICE_HIGH,
+                PRICE_LOW,
+                -MAX_SOURCE_LIVE_SIZE_Q,
+                "short",
+            ),
+        ] {
+            direct_fill(&mut env, asset_index, open_q, open_price)
+                .unwrap_or_else(|error| panic!("asset {asset_index} {side} open failed: {error}"));
+            slot += 1;
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_for_asset_as_admin(asset_index, slot, target_price);
+            settle_both(&mut env, asset_index, slot);
+            direct_fill(&mut env, asset_index, close_q, target_price)
+                .unwrap_or_else(|error| panic!("asset {asset_index} {side} close failed: {error}"));
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(
+                &env.portfolio_state(lp)
+            )));
+
+            source_count += 1;
+            if source_count % 2 != 0 && source_count < 27 {
+                continue;
+            }
+            let capital = env.portfolio_state(lp).capital.get();
+            let (capital_source, withdraw_cu) = env.withdraw_with_cu(&lp_owner, lp, capital);
+            assert_cu_within("sequential-lien collateral release", withdraw_cu, 1_375_000);
+
+            let seed_q = LIEN_PER_SOURCE_Q * i128::from(source_count);
+            let seed_cu = direct_fill(&mut env, 0, seed_q, PRICE_LOW)
+                .unwrap_or_else(|error| panic!("source-lien seed {source_count} failed: {error}"));
+            assert_cu_within("sequential source-lien seed", seed_cu, 1_400_000);
+            max_seed_cu = max_seed_cu.max(seed_cu);
+            let seeded = env.portfolio_state(lp);
+            assert_eq!(
+                seeded
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.source_claim_liened_num.get() != 0)
+                    .count(),
+                usize::from(source_count),
+                "each newly funded source domain must receive a real public lien"
+            );
+
+            env.svm.expire_blockhash();
+            let deposit_cu = env
+                .send(
+                    env.deposit_ix(lp, capital),
+                    vec![
+                        AccountMeta::new(lp_owner.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(lp, false),
+                        AccountMeta::new(capital_source, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&lp_owner],
+                )
+                .expect("redeposit the exact withdrawn collateral");
+            assert_cu_within("sequential-lien collateral restore", deposit_cu, 1_375_000);
+            assert_eq!(env.token_amount(capital_source), 0);
+
+            let flatten_cu = direct_fill(&mut env, 0, -seed_q, PRICE_LOW).unwrap_or_else(|error| {
+                panic!("source-lien seed {source_count} flatten failed: {error}")
+            });
+            assert_cu_within("sequential source-lien flatten", flatten_cu, 1_400_000);
+            max_flatten_cu = max_flatten_cu.max(flatten_cu);
+            let flat = env.portfolio_state(lp);
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(&flat)));
+            assert_eq!(
+                flat.source_domains
+                    .iter()
+                    .filter(|source| source.source_claim_liened_num.get() != 0)
+                    .count(),
+                usize::from(source_count),
+                "flattening must retain every source lien for explicit release"
+            );
+            drive_both_current(&mut env, slot);
+        }
+    }
+
+    let flat = env.portfolio_state(lp);
+    assert_eq!(flat.pnl.get(), 28_000);
+    assert_eq!(
+        flat.source_domains
+            .iter()
+            .filter(|source| source.source_claim_liened_num.get() != 0)
+            .count(),
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+    );
+    let principal = flat.capital.get();
+    assert!(principal > 0);
+    let (principal_destination, principal_withdraw_cu) =
+        env.withdraw_with_cu(&lp_owner, lp, principal);
+    assert_cu_within(
+        "all-source principal withdrawal",
+        principal_withdraw_cu,
+        1_375_000,
+    );
+    assert_eq!(env.token_amount(principal_destination), principal as u64);
+    let funded_lock = env.portfolio_state(lp);
+    assert_eq!(funded_lock.capital.get(), 0);
+    assert_eq!(funded_lock.pnl.get(), 28_000);
+
+    let liens_before_refresh = funded_lock
+        .source_domains
+        .iter()
+        .filter(|source| source.source_claim_liened_num.get() != 0)
+        .count();
+    let mut refresh_calls = 0usize;
+    let mut refresh_cu = 0u64;
+    let max_refresh_calls = usize::from(MAX_SOURCE_LIVE_ASSETS) * 2 + 2;
+    while !cert_current(&env, lp) && refresh_calls < max_refresh_calls {
+        env.svm.expire_blockhash();
+        let cu = env
+            .crank_if_actionable(
+                lp,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(MAX_SOURCE_LIVE_ASSETS - 1),
+                },
+            )
+            .expect("the post-withdrawal refresh prefix must make bounded progress");
+        assert_cu_within("all-source post-withdrawal refresh", cu, 1_375_000);
+        refresh_cu = refresh_cu.max(cu);
+        refresh_calls += 1;
+        assert_eq!(
+            env.portfolio_state(lp)
+                .source_domains
+                .iter()
+                .filter(|source| source.source_claim_liened_num.get() != 0)
+                .count(),
+            liens_before_refresh,
+            "a higher-priority refresh step must not consume source liens"
+        );
+    }
+    assert!(
+        cert_current(&env, lp),
+        "the bounded prefix must expose source-lien release as the next continuation: clock={}, requested_slot={slot}, asset_slot={}, cert={:?}",
+        env.svm.get_sysvar::<Clock>().slot,
+        env.market_state().1.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].slot_last,
+        health_cert(&env.portfolio_state(lp)),
+    );
+
+    let market_before_conversion = env.svm.get_account(&env.market).unwrap();
+    let lp_before_conversion = env.svm.get_account(&lp).unwrap();
+    let vault_before_conversion = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let blocked_conversion = env.send(
+        env.convert_released_pnl_ix(lp, 28_000),
+        vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(lp, false),
+        ],
+        &[&lp_owner],
+    );
+    let conversion_error = blocked_conversion
+        .expect_err("all 28 live liens must block conversion until the crank releases them");
+    assert!(
+        conversion_error.contains("Custom(21)")
+            || conversion_error.contains("custom program error: 0x15"),
+        "conversion must fail on the live-lien economic lock: {conversion_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_conversion
+    );
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_conversion);
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_conversion
+    );
+
+    let market_before_close = env.svm.get_account(&env.market).unwrap();
+    let lp_before_close = env.svm.get_account(&lp).unwrap();
+    env.svm.expire_blockhash();
+    let blocked_close = env.send(
+        env.close_portfolio_ix(lp),
+        vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(lp, false),
+        ],
+        &[&lp_owner],
+    );
+    let close_error = blocked_close
+        .expect_err("a funded liened claim cannot close before permissionless release");
+    assert!(
+        close_error.contains("Custom(21)") || close_error.contains("custom program error: 0x15"),
+        "the pre-release close must fail on the funded-account economic lock: {close_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_close
+    );
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_close);
+
+    let (release_calls, release_cu) = release_all_source_liens_with_cu(
+        &mut env,
+        lp,
+        slot,
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS,
+    );
+    assert!(env.portfolio_state(lp).source_domains.iter().all(|source| {
+        source.source_claim_liened_num.get() == 0
+            && source.source_lien_effective_reserved.get() == 0
+    }));
+
+    let positive_pnl = env.portfolio_state(lp).pnl.get() as u128;
+    let convert_cu = env
+        .send(
+            env.convert_released_pnl_ix(lp, positive_pnl),
+            vec![
+                AccountMeta::new(lp_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lp, false),
+            ],
+            &[&lp_owner],
+        )
+        .expect("all-source released PnL converts");
+    assert_cu_within("all-source ConvertReleasedPnl", convert_cu, 1_400_000);
+    let terminal_capital = env.portfolio_state(lp).capital.get();
+    let (_, withdraw_cu) = env.withdraw_with_cu(&lp_owner, lp, terminal_capital);
+    let close_cu = env.close_portfolio_with_cu(&lp_owner, lp);
+    assert_cu_within("all-source withdrawal", withdraw_cu, CUSTODY_CU_LIMIT);
+    assert_cu_within("all-source portfolio close", close_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(terminal_capital, 28_000);
+    println!(
+        "INV-077 sequential all-source liens CU: seed={max_seed_cu}, flatten={max_flatten_cu}, principal_withdraw={principal_withdraw_cu}, refresh_calls={refresh_calls}, refresh={refresh_cu}, release_calls={release_calls}, release={release_cu}, convert={convert_cu}, withdraw={withdraw_cu}, close={close_cu}"
     );
 }
 
