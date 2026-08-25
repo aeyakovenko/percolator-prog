@@ -10766,6 +10766,7 @@ const DEFAULT_UNDERFUNDED_BACKING_PLAN: UnderfundedBackingPlan = UnderfundedBack
 struct UnderfundedResolvedSeed {
     runner: ScenarioRunner,
     stale_resolve_rejected: bool,
+    stale_policy_rejected: bool,
     engine_vault_at_resolution: u128,
     spl_vault_at_resolution: u128,
     destinations_at_resolution: [u128; PRIMARY_ACTOR_COUNT],
@@ -10775,6 +10776,7 @@ struct UnderfundedTerminalWorld {
     outcome: BoundedTerminalEconomicOutcome,
     transition_count: usize,
     stale_resolve_rejected: bool,
+    stale_policy_rejected: bool,
     partial_receipt_seeded: bool,
     value_moving_claim: bool,
     claim_payout_atoms: u128,
@@ -10818,6 +10820,40 @@ pub struct AuthorityResolvedClaimEvidence {
     pub partial_receipt_count: usize,
     pub value_moving_claim_count: usize,
     pub claim_payout_atoms: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorityPolicyResolvedClaimEvidence {
+    pub world_count: usize,
+    pub stale_resolve_rejection_count: usize,
+    pub stale_policy_rejection_count: usize,
+    pub partial_receipt_count: usize,
+    pub value_moving_claim_count: usize,
+    pub claim_payout_atoms: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnderfundedAuthorityOperation {
+    Policy,
+    Handoff,
+    Resolve,
+}
+
+impl UnderfundedAuthorityOperation {
+    const PERMUTATIONS: [[Self; 3]; 6] = [
+        [Self::Policy, Self::Handoff, Self::Resolve],
+        [Self::Policy, Self::Resolve, Self::Handoff],
+        [Self::Handoff, Self::Policy, Self::Resolve],
+        [Self::Handoff, Self::Resolve, Self::Policy],
+        [Self::Resolve, Self::Policy, Self::Handoff],
+        [Self::Resolve, Self::Handoff, Self::Policy],
+    ];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnderfundedAuthorityPlan {
+    HandoffResolve(bool),
+    PolicyHandoffResolve([UnderfundedAuthorityOperation; 3]),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11176,11 +11212,130 @@ fn execute_authority_ordered_resolve(
     Ok(handoff_first)
 }
 
+fn execute_authority_policy_ordered_resolve(
+    runner: &mut ScenarioRunner,
+    order: [UnderfundedAuthorityOperation; 3],
+) -> Result<(bool, bool), String> {
+    const INCOMING_AUTHORITY: usize = 2;
+    const OLD_REDIRECT_BPS: u16 = 333;
+    const FRESH_REDIRECT_BPS: u16 = 334;
+
+    let initial_policy_sequence = runner.env.primary_control_sequences(0).fee_redirect;
+    let retained_policy = runner.env.build_retained_market_control_from_admin(
+        ProgInstruction::UpdateFeeRedirectPolicy {
+            redirect_bps: OLD_REDIRECT_BPS,
+            policy_sequence: initial_policy_sequence + 1,
+        },
+    );
+    let retained_handoff = runner
+        .env
+        .build_retained_market_authority_handoff_from_admin(INCOMING_AUTHORITY);
+    let retained_resolve = runner.env.build_retained_resolve_market();
+    let mut handoff_landed = false;
+    let mut resolve_landed = false;
+    let mut policy_landed = false;
+    let mut stale_resolve_rejected = false;
+    let mut stale_policy_rejected = false;
+
+    for operation in order {
+        match operation {
+            UnderfundedAuthorityOperation::Handoff => {
+                runner
+                    .env
+                    .land_retained(retained_handoff.clone())
+                    .map_err(|error| format!("INV-010 triple authority handoff: {error}"))?;
+                handoff_landed = true;
+            }
+            UnderfundedAuthorityOperation::Policy => {
+                if handoff_landed {
+                    let before = runner.snapshot();
+                    if runner.env.land_retained(retained_policy.clone()).is_ok() {
+                        return Err("INV-010 old authority policy landed after handoff".into());
+                    }
+                    runner.assert_snapshot_unchanged(&before)?;
+                    stale_policy_rejected = true;
+                } else {
+                    runner
+                        .env
+                        .land_retained(retained_policy.clone())
+                        .map_err(|error| format!("INV-010 retained pre-handoff policy: {error}"))?;
+                    policy_landed = true;
+                }
+            }
+            UnderfundedAuthorityOperation::Resolve => {
+                if handoff_landed {
+                    let before = runner.snapshot();
+                    if runner.env.land_retained(retained_resolve.clone()).is_ok() {
+                        return Err("INV-010 old authority resolved after handoff".into());
+                    }
+                    runner.assert_snapshot_unchanged(&before)?;
+                    stale_resolve_rejected = true;
+                } else {
+                    runner
+                        .env
+                        .land_retained(retained_resolve.clone())
+                        .map_err(|error| {
+                            format!("INV-010 retained pre-handoff resolve: {error}")
+                        })?;
+                    resolve_landed = true;
+                }
+            }
+        }
+        runner.assert_global_invariants()?;
+    }
+
+    let current_policy_sequence = runner.env.primary_control_sequences(0).fee_redirect;
+    let fresh_policy = runner.env.build_retained_market_control_for_actor(
+        INCOMING_AUTHORITY,
+        ProgInstruction::UpdateFeeRedirectPolicy {
+            redirect_bps: FRESH_REDIRECT_BPS,
+            policy_sequence: current_policy_sequence + 1,
+        },
+    );
+    runner
+        .env
+        .land_retained(fresh_policy)
+        .map_err(|error| format!("INV-010 incoming-authority fresh policy: {error}"))?;
+
+    if !resolve_landed {
+        let frontier = runner.env.primary_market_state().1.next_market_id;
+        let fresh_resolve = runner.env.build_retained_market_control_for_actor(
+            INCOMING_AUTHORITY,
+            ProgInstruction::ResolveMarket {
+                asset_generation_frontier: frontier,
+            },
+        );
+        runner
+            .env
+            .land_retained(fresh_resolve)
+            .map_err(|error| format!("INV-010 incoming-authority fresh resolve: {error}"))?;
+    }
+
+    runner.assert_global_invariants()?;
+    let incoming_key = runner.env.actors[INCOMING_AUTHORITY]
+        .signer
+        .pubkey()
+        .to_bytes();
+    let (cfg, group) = runner.env.primary_market_state();
+    if !handoff_landed
+        || cfg.marketauth != incoming_key
+        || cfg.fee_redirect_to_market_0_bps != FRESH_REDIRECT_BPS
+        || group.mode != MarketModeV16::Resolved
+        || policy_landed == stale_policy_rejected
+    {
+        return Err(format!(
+            "INV-010 triple composition mismatch: order={order:?}, handoff={handoff_landed}, old_policy={policy_landed}, stale_policy={stale_policy_rejected}, stale_resolve={stale_resolve_rejected}, authority={:?}, redirect={}, mode={:?}",
+            cfg.marketauth, cfg.fee_redirect_to_market_0_bps, group.mode
+        ));
+    }
+    Ok((stale_resolve_rejected, stale_policy_rejected))
+}
+
 fn build_underfunded_resolved_reference_seed(
     landing: BoundedExpiryLanding,
     reverse_tail: bool,
     claim_first: bool,
-    authority_handoff_first: Option<bool>,
+    authority_plan: Option<UnderfundedAuthorityPlan>,
     backing_plan: UnderfundedBackingPlan,
 ) -> Result<UnderfundedResolvedSeed, String> {
     const JUNIOR_WINNER: usize = 0;
@@ -11210,11 +11365,18 @@ fn build_underfunded_resolved_reference_seed(
     }
 
     runner.env.warp_to_slot(SNAPSHOT_SLOT);
-    let stale_resolve_rejected = if let Some(handoff_first) = authority_handoff_first {
-        execute_authority_ordered_resolve(&mut runner, handoff_first)?
-    } else {
-        runner.execute_resolve_market()?;
-        false
+    let (stale_resolve_rejected, stale_policy_rejected) = match authority_plan {
+        Some(UnderfundedAuthorityPlan::HandoffResolve(handoff_first)) => (
+            execute_authority_ordered_resolve(&mut runner, handoff_first)?,
+            false,
+        ),
+        Some(UnderfundedAuthorityPlan::PolicyHandoffResolve(order)) => {
+            execute_authority_policy_ordered_resolve(&mut runner, order)?
+        }
+        None => {
+            runner.execute_resolve_market()?;
+            (false, false)
+        }
     };
     runner.assert_global_invariants()?;
     let engine_vault_at_resolution = runner.env.primary_market_state().1.vault;
@@ -11278,6 +11440,7 @@ fn build_underfunded_resolved_reference_seed(
     Ok(UnderfundedResolvedSeed {
         runner,
         stale_resolve_rejected,
+        stale_policy_rejected,
         engine_vault_at_resolution,
         spl_vault_at_resolution,
         destinations_at_resolution,
@@ -11452,7 +11615,7 @@ fn run_underfunded_terminal_world(
     landing: BoundedExpiryLanding,
     reverse_tail: bool,
     claim_first: bool,
-    authority_handoff_first: Option<bool>,
+    authority_plan: Option<UnderfundedAuthorityPlan>,
     nodes: &mut BTreeSet<BoundedReferenceNode>,
     edges: &mut BTreeSet<BoundedTerminalEdge>,
 ) -> Result<(UnderfundedTerminalWorld, Coverage), String> {
@@ -11467,6 +11630,7 @@ fn run_underfunded_terminal_world(
     let UnderfundedResolvedSeed {
         mut runner,
         stale_resolve_rejected,
+        stale_policy_rejected,
         engine_vault_at_resolution,
         spl_vault_at_resolution,
         destinations_at_resolution,
@@ -11474,7 +11638,7 @@ fn run_underfunded_terminal_world(
         landing,
         reverse_tail,
         claim_first,
-        authority_handoff_first,
+        authority_plan,
         DEFAULT_UNDERFUNDED_BACKING_PLAN,
     )?;
     let seeded = runner.bounded_reference_node()?;
@@ -11626,6 +11790,7 @@ fn run_underfunded_terminal_world(
             outcome,
             transition_count,
             stale_resolve_rejected,
+            stale_policy_rejected,
             partial_receipt_seeded,
             value_moving_claim: claim_payout != 0,
             claim_payout_atoms: claim_payout,
@@ -12084,7 +12249,7 @@ pub fn verify_underfunded_authority_resolve_claim_orders(
             BoundedExpiryLanding::Before,
             handoff_first,
             true,
-            Some(handoff_first),
+            Some(UnderfundedAuthorityPlan::HandoffResolve(handoff_first)),
             &mut nodes,
             &mut edges,
         )?;
@@ -12099,6 +12264,55 @@ pub fn verify_underfunded_authority_resolve_claim_orders(
     Ok(AuthorityResolvedClaimEvidence {
         world_count: 2,
         stale_resolve_rejection_count,
+        partial_receipt_count,
+        value_moving_claim_count,
+        claim_payout_atoms,
+    })
+}
+
+pub fn verify_underfunded_authority_policy_resolve_claim_orders(
+) -> Result<AuthorityPolicyResolvedClaimEvidence, String> {
+    let mut canonical = None;
+    let mut stale_resolve_rejection_count = 0usize;
+    let mut stale_policy_rejection_count = 0usize;
+    let mut partial_receipt_count = 0usize;
+    let mut value_moving_claim_count = 0usize;
+    let mut claim_payout_atoms = 0u128;
+
+    for order in UnderfundedAuthorityOperation::PERMUTATIONS {
+        let mut nodes = BTreeSet::new();
+        let mut edges = BTreeSet::new();
+        let (world, _) = run_underfunded_terminal_world(
+            BoundedExpiryLanding::Before,
+            false,
+            true,
+            Some(UnderfundedAuthorityPlan::PolicyHandoffResolve(order)),
+            &mut nodes,
+            &mut edges,
+        )?;
+        if let Some(expected) = &canonical {
+            if world.outcome != *expected {
+                return Err(format!(
+                    "INV-010 triple landing order changed terminal economics: order={order:?}, expected={expected:?}, actual={:?}",
+                    world.outcome
+                ));
+            }
+        } else {
+            canonical = Some(world.outcome.clone());
+        }
+        stale_resolve_rejection_count += usize::from(world.stale_resolve_rejected);
+        stale_policy_rejection_count += usize::from(world.stale_policy_rejected);
+        partial_receipt_count += usize::from(world.partial_receipt_seeded);
+        value_moving_claim_count += usize::from(world.value_moving_claim);
+        claim_payout_atoms = claim_payout_atoms
+            .checked_add(world.claim_payout_atoms)
+            .ok_or("INV-010 triple claim payout overflow")?;
+    }
+
+    Ok(AuthorityPolicyResolvedClaimEvidence {
+        world_count: UnderfundedAuthorityOperation::PERMUTATIONS.len(),
+        stale_resolve_rejection_count,
+        stale_policy_rejection_count,
         partial_receipt_count,
         value_moving_claim_count,
         claim_payout_atoms,

@@ -34,13 +34,19 @@
 //! authority orders into the shared independent underfunded terminal model. Both worlds create a
 //! genuine partial receipt, execute a value-moving claim, and converge under the model's exact
 //! position, OI, source-credit, encumbrance, stock, custody, and rollback oracles.
+//! `v16_program_underfunded_policy_handoff_and_resolve_exhaust_all_landing_orders` adds one retained
+//! fee policy to that value-moving world and exhausts all 3! policy/handoff/resolve orders. Every
+//! stale old-authority operation rolls back exactly, fresh incoming-authority policy and resolve
+//! paths remain live, and all six terminal outcomes are economically identical.
 //!
 //! Guarantee boundary: this fixed-pin regression covers the portfolio-scoped matcher capability.
 //! The authority/policy composition covers the market-authority and inherited asset-0 insurance
 //! authority roles. Full-funded and underfunded resolve/claim composition is covered. Higher-arity
-//! authority + policy + terminal permutations and larger economic topologies remain.
+//! authority + policy + terminal permutations are covered for one representative policy lane;
+//! the other lanes and larger economic topologies remain.
 
 use super::*;
+use crate::support::fuzz_model::verify_underfunded_authority_policy_resolve_claim_orders;
 use crate::support::v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
 use percolator::{HealthCertV16Account, MarketModeV16, PortfolioAccountV16Account, POS_SCALE};
 use percolator_prog::ix::Instruction as ProgInstruction;
@@ -889,6 +895,18 @@ fn v16_program_underfunded_claims_survive_both_authority_resolve_orders() {
         .expect("underfunded authority/resolve/claim composition");
     assert_eq!(evidence.world_count, 2);
     assert_eq!(evidence.stale_resolve_rejection_count, 1);
+    assert_eq!(evidence.partial_receipt_count, evidence.world_count);
+    assert_eq!(evidence.value_moving_claim_count, evidence.world_count);
+    assert!(evidence.claim_payout_atoms > 0);
+}
+
+#[test]
+fn v16_program_underfunded_policy_handoff_and_resolve_exhaust_all_landing_orders() {
+    let evidence = verify_underfunded_authority_policy_resolve_claim_orders()
+        .expect("underfunded policy/authority/resolve/claim composition");
+    assert_eq!(evidence.world_count, 6);
+    assert_eq!(evidence.stale_resolve_rejection_count, 3);
+    assert_eq!(evidence.stale_policy_rejection_count, 3);
     assert_eq!(evidence.partial_receipt_count, evidence.world_count);
     assert_eq!(evidence.value_moving_claim_count, evidence.world_count);
     assert!(evidence.claim_payout_atoms > 0);
