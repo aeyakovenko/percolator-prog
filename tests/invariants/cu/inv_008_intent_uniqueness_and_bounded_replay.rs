@@ -153,25 +153,54 @@ fn v16_public_replay_disposition_roster_is_source_complete() {
         debug_names(&SupersededIntentKind::ALL),
         "every executable supersession generator kind needs a production route and vice versa"
     );
+    let retry_route_families = [
+        ("BatchTradeCpi", "trade"),
+        ("BatchTradeNoCpi", "trade"),
+        ("ConvertReleasedPnl", "conversion"),
+        ("Deposit", "deposit"),
+        ("RebalanceReduce", "reduction"),
+        ("TopUpBackingBucket", "backing-top-up"),
+        ("TopUpInsurance", "insurance-top-up"),
+        ("TopUpInsuranceDomain", "insurance-top-up"),
+        ("TradeCpi", "trade"),
+        ("TradeNoCpi", "trade"),
+        ("UpdateAssetLifecycle", "asset-activation"),
+        ("Withdraw", "withdrawal"),
+    ];
     assert_eq!(
         retry_variants,
+        retry_route_families
+            .iter()
+            .map(|(variant, _)| *variant)
+            .collect(),
+        "new retryable economic routes must enter the executable INV-008 matrix"
+    );
+    let mut routes_by_family = BTreeMap::<&str, BTreeSet<&str>>::new();
+    for (variant, family) in retry_route_families {
+        routes_by_family.entry(family).or_default().insert(variant);
+    }
+    assert_eq!(
+        routes_by_family
+            .into_iter()
+            .filter(|(_, variants)| variants.len() > 1)
+            .collect::<BTreeMap<_, _>>(),
         [
-            "BatchTradeCpi",
-            "BatchTradeNoCpi",
-            "ConvertReleasedPnl",
-            "Deposit",
-            "RebalanceReduce",
-            "TopUpBackingBucket",
-            "TopUpInsurance",
-            "TopUpInsuranceDomain",
-            "TradeCpi",
-            "TradeNoCpi",
-            "UpdateAssetLifecycle",
-            "Withdraw",
+            (
+                "insurance-top-up",
+                ["TopUpInsurance", "TopUpInsuranceDomain"]
+                    .into_iter()
+                    .collect(),
+            ),
+            (
+                "trade",
+                ["BatchTradeCpi", "BatchTradeNoCpi", "TradeCpi", "TradeNoCpi",]
+                    .into_iter()
+                    .collect(),
+            ),
         ]
         .into_iter()
         .collect(),
-        "new retryable economic routes must enter the executable INV-008 matrix"
+        "a new multi-entrypoint retained family needs an ordered exact-once route matrix"
     );
     assert_eq!(
         supersession_variants,

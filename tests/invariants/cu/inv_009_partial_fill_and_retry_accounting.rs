@@ -5,12 +5,27 @@
 //! the executed quantity and invalidate the consumed position epoch. A batch has
 //! no signed per-leg minimum or remaining-allowance ledger, so matcher-selected
 //! short fills must reject atomically rather than silently change the strategy's
-//! leg ratio.
+//! leg ratio. The cross-route matrix executes a real single-CPI half fill, proves
+//! every prebuilt single/batch CPI/no-CPI encoding is stale, then executes the
+//! exact residual through every route with cumulative quantity, fee, OI, custody,
+//! epoch, rollback, and CU assertions.
 
 use super::*;
 
 const FLAGGED_PARTIAL_MODE: u8 = 15;
 const ASYMMETRIC_BATCH_PARTIAL_MODE: u8 = 16;
+
+#[derive(Clone, Copy, Debug)]
+enum PartialRetryRoute {
+    NoCpi,
+    BatchNoCpi,
+    Cpi,
+    BatchCpi,
+}
+
+impl PartialRetryRoute {
+    const ALL: [Self; 4] = [Self::NoCpi, Self::BatchNoCpi, Self::Cpi, Self::BatchCpi];
+}
 
 fn setup_hostile_partial_env(
     asset_count: u16,
@@ -101,6 +116,92 @@ fn set_hostile_matcher_mode(env: &mut V16CuEnv, ctx: Pubkey, matcher_program: Pu
             },
         )
         .unwrap();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retained_partial_retry_ix(
+    env: &V16CuEnv,
+    route: PartialRetryRoute,
+    taker_account: Pubkey,
+    lp_account: Pubkey,
+    size_q: i128,
+) -> ProgInstruction {
+    const ASSET: u16 = 0;
+    const PRICE: u64 = 100;
+    const FEE_BPS: u64 = 100;
+    let market_id = env.asset_market_id(ASSET);
+    match route {
+        PartialRetryRoute::NoCpi => {
+            env.trade_no_cpi_ix(taker_account, lp_account, ASSET, size_q, PRICE, FEE_BPS)
+        }
+        PartialRetryRoute::BatchNoCpi => env.batch_trade_no_cpi_ix(
+            taker_account,
+            lp_account,
+            vec![BatchTradeLeg {
+                asset_index: ASSET,
+                market_id,
+                size_q,
+                exec_price: PRICE,
+                fee_bps: FEE_BPS,
+            }],
+        ),
+        PartialRetryRoute::Cpi => {
+            env.trade_cpi_ix(taker_account, lp_account, ASSET, size_q, FEE_BPS, 0)
+        }
+        PartialRetryRoute::BatchCpi => env.batch_trade_cpi_ix(
+            taker_account,
+            lp_account,
+            vec![BatchTradeCpiLeg {
+                asset_index: ASSET,
+                market_id,
+                size_q,
+                fee_bps: FEE_BPS,
+                limit_price: 0,
+            }],
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_partial_retry_route(
+    env: &mut V16CuEnv,
+    route: PartialRetryRoute,
+    ix: ProgInstruction,
+    taker: &Keypair,
+    lp: &Keypair,
+    taker_account: Pubkey,
+    lp_account: Pubkey,
+    matcher: Pubkey,
+    ctx: Pubkey,
+    delegate: Pubkey,
+) -> Result<u64, String> {
+    env.svm.expire_blockhash();
+    match route {
+        PartialRetryRoute::NoCpi | PartialRetryRoute::BatchNoCpi => env.send(
+            ix,
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+            ],
+            &[taker, lp],
+        ),
+        PartialRetryRoute::Cpi | PartialRetryRoute::BatchCpi => env.send(
+            ix,
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+                AccountMeta::new_readonly(matcher, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[taker],
+        ),
+    }
 }
 
 #[test]
@@ -276,6 +377,142 @@ fn v16_program_tradecpi_flagged_partial_accounts_actual_fill_and_requires_fresh_
     assert_eq!(after_retry.insurance - before.insurance, 20);
     assert_eq!(before.c_tot - after_retry.c_tot, 20);
     assert_eq!(after_retry.c_tot + after_retry.insurance, after_retry.vault);
+}
+
+#[test]
+fn v16_program_partial_fill_invalidates_every_stale_route_and_allows_every_fresh_residual() {
+    const TOTAL_Q: i128 = 10 * POS_SCALE as i128;
+    const PARTIAL_Q: i128 = TOTAL_Q / 2;
+
+    for stale_route in PartialRetryRoute::ALL {
+        for residual_route in PartialRetryRoute::ALL {
+            let (mut env, taker, lp, taker_account, lp_account, matcher, ctx, delegate) =
+                setup_hostile_partial_env(1);
+            let stale_ix =
+                retained_partial_retry_ix(&env, stale_route, taker_account, lp_account, TOTAL_Q);
+            let (_, market_before) = env.market_state();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let mint_before = env.svm.get_account(&env.mint).unwrap();
+            let taker_epoch_before = env.portfolio_position_epoch(taker_account);
+            let lp_epoch_before = env.portfolio_position_epoch(lp_account);
+
+            set_hostile_matcher_mode(&mut env, ctx, matcher, FLAGGED_PARTIAL_MODE);
+            let partial_ix = retained_partial_retry_ix(
+                &env,
+                PartialRetryRoute::Cpi,
+                taker_account,
+                lp_account,
+                TOTAL_Q,
+            );
+            let partial_cu = send_partial_retry_route(
+                &mut env,
+                PartialRetryRoute::Cpi,
+                partial_ix,
+                &taker,
+                &lp,
+                taker_account,
+                lp_account,
+                matcher,
+                ctx,
+                delegate,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{stale_route:?}->{residual_route:?}: partial fill rejected: {error}")
+            });
+            assert_cu_within("cross-route flagged partial fill", partial_cu, 1_400_000);
+            assert_eq!(
+                active_leg_for_asset(&env.portfolio_state(taker_account), 0).basis_pos_q,
+                PARTIAL_Q
+            );
+            assert_eq!(
+                active_leg_for_asset(&env.portfolio_state(lp_account), 0).basis_pos_q,
+                -PARTIAL_Q
+            );
+
+            set_hostile_matcher_mode(&mut env, ctx, matcher, 9);
+            let market_before_stale = env.svm.get_account(&env.market).unwrap();
+            let taker_before_stale = env.svm.get_account(&taker_account).unwrap();
+            let lp_before_stale = env.svm.get_account(&lp_account).unwrap();
+            let ctx_before_stale = env.svm.get_account(&ctx).unwrap();
+            let stale = send_partial_retry_route(
+                &mut env,
+                stale_route,
+                stale_ix,
+                &taker,
+                &lp,
+                taker_account,
+                lp_account,
+                matcher,
+                ctx,
+                delegate,
+            );
+            assert!(
+                stale.is_err(),
+                "{stale_route:?}->{residual_route:?}: pre-partial intent replayed"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before_stale
+            );
+            assert_eq!(
+                env.svm.get_account(&taker_account).unwrap(),
+                taker_before_stale
+            );
+            assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before_stale);
+            assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before_stale);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+            assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
+
+            let residual_ix = retained_partial_retry_ix(
+                &env,
+                residual_route,
+                taker_account,
+                lp_account,
+                TOTAL_Q - PARTIAL_Q,
+            );
+            let residual_cu = send_partial_retry_route(
+                &mut env,
+                residual_route,
+                residual_ix,
+                &taker,
+                &lp,
+                taker_account,
+                lp_account,
+                matcher,
+                ctx,
+                delegate,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{stale_route:?}->{residual_route:?}: fresh residual rejected: {error}")
+            });
+            assert_cu_within("cross-route fresh residual fill", residual_cu, 1_400_000);
+
+            let taker_after = env.portfolio_state(taker_account);
+            let lp_after = env.portfolio_state(lp_account);
+            assert_eq!(active_leg_for_asset(&taker_after, 0).basis_pos_q, TOTAL_Q);
+            assert_eq!(active_leg_for_asset(&lp_after, 0).basis_pos_q, -TOTAL_Q);
+            assert_eq!(
+                env.portfolio_position_epoch(taker_account),
+                taker_epoch_before + 2
+            );
+            assert_eq!(
+                env.portfolio_position_epoch(lp_account),
+                lp_epoch_before + 2
+            );
+            let (_, market_after) = env.market_state();
+            assert_eq!(market_after.assets[0].oi_eff_long_q, TOTAL_Q as u128);
+            assert_eq!(market_after.assets[0].oi_eff_short_q, TOTAL_Q as u128);
+            assert_eq!(market_after.insurance - market_before.insurance, 20);
+            assert_eq!(market_before.c_tot - market_after.c_tot, 20);
+            assert_eq!(market_after.vault, market_before.vault);
+            assert_eq!(
+                market_after.c_tot + market_after.insurance,
+                market_after.vault
+            );
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+            assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
+        }
+    }
 }
 
 fn run_flagged_partial_partition(total_units: u128, partial_rounds: usize) {
