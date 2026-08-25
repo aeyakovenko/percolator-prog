@@ -21,7 +21,15 @@ const FLAG_VALID: u32 = 1;
 const FLAG_PARTIAL_OK: u32 = 2;
 
 // Build one crafted 64-byte MatcherReturn; `mode` perturbs exactly one field (default = honest fill).
-fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> [u8; 64] {
+fn craft(
+    mode: u8,
+    ratio_numerator: u8,
+    req_id: u64,
+    lp: u64,
+    asset: u64,
+    oracle: u64,
+    req: i128,
+) -> [u8; 64] {
     let mut flags = FLAG_VALID;
     let mut price = oracle;
     let mut size = req;
@@ -45,6 +53,17 @@ fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> 
             flags = FLAG_VALID | FLAG_PARTIAL_OK;
             size = req / 2
         } // matcher-authorized partial
+        19 => {
+            flags = FLAG_VALID | FLAG_PARTIAL_OK;
+            let numerator = u128::from(ratio_numerator.clamp(1, 254));
+            let magnitude = req.unsigned_abs();
+            let partial = (magnitude / 255) * numerator + ((magnitude % 255) * numerator) / 255;
+            size = if req.is_negative() {
+                -(partial as i128)
+            } else {
+                partial as i128
+            };
+        } // matcher-selected partial numerator over 255
         _ => {}                            // honest full fill -> wrapper accepts
     }
     let mut b = [0u8; 64];
@@ -59,7 +78,7 @@ fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> 
     b
 }
 
-fn mode_for_call(accounts: &[AccountInfo]) -> Result<(u8, bool), ProgramError> {
+fn mode_for_call(accounts: &[AccountInfo]) -> Result<(u8, bool, u8), ProgramError> {
     let mut d = accounts[1].try_borrow_mut_data()?;
     let mode = if d.len() > 64 && d[64] != 0 {
         d[64]
@@ -72,11 +91,12 @@ fn mode_for_call(accounts: &[AccountInfo]) -> Result<(u8, bool), ProgramError> {
         }
         if d[65] == 0 {
             d[65] = 1;
-            return Ok((9, false));
+            return Ok((9, false, 0));
         }
-        return Ok((13, true));
+        return Ok((13, true, 0));
     }
-    Ok((mode, false))
+    let ratio_numerator = d.get(65).copied().unwrap_or(0);
+    Ok((mode, false, ratio_numerator))
 }
 
 fn maybe_drain_tail_signer(mode: u8, accounts: &[AccountInfo]) -> ProgramResult {
@@ -140,12 +160,12 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
             let lp = u64::from_le_bytes(data[11..19].try_into().unwrap());
             let oracle = u64::from_le_bytes(data[19..27].try_into().unwrap());
             let req = i128::from_le_bytes(data[27..43].try_into().unwrap());
-            let (mode, no_write) = mode_for_call(accounts)?;
+            let (mode, no_write, ratio_numerator) = mode_for_call(accounts)?;
             if no_write {
                 return Ok(());
             }
             maybe_drain_tail_signer(mode, accounts)?;
-            let rec = craft(mode, req_id, lp, asset, oracle, req);
+            let rec = craft(mode, ratio_numerator, req_id, lp, asset, oracle, req);
             let mut d = accounts[1].try_borrow_mut_data()?;
             d[0..64].copy_from_slice(&rec);
             Ok(())
@@ -158,7 +178,7 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
             }
             let req_id = u64::from_le_bytes(data[2..10].try_into().unwrap());
             let lp = u64::from_le_bytes(data[10..18].try_into().unwrap());
-            let (mode, no_write) = mode_for_call(accounts)?;
+            let (mode, no_write, ratio_numerator) = mode_for_call(accounts)?;
             if no_write {
                 return Ok(());
             }
@@ -185,8 +205,15 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
                 } else {
                     mode
                 };
-                out[i * 64..i * 64 + 64]
-                    .copy_from_slice(&craft(leg_mode, req_id, lp, asset, oracle, req));
+                out[i * 64..i * 64 + 64].copy_from_slice(&craft(
+                    leg_mode,
+                    ratio_numerator,
+                    req_id,
+                    lp,
+                    asset,
+                    oracle,
+                    req,
+                ));
             }
             set_return_data(&out[..emit * 64]);
             if mode == 18 {
