@@ -11,10 +11,13 @@
 //! A second generated probe duplicates a randomly selected retained family inside one atomic
 //! transaction, requires bundle-wide rollback, then lands exactly one standalone request and
 //! rejects the remaining duplicate without state or SPL-supply drift.
+//! A third probe selects any ordered pair of single/batch CPI/no-CPI encodings for one retained
+//! bilateral trade and requires the same rollback, exact-once, OI, basis, and supply properties.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! plus every additional verification method required by the charter. Non-trade cross-entrypoint
+//! bundles, successful partial-fill partitions, expiry, and aggregate signed budgets remain open.
 
 use super::*;
 
@@ -156,6 +159,31 @@ proptest! {
         prop_assert!(discovery.standalone_compute_units < 1_400_000);
         prop_assert!(discovery.duplicate_rejected);
         prop_assert!(discovery.duplicate_exact_rollback);
+        prop_assert!(discovery.token_supply_conserved);
+    }
+
+    #[test]
+    fn v16_program_cross_route_trade_retry_atomicity_fuzz(
+        seed in any::<[u8; 32]>(),
+        first_index in 0usize..DiscoveryTradeRoute::ALL.len(),
+        duplicate_index in 0usize..DiscoveryTradeRoute::ALL.len(),
+    ) {
+        let first_route = DiscoveryTradeRoute::ALL[first_index];
+        let duplicate_route = DiscoveryTradeRoute::ALL[duplicate_index];
+        let discovery = discover_cross_route_trade_intent_retry(
+            seed,
+            first_route,
+            duplicate_route,
+        ).map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discovery.first_route, first_route);
+        prop_assert_eq!(discovery.duplicate_route, duplicate_route);
+        prop_assert!(discovery.bundle_rejected);
+        prop_assert!(discovery.bundle_exact_rollback);
+        prop_assert!(discovery.standalone_compute_units < 1_400_000);
+        prop_assert!(discovery.duplicate_rejected);
+        prop_assert!(discovery.duplicate_exact_rollback);
+        prop_assert!(discovery.exact_bilateral_position);
+        prop_assert!(discovery.exact_open_interest);
         prop_assert!(discovery.token_supply_conserved);
     }
 

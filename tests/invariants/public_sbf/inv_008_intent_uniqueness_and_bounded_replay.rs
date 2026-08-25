@@ -7,8 +7,9 @@
 //! operation; the PR344/351 tests require both authority-top-up routes to reject stale retries;
 //! `v16_program_same_transaction_cross_route_retry_is_atomic_and_exact_once` bundles the direct
 //! and domain insurance variants in both orders, while the all-family matrix duplicates each of
-//! the eleven retained intents in one transaction. Both prove whole-transaction rollback, then
-//! prove exactly one standalone request can land; PR362 and the
+//! the eleven retained intents in one transaction. The retained-trade matrix additionally covers
+//! all sixteen ordered pairs of single/batch CPI/no-CPI routes from one pre-state. These prove
+//! whole-transaction rollback, then prove exactly one standalone request can land; PR362 and the
 //! issue387/389 tests cover generation/position-bound activation, conversion, and reduction.
 //! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
@@ -16,8 +17,8 @@
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter. Cross-entrypoint bundles
-//! beyond the shared insurance lane and successful partial-fill partitions remain open.
+//! plus every additional verification method required by the charter. Non-trade cross-entrypoint
+//! bundles, successful partial-fill partitions, expiry, and aggregate signed budgets remain open.
 
 use super::*;
 use crate::support::v16_svm::{MarketConfig, V16Svm};
@@ -186,6 +187,41 @@ fn v16_program_every_retained_family_is_atomic_when_duplicated_in_one_transactio
         assert!(
             discovery.token_supply_conserved,
             "{expected:?} replay matrix changed SPL supply"
+        );
+    }
+}
+
+#[test]
+fn v16_program_retained_trade_intent_is_exact_once_across_every_route_pair() {
+    let discoveries = discover_cross_route_trade_intent_retries([0x5a; 32])
+        .expect("finding-blind cross-route retained-trade matrix");
+    assert_eq!(discoveries.len(), 16);
+    assert_eq!(
+        discoveries
+            .iter()
+            .filter(|discovery| discovery.first_route != discovery.duplicate_route)
+            .count(),
+        12,
+        "matrix must contain twelve real route switches and four diagonal controls"
+    );
+    for discovery in discoveries {
+        assert!(
+            discovery.bundle_rejected && discovery.bundle_exact_rollback,
+            "cross-route bundle was not atomic: {discovery:?}"
+        );
+        assert!(
+            discovery.standalone_compute_units < 1_400_000,
+            "standalone route exceeded the transaction limit: {discovery:?}"
+        );
+        assert!(
+            discovery.duplicate_rejected && discovery.duplicate_exact_rollback,
+            "alternate route did not consume the same intent: {discovery:?}"
+        );
+        assert!(
+            discovery.exact_bilateral_position
+                && discovery.exact_open_interest
+                && discovery.token_supply_conserved,
+            "cross-route retry changed trade economics: {discovery:?}"
         );
     }
 }

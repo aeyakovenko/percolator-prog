@@ -875,6 +875,20 @@ pub struct BundledIntentReplayDiscovery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrossRouteTradeReplayDiscovery {
+    pub first_route: DiscoveryTradeRoute,
+    pub duplicate_route: DiscoveryTradeRoute,
+    pub bundle_rejected: bool,
+    pub bundle_exact_rollback: bool,
+    pub standalone_compute_units: u64,
+    pub duplicate_rejected: bool,
+    pub duplicate_exact_rollback: bool,
+    pub exact_bilateral_position: bool,
+    pub exact_open_interest: bool,
+    pub token_supply_conserved: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeeConsentDiscovery {
     pub kind: FeeConsentKind,
     pub accepted_unconsented_terms: bool,
@@ -4288,13 +4302,21 @@ pub fn discover_intent_retry(
     }
 }
 
-pub fn discover_same_transaction_intent_retry(
-    seed: [u8; 32],
-    kind: RetryIntentKind,
-) -> Result<BundledIntentReplayDiscovery, String> {
-    let mut env = prepare_intent_retry_environment(seed, kind)?;
-    let supply_before = env.token_supply_observed();
-    let (intended, duplicate) = retained_retry_pair(&mut env, kind);
+struct AtomicRetryBundleOutcome {
+    bundle_rejected: bool,
+    bundle_exact_rollback: bool,
+    standalone_compute_units: u64,
+    standalone_mutated: bool,
+    duplicate_rejected: bool,
+    duplicate_exact_rollback: bool,
+}
+
+fn execute_atomic_retry_bundle(
+    env: &mut V16Svm,
+    intended: Transaction,
+    duplicate: Transaction,
+    label: &str,
+) -> Result<AtomicRetryBundleOutcome, String> {
     let bundle = env.bundle_retained_transactions(&[intended.clone(), duplicate.clone()]);
     let before_bundle = fingerprint(&env);
     env.begin_public_trace();
@@ -4304,7 +4326,7 @@ pub fn discover_same_transaction_intent_retry(
     let before_standalone = fingerprint(&env);
     let standalone = env
         .land_retained(intended)
-        .map_err(|error| format!("{kind:?} standalone after bundle rollback rejected: {error}"))?;
+        .map_err(|error| format!("{label} standalone after bundle rollback rejected: {error}"))?;
     let standalone_mutated = fingerprint(&env) != before_standalone;
 
     let before_duplicate = fingerprint(&env);
@@ -4313,7 +4335,7 @@ pub fn discover_same_transaction_intent_retry(
     let trace = env.finish_public_trace();
     trace
         .validate_public_execution()
-        .map_err(|error| format!("{kind:?} bundled retry trace invalid: {error}"))?;
+        .map_err(|error| format!("{label} bundled retry trace invalid: {error}"))?;
     if trace.out_of_band_economic_mutations != 0
         || trace.steps.len() != 3
         || trace.steps[0].succeeded
@@ -4323,18 +4345,37 @@ pub fn discover_same_transaction_intent_retry(
         || trace.steps[2].rejected_exact_writable_rollback != Some(true)
     {
         return Err(format!(
-            "{kind:?} bundled retry did not produce reject/success/reject public trace: {trace:?}"
+            "{label} bundled retry did not produce reject/success/reject public trace: {trace:?}"
         ));
     }
 
-    Ok(BundledIntentReplayDiscovery {
-        kind,
+    Ok(AtomicRetryBundleOutcome {
         bundle_rejected: bundled_result.is_err(),
         bundle_exact_rollback,
         standalone_compute_units: standalone.compute_units,
         standalone_mutated,
         duplicate_rejected: duplicate_result.is_err(),
         duplicate_exact_rollback,
+    })
+}
+
+pub fn discover_same_transaction_intent_retry(
+    seed: [u8; 32],
+    kind: RetryIntentKind,
+) -> Result<BundledIntentReplayDiscovery, String> {
+    let mut env = prepare_intent_retry_environment(seed, kind)?;
+    let supply_before = env.token_supply_observed();
+    let (intended, duplicate) = retained_retry_pair(&mut env, kind);
+    let outcome = execute_atomic_retry_bundle(&mut env, intended, duplicate, &format!("{kind:?}"))?;
+
+    Ok(BundledIntentReplayDiscovery {
+        kind,
+        bundle_rejected: outcome.bundle_rejected,
+        bundle_exact_rollback: outcome.bundle_exact_rollback,
+        standalone_compute_units: outcome.standalone_compute_units,
+        standalone_mutated: outcome.standalone_mutated,
+        duplicate_rejected: outcome.duplicate_rejected,
+        duplicate_exact_rollback: outcome.duplicate_exact_rollback,
         token_supply_conserved: env.token_supply_observed() == supply_before,
     })
 }
@@ -4346,6 +4387,93 @@ pub fn discover_same_transaction_intent_retries(
         .into_iter()
         .map(|kind| discover_same_transaction_intent_retry(seed, kind))
         .collect()
+}
+
+fn build_retained_trade_route(
+    env: &mut V16Svm,
+    route: DiscoveryTradeRoute,
+    size_q: i128,
+) -> Transaction {
+    const TAKER: usize = 0;
+    const MAKER: usize = 1;
+    const ASSET: u16 = 0;
+    match route {
+        DiscoveryTradeRoute::NoCpi => {
+            env.build_retained_no_cpi_trade(TAKER, MAKER, ASSET, size_q, INITIAL_PRICE)
+        }
+        DiscoveryTradeRoute::BatchNoCpi => {
+            env.build_retained_batch_no_cpi_trade(TAKER, MAKER, ASSET, size_q, INITIAL_PRICE)
+        }
+        DiscoveryTradeRoute::Cpi => env.build_retained_cpi_trade(TAKER, MAKER, ASSET, size_q, 0),
+        DiscoveryTradeRoute::BatchCpi => {
+            env.build_retained_batch_cpi_trade(TAKER, MAKER, ASSET, size_q, 0)
+        }
+    }
+}
+
+fn active_asset_basis(env: &V16Svm, actor: usize, asset: u16) -> Result<i128, String> {
+    env.primary_portfolio(actor)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == u32::from(asset))
+        .map(|leg| leg.basis_pos_q)
+        .ok_or_else(|| format!("actor {actor} has no active asset-{asset} leg"))
+}
+
+pub fn discover_cross_route_trade_intent_retry(
+    mut seed: [u8; 32],
+    first_route: DiscoveryTradeRoute,
+    duplicate_route: DiscoveryTradeRoute,
+) -> Result<CrossRouteTradeReplayDiscovery, String> {
+    const SIZE_Q: i128 = POS_SCALE as i128 / 4;
+    seed[0] ^= 0xc9;
+    seed[1] ^= first_route.discriminator();
+    seed[2] ^= duplicate_route.discriminator() << 2;
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    let intended = build_retained_trade_route(&mut env, first_route, SIZE_Q);
+    let duplicate = build_retained_trade_route(&mut env, duplicate_route, SIZE_Q);
+    let label = format!("{first_route:?}->{duplicate_route:?}");
+    let outcome = execute_atomic_retry_bundle(&mut env, intended, duplicate, &label)?;
+
+    let taker_basis = active_asset_basis(&env, 0, 0)?;
+    let maker_basis = active_asset_basis(&env, 1, 0)?;
+    let (_, group) = env.primary_market_state();
+    let expected_oi = SIZE_Q as u128;
+
+    Ok(CrossRouteTradeReplayDiscovery {
+        first_route,
+        duplicate_route,
+        bundle_rejected: outcome.bundle_rejected,
+        bundle_exact_rollback: outcome.bundle_exact_rollback,
+        standalone_compute_units: outcome.standalone_compute_units,
+        duplicate_rejected: outcome.duplicate_rejected,
+        duplicate_exact_rollback: outcome.duplicate_exact_rollback,
+        exact_bilateral_position: outcome.standalone_mutated
+            && taker_basis.unsigned_abs() == expected_oi
+            && maker_basis.unsigned_abs() == expected_oi
+            && taker_basis.checked_add(maker_basis) == Some(0),
+        exact_open_interest: group.assets[0].oi_eff_long_q == expected_oi
+            && group.assets[0].oi_eff_short_q == expected_oi,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+    })
+}
+
+pub fn discover_cross_route_trade_intent_retries(
+    seed: [u8; 32],
+) -> Result<Vec<CrossRouteTradeReplayDiscovery>, String> {
+    let mut discoveries = Vec::with_capacity(DiscoveryTradeRoute::ALL.len().pow(2));
+    for first_route in DiscoveryTradeRoute::ALL {
+        for duplicate_route in DiscoveryTradeRoute::ALL {
+            discoveries.push(discover_cross_route_trade_intent_retry(
+                seed,
+                first_route,
+                duplicate_route,
+            )?);
+        }
+    }
+    Ok(discoveries)
 }
 
 pub fn discover_cross_route_insurance_top_up_retry(
