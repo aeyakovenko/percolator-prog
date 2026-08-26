@@ -7077,9 +7077,10 @@ pub mod processor {
                 mark_ewma_halflife_slots,
                 mark_min_fee,
                 observation_sequence,
-            } => handle_configure_ewma_mark(
+            } => handle_configure_managed_mark(
                 program_id,
                 accounts,
+                ManagedMarkKind::Ewma,
                 asset_index,
                 market_id,
                 now_slot,
@@ -7110,13 +7111,16 @@ pub mod processor {
                 now_slot,
                 initial_mark_e6,
                 observation_sequence,
-            } => handle_configure_auth_mark(
+            } => handle_configure_managed_mark(
                 program_id,
                 accounts,
+                ManagedMarkKind::Authority,
                 asset_index,
                 market_id,
                 now_slot,
                 initial_mark_e6,
+                0,
+                0,
                 observation_sequence,
             ),
             Instruction::PushAuthMark {
@@ -12831,10 +12835,69 @@ pub mod processor {
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg_after)
     }
 
+    #[derive(Clone, Copy)]
+    enum ManagedMarkKind {
+        Ewma,
+        Authority,
+    }
+
+    impl ManagedMarkKind {
+        fn configuration_fields(
+            self,
+            mark_ewma_halflife_slots: u64,
+            mark_min_fee: u64,
+        ) -> Result<(u8, u64, u64), ProgramError> {
+            match self {
+                Self::Ewma if mark_ewma_halflife_slots == 0 => {
+                    Err(PercolatorError::InvalidInstruction.into())
+                }
+                Self::Ewma => Ok((
+                    constants::ORACLE_MODE_EWMA_MARK,
+                    mark_ewma_halflife_slots,
+                    mark_min_fee,
+                )),
+                Self::Authority => Ok((constants::ORACLE_MODE_AUTH_MARK, 0, 0)),
+            }
+        }
+
+        fn accepts(self, profile: &state::AssetOracleProfileV16) -> bool {
+            match self {
+                Self::Ewma => oracle_v16::profile_is_ewma_mark(profile),
+                Self::Authority => oracle_v16::profile_is_auth_mark(profile),
+            }
+        }
+
+        fn next_mark(
+            self,
+            profile: &state::AssetOracleProfileV16,
+            reported_mark_e6: u64,
+            authenticated_slot: u64,
+        ) -> Result<u64, ProgramError> {
+            let next_mark = match self {
+                Self::Ewma => policy_v16::ewma_update(
+                    profile.mark_ewma_e6,
+                    reported_mark_e6,
+                    profile.mark_ewma_halflife_slots,
+                    profile.mark_ewma_last_slot,
+                    authenticated_slot,
+                    profile.mark_min_fee,
+                    profile.mark_min_fee,
+                ),
+                Self::Authority => reported_mark_e6,
+            };
+            if next_mark == 0 || next_mark > percolator::MAX_ORACLE_PRICE {
+                return Err(PercolatorError::OracleInvalid.into());
+            }
+            Ok(next_mark)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     #[inline(never)]
-    fn handle_configure_ewma_mark<'a>(
+    fn handle_configure_managed_mark<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        kind: ManagedMarkKind,
         asset_index: u16,
         expected_market_id: u64,
         now_slot: u64,
@@ -12843,17 +12906,16 @@ pub mod processor {
         mark_min_fee: u64,
         observation_sequence: u64,
     ) -> ProgramResult {
-        let admin = account(accounts, 0)?;
+        let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
-        expect_signer(admin)?;
+        expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        if initial_mark_e6 == 0
-            || initial_mark_e6 > percolator::MAX_ORACLE_PRICE
-            || mark_ewma_halflife_slots == 0
-        {
+        if initial_mark_e6 == 0 || initial_mark_e6 > percolator::MAX_ORACLE_PRICE {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        let (oracle_mode, mark_ewma_halflife_slots, mark_min_fee) =
+            kind.configuration_fields(mark_ewma_halflife_slots, mark_min_fee)?;
         let asset_index_usize = asset_index as usize;
         let authenticated_slot = authenticated_slot_or_fallback(now_slot);
         let cfg_after = {
@@ -12876,9 +12938,7 @@ pub mod processor {
             )?;
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            // Asset 0 has a real stored profile; gate oracle reconfiguration on its
-            // oracle_authority exactly like permissionless assets 1..N.
-            expect_live_authority(&existing_profile.oracle_authority, admin.key)?;
+            expect_live_authority(&existing_profile.oracle_authority, authority.key)?;
             advance_control_sequence_view(
                 &mut group,
                 asset_index_usize,
@@ -12887,7 +12947,7 @@ pub mod processor {
             )?;
 
             let profile = state::AssetOracleProfileV16 {
-                oracle_mode: constants::ORACLE_MODE_EWMA_MARK,
+                oracle_mode,
                 oracle_leg_count: 0,
                 oracle_leg_flags: 0,
                 invert: 0,
@@ -12937,150 +12997,6 @@ pub mod processor {
             cfg
         };
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg_after)
-    }
-
-    #[inline(never)]
-    fn handle_configure_auth_mark<'a>(
-        program_id: &Pubkey,
-        accounts: &'a [AccountInfo<'a>],
-        asset_index: u16,
-        expected_market_id: u64,
-        now_slot: u64,
-        initial_mark_e6: u64,
-        observation_sequence: u64,
-    ) -> ProgramResult {
-        let authority = account(accounts, 0)?;
-        let market_ai = account(accounts, 1)?;
-        expect_signer(authority)?;
-        expect_writable(market_ai)?;
-        expect_owner(market_ai, program_id)?;
-        if initial_mark_e6 == 0 || initial_mark_e6 > percolator::MAX_ORACLE_PRICE {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        let asset_index_usize = asset_index as usize;
-        let authenticated_slot = authenticated_slot_or_fallback(now_slot);
-        let cfg_after = {
-            let mut data = market_ai.try_borrow_mut_data()?;
-            let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-            if asset_index_usize >= group.header.config.max_market_slots.get() as usize {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
-            require_asset_generation_view(&group, asset_index_usize, expected_market_id)?;
-            if authenticated_slot < group.header.current_slot.get() {
-                return Err(PercolatorError::EngineStale.into());
-            }
-            if group.header.mode != 0 {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            reject_non_base_oracle_update_after_global_resolve_matured(
-                &cfg,
-                asset_index_usize,
-                authenticated_slot,
-            )?;
-            require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
-            let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            // Asset 0 has a real stored profile; gate oracle reconfiguration on its
-            // oracle_authority exactly like permissionless assets 1..N.
-            expect_live_authority(&existing_profile.oracle_authority, authority.key)?;
-            advance_control_sequence_view(
-                &mut group,
-                asset_index_usize,
-                ControlSequenceLane::OracleObservation,
-                observation_sequence,
-            )?;
-
-            let profile = state::AssetOracleProfileV16 {
-                oracle_mode: constants::ORACLE_MODE_AUTH_MARK,
-                oracle_leg_count: 0,
-                oracle_leg_flags: 0,
-                invert: 0,
-                unit_scale: 0,
-                conf_filter_bps: 0,
-                backing_trade_fee_bps_long: existing_profile.backing_trade_fee_bps_long,
-                backing_trade_fee_bps_short: existing_profile.backing_trade_fee_bps_short,
-                backing_trade_fee_insurance_share_bps_long: existing_profile
-                    .backing_trade_fee_insurance_share_bps_long,
-                backing_trade_fee_insurance_share_bps_short: existing_profile
-                    .backing_trade_fee_insurance_share_bps_short,
-                price_move_remainder_bps_num: 0,
-                _padding0: [0u8; 4],
-                insurance_authority: existing_profile.insurance_authority,
-                insurance_operator: existing_profile.insurance_operator,
-                asset_admin: existing_profile.asset_admin,
-                backing_bucket_authority: existing_profile.backing_bucket_authority,
-                oracle_authority: existing_profile.oracle_authority,
-                max_staleness_secs: 0,
-                hybrid_soft_stale_slots: 0,
-                mark_ewma_e6: initial_mark_e6,
-                mark_ewma_last_slot: authenticated_slot,
-                mark_ewma_halflife_slots: 0,
-                mark_min_fee: 0,
-                oracle_target_price_e6: initial_mark_e6,
-                oracle_target_publish_time: 0,
-                last_good_oracle_slot: authenticated_slot,
-                oracle_leg_feeds: [[0u8; 32]; constants::ORACLE_LEG_CAP],
-                oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
-                oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
-                funding_mark_e6: initial_mark_e6,
-                funding_mark_pending_e6: 0,
-                funding_mark_pending_slot: 0,
-            };
-
-            reset_empty_asset_oracle_anchor_view(
-                &mut group,
-                asset_index_usize,
-                initial_mark_e6,
-                authenticated_slot,
-            )?;
-            // Asset 0 now carries a real stored profile: persist it like 1..N, and ALSO mirror the
-            // oracle/mark fields into the market-wide config (other code paths still read cfg for asset 0).
-            write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
-            if asset_index_usize == 0 {
-                mirror_oracle_profile_to_base_config(&mut cfg, &profile, true);
-            }
-            group.validate_shape().map_err(map_v16_error)?;
-            cfg
-        };
-        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg_after)
-    }
-
-    #[derive(Clone, Copy)]
-    enum ManagedMarkKind {
-        Ewma,
-        Authority,
-    }
-
-    impl ManagedMarkKind {
-        fn accepts(self, profile: &state::AssetOracleProfileV16) -> bool {
-            match self {
-                Self::Ewma => oracle_v16::profile_is_ewma_mark(profile),
-                Self::Authority => oracle_v16::profile_is_auth_mark(profile),
-            }
-        }
-
-        fn next_mark(
-            self,
-            profile: &state::AssetOracleProfileV16,
-            reported_mark_e6: u64,
-            authenticated_slot: u64,
-        ) -> Result<u64, ProgramError> {
-            let next_mark = match self {
-                Self::Ewma => policy_v16::ewma_update(
-                    profile.mark_ewma_e6,
-                    reported_mark_e6,
-                    profile.mark_ewma_halflife_slots,
-                    profile.mark_ewma_last_slot,
-                    authenticated_slot,
-                    profile.mark_min_fee,
-                    profile.mark_min_fee,
-                ),
-                Self::Authority => reported_mark_e6,
-            };
-            if next_mark == 0 || next_mark > percolator::MAX_ORACLE_PRICE {
-                return Err(PercolatorError::OracleInvalid.into());
-            }
-            Ok(next_mark)
-        }
     }
 
     #[inline(never)]
