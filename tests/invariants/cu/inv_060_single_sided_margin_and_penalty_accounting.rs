@@ -401,60 +401,6 @@ fn v16_program_live_backing_withdraw_rejects_exposed_target_effective_lag() {
     );
 }
 
-// security.md sweep — cross-margin gross margin requirement (#9/#22): a portfolio's initial-margin
-// requirement is the SUM of per-leg risk (gross), never netted across legs. Attacker goal: hold a
-// second (opposite-direction, different-asset) position that a netting model would treat as offsetting,
-// to keep margin low while carrying gross risk. Protection: the health cert checked_adds each leg's
-// requirement, so the second leg strictly INCREASES the requirement (no offset).
-#[test]
-fn v16_attack_cross_margin_requirement_is_gross_not_netted() {
-    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
-    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
-    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
-    let xo = Keypair::new();
-    let x = env.create_portfolio(&xo); // cross-margin attacker
-    let yo = Keypair::new();
-    let y = env.create_portfolio(&yo); // counterparty
-    env.deposit(&xo, x, 1_000_000);
-    env.deposit(&yo, y, 1_000_000);
-
-    // Leg 1: x LONG asset 0.
-    env.trade_asset_with_cu(0, &xo, x, &yo, y, POS_SCALE as i128, 100, 0);
-    let req1 = health_cert(&env.portfolio_state(x)).certified_initial_req;
-    assert!(
-        req1 > 0,
-        "single-leg initial margin requirement is positive (non-vacuous), req1={}",
-        req1
-    );
-
-    // Leg 2: x SHORT asset 1 (opposite direction, different underlying — a netting model would 'offset').
-    env.trade_asset_with_cu(1, &xo, x, &yo, y, -(POS_SCALE as i128), 100, 0);
-    let xs = env.portfolio_state(x);
-    let req2 = health_cert(&xs).certified_initial_req;
-    assert_eq!(
-        percolator::active_bitmap_count_ones(active_bitmap(&xs)),
-        2,
-        "x holds two legs"
-    );
-
-    // GROSS: the second leg STRICTLY increased the requirement — it was added, not netted/offset.
-    assert!(
-        req2 > req1,
-        "second leg must INCREASE the margin requirement (gross, no netting): req1={} req2={}",
-        req1,
-        req2
-    );
-    // Same size/price on both legs -> the requirement is ~doubled (each leg's gross risk fully counted).
-    assert_eq!(
-        req2,
-        2 * req1,
-        "two equal legs charge exactly the gross sum (2x), no cross-leg offset"
-    );
-
-    let g = env.market_state().1;
-    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
-}
-
 // security.md sweep — dust-position margin floor (#9/#22): the per-leg initial margin requirement is
 // floored at min_nonzero_im_req for any nonzero position. Attacker goal: open a tiny position whose
 // proportional IM (bps * tiny notional) rounds below the floor, getting near-free leverage / a position

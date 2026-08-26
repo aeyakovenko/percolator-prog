@@ -8292,6 +8292,9 @@ mod inv_041_deterministic_allocation_and_caller_order_independence;
 #[path = "invariants/cu/inv_042_recovery_fallback_envelope.rs"]
 mod inv_042_recovery_fallback_envelope;
 
+#[path = "invariants/cu/inv_043_hedge_and_correlation_credit_envelope.rs"]
+mod inv_043_hedge_and_correlation_credit_envelope;
+
 #[path = "invariants/cu/inv_044_no_phantom_value_from_indices_certificates_or_labels.rs"]
 mod inv_044_no_phantom_value_from_indices_certificates_or_labels;
 

@@ -625,8 +625,15 @@ conservative combined-loss envelope. After credit, worst-case portfolio loss rem
 under the configured scenario set; caller-selected correlations or omitted legs cannot improve
 health.
 
+**Current-surface applicability.** Numeric hedge/correlation credit is disabled in the pinned v16
+public profile. Health certification sums gross per-leg initial margin, maintenance margin, and
+worst-case loss without a cross-leg offset. The envelope is therefore `N/A` while the credit remains
+exactly zero. Any public configuration, persisted field, or health-path consumer that can make it
+nonzero reopens the full statement before activation.
+
 **Required tests.** Exhaustive small portfolios, sign flips, bucket boundaries, missing legs, and
-scenario extremes.
+scenario extremes when numeric credit is implemented. While disabled, require a nonvacuous
+cross-asset opposite-exposure test and source-lock the absence of every public credit control.
 **Verification:** P, F, R
 
 ### INV-044 - No phantom value from indices, certificates, or labels
