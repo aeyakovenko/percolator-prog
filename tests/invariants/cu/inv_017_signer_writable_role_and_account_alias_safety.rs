@@ -8,8 +8,9 @@
 //! single and batch routes from otherwise-valid public fixtures. Deposit, withdraw, and resolved
 //! close separately exhaust their 15-, 21-, and 21-pair SPL custody spaces and privileges. Backing
 //! top-up, live insurance withdrawal, and backing-principal withdrawal, including optional
-//! insurance/backing ledger tails, plus publicly generated backing-earnings withdrawal, add 126
-//! pairwise reserve-custody cases plus 40 required privilege downgrades from value-moving controls.
+//! insurance/backing ledger tails, terminal insurance with and without its ledger, plus publicly
+//! generated backing-earnings withdrawal, add 204 pairwise reserve-custody cases plus 59 required
+//! privilege downgrades from value-moving controls.
 //! Flat close, unilateral reduction, maintenance sync, and both permissionless-crank account shapes
 //! add 19 core-account pairs and 17 required downgrades. Both market and asset-oracle authority
 //! handoffs add all six account-pair aliases, four required-signature downgrades, and two required-
@@ -136,9 +137,9 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
         source_variants.iter().map(String::as_str).collect(),
         "every production instruction needs an INV-017 matrix disposition"
     );
-    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&37));
-    assert_eq!(status_counts.get("PARTIAL"), Some(&4));
-    assert_eq!(status_counts.get("OPEN"), Some(&9));
+    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&40));
+    assert_eq!(status_counts.get("PARTIAL"), Some(&2));
+    assert_eq!(status_counts.get("OPEN"), Some(&8));
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1033,7 +1034,11 @@ enum ReserveCustodyAliasRoute {
     TopUpBacking,
     TopUpBackingWithLedger,
     WithdrawInsurance,
+    WithdrawInsuranceWithLedger,
+    WithdrawTerminalInsurance,
+    WithdrawTerminalInsuranceWithLedger,
     WithdrawBacking,
+    WithdrawBackingWithLedger,
     WithdrawBackingEarnings,
 }
 
@@ -1077,6 +1082,15 @@ fn reserve_custody_alias_fixture(route: ReserveCustodyAliasRoute) -> ReserveCust
                 ReserveCustodyAliasRoute::TopUpBackingWithLedger => {
                     Some(env.backing_domain_ledger_account())
                 }
+                ReserveCustodyAliasRoute::WithdrawInsuranceWithLedger => {
+                    Some(env.insurance_ledger_account())
+                }
+                ReserveCustodyAliasRoute::WithdrawTerminalInsuranceWithLedger => {
+                    Some(env.insurance_ledger_account())
+                }
+                ReserveCustodyAliasRoute::WithdrawBackingWithLedger => {
+                    Some(env.backing_domain_ledger_account())
+                }
                 _ => None,
             };
             (env, ledger, 10, 0)
@@ -1097,8 +1111,38 @@ fn reserve_custody_alias_fixture(route: ReserveCustodyAliasRoute) -> ReserveCust
             env.top_up_insurance(100);
             env.token_account(authority.pubkey(), 0)
         }
+        ReserveCustodyAliasRoute::WithdrawInsuranceWithLedger => {
+            env.enable_live_insurance_withdrawal();
+            env.top_up_insurance_with_ledger_with_cu(
+                ledger.expect("insurance ledger fixture"),
+                100,
+            );
+            env.token_account(authority.pubkey(), 0)
+        }
+        ReserveCustodyAliasRoute::WithdrawTerminalInsurance => {
+            env.top_up_insurance(100);
+            env.resolve();
+            env.token_account(authority.pubkey(), 0)
+        }
+        ReserveCustodyAliasRoute::WithdrawTerminalInsuranceWithLedger => {
+            env.top_up_insurance_with_ledger_with_cu(
+                ledger.expect("terminal insurance ledger fixture"),
+                100,
+            );
+            env.resolve();
+            env.token_account(authority.pubkey(), 0)
+        }
         ReserveCustodyAliasRoute::WithdrawBacking => {
             env.top_up_backing_bucket(0, 100, 10_000);
+            env.token_account(authority.pubkey(), 0)
+        }
+        ReserveCustodyAliasRoute::WithdrawBackingWithLedger => {
+            env.top_up_backing_bucket_with_ledger_with_cu(
+                ledger.expect("backing ledger fixture"),
+                0,
+                100,
+                10_000,
+            );
             env.token_account(authority.pubkey(), 0)
         }
         ReserveCustodyAliasRoute::WithdrawBackingEarnings => {
@@ -1158,16 +1202,28 @@ fn reserve_custody_alias_instruction(
             amount: fixture.amount,
             expiry_slot: 10_000,
         },
-        ReserveCustodyAliasRoute::WithdrawInsurance => ProgInstruction::WithdrawInsuranceAsset {
-            market_id: fixture.env.asset_market_id(0),
-            asset_index: 0,
-            amount: fixture.amount,
-        },
-        ReserveCustodyAliasRoute::WithdrawBacking => ProgInstruction::WithdrawBackingBucket {
-            domain: 0,
-            market_id: fixture.env.asset_market_id(0),
-            amount: fixture.amount,
-        },
+        ReserveCustodyAliasRoute::WithdrawInsurance
+        | ReserveCustodyAliasRoute::WithdrawInsuranceWithLedger => {
+            ProgInstruction::WithdrawInsuranceAsset {
+                market_id: fixture.env.asset_market_id(0),
+                asset_index: 0,
+                amount: fixture.amount,
+            }
+        }
+        ReserveCustodyAliasRoute::WithdrawTerminalInsurance
+        | ReserveCustodyAliasRoute::WithdrawTerminalInsuranceWithLedger => {
+            ProgInstruction::WithdrawInsurance {
+                amount: fixture.amount,
+            }
+        }
+        ReserveCustodyAliasRoute::WithdrawBacking
+        | ReserveCustodyAliasRoute::WithdrawBackingWithLedger => {
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 0,
+                market_id: fixture.env.asset_market_id(0),
+                amount: fixture.amount,
+            }
+        }
         ReserveCustodyAliasRoute::WithdrawBackingEarnings => {
             ProgInstruction::WithdrawBackingBucketEarnings {
                 domain: fixture.domain,
@@ -1262,7 +1318,11 @@ fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaust
         ReserveCustodyAliasRoute::TopUpBacking,
         ReserveCustodyAliasRoute::TopUpBackingWithLedger,
         ReserveCustodyAliasRoute::WithdrawInsurance,
+        ReserveCustodyAliasRoute::WithdrawInsuranceWithLedger,
+        ReserveCustodyAliasRoute::WithdrawTerminalInsurance,
+        ReserveCustodyAliasRoute::WithdrawTerminalInsuranceWithLedger,
         ReserveCustodyAliasRoute::WithdrawBacking,
+        ReserveCustodyAliasRoute::WithdrawBackingWithLedger,
         ReserveCustodyAliasRoute::WithdrawBackingEarnings,
     ] {
         let role_names: &[&str] = match route {
@@ -1286,6 +1346,7 @@ fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaust
                 "ledger",
             ],
             ReserveCustodyAliasRoute::WithdrawInsurance
+            | ReserveCustodyAliasRoute::WithdrawTerminalInsurance
             | ReserveCustodyAliasRoute::WithdrawBacking => &[
                 "authority",
                 "market",
@@ -1293,6 +1354,17 @@ fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaust
                 "vault",
                 "vault_authority",
                 "token_program",
+            ],
+            ReserveCustodyAliasRoute::WithdrawInsuranceWithLedger
+            | ReserveCustodyAliasRoute::WithdrawTerminalInsuranceWithLedger
+            | ReserveCustodyAliasRoute::WithdrawBackingWithLedger => &[
+                "authority",
+                "market",
+                "destination_token",
+                "vault",
+                "vault_authority",
+                "token_program",
+                "ledger",
             ],
             ReserveCustodyAliasRoute::WithdrawBackingEarnings => &[
                 "authority",
@@ -1355,6 +1427,9 @@ fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaust
             ReserveCustodyAliasRoute::TopUpInsuranceWithLedger
             | ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger
             | ReserveCustodyAliasRoute::TopUpBackingWithLedger => &[1, 2, 3, 5],
+            ReserveCustodyAliasRoute::WithdrawInsuranceWithLedger
+            | ReserveCustodyAliasRoute::WithdrawTerminalInsuranceWithLedger
+            | ReserveCustodyAliasRoute::WithdrawBackingWithLedger => &[1, 2, 3, 6],
             ReserveCustodyAliasRoute::WithdrawBackingEarnings => &[1, 2, 3, 4],
             _ => &[1, 2, 3],
         };
