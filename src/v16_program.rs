@@ -13545,29 +13545,14 @@ pub mod processor {
                     || asset_after.fund_px_last.get() != asset.fund_px_last
                     || profile_changed;
                 if asset_index == 0 {
-                    cfg.last_good_oracle_slot = core::cmp::max(
-                        cfg.last_good_oracle_slot,
-                        oracle_profile.last_good_oracle_slot,
-                    );
-                }
-                if asset_index == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
-                    cfg.oracle_mode = oracle_profile.oracle_mode;
-                    cfg.oracle_leg_count = oracle_profile.oracle_leg_count;
-                    cfg.oracle_leg_flags = oracle_profile.oracle_leg_flags;
-                    cfg.invert = oracle_profile.invert;
-                    cfg.unit_scale = oracle_profile.unit_scale;
-                    cfg.conf_filter_bps = oracle_profile.conf_filter_bps;
-                    cfg.max_staleness_secs = oracle_profile.max_staleness_secs;
-                    cfg.hybrid_soft_stale_slots = oracle_profile.hybrid_soft_stale_slots;
-                    cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
-                    cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
-                    cfg.mark_ewma_halflife_slots = oracle_profile.mark_ewma_halflife_slots;
-                    cfg.mark_min_fee = oracle_profile.mark_min_fee;
-                    cfg.oracle_target_price_e6 = oracle_profile.oracle_target_price_e6;
-                    cfg.oracle_target_publish_time = oracle_profile.oracle_target_publish_time;
-                    cfg.oracle_leg_feeds = oracle_profile.oracle_leg_feeds;
-                    cfg.oracle_leg_prices_e6 = oracle_profile.oracle_leg_prices_e6;
-                    cfg.oracle_leg_publish_times = oracle_profile.oracle_leg_publish_times;
+                    if oracle_v16::profile_is_price_managed(&oracle_profile) {
+                        mirror_oracle_profile_to_base_config(&mut cfg, &oracle_profile, true);
+                    } else {
+                        cfg.last_good_oracle_slot = core::cmp::max(
+                            cfg.last_good_oracle_slot,
+                            oracle_profile.last_good_oracle_slot,
+                        );
+                    }
                 }
                 liquidation_fee_reclaimability.push((
                     asset_index,
