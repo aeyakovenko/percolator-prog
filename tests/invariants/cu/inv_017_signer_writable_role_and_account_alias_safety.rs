@@ -17,8 +17,10 @@
 //! matcher-configuration shapes add 21 account-pair aliases and seven required privilege
 //! downgrades. Both ledger synchronizers add six pair aliases and six privilege downgrades; all
 //! seven two-account fee/resolve policy routes add seven pair aliases and fourteen downgrades.
-//! Accepted self-cranker, unsigned no-reward-crank, and readonly reward-cranker cases have explicit
-//! economic controls.
+//! Four managed-mark routes and two authority/lifecycle routes add six pair aliases and twelve
+//! downgrades; permissionless stale resolution adds its sole writable-role downgrade. Accepted
+//! self-cranker, unsigned no-reward-crank, and readonly reward-cranker cases have explicit economic
+//! controls.
 //!
 //! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
 //! it is not an exhaustive pairwise account-meta proof for every instruction.
@@ -1425,6 +1427,158 @@ fn two_account_policy_alias_fixture(route: TwoAccountPolicyAliasRoute) -> CoreAc
     }
 }
 
+#[derive(Clone, Copy)]
+enum ManagedMarkAliasRoute {
+    ConfigureEwma,
+    PushEwma,
+    ConfigureAuthority,
+    PushAuthority,
+}
+
+impl ManagedMarkAliasRoute {
+    const ALL: [Self; 4] = [
+        Self::ConfigureEwma,
+        Self::PushEwma,
+        Self::ConfigureAuthority,
+        Self::PushAuthority,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ConfigureEwma => "ConfigureEwmaMark",
+            Self::PushEwma => "PushEwmaMark",
+            Self::ConfigureAuthority => "ConfigureAuthMark",
+            Self::PushAuthority => "PushAuthMark",
+        }
+    }
+}
+
+fn managed_mark_alias_fixture(route: ManagedMarkAliasRoute) -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    let authority = env.admin.insecure_clone();
+    if matches!(route, ManagedMarkAliasRoute::PushEwma) {
+        env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+        env.svm.warp_to_slot(1);
+    } else if matches!(route, ManagedMarkAliasRoute::PushAuthority) {
+        env.configure_auth_mark_with_cu(0, 100);
+        env.svm.warp_to_slot(1);
+    }
+    let now_slot = env.svm.get_sysvar::<Clock>().slot;
+    let observation_sequence = next_control_sequence(env.control_sequences(0).oracle_observation);
+    let market_id = env.asset_market_id(0);
+    let instruction = match route {
+        ManagedMarkAliasRoute::ConfigureEwma => ProgInstruction::ConfigureEwmaMark {
+            asset_index: 0,
+            market_id,
+            now_slot,
+            initial_mark_e6: 101,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            observation_sequence,
+        },
+        ManagedMarkAliasRoute::PushEwma => ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            market_id,
+            now_slot,
+            mark_e6: 101,
+            observation_sequence,
+        },
+        ManagedMarkAliasRoute::ConfigureAuthority => ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            market_id,
+            now_slot,
+            initial_mark_e6: 101,
+            observation_sequence,
+        },
+        ManagedMarkAliasRoute::PushAuthority => ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            market_id,
+            now_slot,
+            mark_e6: 101,
+            observation_sequence,
+        },
+    };
+    let accounts = vec![
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new(env.market, false),
+    ];
+    let tracked_accounts = vec![env.market];
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![authority],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TwoAccountLifecycleAliasRoute {
+    ResolveMarket,
+    DrainOnlyAsset,
+}
+
+impl TwoAccountLifecycleAliasRoute {
+    const ALL: [Self; 2] = [Self::ResolveMarket, Self::DrainOnlyAsset];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ResolveMarket => "ResolveMarket",
+            Self::DrainOnlyAsset => "UpdateAssetLifecycle drain-only",
+        }
+    }
+}
+
+fn two_account_lifecycle_alias_fixture(
+    route: TwoAccountLifecycleAliasRoute,
+) -> CoreAccountAliasFixture {
+    let env = V16CuEnv::new();
+    let authority = env.admin.insecure_clone();
+    let instruction = match route {
+        TwoAccountLifecycleAliasRoute::ResolveMarket => ProgInstruction::ResolveMarket {
+            asset_generation_frontier: env.market_state().1.next_market_id,
+        },
+        TwoAccountLifecycleAliasRoute::DrainOnlyAsset => ProgInstruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_DRAIN_ONLY,
+            asset_index: 0,
+            market_id: env.asset_market_id(0),
+            now_slot: 0,
+            initial_price: 0,
+            max_init_fee: u128::MAX,
+            insurance_authority: authority.pubkey().to_bytes(),
+            insurance_operator: authority.pubkey().to_bytes(),
+            backing_bucket_authority: authority.pubkey().to_bytes(),
+            oracle_authority: authority.pubkey().to_bytes(),
+        },
+    };
+    let accounts = vec![
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new(env.market, false),
+    ];
+    let tracked_accounts = vec![env.market];
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![authority],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+fn permissionless_resolve_alias_fixture() -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(1, 1);
+    env.svm.warp_to_slot(2);
+    let accounts = vec![AccountMeta::new(env.market, false)];
+    CoreAccountAliasFixture {
+        tracked_accounts: vec![env.market],
+        env,
+        signers: vec![],
+        instruction: ProgInstruction::ResolveStalePermissionless { now_slot: 2 },
+        accounts,
+    }
+}
+
 #[test]
 fn v16_program_authority_handoff_account_pairs_and_privileges_are_exhaustive() {
     for route in [
@@ -1471,6 +1625,46 @@ fn v16_program_two_account_policy_roles_are_exhaustive() {
             || two_account_policy_alias_fixture(route),
         );
     }
+}
+
+#[test]
+fn v16_program_managed_mark_account_roles_are_exhaustive() {
+    for route in ManagedMarkAliasRoute::ALL {
+        assert_core_account_alias_matrix(
+            route.label(),
+            &["oracle_authority", "market"],
+            &[0],
+            &[1],
+            &[],
+            || managed_mark_alias_fixture(route),
+        );
+    }
+}
+
+#[test]
+fn v16_program_two_account_lifecycle_roles_are_exhaustive() {
+    for route in TwoAccountLifecycleAliasRoute::ALL {
+        assert_core_account_alias_matrix(
+            route.label(),
+            &["authority", "market"],
+            &[0],
+            &[1],
+            &[],
+            || two_account_lifecycle_alias_fixture(route),
+        );
+    }
+}
+
+#[test]
+fn v16_program_permissionless_resolve_required_privileges_are_exhaustive() {
+    assert_core_account_alias_matrix(
+        "ResolveStalePermissionless",
+        &["market"],
+        &[],
+        &[0],
+        &[],
+        permissionless_resolve_alias_fixture,
+    );
 }
 
 #[test]
