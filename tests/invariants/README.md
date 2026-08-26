@@ -48,18 +48,23 @@ Updated 2026-08-26. The engine pin remains
 `b10b3454dd03dcf4c04a020dc1a90381ff179200`. This tranche removes duplicated wrapper control
 flow while preserving the deployed ABI and persisted layout: the four market-authority policy
 handlers, both managed-mark configuration handlers, both managed-mark push handlers, and both
-insurance top-up handlers now dispatch through one typed implementation per family. Replay-lane
-access and full oracle-profile mirroring also have one canonical implementation. Relative to the
-PR135 head at `4e25cb16`, `src/v16_program.rs` has 269 added and 581 removed lines, a net reduction
-of 312 production lines. The fresh SBF is 1,241,440 bytes, 22,976 bytes smaller than the prior
-1,264,416-byte artifact, with SHA-256
-`6b0f3850d850a4e5f1d0e8671ceb63746272a16f7c2ed4b1876cd0870488a85a`. The exact artifact passed
-860/860 LiteSVM/CU tests, 100/100 public fuzz regressions, and 206/206 stateful/model tests. Static
+insurance top-up handlers now dispatch through one typed implementation per family. Both market
+and per-asset authority handoffs also use one incoming-key validator, with the sole policy
+difference explicit at the callsite: market authority cannot be burned, while asset admin may be.
+Replay-lane access and full oracle-profile mirroring have one canonical implementation. Relative
+to the PR135 head at `4e25cb16`, `src/v16_program.rs` has 291 added and 596 removed lines, a net
+reduction of 305 production lines. The fresh SBF is 1,241,424 bytes, 22,992 bytes smaller than the
+prior 1,264,416-byte artifact, with SHA-256
+`e363af0ca35d08e3dd99d3c2f5b3496dd0995f1f358a651e901a4808f9d41934`. The exact artifact passed
+863/863 LiteSVM/CU tests, 100/100 public fuzz regressions, and 206/206 stateful/model tests. Static
 rosters now require all 50 public variants to return a handler result while explicitly owning the
 44 canonical handler implementations; they no longer require duplicated handlers as a condition
-of error propagation. INV-019's former injected matcher-context ABA setup is also gone: a deployed
-external matcher fixture now creates, initializes, closes, recreates, and rewrites the same context
-address through public instructions while the wrapper closes and reinitializes the same LP address.
+of error propagation. INV-005 additionally source-locks both handoff handlers to the shared
+incoming-key validator; its 38 public/source cases preserve co-signature, burn, stale-key,
+cross-asset, rollback, and fresh-authority behavior. INV-019's former injected matcher-context ABA
+setup is also gone: a deployed external matcher fixture now creates, initializes, closes, recreates,
+and rewrites the same context address through public instructions while the wrapper closes and
+reinitializes the same LP address.
 The stale old-incarnation response rejects with exact rollback and a fresh response remains live.
 An eight-world generated campaign additionally composes single and batch CPI in both orders through
 three same-address context incarnations per world; every rejected call rolls back exactly and every

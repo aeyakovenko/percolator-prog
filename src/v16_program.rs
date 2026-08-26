@@ -11483,14 +11483,7 @@ pub mod processor {
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
 
-        if new_pubkey == [0u8; 32] {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        // Incoming key must co-sign (proves control).
-        expect_signer(new_authority)?;
-        if new_authority.key.to_bytes() != new_pubkey {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_incoming_authority(new_authority, &new_pubkey, false)?;
 
         let mut data = market_ai.try_borrow_mut_data()?;
         let cfg_after = {
@@ -11536,13 +11529,7 @@ pub mod processor {
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
 
-        // A non-zero incoming key must co-sign (proves control); burning to 0 needs only the rotator.
-        if new_pubkey != [0u8; 32] {
-            expect_signer(new_authority)?;
-            if new_authority.key.to_bytes() != new_pubkey {
-                return Err(PercolatorError::Unauthorized.into());
-            }
-        }
+        expect_incoming_authority(new_authority, &new_pubkey, true)?;
 
         let asset_index = asset_index as usize;
         // Asset 0 carries a real stored profile (asset_admin bootstrapped to the market admin) and is
@@ -13768,6 +13755,26 @@ pub mod processor {
 
     fn expect_live_authority(expected: &[u8; 32], signer: &Pubkey) -> Result<(), ProgramError> {
         if !live_authority_matches(expected, signer) {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn expect_incoming_authority(
+        authority: &AccountInfo<'_>,
+        new_pubkey: &[u8; 32],
+        allow_burn: bool,
+    ) -> ProgramResult {
+        if *new_pubkey == [0u8; 32] {
+            return if allow_burn {
+                Ok(())
+            } else {
+                Err(PercolatorError::InvalidInstruction.into())
+            };
+        }
+        expect_signer(authority)?;
+        if authority.key.to_bytes() != *new_pubkey {
             return Err(PercolatorError::Unauthorized.into());
         }
         Ok(())

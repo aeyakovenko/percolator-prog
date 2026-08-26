@@ -7,12 +7,59 @@
 //! `v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers` submits the two
 //! authority-only instruction families implicated by privileged deadline and insurance claims.
 //! It requires both to reject before changing the market, SPL vault, or attacker destination.
+//! `v16_program_authority_handoffs_share_one_incoming_key_validator` source-locks both authority
+//! handoff handlers to one validator: the market authority cannot be burned, while the asset-admin
+//! role retains its explicitly authorized burn path.
 //!
 //! Guarantee boundary: this proves the alleged transition is not an unprivileged public attack.
 //! It does not protect users from a compromised configured authority; operational deployments
 //! must place that role behind their chosen multisignature or governance policy.
 
 use super::*;
+
+#[test]
+fn v16_program_authority_handoffs_share_one_incoming_key_validator() {
+    let production = include_str!("../../../src/v16_program.rs");
+
+    assert_eq!(
+        production.matches("expect_incoming_authority(").count(),
+        3,
+        "the production surface must contain one validator definition and exactly two handoff calls"
+    );
+
+    let market_start = production
+        .find("fn handle_update_authority<'a>(")
+        .expect("market-authority handler remains mounted");
+    let asset_start = production
+        .find("fn handle_update_asset_authority<'a>(")
+        .expect("asset-authority handler remains mounted");
+    let market_handler = &production[market_start..asset_start];
+    assert!(
+        market_handler.contains("expect_incoming_authority(new_authority, &new_pubkey, false)?;"),
+        "market-authority handoff must use the shared validator with burn disabled"
+    );
+
+    let asset_end = production[asset_start..]
+        .find("fn handle_update_base_unit_mints<'a>(")
+        .map(|offset| asset_start + offset)
+        .expect("next handler remains mounted");
+    let asset_handler = &production[asset_start..asset_end];
+    assert!(
+        asset_handler.contains("expect_incoming_authority(new_authority, &new_pubkey, true)?;"),
+        "asset-authority handoff must use the shared validator with its explicit burn policy"
+    );
+
+    let validator_start = production
+        .find("fn expect_incoming_authority(")
+        .expect("shared incoming-authority validator remains mounted");
+    let validator_end = production[validator_start..]
+        .find("\n    fn live_authority_matches(")
+        .map(|offset| validator_start + offset)
+        .unwrap_or(production.len());
+    let validator = &production[validator_start..validator_end];
+    assert!(validator.contains("expect_signer(authority)?;"));
+    assert!(validator.contains("authority.key.to_bytes() != *new_pubkey"));
+}
 
 #[test]
 fn v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers() {
