@@ -4,7 +4,9 @@
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): empty-target crank
 //! equivalence, batch end-state margin protection, and exact normalized sequential/batch position
-//! semantics across clear, lower-slot flip reuse, attach, and resize in one route. These tests
+//! semantics across clear, lower-slot flip reuse, attach, and resize in one route. Legacy
+//! market-level insurance top-up is also compared with its exact two-domain expansion, including
+//! odd-atom rounding and all persisted bytes after replay-watermark normalization. These tests
 //! exercise the deployed public wrapper with real SBF/LiteSVM account construction and assert
 //! economic state, token, rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -237,6 +239,66 @@ fn v16_program_one_leg_batch_nocpi_matches_single_nocpi_fee_trade() {
     assert_eq!(
         batch, single,
         "a one-leg BatchTradeNoCpi must preserve the exact economic delta of TradeNoCpi, including fees",
+    );
+}
+
+#[test]
+fn v16_program_legacy_insurance_topup_matches_explicit_domain_split() {
+    const AMOUNT: u128 = 101;
+    const LONG_AMOUNT: u128 = AMOUNT / 2;
+    const SHORT_AMOUNT: u128 = AMOUNT - LONG_AMOUNT;
+
+    let mut env = V16CuEnv::new();
+    let market_initial = env.svm.get_account(&env.market).unwrap();
+    let vault_initial = env.svm.get_account(&env.vault).unwrap();
+
+    let (legacy_source, legacy_cu) = env.top_up_insurance_with_cu(AMOUNT);
+    assert_cu_within("legacy insurance top-up", legacy_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(legacy_source), 0);
+    let legacy_market = env.svm.get_account(&env.market).unwrap();
+    let legacy_vault = env.svm.get_account(&env.vault).unwrap();
+    let legacy_state = env.market_state();
+    let legacy_sequences = env.control_sequences(0);
+
+    env.svm.set_account(env.market, market_initial).unwrap();
+    env.svm.set_account(env.vault, vault_initial).unwrap();
+    let authority = env.admin.insecure_clone();
+    let (long_source, long_cu) =
+        env.top_up_insurance_domain_with_authority_and_cu(&authority, 0, LONG_AMOUNT);
+    let (short_source, short_cu) =
+        env.top_up_insurance_domain_with_authority_and_cu(&authority, 1, SHORT_AMOUNT);
+    assert_cu_within("long-domain insurance top-up", long_cu, CUSTODY_CU_LIMIT);
+    assert_cu_within("short-domain insurance top-up", short_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(long_source), 0);
+    assert_eq!(env.token_amount(short_source), 0);
+
+    let split_market = env.svm.get_account(&env.market).unwrap();
+    let split_vault = env.svm.get_account(&env.vault).unwrap();
+    let split_state = env.market_state();
+    let split_sequences = env.control_sequences(0);
+    assert_eq!(
+        split_sequences.insurance_top_up,
+        legacy_sequences.insurance_top_up + 1,
+        "the split route consumes exactly one additional replay ID",
+    );
+    assert_eq!(
+        split_state, legacy_state,
+        "engine and config state must match"
+    );
+    assert_eq!(split_vault, legacy_vault, "SPL vault state must match");
+
+    let mut normalized_split_market = split_market;
+    let mut normalized_sequences = split_sequences;
+    normalized_sequences.insurance_top_up = legacy_sequences.insurance_top_up;
+    state::write_asset_control_sequences(
+        &mut normalized_split_market.data,
+        0,
+        &normalized_sequences,
+    )
+    .unwrap();
+    assert_eq!(
+        normalized_split_market, legacy_market,
+        "all persisted market bytes except the replay watermark must match",
     );
 }
 
