@@ -15,8 +15,10 @@
 //! handoffs add all six account-pair aliases, four required-signature downgrades, and two required-
 //! writable downgrades from valid two-signer mutation controls. Portfolio initialization and both
 //! matcher-configuration shapes add 21 account-pair aliases and seven required privilege
-//! downgrades. Accepted self-cranker, unsigned no-reward-crank, and readonly reward-cranker cases
-//! have explicit economic controls.
+//! downgrades. Both ledger synchronizers add six pair aliases and six privilege downgrades; all
+//! seven two-account fee/resolve policy routes add seven pair aliases and fourteen downgrades.
+//! Accepted self-cranker, unsigned no-reward-crank, and readonly reward-cranker cases have explicit
+//! economic controls.
 //!
 //! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
 //! it is not an exhaustive pairwise account-meta proof for every instruction.
@@ -1292,6 +1294,137 @@ fn matcher_config_alias_fixture(route: MatcherConfigAliasRoute) -> CoreAccountAl
     }
 }
 
+#[derive(Clone, Copy)]
+enum LedgerSyncAliasRoute {
+    Backing,
+    Insurance,
+}
+
+impl LedgerSyncAliasRoute {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Backing => "SyncBackingDomainLedger",
+            Self::Insurance => "SyncInsuranceLedger",
+        }
+    }
+}
+
+fn ledger_sync_alias_fixture(route: LedgerSyncAliasRoute) -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    let authority = env.admin.insecure_clone();
+    let ledger = match route {
+        LedgerSyncAliasRoute::Backing => env.backing_domain_ledger_account(),
+        LedgerSyncAliasRoute::Insurance => env.insurance_ledger_account(),
+    };
+    let instruction = match route {
+        LedgerSyncAliasRoute::Backing => ProgInstruction::SyncBackingDomainLedger { domain: 0 },
+        LedgerSyncAliasRoute::Insurance => ProgInstruction::SyncInsuranceLedger,
+    };
+    let accounts = vec![
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(ledger, false),
+    ];
+    let tracked_accounts = vec![env.market, ledger];
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![authority],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TwoAccountPolicyAliasRoute {
+    LiquidationFee,
+    MaintenanceFee,
+    TradeFee,
+    FeeRedirect,
+    MarketInitFee,
+    BackingFee,
+    PermissionlessResolve,
+}
+
+impl TwoAccountPolicyAliasRoute {
+    const ALL: [Self; 7] = [
+        Self::LiquidationFee,
+        Self::MaintenanceFee,
+        Self::TradeFee,
+        Self::FeeRedirect,
+        Self::MarketInitFee,
+        Self::BackingFee,
+        Self::PermissionlessResolve,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::LiquidationFee => "UpdateLiquidationFeePolicy",
+            Self::MaintenanceFee => "UpdateMaintenanceFeePolicy",
+            Self::TradeFee => "UpdateTradeFeePolicy",
+            Self::FeeRedirect => "UpdateFeeRedirectPolicy",
+            Self::MarketInitFee => "UpdateMarketInitFeePolicy",
+            Self::BackingFee => "UpdateBackingFeePolicy",
+            Self::PermissionlessResolve => "ConfigurePermissionlessResolve",
+        }
+    }
+}
+
+fn two_account_policy_alias_fixture(route: TwoAccountPolicyAliasRoute) -> CoreAccountAliasFixture {
+    let env = V16CuEnv::new();
+    let authority = env.admin.insecure_clone();
+    let sequences = env.control_sequences(0);
+    let instruction = match route {
+        TwoAccountPolicyAliasRoute::LiquidationFee => ProgInstruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 1,
+            policy_sequence: next_control_sequence(sequences.liquidation_fee),
+        },
+        TwoAccountPolicyAliasRoute::MaintenanceFee => ProgInstruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 1,
+            policy_sequence: next_control_sequence(sequences.maintenance_fee),
+        },
+        TwoAccountPolicyAliasRoute::TradeFee => ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 1,
+            policy_sequence: next_control_sequence(sequences.trade_fee),
+        },
+        TwoAccountPolicyAliasRoute::FeeRedirect => ProgInstruction::UpdateFeeRedirectPolicy {
+            redirect_bps: 1,
+            policy_sequence: next_control_sequence(sequences.fee_redirect),
+        },
+        TwoAccountPolicyAliasRoute::MarketInitFee => ProgInstruction::UpdateMarketInitFeePolicy {
+            min_init_fee: 1,
+            policy_sequence: next_control_sequence(sequences.market_init_fee),
+        },
+        TwoAccountPolicyAliasRoute::BackingFee => ProgInstruction::UpdateBackingFeePolicy {
+            domain: 0,
+            market_id: env.asset_market_id(0),
+            fee_bps: 1,
+            insurance_share_bps: 0,
+            policy_sequence: next_control_sequence(sequences.backing_fee_long),
+        },
+        TwoAccountPolicyAliasRoute::PermissionlessResolve => {
+            ProgInstruction::ConfigurePermissionlessResolve {
+                asset_generation_frontier: env.market_state().1.next_market_id,
+                stale_slots: 100,
+                force_close_delay_slots: 100,
+                policy_sequence: next_control_sequence(sequences.permissionless_resolve),
+            }
+        }
+    };
+    let accounts = vec![
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new(env.market, false),
+    ];
+    let tracked_accounts = vec![env.market];
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![authority],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
 #[test]
 fn v16_program_authority_handoff_account_pairs_and_privileges_are_exhaustive() {
     for route in [
@@ -1305,6 +1438,37 @@ fn v16_program_authority_handoff_account_pairs_and_privileges_are_exhaustive() {
             &[2],
             &[],
             || authority_handoff_alias_fixture(route),
+        );
+    }
+}
+
+#[test]
+fn v16_program_ledger_sync_account_roles_are_exhaustive() {
+    for route in [
+        LedgerSyncAliasRoute::Backing,
+        LedgerSyncAliasRoute::Insurance,
+    ] {
+        assert_core_account_alias_matrix(
+            route.label(),
+            &["authority", "market", "ledger"],
+            &[0],
+            &[1, 2],
+            &[],
+            || ledger_sync_alias_fixture(route),
+        );
+    }
+}
+
+#[test]
+fn v16_program_two_account_policy_roles_are_exhaustive() {
+    for route in TwoAccountPolicyAliasRoute::ALL {
+        assert_core_account_alias_matrix(
+            route.label(),
+            &["authority", "market"],
+            &[0],
+            &[1],
+            &[],
+            || two_account_policy_alias_fixture(route),
         );
     }
 }
