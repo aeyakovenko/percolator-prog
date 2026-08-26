@@ -65,7 +65,7 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
     );
     assert_eq!(
         production.matches("map_err(map_v16_error)").count(),
-        141,
+        138,
         "engine-result mapping drift requires an INV-080 disposition review"
     );
     assert!(
@@ -115,9 +115,26 @@ fn v16_program_dispatch_and_entrypoints_preserve_every_handler_error() {
         remaining = &remaining[end..];
     }
     assert_eq!(
-        handlers.len(),
+        dispatcher.matches("handle_").count(),
         50,
-        "all 50 public variants must return one distinct handler result"
+        "all 50 public variants must return a handler result"
+    );
+    for (shared_handler, variant_count) in [
+        ("handle_top_up_insurance(", 2),
+        ("handle_update_market_authority_policy(", 4),
+        ("handle_configure_managed_mark(", 2),
+        ("handle_push_managed_mark(", 2),
+    ] {
+        assert_eq!(
+            dispatcher.matches(shared_handler).count(),
+            variant_count,
+            "shared handler family must preserve every variant's direct result"
+        );
+    }
+    assert_eq!(
+        handlers.len(),
+        44,
+        "dispatcher implementation count drift requires a shared-handler review"
     );
     assert_eq!(
         dispatcher.matches("Instruction::").count(),
