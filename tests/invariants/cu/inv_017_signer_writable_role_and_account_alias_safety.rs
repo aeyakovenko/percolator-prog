@@ -12,11 +12,19 @@
 //! generated backing-earnings withdrawal, add 204 pairwise reserve-custody cases plus 59 required
 //! privilege downgrades from value-moving controls.
 //! Flat close, unilateral reduction, public Recovery forfeit, public bankrupt-close cure,
-//! maintenance sync, and both permissionless-crank account shapes add 37 core-account pairs and 25
-//! required downgrades. The cure fixture reaches a cancellable close through public trade, mark,
-//! crank, and reduction transitions before exercising its SPL deposit tail. All legal one-, two-,
-//! and three-provider Hybrid-oracle tails add 19 pair aliases and six required downgrades from
-//! coherent authenticated controls. Both market and asset-oracle authority
+//! released-PnL conversion, maintenance sync, and both permissionless-crank account shapes add 40
+//! core-account pairs and 28 required downgrades. The conversion and cure fixtures reach their
+//! favorable states through public trade, mark, crank, and reduction transitions; cure then
+//! exercises its SPL deposit tail. Initial and replacement base-unit mint shapes add 41 pair
+//! aliases and eight downgrades; the dual-vault swap adds 28 pairs and five downgrades from a real
+//! two-token transfer. All legal one-, two-, and three-provider Hybrid-oracle tails add 19 pair
+//! aliases and six required downgrades from
+//! coherent authenticated controls. Permissionless crank additionally exhausts every one-, two-,
+//! and three-provider tail both with and without its optional reward portfolio, and proves that a
+//! reward-enabled caller may omit that tail. `CloseSlab` covers primary/secondary collateral with
+//! both ordinary dust and publicly generated unbudgeted insurance; abandoned-asset force close is
+//! reached through public Recovery. Every lifecycle action plus permissionless append/reuse fee
+//! tails are covered. Both market and asset-oracle authority
 //! handoffs add all six account-pair aliases, four required-signature downgrades, and two required-
 //! writable downgrades from valid two-signer mutation controls. Portfolio initialization and both
 //! matcher-configuration shapes add 21 account-pair aliases and seven required privilege
@@ -28,8 +36,9 @@
 //! self-cranker, unsigned no-reward-crank, and readonly reward-cranker cases have explicit economic
 //! controls.
 //!
-//! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
-//! it is not an exhaustive pairwise account-meta proof for every instruction.
+//! Guarantee boundary: this exhausts pairwise aliases and required privilege downgrades for every
+//! current successful public account shape. It does not prove higher-arity alias combinations or
+//! the instructions' non-account-role economic invariants.
 
 use super::*;
 
@@ -141,9 +150,9 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
         source_variants.iter().map(String::as_str).collect(),
         "every production instruction needs an INV-017 matrix disposition"
     );
-    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&43));
-    assert_eq!(status_counts.get("PARTIAL"), Some(&2));
-    assert_eq!(status_counts.get("OPEN"), Some(&5));
+    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&50));
+    assert_eq!(status_counts.get("PARTIAL"), None);
+    assert_eq!(status_counts.get("OPEN"), None);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1803,6 +1812,29 @@ fn rebalance_reduce_alias_fixture() -> CoreAccountAliasFixture {
     }
 }
 
+fn convert_released_pnl_alias_fixture() -> CoreAccountAliasFixture {
+    let PublicReleasedPnlFixture {
+        env,
+        winner_owner,
+        winner,
+        loser,
+    } = public_released_pnl_fixture();
+    let instruction = env.convert_released_pnl_ix(winner, PUBLIC_RELEASED_PNL_FIXTURE_AMOUNT);
+    let accounts = vec![
+        AccountMeta::new(winner_owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(winner, false),
+    ];
+    let tracked_accounts = vec![env.market, winner, loser, env.vault];
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![winner_owner],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
 fn forfeit_recovery_alias_fixture() -> CoreAccountAliasFixture {
     let mut env = V16CuEnv::new();
     env.configure_permissionless_resolve_with_cu(100, 1);
@@ -1946,6 +1978,494 @@ fn cure_and_cancel_close_alias_fixture() -> CoreAccountAliasFixture {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum BaseUnitMintAliasShape {
+    InitialPair,
+    ReplacePrimary,
+    ReplaceSecondary,
+    ReplaceBoth,
+}
+
+impl BaseUnitMintAliasShape {
+    fn role_names(self) -> &'static [&'static str] {
+        match self {
+            Self::InitialPair => &["authority", "market", "primary_mint", "secondary_mint"],
+            Self::ReplacePrimary => &[
+                "authority",
+                "market",
+                "primary_mint",
+                "secondary_mint",
+                "old_primary_vault",
+            ],
+            Self::ReplaceSecondary => &[
+                "authority",
+                "market",
+                "primary_mint",
+                "secondary_mint",
+                "old_secondary_vault",
+            ],
+            Self::ReplaceBoth => &[
+                "authority",
+                "market",
+                "primary_mint",
+                "secondary_mint",
+                "old_primary_vault",
+                "old_secondary_vault",
+            ],
+        }
+    }
+}
+
+fn base_unit_mint_alias_fixture(shape: BaseUnitMintAliasShape) -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    let authority = env.admin.insecure_clone();
+    let old_secondary = env.create_mint();
+    let replacing_existing = !matches!(shape, BaseUnitMintAliasShape::InitialPair);
+    if replacing_existing {
+        env.update_base_unit_mints_with_cu(env.mint, old_secondary);
+    }
+    let old_secondary_vault = canonical_vault_ata(env.vault_authority, old_secondary);
+    if replacing_existing {
+        env.svm
+            .set_account(
+                old_secondary_vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(old_secondary, env.vault_authority, 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .expect("create empty old secondary vault");
+    }
+
+    let replace_primary = matches!(
+        shape,
+        BaseUnitMintAliasShape::ReplacePrimary | BaseUnitMintAliasShape::ReplaceBoth
+    );
+    let replace_secondary = matches!(
+        shape,
+        BaseUnitMintAliasShape::ReplaceSecondary | BaseUnitMintAliasShape::ReplaceBoth
+    );
+    let primary_mint = if replace_primary {
+        env.create_mint()
+    } else {
+        env.mint
+    };
+    let secondary_mint = if !replacing_existing || replace_secondary {
+        env.create_mint()
+    } else {
+        old_secondary
+    };
+    let instruction = ProgInstruction::UpdateBaseUnitMints {
+        primary_mint: primary_mint.to_bytes(),
+        secondary_mint: secondary_mint.to_bytes(),
+    };
+    let mut accounts = vec![
+        AccountMeta::new_readonly(authority.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new_readonly(primary_mint, false),
+        AccountMeta::new_readonly(secondary_mint, false),
+    ];
+    if replace_primary {
+        accounts.push(AccountMeta::new_readonly(env.vault, false));
+    }
+    if replacing_existing && replace_secondary {
+        accounts.push(AccountMeta::new_readonly(old_secondary_vault, false));
+    }
+    assert_eq!(accounts.len(), shape.role_names().len());
+    let tracked_accounts = std::iter::once(env.market)
+        .chain(accounts.iter().map(|account| account.pubkey))
+        .collect();
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![authority],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+fn swap_secondary_alias_fixture() -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    let authority = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    let primary_source = env.token_account_for_mint(env.mint, authority.pubkey(), 10);
+    let secondary_destination = env.token_account_for_mint(secondary_mint, authority.pubkey(), 0);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 10),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .expect("create funded secondary vault");
+    let accounts = vec![
+        AccountMeta::new_readonly(authority.pubkey(), true),
+        AccountMeta::new_readonly(env.market, false),
+        AccountMeta::new(primary_source, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new(secondary_destination, false),
+        AccountMeta::new(secondary_vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let tracked_accounts = std::iter::once(env.market)
+        .chain(accounts.iter().map(|account| account.pubkey))
+        .collect();
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![authority],
+        instruction: ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        accounts,
+        tracked_accounts,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CloseSlabAliasShape {
+    PrimaryDust,
+    SecondaryDust,
+    PrimaryUnbudgetedInsurance,
+    SecondaryUnbudgetedInsurance,
+}
+
+impl CloseSlabAliasShape {
+    fn has_secondary(self) -> bool {
+        matches!(
+            self,
+            Self::SecondaryDust | Self::SecondaryUnbudgetedInsurance
+        )
+    }
+
+    fn has_unbudgeted_insurance(self) -> bool {
+        matches!(
+            self,
+            Self::PrimaryUnbudgetedInsurance | Self::SecondaryUnbudgetedInsurance
+        )
+    }
+
+    fn role_names(self) -> &'static [&'static str] {
+        match self {
+            Self::PrimaryDust => &[
+                "authority_destination",
+                "market",
+                "primary_vault",
+                "vault_authority",
+                "primary_destination",
+                "token_program",
+            ],
+            Self::SecondaryDust => &[
+                "authority_destination",
+                "market",
+                "primary_vault",
+                "vault_authority",
+                "primary_destination",
+                "token_program",
+                "secondary_vault",
+                "secondary_destination",
+            ],
+            Self::PrimaryUnbudgetedInsurance => &[
+                "authority_destination",
+                "market",
+                "primary_vault",
+                "vault_authority",
+                "primary_destination",
+                "token_program",
+                "primary_mint",
+            ],
+            Self::SecondaryUnbudgetedInsurance => &[
+                "authority_destination",
+                "market",
+                "primary_vault",
+                "vault_authority",
+                "primary_destination",
+                "token_program",
+                "secondary_vault",
+                "secondary_destination",
+                "primary_mint",
+            ],
+        }
+    }
+
+    fn required_writable_roles(self) -> &'static [usize] {
+        match self {
+            Self::PrimaryDust => &[0, 1, 2, 4],
+            Self::SecondaryDust => &[0, 1, 2, 4, 6, 7],
+            Self::PrimaryUnbudgetedInsurance => &[0, 1, 2, 4, 6],
+            Self::SecondaryUnbudgetedInsurance => &[0, 1, 2, 4, 6, 7, 8],
+        }
+    }
+}
+
+fn inv017_public_token_transfer(
+    env: &mut V16CuEnv,
+    authority: &Keypair,
+    source: Pubkey,
+    destination: Pubkey,
+    amount: u64,
+) {
+    let payer = env.payer.insecure_clone();
+    send_raw_tx(
+        &mut env.svm,
+        &payer,
+        spl_token::instruction::transfer(
+            &spl_token::ID,
+            &source,
+            &destination,
+            &authority.pubkey(),
+            &[],
+            amount,
+        )
+        .expect("build public SPL transfer"),
+        &[authority],
+    )
+    .expect("public SPL transfer");
+}
+
+fn inv017_certificate_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
+    let group = env.market_state().1;
+    let account = env.portfolio_state(portfolio);
+    let cert = health_cert(&account);
+    cert.valid
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch
+        && cert.active_bitmap_at_cert == active_bitmap(&account)
+}
+
+fn inv017_set_initial_mint_supply(env: &mut V16CuEnv, supply: u64) {
+    let mut account = env.svm.get_account(&env.mint).expect("primary mint");
+    let mut mint = Mint::unpack(&account.data).expect("valid primary mint");
+    mint.supply = supply;
+    Mint::pack(mint, &mut account.data).expect("write primary mint supply");
+    env.svm
+        .set_account(env.mint, account)
+        .expect("seed externally minted fixture supply");
+}
+
+fn inv017_create_unbudgeted_insurance(env: &mut V16CuEnv) {
+    const MARK: u64 = 1_000_000;
+    const RAW_UP: u64 = 2_000_000;
+    const DEPOSIT: u128 = 25_000_000;
+    const TERMINAL_DUST: u128 = 7;
+
+    // The shared LiteSVM mint normally has zero synthetic supply even though deposit fixtures
+    // construct funded SPL accounts. This route reaches CloseSlab's real burn, so give the mint
+    // the exact pre-existing supply represented by the two public deposit sources.
+    inv017_set_initial_mint_supply(env, (2 * DEPOSIT + TERMINAL_DUST) as u64);
+    env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.svm.warp_to_slot(1);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        RAW_UP,
+        0,
+    );
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_DRAIN_ONLY, 0, 0, 0);
+    for _ in 0..6 {
+        for portfolio in [long, short] {
+            if !inv017_certificate_is_current(env, portfolio) {
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 1,
+                        observations: vec![],
+                    },
+                );
+            }
+        }
+        if inv017_certificate_is_current(env, long) && inv017_certificate_is_current(env, short) {
+            break;
+        }
+    }
+    assert!(
+        inv017_certificate_is_current(env, long) && inv017_certificate_is_current(env, short),
+        "public DrainOnly fixture must reach current certificates"
+    );
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -(POS_SCALE as i128),
+        1,
+        0,
+    );
+    let released = env.portfolio_state(long).pnl.get();
+    if released > 0 {
+        env.convert_released_pnl_with_cu(&long_owner, long, released as u128);
+    }
+    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+        let capital = env.portfolio_state(portfolio).capital.get();
+        env.withdraw(owner, portfolio, capital);
+        env.close_portfolio_with_cu(owner, portfolio);
+    }
+    let terminal = env.market_state().1;
+    assert!(
+        terminal.insurance > 0,
+        "paid mark movement must create insurance"
+    );
+    assert_eq!(
+        terminal.insurance_domain_budget.iter().sum::<u128>(),
+        0,
+        "mark-movement insurance must remain outside withdrawable budgets"
+    );
+    assert_eq!(terminal.vault, terminal.insurance);
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.materialized_portfolio_count, 0);
+}
+
+fn close_slab_alias_fixture(shape: CloseSlabAliasShape) -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: 1_000_000,
+        max_trading_fee_bps: 100,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    let authority = env.admin.insecure_clone();
+    let secondary = shape.has_secondary().then(|| env.create_mint());
+    if let Some(secondary_mint) = secondary {
+        env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    }
+    if shape.has_unbudgeted_insurance() {
+        inv017_create_unbudgeted_insurance(&mut env);
+    }
+    let source = env.token_account_for_mint(env.mint, authority.pubkey(), 7);
+    let primary_vault = env.vault;
+    inv017_public_token_transfer(&mut env, &authority, source, primary_vault, 7);
+
+    let secondary_vault = secondary.map(|secondary_mint| {
+        let vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+        env.svm
+            .set_account(
+                vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(secondary_mint, env.vault_authority, 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .expect("create empty secondary vault");
+        let source = env.token_account_for_mint(secondary_mint, authority.pubkey(), 11);
+        inv017_public_token_transfer(&mut env, &authority, source, vault, 11);
+        vault
+    });
+    env.resolve();
+    let primary_destination = env.token_account(authority.pubkey(), 0);
+    let secondary_destination =
+        secondary.map(|mint| env.token_account_for_mint(mint, authority.pubkey(), 0));
+    let mut accounts = vec![
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new(primary_destination, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    if let (Some(vault), Some(destination)) = (secondary_vault, secondary_destination) {
+        accounts.push(AccountMeta::new(vault, false));
+        accounts.push(AccountMeta::new(destination, false));
+    }
+    if shape.has_unbudgeted_insurance() {
+        accounts.push(AccountMeta::new(env.mint, false));
+    }
+    assert_eq!(accounts.len(), shape.role_names().len());
+    let tracked_accounts = std::iter::once(env.market)
+        .chain(accounts.iter().map(|account| account.pubkey))
+        .collect();
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![authority],
+        instruction: ProgInstruction::CloseSlab,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+fn force_close_abandoned_asset_alias_fixture() -> CoreAccountAliasFixture {
+    const MARK: u64 = 100;
+    const MARK_SLOT: u64 = 1;
+    const SHUTDOWN_SLOT: u64 = 2;
+    const FORCE_CLOSE_SLOT: u64 = 3;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, MARK);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000);
+    env.deposit(&short_owner, short, 10_000);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.svm.warp_to_slot(MARK_SLOT);
+    env.push_auth_mark_with_cu(MARK_SLOT, MARK);
+    env.svm.warp_to_slot(SHUTDOWN_SLOT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_SHUTDOWN,
+        0,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    env.svm.warp_to_slot(FORCE_CLOSE_SLOT);
+
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    let accounts = vec![
+        AccountMeta::new_readonly(cranker.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(long, false),
+        AccountMeta::new(short, false),
+    ];
+    CoreAccountAliasFixture {
+        tracked_accounts: vec![env.market, long, short],
+        env,
+        signers: vec![cranker],
+        instruction: ProgInstruction::ForceCloseAbandonedAsset {
+            asset_index: 0,
+            now_slot: FORCE_CLOSE_SLOT,
+            close_q: POS_SCALE,
+        },
+        accounts,
+    }
+}
+
 fn sync_maintenance_alias_fixture(with_cranker: bool) -> CoreAccountAliasFixture {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 25,
@@ -2012,6 +2532,71 @@ fn permissionless_crank_alias_fixture() -> CoreAccountAliasFixture {
         instruction: ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             observations: crank_observations(0),
+        },
+        accounts,
+        tracked_accounts,
+    }
+}
+
+fn permissionless_crank_oracle_alias_fixture(
+    leg_count: usize,
+    reward_enabled: bool,
+    include_reward: bool,
+) -> CoreAccountAliasFixture {
+    assert!((1..=3).contains(&leg_count));
+    assert!(!include_reward || reward_enabled);
+
+    let mut configured = configure_hybrid_role_fixture(leg_count);
+    let configure_instruction = configure_hybrid_role_instruction(&configured);
+    let configure_accounts = configure_hybrid_role_accounts(&configured);
+    configured
+        .env
+        .send(
+            configure_instruction,
+            configure_accounts,
+            &[&configured.authority],
+        )
+        .expect("configure coherent hybrid oracle for crank matrix");
+
+    let feeds = configured.feeds;
+    let mut env = configured.env;
+    if reward_enabled {
+        env.update_liquidation_fee_policy_with_cu(5_000);
+    }
+    let target_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    let reward = include_reward.then(|| env.create_portfolio(&cranker));
+
+    set_test_clock(&mut env, 2, 101);
+    let oracle_accounts = feeds[..leg_count]
+        .iter()
+        .map(|feed| env.set_pyth_price_with_conf(feed, 1_000_000, -6, 0, 101))
+        .collect::<Vec<_>>();
+    let mut accounts = vec![
+        AccountMeta::new_readonly(cranker.pubkey(), include_reward),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(target, false),
+    ];
+    accounts.extend(
+        oracle_accounts
+            .iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+    if let Some(reward) = reward {
+        accounts.push(AccountMeta::new(reward, false));
+    }
+    let tracked_accounts = std::iter::once(env.market)
+        .chain(accounts.iter().map(|account| account.pubkey))
+        .collect();
+    CoreAccountAliasFixture {
+        env,
+        signers: include_reward.then_some(cranker).into_iter().collect(),
+        instruction: ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations_with_accounts(0, leg_count as u8),
         },
         accounts,
         tracked_accounts,
@@ -2361,16 +2946,31 @@ fn managed_mark_alias_fixture(route: ManagedMarkAliasRoute) -> CoreAccountAliasF
 #[derive(Clone, Copy)]
 enum TwoAccountLifecycleAliasRoute {
     ResolveMarket,
+    AdminAppendActivate,
+    AdminReuseActivate,
     DrainOnlyAsset,
+    ShutdownAsset,
+    RetireAsset,
 }
 
 impl TwoAccountLifecycleAliasRoute {
-    const ALL: [Self; 2] = [Self::ResolveMarket, Self::DrainOnlyAsset];
+    const ALL: [Self; 6] = [
+        Self::ResolveMarket,
+        Self::AdminAppendActivate,
+        Self::AdminReuseActivate,
+        Self::DrainOnlyAsset,
+        Self::ShutdownAsset,
+        Self::RetireAsset,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::ResolveMarket => "ResolveMarket",
+            Self::AdminAppendActivate => "UpdateAssetLifecycle admin append activate",
+            Self::AdminReuseActivate => "UpdateAssetLifecycle admin reuse activate",
             Self::DrainOnlyAsset => "UpdateAssetLifecycle drain-only",
+            Self::ShutdownAsset => "UpdateAssetLifecycle shutdown",
+            Self::RetireAsset => "UpdateAssetLifecycle retire",
         }
     }
 }
@@ -2378,17 +2978,92 @@ impl TwoAccountLifecycleAliasRoute {
 fn two_account_lifecycle_alias_fixture(
     route: TwoAccountLifecycleAliasRoute,
 ) -> CoreAccountAliasFixture {
-    let env = V16CuEnv::new();
+    let mut env = V16CuEnv::new();
     let authority = env.admin.insecure_clone();
+    match route {
+        TwoAccountLifecycleAliasRoute::AdminAppendActivate => {
+            env.svm.warp_to_slot(1);
+        }
+        TwoAccountLifecycleAliasRoute::AdminReuseActivate => {
+            env.svm.warp_to_slot(1);
+            env.activate_asset(1, 1, 100);
+            env.svm.warp_to_slot(2);
+            env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_RETIRE, 1, 2, 0);
+            env.svm.warp_to_slot(3);
+        }
+        TwoAccountLifecycleAliasRoute::ShutdownAsset => {
+            env.configure_permissionless_resolve_with_cu(100, 1);
+            env.svm.warp_to_slot(1);
+        }
+        TwoAccountLifecycleAliasRoute::RetireAsset => {
+            env.svm.warp_to_slot(1);
+            env.activate_asset(1, 1, 100);
+            env.svm.warp_to_slot(2);
+        }
+        TwoAccountLifecycleAliasRoute::ResolveMarket
+        | TwoAccountLifecycleAliasRoute::DrainOnlyAsset => {}
+    }
     let instruction = match route {
         TwoAccountLifecycleAliasRoute::ResolveMarket => ProgInstruction::ResolveMarket {
             asset_generation_frontier: env.market_state().1.next_market_id,
         },
+        TwoAccountLifecycleAliasRoute::AdminAppendActivate => {
+            ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                market_id: env.market_state().1.next_market_id,
+                now_slot: 1,
+                initial_price: 100,
+                max_init_fee: u128::MAX,
+                insurance_authority: authority.pubkey().to_bytes(),
+                insurance_operator: authority.pubkey().to_bytes(),
+                backing_bucket_authority: authority.pubkey().to_bytes(),
+                oracle_authority: authority.pubkey().to_bytes(),
+            }
+        }
+        TwoAccountLifecycleAliasRoute::AdminReuseActivate => {
+            ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                market_id: env.market_state().1.next_market_id,
+                now_slot: 3,
+                initial_price: 101,
+                max_init_fee: u128::MAX,
+                insurance_authority: authority.pubkey().to_bytes(),
+                insurance_operator: authority.pubkey().to_bytes(),
+                backing_bucket_authority: authority.pubkey().to_bytes(),
+                oracle_authority: authority.pubkey().to_bytes(),
+            }
+        }
         TwoAccountLifecycleAliasRoute::DrainOnlyAsset => ProgInstruction::UpdateAssetLifecycle {
             action: processor::ASSET_ACTION_DRAIN_ONLY,
             asset_index: 0,
             market_id: env.asset_market_id(0),
             now_slot: 0,
+            initial_price: 0,
+            max_init_fee: u128::MAX,
+            insurance_authority: authority.pubkey().to_bytes(),
+            insurance_operator: authority.pubkey().to_bytes(),
+            backing_bucket_authority: authority.pubkey().to_bytes(),
+            oracle_authority: authority.pubkey().to_bytes(),
+        },
+        TwoAccountLifecycleAliasRoute::ShutdownAsset => ProgInstruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_SHUTDOWN,
+            asset_index: 0,
+            market_id: env.asset_market_id(0),
+            now_slot: 1,
+            initial_price: 0,
+            max_init_fee: u128::MAX,
+            insurance_authority: authority.pubkey().to_bytes(),
+            insurance_operator: authority.pubkey().to_bytes(),
+            backing_bucket_authority: authority.pubkey().to_bytes(),
+            oracle_authority: authority.pubkey().to_bytes(),
+        },
+        TwoAccountLifecycleAliasRoute::RetireAsset => ProgInstruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_RETIRE,
+            asset_index: 1,
+            market_id: env.asset_market_id(1),
+            now_slot: 2,
             initial_price: 0,
             max_init_fee: u128::MAX,
             insurance_authority: authority.pubkey().to_bytes(),
@@ -2405,6 +3080,64 @@ fn two_account_lifecycle_alias_fixture(
     CoreAccountAliasFixture {
         env,
         signers: vec![authority],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PermissionlessActivationAliasShape {
+    Append,
+    Reuse,
+}
+
+fn permissionless_activation_alias_fixture(
+    shape: PermissionlessActivationAliasShape,
+) -> CoreAccountAliasFixture {
+    const FEE: u128 = 10;
+
+    let mut env = V16CuEnv::new();
+    if matches!(shape, PermissionlessActivationAliasShape::Reuse) {
+        env.svm.warp_to_slot(1);
+        env.activate_asset(1, 1, 100);
+        env.svm.warp_to_slot(2);
+        env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_RETIRE, 1, 2, 0);
+    }
+    env.update_market_init_fee_policy_with_cu(FEE);
+    let now_slot = match shape {
+        PermissionlessActivationAliasShape::Append => 1,
+        PermissionlessActivationAliasShape::Reuse => 3,
+    };
+    env.svm.warp_to_slot(now_slot);
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let source = env.token_account(creator.pubkey(), FEE as u64);
+    let instruction = ProgInstruction::UpdateAssetLifecycle {
+        action: processor::ASSET_ACTION_ACTIVATE,
+        asset_index: 1,
+        market_id: env.market_state().1.next_market_id,
+        now_slot,
+        initial_price: 101,
+        max_init_fee: FEE,
+        insurance_authority: creator.pubkey().to_bytes(),
+        insurance_operator: creator.pubkey().to_bytes(),
+        backing_bucket_authority: creator.pubkey().to_bytes(),
+        oracle_authority: creator.pubkey().to_bytes(),
+    };
+    let accounts = vec![
+        AccountMeta::new(creator.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(source, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let tracked_accounts = std::iter::once(env.market)
+        .chain(accounts.iter().map(|account| account.pubkey))
+        .collect();
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![creator],
         instruction,
         accounts,
         tracked_accounts,
@@ -2499,6 +3232,25 @@ fn v16_program_two_account_lifecycle_roles_are_exhaustive() {
             || two_account_lifecycle_alias_fixture(route),
         );
     }
+    for shape in [
+        PermissionlessActivationAliasShape::Append,
+        PermissionlessActivationAliasShape::Reuse,
+    ] {
+        assert_core_account_alias_matrix(
+            &format!("UpdateAssetLifecycle permissionless {shape:?}"),
+            &[
+                "creator",
+                "market",
+                "source_token",
+                "vault",
+                "token_program",
+            ],
+            &[0],
+            &[1, 2, 3],
+            &[],
+            || permissionless_activation_alias_fixture(shape),
+        );
+    }
 }
 
 #[test]
@@ -2567,6 +3319,14 @@ fn v16_program_exit_and_maintenance_core_account_pairs_are_exhaustive() {
         rebalance_reduce_alias_fixture,
     );
     assert_core_account_alias_matrix(
+        "ConvertReleasedPnl",
+        &["owner", "market", "portfolio"],
+        &[0],
+        &[1, 2],
+        &[],
+        convert_released_pnl_alias_fixture,
+    );
+    assert_core_account_alias_matrix(
         "ForfeitRecoveryLeg",
         &["owner", "market", "portfolio"],
         &[0],
@@ -2613,6 +3373,116 @@ fn v16_program_exit_and_maintenance_core_account_pairs_are_exhaustive() {
         &[],
         permissionless_crank_alias_fixture,
     );
+}
+
+#[test]
+fn v16_program_base_unit_and_swap_account_roles_are_exhaustive() {
+    for shape in [
+        BaseUnitMintAliasShape::InitialPair,
+        BaseUnitMintAliasShape::ReplacePrimary,
+        BaseUnitMintAliasShape::ReplaceSecondary,
+        BaseUnitMintAliasShape::ReplaceBoth,
+    ] {
+        assert_core_account_alias_matrix(
+            &format!("UpdateBaseUnitMints {shape:?}"),
+            shape.role_names(),
+            &[0],
+            &[1],
+            &[],
+            || base_unit_mint_alias_fixture(shape),
+        );
+    }
+    assert_core_account_alias_matrix(
+        "SwapSecondaryForPrimary",
+        &[
+            "authority",
+            "market",
+            "primary_source",
+            "primary_vault",
+            "secondary_destination",
+            "secondary_vault",
+            "vault_authority",
+            "token_program",
+        ],
+        &[0],
+        &[2, 3, 4, 5],
+        &[],
+        swap_secondary_alias_fixture,
+    );
+}
+
+#[test]
+fn v16_program_close_slab_account_roles_are_exhaustive() {
+    for shape in [
+        CloseSlabAliasShape::PrimaryDust,
+        CloseSlabAliasShape::SecondaryDust,
+        CloseSlabAliasShape::PrimaryUnbudgetedInsurance,
+        CloseSlabAliasShape::SecondaryUnbudgetedInsurance,
+    ] {
+        assert_core_account_alias_matrix(
+            &format!("CloseSlab {shape:?}"),
+            shape.role_names(),
+            &[0],
+            shape.required_writable_roles(),
+            &[],
+            || close_slab_alias_fixture(shape),
+        );
+    }
+}
+
+#[test]
+fn v16_program_force_close_abandoned_asset_account_roles_are_exhaustive() {
+    assert_core_account_alias_matrix(
+        "ForceCloseAbandonedAsset",
+        &["cranker", "market", "account_a", "account_b"],
+        &[0],
+        &[1, 2, 3],
+        &[],
+        force_close_abandoned_asset_alias_fixture,
+    );
+}
+
+#[test]
+fn v16_program_crank_authenticated_oracle_account_roles_are_exhaustive() {
+    const ORACLE_ROLES: [&str; 3] = ["oracle_1", "oracle_2", "oracle_3"];
+
+    for leg_count in 1..=3 {
+        let mut roles = vec!["cranker", "market", "portfolio"];
+        roles.extend_from_slice(&ORACLE_ROLES[..leg_count]);
+        assert_core_account_alias_matrix(
+            &format!("PermissionlessCrank {leg_count}-provider tail"),
+            &roles,
+            &[],
+            &[1, 2],
+            &[],
+            || permissionless_crank_oracle_alias_fixture(leg_count, false, false),
+        );
+
+        let mut reward_roles = roles.clone();
+        reward_roles.push("reward_portfolio");
+        let reward_index = reward_roles.len() - 1;
+        assert_core_account_alias_matrix(
+            &format!("PermissionlessCrank {leg_count}-provider reward tail"),
+            &reward_roles,
+            &[0],
+            &[1, 2, reward_index],
+            &[],
+            || permissionless_crank_oracle_alias_fixture(leg_count, true, true),
+        );
+
+        let mut omitted = permissionless_crank_oracle_alias_fixture(leg_count, true, false);
+        let before = core_account_alias_snapshot(&omitted);
+        send_core_account_alias_fixture(&mut omitted, false).unwrap_or_else(|error| {
+            panic!(
+                "PermissionlessCrank {leg_count}-provider tail must remain live when the optional reward portfolio is omitted: {error}"
+            )
+        });
+        assert_ne!(
+            core_account_alias_snapshot(&omitted),
+            before,
+            "reward-enabled omitted-tail control must perform authenticated oracle progress"
+        );
+    }
 }
 
 #[test]

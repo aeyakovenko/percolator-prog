@@ -87,6 +87,88 @@ struct PublicActiveCloseFixture {
     live_peer: Pubkey,
 }
 
+const PUBLIC_RELEASED_PNL_FIXTURE_AMOUNT: u128 = 50_000;
+
+struct PublicReleasedPnlFixture {
+    env: V16CuEnv,
+    winner_owner: Keypair,
+    winner: Pubkey,
+    loser: Pubkey,
+}
+
+fn public_released_pnl_fixture() -> PublicReleasedPnlFixture {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const WINNING_PRICE: u64 = 1_050_000;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        max_abs_funding_e9_per_slot: 1_000,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.top_up_backing_bucket(1, 75_000, 10_000);
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    env.deposit(&winner_owner, winner, 1_000_000);
+    env.deposit(&loser_owner, loser, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, WINNING_PRICE);
+    for portfolio in [loser, winner] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        -SIZE_Q,
+        WINNING_PRICE,
+        0,
+    );
+
+    let winner_state = env.portfolio_state(winner);
+    assert!(
+        !has_active_leg_for_asset(&winner_state, 0),
+        "public close must leave the winner flat"
+    );
+    assert_eq!(
+        winner_state.pnl.get(),
+        PUBLIC_RELEASED_PNL_FIXTURE_AMOUNT as i128,
+        "public price move and close must create the expected source-backed claim"
+    );
+    PublicReleasedPnlFixture {
+        env,
+        winner_owner,
+        winner,
+        loser,
+    }
+}
+
 fn public_asset1_bankrupt_close_fixture() -> PublicActiveCloseFixture {
     public_asset1_bankrupt_close_fixture_impl(None).0
 }
