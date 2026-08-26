@@ -11381,6 +11381,24 @@ pub mod processor {
         Ok(())
     }
 
+    #[inline(always)]
+    fn resolve_market_view(
+        cfg: &WrapperConfigV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        resolved_slot: u64,
+        include_pending_mark: bool,
+    ) -> ProgramResult {
+        reject_market_resolve_before_committed_accrual_view(
+            cfg,
+            group,
+            resolved_slot,
+            include_pending_mark,
+        )?;
+        group
+            .resolve_market_not_atomic(resolved_slot)
+            .map_err(map_v16_error)
+    }
+
     fn accrue_committed_funding_before_asset_shutdown_view(
         profile: &mut state::AssetOracleProfileV16,
         group: &mut state::MarketViewMutV16<'_>,
@@ -11463,11 +11481,7 @@ pub mod processor {
         if slot < group.header.current_slot.get() {
             return Err(PercolatorError::EngineStale.into());
         }
-        reject_market_resolve_before_committed_accrual_view(&cfg, &group, slot, false)?;
-        group
-            .resolve_market_not_atomic(slot)
-            .map_err(map_v16_error)?;
-        Ok(())
+        resolve_market_view(&cfg, &mut group, slot, false)
     }
 
     #[inline(never)]
@@ -12621,16 +12635,7 @@ pub mod processor {
         if !oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot) {
             return Err(PercolatorError::OracleStale.into());
         }
-        reject_market_resolve_before_committed_accrual_view(
-            &cfg,
-            &group,
-            authenticated_slot,
-            true,
-        )?;
-        group
-            .resolve_market_not_atomic(authenticated_slot)
-            .map_err(map_v16_error)?;
-        Ok(())
+        resolve_market_view(&cfg, &mut group, authenticated_slot, true)
     }
 
     #[allow(clippy::too_many_arguments)]

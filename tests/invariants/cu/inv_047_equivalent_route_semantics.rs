@@ -7,7 +7,8 @@
 //! semantics across clear, lower-slot flip reuse, attach, and resize in one route. Legacy
 //! market-level insurance top-up is also compared with its exact two-domain expansion, including
 //! odd-atom rounding and all persisted bytes after replay-watermark normalization. Authority and
-//! permissionless stale resolution are byte-exact from the same matured snapshot. Optional
+//! permissionless stale resolution are byte-exact from the same matured snapshot and dispatch one
+//! shared accrual-gated engine finalizer. Optional
 //! insurance and backing ledgers are proven observational for market and custody state across all
 //! three top-up routes. These tests exercise the deployed public wrapper with real SBF/LiteSVM
 //! account construction and assert economic state, token, rollback, liveness, or compute outcomes
@@ -303,6 +304,41 @@ fn v16_program_legacy_insurance_topup_matches_explicit_domain_split() {
         normalized_split_market, legacy_market,
         "all persisted market bytes except the replay watermark must match",
     );
+}
+
+#[test]
+fn v16_program_resolution_routes_share_one_accrual_gated_finalizer() {
+    let production = include_str!("../../../src/v16_program.rs");
+    assert_eq!(
+        production.matches("resolve_market_view(").count(),
+        3,
+        "one finalizer definition must serve exactly two public resolution routes",
+    );
+    assert_eq!(
+        production.matches(".resolve_market_not_atomic(").count(),
+        1,
+        "the engine resolution transition must have one wrapper callsite",
+    );
+
+    let authority_start = production
+        .find("fn handle_resolve_market<'a>(")
+        .expect("authority resolution handler remains mounted");
+    let authority_end = production[authority_start..]
+        .find("fn handle_update_authority<'a>(")
+        .map(|offset| authority_start + offset)
+        .expect("authority resolution handler has a source boundary");
+    assert!(production[authority_start..authority_end]
+        .contains("resolve_market_view(&cfg, &mut group, slot, false)"));
+
+    let permissionless_start = production
+        .find("fn handle_resolve_stale_permissionless<'a>(")
+        .expect("permissionless resolution handler remains mounted");
+    let permissionless_end = production[permissionless_start..]
+        .find("fn handle_configure_hybrid_oracle<'a>(")
+        .map(|offset| permissionless_start + offset)
+        .expect("permissionless resolution handler has a source boundary");
+    assert!(production[permissionless_start..permissionless_end]
+        .contains("resolve_market_view(&cfg, &mut group, authenticated_slot, true)",));
 }
 
 #[test]
