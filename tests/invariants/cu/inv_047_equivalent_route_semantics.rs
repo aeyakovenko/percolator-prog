@@ -7,9 +7,11 @@
 //! semantics across clear, lower-slot flip reuse, attach, and resize in one route. Legacy
 //! market-level insurance top-up is also compared with its exact two-domain expansion, including
 //! odd-atom rounding and all persisted bytes after replay-watermark normalization. Authority and
-//! permissionless stale resolution are byte-exact from the same matured snapshot. These tests
-//! exercise the deployed public wrapper with real SBF/LiteSVM account construction and assert
-//! economic state, token, rollback, liveness, or compute outcomes appropriate to the invariant.
+//! permissionless stale resolution are byte-exact from the same matured snapshot. Optional
+//! insurance and backing ledgers are proven observational for market and custody state across all
+//! three top-up routes. These tests exercise the deployed public wrapper with real SBF/LiteSVM
+//! account construction and assert economic state, token, rollback, liveness, or compute outcomes
+//! appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -337,6 +339,108 @@ fn v16_program_authority_and_permissionless_resolution_match_at_maturity() {
         permissionless_market, authority_market,
         "both public resolution routes must commit the same persisted transition",
     );
+}
+
+#[derive(Clone, Copy)]
+enum OptionalLedgerTopUpRoute {
+    LegacyInsurance,
+    DomainInsurance,
+    Backing,
+}
+
+impl OptionalLedgerTopUpRoute {
+    fn label(self) -> &'static str {
+        match self {
+            Self::LegacyInsurance => "legacy insurance top-up",
+            Self::DomainInsurance => "domain insurance top-up",
+            Self::Backing => "backing top-up",
+        }
+    }
+
+    fn create_ledger(self, env: &mut V16CuEnv) -> Pubkey {
+        match self {
+            Self::LegacyInsurance | Self::DomainInsurance => env.insurance_ledger_account(),
+            Self::Backing => env.backing_domain_ledger_account(),
+        }
+    }
+
+    fn execute(self, env: &mut V16CuEnv, ledger: Option<Pubkey>) -> (Pubkey, u64) {
+        const AMOUNT: u128 = 101;
+        const DOMAIN: u16 = 1;
+        const EXPIRY_SLOT: u64 = 10;
+
+        match (self, ledger) {
+            (Self::LegacyInsurance, None) => env.top_up_insurance_with_cu(AMOUNT),
+            (Self::LegacyInsurance, Some(ledger)) => {
+                env.top_up_insurance_with_ledger_with_cu(ledger, AMOUNT)
+            }
+            (Self::DomainInsurance, None) => {
+                let authority = env.admin.insecure_clone();
+                env.top_up_insurance_domain_with_authority_and_cu(&authority, DOMAIN, AMOUNT)
+            }
+            (Self::DomainInsurance, Some(ledger)) => {
+                let authority = env.admin.insecure_clone();
+                env.top_up_insurance_domain_with_authority_ledger_and_cu(
+                    &authority, ledger, DOMAIN, AMOUNT,
+                )
+            }
+            (Self::Backing, None) => env.top_up_backing_bucket_with_cu(DOMAIN, AMOUNT, EXPIRY_SLOT),
+            (Self::Backing, Some(ledger)) => {
+                env.top_up_backing_bucket_with_ledger_with_cu(ledger, DOMAIN, AMOUNT, EXPIRY_SLOT)
+            }
+        }
+    }
+}
+
+#[test]
+fn v16_program_optional_topup_ledgers_are_economically_transparent() {
+    for route in [
+        OptionalLedgerTopUpRoute::LegacyInsurance,
+        OptionalLedgerTopUpRoute::DomainInsurance,
+        OptionalLedgerTopUpRoute::Backing,
+    ] {
+        let mut env = V16CuEnv::new();
+        let ledger = route.create_ledger(&mut env);
+        let market_initial = env.svm.get_account(&env.market).unwrap();
+        let vault_initial = env.svm.get_account(&env.vault).unwrap();
+        let ledger_initial = env.svm.get_account(&ledger).unwrap();
+
+        let (source_without_ledger, cu_without_ledger) = route.execute(&mut env, None);
+        assert_cu_within(route.label(), cu_without_ledger, CUSTODY_CU_LIMIT);
+        assert_eq!(env.token_amount(source_without_ledger), 0);
+        let market_without_ledger = env.svm.get_account(&env.market).unwrap();
+        let vault_without_ledger = env.svm.get_account(&env.vault).unwrap();
+        assert_eq!(
+            env.svm.get_account(&ledger).unwrap(),
+            ledger_initial,
+            "an account omitted from the instruction cannot be mutated",
+        );
+
+        env.svm.set_account(env.market, market_initial).unwrap();
+        env.svm.set_account(env.vault, vault_initial).unwrap();
+        let (source_with_ledger, cu_with_ledger) = route.execute(&mut env, Some(ledger));
+        assert_cu_within(route.label(), cu_with_ledger, CUSTODY_CU_LIMIT);
+        assert_eq!(env.token_amount(source_with_ledger), 0);
+
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_without_ledger,
+            "{} changed engine or wrapper state when a ledger was supplied",
+            route.label(),
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_without_ledger,
+            "{} changed SPL custody when a ledger was supplied",
+            route.label(),
+        );
+        assert_ne!(
+            env.svm.get_account(&ledger).unwrap(),
+            ledger_initial,
+            "{} did not record its auxiliary ledger delta",
+            route.label(),
+        );
+    }
 }
 
 #[test]
