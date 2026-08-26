@@ -11,7 +11,9 @@
 //! insurance/backing ledger tails, plus publicly generated backing-earnings withdrawal, add 126
 //! pairwise reserve-custody cases plus 40 required privilege downgrades from value-moving controls.
 //! Flat close, unilateral reduction, maintenance sync, and both permissionless-crank account shapes
-//! add 19 core-account pairs and 17 required downgrades. Accepted self-cranker, unsigned
+//! add 19 core-account pairs and 17 required downgrades. Both market and asset-oracle authority
+//! handoffs add all six account-pair aliases, four required-signature downgrades, and two required-
+//! writable downgrades from valid two-signer mutation controls. Accepted self-cranker, unsigned
 //! no-reward-crank, and readonly reward-cranker cases have explicit economic controls.
 //!
 //! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
@@ -913,7 +915,7 @@ fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaust
 
 struct CoreAccountAliasFixture {
     env: V16CuEnv,
-    signer: Option<Keypair>,
+    signers: Vec<Keypair>,
     instruction: ProgInstruction,
     accounts: Vec<AccountMeta>,
     tracked_accounts: Vec<Pubkey>,
@@ -934,23 +936,24 @@ fn send_core_account_alias_fixture(
     fixture: &mut CoreAccountAliasFixture,
     expire_blockhash: bool,
 ) -> Result<u64, String> {
-    let signer = fixture
-        .signer
-        .as_ref()
+    let signers = fixture
+        .signers
+        .iter()
         .filter(|signer| {
             fixture
                 .accounts
                 .iter()
                 .any(|account| account.is_signer && account.pubkey == signer.pubkey())
         })
-        .map(Keypair::insecure_clone);
-    let signers = signer.as_ref().into_iter().collect::<Vec<_>>();
+        .map(Keypair::insecure_clone)
+        .collect::<Vec<_>>();
+    let signer_refs = signers.iter().collect::<Vec<_>>();
     let instruction = fixture.instruction.clone();
     let accounts = fixture.accounts.clone();
     if expire_blockhash {
         fixture.env.svm.expire_blockhash();
     }
-    fixture.env.send(instruction, accounts, &signers)
+    fixture.env.send(instruction, accounts, &signer_refs)
 }
 
 fn assert_core_account_alias_matrix(
@@ -1046,7 +1049,7 @@ fn close_portfolio_alias_fixture() -> CoreAccountAliasFixture {
     let tracked_accounts = vec![env.market, portfolio];
     CoreAccountAliasFixture {
         env,
-        signer: Some(owner),
+        signers: vec![owner],
         instruction,
         accounts,
         tracked_accounts,
@@ -1084,7 +1087,7 @@ fn rebalance_reduce_alias_fixture() -> CoreAccountAliasFixture {
     let tracked_accounts = vec![env.market, portfolio, counterparty, env.vault];
     CoreAccountAliasFixture {
         env,
-        signer: Some(owner),
+        signers: vec![owner],
         instruction,
         accounts,
         tracked_accounts,
@@ -1115,7 +1118,7 @@ fn sync_maintenance_alias_fixture(with_cranker: bool) -> CoreAccountAliasFixture
     }
     CoreAccountAliasFixture {
         env,
-        signer: None,
+        signers: vec![],
         instruction: ProgInstruction::SyncMaintenanceFee { now_slot: 10 },
         accounts,
         tracked_accounts,
@@ -1153,13 +1156,76 @@ fn permissionless_crank_alias_fixture() -> CoreAccountAliasFixture {
     let tracked_accounts = vec![env.market, portfolio, counterparty, env.vault];
     CoreAccountAliasFixture {
         env,
-        signer: Some(cranker),
+        signers: vec![cranker],
         instruction: ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             observations: crank_observations(0),
         },
         accounts,
         tracked_accounts,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AuthorityHandoffAliasRoute {
+    Market,
+    AssetOracle,
+}
+
+impl AuthorityHandoffAliasRoute {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Market => "UpdateAuthority",
+            Self::AssetOracle => "UpdateAssetAuthority oracle",
+        }
+    }
+}
+
+fn authority_handoff_alias_fixture(route: AuthorityHandoffAliasRoute) -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    let current = env.admin.insecure_clone();
+    let incoming = Keypair::new();
+    env.ensure_signer_account(incoming.pubkey());
+    let instruction = match route {
+        AuthorityHandoffAliasRoute::Market => ProgInstruction::UpdateAuthority {
+            new_pubkey: incoming.pubkey().to_bytes(),
+        },
+        AuthorityHandoffAliasRoute::AssetOracle => ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            market_id: env.asset_market_id(0),
+            kind: processor::ASSET_AUTH_ORACLE,
+            new_pubkey: incoming.pubkey().to_bytes(),
+        },
+    };
+    let accounts = vec![
+        AccountMeta::new(current.pubkey(), true),
+        AccountMeta::new(incoming.pubkey(), true),
+        AccountMeta::new(env.market, false),
+    ];
+    let tracked_accounts = vec![env.market];
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![current, incoming],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+#[test]
+fn v16_program_authority_handoff_account_pairs_and_privileges_are_exhaustive() {
+    for route in [
+        AuthorityHandoffAliasRoute::Market,
+        AuthorityHandoffAliasRoute::AssetOracle,
+    ] {
+        assert_core_account_alias_matrix(
+            route.label(),
+            &["current_authority", "incoming_authority", "market"],
+            &[0, 1],
+            &[2],
+            &[],
+            || authority_handoff_alias_fixture(route),
+        );
     }
 }
 
