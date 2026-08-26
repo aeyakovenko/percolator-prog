@@ -253,7 +253,6 @@ fn v16_top_up_intent_wire_and_dispatch_roster_is_complete() {
 fn v16_top_up_intent_guards_precede_mutation_and_consumption_is_last() {
     let source = include_str!("../../../src/v16_program.rs");
     let market = braced_block_after(source, "fn handle_top_up_insurance<'a>");
-    let domain = braced_block_after(source, "fn handle_top_up_insurance_domain<'a>");
     let backing = braced_block_after(source, "fn handle_top_up_backing_bucket<'a>");
 
     assert_ordered(
@@ -267,7 +266,7 @@ fn v16_top_up_intent_guards_precede_mutation_and_consumption_is_last() {
         ],
     );
     assert_ordered(
-        domain,
+        market,
         &[
             "require_newer_control_sequence(sequences.insurance_top_up, intent_id)",
             "deposit_domain_insurance_not_atomic",
@@ -288,12 +287,6 @@ fn v16_top_up_intent_guards_precede_mutation_and_consumption_is_last() {
     );
     assert_eq!(
         market
-            .matches("ControlSequenceLane::InsuranceTopUp")
-            .count(),
-        1
-    );
-    assert_eq!(
-        domain
             .matches("ControlSequenceLane::InsuranceTopUp")
             .count(),
         1

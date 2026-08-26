@@ -6884,14 +6884,26 @@ pub mod processor {
                 market_id,
                 intent_id,
                 amount,
-            } => handle_top_up_insurance(program_id, accounts, market_id, intent_id, amount),
+            } => handle_top_up_insurance(
+                program_id,
+                accounts,
+                InsuranceTopUpScope::BaseMarket,
+                market_id,
+                intent_id,
+                amount,
+            ),
             Instruction::TopUpInsuranceDomain {
                 domain,
                 market_id,
                 intent_id,
                 amount,
-            } => handle_top_up_insurance_domain(
-                program_id, accounts, domain, market_id, intent_id, amount,
+            } => handle_top_up_insurance(
+                program_id,
+                accounts,
+                InsuranceTopUpScope::Domain(domain as usize),
+                market_id,
+                intent_id,
+                amount,
             ),
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
             Instruction::ResolveMarket {
@@ -9561,10 +9573,33 @@ pub mod processor {
         Ok(())
     }
 
+    #[derive(Clone, Copy)]
+    enum InsuranceTopUpScope {
+        BaseMarket,
+        Domain(usize),
+    }
+
+    impl InsuranceTopUpScope {
+        fn asset_index(self) -> usize {
+            match self {
+                Self::BaseMarket => 0,
+                Self::Domain(domain) => domain / 2,
+            }
+        }
+
+        fn authority_domain(self) -> usize {
+            match self {
+                Self::BaseMarket => 0,
+                Self::Domain(domain) => domain,
+            }
+        }
+    }
+
     #[inline(never)]
     fn handle_top_up_insurance<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        scope: InsuranceTopUpScope,
         expected_market_id: u64,
         intent_id: u64,
         amount: u128,
@@ -9585,134 +9620,38 @@ pub mod processor {
             expect_owner(ledger_ai, program_id)?;
         }
         verify_token_program(token_program)?;
-        let (cfg_pre, mode, asset0_insurance_authority) = {
-            let market_data = market_ai.try_borrow_data()?;
-            let (cfg_pre, mode, _, market_id, _, _) =
-                state::read_market_trade_preflight(&market_data, 0)?;
-            if market_id != expected_market_id {
-                return Err(PercolatorError::AssetGenerationMismatch.into());
-            }
-            let sequences = state::read_asset_control_sequences(&market_data, 0)?;
-            state::require_newer_control_sequence(sequences.insurance_top_up, intent_id)?;
-            let profile0 = read_oracle_profile_for_asset(&market_data, &cfg_pre, 0)?;
-            (cfg_pre, mode, profile0.insurance_authority)
-        };
-        if mode != MarketModeV16::Live {
-            return Err(PercolatorError::EngineLockActive.into());
-        }
-        expect_live_authority(&asset0_insurance_authority, signer.key)?;
-        let mint = primary_collateral_mint(&cfg_pre);
-        let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
-        verify_user_token_account(source_token, signer.key, &mint)?;
-        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
-        let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(source_token, amount_u64)?;
-        {
-            let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            if group.header.mode != 0 {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            require_asset_generation_view(&group, 0, expected_market_id)?;
-            reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
-            let asset0_insurance_authority =
-                domain_authorities_from_view(&group, &cfg, 0)?.insurance_authority;
-            expect_live_authority(&asset0_insurance_authority, signer.key)?;
-            let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
-                Some(ledger_ai.try_borrow_mut_data()?)
-            } else {
-                None
-            };
-            let mut ledger_state = if let Some(data) = ledger_data.as_deref() {
-                let (mut ledger, initialized) = read_or_new_insurance_ledger(
-                    data,
-                    market_ai.key.to_bytes(),
-                    asset0_insurance_authority,
-                    market_insurance_remaining_view(&group, 0)?,
-                )?;
-                sync_insurance_ledger(&mut ledger, market_insurance_remaining_view(&group, 0)?)?;
-                Some((ledger, initialized))
-            } else {
-                None
-            };
-            deposit_market_zero_insurance_view(&mut group, amount)?;
-            if let Some((ledger, _)) = ledger_state.as_mut() {
-                ledger.total_principal_atoms = ledger
-                    .total_principal_atoms
-                    .checked_add(amount)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                ledger.total_deposited_atoms = ledger
-                    .total_deposited_atoms
-                    .checked_add(amount)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                ledger.last_observed_insurance_atoms = ledger
-                    .last_observed_insurance_atoms
-                    .checked_add(amount)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-            }
-            group.validate_shape().map_err(map_v16_error)?;
-            if let (Some(data), Some((ledger, initialized))) =
-                (ledger_data.as_deref_mut(), ledger_state.as_ref())
-            {
-                write_or_init_insurance_ledger(data, ledger, *initialized)?;
-            }
-            advance_control_sequence_view(
-                &mut group,
-                0,
-                ControlSequenceLane::InsuranceTopUp,
-                intent_id,
-            )?;
-        }
-        transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
-        Ok(())
-    }
-
-    #[inline(never)]
-    fn handle_top_up_insurance_domain<'a>(
-        program_id: &Pubkey,
-        accounts: &'a [AccountInfo<'a>],
-        domain: u16,
-        expected_market_id: u64,
-        intent_id: u64,
-        amount: u128,
-    ) -> ProgramResult {
-        let signer = account(accounts, 0)?;
-        let market_ai = account(accounts, 1)?;
-        let source_token = account(accounts, 2)?;
-        let vault_token = account(accounts, 3)?;
-        let token_program = account(accounts, 4)?;
-        let ledger_ai = accounts.get(5);
-        expect_signer(signer)?;
-        expect_writable(market_ai)?;
-        expect_writable(source_token)?;
-        expect_writable(vault_token)?;
-        expect_owner(market_ai, program_id)?;
-        if let Some(ledger_ai) = ledger_ai {
-            expect_writable(ledger_ai)?;
-            expect_owner(ledger_ai, program_id)?;
-        }
-        verify_token_program(token_program)?;
-        let domain = domain as usize;
-        let (cfg_pre, authorities) = {
+        let asset_index = scope.asset_index();
+        let (cfg_pre, insurance_authority) = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, group) = state::market_view_mut(&mut market_data)?;
             let configured_slots = group.header.config.max_market_slots.get() as usize;
-            let asset_index = domain / 2;
-            if group.header.mode != 0
-                || domain >= configured_slots.saturating_mul(2)
-                || asset_index >= configured_slots
-            {
+            match scope {
+                InsuranceTopUpScope::BaseMarket => {
+                    if group.header.mode != 0 {
+                        return Err(PercolatorError::EngineLockActive.into());
+                    }
+                }
+                InsuranceTopUpScope::Domain(domain) => {
+                    if group.header.mode != 0
+                        || domain >= configured_slots.saturating_mul(2)
+                        || asset_index >= configured_slots
+                    {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
+                    require_domain_accepts_live_topup_view(&group, domain)?;
+                }
+            }
+            if asset_index >= configured_slots {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
             let sequences = read_control_sequences_from_view(&group, asset_index)?;
             state::require_newer_control_sequence(sequences.insurance_top_up, intent_id)?;
-            require_domain_accepts_live_topup_view(&group, domain)?;
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
-            (cfg, authorities)
+            (cfg, authorities.insurance_authority)
         };
-        expect_live_authority(&authorities.insurance_authority, signer.key)?;
+        expect_live_authority(&insurance_authority, signer.key)?;
         let mint = primary_collateral_mint(&cfg_pre);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
         verify_user_token_account(source_token, signer.key, &mint)?;
@@ -9725,22 +9664,33 @@ pub mod processor {
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            require_asset_generation_view(&group, domain / 2, expected_market_id)?;
+            require_asset_generation_view(&group, asset_index, expected_market_id)?;
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
-            require_domain_accepts_live_topup_view(&group, domain)?;
-            let authorities = domain_authorities_from_view(&group, &cfg, domain)?;
-            expect_live_authority(&authorities.insurance_authority, signer.key)?;
+            if let InsuranceTopUpScope::Domain(domain) = scope {
+                require_domain_accepts_live_topup_view(&group, domain)?;
+            }
+            let insurance_authority =
+                domain_authorities_from_view(&group, &cfg, scope.authority_domain())?
+                    .insurance_authority;
+            expect_live_authority(&insurance_authority, signer.key)?;
+            let observed = match scope {
+                InsuranceTopUpScope::BaseMarket => {
+                    market_insurance_remaining_view(&group, asset_index)?
+                }
+                InsuranceTopUpScope::Domain(domain) => {
+                    domain_budget_remaining_view(&group, domain)?
+                }
+            };
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
                 Some(ledger_ai.try_borrow_mut_data()?)
             } else {
                 None
             };
             let mut ledger_state = if let Some(data) = ledger_data.as_deref() {
-                let observed = domain_budget_remaining_view(&group, domain)?;
                 let (mut ledger, initialized) = read_or_new_insurance_ledger(
                     data,
                     market_ai.key.to_bytes(),
-                    authorities.insurance_authority,
+                    insurance_authority,
                     observed,
                 )?;
                 sync_insurance_ledger(&mut ledger, observed)?;
@@ -9748,9 +9698,14 @@ pub mod processor {
             } else {
                 None
             };
-            group
-                .deposit_domain_insurance_not_atomic(domain, amount)
-                .map_err(map_v16_error)?;
+            match scope {
+                InsuranceTopUpScope::BaseMarket => {
+                    deposit_market_zero_insurance_view(&mut group, amount)?;
+                }
+                InsuranceTopUpScope::Domain(domain) => group
+                    .deposit_domain_insurance_not_atomic(domain, amount)
+                    .map_err(map_v16_error)?,
+            }
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_principal_atoms = ledger
                     .total_principal_atoms
@@ -9773,7 +9728,7 @@ pub mod processor {
             }
             advance_control_sequence_view(
                 &mut group,
-                domain / 2,
+                asset_index,
                 ControlSequenceLane::InsuranceTopUp,
                 intent_id,
             )?;
