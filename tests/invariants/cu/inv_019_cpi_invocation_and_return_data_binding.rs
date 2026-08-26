@@ -4,9 +4,9 @@
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): public
 //! CPI tests reject program-owned matcher tails before CPI, stale matcher
-//! context replay across LP close/reinit, zero-fill batch atomicity, and hostile single/batch matcher
-//! outputs that forge size, sign, asset, oracle, request id, LP id, price, or
-//! partial-fill flags. These tests exercise the deployed public
+//! context replay across public same-pubkey context and LP close/reinit, zero-fill batch atomicity,
+//! and hostile single/batch matcher outputs that forge size, sign, asset, oracle, request id, LP id,
+//! price, or partial-fill flags. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -15,6 +15,120 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+fn inv019_system_create_account(
+    env: &mut V16CuEnv,
+    account: &Keypair,
+    owner: Pubkey,
+    data_len: usize,
+) -> u64 {
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::create_account(
+            &env.payer.pubkey(),
+            &account.pubkey(),
+            1_000_000_000,
+            data_len as u64,
+            &owner,
+        ),
+        &[account],
+    )
+    .expect("System Program creates test account")
+}
+
+fn inv019_initialize_portfolio(env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey) {
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[owner],
+    )
+    .expect("wrapper initializes portfolio");
+}
+
+fn inv019_init_portfolio_at(env: &mut V16CuEnv, owner: &Keypair, portfolio: &Keypair) {
+    inv019_system_create_account(env, portfolio, env.program_id, env.portfolio_account_len);
+    inv019_initialize_portfolio(env, owner, portfolio.pubkey());
+}
+
+fn inv019_reinit_closed_portfolio_at(env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey) {
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &portfolio, 1_000_000_000),
+        &[],
+    )
+    .expect("System Program re-funds closed portfolio");
+    inv019_initialize_portfolio(env, owner, portfolio);
+}
+
+fn inv019_hostile_context_control(
+    env: &mut V16CuEnv,
+    matcher_program: Pubkey,
+    owner: &Keypair,
+    context: Pubkey,
+    data: Vec<u8>,
+    close_recipient: Option<Pubkey>,
+) -> u64 {
+    let mut accounts = vec![
+        AccountMeta::new_readonly(owner.pubkey(), true),
+        AccountMeta::new(context, false),
+    ];
+    if let Some(recipient) = close_recipient {
+        accounts.push(AccountMeta::new(recipient, false));
+    }
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: matcher_program,
+            accounts,
+            data,
+        },
+        &[owner],
+    )
+    .expect("external matcher context control")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inv019_seed_hostile_single_response(
+    env: &mut V16CuEnv,
+    matcher_program: Pubkey,
+    context: Pubkey,
+    delegate: Pubkey,
+    req_id: u64,
+    asset_index: u16,
+    oracle_price: u64,
+    size_q: i128,
+) {
+    let delegate_bytes = delegate.to_bytes();
+    let lp_account_id = u64::from_le_bytes(delegate_bytes[0..8].try_into().unwrap());
+    let mut request = vec![0u8; 67];
+    request[0] = 0;
+    request[1..9].copy_from_slice(&req_id.to_le_bytes());
+    request[9..11].copy_from_slice(&asset_index.to_le_bytes());
+    request[11..19].copy_from_slice(&lp_account_id.to_le_bytes());
+    request[19..27].copy_from_slice(&oracle_price.to_le_bytes());
+    request[27..43].copy_from_slice(&size_q.to_le_bytes());
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: matcher_program,
+            accounts: vec![
+                AccountMeta::new_readonly(delegate, false),
+                AccountMeta::new(context, false),
+            ],
+            data: request,
+        },
+        &[],
+    )
+    .expect("external matcher publicly writes stale response");
+}
 
 #[test]
 fn v16_attack_tradecpi_rejects_program_owned_matcher_tail_before_cpi() {
@@ -160,61 +274,48 @@ fn v16_attack_tradecpi_rejects_program_owned_matcher_tail_before_cpi() {
 fn v16_attack_matcher_context_replay_after_lp_close_reinit_rejects() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
-    let hostile = Pubkey::new_unique();
+    let matcher_program = Pubkey::new_unique();
     env.svm.add_program(
-        hostile,
+        matcher_program,
         &std::fs::read(hostile_matcher_program_path()).unwrap(),
     );
     let taker = Keypair::new();
     let lp = Keypair::new();
     let taker_account = env.create_portfolio(&taker);
-    let lp_account = env.create_portfolio(&lp);
+    let lp_account = Keypair::new();
+    inv019_init_portfolio_at(&mut env, &lp, &lp_account);
+    let lp_account_key = lp_account.pubkey();
     env.deposit(&taker, taker_account, 10_000_000);
-    env.deposit(&lp, lp_account, 10_000_000);
-    let ctx = Pubkey::new_unique();
+    env.deposit(&lp, lp_account_key, 10_000_000);
+
+    let context = Keypair::new();
+    inv019_system_create_account(&mut env, &context, matcher_program, MATCHER_CONTEXT_LEN);
+    let context_key = context.pubkey();
+    inv019_hostile_context_control(&mut env, matcher_program, &lp, context_key, vec![10], None);
     let delegate = matcher_delegate_key(
         &env.program_id,
         &env.market,
-        &lp_account,
+        &lp_account_key,
         &lp.pubkey(),
-        &hostile,
-        &ctx,
+        &matcher_program,
+        &context_key,
     );
-    env.svm
-        .set_account(
-            delegate,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![],
-                owner: Pubkey::default(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
-    ctx_data[0] = 10; // valid full fill; leaves a valid req_id=1 response in ctx[0..64].
-    env.svm
-        .set_account(
-            ctx,
-            Account {
-                lamports: 1_000_000_000,
-                data: ctx_data,
-                owner: hostile,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+    env.set_matcher_config(
+        matcher_program,
+        &lp,
+        lp_account_key,
+        context_key,
+        delegate,
+        1,
+    );
 
     env.try_trade_cpi_with_cu_on_asset(
         &taker,
         taker_account,
         &lp,
-        lp_account,
-        hostile,
-        ctx,
+        lp_account_key,
+        matcher_program,
+        context_key,
         delegate,
         0,
         (2 * POS_SCALE) as i128,
@@ -224,7 +325,7 @@ fn v16_attack_matcher_context_replay_after_lp_close_reinit_rejects() {
     assert_eq!(env.market_state().0.matcher_req_seq, 1);
     assert_eq!(
         u64::from_le_bytes(
-            env.svm.get_account(&ctx).unwrap().data[32..40]
+            env.svm.get_account(&context_key).unwrap().data[32..40]
                 .try_into()
                 .unwrap()
         ),
@@ -237,64 +338,74 @@ fn v16_attack_matcher_context_replay_after_lp_close_reinit_rejects() {
         &taker,
         taker_account,
         &lp,
-        lp_account,
+        lp_account_key,
         -((2 * POS_SCALE) as i128),
         100,
         100,
     );
     env.push_auth_mark_for_asset_as_admin(0, env.svm.get_sysvar::<Clock>().slot, 100);
-    let lp_capital = env.portfolio_state(lp_account).capital.get();
+    let lp_capital = env.portfolio_state(lp_account_key).capital.get();
     assert!(lp_capital > 0, "LP should still have withdrawable capital");
-    env.withdraw(&lp, lp_account, lp_capital);
-    env.close_portfolio_with_cu(&lp, lp_account);
+    env.withdraw(&lp, lp_account_key, lp_capital);
+    env.close_portfolio_with_cu(&lp, lp_account_key);
+    let close_recipient = env.payer.pubkey();
+    inv019_hostile_context_control(
+        &mut env,
+        matcher_program,
+        &lp,
+        context_key,
+        vec![12],
+        Some(close_recipient),
+    );
 
-    env.svm
-        .set_account(
-            lp_account,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![0u8; env.portfolio_account_len],
-                owner: env.program_id,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.send(
-        ProgInstruction::InitPortfolio,
-        vec![
-            AccountMeta::new(lp.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(lp_account, false),
-        ],
-        &[&lp],
-    )
-    .expect("LP reinitializes the same portfolio account");
+    inv019_reinit_closed_portfolio_at(&mut env, &lp, lp_account_key);
+    inv019_system_create_account(&mut env, &context, matcher_program, MATCHER_CONTEXT_LEN);
+    inv019_hostile_context_control(&mut env, matcher_program, &lp, context_key, vec![10], None);
     assert_eq!(
         env.market_state().0.matcher_req_seq,
         1,
-        "LP close/reinit must not reset the market-level matcher request sequence"
+        "portfolio and matcher-context recreation must not reset market request freshness"
     );
-    env.deposit(&lp, lp_account, 10_000_000);
-    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
-
-    let mut stale_no_write_ctx = env.svm.get_account(&ctx).unwrap();
-    stale_no_write_ctx.data[64] = 13;
-    stale_no_write_ctx.data[65] = 1; // force no-write on the next hostile matcher call.
-    env.svm.set_account(ctx, stale_no_write_ctx).unwrap();
+    env.deposit(&lp, lp_account_key, 10_000_000);
+    env.set_matcher_config(
+        matcher_program,
+        &lp,
+        lp_account_key,
+        context_key,
+        delegate,
+        1,
+    );
+    inv019_seed_hostile_single_response(
+        &mut env,
+        matcher_program,
+        context_key,
+        delegate,
+        1,
+        0,
+        100,
+        (2 * POS_SCALE) as i128,
+    );
+    inv019_hostile_context_control(
+        &mut env,
+        matcher_program,
+        &lp,
+        context_key,
+        vec![11, 13, 1],
+        None,
+    );
 
     let market_before = env.svm.get_account(&env.market).unwrap();
     let taker_before = env.svm.get_account(&taker_account).unwrap();
-    let lp_before = env.svm.get_account(&lp_account).unwrap();
-    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    let lp_before = env.svm.get_account(&lp_account_key).unwrap();
+    let ctx_before = env.svm.get_account(&context_key).unwrap();
     env.svm.expire_blockhash();
     let replay = env.try_trade_cpi_with_cu_on_asset(
         &taker,
         taker_account,
         &lp,
-        lp_account,
-        hostile,
-        ctx,
+        lp_account_key,
+        matcher_program,
+        context_key,
         delegate,
         0,
         (2 * POS_SCALE) as i128,
@@ -302,12 +413,35 @@ fn v16_attack_matcher_context_replay_after_lp_close_reinit_rejects() {
     );
     assert!(
         replay.is_err(),
-        "LP close/reinit must not reset matcher freshness enough to replay stale ctx[0..64]: {replay:?}"
+        "same-pubkey portfolio/context recreation must not replay stale matcher output: {replay:?}"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
-    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
-    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+    assert_eq!(env.svm.get_account(&lp_account_key).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&context_key).unwrap(), ctx_before);
+
+    inv019_hostile_context_control(
+        &mut env,
+        matcher_program,
+        &lp,
+        context_key,
+        vec![11, 9, 0],
+        None,
+    );
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker,
+        taker_account,
+        &lp,
+        lp_account_key,
+        matcher_program,
+        context_key,
+        delegate,
+        0,
+        (2 * POS_SCALE) as i128,
+        100,
+    )
+    .expect("fresh matcher output remains live after stale replay rejection");
 }
 
 fn setup_hostile_matcher_cpi_env(

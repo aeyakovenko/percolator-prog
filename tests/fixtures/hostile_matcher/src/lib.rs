@@ -11,7 +11,7 @@ use solana_program::{
     program::{invoke, set_return_data},
     program_error::ProgramError,
     pubkey::Pubkey,
-    system_instruction,
+    system_instruction, system_program,
 };
 
 entrypoint!(process);
@@ -19,6 +19,90 @@ entrypoint!(process);
 const ABI: u32 = 3;
 const FLAG_VALID: u32 = 1;
 const FLAG_PARTIAL_OK: u32 = 2;
+const CONTROL_OWNER_OFFSET: usize = 66;
+const CONTROL_STATE_OFFSET: usize = CONTROL_OWNER_OFFSET + 32;
+const CONTROL_MIN_LEN: usize = CONTROL_STATE_OFFSET + 1;
+
+fn require_control_owner(
+    program_id: &Pubkey,
+    owner: &AccountInfo,
+    ctx: &AccountInfo,
+) -> ProgramResult {
+    if !owner.is_signer
+        || !ctx.is_writable
+        || ctx.owner != program_id
+        || ctx.data_len() < CONTROL_MIN_LEN
+    {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let data = ctx.try_borrow_data()?;
+    if data[CONTROL_STATE_OFFSET] != 1
+        || data[CONTROL_OWNER_OFFSET..CONTROL_STATE_OFFSET] != owner.key.as_ref()[..]
+    {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    drop(data);
+    Ok(())
+}
+
+fn process_control_init(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let owner = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let ctx = accounts.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    if !owner.is_signer
+        || !ctx.is_writable
+        || ctx.owner != program_id
+        || ctx.data_len() < CONTROL_MIN_LEN
+    {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let mut data = ctx.try_borrow_mut_data()?;
+    if data[CONTROL_STATE_OFFSET] != 0 {
+        return Err(ProgramError::AccountAlreadyInitialized);
+    }
+    data[64] = 9;
+    data[65] = 0;
+    data[CONTROL_OWNER_OFFSET..CONTROL_STATE_OFFSET].copy_from_slice(owner.key.as_ref());
+    data[CONTROL_STATE_OFFSET] = 1;
+    Ok(())
+}
+
+fn process_control_configure(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    if data.len() != 3 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let owner = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let ctx = accounts.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    require_control_owner(program_id, owner, ctx)?;
+    let mut ctx_data = ctx.try_borrow_mut_data()?;
+    ctx_data[64] = data[1];
+    ctx_data[65] = data[2];
+    Ok(())
+}
+
+fn process_control_close(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let owner = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let ctx = accounts.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    require_control_owner(program_id, owner, ctx)?;
+    let recipient = accounts.get(2).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    if !recipient.is_writable || recipient.key == ctx.key {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let ctx_lamports = ctx.lamports();
+    let recipient_lamports = recipient
+        .lamports()
+        .checked_add(ctx_lamports)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    **recipient.try_borrow_mut_lamports()? = recipient_lamports;
+    **ctx.try_borrow_mut_lamports()? = 0;
+    ctx.realloc(0, false)?;
+    ctx.assign(&system_program::ID);
+    Ok(())
+}
 
 // Build one crafted 64-byte MatcherReturn; `mode` perturbs exactly one field (default = honest fill).
 fn craft(
@@ -148,7 +232,7 @@ fn invoke_nested_return_writer(accounts: &[AccountInfo]) -> ProgramResult {
     )
 }
 
-fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     match data.first() {
         // Tag 0: single matcher call (67 bytes); write the crafted return into ctx[0..64].
         Some(&0) => {
@@ -221,6 +305,10 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
             }
             Ok(())
         }
+        // Test-only public lifecycle for same-pubkey context ABA coverage.
+        Some(&10) if data.len() == 1 => process_control_init(program_id, accounts),
+        Some(&11) => process_control_configure(program_id, accounts, data),
+        Some(&12) if data.len() == 1 => process_control_close(program_id, accounts),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
