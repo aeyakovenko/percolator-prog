@@ -6,7 +6,9 @@
 //! CPI tests reject program-owned matcher tails before CPI, stale matcher
 //! context replay across public same-pubkey context and LP close/reinit, zero-fill batch atomicity,
 //! and hostile single/batch matcher outputs that forge size, sign, asset, oracle, request id, LP id,
-//! price, or partial-fill flags. These tests exercise the deployed public
+//! price, or partial-fill flags. An eight-world stateful campaign composes both CPI routes in both
+//! orders across repeated public context incarnations, stale/no-write rollback, fresh retry, exit,
+//! OI cleanup, and custody reconciliation. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -471,7 +473,10 @@ fn setup_hostile_matcher_cpi_env(
     let lp_account = env.create_portfolio(&lp);
     env.deposit(&taker, taker_account, 1_000_000);
     env.deposit(&lp, lp_account, 1_000_000);
-    let ctx = Pubkey::new_unique();
+    let context = Keypair::new();
+    inv019_system_create_account(&mut env, &context, hostile, MATCHER_CONTEXT_LEN);
+    let ctx = context.pubkey();
+    inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![10], None);
     let delegate = matcher_delegate_key(
         &env.program_id,
         &env.market,
@@ -480,30 +485,6 @@ fn setup_hostile_matcher_cpi_env(
         &hostile,
         &ctx,
     );
-    env.svm
-        .set_account(
-            delegate,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![],
-                owner: Pubkey::default(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.svm
-        .set_account(
-            ctx,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![0u8; MATCHER_CONTEXT_LEN],
-                owner: hostile,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
     env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
     (
         env,
@@ -517,28 +498,336 @@ fn setup_hostile_matcher_cpi_env(
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Inv019CpiRoute {
+    Single,
+    Batch,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inv019_try_cpi_route(
+    env: &mut V16CuEnv,
+    taker_owner: &Keypair,
+    taker: Pubkey,
+    lp_owner: &Keypair,
+    lp: Pubkey,
+    matcher_program: Pubkey,
+    context: Pubkey,
+    delegate: Pubkey,
+    route: Inv019CpiRoute,
+    single_asset: u16,
+    size_q: i128,
+) -> Result<u64, String> {
+    match route {
+        Inv019CpiRoute::Single => env.try_trade_cpi_with_cu_on_asset(
+            taker_owner,
+            taker,
+            lp_owner,
+            lp,
+            matcher_program,
+            context,
+            delegate,
+            single_asset,
+            size_q,
+            100,
+        ),
+        Inv019CpiRoute::Batch => {
+            let legs = vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    market_id: first_generation_market_id(0),
+                    size_q,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 1,
+                    market_id: first_generation_market_id(1),
+                    size_q: -size_q,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+            ];
+            env.send(
+                env.batch_trade_cpi_ix(taker, lp, legs),
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker, false),
+                    AccountMeta::new(lp, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(context, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[taker_owner],
+            )
+        }
+    }
+}
+
+fn inv019_assert_flat(env: &V16CuEnv, taker: Pubkey, lp: Pubkey, label: &str) {
+    let taker_state = env.portfolio_state(taker);
+    let lp_state = env.portfolio_state(lp);
+    for asset_index in 0..2 {
+        assert!(
+            !has_active_leg_for_asset(&taker_state, asset_index),
+            "{label}: taker asset {asset_index} remains open"
+        );
+        assert!(
+            !has_active_leg_for_asset(&lp_state, asset_index),
+            "{label}: LP asset {asset_index} remains open"
+        );
+        let asset = &env.market_state().1.assets[asset_index];
+        assert_eq!(asset.oi_eff_long_q, 0, "{label}: long OI remains");
+        assert_eq!(asset.oi_eff_short_q, 0, "{label}: short OI remains");
+    }
+}
+
+#[test]
+fn v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi() {
+    const WORLD_COUNT: usize = 8;
+    for world in 0..WORLD_COUNT {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+        env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+        env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+        let matcher_program = Pubkey::new_unique();
+        env.svm.add_program(
+            matcher_program,
+            &std::fs::read(hostile_matcher_program_path()).unwrap(),
+        );
+
+        let taker_owner = Keypair::new();
+        let lp_owner = Keypair::new();
+        let taker = env.create_portfolio(&taker_owner);
+        let lp = env.create_portfolio(&lp_owner);
+        env.deposit(&taker_owner, taker, 50_000_000);
+        env.deposit(&lp_owner, lp, 50_000_000);
+
+        let context_account = Keypair::new();
+        inv019_system_create_account(
+            &mut env,
+            &context_account,
+            matcher_program,
+            MATCHER_CONTEXT_LEN,
+        );
+        let context = context_account.pubkey();
+        inv019_hostile_context_control(
+            &mut env,
+            matcher_program,
+            &lp_owner,
+            context,
+            vec![10],
+            None,
+        );
+        let delegate = matcher_delegate_key(
+            &env.program_id,
+            &env.market,
+            &lp,
+            &lp_owner.pubkey(),
+            &matcher_program,
+            &context,
+        );
+        env.set_matcher_config(matcher_program, &lp_owner, lp, context, delegate, 1);
+
+        let routes = if world % 2 == 0 {
+            [Inv019CpiRoute::Single, Inv019CpiRoute::Batch]
+        } else {
+            [Inv019CpiRoute::Batch, Inv019CpiRoute::Single]
+        };
+        let single_asset = (world % 2) as u16;
+        let size_q = ((world % 4 + 1) as i128) * POS_SCALE as i128;
+
+        for (step, route) in routes.into_iter().enumerate() {
+            let label = format!("world={world} step={step} route={route:?}");
+            inv019_hostile_context_control(
+                &mut env,
+                matcher_program,
+                &lp_owner,
+                context,
+                vec![11, 9, 0],
+                None,
+            );
+            let open_cu = inv019_try_cpi_route(
+                &mut env,
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                matcher_program,
+                context,
+                delegate,
+                route,
+                single_asset,
+                size_q,
+            )
+            .unwrap_or_else(|error| panic!("{label}: honest open failed: {error}"));
+            assert_cu_within(
+                &format!("{label} honest open"),
+                open_cu,
+                MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+            );
+            let close_cu = inv019_try_cpi_route(
+                &mut env,
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                matcher_program,
+                context,
+                delegate,
+                route,
+                single_asset,
+                -size_q,
+            )
+            .unwrap_or_else(|error| panic!("{label}: honest close failed: {error}"));
+            assert_cu_within(
+                &format!("{label} honest close"),
+                close_cu,
+                MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+            );
+            inv019_assert_flat(&env, taker, lp, &format!("{label} pre-recreate"));
+
+            let stale_req_id = env.market_state().0.matcher_req_seq;
+            let close_recipient = env.payer.pubkey();
+            inv019_hostile_context_control(
+                &mut env,
+                matcher_program,
+                &lp_owner,
+                context,
+                vec![12],
+                Some(close_recipient),
+            );
+            inv019_system_create_account(
+                &mut env,
+                &context_account,
+                matcher_program,
+                MATCHER_CONTEXT_LEN,
+            );
+            inv019_hostile_context_control(
+                &mut env,
+                matcher_program,
+                &lp_owner,
+                context,
+                vec![10],
+                None,
+            );
+            env.set_matcher_config(matcher_program, &lp_owner, lp, context, delegate, 1);
+            inv019_seed_hostile_single_response(
+                &mut env,
+                matcher_program,
+                context,
+                delegate,
+                stale_req_id,
+                single_asset,
+                100,
+                size_q,
+            );
+            inv019_hostile_context_control(
+                &mut env,
+                matcher_program,
+                &lp_owner,
+                context,
+                vec![11, 13, 1],
+                None,
+            );
+
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let taker_before = env.svm.get_account(&taker).unwrap();
+            let lp_before = env.svm.get_account(&lp).unwrap();
+            let context_before = env.svm.get_account(&context).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            env.svm.expire_blockhash();
+            let stale = inv019_try_cpi_route(
+                &mut env,
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                matcher_program,
+                context,
+                delegate,
+                route,
+                single_asset,
+                size_q,
+            );
+            assert!(
+                stale.is_err(),
+                "{label}: stale/no-write matcher output executed: {stale:?}"
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+            assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+            assert_eq!(env.svm.get_account(&context).unwrap(), context_before);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+            assert_eq!(env.market_state().0.matcher_req_seq, stale_req_id);
+
+            inv019_hostile_context_control(
+                &mut env,
+                matcher_program,
+                &lp_owner,
+                context,
+                vec![11, 9, 0],
+                None,
+            );
+            env.svm.expire_blockhash();
+            let retry_cu = inv019_try_cpi_route(
+                &mut env,
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                matcher_program,
+                context,
+                delegate,
+                route,
+                single_asset,
+                size_q,
+            )
+            .unwrap_or_else(|error| panic!("{label}: fresh retry failed: {error}"));
+            assert_cu_within(
+                &format!("{label} fresh retry"),
+                retry_cu,
+                MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+            );
+            let exit_cu = inv019_try_cpi_route(
+                &mut env,
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                matcher_program,
+                context,
+                delegate,
+                route,
+                single_asset,
+                -size_q,
+            )
+            .unwrap_or_else(|error| panic!("{label}: fresh exit failed: {error}"));
+            assert_cu_within(
+                &format!("{label} fresh exit"),
+                exit_cu,
+                MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+            );
+            inv019_assert_flat(&env, taker, lp, &format!("{label} post-retry"));
+            assert_eq!(env.market_state().0.matcher_req_seq, stale_req_id + 2);
+        }
+
+        let group = env.market_state().1;
+        assert_eq!(group.vault as u64, env.token_amount(env.vault));
+        assert_eq!(group.vault, group.c_tot + group.insurance);
+        assert_eq!(env.market_state().0.matcher_req_seq, 8);
+    }
+}
+
 #[test]
 fn v16_program_hostile_matcher_batch_returns_all_rejected() {
-    let (mut env, taker, _lp, taker_account, lp_account, hostile, ctx, delegate) =
+    let (mut env, taker, lp, taker_account, lp_account, hostile, ctx, delegate) =
         setup_hostile_matcher_cpi_env(2);
     let size_q = (5 * POS_SCALE) as i128;
     let send_mode = |env: &mut V16CuEnv,
                      mode: u8|
      -> (Result<u64, String>, Account, Account, Account, Account) {
-        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
-        data[0] = mode;
-        env.svm
-            .set_account(
-                ctx,
-                Account {
-                    lamports: 1_000_000_000,
-                    data,
-                    owner: hostile,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
+        inv019_hostile_context_control(env, hostile, &lp, ctx, vec![11, mode, 0], None);
         let market_before = env.svm.get_account(&env.market).unwrap();
         let taker_before = env.svm.get_account(&taker_account).unwrap();
         let lp_before = env.svm.get_account(&lp_account).unwrap();
@@ -620,40 +909,21 @@ fn v16_program_hostile_matcher_batch_returns_all_rejected() {
 #[test]
 fn v16_program_batch_tradecpi_uses_only_current_configured_matcher_return_data() {
     for (mode, nested_after_matcher) in [(17u8, false), (18u8, true)] {
-        let (mut env, taker, _lp, taker_account, lp_account, hostile, ctx, delegate) =
+        let (mut env, taker, lp, taker_account, lp_account, hostile, ctx, delegate) =
             setup_hostile_matcher_cpi_env(2);
         let fixture = std::fs::read(hostile_matcher_program_path()).unwrap();
         let nested_program = Pubkey::new_unique();
         env.svm.add_program(nested_program, &fixture);
-        let nested_ctx = Pubkey::new_unique();
-        let mut nested_ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
-        nested_ctx_data[0] = 9;
-        env.svm
-            .set_account(
-                nested_ctx,
-                Account {
-                    lamports: 1_000_000_000,
-                    data: nested_ctx_data,
-                    owner: nested_program,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-        let mut outer_ctx = vec![0u8; MATCHER_CONTEXT_LEN];
-        outer_ctx[0] = mode;
-        env.svm
-            .set_account(
-                ctx,
-                Account {
-                    lamports: 1_000_000_000,
-                    data: outer_ctx,
-                    owner: hostile,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
+        let nested_context = Keypair::new();
+        inv019_system_create_account(
+            &mut env,
+            &nested_context,
+            nested_program,
+            MATCHER_CONTEXT_LEN,
+        );
+        let nested_ctx = nested_context.pubkey();
+        inv019_hostile_context_control(&mut env, nested_program, &lp, nested_ctx, vec![10], None);
+        inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![11, mode, 0], None);
 
         let size_q = (5 * POS_SCALE) as i128;
         let market_before = env.svm.get_account(&env.market).unwrap();
@@ -725,7 +995,7 @@ fn v16_program_batch_tradecpi_uses_only_current_configured_matcher_return_data()
 
 #[test]
 fn v16_program_hostile_matcher_single_tradecpi_returns_all_rejected() {
-    let (mut env, taker, _lp, taker_account, lp_account, hostile, ctx, delegate) =
+    let (mut env, taker, lp, taker_account, lp_account, hostile, ctx, delegate) =
         setup_hostile_matcher_cpi_env(2);
     let size_q = (5 * POS_SCALE) as i128;
     let metas = |env: &V16CuEnv| {
@@ -742,20 +1012,7 @@ fn v16_program_hostile_matcher_single_tradecpi_returns_all_rejected() {
     let send_mode = |env: &mut V16CuEnv,
                      mode: u8|
      -> (Result<u64, String>, Account, Account, Account, Account) {
-        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
-        data[0] = mode;
-        env.svm
-            .set_account(
-                ctx,
-                Account {
-                    lamports: 1_000_000_000,
-                    data,
-                    owner: hostile,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
+        inv019_hostile_context_control(env, hostile, &lp, ctx, vec![11, mode, 0], None);
         let market_before = env.svm.get_account(&env.market).unwrap();
         let taker_before = env.svm.get_account(&taker_account).unwrap();
         let lp_before = env.svm.get_account(&lp_account).unwrap();
@@ -807,22 +1064,9 @@ fn v16_program_hostile_matcher_single_tradecpi_returns_all_rejected() {
 
 #[test]
 fn v16_program_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() {
-    let (mut env, taker, _lp, taker_account, lp_account, hostile, ctx, delegate) =
+    let (mut env, taker, lp, taker_account, lp_account, hostile, ctx, delegate) =
         setup_hostile_matcher_cpi_env(2);
-    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
-    ctx_data[64] = 13;
-    env.svm
-        .set_account(
-            ctx,
-            Account {
-                lamports: 1_000_000_000,
-                data: ctx_data,
-                owner: hostile,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
+    inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![11, 13, 0], None);
 
     let size_q = POS_SCALE as i128;
     let program_id = env.program_id;
@@ -889,23 +1133,9 @@ fn v16_program_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() 
 
 #[test]
 fn v16_program_hostile_matcher_no_write_cannot_replay_stale_single_context() {
-    let (mut env, taker, _lp, taker_account, lp_account, hostile, ctx, delegate) =
+    let (mut env, taker, lp, taker_account, lp_account, hostile, ctx, delegate) =
         setup_hostile_matcher_cpi_env(1);
-    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
-    ctx_data[0] = 9;
-    ctx_data[64] = 13;
-    env.svm
-        .set_account(
-            ctx,
-            Account {
-                lamports: 1_000_000_000,
-                data: ctx_data,
-                owner: hostile,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
+    inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![11, 13, 0], None);
 
     let size_q = POS_SCALE as i128;
     let program_id = env.program_id;
@@ -1524,7 +1754,10 @@ fn v16_attack_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     env.deposit(&taker, taker_account, 1_000_000);
     env.deposit(&lp, lp_account, 1_000_000);
 
-    let ctx = Pubkey::new_unique();
+    let context = Keypair::new();
+    inv019_system_create_account(&mut env, &context, hostile, MATCHER_CONTEXT_LEN);
+    let ctx = context.pubkey();
+    inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![10], None);
     let delegate = matcher_delegate_key(
         &env.program_id,
         &env.market,
@@ -1533,32 +1766,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_forward_taker_signer() {
         &hostile,
         &ctx,
     );
-    env.svm
-        .set_account(
-            delegate,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![],
-                owner: Pubkey::default(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
-    ctx_data[0] = 14; // hostile mode: transfer lamports from tail[0] to tail[1], then return valid fill.
-    env.svm
-        .set_account(
-            ctx,
-            Account {
-                lamports: 1_000_000_000,
-                data: ctx_data,
-                owner: hostile,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
+    inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![11, 14, 0], None);
     env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
 
     let recipient = Pubkey::new_unique();
@@ -1627,9 +1835,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_forward_taker_signer() {
         "hostile matcher must not receive lamports from the taker wallet"
     );
 
-    let mut honest_ctx = env.svm.get_account(&ctx).unwrap();
-    honest_ctx.data[0] = 9;
-    env.svm.set_account(ctx, honest_ctx).unwrap();
+    inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![11, 9, 0], None);
     env.svm.expire_blockhash();
     let ok = env.try_trade_cpi_with_cu_on_asset(
         &taker,
@@ -1779,7 +1985,10 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     env.deposit(&taker, taker_account, 1_000_000);
     env.deposit(&lp, lp_account, 1_000_000);
 
-    let ctx = Pubkey::new_unique();
+    let context = Keypair::new();
+    inv019_system_create_account(&mut env, &context, hostile, MATCHER_CONTEXT_LEN);
+    let ctx = context.pubkey();
+    inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![10], None);
     let delegate = matcher_delegate_key(
         &env.program_id,
         &env.market,
@@ -1788,32 +1997,7 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
         &hostile,
         &ctx,
     );
-    env.svm
-        .set_account(
-            delegate,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![],
-                owner: Pubkey::default(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
-    ctx_data[0] = 14;
-    env.svm
-        .set_account(
-            ctx,
-            Account {
-                lamports: 1_000_000_000,
-                data: ctx_data,
-                owner: hostile,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
+    inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![11, 14, 0], None);
     env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
 
     let recipient = Pubkey::new_unique();
@@ -1891,9 +2075,7 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
         "hostile batch matcher must not receive lamports from the taker wallet"
     );
 
-    let mut honest_ctx = env.svm.get_account(&ctx).unwrap();
-    honest_ctx.data[0] = 9;
-    env.svm.set_account(ctx, honest_ctx).unwrap();
+    inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![11, 9, 0], None);
     env.svm.expire_blockhash();
     let ok = env.send(
         env.batch_trade_cpi_ix(taker_account, lp_account, legs),
@@ -2041,7 +2223,10 @@ fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi(
     env.deposit(&taker, ta, 1_000_000);
     env.deposit(&lp, la, 1_000_000);
 
-    let ctx = Pubkey::new_unique();
+    let context = Keypair::new();
+    inv019_system_create_account(&mut env, &context, hostile, MATCHER_CONTEXT_LEN);
+    let ctx = context.pubkey();
+    inv019_hostile_context_control(&mut env, hostile, &lp, ctx, vec![10], None);
     let delegate = matcher_delegate_key(
         &env.program_id,
         &env.market,
@@ -2050,47 +2235,11 @@ fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi(
         &hostile,
         &ctx,
     );
-    env.svm
-        .set_account(
-            delegate,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![],
-                owner: Pubkey::default(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.svm
-        .set_account(
-            ctx,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![0u8; MATCHER_CONTEXT_LEN],
-                owner: hostile,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
     env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
 
     let send = |env: &mut V16CuEnv, legs: Vec<BatchTradeCpiLeg>| {
-        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
-        data[0] = 0; // hostile over-fill mode: if CPI occurs, validation fails InvalidAccountData.
-        env.svm
-            .set_account(
-                ctx,
-                Account {
-                    lamports: 1_000_000_000,
-                    data,
-                    owner: hostile,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
+        // Hostile over-fill mode: if CPI occurs, validation fails InvalidAccountData.
+        inv019_hostile_context_control(env, hostile, &lp, ctx, vec![11, 0, 0], None);
         env.svm.expire_blockhash();
         env.send(
             env.batch_trade_cpi_ix(ta, la, legs),
