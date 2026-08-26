@@ -378,6 +378,131 @@ fn v16_attack_live_insurance_asset_withdraw_uniform_for_asset0_and_permissionles
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
 
+#[test]
+fn v16_program_live_and_terminal_insurance_routes_share_one_finite_budget() {
+    const DOMAIN_BUDGETS: [u128; 4] = [11, 13, 17, 19];
+    const FUNDED: u128 = 60;
+    const LIVE_WITHDRAW: u128 = 7;
+    const TERMINAL_REMAINING: u128 = FUNDED - LIVE_WITHDRAW;
+
+    // None is the terminal market-wide route; Some(asset) is the terminal asset route.
+    // The plans cross both asset orders, each intra-asset domain boundary, and partial
+    // market-wide scans that stop within asset 0 or continue into asset 1.
+    let plans: Vec<(&str, Vec<(Option<u16>, u128)>)> = vec![
+        ("global-full", vec![(None, 53)]),
+        ("asset-forward", vec![(Some(0), 17), (Some(1), 36)]),
+        ("asset-reverse", vec![(Some(1), 36), (Some(0), 17)]),
+        (
+            "global-then-assets",
+            vec![(None, 5), (Some(0), 12), (Some(1), 36)],
+        ),
+        ("asset1-then-global", vec![(Some(1), 20), (None, 33)]),
+        ("asset0-then-global", vec![(Some(0), 8), (None, 45)]),
+        ("global-cross-asset", vec![(None, 18), (Some(1), 35)]),
+        (
+            "both-assets-then-global",
+            vec![(Some(1), 20), (Some(0), 17), (None, 16)],
+        ),
+    ];
+
+    for (world, plan) in plans {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+        let admin = env.admin.insecure_clone();
+        for (domain, amount) in DOMAIN_BUDGETS.into_iter().enumerate() {
+            env.top_up_insurance_domain_with_authority(&admin, domain as u16, amount);
+        }
+        let funded = env.market_state().1;
+        assert_eq!(funded.insurance, FUNDED, "{world}: aggregate funding");
+        assert_eq!(funded.vault, FUNDED, "{world}: engine funding");
+        assert_eq!(env.token_amount(env.vault), FUNDED as u64);
+
+        let (live_destination, live_cu) = env
+            .try_withdraw_insurance_asset_with_authority(&admin, 0, LIVE_WITHDRAW)
+            .expect("healthy live asset route must consume its finite budget");
+        assert_cu_within(
+            &format!("{world}: live insurance withdrawal"),
+            live_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(env.token_amount(live_destination), LIVE_WITHDRAW as u64);
+        let after_live = env.market_state().1;
+        assert_eq!(after_live.insurance, TERMINAL_REMAINING);
+        assert_eq!(after_live.vault, TERMINAL_REMAINING);
+        assert_eq!(after_live.insurance_domain_budget[0], 4);
+        assert_eq!(after_live.insurance_domain_budget[1], 13);
+
+        env.resolve();
+        let mut terminal_paid = 0u128;
+        for (route, amount) in plan {
+            let (destination, cu) = match route {
+                Some(asset_index) => env
+                    .try_withdraw_insurance_asset_with_authority(&admin, asset_index, amount)
+                    .expect("terminal asset route must consume the current domain budget"),
+                None => env.withdraw_terminal_insurance_with_authority(&admin, amount),
+            };
+            assert_cu_within(
+                &format!("{world}: terminal insurance withdrawal"),
+                cu,
+                CUSTODY_CU_LIMIT,
+            );
+            assert_eq!(env.token_amount(destination), amount as u64);
+            terminal_paid += amount;
+
+            let group = env.market_state().1;
+            let domain_remaining: u128 = group.insurance_domain_budget[..4].iter().sum();
+            let expected_remaining = TERMINAL_REMAINING - terminal_paid;
+            assert_eq!(group.insurance, expected_remaining, "{world}: insurance");
+            assert_eq!(group.vault, expected_remaining, "{world}: engine vault");
+            assert_eq!(
+                domain_remaining, expected_remaining,
+                "{world}: domain census"
+            );
+            assert_eq!(env.token_amount(env.vault), expected_remaining as u64);
+        }
+
+        assert_eq!(terminal_paid, TERMINAL_REMAINING, "{world}: exact drain");
+        let exhausted = env.market_state().1;
+        assert_eq!(exhausted.insurance, 0);
+        assert_eq!(exhausted.vault, 0);
+        assert!(exhausted.insurance_domain_budget[..4]
+            .iter()
+            .all(|amount| *amount == 0));
+
+        // Both public tags observe the same exhausted budget and reject atomically. A route
+        // transition cannot reset allowance or make the same insurance atom withdrawable twice.
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        assert!(env
+            .try_withdraw_insurance_asset_with_authority(&admin, 0, 1)
+            .is_err());
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+        let retry_destination = env.token_account(admin.pubkey(), 0);
+        let retry_destination_before = env.svm.get_account(&retry_destination).unwrap();
+        env.svm.expire_blockhash();
+        let terminal_retry = env.send(
+            ProgInstruction::WithdrawInsurance { amount: 1 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(retry_destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        );
+        assert!(terminal_retry.is_err(), "{world}: exhausted global retry");
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        assert_eq!(
+            env.svm.get_account(&retry_destination).unwrap(),
+            retry_destination_before
+        );
+    }
+}
+
 // security.md sweep — removed live-insurance policy tags (#6/#23): live insurance withdrawal is now
 // uniformly asset-scoped through tag 57. The old asset-0-only rate-limit tag and its policy-update tag
 // must reject raw instruction bytes without mutating state.
