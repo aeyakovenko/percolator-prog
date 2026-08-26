@@ -41,6 +41,11 @@ fn variant_body<'a>(instruction_enum: &'a str, variant: &str) -> &'a str {
 #[test]
 fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
     let source = include_str!("../../../src/v16_program.rs");
+    let public_generation_evidence =
+        include_str!("../public_sbf/inv_002_asset_generation_binding.rs");
+    let transaction_domain_evidence =
+        include_str!("../public_sbf/inv_006_program_chain_message_type_and_version_binding.rs");
+    let matcher_scope_evidence = include_str!("inv_012_capability_and_delegate_scope.rs");
     let instruction_enum =
         source_between(source, "pub enum Instruction {", "\n    impl Instruction {");
 
@@ -75,6 +80,22 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
         let body = source_between(source, leg, "\n    }");
         assert!(body.contains("market_id: u64"), "{leg} lost market_id");
     }
+
+    assert!(public_generation_evidence.contains(
+        "fn v16_program_stale_backing_earnings_withdrawal_rejects_across_asset_generation("
+    ));
+    assert!(transaction_domain_evidence
+        .contains("fn retained_transaction_binds_program_market_kind_schema_and_blockhash("));
+
+    let matcher_config = variant_body(instruction_enum, "SetMatcherConfig");
+    assert!(!matcher_config.contains("asset_index"));
+    assert!(!matcher_config.contains("market_id"));
+    assert!(matcher_scope_evidence
+        .contains("fn v16_program_matcher_capability_route_roster_binds_every_current_scope("));
+    assert!(
+        instruction_enum.contains("ClaimResolvedPayoutTopup,"),
+        "resolved claims remain permissionless current-state transitions without retained asset consent"
+    );
 
     for (handler, next) in [
         (
