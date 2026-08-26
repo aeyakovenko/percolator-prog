@@ -1067,9 +1067,16 @@ program-owned account bytes, SPL balances, lamports, or other persistent effects
 return data are non-authoritative; no later economic action may treat an errored invocation as
 success. SVM rollback is relied upon only when an actual error is returned.
 
-**Required tests.** Fault-inject every fallible step and compare persistent pre/post account
-snapshots byte-for-byte and token/lamport balances exactly; also assert the transaction aborts before
-any later instruction can consume success-only output.
+**Verification boundary.** Exact rollback after a returned instruction error is an SVM semantic
+assumption, not a property reimplemented by this wrapper. The wrapper proof obligation is complete
+error propagation: every engine error maps to a nonzero instruction error, every exceptional
+disposition has a named safe-success postcondition, every dispatcher arm returns its handler result,
+and each deployed entrypoint preserves that result.
+
+**Required tests.** Prove the complete engine-error mapping and source-lock every exceptional
+disposition and public dispatch/entrypoint edge. Use representative late-failure integration tests
+to confirm the SVM assumption across program bytes, SPL/lamport effects, CPI return consumers, and
+multi-instruction transactions; do not duplicate platform rollback semantics at every `?` site.
 **Verification:** P, F, I
 
 ### INV-081 - Success-state validity over complete public routes

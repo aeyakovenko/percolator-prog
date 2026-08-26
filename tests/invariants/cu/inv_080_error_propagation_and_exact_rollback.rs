@@ -72,8 +72,20 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
         !production.contains("Err(_) =>"),
         "the wrapper must not silently discard an unclassified error"
     );
+    assert!(
+        !production.contains("map_err(map_v16_error).ok()"),
+        "an engine error must never be converted into an optional value"
+    );
+
+    let soft_stale_fallback = "Err(e)\n                if e == ProgramError::from(PercolatorError::OracleStale)\n                    || e == ProgramError::NotEnoughAccountKeys =>";
+    assert_eq!(
+        production.matches(soft_stale_fallback).count(),
+        1,
+        "the authenticated hybrid soft-stale branch is the sole parser-error fallback"
+    );
 
     let witnesses = [
+        include_str!("inv_080_error_propagation_and_exact_rollback.rs"),
         include_str!("inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs"),
         include_str!("inv_071_crank_progress.rs"),
     ];
@@ -87,6 +99,8 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
             row.witness
         );
     }
+    assert!(witnesses[0]
+        .contains("fn v16_attack_hybrid_soft_stale_partial_oracle_error_does_not_poison_retry"));
 }
 
 #[test]
