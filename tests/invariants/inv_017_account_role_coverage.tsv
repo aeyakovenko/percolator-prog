@@ -28,7 +28,7 @@ tag	variant	status	evidence	remaining_gap
 42	CureAndCancelClose	OPEN	-	public close episode with optional-deposit custody tail
 43	ForfeitRecoveryLeg	OPEN	-	public Recovery episode three-account matrix
 44	RebalanceReduce	EXHAUSTIVE	v16_program_exit_and_maintenance_core_account_pairs_are_exhaustive	-
-45	FinalizeResetSide	OPEN	-	publicly reached ResetPending one-account writable matrix
+45	FinalizeResetSide	EXHAUSTIVE	v16_program_finalize_reset_side_account_roles_are_exhaustive	-
 46	ClaimResolvedPayoutTopup	EXHAUSTIVE	v16_program_custody_account_pairs_and_required_privileges_are_exhaustive	-
 48	SyncMaintenanceFee	EXHAUSTIVE	v16_program_exit_and_maintenance_core_account_pairs_are_exhaustive	-
 49	UpdateMaintenanceFeePolicy	EXHAUSTIVE	v16_program_two_account_policy_roles_are_exhaustive	-
@@ -51,4 +51,4 @@ tag	variant	status	evidence	remaining_gap
 66	BatchTradeNoCpi	EXHAUSTIVE	v16_program_direct_trade_account_pairs_and_required_privileges_are_exhaustive	-
 67	BatchTradeCpi	EXHAUSTIVE	v16_program_cpi_trade_account_pairs_and_required_privileges_are_exhaustive	-
 68	SetMatcherConfig	EXHAUSTIVE	v16_program_initialization_and_matcher_config_account_roles_are_exhaustive	-
-69	RestartAssetOracle	OPEN	-	public Recovery restart two-account matrix
+69	RestartAssetOracle	EXHAUSTIVE	v16_program_restart_asset_oracle_account_roles_are_exhaustive	-

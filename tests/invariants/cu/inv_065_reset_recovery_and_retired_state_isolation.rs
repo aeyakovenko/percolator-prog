@@ -6,8 +6,13 @@
 
 use super::*;
 
-#[test]
-fn v16_program_reset_pending_rejects_fresh_counterparty_and_completes_recovery() {
+pub(super) struct PublicEmptyLongResetPendingFixture {
+    pub(super) env: V16CuEnv,
+    pub(super) long_owner: Keypair,
+    pub(super) long: Pubkey,
+}
+
+pub(super) fn public_empty_long_reset_pending_fixture() -> PublicEmptyLongResetPendingFixture {
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         initial_price: 1,
         max_trading_fee_bps: 10,
@@ -74,6 +79,22 @@ fn v16_program_reset_pending_rejects_fresh_counterparty_and_completes_recovery()
     );
     assert_eq!(reset_pending_after_cleanup.stored_pos_count_long, 0);
     assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+
+    PublicEmptyLongResetPendingFixture {
+        env,
+        long_owner,
+        long,
+    }
+}
+
+#[test]
+fn v16_program_reset_pending_rejects_fresh_counterparty_and_completes_recovery() {
+    let PublicEmptyLongResetPendingFixture {
+        mut env,
+        long_owner,
+        long,
+    } = public_empty_long_reset_pending_fixture();
+    let reset_pending_after_cleanup = env.market_state().1.assets[0];
     let fresh_short_owner = Keypair::new();
     let fresh_short = env.create_portfolio(&fresh_short_owner);
     env.deposit(&fresh_short_owner, fresh_short, 20_000);

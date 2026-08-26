@@ -136,9 +136,9 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
         source_variants.iter().map(String::as_str).collect(),
         "every production instruction needs an INV-017 matrix disposition"
     );
-    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&35));
+    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&37));
     assert_eq!(status_counts.get("PARTIAL"), Some(&4));
-    assert_eq!(status_counts.get("OPEN"), Some(&11));
+    assert_eq!(status_counts.get("OPEN"), Some(&9));
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -286,6 +286,193 @@ fn v16_program_init_market_account_roles_are_exhaustive() {
     });
     assert_init_market_role_rejects_atomically("market writable downgrade", |accounts| {
         accounts[1].is_writable = false;
+    });
+}
+
+#[test]
+fn v16_program_finalize_reset_side_account_roles_are_exhaustive() {
+    let super::inv_065_reset_recovery_and_retired_state_isolation::PublicEmptyLongResetPendingFixture {
+        mut env,
+        ..
+    } = super::inv_065_reset_recovery_and_retired_state_isolation::public_empty_long_reset_pending_fixture();
+    let before = env.svm.get_account(&env.market).expect("market account");
+    let risk_epoch_before = env.market_state().1.risk_epoch;
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new_readonly(env.market, false)],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "FinalizeResetSide must reject its sole market role when readonly"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).expect("market account"),
+        before,
+        "readonly rejection must preserve the publicly reached ResetPending state exactly"
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("permissionless writable finalizer control");
+    let (_, finalized) = env.market_state();
+    assert_eq!(finalized.assets[0].mode_long, SideModeV16::Normal);
+    assert_eq!(finalized.risk_epoch, risk_epoch_before + 1);
+}
+
+struct RestartAssetOracleRoleFixture {
+    env: V16CuEnv,
+    authority: Keypair,
+    observation_sequence: u64,
+}
+
+fn restart_asset_oracle_role_fixture() -> RestartAssetOracleRoleFixture {
+    let mut env = V16CuEnv::new();
+    let authority = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&authority, 0, 2)
+        .expect("asset admin publicly shuts down empty asset");
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    let observation_sequence = next_control_sequence(env.control_sequences(0).oracle_observation);
+    env.svm.warp_to_slot(3);
+    RestartAssetOracleRoleFixture {
+        env,
+        authority,
+        observation_sequence,
+    }
+}
+
+fn restart_asset_oracle_role_instruction(
+    fixture: &RestartAssetOracleRoleFixture,
+) -> ProgInstruction {
+    ProgInstruction::RestartAssetOracle {
+        market_id: fixture.env.asset_market_id(0),
+        asset_index: 0,
+        now_slot: 3,
+        initial_price: 111,
+        observation_sequence: fixture.observation_sequence,
+    }
+}
+
+fn restart_asset_oracle_role_accounts(fixture: &RestartAssetOracleRoleFixture) -> Vec<AccountMeta> {
+    vec![
+        AccountMeta::new(fixture.authority.pubkey(), true),
+        AccountMeta::new(fixture.env.market, false),
+    ]
+}
+
+fn assert_restart_asset_oracle_role_rejects_atomically(
+    label: &str,
+    mutate: impl FnOnce(&mut [AccountMeta]),
+) {
+    let mut fixture = restart_asset_oracle_role_fixture();
+    let mut accounts = restart_asset_oracle_role_accounts(&fixture);
+    mutate(&mut accounts);
+    let market_before = fixture
+        .env
+        .svm
+        .get_account(&fixture.env.market)
+        .expect("market account");
+    let authority_before = fixture
+        .env
+        .svm
+        .get_account(&fixture.authority.pubkey())
+        .expect("authority account");
+    let authority_signature_required = accounts
+        .iter()
+        .any(|account| account.is_signer && account.pubkey == fixture.authority.pubkey());
+    let signers = authority_signature_required
+        .then_some(&fixture.authority)
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    fixture.env.svm.expire_blockhash();
+    let rejected = fixture.env.send(
+        restart_asset_oracle_role_instruction(&fixture),
+        accounts,
+        &signers,
+    );
+    assert!(
+        rejected.is_err(),
+        "{label}: aliased or underprivileged RestartAssetOracle unexpectedly succeeded"
+    );
+    assert_eq!(
+        fixture
+            .env
+            .svm
+            .get_account(&fixture.env.market)
+            .expect("market account"),
+        market_before,
+        "{label}: restart rejection must preserve the Recovery market exactly"
+    );
+    assert_eq!(
+        fixture
+            .env
+            .svm
+            .get_account(&fixture.authority.pubkey())
+            .expect("authority account"),
+        authority_before,
+        "{label}: restart rejection must preserve the authority account exactly"
+    );
+}
+
+#[test]
+fn v16_program_restart_asset_oracle_account_roles_are_exhaustive() {
+    let mut control = restart_asset_oracle_role_fixture();
+    let market_before = control
+        .env
+        .svm
+        .get_account(&control.env.market)
+        .expect("market account");
+    control.env.svm.expire_blockhash();
+    control
+        .env
+        .send(
+            restart_asset_oracle_role_instruction(&control),
+            restart_asset_oracle_role_accounts(&control),
+            &[&control.authority],
+        )
+        .expect("canonical RestartAssetOracle control");
+    assert_ne!(
+        control
+            .env
+            .svm
+            .get_account(&control.env.market)
+            .expect("market account"),
+        market_before,
+        "canonical restart must mutate the Recovery market"
+    );
+    let (_, restarted) = control.env.market_state();
+    assert_eq!(restarted.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(restarted.assets[0].effective_price, 111);
+
+    assert_restart_asset_oracle_role_rejects_atomically(
+        "alias authority with market",
+        |accounts| accounts[1].pubkey = accounts[0].pubkey,
+    );
+    assert_restart_asset_oracle_role_rejects_atomically("authority signer downgrade", |accounts| {
+        accounts[0].is_signer = false
+    });
+    assert_restart_asset_oracle_role_rejects_atomically("market writable downgrade", |accounts| {
+        accounts[1].is_writable = false
     });
 }
 
