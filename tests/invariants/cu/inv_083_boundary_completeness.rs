@@ -149,6 +149,7 @@ fn inv_083_boundary_profile(type_name: &str, field: &str, classification: &str) 
         return "rate";
     }
     if field == "mark_min_fee"
+        || field == "reduce_q"
         || field == "min_init_fee"
         || field == "max_init_fee"
         || field == "optional_deposit"
