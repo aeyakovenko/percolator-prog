@@ -216,4 +216,31 @@ fn v16_program_public_source_lien_classification_never_double_counts_insurance()
         insurance_only.market_valid_liened_insurance_num, 0,
         "rejected route must not consume reserved insurance",
     );
+
+    // This is an intentional API absence, not an untested public transition. The wrapper may
+    // serialize the engine-owned reservation fields, but it cannot create or mutate them. A new
+    // callsite makes the insurance-lien lifecycle publicly reachable and must reopen INV-033.
+    let wrapper = include_str!("../../../src/v16_program.rs");
+    for engine_method in [
+        "reserve_insurance_credit_not_atomic(",
+        "create_source_credit_lien_from_insurance_not_atomic(",
+        "release_source_credit_lien_from_insurance_not_atomic(",
+        "consume_source_credit_lien_from_insurance_not_atomic(",
+        "impair_source_credit_lien_from_insurance_not_atomic(",
+    ] {
+        assert_eq!(
+            wrapper.matches(engine_method).count(),
+            0,
+            "wrapper exposed engine-only insurance-lien method {engine_method}",
+        );
+    }
+
+    let lock = include_str!("../../../Cargo.lock");
+    assert!(
+        lock.contains(
+            "git+https://github.com/aeyakovenko/percolator?rev=b10b3454#\
+             b10b3454dd03dcf4c04a020dc1a90381ff179200"
+        ),
+        "INV-033 engine-contract evidence is bound to the exact certified engine pin",
+    );
 }
