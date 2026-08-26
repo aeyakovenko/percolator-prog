@@ -604,8 +604,18 @@ and within the configured reference-price deviation envelope. Per-account and pe
 transfer is computed and bounded; if the bound is unavailable or exceeded, no positive junior
 payout occurs.
 
+**Current-surface applicability.** Engine v16.9 reserves synthetic fallback pricing and the deployed
+wrapper exposes no fallback price, reference, deviation, envelope, or value-transfer-bound input.
+Recovery and abandoned-asset force close use the last stored authenticated effective price; junior
+forfeit paths do not synthesize a replacement price. Therefore the numeric fallback envelope is
+`N/A` for the current public transition system. The executable obligation is that no public wire or
+handler consumes the reserved fallback controls. Adding any such consumer immediately reopens the
+statement and all tests below before activation can rely on it.
+
 **Required tests.** Boundary prices, stale/unavailable reference, maximum positions, multiple
-accounts, and fallback just inside/outside the cap.
+accounts, and fallback just inside/outside the cap once the mechanism is implemented. While it is
+reserved, source-lock the public absence and prove existing Recovery routes use authenticated stored
+state without caller-selected pricing.
 **Verification:** P, F, I
 
 ### INV-043 - Hedge and correlation credit envelope

@@ -5,11 +5,13 @@
 //! atomically, and caller-selected close size is bounded by real exposure before
 //! value or OI can move.
 //!
-//! Evidence in this file (I/C): deployed LiteSVM public wrapper tests cover
+//! Evidence in this file (I/C plus a production-source absence guard): deployed LiteSVM public wrapper tests cover
 //! healthy-asset rejection, same-side pair rejection with a valid opposite-side
 //! control, oversized `close_q` clamping, and the authenticated shutdown-delay
-//! clock. This is partial envelope coverage; a complete per-account recovery
-//! price/value-transfer proof still belongs in the engine/spec layer.
+//! clock. Synthetic fallback pricing is reserved in the pinned engine: the public
+//! force-close wire carries no price and the handler trades only at the stored
+//! effective mark. A future fallback input or config consumer reopens the full
+//! price/value-transfer envelope.
 
 use super::*;
 
@@ -299,4 +301,53 @@ fn v16_program_force_close_cannot_bypass_timeout_with_future_now_slot() {
         ok.is_ok(),
         "force-close succeeds once the authenticated clock crosses the window: {ok:?}"
     );
+}
+
+#[test]
+fn v16_program_recovery_fallback_pricing_is_absent_and_force_close_uses_frozen_mark() {
+    let source = include_str!("../../../src/v16_program.rs");
+    let enum_start = source
+        .find("ForceCloseAbandonedAsset {")
+        .expect("force-close instruction variant");
+    let enum_tail = &source[enum_start..];
+    let enum_end = enum_tail.find("},").expect("force-close variant end") + 2;
+    let wire = &enum_tail[..enum_end];
+    assert!(wire.contains("asset_index: u16"));
+    assert!(wire.contains("now_slot: u64"));
+    assert!(wire.contains("close_q: u128"));
+    for forbidden in ["price", "reference", "deviation", "envelope"] {
+        assert!(
+            !wire.contains(forbidden),
+            "reserved fallback field {forbidden} became caller-controlled",
+        );
+    }
+
+    let handler_start = source
+        .find("fn handle_force_close_abandoned_asset")
+        .expect("force-close handler");
+    let handler_tail = &source[handler_start..];
+    let handler_end = handler_tail
+        .find("fn matcher_tail_start_or_verify_lp_config")
+        .expect("force-close handler end");
+    let handler = &handler_tail[..handler_end];
+    assert!(handler.contains("let frozen_mark = asset.effective_price.get();"));
+    assert!(handler.contains("exec_price: frozen_mark"));
+    assert!(handler.contains("if frozen_mark == 0 || frozen_mark > percolator::MAX_ORACLE_PRICE"));
+    for forbidden in [
+        "max_recovery_fallback_deviation_bps",
+        "recovery_fallback_price_enabled",
+        "recovery_fallback_envelope_enabled",
+        "fallback_recovery_price",
+    ] {
+        assert!(
+            !handler.contains(forbidden),
+            "reserved fallback control {forbidden} became active in force-close",
+        );
+    }
+
+    let lock = include_str!("../../../Cargo.lock");
+    assert!(lock.contains(
+        "git+https://github.com/aeyakovenko/percolator?rev=b10b3454#\
+         b10b3454dd03dcf4c04a020dc1a90381ff179200"
+    ));
 }
