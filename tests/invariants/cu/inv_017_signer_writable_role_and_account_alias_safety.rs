@@ -13,8 +13,10 @@
 //! Flat close, unilateral reduction, maintenance sync, and both permissionless-crank account shapes
 //! add 19 core-account pairs and 17 required downgrades. Both market and asset-oracle authority
 //! handoffs add all six account-pair aliases, four required-signature downgrades, and two required-
-//! writable downgrades from valid two-signer mutation controls. Accepted self-cranker, unsigned
-//! no-reward-crank, and readonly reward-cranker cases have explicit economic controls.
+//! writable downgrades from valid two-signer mutation controls. Portfolio initialization and both
+//! matcher-configuration shapes add 21 account-pair aliases and seven required privilege
+//! downgrades. Accepted self-cranker, unsigned no-reward-crank, and readonly reward-cranker cases
+//! have explicit economic controls.
 //!
 //! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
 //! it is not an exhaustive pairwise account-meta proof for every instruction.
@@ -1212,6 +1214,84 @@ fn authority_handoff_alias_fixture(route: AuthorityHandoffAliasRoute) -> CoreAcc
     }
 }
 
+fn init_portfolio_alias_fixture() -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    let portfolio = env.program_account(env.portfolio_account_len);
+    let accounts = vec![
+        AccountMeta::new(owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+    ];
+    let tracked_accounts = vec![env.market, portfolio];
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![owner],
+        instruction: ProgInstruction::InitPortfolio,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MatcherConfigAliasRoute {
+    Disabled,
+    Enabled,
+}
+
+impl MatcherConfigAliasRoute {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "SetMatcherConfig disabled",
+            Self::Enabled => "SetMatcherConfig enabled",
+        }
+    }
+}
+
+fn matcher_config_alias_fixture(route: MatcherConfigAliasRoute) -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let mut accounts = vec![
+        AccountMeta::new(owner.pubkey(), true),
+        AccountMeta::new_readonly(env.market, false),
+        AccountMeta::new(portfolio, false),
+    ];
+    let enabled = match route {
+        MatcherConfigAliasRoute::Disabled => 0,
+        MatcherConfigAliasRoute::Enabled => {
+            let matcher_program = Pubkey::new_unique();
+            let matcher_bytes =
+                std::fs::read(matcher_program_path()).expect("read matcher program");
+            env.svm.add_program(matcher_program, &matcher_bytes);
+            let (matcher_context, matcher_delegate, _) =
+                env.init_matcher_context(matcher_program, portfolio);
+            accounts.extend([
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new_readonly(matcher_context, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
+            ]);
+            1
+        }
+    };
+    let instruction = ProgInstruction::SetMatcherConfig {
+        portfolio_id: env.portfolio_id(portfolio),
+        expected_sequence: env.portfolio_matcher_sequence(portfolio),
+        enabled,
+        trade_fee_cap_bps: if enabled == 0 { 0 } else { 10_000 },
+    };
+    let mut tracked_accounts = vec![env.market, portfolio];
+    tracked_accounts.extend(accounts.iter().skip(3).map(|account| account.pubkey));
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![owner],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
 #[test]
 fn v16_program_authority_handoff_account_pairs_and_privileges_are_exhaustive() {
     for route in [
@@ -1227,6 +1307,41 @@ fn v16_program_authority_handoff_account_pairs_and_privileges_are_exhaustive() {
             || authority_handoff_alias_fixture(route),
         );
     }
+}
+
+#[test]
+fn v16_program_initialization_and_matcher_config_account_roles_are_exhaustive() {
+    assert_core_account_alias_matrix(
+        "InitPortfolio",
+        &["owner", "market", "portfolio"],
+        &[0],
+        &[1, 2],
+        &[],
+        init_portfolio_alias_fixture,
+    );
+    assert_core_account_alias_matrix(
+        MatcherConfigAliasRoute::Disabled.label(),
+        &["owner", "market", "portfolio"],
+        &[0],
+        &[2],
+        &[],
+        || matcher_config_alias_fixture(MatcherConfigAliasRoute::Disabled),
+    );
+    assert_core_account_alias_matrix(
+        MatcherConfigAliasRoute::Enabled.label(),
+        &[
+            "owner",
+            "market",
+            "portfolio",
+            "matcher_program",
+            "matcher_context",
+            "matcher_delegate",
+        ],
+        &[0],
+        &[2],
+        &[],
+        || matcher_config_alias_fixture(MatcherConfigAliasRoute::Enabled),
+    );
 }
 
 #[test]
