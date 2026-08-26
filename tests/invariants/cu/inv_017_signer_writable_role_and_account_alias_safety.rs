@@ -27,6 +27,119 @@
 
 use super::*;
 
+fn inv017_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing source marker {marker}"));
+    let open = start
+        + source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("missing opening brace after {marker}"));
+    let mut depth = 0i32;
+    for (offset, character) in source[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[(open + 1)..(open + offset)];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated source block after {marker}");
+}
+
+fn inv017_instruction_variants(source: &str) -> std::collections::BTreeSet<String> {
+    inv017_braced_block_after(source, "pub enum Instruction")
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if !line.as_bytes().first()?.is_ascii_uppercase() {
+                return None;
+            }
+            line.split(|character| character == '{' || character == ',')
+                .next()
+                .map(str::trim)
+                .filter(|variant| !variant.is_empty())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn v16_program_account_role_matrix_roster_is_source_complete() {
+    let production = include_str!("../../../src/v16_program.rs");
+    let source_variants = inv017_instruction_variants(production);
+    assert_eq!(
+        source_variants.len(),
+        50,
+        "production instruction roster drift"
+    );
+
+    let public_registry = include_str!("../public_instruction_coverage.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty() && !line.starts_with("tag\t"))
+        .map(|line| {
+            let fields = line.splitn(5, '\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 5, "malformed public registry row: {line}");
+            (fields[0].parse::<u8>().expect("numeric tag"), fields[1])
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let test_source = include_str!("inv_017_signer_writable_role_and_account_alias_safety.rs");
+    let mut roster = std::collections::BTreeMap::new();
+    let mut status_counts = std::collections::BTreeMap::<&str, usize>::new();
+    for line in include_str!("../inv_017_account_role_coverage.tsv").lines() {
+        if line.starts_with('#') || line.is_empty() || line.starts_with("tag\t") {
+            continue;
+        }
+        let fields = line.splitn(5, '\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 5, "malformed INV-017 roster row: {line}");
+        let tag = fields[0].parse::<u8>().expect("numeric tag");
+        let variant = fields[1];
+        let status = fields[2];
+        let evidence = fields[3];
+        let gap = fields[4];
+        assert_eq!(public_registry.get(&tag), Some(&variant));
+        assert!(
+            roster.insert(variant, status).is_none(),
+            "duplicate {variant}"
+        );
+        *status_counts.entry(status).or_default() += 1;
+        match status {
+            "EXHAUSTIVE" => {
+                assert_eq!(gap, "-", "closed matrix {variant} must have no gap");
+                assert!(
+                    test_source.contains(&format!("fn {evidence}")),
+                    "closed matrix {variant} lacks executable evidence {evidence}"
+                );
+            }
+            "PARTIAL" => {
+                assert_ne!(evidence, "-");
+                assert_ne!(gap, "-");
+                assert!(test_source.contains(&format!("fn {evidence}")));
+            }
+            "OPEN" => {
+                assert_eq!(evidence, "-");
+                assert_ne!(gap, "-");
+            }
+            other => panic!("unknown INV-017 matrix status {other}"),
+        }
+    }
+    assert_eq!(
+        roster
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        source_variants.iter().map(String::as_str).collect(),
+        "every production instruction needs an INV-017 matrix disposition"
+    );
+    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&34));
+    assert_eq!(status_counts.get("PARTIAL"), Some(&4));
+    assert_eq!(status_counts.get("OPEN"), Some(&12));
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AliasSnapshot {
     market: Account,
