@@ -6,6 +6,9 @@
 //! reinit, foreign-account, alias, and non-rent-exempt paths roll back every program byte,
 //! lamport, and SPL-token effect exactly. The issue-404 regression creates the hostile account
 //! through the System Program in the same transaction; no program-owned state is injected.
+//! Finding-blind public lifecycles additionally prove active positions, source-backed claims,
+//! retained Recovery obligations, and bankruptcy residual ledgers cannot be discarded by close,
+//! while canonical cleanup and same-address reincarnation remain live and clean.
 
 use super::*;
 
@@ -19,6 +22,129 @@ fn inv021_init_portfolio_ix(env: &V16CuEnv, owner: Pubkey, portfolio: Pubkey) ->
         ],
         data: ProgInstruction::InitPortfolio.encode(),
     }
+}
+
+fn inv021_assert_close_rejects_exact_rollback(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    label: &str,
+) {
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let count_before = env.market_state().1.materialized_portfolio_count;
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        env.close_portfolio_ix(portfolio),
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[owner],
+    );
+    assert!(rejected.is_err(), "{label}: ClosePortfolio must reject");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "{label}: rejected close rolls back market bytes and lamports"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "{label}: rejected close rolls back portfolio bytes and lamports"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "{label}: rejected close rolls back SPL custody"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        count_before,
+        "{label}: rejected close does not deregister the portfolio"
+    );
+}
+
+fn inv021_reinitialize_closed_portfolio(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    old_portfolio_id: u64,
+    new_owner: &Keypair,
+) -> u64 {
+    let closed = env
+        .svm
+        .get_account(&portfolio)
+        .expect("closed account shell");
+    assert_eq!(closed.lamports, 0, "close sweeps the account rent");
+    assert!(closed.data.is_empty(), "close removes the old state bytes");
+
+    env.svm.expire_blockhash();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &portfolio, 1_000_000_000),
+        &[],
+    )
+    .expect("publicly re-fund the closed portfolio address");
+    env.ensure_signer_account(new_owner.pubkey());
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(new_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[new_owner],
+    )
+    .expect("publicly reinitialize the same portfolio address");
+
+    let new_portfolio_id = env.portfolio_id(portfolio);
+    assert!(
+        new_portfolio_id > old_portfolio_id,
+        "same-address reuse receives a fresh monotonic portfolio incarnation"
+    );
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(account.capital.get(), 0, "new incarnation has zero capital");
+    assert_eq!(account.pnl.get(), 0, "new incarnation has zero pnl");
+    assert_eq!(
+        account.reserved_pnl.get(),
+        0,
+        "new incarnation has no reservation"
+    );
+    assert_eq!(
+        account.fee_credits.get(),
+        0,
+        "new incarnation has no fee credit"
+    );
+    assert_eq!(
+        account.cancel_deposit_escrow.get(),
+        0,
+        "new incarnation has no close escrow"
+    );
+    assert!(
+        !resolved_receipt(&account).present,
+        "new incarnation has no resolved receipt"
+    );
+    assert!(
+        close_progress(&account).is_empty(),
+        "new incarnation has no close episode"
+    );
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&account)),
+        "new incarnation has no position"
+    );
+    assert!(
+        account
+            .source_domains
+            .iter()
+            .all(|source| !source.is_occupied()),
+        "new incarnation has no source claim"
+    );
+    new_portfolio_id
 }
 
 #[test]
@@ -294,47 +420,280 @@ fn v16_program_funded_close_rejects_exact_rollback_and_remains_withdrawable() {
     let portfolio = env.create_portfolio(&owner);
     env.deposit(&owner, portfolio, 400_000);
 
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
-    let vault_before = env.token_amount(env.vault);
     let capital_before = env.portfolio_state(portfolio).capital.get();
     assert!(capital_before > 0, "control portfolio is funded");
 
-    env.svm.expire_blockhash();
-    let rejected = env.send(
-        env.close_portfolio_ix(portfolio),
-        vec![
-            AccountMeta::new(owner.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(portfolio, false),
-        ],
-        &[&owner],
-    );
-    assert!(
-        rejected.is_err(),
-        "ClosePortfolio must reject while user capital remains",
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "funded-close reject rolls back market bytes and lamports",
-    );
-    assert_eq!(
-        env.svm.get_account(&portfolio).unwrap(),
-        portfolio_before,
-        "funded-close reject rolls back portfolio bytes and lamports",
-    );
-    assert_eq!(
-        env.token_amount(env.vault),
-        vault_before,
-        "funded-close reject leaves custody tokens untouched",
-    );
+    inv021_assert_close_rejects_exact_rollback(&mut env, &owner, portfolio, "funded portfolio");
 
     let dest = env.withdraw(&owner, portfolio, 400_000);
     assert_eq!(
         env.token_amount(dest),
         400_000,
         "owner can still withdraw after the rejected close",
+    );
+}
+
+#[test]
+fn v16_program_trade_and_source_claim_block_close_then_public_reuse_is_clean() {
+    const INITIAL_PRICE: u64 = 100;
+    const MARK_AFTER_MOVE: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const EXPECTED_PNL: u128 = 100;
+    const WINNING_DOMAIN: u16 = 1;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, WINNING_DOMAIN, 150, 10);
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    let old_portfolio_id = env.portfolio_id(winner);
+    env.deposit(&winner_owner, winner, 1_000);
+    env.deposit(&loser_owner, loser, 1_000);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    assert!(
+        has_active_leg_for_asset(&env.portfolio_state(winner), 0),
+        "control must hold a real public-route position"
+    );
+    inv021_assert_close_rejects_exact_rollback(&mut env, &winner_owner, winner, "active position");
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, MARK_AFTER_MOVE);
+    for portfolio in [loser, winner] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        -SIZE_Q,
+        MARK_AFTER_MOVE,
+        0,
+    );
+
+    let released = env.portfolio_state(winner);
+    assert!(
+        !has_active_leg_for_asset(&released, 0),
+        "inverse public trade flattens the position"
+    );
+    assert_eq!(
+        released.pnl.get(),
+        EXPECTED_PNL as i128,
+        "price movement creates the expected source-backed claim"
+    );
+    assert!(
+        released
+            .source_domains
+            .iter()
+            .any(|source| { source.is_occupied() && source.domain.get() == WINNING_DOMAIN as u32 }),
+        "the claim retains its source-domain attribution"
+    );
+    inv021_assert_close_rejects_exact_rollback(
+        &mut env,
+        &winner_owner,
+        winner,
+        "released source-backed claim",
+    );
+
+    env.convert_released_pnl_with_cu(&winner_owner, winner, EXPECTED_PNL);
+    let converted = env.portfolio_state(winner);
+    assert_eq!(
+        converted.pnl.get(),
+        0,
+        "conversion consumes the released claim"
+    );
+    assert!(
+        converted
+            .source_domains
+            .iter()
+            .all(|source| !source.is_occupied()),
+        "conversion clears all portfolio-local source attribution"
+    );
+    assert_eq!(
+        converted.capital.get(),
+        1_000 + EXPECTED_PNL,
+        "conversion credits only the backed claim"
+    );
+
+    env.withdraw(&winner_owner, winner, converted.capital.get());
+    env.close_portfolio_with_cu(&winner_owner, winner);
+    let new_owner = Keypair::new();
+    inv021_reinitialize_closed_portfolio(&mut env, winner, old_portfolio_id, &new_owner);
+    env.deposit(&new_owner, winner, 7);
+    assert_eq!(
+        env.portfolio_state(winner).capital.get(),
+        7,
+        "the reused address starts a clean economic lifecycle"
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "custody and engine stock reconcile after reject, cleanup, close, and reuse"
+    );
+}
+
+#[test]
+fn v16_program_recovery_leg_blocks_close_then_public_forfeit_allows_clean_reuse() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.configure_auth_mark_with_cu(0, 100);
+    let owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    let old_portfolio_id = env.portfolio_id(portfolio);
+    env.deposit(&owner, portfolio, 1_000_000);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        portfolio,
+        &counterparty_owner,
+        counterparty,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 0, 1, 0);
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery,
+        "public shutdown moves the exposed asset into Recovery"
+    );
+    assert!(
+        has_active_leg_for_asset(&env.portfolio_state(portfolio), 0),
+        "the owner retains a real Recovery obligation"
+    );
+    inv021_assert_close_rejects_exact_rollback(&mut env, &owner, portfolio, "Recovery leg");
+
+    env.forfeit_recovery_leg_with_cu(&owner, portfolio, 0, u128::MAX);
+    env.forfeit_recovery_leg_with_cu(&counterparty_owner, counterparty, 0, u128::MAX);
+    assert!(
+        has_active_leg_for_asset(&env.portfolio_state(portfolio), 0),
+        "forfeit retains reset-weight accounting until the side epoch finalizes"
+    );
+    inv021_assert_close_rejects_exact_rollback(
+        &mut env,
+        &owner,
+        portfolio,
+        "retained Recovery obligation",
+    );
+
+    for side in [0u8, 1] {
+        env.finalize_reset_side_with_cu(0, side);
+    }
+    for target in [portfolio, counterparty] {
+        for _ in 0..4 {
+            if !has_active_leg_for_asset(&env.portfolio_state(target), 0) {
+                break;
+            }
+            env.crank_if_actionable(
+                target,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+    }
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(portfolio), 0),
+        "bounded public cranks release the owner's finalized Recovery obligation"
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(counterparty), 0),
+        "bounded public cranks release the counterparty's finalized Recovery obligation"
+    );
+    let capital = env.portfolio_state(portfolio).capital.get();
+    env.withdraw(&owner, portfolio, capital);
+    env.close_portfolio_with_cu(&owner, portfolio);
+
+    let new_owner = Keypair::new();
+    inv021_reinitialize_closed_portfolio(&mut env, portfolio, old_portfolio_id, &new_owner);
+    env.deposit(&new_owner, portfolio, 11);
+    assert_eq!(
+        env.portfolio_state(portfolio).capital.get(),
+        11,
+        "Recovery cleanup leaves no state in the next incarnation"
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "recovery cleanup and same-address reuse preserve custody reconciliation"
+    );
+}
+
+#[test]
+fn v16_program_active_residual_ledger_blocks_close_while_public_crank_progresses() {
+    let PublicActiveCloseFixture {
+        mut env,
+        loss_owner,
+        loss,
+        ..
+    } = public_asset1_bankrupt_close_fixture();
+    let close_before = close_progress(&env.portfolio_state(loss));
+    assert!(
+        close_before.active && close_before.residual_remaining > 0,
+        "public bankruptcy fixture must carry a nonterminal residual ledger"
+    );
+    inv021_assert_close_rejects_exact_rollback(
+        &mut env,
+        &loss_owner,
+        loss,
+        "active residual close ledger",
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let loss_before = env.svm.get_account(&loss).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let progressed = env.crank_if_actionable(
+        loss,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(1),
+        },
+    );
+    assert!(
+        progressed.is_some(),
+        "a rejected close cannot consume or hide the permissionless continuation"
+    );
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before
+            || env.svm.get_account(&loss).unwrap() != loss_before,
+        "the accepted continuation changes economic state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "residual bookkeeping progress does not move SPL custody"
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "post-progress engine stock still equals real custody"
     );
 }
 
@@ -834,71 +1193,23 @@ fn v16_program_portfolio_reuse_after_close_is_clean() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
     let p = env.create_portfolio(&owner);
+    let old_portfolio_id = env.portfolio_id(p);
     env.deposit(&owner, p, 1_000);
-    // flatten then close.
     env.svm.expire_blockhash();
     env.withdraw(&owner, p, 1_000);
     env.close_portfolio_with_cu(&owner, p);
 
-    // Adversarial twist: re-fund the SAME address with the OLD (possibly stale) bytes still present,
-    // simulating a reuse where the closed account's data was not zeroed. Re-init must overwrite it.
-    let stale = env
-        .svm
-        .get_account(&p)
-        .map(|a| a.data.clone())
-        .unwrap_or_else(|| vec![0u8; env.portfolio_account_len]);
-    env.svm
-        .set_account(
-            p,
-            Account {
-                lamports: 1_000_000_000,
-                data: stale, // whatever close left behind
-                owner: env.program_id,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
     let new_owner = Keypair::new();
-    env.ensure_signer_account(new_owner.pubkey());
+    inv021_reinitialize_closed_portfolio(&mut env, p, old_portfolio_id, &new_owner);
+
     env.svm.expire_blockhash();
-    let r = env.send(
-        ProgInstruction::InitPortfolio,
-        vec![
-            AccountMeta::new(new_owner.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(p, false),
-        ],
-        &[&new_owner],
+    env.deposit(&new_owner, p, 500);
+    assert_eq!(
+        env.portfolio_state(p).capital.get(),
+        500,
+        "fresh deposit credits exactly without a stale base"
     );
-    // Either re-init is rejected (account still considered live) OR it succeeds with a CLEAN slate.
-    if r.is_ok() {
-        let a = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap();
-        assert_eq!(
-            a.capital.get(),
-            0,
-            "reused portfolio starts with zero capital (no stale value)"
-        );
-        assert_eq!(a.pnl.get(), 0, "no stale pnl carried over");
-        assert!(
-            !resolved_receipt(&a).present,
-            "no stale resolved receipt carried over"
-        );
-        assert!(
-            percolator::active_bitmap_is_empty(active_bitmap(&a)),
-            "no stale positions"
-        );
-        // and a fresh deposit credits exactly the deposited amount.
-        env.svm.expire_blockhash();
-        env.deposit(&new_owner, p, 500);
-        let a2 = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap();
-        assert_eq!(
-            a2.capital.get(),
-            500,
-            "fresh deposit credits exactly 500 (no stale base)"
-        );
-    }
-    // conservation intact regardless.
+
     let (_, g) = env.market_state();
     assert_eq!(
         g.vault,
