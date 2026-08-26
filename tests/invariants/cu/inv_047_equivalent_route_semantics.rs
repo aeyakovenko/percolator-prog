@@ -6,7 +6,8 @@
 //! equivalence, batch end-state margin protection, and exact normalized sequential/batch position
 //! semantics across clear, lower-slot flip reuse, attach, and resize in one route. Legacy
 //! market-level insurance top-up is also compared with its exact two-domain expansion, including
-//! odd-atom rounding and all persisted bytes after replay-watermark normalization. These tests
+//! odd-atom rounding and all persisted bytes after replay-watermark normalization. Authority and
+//! permissionless stale resolution are byte-exact from the same matured snapshot. These tests
 //! exercise the deployed public wrapper with real SBF/LiteSVM account construction and assert
 //! economic state, token, rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -299,6 +300,42 @@ fn v16_program_legacy_insurance_topup_matches_explicit_domain_split() {
     assert_eq!(
         normalized_split_market, legacy_market,
         "all persisted market bytes except the replay watermark must match",
+    );
+}
+
+#[test]
+fn v16_program_authority_and_permissionless_resolution_match_at_maturity() {
+    const RESOLVE_SLOT: u64 = 3;
+
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(2, 1);
+    env.svm.warp_to_slot(RESOLVE_SLOT);
+    let live_market = env.svm.get_account(&env.market).unwrap();
+
+    let authority_cu = env.resolve();
+    assert_cu_within(
+        "authority market resolution",
+        authority_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let authority_market = env.svm.get_account(&env.market).unwrap();
+    let authority_state = env.market_state();
+    assert_eq!(authority_state.1.resolved_slot, RESOLVE_SLOT);
+
+    env.svm.set_account(env.market, live_market).unwrap();
+    let permissionless_cu = env.resolve_stale_permissionless_with_cu(RESOLVE_SLOT);
+    assert_cu_within(
+        "permissionless stale market resolution",
+        permissionless_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let permissionless_market = env.svm.get_account(&env.market).unwrap();
+    let permissionless_state = env.market_state();
+
+    assert_eq!(permissionless_state, authority_state);
+    assert_eq!(
+        permissionless_market, authority_market,
+        "both public resolution routes must commit the same persisted transition",
     );
 }
 
