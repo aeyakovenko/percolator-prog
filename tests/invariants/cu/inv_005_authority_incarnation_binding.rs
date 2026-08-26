@@ -2845,7 +2845,7 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
 // withdrawals move SPL custody out of the market's insurance/backing layers. Once
 // the market is resolve-matured, insurance, backing principal, and backing-provider
 // Per-asset oracle-authority isolation: PushAuthMark validates the signer against THE TARGET ASSET's
-// oracle_authority (handle_push_auth_mark reads asset_index's profile -> domain_authorities_from_profile ->
+// oracle_authority (handle_push_managed_mark reads asset_index's profile -> domain_authorities_from_profile ->
 // expect_live_authority, v16_program ~10188). A key that is a *valid* oracle_authority for asset 1 must NOT be
 // able to push asset 0's mark. Distinct from v16_attack_non_authority_cannot_push_auth_mark (random key): a
 // wrong-asset-index authority read would still reject a random key but WRONGLY ACCEPT asset-1's real authority.

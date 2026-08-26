@@ -5840,42 +5840,22 @@ pub mod processor {
         Ok(())
     }
 
-    fn control_sequence(
-        sequences: &state::AssetControlSequencesV16,
-        lane: ControlSequenceLane,
-    ) -> u64 {
-        match lane {
-            ControlSequenceLane::OracleObservation => sequences.oracle_observation,
-            ControlSequenceLane::BackingFeeLong => sequences.backing_fee_long,
-            ControlSequenceLane::BackingFeeShort => sequences.backing_fee_short,
-            ControlSequenceLane::TradeFee => sequences.trade_fee,
-            ControlSequenceLane::LiquidationFee => sequences.liquidation_fee,
-            ControlSequenceLane::MaintenanceFee => sequences.maintenance_fee,
-            ControlSequenceLane::FeeRedirect => sequences.fee_redirect,
-            ControlSequenceLane::MarketInitFee => sequences.market_init_fee,
-            ControlSequenceLane::PermissionlessResolve => sequences.permissionless_resolve,
-            ControlSequenceLane::InsuranceTopUp => sequences.insurance_top_up,
-            ControlSequenceLane::BackingTopUp => sequences.backing_top_up,
-        }
-    }
-
-    fn set_control_sequence(
+    fn control_sequence_mut(
         sequences: &mut state::AssetControlSequencesV16,
         lane: ControlSequenceLane,
-        value: u64,
-    ) {
+    ) -> &mut u64 {
         match lane {
-            ControlSequenceLane::OracleObservation => sequences.oracle_observation = value,
-            ControlSequenceLane::BackingFeeLong => sequences.backing_fee_long = value,
-            ControlSequenceLane::BackingFeeShort => sequences.backing_fee_short = value,
-            ControlSequenceLane::TradeFee => sequences.trade_fee = value,
-            ControlSequenceLane::LiquidationFee => sequences.liquidation_fee = value,
-            ControlSequenceLane::MaintenanceFee => sequences.maintenance_fee = value,
-            ControlSequenceLane::FeeRedirect => sequences.fee_redirect = value,
-            ControlSequenceLane::MarketInitFee => sequences.market_init_fee = value,
-            ControlSequenceLane::PermissionlessResolve => sequences.permissionless_resolve = value,
-            ControlSequenceLane::InsuranceTopUp => sequences.insurance_top_up = value,
-            ControlSequenceLane::BackingTopUp => sequences.backing_top_up = value,
+            ControlSequenceLane::OracleObservation => &mut sequences.oracle_observation,
+            ControlSequenceLane::BackingFeeLong => &mut sequences.backing_fee_long,
+            ControlSequenceLane::BackingFeeShort => &mut sequences.backing_fee_short,
+            ControlSequenceLane::TradeFee => &mut sequences.trade_fee,
+            ControlSequenceLane::LiquidationFee => &mut sequences.liquidation_fee,
+            ControlSequenceLane::MaintenanceFee => &mut sequences.maintenance_fee,
+            ControlSequenceLane::FeeRedirect => &mut sequences.fee_redirect,
+            ControlSequenceLane::MarketInitFee => &mut sequences.market_init_fee,
+            ControlSequenceLane::PermissionlessResolve => &mut sequences.permissionless_resolve,
+            ControlSequenceLane::InsuranceTopUp => &mut sequences.insurance_top_up,
+            ControlSequenceLane::BackingTopUp => &mut sequences.backing_top_up,
         }
     }
 
@@ -5886,8 +5866,9 @@ pub mod processor {
         proposed: u64,
     ) -> ProgramResult {
         let mut sequences = read_control_sequences_from_view(group, asset_index)?;
-        state::require_newer_control_sequence(control_sequence(&sequences, lane), proposed)?;
-        set_control_sequence(&mut sequences, lane, proposed);
+        let current = control_sequence_mut(&mut sequences, lane);
+        state::require_newer_control_sequence(*current, proposed)?;
+        *current = proposed;
         write_control_sequences_to_view(group, asset_index, &sequences)
     }
 
@@ -5916,6 +5897,35 @@ pub mod processor {
         cfg.oracle_leg_feeds = [[0u8; 32]; constants::ORACLE_LEG_CAP];
         cfg.oracle_leg_prices_e6 = [0u64; constants::ORACLE_LEG_CAP];
         cfg.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
+    }
+
+    #[inline(never)]
+    fn mirror_oracle_profile_to_base_config(
+        cfg: &mut WrapperConfigV16,
+        profile: &state::AssetOracleProfileV16,
+        refresh_liveness: bool,
+    ) {
+        cfg.oracle_mode = profile.oracle_mode;
+        cfg.oracle_leg_count = profile.oracle_leg_count;
+        cfg.oracle_leg_flags = profile.oracle_leg_flags;
+        cfg.invert = profile.invert;
+        cfg.unit_scale = profile.unit_scale;
+        cfg.conf_filter_bps = profile.conf_filter_bps;
+        cfg.max_staleness_secs = profile.max_staleness_secs;
+        cfg.hybrid_soft_stale_slots = profile.hybrid_soft_stale_slots;
+        cfg.mark_ewma_e6 = profile.mark_ewma_e6;
+        cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
+        cfg.mark_ewma_halflife_slots = profile.mark_ewma_halflife_slots;
+        cfg.mark_min_fee = profile.mark_min_fee;
+        cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
+        cfg.oracle_target_publish_time = profile.oracle_target_publish_time;
+        if refresh_liveness {
+            cfg.last_good_oracle_slot =
+                core::cmp::max(cfg.last_good_oracle_slot, profile.last_good_oracle_slot);
+        }
+        cfg.oracle_leg_feeds = profile.oracle_leg_feeds;
+        cfg.oracle_leg_prices_e6 = profile.oracle_leg_prices_e6;
+        cfg.oracle_leg_publish_times = profile.oracle_leg_publish_times;
     }
 
     fn preserve_backing_fee_policy(
@@ -6940,19 +6950,19 @@ pub mod processor {
             Instruction::UpdateLiquidationFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
-            } => handle_update_liquidation_fee_policy(
+            } => handle_update_market_authority_policy(
                 program_id,
                 accounts,
-                cranker_share_bps,
+                MarketAuthorityPolicyUpdate::LiquidationCrankerShare(cranker_share_bps),
                 policy_sequence,
             ),
             Instruction::UpdateMaintenanceFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
-            } => handle_update_maintenance_fee_policy(
+            } => handle_update_market_authority_policy(
                 program_id,
                 accounts,
-                cranker_share_bps,
+                MarketAuthorityPolicyUpdate::MaintenanceCrankerShare(cranker_share_bps),
                 policy_sequence,
             ),
             Instruction::UpdateBackingFeePolicy {
@@ -6982,19 +6992,19 @@ pub mod processor {
             Instruction::UpdateFeeRedirectPolicy {
                 redirect_bps,
                 policy_sequence,
-            } => handle_update_fee_redirect_policy(
+            } => handle_update_market_authority_policy(
                 program_id,
                 accounts,
-                redirect_bps,
+                MarketAuthorityPolicyUpdate::FeeRedirect(redirect_bps),
                 policy_sequence,
             ),
             Instruction::UpdateMarketInitFeePolicy {
                 min_init_fee,
                 policy_sequence,
-            } => handle_update_market_init_fee_policy(
+            } => handle_update_market_authority_policy(
                 program_id,
                 accounts,
-                min_init_fee,
+                MarketAuthorityPolicyUpdate::MarketInitFee(min_init_fee),
                 policy_sequence,
             ),
             Instruction::WithdrawBackingBucketEarnings {
@@ -7084,9 +7094,10 @@ pub mod processor {
                 now_slot,
                 mark_e6,
                 observation_sequence,
-            } => handle_push_ewma_mark(
+            } => handle_push_managed_mark(
                 program_id,
                 accounts,
+                ManagedMarkKind::Ewma,
                 asset_index,
                 market_id,
                 now_slot,
@@ -7114,9 +7125,10 @@ pub mod processor {
                 now_slot,
                 mark_e6,
                 observation_sequence,
-            } => handle_push_auth_mark(
+            } => handle_push_managed_mark(
                 program_id,
                 accounts,
+                ManagedMarkKind::Authority,
                 asset_index,
                 market_id,
                 now_slot,
@@ -12372,42 +12384,59 @@ pub mod processor {
             .map_err(map_v16_error)
     }
 
-    #[inline(never)]
-    fn handle_update_liquidation_fee_policy<'a>(
-        program_id: &Pubkey,
-        accounts: &'a [AccountInfo<'a>],
-        cranker_share_bps: u16,
-        policy_sequence: u64,
-    ) -> ProgramResult {
-        let admin = account(accounts, 0)?;
-        let market_ai = account(accounts, 1)?;
-        expect_signer(admin)?;
-        expect_writable(market_ai)?;
-        expect_owner(market_ai, program_id)?;
-        if cranker_share_bps > 10_000 {
-            return Err(PercolatorError::InvalidInstruction.into());
+    #[derive(Clone, Copy)]
+    enum MarketAuthorityPolicyUpdate {
+        LiquidationCrankerShare(u16),
+        MaintenanceCrankerShare(u16),
+        FeeRedirect(u16),
+        MarketInitFee(u128),
+    }
+
+    impl MarketAuthorityPolicyUpdate {
+        fn validate(self) -> ProgramResult {
+            match self {
+                Self::LiquidationCrankerShare(value)
+                | Self::MaintenanceCrankerShare(value)
+                | Self::FeeRedirect(value) => {
+                    if value > 10_000 {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
+                }
+                Self::MarketInitFee(value) => {
+                    let _ = amount_to_u64(value)?;
+                }
+            }
+            Ok(())
         }
-        let mut data = market_ai.try_borrow_mut_data()?;
-        let cfg_after = {
-            let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-            expect_live_authority(&cfg.marketauth, admin.key)?;
-            advance_control_sequence_view(
-                &mut group,
-                0,
-                ControlSequenceLane::LiquidationFee,
-                policy_sequence,
-            )?;
-            cfg.liquidation_cranker_fee_share_bps = cranker_share_bps;
-            cfg
-        };
-        state::write_wrapper_config(&mut data, &cfg_after)
+
+        fn sequence_lane(self) -> ControlSequenceLane {
+            match self {
+                Self::LiquidationCrankerShare(_) => ControlSequenceLane::LiquidationFee,
+                Self::MaintenanceCrankerShare(_) => ControlSequenceLane::MaintenanceFee,
+                Self::FeeRedirect(_) => ControlSequenceLane::FeeRedirect,
+                Self::MarketInitFee(_) => ControlSequenceLane::MarketInitFee,
+            }
+        }
+
+        fn apply(self, cfg: &mut WrapperConfigV16) {
+            match self {
+                Self::LiquidationCrankerShare(value) => {
+                    cfg.liquidation_cranker_fee_share_bps = value;
+                }
+                Self::MaintenanceCrankerShare(value) => {
+                    cfg.maintenance_cranker_fee_share_bps = value;
+                }
+                Self::FeeRedirect(value) => cfg.fee_redirect_to_market_0_bps = value,
+                Self::MarketInitFee(value) => cfg.permissionless_market_init_fee = value,
+            }
+        }
     }
 
     #[inline(never)]
-    fn handle_update_maintenance_fee_policy<'a>(
+    fn handle_update_market_authority_policy<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        cranker_share_bps: u16,
+        update: MarketAuthorityPolicyUpdate,
         policy_sequence: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
@@ -12415,20 +12444,14 @@ pub mod processor {
         expect_signer(admin)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        if cranker_share_bps > 10_000 {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
+        update.validate()?;
+
         let mut data = market_ai.try_borrow_mut_data()?;
         let cfg_after = {
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
             expect_live_authority(&cfg.marketauth, admin.key)?;
-            advance_control_sequence_view(
-                &mut group,
-                0,
-                ControlSequenceLane::MaintenanceFee,
-                policy_sequence,
-            )?;
-            cfg.maintenance_cranker_fee_share_bps = cranker_share_bps;
+            advance_control_sequence_view(&mut group, 0, update.sequence_lane(), policy_sequence)?;
+            update.apply(&mut cfg);
             cfg
         };
         state::write_wrapper_config(&mut data, &cfg_after)
@@ -12584,66 +12607,6 @@ pub mod processor {
             cfg
         };
         state::write_wrapper_config(&mut market_data, &cfg_after)
-    }
-
-    #[inline(never)]
-    fn handle_update_fee_redirect_policy<'a>(
-        program_id: &Pubkey,
-        accounts: &'a [AccountInfo<'a>],
-        redirect_bps: u16,
-        policy_sequence: u64,
-    ) -> ProgramResult {
-        let admin = account(accounts, 0)?;
-        let market_ai = account(accounts, 1)?;
-        expect_signer(admin)?;
-        expect_writable(market_ai)?;
-        expect_owner(market_ai, program_id)?;
-        if redirect_bps > 10_000 {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        let mut data = market_ai.try_borrow_mut_data()?;
-        let cfg_after = {
-            let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-            expect_live_authority(&cfg.marketauth, admin.key)?;
-            advance_control_sequence_view(
-                &mut group,
-                0,
-                ControlSequenceLane::FeeRedirect,
-                policy_sequence,
-            )?;
-            cfg.fee_redirect_to_market_0_bps = redirect_bps;
-            cfg
-        };
-        state::write_wrapper_config(&mut data, &cfg_after)
-    }
-
-    #[inline(never)]
-    fn handle_update_market_init_fee_policy<'a>(
-        program_id: &Pubkey,
-        accounts: &'a [AccountInfo<'a>],
-        min_init_fee: u128,
-        policy_sequence: u64,
-    ) -> ProgramResult {
-        let admin = account(accounts, 0)?;
-        let market_ai = account(accounts, 1)?;
-        expect_signer(admin)?;
-        expect_writable(market_ai)?;
-        expect_owner(market_ai, program_id)?;
-        let _ = amount_to_u64(min_init_fee)?;
-        let mut data = market_ai.try_borrow_mut_data()?;
-        let cfg_after = {
-            let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-            expect_live_authority(&cfg.marketauth, admin.key)?;
-            advance_control_sequence_view(
-                &mut group,
-                0,
-                ControlSequenceLane::MarketInitFee,
-                policy_sequence,
-            )?;
-            cfg.permissionless_market_init_fee = min_init_fee;
-            cfg
-        };
-        state::write_wrapper_config(&mut data, &cfg_after)
     }
 
     #[inline(never)]
@@ -12860,25 +12823,7 @@ pub mod processor {
             )?;
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
-                cfg.last_good_oracle_slot =
-                    core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
-                cfg.oracle_mode = profile.oracle_mode;
-                cfg.oracle_leg_count = profile.oracle_leg_count;
-                cfg.oracle_leg_flags = profile.oracle_leg_flags;
-                cfg.invert = profile.invert;
-                cfg.unit_scale = profile.unit_scale;
-                cfg.conf_filter_bps = profile.conf_filter_bps;
-                cfg.max_staleness_secs = profile.max_staleness_secs;
-                cfg.hybrid_soft_stale_slots = profile.hybrid_soft_stale_slots;
-                cfg.mark_ewma_halflife_slots = profile.mark_ewma_halflife_slots;
-                cfg.mark_min_fee = profile.mark_min_fee;
-                cfg.oracle_leg_feeds = profile.oracle_leg_feeds;
-                cfg.oracle_leg_prices_e6 = profile.oracle_leg_prices_e6;
-                cfg.oracle_leg_publish_times = profile.oracle_leg_publish_times;
-                cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
-                cfg.oracle_target_publish_time = profile.oracle_target_publish_time;
-                cfg.mark_ewma_e6 = profile.mark_ewma_e6;
-                cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
+                mirror_oracle_profile_to_base_config(&mut cfg, &profile, true);
             }
             group.validate_shape().map_err(map_v16_error)?;
             cfg
@@ -12986,25 +12931,7 @@ pub mod processor {
             )?;
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
-                cfg.last_good_oracle_slot =
-                    core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
-                cfg.oracle_mode = profile.oracle_mode;
-                cfg.oracle_leg_count = 0;
-                cfg.oracle_leg_flags = 0;
-                cfg.invert = 0;
-                cfg.unit_scale = 0;
-                cfg.conf_filter_bps = 0;
-                cfg.max_staleness_secs = 0;
-                cfg.hybrid_soft_stale_slots = 0;
-                cfg.mark_ewma_e6 = profile.mark_ewma_e6;
-                cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
-                cfg.mark_ewma_halflife_slots = profile.mark_ewma_halflife_slots;
-                cfg.mark_min_fee = profile.mark_min_fee;
-                cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
-                cfg.oracle_target_publish_time = 0;
-                cfg.oracle_leg_feeds = [[0u8; 32]; constants::ORACLE_LEG_CAP];
-                cfg.oracle_leg_prices_e6 = [0u64; constants::ORACLE_LEG_CAP];
-                cfg.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
+                mirror_oracle_profile_to_base_config(&mut cfg, &profile, true);
             }
             group.validate_shape().map_err(map_v16_error)?;
             cfg
@@ -13109,25 +13036,7 @@ pub mod processor {
             // oracle/mark fields into the market-wide config (other code paths still read cfg for asset 0).
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
-                cfg.last_good_oracle_slot =
-                    core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
-                cfg.oracle_mode = profile.oracle_mode;
-                cfg.oracle_leg_count = 0;
-                cfg.oracle_leg_flags = 0;
-                cfg.invert = 0;
-                cfg.unit_scale = 0;
-                cfg.conf_filter_bps = 0;
-                cfg.max_staleness_secs = 0;
-                cfg.hybrid_soft_stale_slots = 0;
-                cfg.mark_ewma_e6 = profile.mark_ewma_e6;
-                cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
-                cfg.mark_ewma_halflife_slots = 0;
-                cfg.mark_min_fee = 0;
-                cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
-                cfg.oracle_target_publish_time = 0;
-                cfg.oracle_leg_feeds = [[0u8; 32]; constants::ORACLE_LEG_CAP];
-                cfg.oracle_leg_prices_e6 = [0u64; constants::ORACLE_LEG_CAP];
-                cfg.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
+                mirror_oracle_profile_to_base_config(&mut cfg, &profile, true);
             }
             group.validate_shape().map_err(map_v16_error)?;
             cfg
@@ -13135,10 +13044,50 @@ pub mod processor {
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg_after)
     }
 
+    #[derive(Clone, Copy)]
+    enum ManagedMarkKind {
+        Ewma,
+        Authority,
+    }
+
+    impl ManagedMarkKind {
+        fn accepts(self, profile: &state::AssetOracleProfileV16) -> bool {
+            match self {
+                Self::Ewma => oracle_v16::profile_is_ewma_mark(profile),
+                Self::Authority => oracle_v16::profile_is_auth_mark(profile),
+            }
+        }
+
+        fn next_mark(
+            self,
+            profile: &state::AssetOracleProfileV16,
+            reported_mark_e6: u64,
+            authenticated_slot: u64,
+        ) -> Result<u64, ProgramError> {
+            let next_mark = match self {
+                Self::Ewma => policy_v16::ewma_update(
+                    profile.mark_ewma_e6,
+                    reported_mark_e6,
+                    profile.mark_ewma_halflife_slots,
+                    profile.mark_ewma_last_slot,
+                    authenticated_slot,
+                    profile.mark_min_fee,
+                    profile.mark_min_fee,
+                ),
+                Self::Authority => reported_mark_e6,
+            };
+            if next_mark == 0 || next_mark > percolator::MAX_ORACLE_PRICE {
+                return Err(PercolatorError::OracleInvalid.into());
+            }
+            Ok(next_mark)
+        }
+    }
+
     #[inline(never)]
-    fn handle_push_ewma_mark<'a>(
+    fn handle_push_managed_mark<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        kind: ManagedMarkKind,
         asset_index: u16,
         expected_market_id: u64,
         now_slot: u64,
@@ -13172,7 +13121,7 @@ pub mod processor {
                 authenticated_slot,
             )?;
             require_asset_mark_pushable_view(&group, asset_index_usize)?;
-            if !oracle_v16::profile_is_ewma_mark(&profile) {
+            if !kind.accepts(&profile) {
                 return Err(PercolatorError::Unauthorized.into());
             }
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index_usize);
@@ -13188,23 +13137,7 @@ pub mod processor {
                 ControlSequenceLane::OracleObservation,
                 observation_sequence,
             )?;
-            let full_weight_fee = if profile.mark_min_fee == 0 {
-                0
-            } else {
-                profile.mark_min_fee
-            };
-            let next_mark = policy_v16::ewma_update(
-                profile.mark_ewma_e6,
-                mark_e6,
-                profile.mark_ewma_halflife_slots,
-                profile.mark_ewma_last_slot,
-                authenticated_slot,
-                full_weight_fee,
-                profile.mark_min_fee,
-            );
-            if next_mark == 0 || next_mark > percolator::MAX_ORACLE_PRICE {
-                return Err(PercolatorError::OracleInvalid.into());
-            }
+            let next_mark = kind.next_mark(&profile, mark_e6, authenticated_slot)?;
             if next_mark != profile.mark_ewma_e6 {
                 let asset_slot = group.markets[asset_index_usize]
                     .engine
@@ -13234,108 +13167,7 @@ pub mod processor {
                 .map_err(map_v16_error)?;
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
-                cfg.last_good_oracle_slot =
-                    core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
-                cfg.mark_ewma_e6 = profile.mark_ewma_e6;
-                cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
-                cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
-                cfg.oracle_target_publish_time = 0;
-            }
-            cfg
-        };
-        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg_after)
-    }
-
-    #[inline(never)]
-    fn handle_push_auth_mark<'a>(
-        program_id: &Pubkey,
-        accounts: &'a [AccountInfo<'a>],
-        asset_index: u16,
-        expected_market_id: u64,
-        now_slot: u64,
-        mark_e6: u64,
-        observation_sequence: u64,
-    ) -> ProgramResult {
-        let authority = account(accounts, 0)?;
-        let market_ai = account(accounts, 1)?;
-        expect_signer(authority)?;
-        expect_writable(market_ai)?;
-        expect_owner(market_ai, program_id)?;
-        if mark_e6 == 0 || mark_e6 > percolator::MAX_ORACLE_PRICE {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
-        let asset_index_usize = asset_index as usize;
-        let authenticated_slot = authenticated_slot_or_fallback(now_slot);
-        let cfg_after = {
-            let mut data = market_ai.try_borrow_mut_data()?;
-            let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-            if asset_index_usize >= group.header.config.max_market_slots.get() as usize {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
-            require_asset_generation_view(&group, asset_index_usize, expected_market_id)?;
-            let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            if group.header.mode != 0 {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            reject_non_base_oracle_update_after_global_resolve_matured(
-                &cfg,
-                asset_index_usize,
-                authenticated_slot,
-            )?;
-            require_asset_mark_pushable_view(&group, asset_index_usize)?;
-            if !oracle_v16::profile_is_auth_mark(&profile) {
-                return Err(PercolatorError::Unauthorized.into());
-            }
-            let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index_usize);
-            expect_live_authority(&authorities.oracle_authority, authority.key)?;
-            if authenticated_slot < profile.mark_ewma_last_slot
-                || authenticated_slot < group.header.current_slot.get()
-            {
-                return Err(PercolatorError::EngineStale.into());
-            }
-            advance_control_sequence_view(
-                &mut group,
-                asset_index_usize,
-                ControlSequenceLane::OracleObservation,
-                observation_sequence,
-            )?;
-            if mark_e6 != profile.mark_ewma_e6 {
-                let asset_slot = group.markets[asset_index_usize]
-                    .engine
-                    .asset
-                    .slot_last
-                    .get();
-                record_funding_mark_transition_view(
-                    &mut profile,
-                    asset_slot,
-                    mark_e6,
-                    authenticated_slot,
-                )?;
-                profile.mark_ewma_e6 = mark_e6;
-                profile.mark_ewma_last_slot = authenticated_slot;
-            }
-            profile.oracle_target_price_e6 = mark_e6;
-            profile.oracle_target_publish_time = 0;
-            profile.last_good_oracle_slot = authenticated_slot;
-            reset_price_move_remainder_on_target_change_view(
-                &mut profile,
-                &group,
-                asset_index_usize,
-                mark_e6,
-            )?;
-            group
-                .set_asset_raw_oracle_target_not_atomic(asset_index_usize, mark_e6)
-                .map_err(map_v16_error)?;
-            write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
-            if asset_index_usize == 0 {
-                cfg.last_good_oracle_slot =
-                    core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
-                cfg.mark_ewma_e6 = profile.mark_ewma_e6;
-                cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
-                cfg.mark_ewma_halflife_slots = 0;
-                cfg.mark_min_fee = 0;
-                cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
-                cfg.oracle_target_publish_time = 0;
+                mirror_oracle_profile_to_base_config(&mut cfg, &profile, true);
             }
             cfg
         };
