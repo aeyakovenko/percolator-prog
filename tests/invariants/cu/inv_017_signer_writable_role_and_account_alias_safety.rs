@@ -11,8 +11,12 @@
 //! insurance/backing ledger tails, terminal insurance with and without its ledger, plus publicly
 //! generated backing-earnings withdrawal, add 204 pairwise reserve-custody cases plus 59 required
 //! privilege downgrades from value-moving controls.
-//! Flat close, unilateral reduction, maintenance sync, and both permissionless-crank account shapes
-//! add 19 core-account pairs and 17 required downgrades. Both market and asset-oracle authority
+//! Flat close, unilateral reduction, public Recovery forfeit, public bankrupt-close cure,
+//! maintenance sync, and both permissionless-crank account shapes add 37 core-account pairs and 25
+//! required downgrades. The cure fixture reaches a cancellable close through public trade, mark,
+//! crank, and reduction transitions before exercising its SPL deposit tail. All legal one-, two-,
+//! and three-provider Hybrid-oracle tails add 19 pair aliases and six required downgrades from
+//! coherent authenticated controls. Both market and asset-oracle authority
 //! handoffs add all six account-pair aliases, four required-signature downgrades, and two required-
 //! writable downgrades from valid two-signer mutation controls. Portfolio initialization and both
 //! matcher-configuration shapes add 21 account-pair aliases and seven required privilege
@@ -137,9 +141,9 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
         source_variants.iter().map(String::as_str).collect(),
         "every production instruction needs an INV-017 matrix disposition"
     );
-    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&40));
+    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&43));
     assert_eq!(status_counts.get("PARTIAL"), Some(&2));
-    assert_eq!(status_counts.get("OPEN"), Some(&8));
+    assert_eq!(status_counts.get("OPEN"), Some(&5));
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -475,6 +479,181 @@ fn v16_program_restart_asset_oracle_account_roles_are_exhaustive() {
     assert_restart_asset_oracle_role_rejects_atomically("market writable downgrade", |accounts| {
         accounts[1].is_writable = false
     });
+}
+
+struct ConfigureHybridRoleFixture {
+    env: V16CuEnv,
+    authority: Keypair,
+    feeds: [[u8; 32]; 3],
+    oracle_accounts: Vec<Pubkey>,
+    observation_sequence: u64,
+}
+
+fn configure_hybrid_role_fixture(leg_count: usize) -> ConfigureHybridRoleFixture {
+    assert!((1..=3).contains(&leg_count));
+    let mut env = V16CuEnv::new();
+    let authority = env.admin.insecure_clone();
+    set_test_clock(&mut env, 1, 100);
+    let mut feeds = [[0u8; 32]; 3];
+    let mut oracle_accounts = Vec::with_capacity(leg_count);
+    for index in 0..leg_count {
+        feeds[index] = [0x91 + index as u8; 32];
+        oracle_accounts.push(env.set_pyth_price_with_conf(&feeds[index], 1_000_000, -6, 0, 100));
+    }
+    let observation_sequence = next_control_sequence(env.control_sequences(0).oracle_observation);
+    ConfigureHybridRoleFixture {
+        env,
+        authority,
+        feeds,
+        oracle_accounts,
+        observation_sequence,
+    }
+}
+
+fn configure_hybrid_role_instruction(fixture: &ConfigureHybridRoleFixture) -> ProgInstruction {
+    ProgInstruction::ConfigureHybridOracle {
+        market_id: fixture.env.asset_market_id(0),
+        asset_index: 0,
+        now_slot: 1,
+        now_unix_ts: 100,
+        oracle_leg_count: fixture.oracle_accounts.len() as u8,
+        oracle_leg_flags: 0,
+        max_staleness_secs: 60,
+        hybrid_soft_stale_slots: 3,
+        mark_ewma_halflife_slots: 1,
+        mark_min_fee: 0,
+        invert: 0,
+        unit_scale: 0,
+        conf_filter_bps: 0,
+        oracle_leg_feeds: fixture.feeds,
+        observation_sequence: fixture.observation_sequence,
+    }
+}
+
+fn configure_hybrid_role_accounts(fixture: &ConfigureHybridRoleFixture) -> Vec<AccountMeta> {
+    let mut accounts = vec![
+        AccountMeta::new(fixture.authority.pubkey(), true),
+        AccountMeta::new(fixture.env.market, false),
+    ];
+    accounts.extend(
+        fixture
+            .oracle_accounts
+            .iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+    accounts
+}
+
+fn configure_hybrid_role_snapshot(fixture: &ConfigureHybridRoleFixture) -> Vec<Account> {
+    std::iter::once(fixture.authority.pubkey())
+        .chain(std::iter::once(fixture.env.market))
+        .chain(fixture.oracle_accounts.iter().copied())
+        .map(|key| fixture.env.svm.get_account(&key).expect("tracked account"))
+        .collect()
+}
+
+fn assert_configure_hybrid_role_rejects_atomically(
+    leg_count: usize,
+    label: &str,
+    mutate: impl FnOnce(&mut [AccountMeta]),
+) {
+    let mut fixture = configure_hybrid_role_fixture(leg_count);
+    let mut accounts = configure_hybrid_role_accounts(&fixture);
+    mutate(&mut accounts);
+    let before = configure_hybrid_role_snapshot(&fixture);
+    let authority_signature_required = accounts
+        .iter()
+        .any(|account| account.is_signer && account.pubkey == fixture.authority.pubkey());
+    let signers = authority_signature_required
+        .then_some(&fixture.authority)
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    fixture.env.svm.expire_blockhash();
+    let rejected = fixture.env.send(
+        configure_hybrid_role_instruction(&fixture),
+        accounts,
+        &signers,
+    );
+    assert!(
+        rejected.is_err(),
+        "{leg_count}-leg {label}: hostile hybrid configuration unexpectedly succeeded"
+    );
+    assert_eq!(
+        configure_hybrid_role_snapshot(&fixture),
+        before,
+        "{leg_count}-leg {label}: rejection must preserve market, authority, and feeds exactly"
+    );
+}
+
+#[test]
+fn v16_program_configure_hybrid_oracle_account_roles_are_exhaustive() {
+    let mut total_pairs = 0usize;
+    for leg_count in 1..=3 {
+        let mut control = configure_hybrid_role_fixture(leg_count);
+        let before = control
+            .env
+            .svm
+            .get_account(&control.env.market)
+            .expect("market account");
+        control.env.svm.expire_blockhash();
+        control
+            .env
+            .send(
+                configure_hybrid_role_instruction(&control),
+                configure_hybrid_role_accounts(&control),
+                &[&control.authority],
+            )
+            .expect("canonical hybrid configuration control");
+        assert_ne!(
+            control
+                .env
+                .svm
+                .get_account(&control.env.market)
+                .expect("market account"),
+            before,
+            "{leg_count}-leg control must install a hybrid profile"
+        );
+        let profile = state::read_asset_oracle_profile(
+            &control
+                .env
+                .svm
+                .get_account(&control.env.market)
+                .expect("market account")
+                .data,
+            0,
+        )
+        .expect("hybrid profile");
+        assert_eq!(profile.oracle_leg_count as usize, leg_count);
+        assert_eq!(profile.oracle_target_price_e6, 1_000_000);
+
+        let role_names = std::iter::once("authority".to_owned())
+            .chain(std::iter::once("market".to_owned()))
+            .chain((0..leg_count).map(|index| format!("oracle_{index}")))
+            .collect::<Vec<_>>();
+        for first in 0..role_names.len() {
+            for second in (first + 1)..role_names.len() {
+                total_pairs += 1;
+                assert_configure_hybrid_role_rejects_atomically(
+                    leg_count,
+                    &format!("alias {} with {}", role_names[first], role_names[second]),
+                    |accounts| accounts[second].pubkey = accounts[first].pubkey,
+                );
+            }
+        }
+        assert_configure_hybrid_role_rejects_atomically(
+            leg_count,
+            "authority signer downgrade",
+            |accounts| accounts[0].is_signer = false,
+        );
+        assert_configure_hybrid_role_rejects_atomically(
+            leg_count,
+            "market writable downgrade",
+            |accounts| accounts[1].is_writable = false,
+        );
+    }
+    assert_eq!(total_pairs, 19);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1624,6 +1803,149 @@ fn rebalance_reduce_alias_fixture() -> CoreAccountAliasFixture {
     }
 }
 
+fn forfeit_recovery_alias_fixture() -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.configure_auth_mark_with_cu(0, 100);
+    let owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+    env.trade_with_cu(
+        &owner,
+        portfolio,
+        &counterparty_owner,
+        counterparty,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.svm.warp_to_slot(1);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 0, 1, 0);
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery,
+        "public shutdown must establish the Recovery fixture"
+    );
+    let instruction = ProgInstruction::ForfeitRecoveryLeg {
+        portfolio_id: env.portfolio_id(portfolio),
+        position_epoch: env.portfolio_position_epoch(portfolio),
+        asset_index: 0,
+        b_delta_budget: u128::MAX,
+    };
+    let accounts = vec![
+        AccountMeta::new(owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+    ];
+    let tracked_accounts = vec![env.market, portfolio, counterparty, env.vault];
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![owner],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+fn cure_and_cancel_close_alias_fixture() -> CoreAccountAliasFixture {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: 1_000_000,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let winner_owner = Keypair::new();
+    let loss_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loss = env.create_portfolio(&loss_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&winner_owner, winner, 1_000_000);
+    env.deposit(&loss_owner, loss, 161_600);
+    env.deposit(&cranker_owner, cranker, 1);
+    let position_q = (POS_SCALE as i128) * 3 / 4;
+    env.trade_with_cu(
+        &winner_owner,
+        winner,
+        &loss_owner,
+        loss,
+        position_q,
+        1_000_000,
+        0,
+    );
+    let mut mark = 1_000_000u64;
+    for slot in 1..=20 {
+        mark = mark * 10_500 / 10_000;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, mark);
+        env.crank_if_actionable(
+            cranker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let effective_price = env.market_state().1.assets[0].effective_price;
+    env.trade_with_cu(
+        &winner_owner,
+        winner,
+        &loss_owner,
+        loss,
+        -position_q,
+        effective_price,
+        0,
+    );
+    let close = close_progress(&env.portfolio_state(loss));
+    assert!(
+        close.active
+            && !close.canceled
+            && !close.finalized
+            && close.support_consumed == 0
+            && close.junior_face_burned == 0
+            && close.insurance_spent == 0
+            && close.b_loss_booked == 0
+            && close.explicit_loss_assigned == 0
+            && close.quantity_adl_applied_q == 0
+            && close.drift_consumed == 0
+            && close.residual_remaining != 0
+            && close.residual_remaining == close.gross_loss_at_close_start,
+        "public trade reduction must create a cancellable close: {close:?}"
+    );
+    let deposit = 100_000_000_000u128;
+    let source = env.token_account_for_mint(
+        env.mint,
+        loss_owner.pubkey(),
+        u64::try_from(deposit).expect("public close residual fits SPL atoms"),
+    );
+    let instruction = ProgInstruction::CureAndCancelClose {
+        portfolio_id: env.portfolio_id(loss),
+        position_epoch: env.portfolio_position_epoch(loss),
+        optional_deposit: deposit,
+    };
+    let accounts = vec![
+        AccountMeta::new(loss_owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(loss, false),
+        AccountMeta::new(source, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let tracked_accounts = vec![env.market, loss, winner, cranker, source, env.vault];
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![loss_owner],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
 fn sync_maintenance_alias_fixture(with_cranker: bool) -> CoreAccountAliasFixture {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 25,
@@ -2243,6 +2565,29 @@ fn v16_program_exit_and_maintenance_core_account_pairs_are_exhaustive() {
         &[1, 2],
         &[],
         rebalance_reduce_alias_fixture,
+    );
+    assert_core_account_alias_matrix(
+        "ForfeitRecoveryLeg",
+        &["owner", "market", "portfolio"],
+        &[0],
+        &[1, 2],
+        &[],
+        forfeit_recovery_alias_fixture,
+    );
+    assert_core_account_alias_matrix(
+        "CureAndCancelClose with public residual deposit",
+        &[
+            "owner",
+            "market",
+            "portfolio",
+            "source_token",
+            "vault",
+            "token_program",
+        ],
+        &[0],
+        &[1, 2, 3, 4],
+        &[],
+        cure_and_cancel_close_alias_fixture,
     );
     assert_core_account_alias_matrix(
         "SyncMaintenanceFee",
