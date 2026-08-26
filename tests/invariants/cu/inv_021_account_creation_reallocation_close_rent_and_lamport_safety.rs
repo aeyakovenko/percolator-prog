@@ -24,6 +24,70 @@ fn inv021_init_portfolio_ix(env: &V16CuEnv, owner: Pubkey, portfolio: Pubkey) ->
     }
 }
 
+#[test]
+fn v16_program_portfolio_shape_and_close_destination_are_closed_api() {
+    let close_wire = ProgInstruction::ClosePortfolio {
+        portfolio_id: 1,
+        expected_sequence: 2,
+        position_epoch: 3,
+    }
+    .encode();
+    assert_eq!(
+        close_wire.len(),
+        1 + 3 * core::mem::size_of::<u64>(),
+        "ClosePortfolio encodes only its tag and three incarnation fields; no destination exists"
+    );
+
+    let source = include_str!("../../../src/v16_program.rs");
+    assert_eq!(
+        source.matches("portfolio_ai.realloc(").count(),
+        3,
+        "every portfolio AccountInfo realloc callsite must remain source-owned"
+    );
+    for canonical_shape in [
+        "portfolio_ai.realloc(required_portfolio_len, true)?;",
+        "portfolio_ai.realloc(required, true)?;",
+        "portfolio_ai.realloc(0, false)?;",
+    ] {
+        assert!(
+            source.contains(canonical_shape),
+            "missing canonical portfolio shape transition: {canonical_shape}"
+        );
+    }
+
+    let close_handler = source
+        .split_once("fn handle_close_portfolio<'a>(")
+        .expect("ClosePortfolio handler")
+        .1
+        .split_once("enum InsuranceTopUpScope")
+        .expect("end of ClosePortfolio handler")
+        .0;
+    assert!(close_handler.contains("let market_ai = account(accounts, 1)?;"));
+    assert!(close_handler.contains("let portfolio_ai = account(accounts, 2)?;"));
+    assert!(!close_handler.contains("account(accounts, 3)?;"));
+    assert!(
+        close_handler.contains("close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?;")
+    );
+    assert_eq!(
+        source
+            .matches("close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?;")
+            .count(),
+        2,
+        "owner close and maintenance close must share the fixed market-slab destination"
+    );
+
+    let close_implementation = source
+        .split_once("fn close_portfolio_account_to_market_slab(")
+        .expect("portfolio close implementation")
+        .1
+        .split_once("fn ensure_portfolio_storage_for_market_slots(")
+        .expect("end of portfolio close implementation")
+        .0;
+    assert!(close_implementation.contains("portfolio_ai.realloc(0, false)?;"));
+    assert!(close_implementation.contains("**portfolio_ai.lamports.borrow_mut() = 0;"));
+    assert!(close_implementation.contains("**market_ai.lamports.borrow_mut() = market_ai"));
+}
+
 fn inv021_assert_close_rejects_exact_rollback(
     env: &mut V16CuEnv,
     owner: &Keypair,
