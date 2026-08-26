@@ -2,7 +2,7 @@
 # Status: EXHAUSTIVE covers every current account shape; PARTIAL names an uncovered dynamic shape;
 # OPEN has no generated pair/privilege matrix yet. Evidence is an INV-017 test function or '-'.
 tag	variant	status	evidence	remaining_gap
-0	InitMarket	OPEN	-	three-account initialization matrix
+0	InitMarket	EXHAUSTIVE	v16_program_init_market_account_roles_are_exhaustive	-
 1	InitPortfolio	EXHAUSTIVE	v16_program_initialization_and_matcher_config_account_roles_are_exhaustive	-
 3	Deposit	EXHAUSTIVE	v16_program_custody_account_pairs_and_required_privileges_are_exhaustive	-
 4	Withdraw	EXHAUSTIVE	v16_program_custody_account_pairs_and_required_privileges_are_exhaustive	-

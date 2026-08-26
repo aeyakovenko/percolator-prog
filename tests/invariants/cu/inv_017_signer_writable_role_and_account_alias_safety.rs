@@ -15,6 +15,7 @@
 //! handoffs add all six account-pair aliases, four required-signature downgrades, and two required-
 //! writable downgrades from valid two-signer mutation controls. Portfolio initialization and both
 //! matcher-configuration shapes add 21 account-pair aliases and seven required privilege
+//! downgrades. Fresh market initialization adds all three aliases and both required privilege
 //! downgrades. Both ledger synchronizers add six pair aliases and six privilege downgrades; all
 //! seven two-account fee/resolve policy routes add seven pair aliases and fourteen downgrades.
 //! Four managed-mark routes and two authority/lifecycle routes add six pair aliases and twelve
@@ -135,9 +136,157 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
         source_variants.iter().map(String::as_str).collect(),
         "every production instruction needs an INV-017 matrix disposition"
     );
-    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&34));
+    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&35));
     assert_eq!(status_counts.get("PARTIAL"), Some(&4));
-    assert_eq!(status_counts.get("OPEN"), Some(&12));
+    assert_eq!(status_counts.get("OPEN"), Some(&11));
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InitMarketRoleSnapshot {
+    admin: Account,
+    market: Account,
+    mint: Account,
+}
+
+struct InitMarketRoleFixture {
+    env: V16CuEnv,
+    admin: Keypair,
+    market: Keypair,
+}
+
+fn init_market_role_fixture() -> InitMarketRoleFixture {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let market = Keypair::new();
+    let market_len = state::market_account_len_for_capacity(
+        V16CuMarketParams::default().max_portfolio_assets as usize,
+    )
+    .expect("market account length");
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &market,
+        market_len,
+        env.program_id,
+    );
+    InitMarketRoleFixture { env, admin, market }
+}
+
+fn init_market_role_accounts(fixture: &InitMarketRoleFixture) -> Vec<AccountMeta> {
+    vec![
+        AccountMeta::new(fixture.admin.pubkey(), true),
+        AccountMeta::new(fixture.market.pubkey(), false),
+        AccountMeta::new_readonly(fixture.env.mint, false),
+    ]
+}
+
+fn init_market_role_snapshot(fixture: &InitMarketRoleFixture) -> InitMarketRoleSnapshot {
+    InitMarketRoleSnapshot {
+        admin: fixture
+            .env
+            .svm
+            .get_account(&fixture.admin.pubkey())
+            .expect("admin account"),
+        market: fixture
+            .env
+            .svm
+            .get_account(&fixture.market.pubkey())
+            .expect("market account"),
+        mint: fixture
+            .env
+            .svm
+            .get_account(&fixture.env.mint)
+            .expect("mint account"),
+    }
+}
+
+fn assert_init_market_role_rejects_atomically(
+    label: &str,
+    mutate: impl FnOnce(&mut [AccountMeta]),
+) {
+    let mut fixture = init_market_role_fixture();
+    let mut accounts = init_market_role_accounts(&fixture);
+    mutate(&mut accounts);
+    let before = init_market_role_snapshot(&fixture);
+    let admin_signature_required = accounts
+        .iter()
+        .any(|account| account.is_signer && account.pubkey == fixture.admin.pubkey());
+    let signers = admin_signature_required
+        .then_some(&fixture.admin)
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    fixture.env.svm.expire_blockhash();
+    let rejected = fixture.env.send(
+        init_market_instruction(&V16CuMarketParams::default()),
+        accounts,
+        &signers,
+    );
+    assert!(
+        rejected.is_err(),
+        "{label}: aliased or underprivileged InitMarket unexpectedly succeeded"
+    );
+    assert_eq!(
+        init_market_role_snapshot(&fixture),
+        before,
+        "{label}: rejected InitMarket must roll back all supplied account state exactly"
+    );
+}
+
+#[test]
+fn v16_program_init_market_account_roles_are_exhaustive() {
+    const ROLE_NAMES: [&str; 3] = ["admin", "market", "mint"];
+
+    let mut control = init_market_role_fixture();
+    let before = init_market_role_snapshot(&control);
+    control.env.svm.expire_blockhash();
+    control
+        .env
+        .send(
+            init_market_instruction(&V16CuMarketParams::default()),
+            init_market_role_accounts(&control),
+            &[&control.admin],
+        )
+        .expect("canonical InitMarket control");
+    assert_ne!(
+        init_market_role_snapshot(&control).market,
+        before.market,
+        "canonical control must initialize the fresh market account"
+    );
+    let initialized = control
+        .env
+        .svm
+        .get_account(&control.market.pubkey())
+        .expect("initialized market");
+    let (wrapper, group) = state::read_market(&initialized.data).expect("valid initialized market");
+    assert_eq!(wrapper.marketauth, control.admin.pubkey().to_bytes());
+    assert_eq!(wrapper.collateral_mint, control.env.mint.to_bytes());
+    assert_eq!(
+        group.assets[0].effective_price,
+        V16CuMarketParams::default().initial_price
+    );
+
+    let mut pair_count = 0usize;
+    for first in 0..ROLE_NAMES.len() {
+        for second in (first + 1)..ROLE_NAMES.len() {
+            pair_count += 1;
+            assert_init_market_role_rejects_atomically(
+                &format!("alias {} with {}", ROLE_NAMES[first], ROLE_NAMES[second]),
+                |accounts| accounts[second].pubkey = accounts[first].pubkey,
+            );
+        }
+    }
+    assert_eq!(
+        pair_count, 3,
+        "three InitMarket roles have exactly three pairs"
+    );
+
+    assert_init_market_role_rejects_atomically("admin signer downgrade", |accounts| {
+        accounts[0].is_signer = false;
+    });
+    assert_init_market_role_rejects_atomically("market writable downgrade", |accounts| {
+        accounts[1].is_writable = false;
+    });
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
