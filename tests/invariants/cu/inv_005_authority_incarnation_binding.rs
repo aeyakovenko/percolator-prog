@@ -17,6 +17,111 @@
 
 use super::*;
 
+fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing source marker {marker}"));
+    let open = start
+        + source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("missing opening brace after {marker}"));
+    let mut depth = 0i32;
+    for (offset, character) in source[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[(open + 1)..(open + offset)];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated source block after {marker}");
+}
+
+fn inv005_epoch_bearing_instruction_variants(source: &str) -> std::collections::BTreeSet<String> {
+    let body = inv005_braced_block_after(source, "pub enum Instruction");
+    let mut variants = std::collections::BTreeSet::new();
+    let mut current_name: Option<String> = None;
+    let mut current_body = String::new();
+    let mut depth = 0i32;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if depth == 0 {
+            let Some(first) = trimmed.as_bytes().first() else {
+                continue;
+            };
+            if !first.is_ascii_uppercase() {
+                continue;
+            }
+            let name = trimmed
+                .split(|character| character == '{' || character == ',')
+                .next()
+                .expect("variant name")
+                .trim()
+                .to_owned();
+            if trimmed.contains('{') {
+                current_name = Some(name);
+                current_body.clear();
+                depth = trimmed.matches('{').count() as i32 - trimmed.matches('}').count() as i32;
+                current_body.push_str(trimmed);
+                current_body.push('\n');
+                if depth == 0 && current_body.contains("authority_epoch") {
+                    if let Some(name) = current_name.take() {
+                        variants.insert(name);
+                    }
+                }
+            }
+            continue;
+        }
+
+        current_body.push_str(trimmed);
+        current_body.push('\n');
+        depth += trimmed.matches('{').count() as i32 - trimmed.matches('}').count() as i32;
+        if depth == 0 {
+            if current_body.contains("authority_epoch") {
+                variants.insert(current_name.take().expect("open variant name"));
+            } else {
+                current_name = None;
+            }
+        }
+    }
+    assert_eq!(depth, 0, "instruction variant parser ended inside a body");
+    variants
+}
+
+#[test]
+fn v16_program_authority_epoch_matrix_is_source_complete() {
+    let source = include_str!("../../../src/v16_program.rs");
+    let source_variants = inv005_epoch_bearing_instruction_variants(source);
+    let matrix_variants = crate::support::invariant_discovery::AuthorityIntentKind::ALL
+        .into_iter()
+        .map(|kind| kind.instruction_variant())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        source_variants
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        matrix_variants,
+        "every epoch-bearing production route needs a finding-blind A-to-B-to-A public matrix case"
+    );
+
+    let semantic_counts = crate::support::invariant_discovery::AuthorityIntentKind::ALL
+        .into_iter()
+        .fold(std::collections::BTreeMap::new(), |mut counts, kind| {
+            *counts.entry(kind.instruction_variant()).or_insert(0usize) += 1;
+            counts
+        });
+    assert_eq!(semantic_counts.get("UpdateAssetAuthority"), Some(&5));
+    assert!(semantic_counts
+        .iter()
+        .all(|(variant, count)| *variant == "UpdateAssetAuthority" || *count == 1));
+}
+
 #[test]
 fn v16_program_authority_handoffs_share_one_incoming_key_validator() {
     let production = include_str!("../../../src/v16_program.rs");
@@ -108,6 +213,7 @@ fn v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers() {
             policy_sequence: u64::MAX,
             stale_slots: 1,
             force_close_delay_slots: 1,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
@@ -229,6 +335,7 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
             asset_index: 1,
             now_slot: 5,
             initial_mark_e6: 300,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(old_creator.pubkey(), true),
@@ -255,6 +362,7 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
             asset_index: 1,
             now_slot: 5,
             initial_mark_e6: 300,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(new_oracle.pubkey(), true),
@@ -718,6 +826,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
         ProgInstruction::UpdateLiquidationFeePolicy {
             policy_sequence: u64::MAX,
             cranker_share_bps: 5_000,
+            authority_epoch: 0,
         },
         "liquidation policy replay",
     );
@@ -725,6 +834,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
         ProgInstruction::UpdateMaintenanceFeePolicy {
             policy_sequence: u64::MAX,
             cranker_share_bps: 4_000,
+            authority_epoch: 0,
         },
         "maintenance policy replay",
     );
@@ -732,6 +842,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
         ProgInstruction::UpdateFeeRedirectPolicy {
             policy_sequence: u64::MAX,
             redirect_bps: 2_000,
+            authority_epoch: 0,
         },
         "fee redirect replay",
     );
@@ -739,6 +850,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
         ProgInstruction::UpdateMarketInitFeePolicy {
             min_init_fee: 40,
             policy_sequence: u64::MAX,
+            authority_epoch: 0,
         },
         "permissionless init-fee replay",
     );
@@ -748,10 +860,12 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
             policy_sequence: u64::MAX,
             stale_slots: 100,
             force_close_delay_slots: 5,
+            authority_epoch: 0,
         },
         "permissionless resolve policy replay",
     );
 
+    let current_authority_epoch = env.control_sequences(0).authority_epoch;
     let mut new_update = |ix: ProgInstruction, label: &str| {
         env.svm.expire_blockhash();
         send_tx(
@@ -772,6 +886,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
         ProgInstruction::UpdateLiquidationFeePolicy {
             policy_sequence: u64::MAX,
             cranker_share_bps: 5_000,
+            authority_epoch: current_authority_epoch,
         },
         "liquidation policy update",
     );
@@ -779,6 +894,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
         ProgInstruction::UpdateMaintenanceFeePolicy {
             policy_sequence: u64::MAX,
             cranker_share_bps: 4_000,
+            authority_epoch: current_authority_epoch,
         },
         "maintenance policy update",
     );
@@ -786,6 +902,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
         ProgInstruction::UpdateFeeRedirectPolicy {
             policy_sequence: u64::MAX,
             redirect_bps: 2_000,
+            authority_epoch: current_authority_epoch,
         },
         "fee redirect update",
     );
@@ -793,6 +910,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
         ProgInstruction::UpdateMarketInitFeePolicy {
             min_init_fee: 40,
             policy_sequence: u64::MAX,
+            authority_epoch: current_authority_epoch,
         },
         "permissionless init-fee update",
     );
@@ -802,6 +920,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
             policy_sequence: u64::MAX,
             stale_slots: 100,
             force_close_delay_slots: 5,
+            authority_epoch: current_authority_epoch,
         },
         "permissionless resolve policy update",
     );
@@ -1434,6 +1553,7 @@ fn v16_attack_retire_asset_authority_gated() {
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -1516,6 +1636,7 @@ fn v16_attack_backing_fee_policy_authority_gated() {
             domain: 0,
             fee_bps: 77,
             insurance_share_bps: 5_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -1539,6 +1660,7 @@ fn v16_attack_backing_fee_policy_authority_gated() {
             domain: 0,
             fee_bps: 77,
             insurance_share_bps: 20_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -1599,6 +1721,7 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
             domain: 0,
             fee_bps: 91,
             insurance_share_bps: 5_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(asset1_insurance.pubkey(), true),
@@ -1627,6 +1750,7 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
             domain: 2,
             fee_bps: 91,
             insurance_share_bps: 5_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(asset1_insurance.pubkey(), true),
@@ -1686,6 +1810,7 @@ fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
         ProgInstruction::UpdateTradeFeePolicy {
             policy_sequence: u64::MAX,
             trade_fee_base_bps: 500,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -1704,6 +1829,7 @@ fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
     );
     assert_eq!(env.market_state().0.trade_fee_base_bps, 0);
 
+    let current_authority_epoch = env.control_sequences(0).authority_epoch;
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
@@ -1712,6 +1838,7 @@ fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
         ProgInstruction::UpdateTradeFeePolicy {
             policy_sequence: u64::MAX,
             trade_fee_base_bps: 500,
+            authority_epoch: current_authority_epoch,
         },
         vec![
             AccountMeta::new(new_insurance.pubkey(), true),
@@ -1805,7 +1932,8 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     assert!(
         attempt(ProgInstruction::UpdateTradeFeePolicy {
             policy_sequence: u64::MAX,
-            trade_fee_base_bps: 123
+            trade_fee_base_bps: 123,
+            authority_epoch: 0,
         })
         .is_err(),
         "asset-1 authority must not control the market-wide trade fee"
@@ -1813,7 +1941,8 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     assert!(
         attempt(ProgInstruction::UpdateFeeRedirectPolicy {
             policy_sequence: u64::MAX,
-            redirect_bps: 5_000
+            redirect_bps: 5_000,
+            authority_epoch: 0,
         })
         .is_err(),
         "asset-1 authority must not control market-0 fee redirect"
@@ -1822,6 +1951,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
         attempt(ProgInstruction::UpdateMarketInitFeePolicy {
             min_init_fee: 9,
             policy_sequence: u64::MAX,
+            authority_epoch: 0,
         })
         .is_err(),
         "asset-1 authority must not control permissionless init fee"
@@ -1829,7 +1959,8 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     assert!(
         attempt(ProgInstruction::UpdateLiquidationFeePolicy {
             policy_sequence: u64::MAX,
-            cranker_share_bps: 2_500
+            cranker_share_bps: 2_500,
+            authority_epoch: 0,
         })
         .is_err(),
         "asset-1 authority must not control global liquidation-fee policy"
@@ -1837,7 +1968,8 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     assert!(
         attempt(ProgInstruction::UpdateMaintenanceFeePolicy {
             policy_sequence: u64::MAX,
-            cranker_share_bps: 2_500
+            cranker_share_bps: 2_500,
+            authority_epoch: 0,
         })
         .is_err(),
         "asset-1 authority must not control global maintenance-fee policy"
@@ -1849,6 +1981,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
             domain: 0,
             fee_bps: 55,
             insurance_share_bps: 5_000,
+            authority_epoch: 0,
         })
         .is_err(),
         "asset-1 authority must not control market-0 backing-fee policy"
@@ -1895,6 +2028,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
             domain: 2,
             fee_bps: 111,
             insurance_share_bps: 5_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(creator.pubkey(), true),
@@ -2128,6 +2262,7 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 9_999_999,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -2158,6 +2293,7 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 150,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -2196,6 +2332,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
             initial_mark_e6: 200,
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -2224,6 +2361,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 200,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -2266,6 +2404,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
             unit_scale: 0,
             conf_filter_bps: 500,
             oracle_leg_feeds: feeds,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -2298,6 +2437,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
             initial_mark_e6: 200,
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -2815,6 +2955,7 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
             asset_index: 1,
             now_slot: 1,
             initial_mark_e6: 1_000_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -2945,6 +3086,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 9_999_999,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(a1.pubkey(), true),
@@ -2976,6 +3118,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 150,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3021,6 +3164,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 10,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(a1.pubkey(), true),
@@ -3044,6 +3188,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
             asset_index: 1,
             now_slot: 2,
             mark_e6: 150,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(a1.pubkey(), true),
@@ -3069,6 +3214,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 9_999_999,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(a1.pubkey(), true),
@@ -3099,6 +3245,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 150,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3155,6 +3302,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
                 asset_index: 0,
                 now_slot: 1,
                 initial_mark_e6: 250,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(a1.pubkey(), true),
@@ -3183,6 +3331,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
                 asset_index: 1,
                 now_slot: 1,
                 initial_mark_e6: 250,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(a1.pubkey(), true),
@@ -3220,6 +3369,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
                 initial_mark_e6: 250,
                 mark_ewma_halflife_slots: 10,
                 mark_min_fee: 0,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(a1.pubkey(), true),
@@ -3250,6 +3400,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
                 initial_mark_e6: 250,
                 mark_ewma_halflife_slots: 10,
                 mark_min_fee: 0,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(a1.pubkey(), true),
@@ -3300,6 +3451,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
                 unit_scale: 0,
                 conf_filter_bps: 500,
                 oracle_leg_feeds: feeds,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(a1.pubkey(), true),
@@ -3339,6 +3491,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
                 unit_scale: 0,
                 conf_filter_bps: 500,
                 oracle_leg_feeds: feeds,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(a1.pubkey(), true),
@@ -3387,6 +3540,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 110,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3436,6 +3590,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
             asset_index: 0,
             now_slot: 3,
             mark_e6: 120,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3453,6 +3608,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     );
 
     // NEW authority can push: rotation GRANTED control.
+    let current_authority_epoch = env.control_sequences(0).authority_epoch;
     env.svm.expire_blockhash();
     let r_new = env.send(
         ProgInstruction::PushAuthMark {
@@ -3461,6 +3617,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
             asset_index: 0,
             now_slot: 3,
             mark_e6: 120,
+            authority_epoch: current_authority_epoch,
         },
         vec![
             AccountMeta::new(newauth.pubkey(), true),
@@ -3972,6 +4129,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         ProgInstruction::UpdateTradeFeePolicy {
             policy_sequence: u64::MAX,
             trade_fee_base_bps: 500,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(old_marketauth.pubkey(), true),
@@ -3989,6 +4147,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         "rejected stale fee update leaves market bytes unchanged"
     );
 
+    let current_authority_epoch = env.control_sequences(0).authority_epoch;
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
@@ -3997,6 +4156,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         ProgInstruction::UpdateTradeFeePolicy {
             policy_sequence: u64::MAX,
             trade_fee_base_bps: 500,
+            authority_epoch: current_authority_epoch,
         },
         vec![
             AccountMeta::new(new_marketauth.pubkey(), true),
@@ -4020,6 +4180,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
             asset_index: 0,
             now_slot: 2,
             mark_e6: 777,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(old_marketauth.pubkey(), true),
@@ -4098,6 +4259,7 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
             asset_index: 0,
             now_slot: 0,
             initial_mark_e6: 999_999,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),

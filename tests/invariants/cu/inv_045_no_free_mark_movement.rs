@@ -843,6 +843,7 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
                 asset_index: 0,
                 now_slot: 5,
                 mark_e6: mark,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(env.admin.pubkey(), true),
@@ -994,6 +995,7 @@ fn v16_attack_ewma_mark_halflife_zero_safe() {
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 0,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -1206,6 +1208,7 @@ fn configure_max_shape_ewma_asset(
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
             observation_sequence,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),

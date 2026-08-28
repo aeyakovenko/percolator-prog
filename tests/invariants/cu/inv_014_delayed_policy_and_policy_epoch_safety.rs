@@ -41,6 +41,7 @@ fn v16_control_sequences_accept_gaps_reject_replays_and_keep_lanes_independent()
         ProgInstruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: 123,
             policy_sequence: 17,
+            authority_epoch: 0,
         },
     )
     .expect("a forward sequence gap must be accepted");
@@ -55,6 +56,7 @@ fn v16_control_sequences_accept_gaps_reject_replays_and_keep_lanes_independent()
             ProgInstruction::UpdateTradeFeePolicy {
                 trade_fee_base_bps: 999,
                 policy_sequence: stale_sequence,
+                authority_epoch: 0,
             },
         );
         assert!(
@@ -74,6 +76,7 @@ fn v16_control_sequences_accept_gaps_reject_replays_and_keep_lanes_independent()
         ProgInstruction::UpdateLiquidationFeePolicy {
             cranker_share_bps: 1_000,
             policy_sequence: 1,
+            authority_epoch: 0,
         },
     )
     .expect("an unrelated policy lane starts at its own sequence");
@@ -90,6 +93,7 @@ fn v16_control_sequences_accept_gaps_reject_replays_and_keep_lanes_independent()
         ProgInstruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: 321,
             policy_sequence: 1_000_000,
+            authority_epoch: 0,
         },
     )
     .expect("large forward gaps must remain valid for out-of-order landing");
@@ -112,6 +116,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
             observation_sequence: 2,
+            authority_epoch: 0,
         },
     )
     .expect("new EWMA control");
@@ -126,6 +131,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
             now_slot: 1,
             initial_mark_e6: 200,
             observation_sequence: 1,
+            authority_epoch: 0,
         },
     );
     assert!(
@@ -143,6 +149,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
             now_slot: 1,
             initial_mark_e6: 200,
             observation_sequence: 3,
+            authority_epoch: 0,
         },
     )
     .expect("newer authenticated-mark control");
@@ -175,6 +182,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
             conf_filter_bps: 500,
             oracle_leg_feeds: feeds,
             observation_sequence: 2,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -207,6 +215,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
             conf_filter_bps: 500,
             oracle_leg_feeds: feeds,
             observation_sequence: 4,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -229,6 +238,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
             observation_sequence: 3,
+            authority_epoch: 0,
         },
     );
     assert!(stale_ewma.is_err(), "stale EWMA control must reject");

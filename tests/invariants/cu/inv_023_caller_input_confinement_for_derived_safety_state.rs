@@ -417,13 +417,13 @@ fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes() {
     }
     assert_eq!(role_variants, production_variants);
 
-    // INV-083 owns the 206 field-boundary matrix. Source-lock the composition edge so
+    // INV-083 owns the 222 field-boundary matrix. Source-lock the composition edge so
     // its closure cannot silently disappear while INV-023 continues to claim it.
     assert!(inv023_source_contains_test(
         BOUNDARY_TESTS,
         "v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness",
     ));
-    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 206;"));
+    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 222;"));
     assert!(BOUNDARY_TESTS.contains("const EXPECTED_TYPE_COUNT: usize = 53;"));
 
     let dispatcher = inv023_dispatcher_source(PRODUCTION);
@@ -743,6 +743,9 @@ fn v16_program_caller_input_roster_owns_every_production_field() {
             }
             if field.ends_with("sequence") {
                 assert_eq!(classification, "REPLAY_GUARD");
+            }
+            if field.ends_with("_epoch") {
+                assert_eq!(classification, "IDENTITY_BINDING");
             }
             if matches!(field, "close_q" | "b_delta_budget") {
                 assert_eq!(classification, "BOUNDED_WORK");

@@ -713,6 +713,7 @@ fn v16_program_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
             asset_index: 1,
             now_slot: 40,
             mark_e6: 102,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(creator.pubkey(), true),
@@ -995,6 +996,7 @@ fn v16_attack_per_asset_funding_isolation() {
             initial_mark_e6: IP,
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),

@@ -3025,10 +3025,12 @@ pub mod ix {
         UpdateLiquidationFeePolicy {
             cranker_share_bps: u16,
             policy_sequence: u64,
+            authority_epoch: u64,
         },
         UpdateMaintenanceFeePolicy {
             cranker_share_bps: u16,
             policy_sequence: u64,
+            authority_epoch: u64,
         },
         UpdateBackingFeePolicy {
             domain: u16,
@@ -3036,18 +3038,22 @@ pub mod ix {
             fee_bps: u16,
             insurance_share_bps: u16,
             policy_sequence: u64,
+            authority_epoch: u64,
         },
         UpdateTradeFeePolicy {
             trade_fee_base_bps: u64,
             policy_sequence: u64,
+            authority_epoch: u64,
         },
         UpdateFeeRedirectPolicy {
             redirect_bps: u16,
             policy_sequence: u64,
+            authority_epoch: u64,
         },
         UpdateMarketInitFeePolicy {
             min_init_fee: u128,
             policy_sequence: u64,
+            authority_epoch: u64,
         },
         WithdrawBackingBucketEarnings {
             domain: u16,
@@ -3063,6 +3069,7 @@ pub mod ix {
             stale_slots: u64,
             force_close_delay_slots: u64,
             policy_sequence: u64,
+            authority_epoch: u64,
         },
         ResolveStalePermissionless {
             now_slot: u64,
@@ -3083,6 +3090,7 @@ pub mod ix {
             conf_filter_bps: u16,
             oracle_leg_feeds: [[u8; 32]; 3],
             observation_sequence: u64,
+            authority_epoch: u64,
         },
         ConfigureEwmaMark {
             asset_index: u16,
@@ -3092,6 +3100,7 @@ pub mod ix {
             mark_ewma_halflife_slots: u64,
             mark_min_fee: u64,
             observation_sequence: u64,
+            authority_epoch: u64,
         },
         PushEwmaMark {
             asset_index: u16,
@@ -3099,6 +3108,7 @@ pub mod ix {
             now_slot: u64,
             mark_e6: u64,
             observation_sequence: u64,
+            authority_epoch: u64,
         },
         ConfigureAuthMark {
             asset_index: u16,
@@ -3106,6 +3116,7 @@ pub mod ix {
             now_slot: u64,
             initial_mark_e6: u64,
             observation_sequence: u64,
+            authority_epoch: u64,
         },
         PushAuthMark {
             asset_index: u16,
@@ -3113,6 +3124,7 @@ pub mod ix {
             now_slot: u64,
             mark_e6: u64,
             observation_sequence: u64,
+            authority_epoch: u64,
         },
         ForceCloseAbandonedAsset {
             asset_index: u16,
@@ -3125,6 +3137,7 @@ pub mod ix {
             now_slot: u64,
             initial_price: u64,
             observation_sequence: u64,
+            authority_epoch: u64,
         },
         UpdateAssetLifecycle {
             action: u8,
@@ -3417,10 +3430,12 @@ pub mod ix {
                 37 => Self::UpdateLiquidationFeePolicy {
                     cranker_share_bps: read_u16(&mut rest)?,
                     policy_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 49 => Self::UpdateMaintenanceFeePolicy {
                     cranker_share_bps: read_u16(&mut rest)?,
                     policy_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 51 => Self::UpdateBackingFeePolicy {
                     domain: read_u16(&mut rest)?,
@@ -3428,18 +3443,22 @@ pub mod ix {
                     fee_bps: read_u16(&mut rest)?,
                     insurance_share_bps: read_u16(&mut rest)?,
                     policy_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 55 => Self::UpdateTradeFeePolicy {
                     trade_fee_base_bps: read_u64(&mut rest)?,
                     policy_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 58 => Self::UpdateFeeRedirectPolicy {
                     redirect_bps: read_u16(&mut rest)?,
                     policy_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 59 => Self::UpdateMarketInitFeePolicy {
                     min_init_fee: read_u128(&mut rest)?,
                     policy_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 60 => Self::UpdateBaseUnitMints {
                     primary_mint: read_bytes32(&mut rest)?,
@@ -3454,6 +3473,7 @@ pub mod ix {
                     now_slot: read_u64(&mut rest)?,
                     initial_mark_e6: read_u64(&mut rest)?,
                     observation_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 63 => Self::PushAuthMark {
                     asset_index: read_u16(&mut rest)?,
@@ -3461,6 +3481,7 @@ pub mod ix {
                     now_slot: read_u64(&mut rest)?,
                     mark_e6: read_u64(&mut rest)?,
                     observation_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 64 => Self::ForceCloseAbandonedAsset {
                     asset_index: read_u16(&mut rest)?,
@@ -3473,6 +3494,7 @@ pub mod ix {
                     now_slot: read_u64(&mut rest)?,
                     initial_price: read_u64(&mut rest)?,
                     observation_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 52 => Self::WithdrawBackingBucketEarnings {
                     domain: read_u16(&mut rest)?,
@@ -3488,6 +3510,7 @@ pub mod ix {
                     stale_slots: read_u64(&mut rest)?,
                     force_close_delay_slots: read_u64(&mut rest)?,
                     policy_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 39 => Self::ResolveStalePermissionless {
                     now_slot: read_u64(&mut rest)?,
@@ -3512,6 +3535,7 @@ pub mod ix {
                         read_bytes32(&mut rest)?,
                     ],
                     observation_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 35 => Self::ConfigureEwmaMark {
                     asset_index: read_u16(&mut rest)?,
@@ -3521,6 +3545,7 @@ pub mod ix {
                     mark_ewma_halflife_slots: read_u64(&mut rest)?,
                     mark_min_fee: read_u64(&mut rest)?,
                     observation_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 36 => Self::PushEwmaMark {
                     asset_index: read_u16(&mut rest)?,
@@ -3528,6 +3553,7 @@ pub mod ix {
                     now_slot: read_u64(&mut rest)?,
                     mark_e6: read_u64(&mut rest)?,
                     observation_sequence: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 40 => Self::UpdateAssetLifecycle {
                     action: read_u8(&mut rest)?,
@@ -3868,18 +3894,22 @@ pub mod ix {
                 Self::UpdateLiquidationFeePolicy {
                     cranker_share_bps,
                     policy_sequence,
+                    authority_epoch,
                 } => {
                     out.push(37);
                     push_u16(&mut out, cranker_share_bps);
                     push_u64(&mut out, policy_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::UpdateMaintenanceFeePolicy {
                     cranker_share_bps,
                     policy_sequence,
+                    authority_epoch,
                 } => {
                     out.push(49);
                     push_u16(&mut out, cranker_share_bps);
                     push_u64(&mut out, policy_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::UpdateBackingFeePolicy {
                     domain,
@@ -3887,6 +3917,7 @@ pub mod ix {
                     fee_bps,
                     insurance_share_bps,
                     policy_sequence,
+                    authority_epoch,
                 } => {
                     out.push(51);
                     push_u16(&mut out, domain);
@@ -3894,30 +3925,37 @@ pub mod ix {
                     push_u16(&mut out, fee_bps);
                     push_u16(&mut out, insurance_share_bps);
                     push_u64(&mut out, policy_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::UpdateTradeFeePolicy {
                     trade_fee_base_bps,
                     policy_sequence,
+                    authority_epoch,
                 } => {
                     out.push(55);
                     push_u64(&mut out, trade_fee_base_bps);
                     push_u64(&mut out, policy_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::UpdateFeeRedirectPolicy {
                     redirect_bps,
                     policy_sequence,
+                    authority_epoch,
                 } => {
                     out.push(58);
                     push_u16(&mut out, redirect_bps);
                     push_u64(&mut out, policy_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::UpdateMarketInitFeePolicy {
                     min_init_fee,
                     policy_sequence,
+                    authority_epoch,
                 } => {
                     out.push(59);
                     push_u128(&mut out, min_init_fee);
                     push_u64(&mut out, policy_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::UpdateBaseUnitMints {
                     primary_mint,
@@ -3951,12 +3989,14 @@ pub mod ix {
                     stale_slots,
                     force_close_delay_slots,
                     policy_sequence,
+                    authority_epoch,
                 } => {
                     out.push(38);
                     push_u64(&mut out, asset_generation_frontier);
                     push_u64(&mut out, stale_slots);
                     push_u64(&mut out, force_close_delay_slots);
                     push_u64(&mut out, policy_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::ResolveStalePermissionless { now_slot } => {
                     out.push(39);
@@ -3978,6 +4018,7 @@ pub mod ix {
                     conf_filter_bps,
                     oracle_leg_feeds,
                     observation_sequence,
+                    authority_epoch,
                 } => {
                     out.push(34);
                     push_u16(&mut out, asset_index);
@@ -3997,6 +4038,7 @@ pub mod ix {
                         out.extend_from_slice(&feed);
                     }
                     push_u64(&mut out, observation_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::ConfigureEwmaMark {
                     asset_index,
@@ -4006,6 +4048,7 @@ pub mod ix {
                     mark_ewma_halflife_slots,
                     mark_min_fee,
                     observation_sequence,
+                    authority_epoch,
                 } => {
                     out.push(35);
                     push_u16(&mut out, asset_index);
@@ -4015,6 +4058,7 @@ pub mod ix {
                     push_u64(&mut out, mark_ewma_halflife_slots);
                     push_u64(&mut out, mark_min_fee);
                     push_u64(&mut out, observation_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::PushEwmaMark {
                     asset_index,
@@ -4022,6 +4066,7 @@ pub mod ix {
                     now_slot,
                     mark_e6,
                     observation_sequence,
+                    authority_epoch,
                 } => {
                     out.push(36);
                     push_u16(&mut out, asset_index);
@@ -4029,6 +4074,7 @@ pub mod ix {
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, mark_e6);
                     push_u64(&mut out, observation_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::ConfigureAuthMark {
                     asset_index,
@@ -4036,6 +4082,7 @@ pub mod ix {
                     now_slot,
                     initial_mark_e6,
                     observation_sequence,
+                    authority_epoch,
                 } => {
                     out.push(62);
                     push_u16(&mut out, asset_index);
@@ -4043,6 +4090,7 @@ pub mod ix {
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_mark_e6);
                     push_u64(&mut out, observation_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::PushAuthMark {
                     asset_index,
@@ -4050,6 +4098,7 @@ pub mod ix {
                     now_slot,
                     mark_e6,
                     observation_sequence,
+                    authority_epoch,
                 } => {
                     out.push(63);
                     push_u16(&mut out, asset_index);
@@ -4057,6 +4106,7 @@ pub mod ix {
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, mark_e6);
                     push_u64(&mut out, observation_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::ForceCloseAbandonedAsset {
                     asset_index,
@@ -4074,6 +4124,7 @@ pub mod ix {
                     now_slot,
                     initial_price,
                     observation_sequence,
+                    authority_epoch,
                 } => {
                     out.push(69);
                     push_u16(&mut out, asset_index);
@@ -4081,6 +4132,7 @@ pub mod ix {
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_price);
                     push_u64(&mut out, observation_sequence);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::UpdateAssetLifecycle {
                     action,
@@ -7043,20 +7095,24 @@ pub mod processor {
             Instruction::UpdateLiquidationFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
+                authority_epoch,
             } => handle_update_market_authority_policy(
                 program_id,
                 accounts,
                 MarketAuthorityPolicyUpdate::LiquidationCrankerShare(cranker_share_bps),
                 policy_sequence,
+                authority_epoch,
             ),
             Instruction::UpdateMaintenanceFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
+                authority_epoch,
             } => handle_update_market_authority_policy(
                 program_id,
                 accounts,
                 MarketAuthorityPolicyUpdate::MaintenanceCrankerShare(cranker_share_bps),
                 policy_sequence,
+                authority_epoch,
             ),
             Instruction::UpdateBackingFeePolicy {
                 domain,
@@ -7064,6 +7120,7 @@ pub mod processor {
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
+                authority_epoch,
             } => handle_update_backing_fee_policy(
                 program_id,
                 accounts,
@@ -7072,33 +7129,40 @@ pub mod processor {
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
+                authority_epoch,
             ),
             Instruction::UpdateTradeFeePolicy {
                 trade_fee_base_bps,
                 policy_sequence,
+                authority_epoch,
             } => handle_update_trade_fee_policy(
                 program_id,
                 accounts,
                 trade_fee_base_bps,
                 policy_sequence,
+                authority_epoch,
             ),
             Instruction::UpdateFeeRedirectPolicy {
                 redirect_bps,
                 policy_sequence,
+                authority_epoch,
             } => handle_update_market_authority_policy(
                 program_id,
                 accounts,
                 MarketAuthorityPolicyUpdate::FeeRedirect(redirect_bps),
                 policy_sequence,
+                authority_epoch,
             ),
             Instruction::UpdateMarketInitFeePolicy {
                 min_init_fee,
                 policy_sequence,
+                authority_epoch,
             } => handle_update_market_authority_policy(
                 program_id,
                 accounts,
                 MarketAuthorityPolicyUpdate::MarketInitFee(min_init_fee),
                 policy_sequence,
+                authority_epoch,
             ),
             Instruction::WithdrawBackingBucketEarnings {
                 domain,
@@ -7116,6 +7180,7 @@ pub mod processor {
                 stale_slots,
                 force_close_delay_slots,
                 policy_sequence,
+                authority_epoch,
             } => handle_configure_permissionless_resolve(
                 program_id,
                 accounts,
@@ -7123,6 +7188,7 @@ pub mod processor {
                 stale_slots,
                 force_close_delay_slots,
                 policy_sequence,
+                authority_epoch,
             ),
             Instruction::ResolveStalePermissionless { now_slot } => {
                 handle_resolve_stale_permissionless(program_id, accounts, now_slot)
@@ -7143,6 +7209,7 @@ pub mod processor {
                 conf_filter_bps,
                 oracle_leg_feeds,
                 observation_sequence,
+                authority_epoch,
             } => handle_configure_hybrid_oracle(
                 program_id,
                 accounts,
@@ -7161,6 +7228,7 @@ pub mod processor {
                 conf_filter_bps,
                 oracle_leg_feeds,
                 observation_sequence,
+                authority_epoch,
             ),
             Instruction::ConfigureEwmaMark {
                 asset_index,
@@ -7170,6 +7238,7 @@ pub mod processor {
                 mark_ewma_halflife_slots,
                 mark_min_fee,
                 observation_sequence,
+                authority_epoch,
             } => handle_configure_managed_mark(
                 program_id,
                 accounts,
@@ -7181,6 +7250,7 @@ pub mod processor {
                 mark_ewma_halflife_slots,
                 mark_min_fee,
                 observation_sequence,
+                authority_epoch,
             ),
             Instruction::PushEwmaMark {
                 asset_index,
@@ -7188,6 +7258,7 @@ pub mod processor {
                 now_slot,
                 mark_e6,
                 observation_sequence,
+                authority_epoch,
             } => handle_push_managed_mark(
                 program_id,
                 accounts,
@@ -7197,6 +7268,7 @@ pub mod processor {
                 now_slot,
                 mark_e6,
                 observation_sequence,
+                authority_epoch,
             ),
             Instruction::ConfigureAuthMark {
                 asset_index,
@@ -7204,6 +7276,7 @@ pub mod processor {
                 now_slot,
                 initial_mark_e6,
                 observation_sequence,
+                authority_epoch,
             } => handle_configure_managed_mark(
                 program_id,
                 accounts,
@@ -7215,6 +7288,7 @@ pub mod processor {
                 0,
                 0,
                 observation_sequence,
+                authority_epoch,
             ),
             Instruction::PushAuthMark {
                 asset_index,
@@ -7222,6 +7296,7 @@ pub mod processor {
                 now_slot,
                 mark_e6,
                 observation_sequence,
+                authority_epoch,
             } => handle_push_managed_mark(
                 program_id,
                 accounts,
@@ -7231,6 +7306,7 @@ pub mod processor {
                 now_slot,
                 mark_e6,
                 observation_sequence,
+                authority_epoch,
             ),
             Instruction::ForceCloseAbandonedAsset {
                 asset_index,
@@ -7249,6 +7325,7 @@ pub mod processor {
                 now_slot,
                 initial_price,
                 observation_sequence,
+                authority_epoch,
             } => handle_restart_asset_oracle(
                 program_id,
                 accounts,
@@ -7257,6 +7334,7 @@ pub mod processor {
                 now_slot,
                 initial_price,
                 observation_sequence,
+                authority_epoch,
             ),
             Instruction::UpdateAssetLifecycle {
                 action,
@@ -11872,6 +11950,7 @@ pub mod processor {
         now_slot: u64,
         initial_price: u64,
         observation_sequence: u64,
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -11905,6 +11984,7 @@ pub mod processor {
             }
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             expect_live_authority(&existing_profile.asset_admin, authority.key)?;
+            require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;
             advance_control_sequence_view(
                 &mut group,
                 asset_index,
@@ -12485,6 +12565,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         update: MarketAuthorityPolicyUpdate,
         policy_sequence: u64,
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -12497,6 +12578,7 @@ pub mod processor {
         let cfg_after = {
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
             expect_live_authority(&cfg.marketauth, admin.key)?;
+            require_authority_epoch_view(&group, 0, expected_authority_epoch)?;
             advance_control_sequence_view(&mut group, 0, update.sequence_lane(), policy_sequence)?;
             update.apply(&mut cfg);
             cfg
@@ -12513,6 +12595,7 @@ pub mod processor {
         fee_bps: u16,
         insurance_share_bps: u16,
         policy_sequence: u64,
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -12566,6 +12649,7 @@ pub mod processor {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
+            require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;
             let lifecycle = group.markets[asset_index].engine.asset.lifecycle;
             if lifecycle == ASSET_LIFECYCLE_RETIRED
                 || (fee_bps != 0 && lifecycle != ASSET_LIFECYCLE_ACTIVE)
@@ -12621,6 +12705,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         trade_fee_base_bps: u64,
         policy_sequence: u64,
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -12639,6 +12724,7 @@ pub mod processor {
         }
         let cfg_after = {
             let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            require_authority_epoch_view(&group, 0, expected_authority_epoch)?;
             advance_control_sequence_view(
                 &mut group,
                 0,
@@ -12659,6 +12745,7 @@ pub mod processor {
         stale_slots: u64,
         force_close_delay_slots: u64,
         policy_sequence: u64,
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -12677,6 +12764,7 @@ pub mod processor {
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
             require_asset_generation_frontier_view(&group, expected_asset_generation_frontier)?;
             expect_live_authority(&cfg.marketauth, admin.key)?;
+            require_authority_epoch_view(&group, 0, expected_authority_epoch)?;
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
@@ -12740,6 +12828,7 @@ pub mod processor {
         conf_filter_bps: u16,
         oracle_leg_feeds: [[u8; 32]; constants::ORACLE_LEG_CAP],
         observation_sequence: u64,
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -12790,6 +12879,7 @@ pub mod processor {
             // Asset 0 has a real stored profile; gate oracle reconfiguration on its
             // oracle_authority exactly like permissionless assets 1..N.
             expect_live_authority(&existing_profile.oracle_authority, admin.key)?;
+            require_authority_epoch_view(&group, asset_index_usize, expected_authority_epoch)?;
             advance_control_sequence_view(
                 &mut group,
                 asset_index_usize,
@@ -12934,6 +13024,7 @@ pub mod processor {
         mark_ewma_halflife_slots: u64,
         mark_min_fee: u64,
         observation_sequence: u64,
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -12968,6 +13059,7 @@ pub mod processor {
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
             expect_live_authority(&existing_profile.oracle_authority, authority.key)?;
+            require_authority_epoch_view(&group, asset_index_usize, expected_authority_epoch)?;
             advance_control_sequence_view(
                 &mut group,
                 asset_index_usize,
@@ -13038,6 +13130,7 @@ pub mod processor {
         now_slot: u64,
         mark_e6: u64,
         observation_sequence: u64,
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -13071,6 +13164,7 @@ pub mod processor {
             }
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index_usize);
             expect_live_authority(&authorities.oracle_authority, authority.key)?;
+            require_authority_epoch_view(&group, asset_index_usize, expected_authority_epoch)?;
             if authenticated_slot < profile.mark_ewma_last_slot
                 || authenticated_slot < group.header.current_slot.get()
             {

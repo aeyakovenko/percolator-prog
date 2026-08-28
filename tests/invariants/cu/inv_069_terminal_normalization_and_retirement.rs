@@ -132,6 +132,7 @@ fn v16_program_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate()
                     domain: 2,
                     fee_bps,
                     insurance_share_bps: if fee_bps == 0 { 0 } else { 5_000 },
+                    authority_epoch: 0,
                 },
                 vec![
                     AccountMeta::new(signer.pubkey(), true),

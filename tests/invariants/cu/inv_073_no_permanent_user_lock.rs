@@ -267,6 +267,7 @@ fn v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_pr
     let terminal_empty = env.market_state().1;
     assert!(terminal_empty.bankruptcy_hlock_active);
     assert_eq!(terminal_empty.insurance_domain_budget_remaining_total, 0);
+    let restart_authority_epoch = env.control_sequences(0).authority_epoch;
 
     env.svm.expire_blockhash();
     let restart_cu = env
@@ -277,6 +278,7 @@ fn v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_pr
                 now_slot: 3,
                 initial_price: 1_000,
                 observation_sequence: u64::MAX,
+                authority_epoch: restart_authority_epoch,
             },
             vec![
                 AccountMeta::new(marketauth.pubkey(), true),
@@ -2460,6 +2462,7 @@ fn v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit() {
             asset_index: ATTACK_ASSET,
             now_slot: 3,
             mark_e6: 200,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
@@ -2573,6 +2576,7 @@ fn v16_program_configure_permissionless_resolve_rejects_when_resolve_matured() {
             policy_sequence: u64::MAX,
             stale_slots: 6,
             force_close_delay_slots: 6,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -2602,6 +2606,7 @@ fn v16_program_configure_permissionless_resolve_rejects_when_resolve_matured() {
             policy_sequence: u64::MAX,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -4601,6 +4606,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
+            authority_epoch: 0,
         },
     );
     let victim_owner = Keypair::new();
@@ -4647,6 +4653,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                 asset_index: 1,
                 now_slot: slot,
                 mark_e6: mark,
+                authority_epoch: 0,
             },
         );
         for ai in [0u16, 1] {

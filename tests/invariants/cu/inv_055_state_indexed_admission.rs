@@ -1340,6 +1340,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 500,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -1370,6 +1371,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
             initial_mark_e6: 500,
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -1412,6 +1414,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
             unit_scale: 0,
             conf_filter_bps: 500,
             oracle_leg_feeds: feeds,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),

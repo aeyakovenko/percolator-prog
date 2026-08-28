@@ -10841,27 +10841,33 @@ impl UnderfundedPolicyKind {
         fresh: bool,
     ) -> ProgInstruction {
         let policy_sequence = self.sequence(env) + 1;
+        let authority_epoch = env.primary_control_sequences(0).authority_epoch;
         let bps = boundary.bps(fresh);
         match self {
             Self::TradeFee => ProgInstruction::UpdateTradeFeePolicy {
                 trade_fee_base_bps: u64::from(bps),
                 policy_sequence,
+                authority_epoch,
             },
             Self::FeeRedirect => ProgInstruction::UpdateFeeRedirectPolicy {
                 redirect_bps: bps,
                 policy_sequence,
+                authority_epoch,
             },
             Self::MarketInitFee => ProgInstruction::UpdateMarketInitFeePolicy {
                 min_init_fee: boundary.init_fee(fresh),
                 policy_sequence,
+                authority_epoch,
             },
             Self::LiquidationFee => ProgInstruction::UpdateLiquidationFeePolicy {
                 cranker_share_bps: bps,
                 policy_sequence,
+                authority_epoch,
             },
             Self::MaintenanceFee => ProgInstruction::UpdateMaintenanceFeePolicy {
                 cranker_share_bps: bps,
                 policy_sequence,
+                authority_epoch,
             },
             Self::Resolve => {
                 let (stale_slots, force_close_delay_slots) = boundary.resolve_slots(fresh);
@@ -10870,6 +10876,7 @@ impl UnderfundedPolicyKind {
                     stale_slots,
                     force_close_delay_slots,
                     policy_sequence,
+                    authority_epoch,
                 }
             }
             Self::BackingFeeLong | Self::BackingFeeShort => {
@@ -10879,6 +10886,7 @@ impl UnderfundedPolicyKind {
                     fee_bps: bps,
                     insurance_share_bps: bps,
                     policy_sequence,
+                    authority_epoch,
                 }
             }
         }
@@ -11363,7 +11371,6 @@ fn execute_authority_policy_ordered_resolve(
 ) -> Result<(bool, bool, bool, bool), String> {
     const INCOMING_AUTHORITY: usize = 2;
 
-    let initial_policy_sequence = policy_kind.sequence(&runner.env);
     let initial_policy_value = policy_kind.current_value(&runner.env);
     let retained_policy =
         runner
@@ -11450,6 +11457,7 @@ fn execute_authority_policy_ordered_resolve(
         runner.assert_global_invariants()?;
     }
 
+    let policy_sequence_before_fresh = policy_kind.sequence(&runner.env);
     let fresh_policy = runner.env.build_retained_market_control_for_actor(
         INCOMING_AUTHORITY,
         policy_kind.instruction(&runner.env, boundary, true),
@@ -11504,8 +11512,7 @@ fn execute_authority_policy_ordered_resolve(
         .pubkey()
         .to_bytes();
     let (cfg, group) = runner.env.primary_market_state();
-    let expected_policy_sequence =
-        initial_policy_sequence + u64::from(policy_landed) + u64::from(fresh_policy_landed);
+    let expected_policy_sequence = policy_sequence_before_fresh + u64::from(fresh_policy_landed);
     let expected_policy_value = if fresh_policy_landed {
         policy_kind.requested_value(boundary, true)
     } else if policy_landed {

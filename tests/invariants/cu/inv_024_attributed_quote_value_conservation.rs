@@ -25,6 +25,7 @@ fn v16_attack_cross_margin_two_asset_conservation() {
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -94,6 +95,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
+            authority_epoch: 0,
         },
     );
     let la = Keypair::new();
@@ -119,6 +121,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
             asset_index: 1,
             now_slot: 10,
             mark_e6: 90,
+            authority_epoch: 0,
         },
     ); // asset1 down -> la loses
        // crank both assets for both portfolios, two passes to converge §6.1/§6.2 warmup.
@@ -1082,6 +1085,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
+            authority_epoch: 0,
         },
     );
     let la = Keypair::new();
@@ -1105,6 +1109,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
             asset_index: 1,
             now_slot: 10,
             mark_e6: 90,
+            authority_epoch: 0,
         },
     );
     for slot in [10u64, 11] {
@@ -1485,6 +1490,7 @@ fn v16_attack_max_leg_multi_asset_conserves() {
                 asset_index: ai,
                 now_slot: 0,
                 initial_mark_e6: 100,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(env.admin.pubkey(), true),
@@ -1903,6 +1909,7 @@ fn v16_attack_cross_margin_netting_conserves() {
             asset_index: 1,
             now_slot: 2,
             mark_e6: 110,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -2648,6 +2655,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
+            authority_epoch: 0,
         },
     );
     let victim_owner = Keypair::new();
@@ -2691,6 +2699,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
                 asset_index: 1,
                 now_slot: slot,
                 mark_e6: mark,
+                authority_epoch: 0,
             },
         );
         for ai in [0u16, 1] {

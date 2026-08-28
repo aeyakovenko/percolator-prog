@@ -723,6 +723,7 @@ fn v16_attack_fee_redirect_gated_bounded_no_leak() {
         ProgInstruction::UpdateFeeRedirectPolicy {
             policy_sequence: u64::MAX,
             redirect_bps: 5_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -740,6 +741,7 @@ fn v16_attack_fee_redirect_gated_bounded_no_leak() {
         ProgInstruction::UpdateFeeRedirectPolicy {
             policy_sequence: u64::MAX,
             redirect_bps: 20_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -757,6 +759,7 @@ fn v16_attack_fee_redirect_gated_bounded_no_leak() {
         ProgInstruction::UpdateFeeRedirectPolicy {
             policy_sequence: u64::MAX,
             redirect_bps: 5_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -815,6 +818,7 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -919,6 +923,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
         ProgInstruction::UpdateLiquidationFeePolicy {
             policy_sequence: u64::MAX,
             cranker_share_bps: 10_001,
+            authority_epoch: 0,
         },
         "liquidation cranker share above 100%",
     );
@@ -927,6 +932,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
         ProgInstruction::UpdateMaintenanceFeePolicy {
             policy_sequence: u64::MAX,
             cranker_share_bps: 10_001,
+            authority_epoch: 0,
         },
         "maintenance cranker share above 100%",
     );
@@ -935,6 +941,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
         ProgInstruction::UpdateTradeFeePolicy {
             policy_sequence: u64::MAX,
             trade_fee_base_bps: 10_001,
+            authority_epoch: 0,
         },
         "trade fee above the market maximum",
     );
@@ -943,6 +950,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
         ProgInstruction::UpdateMarketInitFeePolicy {
             policy_sequence: u64::MAX,
             min_init_fee: u128::from(u64::MAX) + 1,
+            authority_epoch: 0,
         },
         "permissionless init fee that cannot fit a token transfer",
     );
@@ -954,6 +962,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
             domain: 0,
             fee_bps: 0,
             insurance_share_bps: 1,
+            authority_epoch: 0,
         },
         "nonzero backing insurance split on a zero backing fee",
     );
@@ -1048,6 +1057,7 @@ fn v16_attack_fee_redirect_full_boundary() {
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),

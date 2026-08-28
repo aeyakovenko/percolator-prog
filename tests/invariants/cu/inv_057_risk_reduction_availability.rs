@@ -1626,6 +1626,7 @@ fn v16_program_non_active_asset_cannot_enable_backing_fee_batch_gate() {
                 domain: 2,
                 fee_bps: 77,
                 insurance_share_bps: 5_000,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(creator.pubkey(), true),

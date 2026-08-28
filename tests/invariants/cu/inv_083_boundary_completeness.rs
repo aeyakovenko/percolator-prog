@@ -7,7 +7,7 @@
 //! Evidence in this file (I/C): oversized batch leg vectors at the public decode
 //! boundary reject as instruction data errors rather than allocating a large
 //! vector or panicking the SBF program. The machine-readable class roster and
-//! source-locked caller-input inventory assign all 206 fields across 53 public
+//! source-locked caller-input inventory assign all 222 fields across 53 public
 //! input types to 20 semantic boundary profiles, per-field public evidence, and
 //! profile-level boundary evidence. InitMarket's complete validation predicate
 //! is exercised through public exact-rollback failures and live retries. Other
@@ -176,7 +176,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
     use std::collections::{BTreeMap, BTreeSet};
 
     const HEADER: &str = "type\tfields\tclassification\tevidence";
-    const EXPECTED_FIELD_COUNT: usize = 206;
+    const EXPECTED_FIELD_COUNT: usize = 222;
     const EXPECTED_TYPE_COUNT: usize = 53;
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -262,7 +262,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
         ("duration", 9),
         ("enum", 5),
         ("expiry", 1),
-        ("identity", 50),
+        ("identity", 66),
         ("ignored", 1),
         ("index", 24),
         ("key", 9),
@@ -565,6 +565,7 @@ fn v16_attack_out_of_range_asset_index_rejected() {
                 asset_index: bad,
                 now_slot: 1,
                 mark_e6: 100,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(env.admin.pubkey(), true),
@@ -808,6 +809,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
             domain: BAD_DOMAIN,
             fee_bps: 77,
             insurance_share_bps: 5_000,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -939,6 +941,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 0,
+            authority_epoch: 0,
         },
         "ConfigureAuthMark zero initial mark",
     );
@@ -950,6 +953,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: over_max,
+            authority_epoch: 0,
         },
         "ConfigureAuthMark over-max initial mark",
     );
@@ -963,6 +967,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             initial_mark_e6: 0,
             mark_ewma_halflife_slots: 4,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         "ConfigureEwmaMark zero initial mark",
     );
@@ -976,6 +981,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             initial_mark_e6: over_max,
             mark_ewma_halflife_slots: 4,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         "ConfigureEwmaMark over-max initial mark",
     );
@@ -989,6 +995,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 0,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         "ConfigureEwmaMark zero halflife",
     );
@@ -1006,6 +1013,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 4,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -1034,6 +1042,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 0,
+            authority_epoch: 0,
         },
         "PushEwmaMark zero mark",
     );
@@ -1045,6 +1054,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: over_max,
+            authority_epoch: 0,
         },
         "PushEwmaMark over-max mark",
     );
@@ -1060,6 +1070,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 120,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -1085,6 +1096,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 3,
             initial_mark_e6: 200,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -1106,6 +1118,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 4,
             mark_e6: 0,
+            authority_epoch: 0,
         },
         "PushAuthMark zero mark",
     );
@@ -1117,6 +1130,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 4,
             mark_e6: over_max,
+            authority_epoch: 0,
         },
         "PushAuthMark over-max mark",
     );
@@ -1132,6 +1146,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 4,
             mark_e6: 220,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),

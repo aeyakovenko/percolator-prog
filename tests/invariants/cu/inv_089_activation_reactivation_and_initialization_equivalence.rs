@@ -302,6 +302,7 @@ fn v16_program_reuse_matches_fresh_activation_envelope_and_drops_old_authority()
             asset_index: 1,
             now_slot: 6,
             initial_mark_e6: 300,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(old_creator.pubkey(), true),
@@ -328,6 +329,7 @@ fn v16_program_reuse_matches_fresh_activation_envelope_and_drops_old_authority()
                 asset_index: 1,
                 now_slot: 6,
                 initial_mark_e6: 300,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(new_creator.pubkey(), true),
@@ -408,6 +410,7 @@ fn v16_program_privileged_reuse_matches_fresh_after_public_position_and_sequence
                 now_slot: 2,
                 mark_e6: OLD_PRICE,
                 observation_sequence: u64::MAX,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(prior_domain_authority.pubkey(), true),
@@ -480,6 +483,7 @@ fn v16_program_privileged_reuse_matches_fresh_after_public_position_and_sequence
             asset_index: ASSET_INDEX,
             now_slot: 6,
             initial_mark_e6: 300,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(prior_domain_authority.pubkey(), true),
@@ -620,6 +624,7 @@ fn v16_attack_privileged_reactivate_invalid_price_keeps_retired_slot_reusable() 
             now_slot: 2,
             mark_e6: 100,
             observation_sequence: u64::MAX,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(old_creator.pubkey(), true),
@@ -1703,6 +1708,7 @@ fn v16_program_reused_slot_matches_fresh_persisted_state_after_public_history() 
                 now_slot: 2,
                 mark_e6: 105,
                 observation_sequence: u64::MAX,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(old_creator.pubkey(), true),

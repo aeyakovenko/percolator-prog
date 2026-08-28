@@ -812,6 +812,7 @@ fn v16_program_every_wrapper_persisted_security_field_has_a_named_mutation_witne
     let inv_089 = include_str!("inv_089_activation_reactivation_and_initialization_equivalence.rs");
     let inv_008_stateful =
         include_str!("../stateful/inv_008_intent_uniqueness_and_bounded_replay.rs");
+    let inv_005_stateful = include_str!("../stateful/inv_005_authority_incarnation_binding.rs");
     let inv_014_stateful =
         include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs");
 
@@ -1059,7 +1060,7 @@ fn v16_program_every_wrapper_persisted_security_field_has_a_named_mutation_witne
             "authority incarnation",
             "AssetControlSequencesV16",
             &["authority_epoch"],
-            inv_005,
+            inv_005_stateful,
             "v16_program_authority_incarnation_operation_matrix_rejects_aba_replays",
         ),
         (
@@ -1229,6 +1230,7 @@ fn v16_program_configure_permissionless_resolve_gated_and_bounded() {
             policy_sequence: u64::MAX,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
+            authority_epoch: 0,
         },
         metas(mallory.pubkey()),
         &[&mallory],
@@ -1257,6 +1259,7 @@ fn v16_program_configure_permissionless_resolve_gated_and_bounded() {
                 policy_sequence: u64::MAX,
                 stale_slots,
                 force_close_delay_slots,
+                authority_epoch: 0,
             },
             metas(admin.pubkey()),
             &[&admin],
@@ -1276,6 +1279,7 @@ fn v16_program_configure_permissionless_resolve_gated_and_bounded() {
             policy_sequence: u64::MAX,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
+            authority_epoch: 0,
         },
         metas(admin.pubkey()),
         &[&admin],

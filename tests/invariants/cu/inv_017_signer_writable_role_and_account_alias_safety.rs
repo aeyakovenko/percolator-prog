@@ -383,6 +383,7 @@ fn restart_asset_oracle_role_instruction(
         now_slot: 3,
         initial_price: 111,
         observation_sequence: fixture.observation_sequence,
+        authority_epoch: 0,
     }
 }
 
@@ -536,6 +537,7 @@ fn configure_hybrid_role_instruction(fixture: &ConfigureHybridRoleFixture) -> Pr
         conf_filter_bps: 0,
         oracle_leg_feeds: fixture.feeds,
         observation_sequence: fixture.observation_sequence,
+        authority_epoch: 0,
     }
 }
 
@@ -2814,22 +2816,27 @@ fn two_account_policy_alias_fixture(route: TwoAccountPolicyAliasRoute) -> CoreAc
         TwoAccountPolicyAliasRoute::LiquidationFee => ProgInstruction::UpdateLiquidationFeePolicy {
             cranker_share_bps: 1,
             policy_sequence: next_control_sequence(sequences.liquidation_fee),
+            authority_epoch: sequences.authority_epoch,
         },
         TwoAccountPolicyAliasRoute::MaintenanceFee => ProgInstruction::UpdateMaintenanceFeePolicy {
             cranker_share_bps: 1,
             policy_sequence: next_control_sequence(sequences.maintenance_fee),
+            authority_epoch: sequences.authority_epoch,
         },
         TwoAccountPolicyAliasRoute::TradeFee => ProgInstruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: 1,
             policy_sequence: next_control_sequence(sequences.trade_fee),
+            authority_epoch: sequences.authority_epoch,
         },
         TwoAccountPolicyAliasRoute::FeeRedirect => ProgInstruction::UpdateFeeRedirectPolicy {
             redirect_bps: 1,
             policy_sequence: next_control_sequence(sequences.fee_redirect),
+            authority_epoch: sequences.authority_epoch,
         },
         TwoAccountPolicyAliasRoute::MarketInitFee => ProgInstruction::UpdateMarketInitFeePolicy {
             min_init_fee: 1,
             policy_sequence: next_control_sequence(sequences.market_init_fee),
+            authority_epoch: sequences.authority_epoch,
         },
         TwoAccountPolicyAliasRoute::BackingFee => ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
@@ -2839,6 +2846,7 @@ fn two_account_policy_alias_fixture(route: TwoAccountPolicyAliasRoute) -> CoreAc
             policy_sequence: next_control_sequence(
                 sequences.backing_fee.max(sequences.authority_epoch),
             ),
+            authority_epoch: sequences.authority_epoch,
         },
         TwoAccountPolicyAliasRoute::PermissionlessResolve => {
             ProgInstruction::ConfigurePermissionlessResolve {
@@ -2846,6 +2854,7 @@ fn two_account_policy_alias_fixture(route: TwoAccountPolicyAliasRoute) -> CoreAc
                 stale_slots: 100,
                 force_close_delay_slots: 100,
                 policy_sequence: next_control_sequence(sequences.permissionless_resolve),
+                authority_epoch: sequences.authority_epoch,
             }
         }
     };
@@ -2911,6 +2920,7 @@ fn managed_mark_alias_fixture(route: ManagedMarkAliasRoute) -> CoreAccountAliasF
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
             observation_sequence,
+            authority_epoch: 0,
         },
         ManagedMarkAliasRoute::PushEwma => ProgInstruction::PushEwmaMark {
             asset_index: 0,
@@ -2918,6 +2928,7 @@ fn managed_mark_alias_fixture(route: ManagedMarkAliasRoute) -> CoreAccountAliasF
             now_slot,
             mark_e6: 101,
             observation_sequence,
+            authority_epoch: 0,
         },
         ManagedMarkAliasRoute::ConfigureAuthority => ProgInstruction::ConfigureAuthMark {
             asset_index: 0,
@@ -2925,6 +2936,7 @@ fn managed_mark_alias_fixture(route: ManagedMarkAliasRoute) -> CoreAccountAliasF
             now_slot,
             initial_mark_e6: 101,
             observation_sequence,
+            authority_epoch: 0,
         },
         ManagedMarkAliasRoute::PushAuthority => ProgInstruction::PushAuthMark {
             asset_index: 0,
@@ -2932,6 +2944,7 @@ fn managed_mark_alias_fixture(route: ManagedMarkAliasRoute) -> CoreAccountAliasF
             now_slot,
             mark_e6: 101,
             observation_sequence,
+            authority_epoch: 0,
         },
     };
     let accounts = vec![

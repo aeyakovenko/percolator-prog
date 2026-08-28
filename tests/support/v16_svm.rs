@@ -36,6 +36,7 @@ const TOKEN_BALANCE_PER_USER: u64 = 200_000_000;
 pub const EXIT_MAKER_TOKEN_BALANCE: u64 = 2_500_000_000;
 const FOREIGN_TOKEN_BALANCE: u64 = 200_000_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
+const CURRENT_AUTHORITY_EPOCH: u64 = u64::MAX;
 
 fn next_control_sequence(current: u64) -> u64 {
     current.checked_add(1).expect("control sequence exhausted")
@@ -1469,6 +1470,7 @@ impl V16Svm {
                 stale_slots,
                 force_close_delay_slots,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -1819,6 +1821,7 @@ impl V16Svm {
                 now_slot,
                 initial_mark_e6: mark,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1873,6 +1876,7 @@ impl V16Svm {
                 conf_filter_bps,
                 oracle_leg_feeds: feeds,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             accounts,
             &[authority],
@@ -1950,6 +1954,7 @@ impl V16Svm {
                 conf_filter_bps,
                 oracle_leg_feeds: feeds,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             accounts,
             &[authority],
@@ -1976,6 +1981,7 @@ impl V16Svm {
                 now_slot,
                 initial_mark_e6: mark,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2008,6 +2014,7 @@ impl V16Svm {
                 mark_ewma_halflife_slots: halflife_slots,
                 mark_min_fee,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2041,6 +2048,7 @@ impl V16Svm {
                 mark_ewma_halflife_slots: halflife_slots,
                 mark_min_fee,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2069,6 +2077,7 @@ impl V16Svm {
                 now_slot,
                 mark_e6: mark,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2097,6 +2106,7 @@ impl V16Svm {
                 now_slot,
                 mark_e6: mark,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2126,6 +2136,7 @@ impl V16Svm {
                 now_slot,
                 mark_e6: mark,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2152,6 +2163,7 @@ impl V16Svm {
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2179,6 +2191,7 @@ impl V16Svm {
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2206,6 +2219,34 @@ impl V16Svm {
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn build_retained_backing_fee_policy(
+        &mut self,
+        domain: u16,
+        fee_bps: u16,
+        insurance_share_bps: u16,
+    ) -> Transaction {
+        let sequences = self.primary_control_sequences(domain as usize / 2);
+        let policy_sequence = next_backing_fee_sequence(sequences);
+        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain,
+                market_id,
+                fee_bps,
+                insurance_share_bps,
+                policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2226,6 +2267,7 @@ impl V16Svm {
             ProgInstruction::UpdateMarketInitFeePolicy {
                 min_init_fee,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2245,6 +2287,7 @@ impl V16Svm {
             ProgInstruction::UpdateTradeFeePolicy {
                 trade_fee_base_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2261,6 +2304,7 @@ impl V16Svm {
             ProgInstruction::UpdateTradeFeePolicy {
                 trade_fee_base_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2308,6 +2352,7 @@ impl V16Svm {
             ProgInstruction::UpdateFeeRedirectPolicy {
                 redirect_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2324,6 +2369,7 @@ impl V16Svm {
             ProgInstruction::UpdateFeeRedirectPolicy {
                 redirect_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2341,6 +2387,7 @@ impl V16Svm {
             ProgInstruction::UpdateMarketInitFeePolicy {
                 min_init_fee,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2361,6 +2408,7 @@ impl V16Svm {
             ProgInstruction::UpdateLiquidationFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2378,6 +2426,7 @@ impl V16Svm {
             ProgInstruction::UpdateLiquidationFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2398,6 +2447,7 @@ impl V16Svm {
             ProgInstruction::UpdateMaintenanceFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2415,6 +2465,7 @@ impl V16Svm {
             ProgInstruction::UpdateMaintenanceFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2519,6 +2570,7 @@ impl V16Svm {
                 now_slot,
                 initial_price,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2548,6 +2600,7 @@ impl V16Svm {
                 now_slot,
                 initial_price,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2574,6 +2627,36 @@ impl V16Svm {
                 now_slot,
                 initial_price,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn build_retained_restart_asset_oracle(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+    ) -> Transaction {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::RestartAssetOracle {
+                asset_index,
+                market_id,
+                now_slot,
+                initial_price,
+                observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -3771,6 +3854,7 @@ impl V16Svm {
                 stale_slots,
                 force_close_delay_slots,
                 policy_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -4364,14 +4448,16 @@ impl V16Svm {
         observation_sequence: u64,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let now_slot = self.current_slot();
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::PushAuthMark {
                 asset_index,
                 market_id,
-                now_slot: 0,
+                now_slot,
                 mark_e6,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -4396,14 +4482,16 @@ impl V16Svm {
         observation_sequence: u64,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let now_slot = self.current_slot();
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::PushEwmaMark {
                 asset_index,
                 market_id,
-                now_slot: 0,
+                now_slot,
                 mark_e6,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -4436,14 +4524,16 @@ impl V16Svm {
         observation_sequence: u64,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let now_slot = self.current_slot();
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::ConfigureAuthMark {
                 asset_index,
                 market_id,
-                now_slot: 0,
+                now_slot,
                 initial_mark_e6,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -4482,16 +4572,18 @@ impl V16Svm {
         observation_sequence: u64,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let now_slot = self.current_slot();
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::ConfigureEwmaMark {
                 asset_index,
                 market_id,
-                now_slot: 0,
+                now_slot,
                 initial_mark_e6,
                 mark_ewma_halflife_slots: halflife_slots,
                 mark_min_fee,
                 observation_sequence,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -5074,11 +5166,94 @@ impl V16Svm {
         self.build_program_instructions_transaction(vec![(instruction, accounts)], extra_signers)
     }
 
+    fn bind_current_authority_epoch(
+        &self,
+        instruction: &mut ProgInstruction,
+        accounts: &[AccountMeta],
+    ) {
+        let target_asset = match instruction {
+            ProgInstruction::UpdateLiquidationFeePolicy {
+                authority_epoch, ..
+            }
+            | ProgInstruction::UpdateMaintenanceFeePolicy {
+                authority_epoch, ..
+            }
+            | ProgInstruction::UpdateTradeFeePolicy {
+                authority_epoch, ..
+            }
+            | ProgInstruction::UpdateFeeRedirectPolicy {
+                authority_epoch, ..
+            }
+            | ProgInstruction::UpdateMarketInitFeePolicy {
+                authority_epoch, ..
+            }
+            | ProgInstruction::ConfigurePermissionlessResolve {
+                authority_epoch, ..
+            } if *authority_epoch == CURRENT_AUTHORITY_EPOCH => Some((0usize, authority_epoch)),
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain,
+                authority_epoch,
+                ..
+            } if *authority_epoch == CURRENT_AUTHORITY_EPOCH => {
+                Some((*domain as usize / 2, authority_epoch))
+            }
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index,
+                authority_epoch,
+                ..
+            }
+            | ProgInstruction::ConfigureEwmaMark {
+                asset_index,
+                authority_epoch,
+                ..
+            }
+            | ProgInstruction::PushEwmaMark {
+                asset_index,
+                authority_epoch,
+                ..
+            }
+            | ProgInstruction::ConfigureAuthMark {
+                asset_index,
+                authority_epoch,
+                ..
+            }
+            | ProgInstruction::PushAuthMark {
+                asset_index,
+                authority_epoch,
+                ..
+            }
+            | ProgInstruction::RestartAssetOracle {
+                asset_index,
+                authority_epoch,
+                ..
+            } if *authority_epoch == CURRENT_AUTHORITY_EPOCH => {
+                Some((*asset_index as usize, authority_epoch))
+            }
+            _ => None,
+        };
+        let Some((asset_index, authority_epoch)) = target_asset else {
+            return;
+        };
+        let market = accounts
+            .get(1)
+            .map(|meta| meta.pubkey)
+            .expect("authority-bound instruction market account");
+        *authority_epoch = if market == self.foreign_market {
+            self.foreign_control_sequences(asset_index).authority_epoch
+        } else {
+            assert_eq!(market, self.market, "unknown authority-bound market");
+            self.primary_control_sequences(asset_index).authority_epoch
+        };
+    }
+
     fn build_program_instructions_transaction(
         &mut self,
-        instructions: Vec<(ProgInstruction, Vec<AccountMeta>)>,
+        mut instructions: Vec<(ProgInstruction, Vec<AccountMeta>)>,
         extra_signers: &[Keypair],
     ) -> Transaction {
+        for (instruction, accounts) in &mut instructions {
+            self.bind_current_authority_epoch(instruction, accounts);
+        }
         self.build_transaction_instructions(
             instructions
                 .into_iter()

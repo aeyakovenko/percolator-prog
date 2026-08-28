@@ -785,6 +785,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     );
     let restart_observation_sequence =
         next_control_sequence(env.control_sequences(0).oracle_observation);
+    let pre_rotation_authority_epoch = env.control_sequences(0).authority_epoch;
 
     env.svm.expire_blockhash();
     let restart_with_positions = send_tx(
@@ -797,6 +798,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
             now_slot: 3,
             initial_price: 250,
             observation_sequence: restart_observation_sequence,
+            authority_epoch: pre_rotation_authority_epoch,
         },
         vec![
             AccountMeta::new(marketauth.pubkey(), true),
@@ -858,6 +860,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         new_oracle.pubkey().to_bytes(),
     )
     .expect("asset-0 admin rotates oracle before restart");
+    let restart_authority_epoch = env.control_sequences(0).authority_epoch;
     env.svm.warp_to_slot(8);
     env.svm.expire_blockhash();
     let restart_by_marketauth = send_tx(
@@ -870,6 +873,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
             now_slot: 8,
             initial_price: 250,
             observation_sequence: restart_observation_sequence,
+            authority_epoch: restart_authority_epoch,
         },
         vec![
             AccountMeta::new(marketauth.pubkey(), true),
@@ -892,6 +896,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
             now_slot: 8,
             initial_price: 250,
             observation_sequence: restart_observation_sequence,
+            authority_epoch: restart_authority_epoch,
         },
         vec![
             AccountMeta::new(asset_admin.pubkey(), true),
@@ -976,6 +981,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
             asset_index: 0,
             now_slot: 8,
             initial_mark_e6: 250,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(marketauth.pubkey(), true),

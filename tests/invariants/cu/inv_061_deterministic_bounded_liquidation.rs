@@ -1108,6 +1108,7 @@ fn v16_program_cross_margin_solvent_account_not_unfairly_liquidated() {
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
+            authority_epoch: 0,
         },
     );
     let victim_owner = Keypair::new();
@@ -1149,6 +1150,7 @@ fn v16_program_cross_margin_solvent_account_not_unfairly_liquidated() {
             asset_index: 1,
             now_slot: 10,
             mark_e6: 110,
+            authority_epoch: 0,
         },
     );
     for slot in [10u64, 11] {

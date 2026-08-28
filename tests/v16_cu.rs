@@ -1210,7 +1210,8 @@ impl V16CuEnv {
     }
 
     fn update_market_init_fee_policy_with_cu(&mut self, min_init_fee: u128) -> u64 {
-        let policy_sequence = next_control_sequence(self.control_sequences(0).market_init_fee);
+        let sequences = self.control_sequences(0);
+        let policy_sequence = next_control_sequence(sequences.market_init_fee);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1218,6 +1219,7 @@ impl V16CuEnv {
             ProgInstruction::UpdateMarketInitFeePolicy {
                 min_init_fee,
                 policy_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -1450,10 +1452,8 @@ impl V16CuEnv {
         now_slot: u64,
         initial_price: u64,
     ) -> Result<u64, String> {
-        let observation_sequence = next_control_sequence(
-            self.control_sequences(asset_index as usize)
-                .oracle_observation,
-        );
+        let sequences = self.control_sequences(asset_index as usize);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1464,6 +1464,7 @@ impl V16CuEnv {
                 now_slot,
                 initial_price,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1474,7 +1475,8 @@ impl V16CuEnv {
     }
 
     fn update_liquidation_fee_policy_with_cu(&mut self, cranker_share_bps: u16) -> u64 {
-        let policy_sequence = next_control_sequence(self.control_sequences(0).liquidation_fee);
+        let sequences = self.control_sequences(0);
+        let policy_sequence = next_control_sequence(sequences.liquidation_fee);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1482,6 +1484,7 @@ impl V16CuEnv {
             ProgInstruction::UpdateLiquidationFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -1511,6 +1514,7 @@ impl V16CuEnv {
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -1522,7 +1526,8 @@ impl V16CuEnv {
     }
 
     fn update_trade_fee_policy_with_cu(&mut self, trade_fee_base_bps: u64) -> u64 {
-        let policy_sequence = next_control_sequence(self.control_sequences(0).trade_fee);
+        let sequences = self.control_sequences(0);
+        let policy_sequence = next_control_sequence(sequences.trade_fee);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1530,6 +1535,7 @@ impl V16CuEnv {
             ProgInstruction::UpdateTradeFeePolicy {
                 trade_fee_base_bps,
                 policy_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -1541,7 +1547,8 @@ impl V16CuEnv {
     }
 
     fn update_fee_redirect_policy_with_cu(&mut self, redirect_bps: u16) -> u64 {
-        let policy_sequence = next_control_sequence(self.control_sequences(0).fee_redirect);
+        let sequences = self.control_sequences(0);
+        let policy_sequence = next_control_sequence(sequences.fee_redirect);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1549,6 +1556,7 @@ impl V16CuEnv {
             ProgInstruction::UpdateFeeRedirectPolicy {
                 redirect_bps,
                 policy_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -2167,7 +2175,8 @@ impl V16CuEnv {
     }
 
     fn update_maintenance_fee_policy_with_cu(&mut self, cranker_share_bps: u16) -> u64 {
-        let policy_sequence = next_control_sequence(self.control_sequences(0).maintenance_fee);
+        let sequences = self.control_sequences(0);
+        let policy_sequence = next_control_sequence(sequences.maintenance_fee);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2175,6 +2184,7 @@ impl V16CuEnv {
             ProgInstruction::UpdateMaintenanceFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3011,8 +3021,8 @@ impl V16CuEnv {
         stale_slots: u64,
         force_close_delay_slots: u64,
     ) -> u64 {
-        let policy_sequence =
-            next_control_sequence(self.control_sequences(0).permissionless_resolve);
+        let sequences = self.control_sequences(0);
+        let policy_sequence = next_control_sequence(sequences.permissionless_resolve);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3022,6 +3032,7 @@ impl V16CuEnv {
                 stale_slots,
                 force_close_delay_slots,
                 policy_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3121,8 +3132,8 @@ impl V16CuEnv {
         now_slot: u64,
         now_unix_ts: i64,
     ) -> Result<u64, String> {
-        let observation_sequence =
-            next_control_sequence(self.control_sequences(0).oracle_observation);
+        let sequences = self.control_sequences(0);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3143,6 +3154,7 @@ impl V16CuEnv {
                 conf_filter_bps: 500,
                 oracle_leg_feeds: feeds,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3226,10 +3238,8 @@ impl V16CuEnv {
         hybrid_soft_stale_slots: u64,
         conf_filter_bps: u16,
     ) -> Result<u64, String> {
-        let observation_sequence = next_control_sequence(
-            self.control_sequences(asset_index as usize)
-                .oracle_observation,
-        );
+        let sequences = self.control_sequences(asset_index as usize);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         let mut accounts = vec![
             AccountMeta::new(self.admin.pubkey(), true),
             AccountMeta::new(self.market, false),
@@ -3261,6 +3271,7 @@ impl V16CuEnv {
                 conf_filter_bps,
                 oracle_leg_feeds: feeds,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             accounts,
             &[&self.admin],
@@ -3274,8 +3285,8 @@ impl V16CuEnv {
         halflife_slots: u64,
         mark_min_fee: u64,
     ) -> u64 {
-        let observation_sequence =
-            next_control_sequence(self.control_sequences(0).oracle_observation);
+        let sequences = self.control_sequences(0);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3288,6 +3299,7 @@ impl V16CuEnv {
                 mark_ewma_halflife_slots: halflife_slots,
                 mark_min_fee,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3299,8 +3311,8 @@ impl V16CuEnv {
     }
 
     fn push_ewma_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
-        let observation_sequence =
-            next_control_sequence(self.control_sequences(0).oracle_observation);
+        let sequences = self.control_sequences(0);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3311,6 +3323,7 @@ impl V16CuEnv {
                 now_slot,
                 mark_e6,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3322,8 +3335,8 @@ impl V16CuEnv {
     }
 
     fn configure_auth_mark_with_cu(&mut self, now_slot: u64, initial_mark_e6: u64) -> u64 {
-        let observation_sequence =
-            next_control_sequence(self.control_sequences(0).oracle_observation);
+        let sequences = self.control_sequences(0);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3334,6 +3347,7 @@ impl V16CuEnv {
                 now_slot,
                 initial_mark_e6,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3345,8 +3359,8 @@ impl V16CuEnv {
     }
 
     fn push_auth_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
-        let observation_sequence =
-            next_control_sequence(self.control_sequences(0).oracle_observation);
+        let sequences = self.control_sequences(0);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3357,6 +3371,7 @@ impl V16CuEnv {
                 now_slot,
                 mark_e6,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3373,10 +3388,8 @@ impl V16CuEnv {
         now_slot: u64,
         initial_mark_e6: u64,
     ) -> u64 {
-        let observation_sequence = next_control_sequence(
-            self.control_sequences(asset_index as usize)
-                .oracle_observation,
-        );
+        let sequences = self.control_sequences(asset_index as usize);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3387,6 +3400,7 @@ impl V16CuEnv {
                 now_slot,
                 initial_mark_e6,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3403,10 +3417,8 @@ impl V16CuEnv {
         now_slot: u64,
         mark_e6: u64,
     ) -> u64 {
-        let observation_sequence = next_control_sequence(
-            self.control_sequences(asset_index as usize)
-                .oracle_observation,
-        );
+        let sequences = self.control_sequences(asset_index as usize);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3417,6 +3429,7 @@ impl V16CuEnv {
                 now_slot,
                 mark_e6,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3435,10 +3448,8 @@ impl V16CuEnv {
         initial_mark_e6: u64,
     ) -> u64 {
         self.ensure_signer_account(authority.pubkey());
-        let observation_sequence = next_control_sequence(
-            self.control_sequences(asset_index as usize)
-                .oracle_observation,
-        );
+        let sequences = self.control_sequences(asset_index as usize);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3449,6 +3460,7 @@ impl V16CuEnv {
                 now_slot,
                 initial_mark_e6,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -3467,10 +3479,8 @@ impl V16CuEnv {
         mark_e6: u64,
     ) -> u64 {
         self.ensure_signer_account(authority.pubkey());
-        let observation_sequence = next_control_sequence(
-            self.control_sequences(asset_index as usize)
-                .oracle_observation,
-        );
+        let sequences = self.control_sequences(asset_index as usize);
+        let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3481,6 +3491,7 @@ impl V16CuEnv {
                 now_slot,
                 mark_e6,
                 observation_sequence,
+                authority_epoch: sequences.authority_epoch,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),

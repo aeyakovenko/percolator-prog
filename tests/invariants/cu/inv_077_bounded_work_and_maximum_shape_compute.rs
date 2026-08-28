@@ -1324,6 +1324,7 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
             policy_sequence: u64::MAX,
             stale_slots: 1,
             force_close_delay_slots: 1,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3427,6 +3428,7 @@ fn v16_program_market_exceeds_64_assets_position_holds_any_14_legs() {
                 asset_index: ai,
                 now_slot: TRADE_SLOT,
                 initial_mark_e6: PRICE,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(env.admin.pubkey(), true),
@@ -4167,6 +4169,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
             initial_mark_e6: PRICE,
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -4213,6 +4216,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
             asset_index: HIGH_ASSET as u16,
             now_slot: LIQUIDATION_SLOT,
             mark_e6: 300,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),

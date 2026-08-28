@@ -160,27 +160,33 @@ impl AuthorityPolicyKind {
 
     fn instruction(self, env: &V16Svm, boundary: PolicyBoundary, fresh: bool) -> ProgInstruction {
         let policy_sequence = self.sequence(env) + 1;
+        let authority_epoch = env.primary_control_sequences(0).authority_epoch;
         let bps = boundary.bps(fresh);
         match self {
             Self::TradeFee => ProgInstruction::UpdateTradeFeePolicy {
                 trade_fee_base_bps: u64::from(bps),
                 policy_sequence,
+                authority_epoch,
             },
             Self::FeeRedirect => ProgInstruction::UpdateFeeRedirectPolicy {
                 redirect_bps: bps,
                 policy_sequence,
+                authority_epoch,
             },
             Self::MarketInitFee => ProgInstruction::UpdateMarketInitFeePolicy {
                 min_init_fee: boundary.init_fee(fresh),
                 policy_sequence,
+                authority_epoch,
             },
             Self::LiquidationFee => ProgInstruction::UpdateLiquidationFeePolicy {
                 cranker_share_bps: bps,
                 policy_sequence,
+                authority_epoch,
             },
             Self::MaintenanceFee => ProgInstruction::UpdateMaintenanceFeePolicy {
                 cranker_share_bps: bps,
                 policy_sequence,
+                authority_epoch,
             },
             Self::Resolve => {
                 let (stale_slots, force_close_delay_slots) = boundary.resolve_slots(fresh);
@@ -189,6 +195,7 @@ impl AuthorityPolicyKind {
                     stale_slots,
                     force_close_delay_slots,
                     policy_sequence,
+                    authority_epoch,
                 }
             }
             Self::BackingFeeLong | Self::BackingFeeShort => {
@@ -198,6 +205,7 @@ impl AuthorityPolicyKind {
                     fee_bps: bps,
                     insurance_share_bps: bps,
                     policy_sequence,
+                    authority_epoch,
                 }
             }
         }
@@ -742,7 +750,15 @@ fn run_authority_policy_order(
             before_stale_policy,
             "the superseded authority policy must roll back every economic account"
         );
-        assert_eq!(policy_kind.sequence(&env), initial_sequence);
+        let expected_sequence = if matches!(
+            policy_kind,
+            AuthorityPolicyKind::BackingFeeLong | AuthorityPolicyKind::BackingFeeShort
+        ) {
+            initial_sequence.max(env.primary_control_sequences(0).authority_epoch)
+        } else {
+            initial_sequence
+        };
+        assert_eq!(policy_kind.sequence(&env), expected_sequence);
         policy_kind.assert_initial_value(&env);
     } else {
         env.land_retained(retained_policy)
@@ -762,16 +778,14 @@ fn run_authority_policy_order(
         "asset-0's inherited policy authority must rotate atomically"
     );
 
+    let sequence_before_fresh = policy_kind.sequence(&env);
     let fresh_policy_instruction = policy_kind.instruction(&env, boundary, true);
     let fresh_policy =
         env.build_retained_market_control_for_actor(INCOMING_AUTHORITY, fresh_policy_instruction);
     env.land_retained(fresh_policy)
         .expect("the incoming authority must retain a fresh policy path");
     policy_kind.assert_value(&env, boundary, true);
-    assert_eq!(
-        policy_kind.sequence(&env),
-        initial_sequence + if handoff_first { 1 } else { 2 }
-    );
+    assert_eq!(policy_kind.sequence(&env), sequence_before_fresh + 1);
 
     let capital = env.primary_portfolio(LP).capital.get();
     env.withdraw_primary(LP, capital)

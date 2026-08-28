@@ -29,6 +29,7 @@ fn v16_program_force_close_healthy_asset_rejected() {
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),

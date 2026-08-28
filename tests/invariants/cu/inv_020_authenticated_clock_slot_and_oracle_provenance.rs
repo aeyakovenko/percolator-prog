@@ -93,6 +93,7 @@ fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
             asset_index: 1,
             now_slot: FORCE_CLOSE_SLOT - 1,
             mark_e6: 101,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(oracle_authority.pubkey(), true),
@@ -1388,6 +1389,7 @@ fn v16_program_pushed_mark_cannot_override_external_oracle_asset() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 9_999_999,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -1413,6 +1415,7 @@ fn v16_program_pushed_mark_cannot_override_external_oracle_asset() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 9_999_999,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -1794,6 +1797,7 @@ fn v16_attack_hybrid_oracle_scalar_bounds_reject_atomically() {
                 unit_scale: 0,
                 conf_filter_bps,
                 oracle_leg_feeds: feeds,
+                authority_epoch: 0,
             },
             accounts.clone(),
             &[&admin],
@@ -1844,6 +1848,7 @@ fn v16_attack_hybrid_oracle_scalar_bounds_reject_atomically() {
             unit_scale: 0,
             conf_filter_bps: 500,
             oracle_leg_feeds: feeds,
+            authority_epoch: 0,
         },
         accounts,
         &[&admin],

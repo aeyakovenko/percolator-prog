@@ -279,6 +279,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             conf_filter_bps: 500,
             oracle_leg_feeds: [[1u8; 32], [0u8; 32], [0u8; 32]],
             observation_sequence: 1,
+            authority_epoch: 0,
         },
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 0,
@@ -288,6 +289,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
             observation_sequence: 1,
+            authority_epoch: 0,
         },
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
@@ -295,16 +297,19 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             now_slot: 2,
             mark_e6: 101,
             observation_sequence: 2,
+            authority_epoch: 0,
         },
         ProgInstruction::UpdateLiquidationFeePolicy {
             cranker_share_bps: 4_000,
             policy_sequence: 1,
+            authority_epoch: 0,
         },
         ProgInstruction::ConfigurePermissionlessResolve {
             asset_generation_frontier: 1,
             stale_slots: 5,
             force_close_delay_slots: 1,
             policy_sequence: 1,
+            authority_epoch: 0,
         },
         ProgInstruction::ResolveStalePermissionless { now_slot: 5 },
         ProgInstruction::UpdateAssetLifecycle {
@@ -346,6 +351,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         ProgInstruction::UpdateMaintenanceFeePolicy {
             cranker_share_bps: 4_000,
             policy_sequence: 1,
+            authority_epoch: 0,
         },
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
@@ -358,6 +364,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             fee_bps: 25,
             insurance_share_bps: 0,
             policy_sequence: 1,
+            authority_epoch: 0,
         },
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 0,
@@ -369,6 +376,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         ProgInstruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: 25,
             policy_sequence: 1,
+            authority_epoch: 0,
         },
         ProgInstruction::TopUpInsuranceDomain {
             intent_id: 3,
@@ -384,10 +392,12 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         ProgInstruction::UpdateFeeRedirectPolicy {
             redirect_bps: 250,
             policy_sequence: 1,
+            authority_epoch: 0,
         },
         ProgInstruction::UpdateMarketInitFeePolicy {
             min_init_fee: 50,
             policy_sequence: 1,
+            authority_epoch: 0,
         },
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: [1u8; 32],
@@ -400,6 +410,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             now_slot: 1,
             initial_mark_e6: 100,
             observation_sequence: 1,
+            authority_epoch: 0,
         },
         ProgInstruction::PushAuthMark {
             asset_index: 0,
@@ -407,6 +418,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             now_slot: 2,
             mark_e6: 101,
             observation_sequence: 2,
+            authority_epoch: 0,
         },
         ProgInstruction::ForceCloseAbandonedAsset {
             asset_index: 0,
@@ -458,6 +470,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             now_slot: 3,
             initial_price: 100,
             observation_sequence: 3,
+            authority_epoch: 0,
         },
     ]
 }

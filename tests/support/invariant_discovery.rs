@@ -11,7 +11,7 @@ use percolator_prog::{
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
 };
 use serde::{Deserialize, Serialize};
-use solana_sdk::{account::Account, transaction::Transaction};
+use solana_sdk::{account::Account, pubkey::Pubkey, transaction::Transaction};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PortfolioIntentKind {
@@ -135,6 +135,19 @@ pub enum AuthorityIntentKind {
     BackingAuthorityHandoff,
     OracleAuthorityHandoff,
     ResolveMarket,
+    LiquidationFeePolicy,
+    MaintenanceFeePolicy,
+    BackingFeePolicy,
+    TradeFeePolicy,
+    FeeRedirectPolicy,
+    MarketInitFeePolicy,
+    PermissionlessResolvePolicy,
+    ConfigureHybridOracle,
+    ConfigureEwmaMark,
+    PushEwmaMark,
+    ConfigureAuthMark,
+    PushAuthMark,
+    RestartAssetOracle,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -570,7 +583,7 @@ impl RetryIntentKind {
 }
 
 impl AuthorityIntentKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 20] = [
         Self::MarketAuthorityHandoff,
         Self::AssetAdminHandoff,
         Self::InsuranceAuthorityHandoff,
@@ -578,6 +591,19 @@ impl AuthorityIntentKind {
         Self::BackingAuthorityHandoff,
         Self::OracleAuthorityHandoff,
         Self::ResolveMarket,
+        Self::LiquidationFeePolicy,
+        Self::MaintenanceFeePolicy,
+        Self::BackingFeePolicy,
+        Self::TradeFeePolicy,
+        Self::FeeRedirectPolicy,
+        Self::MarketInitFeePolicy,
+        Self::PermissionlessResolvePolicy,
+        Self::ConfigureHybridOracle,
+        Self::ConfigureEwmaMark,
+        Self::PushEwmaMark,
+        Self::ConfigureAuthMark,
+        Self::PushAuthMark,
+        Self::RestartAssetOracle,
     ];
 
     fn discriminator(self) -> u8 {
@@ -589,6 +615,19 @@ impl AuthorityIntentKind {
             Self::BackingAuthorityHandoff => 4,
             Self::OracleAuthorityHandoff => 5,
             Self::ResolveMarket => 6,
+            Self::LiquidationFeePolicy => 7,
+            Self::MaintenanceFeePolicy => 8,
+            Self::BackingFeePolicy => 9,
+            Self::TradeFeePolicy => 10,
+            Self::FeeRedirectPolicy => 11,
+            Self::MarketInitFeePolicy => 12,
+            Self::PermissionlessResolvePolicy => 13,
+            Self::ConfigureHybridOracle => 14,
+            Self::ConfigureEwmaMark => 15,
+            Self::PushEwmaMark => 16,
+            Self::ConfigureAuthMark => 17,
+            Self::PushAuthMark => 18,
+            Self::RestartAssetOracle => 19,
         }
     }
 
@@ -605,7 +644,50 @@ impl AuthorityIntentKind {
                 Some(percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET)
             }
             Self::OracleAuthorityHandoff => Some(percolator_prog::processor::ASSET_AUTH_ORACLE),
-            Self::MarketAuthorityHandoff | Self::ResolveMarket => None,
+            Self::MarketAuthorityHandoff
+            | Self::ResolveMarket
+            | Self::LiquidationFeePolicy
+            | Self::MaintenanceFeePolicy
+            | Self::BackingFeePolicy
+            | Self::TradeFeePolicy
+            | Self::FeeRedirectPolicy
+            | Self::MarketInitFeePolicy
+            | Self::PermissionlessResolvePolicy
+            | Self::ConfigureHybridOracle
+            | Self::ConfigureEwmaMark
+            | Self::PushEwmaMark
+            | Self::ConfigureAuthMark
+            | Self::PushAuthMark
+            | Self::RestartAssetOracle => None,
+        }
+    }
+
+    fn uses_market_authority_rotation(self) -> bool {
+        self.asset_authority_kind().is_none()
+    }
+
+    pub fn instruction_variant(self) -> &'static str {
+        match self {
+            Self::MarketAuthorityHandoff => "UpdateAuthority",
+            Self::AssetAdminHandoff
+            | Self::InsuranceAuthorityHandoff
+            | Self::InsuranceOperatorHandoff
+            | Self::BackingAuthorityHandoff
+            | Self::OracleAuthorityHandoff => "UpdateAssetAuthority",
+            Self::ResolveMarket => "ResolveMarket",
+            Self::LiquidationFeePolicy => "UpdateLiquidationFeePolicy",
+            Self::MaintenanceFeePolicy => "UpdateMaintenanceFeePolicy",
+            Self::BackingFeePolicy => "UpdateBackingFeePolicy",
+            Self::TradeFeePolicy => "UpdateTradeFeePolicy",
+            Self::FeeRedirectPolicy => "UpdateFeeRedirectPolicy",
+            Self::MarketInitFeePolicy => "UpdateMarketInitFeePolicy",
+            Self::PermissionlessResolvePolicy => "ConfigurePermissionlessResolve",
+            Self::ConfigureHybridOracle => "ConfigureHybridOracle",
+            Self::ConfigureEwmaMark => "ConfigureEwmaMark",
+            Self::PushEwmaMark => "PushEwmaMark",
+            Self::ConfigureAuthMark => "ConfigureAuthMark",
+            Self::PushAuthMark => "PushAuthMark",
+            Self::RestartAssetOracle => "RestartAssetOracle",
         }
     }
 }
@@ -806,6 +888,9 @@ pub struct AuthorityIncarnationDiscovery {
     pub rejected_exact_rollback: bool,
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
+    pub fresh_intent_landed: bool,
+    pub fresh_mutated_economic_state: bool,
+    pub fresh_compute_units: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2306,6 +2391,9 @@ impl AuthorityIncarnationDiscovery {
             && self.rejected_exact_rollback
             && !self.mutated_economic_state
             && self.compute_units.is_none()
+            && self.fresh_intent_landed
+            && self.fresh_mutated_economic_state
+            && self.fresh_compute_units.is_some()
     }
 }
 
@@ -4289,6 +4377,112 @@ pub fn discover_asset_generation_replay(
     discover_one_asset_generation_replay(seed, kind)
 }
 
+fn prepare_authority_incarnation_route(
+    env: &mut V16Svm,
+    kind: AuthorityIntentKind,
+) -> Result<Option<Pubkey>, String> {
+    match kind {
+        AuthorityIntentKind::PushAuthMark => {
+            env.configure_auth_mark(false, 0, 0, INITIAL_PRICE)
+                .map_err(|error| format!("configure authority-incarnation AuthMark: {error}"))?;
+            env.warp_to_slot(1);
+        }
+        AuthorityIntentKind::PushEwmaMark => {
+            env.configure_ewma_mark(0, 0, INITIAL_PRICE, 1, 0)
+                .map_err(|error| format!("configure authority-incarnation EwmaMark: {error}"))?;
+            env.warp_to_slot(1);
+        }
+        AuthorityIntentKind::ConfigureHybridOracle => {
+            const FEED_ID: [u8; 32] = [0x5a; 32];
+            env.set_clock(1, 100);
+            return Ok(Some(env.set_pyth_price(
+                &FEED_ID,
+                INITIAL_PRICE as i64,
+                0,
+                1,
+                100,
+            )));
+        }
+        AuthorityIntentKind::RestartAssetOracle => {
+            env.configure_permissionless_resolve(100, 5)
+                .map_err(|error| format!("configure retained restart lifecycle: {error}"))?;
+            env.configure_auth_mark(false, 0, 0, INITIAL_PRICE)
+                .map_err(|error| format!("configure retained restart mark: {error}"))?;
+            env.warp_to_slot(1);
+            env.shutdown_asset(0, 1)
+                .map_err(|error| format!("enter Recovery before retained restart: {error}"))?;
+        }
+        _ => {}
+    }
+    Ok(None)
+}
+
+fn build_authority_incarnation_intent(
+    env: &mut V16Svm,
+    kind: AuthorityIntentKind,
+    oracle_account: Option<Pubkey>,
+) -> Transaction {
+    const ASSET: u16 = 1;
+    const AUTHORITY_A: usize = 0;
+    const TARGET: usize = 2;
+    match kind {
+        AuthorityIntentKind::MarketAuthorityHandoff => {
+            env.build_retained_market_authority_handoff_from_admin(TARGET)
+        }
+        AuthorityIntentKind::AssetAdminHandoff
+        | AuthorityIntentKind::InsuranceAuthorityHandoff
+        | AuthorityIntentKind::InsuranceOperatorHandoff
+        | AuthorityIntentKind::BackingAuthorityHandoff
+        | AuthorityIntentKind::OracleAuthorityHandoff => env
+            .build_retained_asset_authority_handoff_between_actors(
+                ASSET,
+                kind.asset_authority_kind().expect("asset authority kind"),
+                AUTHORITY_A,
+                TARGET,
+            ),
+        AuthorityIntentKind::ResolveMarket => env.build_retained_resolve_market(),
+        AuthorityIntentKind::LiquidationFeePolicy => {
+            env.build_retained_liquidation_fee_policy(1_234)
+        }
+        AuthorityIntentKind::MaintenanceFeePolicy => {
+            env.build_retained_maintenance_fee_policy(2_345)
+        }
+        AuthorityIntentKind::BackingFeePolicy => {
+            env.build_retained_backing_fee_policy(0, 77, 5_000)
+        }
+        AuthorityIntentKind::TradeFeePolicy => env.build_retained_trade_fee_policy(50),
+        AuthorityIntentKind::FeeRedirectPolicy => env.build_retained_fee_redirect_policy(123),
+        AuthorityIntentKind::MarketInitFeePolicy => env.build_retained_market_init_fee_policy(123),
+        AuthorityIntentKind::PermissionlessResolvePolicy => {
+            env.build_retained_permissionless_resolve_policy(10, 5)
+        }
+        AuthorityIntentKind::ConfigureHybridOracle => {
+            const FEED_ID: [u8; 32] = [0x5a; 32];
+            env.build_retained_hybrid_oracle_config(
+                0,
+                1,
+                100,
+                0,
+                [FEED_ID, [0; 32], [0; 32]],
+                &[oracle_account.expect("hybrid oracle fixture")],
+                3,
+                500,
+            )
+        }
+        AuthorityIntentKind::ConfigureEwmaMark => {
+            env.build_retained_ewma_config(0, INITIAL_PRICE + 1, 1, 0)
+        }
+        AuthorityIntentKind::PushEwmaMark => env.build_retained_ewma_mark(0, INITIAL_PRICE + 1),
+        AuthorityIntentKind::ConfigureAuthMark => {
+            env.build_retained_auth_config(0, INITIAL_PRICE + 1)
+        }
+        AuthorityIntentKind::PushAuthMark => env.build_retained_auth_mark(0, INITIAL_PRICE + 1),
+        AuthorityIntentKind::RestartAssetOracle => {
+            env.build_retained_restart_asset_oracle(0, 1, INITIAL_PRICE + 1)
+        }
+    }
+}
+
 fn discover_one_authority_incarnation_replay(
     mut seed: [u8; 32],
     kind: AuthorityIntentKind,
@@ -4302,52 +4496,26 @@ fn discover_one_authority_incarnation_replay(
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
 
-    let retained = match kind {
-        AuthorityIntentKind::MarketAuthorityHandoff => {
-            env.build_retained_market_authority_handoff_from_admin(TARGET)
-        }
-        AuthorityIntentKind::ResolveMarket => env.build_retained_resolve_market(),
-        _ => {
-            let authority_kind = kind
-                .asset_authority_kind()
-                .expect("asset authority operation");
-            env.update_asset_authority_from_admin(ASSET, authority_kind, AUTHORITY_A)
-                .map_err(|error| format!("install authority A: {error}"))?;
-            env.build_retained_asset_authority_handoff_between_actors(
-                ASSET,
-                authority_kind,
-                AUTHORITY_A,
-                TARGET,
-            )
-        }
-    };
+    if let Some(authority_kind) = kind.asset_authority_kind() {
+        env.update_asset_authority_from_admin(ASSET, authority_kind, AUTHORITY_A)
+            .map_err(|error| format!("install authority A: {error}"))?;
+    }
+    let oracle_account = prepare_authority_incarnation_route(&mut env, kind)?;
+    let retained = build_authority_incarnation_intent(&mut env, kind, oracle_account);
 
-    match kind {
-        AuthorityIntentKind::MarketAuthorityHandoff | AuthorityIntentKind::ResolveMarket => {
-            env.update_market_authority_from_admin(AUTHORITY_B)
-                .map_err(|error| format!("rotate market authority A to B: {error}"))?;
-            env.update_market_authority_to_admin(AUTHORITY_B)
-                .map_err(|error| format!("rotate market authority B to A: {error}"))?;
-        }
-        _ => {
-            let authority_kind = kind
-                .asset_authority_kind()
-                .expect("asset authority operation");
-            env.update_asset_authority_between_actors(
-                ASSET,
-                authority_kind,
-                AUTHORITY_A,
-                AUTHORITY_B,
-            )
+    if kind.uses_market_authority_rotation() {
+        env.update_market_authority_from_admin(AUTHORITY_B)
+            .map_err(|error| format!("rotate market authority A to B: {error}"))?;
+        env.update_market_authority_to_admin(AUTHORITY_B)
+            .map_err(|error| format!("rotate market authority B to A: {error}"))?;
+    } else {
+        let authority_kind = kind
+            .asset_authority_kind()
+            .expect("asset authority operation");
+        env.update_asset_authority_between_actors(ASSET, authority_kind, AUTHORITY_A, AUTHORITY_B)
             .map_err(|error| format!("rotate asset authority A to B: {error}"))?;
-            env.update_asset_authority_between_actors(
-                ASSET,
-                authority_kind,
-                AUTHORITY_B,
-                AUTHORITY_A,
-            )
+        env.update_asset_authority_between_actors(ASSET, authority_kind, AUTHORITY_B, AUTHORITY_A)
             .map_err(|error| format!("rotate asset authority B to A: {error}"))?;
-        }
     }
 
     let before = fingerprint(&env);
@@ -4360,37 +4528,67 @@ fn discover_one_authority_incarnation_replay(
         ));
     }
 
-    match result {
-        Ok(success) => {
-            let mutated_economic_state = before != after;
-            if !mutated_economic_state {
-                return Err(format!(
+    let (accepted_stale_intent, rejected_exact_rollback, mutated_economic_state, compute_units) =
+        match result {
+            Ok(success) => {
+                let mutated_economic_state = before != after;
+                if !mutated_economic_state {
+                    return Err(format!(
                     "{kind:?} stale authority transaction succeeded without an observable state delta"
                 ));
+                }
+                (
+                    true,
+                    false,
+                    mutated_economic_state,
+                    Some(success.compute_units),
+                )
             }
-            Ok(AuthorityIncarnationDiscovery {
-                kind,
-                accepted_stale_intent: true,
-                rejected_exact_rollback: false,
-                mutated_economic_state,
-                compute_units: Some(success.compute_units),
-            })
-        }
-        Err(_) => {
-            if before != after {
-                return Err(format!(
-                    "{kind:?} rejected stale authority transaction did not roll back exactly"
-                ));
+            Err(_) => {
+                if before != after {
+                    return Err(format!(
+                        "{kind:?} rejected stale authority transaction did not roll back exactly"
+                    ));
+                }
+                (false, true, false, None)
             }
-            Ok(AuthorityIncarnationDiscovery {
-                kind,
-                accepted_stale_intent: false,
-                rejected_exact_rollback: true,
-                mutated_economic_state: false,
-                compute_units: None,
-            })
+        };
+
+    let before_fresh = fingerprint(&env);
+    let fresh = build_authority_incarnation_intent(&mut env, kind, oracle_account);
+    let fresh_result = env.land_retained(fresh);
+    let after_fresh = fingerprint(&env);
+    let (fresh_intent_landed, fresh_compute_units) = match fresh_result {
+        Ok(success) => (true, Some(success.compute_units)),
+        Err(error) => {
+            return Err(format!(
+                "{kind:?} current-incarnation control rejected after stale replay: {error}"
+            ));
         }
+    };
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} fresh authority control changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
     }
+    let fresh_mutated_economic_state = before_fresh != after_fresh;
+    if !fresh_mutated_economic_state {
+        return Err(format!(
+            "{kind:?} current-incarnation control succeeded without an observable state delta"
+        ));
+    }
+
+    Ok(AuthorityIncarnationDiscovery {
+        kind,
+        accepted_stale_intent,
+        rejected_exact_rollback,
+        mutated_economic_state,
+        compute_units,
+        fresh_intent_landed,
+        fresh_mutated_economic_state,
+        fresh_compute_units,
+    })
 }
 
 pub fn discover_authority_incarnation_replays(
