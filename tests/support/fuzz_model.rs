@@ -380,12 +380,6 @@ pub enum BackingFeeConsentOrder {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuthorityHandoffAbaPath {
-    Market,
-    AssetInsuranceOperator,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompositeRoundingReproduction {
     pub blocker: KnownBlocker,
     pub case: CompositeRoundingCase,
@@ -670,17 +664,6 @@ pub struct BilateralFeeSupportReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DelayedAssetAuthorityRevivalReproduction {
-    pub blocker: KnownBlocker,
-    pub provider_loss: u64,
-    pub attacker_extraction: u64,
-    pub funded_reserve: u128,
-    pub reserve_after: u128,
-    pub handoff_cu: u64,
-    pub withdrawal_cu: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CollateralTopUpGenerationReplayReproduction {
     pub blocker: KnownBlocker,
     pub old_market_id: u64,
@@ -887,18 +870,6 @@ pub struct BackingFeeConsentReplayReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AuthorityHandoffAbaReplayReproduction {
-    pub blocker: KnownBlocker,
-    pub path: AuthorityHandoffAbaPath,
-    pub attacker_extraction: u64,
-    pub control_withdrawal_blocked: bool,
-    pub reserve_before: u128,
-    pub reserve_after: u128,
-    pub replay_cu: u64,
-    pub withdrawal_cu: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DelayedResolvePolicyReplayReproduction {
     pub blocker: KnownBlocker,
     pub victim_loss: u64,
@@ -911,17 +882,6 @@ pub struct DelayedResolvePolicyReplayReproduction {
     pub control_price: u64,
     pub replay_cu: u64,
     pub resolve_cu: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResolveAuthorityIncarnationReplayReproduction {
-    pub blocker: KnownBlocker,
-    pub victim_loss: u64,
-    pub winner_gain: u64,
-    pub replay_price: u64,
-    pub control_price: u64,
-    pub replay_cu: u64,
-    pub max_crank_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10868,8 +10828,9 @@ impl UnderfundedPolicyKind {
             Self::LiquidationFee => sequences.liquidation_fee,
             Self::MaintenanceFee => sequences.maintenance_fee,
             Self::Resolve => sequences.permissionless_resolve,
-            Self::BackingFeeLong => sequences.backing_fee_long,
-            Self::BackingFeeShort => sequences.backing_fee_short,
+            Self::BackingFeeLong | Self::BackingFeeShort => {
+                sequences.backing_fee.max(sequences.authority_epoch)
+            }
         }
     }
 
@@ -11356,10 +11317,12 @@ fn execute_authority_ordered_resolve(
         }
         runner.assert_snapshot_unchanged(&before_stale_resolve)?;
         let frontier = runner.env.primary_market_state().1.next_market_id;
+        let authority_epoch = runner.env.primary_control_sequences(0).authority_epoch;
         let fresh_resolve = runner.env.build_retained_market_control_for_actor(
             INCOMING_AUTHORITY,
             ProgInstruction::ResolveMarket {
                 asset_generation_frontier: frontier,
+                authority_epoch,
             },
         );
         runner
@@ -11517,10 +11480,12 @@ fn execute_authority_policy_ordered_resolve(
 
     if !resolve_landed {
         let frontier = runner.env.primary_market_state().1.next_market_id;
+        let authority_epoch = runner.env.primary_control_sequences(0).authority_epoch;
         let fresh_resolve = runner.env.build_retained_market_control_for_actor(
             INCOMING_AUTHORITY,
             ProgInstruction::ResolveMarket {
                 asset_generation_frontier: frontier,
+                authority_epoch,
             },
         );
         runner
@@ -16169,114 +16134,6 @@ pub fn reproduce_bilateral_fee_support(
     })
 }
 
-pub fn reproduce_delayed_asset_authority_revival(
-    seed: [u8; 32],
-) -> Result<DelayedAssetAuthorityRevivalReproduction, String> {
-    const ASSET: u16 = 0;
-    const DOMAIN: u16 = 0;
-    const DISPLACED_OPERATOR: usize = 0;
-    const REPLACEMENT_OPERATOR: usize = 1;
-    const PROVIDER: usize = 2;
-    const AMOUNT: u128 = 50_000;
-
-    let mut env = V16Svm::new(seed, MarketConfig::default());
-    let supply_before = env.token_supply_observed();
-    let provider_source = env.actors[PROVIDER].source_token;
-    let attacker_destination = env.actors[DISPLACED_OPERATOR].destination_token;
-    let provider_source_before = env.token_amount(provider_source);
-    let attacker_destination_before = env.token_amount(attacker_destination);
-
-    let retained_handoff = env.build_retained_asset_authority_handoff_from_admin(
-        ASSET,
-        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
-        DISPLACED_OPERATOR,
-    );
-    env.update_asset_authority_from_admin(
-        ASSET,
-        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
-        REPLACEMENT_OPERATOR,
-    )
-    .map_err(|error| format!("PR 251 install replacement operator: {error}"))?;
-    env.update_asset_authority_from_admin(
-        ASSET,
-        percolator_prog::processor::ASSET_AUTH_INSURANCE,
-        PROVIDER,
-    )
-    .map_err(|error| format!("PR 251 install independent insurance provider: {error}"))?;
-
-    let profile = env.primary_profile(ASSET as usize);
-    if profile.insurance_operator != env.actors[REPLACEMENT_OPERATOR].signer.pubkey().to_bytes()
-        || profile.insurance_authority != env.actors[PROVIDER].signer.pubkey().to_bytes()
-    {
-        return Err("PR 251 replacement authority handoffs did not commit".into());
-    }
-
-    let top_up = env
-        .top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, AMOUNT)
-        .map_err(|error| format!("PR 251 independent provider top-up: {error}"))?;
-    let funded_reserve = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
-    let provider_debit = provider_source_before
-        .checked_sub(env.token_amount(provider_source))
-        .ok_or("PR 251 provider source increased")?;
-    if funded_reserve != AMOUNT || provider_debit != AMOUNT as u64 {
-        return Err(format!(
-            "PR 251 provider funding did not reach the live reserve: debit={provider_debit}, \
-             reserve={funded_reserve}"
-        ));
-    }
-
-    let handoff = env
-        .land_retained(retained_handoff)
-        .map_err(|error| format!("PR 251 stale admin handoff no longer lands: {error}"))?;
-    if env.primary_profile(ASSET as usize).insurance_operator
-        != env.actors[DISPLACED_OPERATOR].signer.pubkey().to_bytes()
-    {
-        return Err(
-            "PR 251 retained handoff landed without reviving the displaced operator".into(),
-        );
-    }
-
-    let withdrawal = env
-        .withdraw_insurance_asset(DISPLACED_OPERATOR, ASSET, AMOUNT)
-        .map_err(|error| format!("PR 251 revived operator could not drain reserve: {error}"))?;
-    let attacker_extraction = env
-        .token_amount(attacker_destination)
-        .checked_sub(attacker_destination_before)
-        .ok_or("PR 251 attacker destination decreased")?;
-    let provider_loss = provider_source_before
-        .checked_sub(env.token_amount(provider_source))
-        .ok_or("PR 251 provider source increased after withdrawal")?;
-    let reserve_after = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
-    let max_cu = top_up
-        .compute_units
-        .max(handoff.compute_units)
-        .max(withdrawal.compute_units);
-    if provider_loss != AMOUNT as u64
-        || attacker_extraction != AMOUNT as u64
-        || reserve_after != 0
-        || max_cu >= TX_CU_LIMIT
-        || env.token_supply_observed() != supply_before
-    {
-        return Err(format!(
-            "PR 251 public extraction conditions failed: provider_loss={provider_loss}, \
-             attacker_extraction={attacker_extraction}, reserve={funded_reserve}->{reserve_after}, \
-             max_cu={max_cu}, supply={}/{}",
-            env.token_supply_observed(),
-            supply_before
-        ));
-    }
-
-    Ok(DelayedAssetAuthorityRevivalReproduction {
-        blocker: KnownBlocker::DelayedAssetAuthorityRevival,
-        provider_loss,
-        attacker_extraction,
-        funded_reserve,
-        reserve_after,
-        handoff_cu: handoff.compute_units,
-        withdrawal_cu: withdrawal.compute_units,
-    })
-}
-
 pub fn reproduce_collateral_top_up_generation_replay(
     seed: [u8; 32],
 ) -> Result<CollateralTopUpGenerationReplayReproduction, String> {
@@ -18932,198 +18789,6 @@ pub fn reproduce_backing_fee_consent_replay(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct AuthorityHandoffAbaWorld {
-    attacker_extraction: u64,
-    control_withdrawal_blocked: bool,
-    reserve_before: u128,
-    reserve_after: u128,
-    replay_cu: u64,
-    withdrawal_cu: u64,
-}
-
-fn authority_aba_reserve(env: &V16Svm, path: AuthorityHandoffAbaPath) -> u128 {
-    let group = env.primary_market_state().1;
-    match path {
-        AuthorityHandoffAbaPath::Market => {
-            group.insurance_domain_budget[0] + group.insurance_domain_budget[1]
-        }
-        AuthorityHandoffAbaPath::AssetInsuranceOperator => group.insurance_domain_budget[2],
-    }
-}
-
-fn run_authority_handoff_aba_world(
-    seed: [u8; 32],
-    path: AuthorityHandoffAbaPath,
-    land_replay: bool,
-) -> Result<AuthorityHandoffAbaWorld, String> {
-    const ATTACKER: usize = 0;
-    const INTERIM: usize = 1;
-    const PROVIDER: usize = 2;
-    const ORIGINAL: usize = 3;
-    const ASSET: u16 = 1;
-    const AMOUNT: u128 = 50_000;
-
-    let mut env = V16Svm::new(
-        seed,
-        MarketConfig {
-            actor_deposits: [1, 1, 1, 1, 1],
-            ..MarketConfig::default()
-        },
-    );
-    let supply_before = env.token_supply_observed();
-    let retained = match path {
-        AuthorityHandoffAbaPath::Market => {
-            let retained = env.build_retained_market_authority_handoff_from_admin(ATTACKER);
-            env.update_market_authority_from_admin(INTERIM)
-                .map_err(|error| format!("PR 345 A-to-C handoff: {error}"))?;
-            env.update_market_authority_to_admin(INTERIM)
-                .map_err(|error| format!("PR 345 C-to-A handoff: {error}"))?;
-            env.top_up_insurance_domain(0, AMOUNT)
-                .map_err(|error| format!("PR 345 fresh base-insurance contribution: {error}"))?;
-            retained
-        }
-        AuthorityHandoffAbaPath::AssetInsuranceOperator => {
-            env.update_asset_authority_from_admin(
-                ASSET,
-                percolator_prog::processor::ASSET_AUTH_INSURANCE,
-                PROVIDER,
-            )
-            .map_err(|error| format!("PR 346 install independent provider: {error}"))?;
-            env.update_asset_authority_from_admin(
-                ASSET,
-                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
-                ORIGINAL,
-            )
-            .map_err(|error| format!("PR 346 install original operator: {error}"))?;
-            env.burn_asset_admin(ASSET)
-                .map_err(|error| format!("PR 346 burn asset admin: {error}"))?;
-            if env.primary_profile(ASSET as usize).asset_admin != [0; 32] {
-                return Err("PR 346 asset admin remained live".into());
-            }
-            let retained = env.build_retained_asset_authority_handoff_between_actors(
-                ASSET,
-                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
-                ORIGINAL,
-                ATTACKER,
-            );
-            env.update_asset_authority_between_actors(
-                ASSET,
-                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
-                ORIGINAL,
-                INTERIM,
-            )
-            .map_err(|error| format!("PR 346 A-to-C handoff: {error}"))?;
-            env.update_asset_authority_between_actors(
-                ASSET,
-                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
-                INTERIM,
-                ORIGINAL,
-            )
-            .map_err(|error| format!("PR 346 C-to-A handoff: {error}"))?;
-            env.top_up_insurance_domain_for_actor(PROVIDER, 2, AMOUNT)
-                .map_err(|error| format!("PR 346 independent provider contribution: {error}"))?;
-            retained
-        }
-    };
-    let reserve_before = authority_aba_reserve(&env, path);
-    if reserve_before != AMOUNT {
-        return Err(format!(
-            "PR 345/346 {path:?} reserve {reserve_before}, expected {AMOUNT}"
-        ));
-    }
-    let destination = env.actors[ATTACKER].destination_token;
-    let destination_before = env.token_amount(destination);
-    let (control_withdrawal_blocked, replay_cu, withdrawal_cu) = if land_replay {
-        let replay = env
-            .land_retained(retained)
-            .map_err(|error| format!("PR 345/346 {path:?} retained handoff: {error}"))?;
-        let withdrawal = env
-            .withdraw_insurance_asset(
-                ATTACKER,
-                match path {
-                    AuthorityHandoffAbaPath::Market => 0,
-                    AuthorityHandoffAbaPath::AssetInsuranceOperator => ASSET,
-                },
-                AMOUNT,
-            )
-            .map_err(|error| format!("PR 345/346 {path:?} attacker withdrawal: {error}"))?;
-        (false, replay.compute_units, withdrawal.compute_units)
-    } else {
-        let blocked = env
-            .withdraw_insurance_asset(
-                ATTACKER,
-                match path {
-                    AuthorityHandoffAbaPath::Market => 0,
-                    AuthorityHandoffAbaPath::AssetInsuranceOperator => ASSET,
-                },
-                AMOUNT,
-            )
-            .is_err();
-        if !blocked {
-            return Err(format!(
-                "PR 345/346 {path:?} control attacker withdrawal succeeded"
-            ));
-        }
-        (true, 0, 0)
-    };
-    let attacker_extraction = env
-        .token_amount(destination)
-        .checked_sub(destination_before)
-        .ok_or("PR 345/346 attacker destination decreased")?;
-    let reserve_after = authority_aba_reserve(&env, path);
-    if env.token_supply_observed() != supply_before {
-        return Err(format!(
-            "PR 345/346 {path:?} changed SPL supply: {}/{}",
-            env.token_supply_observed(),
-            supply_before
-        ));
-    }
-    Ok(AuthorityHandoffAbaWorld {
-        attacker_extraction,
-        control_withdrawal_blocked,
-        reserve_before,
-        reserve_after,
-        replay_cu,
-        withdrawal_cu,
-    })
-}
-
-pub fn reproduce_authority_handoff_aba_replay(
-    mut seed: [u8; 32],
-    path: AuthorityHandoffAbaPath,
-) -> Result<AuthorityHandoffAbaReplayReproduction, String> {
-    seed[0] ^= match path {
-        AuthorityHandoffAbaPath::Market => 0x45,
-        AuthorityHandoffAbaPath::AssetInsuranceOperator => 0x46,
-    };
-    let control = run_authority_handoff_aba_world(seed, path, false)?;
-    let replay = run_authority_handoff_aba_world(seed, path, true)?;
-    if !control.control_withdrawal_blocked
-        || control.attacker_extraction != 0
-        || control.reserve_after != 50_000
-        || replay.attacker_extraction != 50_000
-        || replay.reserve_after != 0
-        || replay.replay_cu == 0
-        || replay.withdrawal_cu == 0
-        || control.reserve_before != replay.reserve_before
-    {
-        return Err(format!(
-            "PR 345/346 {path:?} paired-world mismatch: control={control:?}, replay={replay:?}"
-        ));
-    }
-    Ok(AuthorityHandoffAbaReplayReproduction {
-        blocker: KnownBlocker::AuthorityHandoffAbaReplay,
-        path,
-        attacker_extraction: replay.attacker_extraction,
-        control_withdrawal_blocked: control.control_withdrawal_blocked,
-        reserve_before: replay.reserve_before,
-        reserve_after: replay.reserve_after,
-        replay_cu: replay.replay_cu,
-        withdrawal_cu: replay.withdrawal_cu,
-    })
-}
-
-#[derive(Clone, Copy, Debug)]
 struct DelayedResolvePolicyWorld {
     victim_payout: u64,
     attacker_payout: u64,
@@ -19348,159 +19013,6 @@ pub fn reproduce_delayed_resolve_policy_replay(
         control_price: control.settlement_price,
         replay_cu: replay.replay_cu,
         resolve_cu: replay.resolve_cu,
-    })
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ResolveAuthorityIncarnationWorld {
-    victim_payout: u64,
-    winner_payout: u64,
-    settlement_price: u64,
-    replay_cu: u64,
-    max_crank_cu: u64,
-}
-
-fn run_resolve_authority_incarnation_world(
-    seed: [u8; 32],
-    land_replay: bool,
-) -> Result<ResolveAuthorityIncarnationWorld, String> {
-    const WINNER: usize = 0;
-    const VICTIM: usize = 1;
-    const INTERIM: usize = 2;
-    const PRICE: u64 = 100;
-    const ADVERSE_PRICE: u64 = 110;
-    const SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
-    const DEPOSIT: u128 = 1_000_000;
-
-    let mut env = V16Svm::new(
-        seed,
-        MarketConfig {
-            initial_price: PRICE,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            min_funding_lifetime_slots: 1,
-            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
-            ..MarketConfig::default()
-        },
-    );
-    let supply_before = env.token_supply_observed();
-    let retained_resolve = env.build_retained_resolve_market();
-    env.update_market_authority_from_admin(INTERIM)
-        .map_err(|error| format!("PR 353 A-to-C handoff: {error}"))?;
-    env.update_market_authority_to_admin(INTERIM)
-        .map_err(|error| format!("PR 353 C-to-A handoff: {error}"))?;
-    env.trade_no_cpi(WINNER, VICTIM, 0, SIZE_Q, PRICE, 0)
-        .map_err(|error| format!("PR 353 open independent winner/victim OI: {error}"))?;
-    env.warp_to_slot(10);
-    env.push_auth_mark(0, 10, ADVERSE_PRICE)
-        .map_err(|error| format!("PR 353 push temporary adverse mark: {error}"))?;
-    let mut max_crank_cu =
-        crank_market_then_accounts_once(&mut env, INTERIM, &[VICTIM, WINNER], 10, 0, 16)
-            .map_err(|error| format!("PR 353 settle adverse mark: {error}"))?;
-    if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
-        return Err("PR 353 adverse mark did not become effective".into());
-    }
-    let replay_cu;
-    let settlement_price;
-    if land_replay {
-        replay_cu = env
-            .land_retained(retained_resolve)
-            .map_err(|error| format!("PR 353 prior-incarnation resolve no longer lands: {error}"))?
-            .compute_units;
-        settlement_price = env.primary_market_state().1.assets[0].effective_price;
-        env.warp_to_slot(11);
-    } else {
-        env.warp_to_slot(12);
-        env.push_auth_mark(0, 12, PRICE)
-            .map_err(|error| format!("PR 353 restore honest mark: {error}"))?;
-        let boundary_cu =
-            crank_market_then_accounts_once(&mut env, INTERIM, &[VICTIM, WINNER], 12, 0, 16)
-                .map_err(|error| format!("PR 353 settle restored-mark boundary: {error}"))?;
-        max_crank_cu = max_crank_cu.max(boundary_cu);
-        env.warp_to_slot(13);
-        let restored_cu =
-            crank_market_then_accounts_once(&mut env, INTERIM, &[VICTIM, WINNER], 13, 0, 16)
-                .map_err(|error| format!("PR 353 settle restored mark: {error}"))?;
-        max_crank_cu = max_crank_cu.max(restored_cu);
-        if env.primary_market_state().1.assets[0].effective_price != PRICE {
-            return Err("PR 353 restored mark did not commit within bounded public cranks".into());
-        }
-        settlement_price = env.primary_market_state().1.assets[0].effective_price;
-        env.resolve_market()
-            .map_err(|error| format!("PR 353 current-incarnation resolve: {error}"))?;
-        env.warp_to_slot(14);
-        replay_cu = 0;
-    }
-    let (victim_payout, winner_payout) = if land_replay {
-        let (victim_payout, _) = drain_resolved_actor(&mut env, VICTIM)?;
-        let (winner_payout, _) = drain_resolved_actor(&mut env, WINNER)?;
-        (victim_payout, winner_payout)
-    } else {
-        let (winner_payout, _) = drain_resolved_actor(&mut env, WINNER)?;
-        let (victim_payout, _) = drain_resolved_actor(&mut env, VICTIM)?;
-        (victim_payout, winner_payout)
-    };
-    let victim_payout =
-        u64::try_from(victim_payout).map_err(|_| "PR 353 victim payout exceeds SPL range")?;
-    let winner_payout =
-        u64::try_from(winner_payout).map_err(|_| "PR 353 winner payout exceeds SPL range")?;
-    if u128::from(victim_payout) + u128::from(winner_payout) != 2 * DEPOSIT
-        || env.token_supply_observed() != supply_before
-        || replay_cu >= TX_CU_LIMIT
-        || max_crank_cu >= TX_CU_LIMIT
-    {
-        return Err(format!(
-            "PR 353 terminal mismatch: payout={victim_payout}/{winner_payout}, \
-             replay_cu={replay_cu}, crank_cu={max_crank_cu}, supply={}/{}",
-            env.token_supply_observed(),
-            supply_before
-        ));
-    }
-    Ok(ResolveAuthorityIncarnationWorld {
-        victim_payout,
-        winner_payout,
-        settlement_price,
-        replay_cu,
-        max_crank_cu,
-    })
-}
-
-pub fn reproduce_resolve_authority_incarnation_replay(
-    mut seed: [u8; 32],
-) -> Result<ResolveAuthorityIncarnationReplayReproduction, String> {
-    seed[0] ^= 0x53;
-    let control = run_resolve_authority_incarnation_world(seed, false)?;
-    let replay = run_resolve_authority_incarnation_world(seed, true)?;
-    let victim_loss = control
-        .victim_payout
-        .checked_sub(replay.victim_payout)
-        .ok_or("PR 353 replay increased victim payout")?;
-    let winner_gain = replay
-        .winner_payout
-        .checked_sub(control.winner_payout)
-        .ok_or("PR 353 replay decreased winner payout")?;
-    if control.victim_payout != 1_000_000
-        || control.winner_payout != 1_000_000
-        || replay.victim_payout != 900_000
-        || replay.winner_payout != 1_100_000
-        || victim_loss != winner_gain
-        || control.settlement_price != 100
-        || replay.settlement_price != 110
-        || replay.replay_cu == 0
-    {
-        return Err(format!(
-            "PR 353 paired-world mismatch: control={control:?}, replay={replay:?}, \
-             victim_loss={victim_loss}, winner_gain={winner_gain}"
-        ));
-    }
-    Ok(ResolveAuthorityIncarnationReplayReproduction {
-        blocker: KnownBlocker::ResolveAuthorityIncarnationReplay,
-        victim_loss,
-        winner_gain,
-        replay_price: replay.settlement_price,
-        control_price: control.settlement_price,
-        replay_cu: replay.replay_cu,
-        max_crank_cu: replay.max_crank_cu.max(control.max_crank_cu),
     })
 }
 
@@ -27360,11 +26872,6 @@ pub fn bilateral_fee_support_strategy(
 }
 
 #[allow(dead_code)]
-pub fn delayed_asset_authority_revival_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
-    any::<[u8; 32]>()
-}
-
-#[allow(dead_code)]
 pub fn collateral_top_up_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
@@ -27462,24 +26969,7 @@ pub fn backing_fee_consent_replay_strategy(
 }
 
 #[allow(dead_code)]
-pub fn authority_handoff_aba_replay_strategy(
-) -> impl Strategy<Value = ([u8; 32], AuthorityHandoffAbaPath)> {
-    (
-        any::<[u8; 32]>(),
-        prop::sample::select(vec![
-            AuthorityHandoffAbaPath::Market,
-            AuthorityHandoffAbaPath::AssetInsuranceOperator,
-        ]),
-    )
-}
-
-#[allow(dead_code)]
 pub fn delayed_resolve_policy_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
-    any::<[u8; 32]>()
-}
-
-#[allow(dead_code)]
-pub fn resolve_authority_incarnation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

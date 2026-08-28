@@ -41,6 +41,10 @@ fn next_control_sequence(current: u64) -> u64 {
     current.checked_add(1).expect("control sequence exhausted")
 }
 
+fn next_backing_fee_sequence(sequences: state::AssetControlSequencesV16) -> u64 {
+    next_control_sequence(sequences.backing_fee.max(sequences.authority_epoch))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MarketConfig {
     pub initial_price: u64,
@@ -1319,9 +1323,11 @@ impl V16Svm {
     pub fn resolve_market(&mut self) -> Result<TxSuccess, String> {
         let admin = copy_keypair(&self.admin);
         let asset_generation_frontier = self.primary_market_state().1.next_market_id;
+        let authority_epoch = self.primary_control_sequences(0).authority_epoch;
         self.send_program(
             ProgInstruction::ResolveMarket {
                 asset_generation_frontier,
+                authority_epoch,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -1334,9 +1340,11 @@ impl V16Svm {
     pub fn resolve_foreign_market(&mut self) -> Result<TxSuccess, String> {
         let admin = copy_keypair(&self.foreign_admin);
         let asset_generation_frontier = self.foreign_market_state().1.next_market_id;
+        let authority_epoch = self.foreign_control_sequences(0).authority_epoch;
         self.send_program(
             ProgInstruction::ResolveMarket {
                 asset_generation_frontier,
+                authority_epoch,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -2134,11 +2142,7 @@ impl V16Svm {
         insurance_share_bps: u16,
     ) -> Result<TxSuccess, String> {
         let sequences = self.primary_control_sequences(domain as usize / 2);
-        let policy_sequence = next_control_sequence(if domain % 2 == 0 {
-            sequences.backing_fee_long
-        } else {
-            sequences.backing_fee_short
-        });
+        let policy_sequence = next_backing_fee_sequence(sequences);
         let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
         let authority = copy_keypair(&self.admin);
         self.send_program(
@@ -2165,11 +2169,7 @@ impl V16Svm {
         insurance_share_bps: u16,
     ) -> Result<TxSuccess, String> {
         let sequences = self.primary_control_sequences(domain as usize / 2);
-        let policy_sequence = next_control_sequence(if domain % 2 == 0 {
-            sequences.backing_fee_long
-        } else {
-            sequences.backing_fee_short
-        });
+        let policy_sequence = next_backing_fee_sequence(sequences);
         let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.send_program(
@@ -2196,11 +2196,7 @@ impl V16Svm {
         insurance_share_bps: u16,
     ) -> Transaction {
         let sequences = self.primary_control_sequences(domain as usize / 2);
-        let policy_sequence = next_control_sequence(if domain % 2 == 0 {
-            sequences.backing_fee_long
-        } else {
-            sequences.backing_fee_short
-        });
+        let policy_sequence = next_backing_fee_sequence(sequences);
         let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.build_program_transaction(
@@ -2858,11 +2854,15 @@ impl V16Svm {
 
     pub fn burn_asset_admin(&mut self, asset_index: u16) -> Result<TxSuccess, String> {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let authority_epoch = self
+            .primary_control_sequences(asset_index as usize)
+            .authority_epoch;
         let current = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
                 market_id,
+                authority_epoch,
                 kind: percolator_prog::processor::ASSET_AUTH_ADMIN,
                 new_pubkey: [0; 32],
             },
@@ -2883,10 +2883,14 @@ impl V16Svm {
         incoming: Keypair,
     ) -> Result<TxSuccess, String> {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let authority_epoch = self
+            .primary_control_sequences(asset_index as usize)
+            .authority_epoch;
         self.send_program(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
                 market_id,
+                authority_epoch,
                 kind,
                 new_pubkey: incoming.pubkey().to_bytes(),
             },
@@ -3738,9 +3742,11 @@ impl V16Svm {
     pub fn build_retained_resolve_market(&mut self) -> Transaction {
         let admin = copy_keypair(&self.admin);
         let asset_generation_frontier = self.primary_market_state().1.next_market_id;
+        let authority_epoch = self.primary_control_sequences(0).authority_epoch;
         self.build_program_transaction(
             ProgInstruction::ResolveMarket {
                 asset_generation_frontier,
+                authority_epoch,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -4021,12 +4027,16 @@ impl V16Svm {
         new_actor_index: usize,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let authority_epoch = self
+            .primary_control_sequences(asset_index as usize)
+            .authority_epoch;
         let current = copy_keypair(&self.admin);
         let incoming = copy_keypair(&self.actors[new_actor_index].signer);
         self.build_program_transaction(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
                 market_id,
+                authority_epoch,
                 kind,
                 new_pubkey: incoming.pubkey().to_bytes(),
             },
@@ -4047,12 +4057,16 @@ impl V16Svm {
         incoming_actor_index: usize,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let authority_epoch = self
+            .primary_control_sequences(asset_index as usize)
+            .authority_epoch;
         let current = copy_keypair(&self.actors[current_actor_index].signer);
         let incoming = copy_keypair(&self.actors[incoming_actor_index].signer);
         self.build_program_transaction(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
                 market_id,
+                authority_epoch,
                 kind,
                 new_pubkey: incoming.pubkey().to_bytes(),
             },
@@ -4069,10 +4083,12 @@ impl V16Svm {
         &mut self,
         new_actor_index: usize,
     ) -> Transaction {
+        let authority_epoch = self.primary_control_sequences(0).authority_epoch;
         let current = copy_keypair(&self.admin);
         let incoming = copy_keypair(&self.actors[new_actor_index].signer);
         self.build_program_transaction(
             ProgInstruction::UpdateAuthority {
+                authority_epoch,
                 new_pubkey: incoming.pubkey().to_bytes(),
             },
             vec![
@@ -4107,8 +4123,10 @@ impl V16Svm {
         current: Keypair,
         incoming: Keypair,
     ) -> Result<TxSuccess, String> {
+        let authority_epoch = self.primary_control_sequences(0).authority_epoch;
         self.send_program(
             ProgInstruction::UpdateAuthority {
+                authority_epoch,
                 new_pubkey: incoming.pubkey().to_bytes(),
             },
             vec![

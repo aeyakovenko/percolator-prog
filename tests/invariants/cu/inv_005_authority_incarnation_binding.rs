@@ -488,6 +488,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
     let mut env = V16CuEnv::new();
     let victim = Keypair::new(); // a key that will NOT sign
     let (cfg0, _) = env.market_state();
+    let authority_epoch = env.control_sequences(0).authority_epoch;
     // --- market-wide handler (single `marketauth` key) ---
     // marketauth tries to set itself to `victim` without victim signing -> reject.
     env.svm.expire_blockhash();
@@ -496,6 +497,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            authority_epoch,
             new_pubkey: victim.pubkey().to_bytes(),
         },
         vec![
@@ -524,6 +526,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            authority_epoch,
             new_pubkey: new_asset.pubkey().to_bytes(),
         },
         vec![
@@ -551,11 +554,13 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         "default asset-0 admin follows the co-signed market authority handoff"
     );
     env.svm.expire_blockhash();
+    let authority_epoch = env.control_sequences(0).authority_epoch;
     let stale_old_key = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            authority_epoch,
             new_pubkey: env.admin.pubkey().to_bytes(),
         },
         vec![
@@ -582,6 +587,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
     };
     let ins_before = prof0(&env).insurance_authority;
     let asset_market_id = env.asset_market_id(0);
+    let authority_epoch = env.control_sequences(0).authority_epoch;
     // The current asset-0 admin tries to set asset-0 insurance to a non-signing key -> reject.
     env.svm.expire_blockhash();
     let r2 = send_tx(
@@ -591,6 +597,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
             market_id: asset_market_id,
+            authority_epoch,
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: victim.pubkey().to_bytes(),
         },
@@ -621,6 +628,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
             market_id: asset_market_id,
+            authority_epoch,
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: new_ins.pubkey().to_bytes(),
         },
@@ -1926,6 +1934,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
     // mallory is NOT any authority; she tries to seize ADMIN, co-signing as the incoming admin.
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
+    let authority_epoch = env.control_sequences(0).authority_epoch;
 
     // ATTACK: rotate marketauth with mallory as the CURRENT authority -> reject (mallory != cfg.marketauth).
     env.svm.expire_blockhash();
@@ -1934,6 +1943,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            authority_epoch,
             new_pubkey: mallory.pubkey().to_bytes(),
         },
         vec![
@@ -1964,6 +1974,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
             market_id: asset_market_id,
+            authority_epoch,
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: mallory.pubkey().to_bytes(),
         },
@@ -2000,6 +2011,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            authority_epoch,
             new_pubkey: new_admin.pubkey().to_bytes(),
         },
         vec![
@@ -2030,6 +2042,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
     let mut env = V16CuEnv::new(); // default: permissionless_resolve_stale_slots == 0 (no fallback)
     let (cfg0, _) = env.market_state();
     let zero = Pubkey::default();
+    let authority_epoch = env.control_sequences(0).authority_epoch;
 
     // ATTACK/FOOTGUN: renounce marketauth (-> zero) with NO permissionless fallback -> reject.
     env.svm.expire_blockhash();
@@ -2038,6 +2051,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            authority_epoch,
             new_pubkey: [0u8; 32],
         },
         vec![
@@ -2067,6 +2081,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            authority_epoch,
             new_pubkey: [0u8; 32],
         },
         vec![
@@ -2341,6 +2356,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
             signers.push(k);
         }
         let market_id = env.asset_market_id(ai);
+        let authority_epoch = env.control_sequences(ai as usize).authority_epoch;
         env.svm.expire_blockhash();
         send_tx(
             &mut env.svm,
@@ -2349,6 +2365,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
             ProgInstruction::UpdateAssetAuthority {
                 asset_index: ai,
                 market_id,
+                authority_epoch,
                 kind,
                 new_pubkey: new,
             },
@@ -2553,6 +2570,7 @@ fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
         (processor::ASSET_AUTH_ORACLE, "oracle authority"),
     ] {
         let market_id = env.asset_market_id(0);
+        let authority_epoch = env.control_sequences(0).authority_epoch;
         env.svm.expire_blockhash();
         let burn = send_tx(
             &mut env.svm,
@@ -2561,6 +2579,7 @@ fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
             ProgInstruction::UpdateAssetAuthority {
                 asset_index: 0,
                 market_id,
+                authority_epoch,
                 kind,
                 new_pubkey: [0u8; 32],
             },
@@ -3385,11 +3404,13 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     let newauth = Keypair::new();
     env.ensure_signer_account(newauth.pubkey());
     let asset_market_id = env.asset_market_id(0);
+    let authority_epoch = env.control_sequences(0).authority_epoch;
     env.svm.expire_blockhash();
     let rot = env.send(
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
             market_id: asset_market_id,
+            authority_epoch,
             kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
             new_pubkey: newauth.pubkey().to_bytes(),
         },
@@ -4052,6 +4073,7 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
         &env.payer,
         ProgInstruction::ResolveMarket {
             asset_generation_frontier: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -4118,12 +4140,14 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
     );
 
     env.svm.expire_blockhash();
+    let authority_epoch = env.control_sequences(0).authority_epoch;
     let resolve = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::ResolveMarket {
             asset_generation_frontier: 0,
+            authority_epoch,
         },
         vec![
             AccountMeta::new(new_admin.pubkey(), true),

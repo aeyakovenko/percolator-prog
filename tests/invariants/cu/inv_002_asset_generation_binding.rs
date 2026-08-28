@@ -141,11 +141,12 @@ fn host_asset_generation_wire_migrations_roundtrip_and_reject_legacy_payloads() 
     let authority = ProgInstruction::UpdateAssetAuthority {
         asset_index: 1,
         market_id: 0x1122_3344_5566_7788,
+        authority_epoch: 0x99aa_bbcc_ddee_ff00,
         kind: processor::ASSET_AUTH_ORACLE,
         new_pubkey: [0xab; 32],
     };
     let encoded_authority = authority.encode();
-    assert_eq!(encoded_authority.len(), 44);
+    assert_eq!(encoded_authority.len(), 52);
     assert_eq!(
         ProgInstruction::decode(&encoded_authority).unwrap(),
         authority

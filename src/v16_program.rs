@@ -631,8 +631,13 @@ pub mod state {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
     pub struct AssetControlSequencesV16 {
         pub oracle_observation: u64,
-        pub backing_fee_long: u64,
-        pub backing_fee_short: u64,
+        /// Shared backing-fee policy watermark. On upgrade, the effective watermark is the
+        /// maximum of this field and `authority_epoch`, which occupies the former short-side
+        /// backing watermark and preserves both old lanes without changing persisted layout.
+        pub backing_fee: u64,
+        /// Strict per-asset authority incarnation. Every market/asset authority handoff that can
+        /// affect this asset binds the exact value and increments it atomically.
+        pub authority_epoch: u64,
         pub trade_fee: u64,
         pub liquidation_fee: u64,
         pub maintenance_fee: u64,
@@ -1717,6 +1722,30 @@ pub mod state {
             return Err(PercolatorError::EngineStale.into());
         }
         Ok(())
+    }
+
+    #[inline]
+    pub fn require_current_authority_epoch(
+        current: u64,
+        expected: u64,
+    ) -> Result<(), ProgramError> {
+        if current != expected {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn next_authority_epoch(current: u64, expected: u64) -> Result<u64, ProgramError> {
+        require_current_authority_epoch(current, expected)?;
+        current
+            .checked_add(1)
+            .ok_or_else(|| PercolatorError::EngineCounterOverflow.into())
+    }
+
+    #[inline]
+    pub fn backing_fee_sequence_floor(backing_fee: u64, legacy_short_or_epoch: u64) -> u64 {
+        backing_fee.max(legacy_short_or_epoch)
     }
 
     pub fn read_asset_oracle_profile(
@@ -2955,6 +2984,7 @@ pub mod ix {
         CloseSlab,
         ResolveMarket {
             asset_generation_frontier: u64,
+            authority_epoch: u64,
         },
         TopUpBackingBucket {
             domain: u16,
@@ -2979,6 +3009,7 @@ pub mod ix {
         /// Rotate the single market-level authority (`marketauth`). The current `marketauth` must sign;
         /// the non-zero replacement must co-sign. Burning `marketauth` to zero is rejected.
         UpdateAuthority {
+            authority_epoch: u64,
             new_pubkey: [u8; 32],
         },
         /// Rotate one of an asset's per-asset authorities. Gated by the asset's own `asset_admin`
@@ -2987,6 +3018,7 @@ pub mod ix {
         UpdateAssetAuthority {
             asset_index: u16,
             market_id: u64,
+            authority_epoch: u64,
             kind: u8,
             new_pubkey: [u8; 32],
         },
@@ -3349,6 +3381,7 @@ pub mod ix {
                 13 => Self::CloseSlab,
                 19 => Self::ResolveMarket {
                     asset_generation_frontier: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                 },
                 24 => Self::TopUpBackingBucket {
                     domain: read_u16(&mut rest)?,
@@ -3371,11 +3404,13 @@ pub mod ix {
                     fee_rate_per_slot: read_u128(&mut rest)?,
                 },
                 32 => Self::UpdateAuthority {
+                    authority_epoch: read_u64(&mut rest)?,
                     new_pubkey: read_bytes32(&mut rest)?,
                 },
                 65 => Self::UpdateAssetAuthority {
                     asset_index: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                     kind: read_u8(&mut rest)?,
                     new_pubkey: read_bytes32(&mut rest)?,
                 },
@@ -3764,9 +3799,11 @@ pub mod ix {
                 Self::CloseSlab => out.push(13),
                 Self::ResolveMarket {
                     asset_generation_frontier,
+                    authority_epoch,
                 } => {
                     out.push(19);
                     push_u64(&mut out, asset_generation_frontier);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::TopUpBackingBucket {
                     domain,
@@ -3806,19 +3843,25 @@ pub mod ix {
                     out.push(30);
                     push_u128(&mut out, fee_rate_per_slot);
                 }
-                Self::UpdateAuthority { new_pubkey } => {
+                Self::UpdateAuthority {
+                    authority_epoch,
+                    new_pubkey,
+                } => {
                     out.push(32);
+                    push_u64(&mut out, authority_epoch);
                     out.extend_from_slice(&new_pubkey);
                 }
                 Self::UpdateAssetAuthority {
                     asset_index,
                     market_id,
+                    authority_epoch,
                     kind,
                     new_pubkey,
                 } => {
                     out.push(65);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, market_id);
+                    push_u64(&mut out, authority_epoch);
                     out.push(kind);
                     out.extend_from_slice(&new_pubkey);
                 }
@@ -5791,8 +5834,6 @@ pub mod processor {
     #[derive(Clone, Copy)]
     enum ControlSequenceLane {
         OracleObservation,
-        BackingFeeLong,
-        BackingFeeShort,
         TradeFee,
         LiquidationFee,
         MaintenanceFee,
@@ -5846,8 +5887,6 @@ pub mod processor {
     ) -> &mut u64 {
         match lane {
             ControlSequenceLane::OracleObservation => &mut sequences.oracle_observation,
-            ControlSequenceLane::BackingFeeLong => &mut sequences.backing_fee_long,
-            ControlSequenceLane::BackingFeeShort => &mut sequences.backing_fee_short,
             ControlSequenceLane::TradeFee => &mut sequences.trade_fee,
             ControlSequenceLane::LiquidationFee => &mut sequences.liquidation_fee,
             ControlSequenceLane::MaintenanceFee => &mut sequences.maintenance_fee,
@@ -5870,6 +5909,39 @@ pub mod processor {
         state::require_newer_control_sequence(*current, proposed)?;
         *current = proposed;
         write_control_sequences_to_view(group, asset_index, &sequences)
+    }
+
+    fn advance_backing_fee_sequence_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        proposed: u64,
+    ) -> ProgramResult {
+        let mut sequences = read_control_sequences_from_view(group, asset_index)?;
+        let migration_floor =
+            state::backing_fee_sequence_floor(sequences.backing_fee, sequences.authority_epoch);
+        state::require_newer_control_sequence(migration_floor, proposed)?;
+        sequences.backing_fee = proposed;
+        write_control_sequences_to_view(group, asset_index, &sequences)
+    }
+
+    fn advance_authority_epoch_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        expected: u64,
+    ) -> ProgramResult {
+        let mut sequences = read_control_sequences_from_view(group, asset_index)?;
+        sequences.authority_epoch =
+            state::next_authority_epoch(sequences.authority_epoch, expected)?;
+        write_control_sequences_to_view(group, asset_index, &sequences)
+    }
+
+    fn require_authority_epoch_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        expected: u64,
+    ) -> ProgramResult {
+        let sequences = read_control_sequences_from_view(group, asset_index)?;
+        state::require_current_authority_epoch(sequences.authority_epoch, expected)
     }
 
     fn mirror_manual_profile_to_base_config(
@@ -6908,7 +6980,13 @@ pub mod processor {
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
             Instruction::ResolveMarket {
                 asset_generation_frontier,
-            } => handle_resolve_market(program_id, accounts, asset_generation_frontier),
+                authority_epoch,
+            } => handle_resolve_market(
+                program_id,
+                accounts,
+                asset_generation_frontier,
+                authority_epoch,
+            ),
             Instruction::TopUpBackingBucket {
                 domain,
                 market_id,
@@ -6943,12 +7021,14 @@ pub mod processor {
             Instruction::CloseResolved { fee_rate_per_slot } => {
                 handle_close_resolved(program_id, accounts, fee_rate_per_slot, None)
             }
-            Instruction::UpdateAuthority { new_pubkey } => {
-                handle_update_authority(program_id, accounts, new_pubkey)
-            }
+            Instruction::UpdateAuthority {
+                authority_epoch,
+                new_pubkey,
+            } => handle_update_authority(program_id, accounts, authority_epoch, new_pubkey),
             Instruction::UpdateAssetAuthority {
                 asset_index,
                 market_id,
+                authority_epoch,
                 kind,
                 new_pubkey,
             } => handle_update_asset_authority(
@@ -6956,6 +7036,7 @@ pub mod processor {
                 accounts,
                 asset_index,
                 market_id,
+                authority_epoch,
                 kind,
                 new_pubkey,
             ),
@@ -11462,6 +11543,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         expected_asset_generation_frontier: u64,
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -11475,6 +11557,7 @@ pub mod processor {
             return Err(PercolatorError::EngineLockActive.into());
         }
         expect_live_authority(&cfg.marketauth, admin.key)?;
+        require_authority_epoch_view(&group, 0, expected_authority_epoch)?;
         let slot = Clock::get()
             .map(|c| c.slot)
             .unwrap_or(group.header.current_slot.get());
@@ -11488,6 +11571,7 @@ pub mod processor {
     fn handle_update_authority<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_authority_epoch: u64,
         new_pubkey: [u8; 32],
     ) -> ProgramResult {
         let current = account(accounts, 0)?;
@@ -11520,6 +11604,7 @@ pub mod processor {
             if profile.oracle_authority == old_marketauth {
                 profile.oracle_authority = new_pubkey;
             }
+            advance_authority_epoch_view(&mut group, 0, expected_authority_epoch)?;
             write_oracle_profile_to_view(&mut group, 0, &profile)?;
             cfg.marketauth = new_pubkey;
             cfg
@@ -11533,6 +11618,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
         expected_market_id: u64,
+        expected_authority_epoch: u64,
         kind: u8,
         new_pubkey: [u8; 32],
     ) -> ProgramResult {
@@ -11579,6 +11665,7 @@ pub mod processor {
         if !admin_signed {
             expect_live_authority(&current_value, current.key)?;
         }
+        advance_authority_epoch_view(&mut group, asset_index, expected_authority_epoch)?;
         match kind {
             ASSET_AUTH_ADMIN => profile.asset_admin = new_pubkey,
             ASSET_AUTH_INSURANCE => profile.insurance_authority = new_pubkey,
@@ -12485,12 +12572,7 @@ pub mod processor {
             {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            let lane = if long_side {
-                ControlSequenceLane::BackingFeeLong
-            } else {
-                ControlSequenceLane::BackingFeeShort
-            };
-            advance_control_sequence_view(&mut group, asset_index, lane, policy_sequence)?;
+            advance_backing_fee_sequence_view(&mut group, asset_index, policy_sequence)?;
         }
         if asset_index == 0 {
             let mut profile = state::read_asset_oracle_profile(&market_data, asset_index)?;

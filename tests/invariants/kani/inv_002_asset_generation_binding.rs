@@ -45,11 +45,13 @@ fn kani_v16_asset_lifecycle_binding_selects_current_or_frontier_exactly() {
 fn kani_v16_asset_authority_preserves_generation_and_rejects_legacy() {
     let asset_index: u16 = kani::any();
     let market_id: u64 = kani::any();
+    let authority_epoch: u64 = kani::any();
     let kind: u8 = kani::any();
     let new_pubkey = [0xabu8; 32];
     let encoded = Instruction::UpdateAssetAuthority {
         asset_index,
         market_id,
+        authority_epoch,
         kind,
         new_pubkey,
     }
@@ -59,11 +61,13 @@ fn kani_v16_asset_authority_preserves_generation_and_rejects_legacy() {
         Instruction::UpdateAssetAuthority {
             asset_index: decoded_asset_index,
             market_id: decoded_market_id,
+            authority_epoch: decoded_authority_epoch,
             kind: decoded_kind,
             new_pubkey: decoded_pubkey,
         } => {
             assert_eq!(decoded_asset_index, asset_index);
             assert_eq!(decoded_market_id, market_id);
+            assert_eq!(decoded_authority_epoch, authority_epoch);
             assert_eq!(decoded_kind, kind);
             assert_eq!(decoded_pubkey, new_pubkey);
         }

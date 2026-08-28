@@ -1026,6 +1026,7 @@ fn kani_v16_legacy_permissionless_crank_size_payload_is_rejected() {
 #[kani::proof]
 #[kani::unwind(34)]
 fn kani_v16_update_authority_decode_preserves_wire_fields() {
+    let authority_epoch: u64 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
     while i < 32 {
@@ -1033,14 +1034,17 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 33];
+    let mut data = [0u8; 41];
     data[0] = 32;
-    data[1..33].copy_from_slice(&new_pubkey);
+    data[1..9].copy_from_slice(&authority_epoch.to_le_bytes());
+    data[9..41].copy_from_slice(&new_pubkey);
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateAuthority {
+            authority_epoch: got_authority_epoch,
             new_pubkey: got_pubkey,
         } => {
+            assert_eq!(got_authority_epoch, authority_epoch);
             assert_eq!(got_pubkey, new_pubkey);
         }
         _ => unreachable!(),
@@ -1052,6 +1056,7 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let market_id: u64 = kani::any();
+    let authority_epoch: u64 = kani::any();
     let kind: u8 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
@@ -1060,22 +1065,25 @@ fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 44];
+    let mut data = [0u8; 52];
     data[0] = 65;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
     data[3..11].copy_from_slice(&market_id.to_le_bytes());
-    data[11] = kind;
-    data[12..44].copy_from_slice(&new_pubkey);
+    data[11..19].copy_from_slice(&authority_epoch.to_le_bytes());
+    data[19] = kind;
+    data[20..52].copy_from_slice(&new_pubkey);
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateAssetAuthority {
             asset_index: got_asset_index,
             market_id: got_market_id,
+            authority_epoch: got_authority_epoch,
             kind: got_kind,
             new_pubkey: got_pubkey,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_market_id, market_id);
+            assert_eq!(got_authority_epoch, authority_epoch);
             assert_eq!(got_kind, kind);
             assert_eq!(got_pubkey, new_pubkey);
         }
@@ -1265,18 +1273,24 @@ fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
     let asset_generation_frontier: u64 = kani::any();
+    let authority_epoch: u64 = kani::any();
     let stale_slots: u64 = kani::any();
     let force_close_delay_slots: u64 = kani::any();
     let policy_sequence: u64 = kani::any();
     let now_slot: u64 = kani::any();
 
-    let mut resolve_market = [0u8; 9];
+    let mut resolve_market = [0u8; 17];
     resolve_market[0] = 19;
     resolve_market[1..9].copy_from_slice(&asset_generation_frontier.to_le_bytes());
+    resolve_market[9..17].copy_from_slice(&authority_epoch.to_le_bytes());
     match Instruction::decode(&resolve_market).unwrap() {
         Instruction::ResolveMarket {
             asset_generation_frontier: got_frontier,
-        } => assert_eq!(got_frontier, asset_generation_frontier),
+            authority_epoch: got_epoch,
+        } => {
+            assert_eq!(got_frontier, asset_generation_frontier);
+            assert_eq!(got_epoch, authority_epoch);
+        }
         _ => unreachable!(),
     }
 
@@ -1719,6 +1733,7 @@ fn kani_v16_close_and_resolve_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::ResolveMarket {
             asset_generation_frontier: 1,
+            authority_epoch: 2,
         },
         extra,
     );
@@ -1731,6 +1746,7 @@ fn kani_v16_update_authority_payload_rejects_trailing_byte() {
 
     assert_rejects_trailing_byte(
         Instruction::UpdateAuthority {
+            authority_epoch: 1,
             new_pubkey: [1u8; 32],
         },
         extra,
@@ -1741,13 +1757,14 @@ fn kani_v16_update_authority_payload_rejects_trailing_byte() {
 #[kani::unwind(18)]
 fn kani_v16_update_asset_authority_payload_rejects_trailing_byte() {
     let extra: u8 = kani::any();
-    let mut data = [0u8; 45];
+    let mut data = [0u8; 53];
     data[0] = 65;
     data[1..3].copy_from_slice(&1u16.to_le_bytes());
     data[3..11].copy_from_slice(&2u64.to_le_bytes());
-    data[11] = 0;
-    data[12..44].copy_from_slice(&[1u8; 32]);
-    data[44] = extra;
+    data[11..19].copy_from_slice(&3u64.to_le_bytes());
+    data[19] = 0;
+    data[20..52].copy_from_slice(&[1u8; 32]);
+    data[52] = extra;
     assert!(Instruction::decode(&data).is_err());
 }
 

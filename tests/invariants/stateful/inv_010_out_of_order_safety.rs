@@ -152,8 +152,9 @@ impl AuthorityPolicyKind {
             Self::LiquidationFee => sequences.liquidation_fee,
             Self::MaintenanceFee => sequences.maintenance_fee,
             Self::Resolve => sequences.permissionless_resolve,
-            Self::BackingFeeLong => sequences.backing_fee_long,
-            Self::BackingFeeShort => sequences.backing_fee_short,
+            Self::BackingFeeLong | Self::BackingFeeShort => {
+                sequences.backing_fee.max(sequences.authority_epoch)
+            }
         }
     }
 
@@ -815,10 +816,12 @@ fn run_authority_resolve_order(seed: [u8; 32], handoff_first: bool) {
             "a superseded authority's resolution must roll back every economic account"
         );
         let frontier = env.primary_market_state().1.next_market_id;
+        let authority_epoch = env.primary_control_sequences(0).authority_epoch;
         let fresh_resolve = env.build_retained_market_control_for_actor(
             INCOMING_AUTHORITY,
             ProgInstruction::ResolveMarket {
                 asset_generation_frontier: frontier,
+                authority_epoch,
             },
         );
         env.land_retained(fresh_resolve)

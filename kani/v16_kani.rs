@@ -19,6 +19,9 @@ mod inv_003_portfolio_incarnation_binding;
 #[path = "../tests/invariants/kani/inv_004_position_episode_binding.rs"]
 mod inv_004_position_episode_binding;
 
+#[path = "../tests/invariants/kani/inv_005_authority_incarnation_binding.rs"]
+mod inv_005_authority_incarnation_binding;
+
 #[path = "../tests/invariants/kani/inv_008_intent_uniqueness_and_bounded_replay.rs"]
 mod inv_008_intent_uniqueness_and_bounded_replay;
 

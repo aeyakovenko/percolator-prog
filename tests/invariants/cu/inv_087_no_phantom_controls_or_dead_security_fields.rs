@@ -573,8 +573,8 @@ fn v16_program_all_wrapper_owned_persisted_structs_have_complete_field_rosters()
             "AssetControlSequencesV16",
             &[
                 "oracle_observation",
-                "backing_fee_long",
-                "backing_fee_short",
+                "backing_fee",
+                "authority_epoch",
                 "trade_fee",
                 "liquidation_fee",
                 "maintenance_fee",
@@ -1044,8 +1044,7 @@ fn v16_program_every_wrapper_persisted_security_field_has_a_named_mutation_witne
             "AssetControlSequencesV16",
             &[
                 "oracle_observation",
-                "backing_fee_long",
-                "backing_fee_short",
+                "backing_fee",
                 "trade_fee",
                 "liquidation_fee",
                 "maintenance_fee",
@@ -1055,6 +1054,13 @@ fn v16_program_every_wrapper_persisted_security_field_has_a_named_mutation_witne
             ],
             inv_014_stateful,
             "v16_program_superseded_control_matrix_rejects_stale_overwrites",
+        ),
+        (
+            "authority incarnation",
+            "AssetControlSequencesV16",
+            &["authority_epoch"],
+            inv_005,
+            "v16_program_authority_incarnation_operation_matrix_rejects_aba_replays",
         ),
         (
             "retryable top-up controls",

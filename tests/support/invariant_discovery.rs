@@ -803,6 +803,7 @@ impl TerminalGenerationDiscovery {
 pub struct AuthorityIncarnationDiscovery {
     pub kind: AuthorityIntentKind,
     pub accepted_stale_intent: bool,
+    pub rejected_exact_rollback: bool,
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
 }
@@ -810,6 +811,9 @@ pub struct AuthorityIncarnationDiscovery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorityResolveTerminalDiscovery {
     pub stale_resolve_landed: bool,
+    pub stale_resolve_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub fresh_resolve_landed: bool,
     pub victim_payout: u128,
     pub winner_payout: u128,
     pub victim_loss: u128,
@@ -822,7 +826,11 @@ pub struct AuthorityResolveTerminalDiscovery {
 pub struct AuthorityFundedHandoffDiscovery {
     pub provider_source_debit: u128,
     pub stale_handoff_landed: bool,
+    pub stale_handoff_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub replacement_withdraw_rejected: bool,
     pub replacement_gain: u128,
+    pub provider_exit_gain: u128,
     pub terminal_classification: PublicTerminalClassification,
     pub public_trace: PublicTraceEvidence,
 }
@@ -2292,6 +2300,13 @@ impl AuthorityIncarnationDiscovery {
     pub fn is_violation(&self) -> bool {
         self.accepted_stale_intent && self.mutated_economic_state
     }
+
+    pub fn certifies_epoch_rejection(&self) -> bool {
+        !self.accepted_stale_intent
+            && self.rejected_exact_rollback
+            && !self.mutated_economic_state
+            && self.compute_units.is_none()
+    }
 }
 
 impl AuthorityResolveTerminalDiscovery {
@@ -2309,6 +2324,19 @@ impl AuthorityResolveTerminalDiscovery {
             )
             && self.public_trace.validate_public_execution().is_ok()
     }
+
+    pub fn certifies_epoch_and_bounded_exit(&self) -> bool {
+        !self.is_violation()
+            && !self.stale_resolve_landed
+            && self.stale_resolve_rejected
+            && self.rejected_exact_rollback
+            && self.fresh_resolve_landed
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && self.public_trace.validate_public_execution().is_ok()
+    }
 }
 
 impl AuthorityFundedHandoffDiscovery {
@@ -2323,6 +2351,22 @@ impl AuthorityFundedHandoffDiscovery {
                     unauthorized_gain_atoms,
                 } if victim_loss_atoms == self.provider_source_debit
                     && unauthorized_gain_atoms == self.replacement_gain
+            )
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+
+    pub fn certifies_epoch_and_bounded_exit(&self) -> bool {
+        !self.is_violation()
+            && !self.stale_handoff_landed
+            && self.stale_handoff_rejected
+            && self.rejected_exact_rollback
+            && self.replacement_withdraw_rejected
+            && self.replacement_gain == 0
+            && self.provider_source_debit != 0
+            && self.provider_exit_gain == self.provider_source_debit
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
             )
             && self.public_trace.validate_public_execution().is_ok()
     }
@@ -3209,6 +3253,28 @@ fn finish_public_terminal_loss_evidence(
             progressing_exit_routes: 0,
         })
         .map_err(|error| format!("{context} terminal evidence is invalid: {error}"))?;
+    Ok((terminal_classification, public_trace))
+}
+
+fn finish_public_bounded_exit_evidence(
+    env: &mut V16Svm,
+    context: &str,
+) -> Result<(PublicTerminalClassification, PublicTraceEvidence), String> {
+    let public_trace = env.finish_public_trace();
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: 0,
+            unauthorized_gain_atoms: 0,
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: true,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("{context} bounded-exit evidence is invalid: {error}"))?;
     Ok((terminal_classification, public_trace))
 }
 
@@ -4305,6 +4371,7 @@ fn discover_one_authority_incarnation_replay(
             Ok(AuthorityIncarnationDiscovery {
                 kind,
                 accepted_stale_intent: true,
+                rejected_exact_rollback: false,
                 mutated_economic_state,
                 compute_units: Some(success.compute_units),
             })
@@ -4318,6 +4385,7 @@ fn discover_one_authority_incarnation_replay(
             Ok(AuthorityIncarnationDiscovery {
                 kind,
                 accepted_stale_intent: false,
+                rejected_exact_rollback: true,
                 mutated_economic_state: false,
                 compute_units: None,
             })
@@ -4385,13 +4453,40 @@ pub fn discover_authority_resolve_terminal_replay(
     }
 
     let before_replay = fingerprint(&env);
-    env.land_retained(retained_resolve)
-        .map_err(|error| format!("old-authority resolve request rejected: {error}"))?;
-    let stale_resolve_landed = before_replay != fingerprint(&env)
-        && env.primary_market_state().1.mode == MarketModeV16::Resolved;
-    if !stale_resolve_landed {
-        return Err("old-authority resolve did not terminalize the funded market".into());
-    }
+    let replay_result = env.land_retained(retained_resolve);
+    let after_replay = fingerprint(&env);
+    let (
+        stale_resolve_landed,
+        stale_resolve_rejected,
+        rejected_exact_rollback,
+        fresh_resolve_landed,
+    ) = match replay_result {
+        Ok(_) => {
+            let landed = before_replay != after_replay
+                && env.primary_market_state().1.mode == MarketModeV16::Resolved;
+            if !landed {
+                return Err(
+                    "old-authority resolve succeeded without terminalizing the funded market"
+                        .into(),
+                );
+            }
+            (true, false, false, false)
+        }
+        Err(_) => {
+            if before_replay != after_replay {
+                return Err("rejected old-authority resolve did not roll back exactly".into());
+            }
+            env.resolve_market()
+                .map_err(|error| format!("fresh current-authority resolve failed: {error}"))?;
+            let fresh_landed = env.primary_market_state().1.mode == MarketModeV16::Resolved;
+            if !fresh_landed {
+                return Err(
+                    "fresh current-authority resolve did not terminalize the market".into(),
+                );
+            }
+            (false, true, true, true)
+        }
+    };
 
     env.warp_to_slot(MARK_SLOT + 1);
     let victim_destination = env.actors[VICTIM].destination_token;
@@ -4417,10 +4512,16 @@ pub fn discover_authority_resolve_terminal_replay(
     if env.token_supply_observed() != supply_before {
         return Err("authority-epoch terminal replay changed SPL supply".into());
     }
-    let (terminal_classification, public_trace) =
-        finish_public_terminal_loss_evidence(&mut env, victim_loss, 0, "authority epoch")?;
+    let (terminal_classification, public_trace) = if stale_resolve_landed {
+        finish_public_terminal_loss_evidence(&mut env, victim_loss, 0, "authority epoch")?
+    } else {
+        finish_public_bounded_exit_evidence(&mut env, "authority epoch")?
+    };
     Ok(AuthorityResolveTerminalDiscovery {
         stale_resolve_landed,
+        stale_resolve_rejected,
+        rejected_exact_rollback,
+        fresh_resolve_landed,
         victim_payout,
         winner_payout,
         victim_loss,
@@ -4494,33 +4595,79 @@ pub fn discover_authority_funded_handoff_replay(
     .map_err(|error| format!("rotate backing authority B to A: {error}"))?;
 
     let before_replay = fingerprint(&env);
-    env.land_retained(retained_handoff)
-        .map_err(|error| format!("old-authority backing handoff rejected: {error}"))?;
-    let stale_handoff_landed = before_replay != fingerprint(&env);
-    if !stale_handoff_landed {
-        return Err("old-authority backing handoff succeeded without changing authority".into());
-    }
+    let replay_result = env.land_retained(retained_handoff);
+    let after_replay = fingerprint(&env);
+    let (stale_handoff_landed, stale_handoff_rejected, rejected_exact_rollback) =
+        match replay_result {
+            Ok(_) => {
+                if before_replay == after_replay {
+                    return Err(
+                        "old-authority backing handoff succeeded without changing authority".into(),
+                    );
+                }
+                (true, false, false)
+            }
+            Err(_) => {
+                if before_replay != after_replay {
+                    return Err(
+                        "rejected old-authority backing handoff did not roll back exactly".into(),
+                    );
+                }
+                (false, true, true)
+            }
+        };
 
     let replacement_destination = env.actors[REPLACEMENT].destination_token;
     let replacement_before = u128::from(env.token_amount(replacement_destination));
-    env.withdraw_backing_bucket_for_actor(REPLACEMENT, DOMAIN, PRINCIPAL)
-        .map_err(|error| format!("replacement withdraw backing principal: {error}"))?;
+    let replacement_withdraw_before = fingerprint(&env);
+    let replacement_withdraw =
+        env.withdraw_backing_bucket_for_actor(REPLACEMENT, DOMAIN, PRINCIPAL);
+    let replacement_withdraw_after = fingerprint(&env);
+    let replacement_withdraw_rejected = replacement_withdraw.is_err();
+    if stale_handoff_landed {
+        replacement_withdraw
+            .map_err(|error| format!("replacement withdraw backing principal: {error}"))?;
+    } else {
+        if !replacement_withdraw_rejected {
+            return Err("replacement withdrew backing after stale handoff rejection".into());
+        }
+        if replacement_withdraw_before != replacement_withdraw_after {
+            return Err("rejected replacement withdrawal did not roll back exactly".into());
+        }
+    }
     let replacement_gain = u128::from(env.token_amount(replacement_destination))
         .checked_sub(replacement_before)
         .ok_or_else(|| "authority-handoff replacement destination decreased".to_string())?;
+    let provider_destination = env.actors[PROVIDER].destination_token;
+    let provider_before = u128::from(env.token_amount(provider_destination));
+    if stale_handoff_rejected {
+        env.withdraw_backing_bucket_for_actor(PROVIDER, DOMAIN, PRINCIPAL)
+            .map_err(|error| format!("incumbent provider bounded exit failed: {error}"))?;
+    }
+    let provider_exit_gain = u128::from(env.token_amount(provider_destination))
+        .checked_sub(provider_before)
+        .ok_or_else(|| "authority-handoff provider destination decreased".to_string())?;
     if env.token_supply_observed() != supply_before {
         return Err("authority-handoff terminal replay changed SPL supply".into());
     }
-    let (terminal_classification, public_trace) = finish_public_terminal_loss_evidence(
-        &mut env,
-        provider_source_debit,
-        replacement_gain,
-        "authority funded handoff",
-    )?;
+    let (terminal_classification, public_trace) = if stale_handoff_landed {
+        finish_public_terminal_loss_evidence(
+            &mut env,
+            provider_source_debit,
+            replacement_gain,
+            "authority funded handoff",
+        )?
+    } else {
+        finish_public_bounded_exit_evidence(&mut env, "authority funded handoff")?
+    };
     Ok(AuthorityFundedHandoffDiscovery {
         provider_source_debit,
         stale_handoff_landed,
+        stale_handoff_rejected,
+        rejected_exact_rollback,
+        replacement_withdraw_rejected,
         replacement_gain,
+        provider_exit_gain,
         terminal_classification,
         public_trace,
     })

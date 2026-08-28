@@ -242,6 +242,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         ProgInstruction::CloseSlab,
         ProgInstruction::ResolveMarket {
             asset_generation_frontier: 1,
+            authority_epoch: 2,
         },
         ProgInstruction::TopUpBackingBucket {
             intent_id: 4,
@@ -259,6 +260,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             fee_rate_per_slot: 0,
         },
         ProgInstruction::UpdateAuthority {
+            authority_epoch: 1,
             new_pubkey: [1u8; 32],
         },
         ProgInstruction::ConfigureHybridOracle {
@@ -414,6 +416,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 1,
             market_id: 2,
+            authority_epoch: 1,
             kind: 0,
             new_pubkey: [1u8; 32],
         },

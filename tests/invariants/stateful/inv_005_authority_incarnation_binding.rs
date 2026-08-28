@@ -3,14 +3,12 @@
 //! Normative obligation: Authority consent cannot revive after rotation, disablement, or A-to-B-to-A reuse.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_authority_incarnation_operation_matrix_discovers_aba_replays` enumerates market
-//! and asset authority scopes without finding metadata.
-//! The same generated seed also drives a funded authority A-to-B-to-A market: an old resolve
-//! request lands after two users trade, and exact terminal SPL payouts bind the victim's loss to
-//! the beneficiary's gain through the shared public terminal classifier.
-//! A second funded A-to-B-to-A route retains a backing-authority handoff, funds principal under the
-//! incumbent, lands the stale handoff after the authority returns, and binds the incumbent's exact
-//! source debit to the replacement authority's exact SPL withdrawal.
+//! `v16_program_authority_incarnation_operation_matrix_rejects_aba_replays` enumerates market
+//! and asset authority scopes without finding metadata and proves stale requests reject with exact
+//! rollback after A-to-B-to-A rotation.
+//! The same generated seed drives funded terminal-resolve and backing-handoff traces. Both retain
+//! old consent across A-to-B-to-A, prove rejection and rollback, and then execute the current
+//! authority or incumbent owner's bounded public exit.
 //! `v16_program_funded_role_matrix_discovers_admin_seizure` independently funds each value-bearing
 //! asset role, delegates a distinct cold asset admin, and measures whether that admin can redirect
 //! the incumbent's principal to a replacement key. The economic oracle requires an exact provider
@@ -39,7 +37,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_authority_incarnation_operation_matrix_discovers_aba_replays(
+    fn v16_program_authority_incarnation_operation_matrix_rejects_aba_replays(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_authority_incarnation_replays(seed)
@@ -48,22 +46,18 @@ proptest! {
         for (expected, discovery) in AuthorityIntentKind::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.kind, expected);
         }
-        let violations: Vec<_> = discoveries
-            .iter()
-            .filter(|discovery| discovery.is_violation())
-            .map(|discovery| discovery.kind)
-            .collect();
-        eprintln!("independent INV-005 discoveries: {violations:?}");
-        prop_assert_eq!(
-            violations,
-            AuthorityIntentKind::ALL.to_vec(),
-            "vulnerable-pin authority-incarnation discovery corpus changed"
-        );
+        for discovery in &discoveries {
+            prop_assert!(
+                discovery.certifies_epoch_rejection(),
+                "authority-incarnation route did not reject with exact rollback: {:?}",
+                discovery
+            );
+        }
         let terminal = crate::support::invariant_discovery::discover_authority_resolve_terminal_replay(seed)
             .map_err(TestCaseError::fail)?;
         prop_assert!(
-            terminal.is_violation(),
-            "old-authority resolve did not produce exact funded terminal evidence: {:?}",
+            terminal.certifies_epoch_and_bounded_exit(),
+            "old-authority resolve was not rejected before a fresh bounded exit: {:?}",
             terminal
         );
         prop_assert_eq!(terminal.victim_loss, 100_000);
@@ -73,12 +67,13 @@ proptest! {
             crate::support::invariant_discovery::discover_authority_funded_handoff_replay(seed)
                 .map_err(TestCaseError::fail)?;
         prop_assert!(
-            funded_handoff.is_violation(),
-            "old-authority handoff did not transfer exact funded principal: {:?}",
+            funded_handoff.certifies_epoch_and_bounded_exit(),
+            "old-authority handoff was not rejected before the incumbent bounded exit: {:?}",
             funded_handoff
         );
         prop_assert_eq!(funded_handoff.provider_source_debit, 500);
-        prop_assert_eq!(funded_handoff.replacement_gain, funded_handoff.provider_source_debit);
+        prop_assert_eq!(funded_handoff.replacement_gain, 0);
+        prop_assert_eq!(funded_handoff.provider_exit_gain, funded_handoff.provider_source_debit);
     }
 
     #[test]
@@ -95,58 +90,5 @@ proptest! {
                 "vulnerable-pin funded-role discovery changed: {discovery:?}"
             );
         }
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
-        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
-        failure_persistence: Some(Box::new(
-            proptest::test_runner::FileFailurePersistence::Direct(
-                "proptest-regressions/v16_program_stateful_fuzz.txt",
-            ),
-        )),
-        ..ProptestConfig::default()
-    })]
-
-    #[test]
-    fn v16_program_pr251_delayed_asset_authority_revival_fuzz(
-        seed in delayed_asset_authority_revival_seed_strategy()
-    ) {
-        let result = reproduce_delayed_asset_authority_revival(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 251 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn v16_program_pr345_pr346_authority_handoff_aba_replay_fuzz(
-        (seed, path) in authority_handoff_aba_replay_strategy()
-    ) {
-        let result = reproduce_authority_handoff_aba_replay(seed, path);
-        prop_assert!(
-            result.is_ok(),
-            "PR 345/346 {:?} no longer reproduces for seed {:?}: {}",
-            path,
-            seed,
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn v16_program_pr353_resolve_authority_incarnation_replay_fuzz(
-        seed in resolve_authority_incarnation_replay_seed_strategy()
-    ) {
-        let result = reproduce_resolve_authority_incarnation_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 353 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
     }
 }

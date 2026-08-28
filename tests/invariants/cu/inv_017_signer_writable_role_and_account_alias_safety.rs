@@ -2623,13 +2623,16 @@ fn authority_handoff_alias_fixture(route: AuthorityHandoffAliasRoute) -> CoreAcc
     let current = env.admin.insecure_clone();
     let incoming = Keypair::new();
     env.ensure_signer_account(incoming.pubkey());
+    let authority_epoch = env.control_sequences(0).authority_epoch;
     let instruction = match route {
         AuthorityHandoffAliasRoute::Market => ProgInstruction::UpdateAuthority {
+            authority_epoch,
             new_pubkey: incoming.pubkey().to_bytes(),
         },
         AuthorityHandoffAliasRoute::AssetOracle => ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
             market_id: env.asset_market_id(0),
+            authority_epoch,
             kind: processor::ASSET_AUTH_ORACLE,
             new_pubkey: incoming.pubkey().to_bytes(),
         },
@@ -2833,7 +2836,9 @@ fn two_account_policy_alias_fixture(route: TwoAccountPolicyAliasRoute) -> CoreAc
             market_id: env.asset_market_id(0),
             fee_bps: 1,
             insurance_share_bps: 0,
-            policy_sequence: next_control_sequence(sequences.backing_fee_long),
+            policy_sequence: next_control_sequence(
+                sequences.backing_fee.max(sequences.authority_epoch),
+            ),
         },
         TwoAccountPolicyAliasRoute::PermissionlessResolve => {
             ProgInstruction::ConfigurePermissionlessResolve {
@@ -3006,6 +3011,7 @@ fn two_account_lifecycle_alias_fixture(
     let instruction = match route {
         TwoAccountLifecycleAliasRoute::ResolveMarket => ProgInstruction::ResolveMarket {
             asset_generation_frontier: env.market_state().1.next_market_id,
+            authority_epoch: 0,
         },
         TwoAccountLifecycleAliasRoute::AdminAppendActivate => {
             ProgInstruction::UpdateAssetLifecycle {
@@ -5208,6 +5214,7 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
         program_id,
         &payer,
         ProgInstruction::UpdateAuthority {
+            authority_epoch: 0,
             new_pubkey: market.pubkey().to_bytes(),
         },
         vec![
@@ -5226,6 +5233,7 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
         &payer,
         ProgInstruction::ResolveMarket {
             asset_generation_frontier: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(market.pubkey(), true),

@@ -394,11 +394,13 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
         (processor::ASSET_AUTH_BACKING_BUCKET, &provider),
         (processor::ASSET_AUTH_ORACLE, &oracle),
     ] {
+        let authority_epoch = env.control_sequences(0).authority_epoch;
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index: 0,
                 market_id,
+                authority_epoch,
                 kind,
                 new_pubkey: incoming.pubkey().to_bytes(),
             },

@@ -2485,6 +2485,7 @@ fn v16_bpf_10m_market_resolution_stays_bounded() {
         .send(
             ProgInstruction::ResolveMarket {
                 asset_generation_frontier: 0,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),

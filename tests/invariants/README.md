@@ -45,7 +45,36 @@ Completion requires all of the following:
 ## Current checkpoint
 
 Updated 2026-08-28. The current engine pin is
-`9b737fdcec16f3709c0651f4ecc7488b4917f2d8`. A finding-blind INV-034 public-route campaign
+`9b737fdcec16f3709c0651f4ecc7488b4917f2d8`.
+
+The current INV-005 tranche fixes the concrete same-market `A -> B -> A` replay paths for market
+authority handoff, all five per-asset authority handoffs, and authenticated market resolution.
+Each retained operation binds the exact current per-asset authority epoch; a handoff increments it
+exactly once with checked arithmetic. The implementation adds no persisted bytes or mirror state:
+the epoch occupies the former short-side backing-fee watermark, while one canonical backing-fee
+watermark uses the maximum of both legacy lanes during migration. Three full-width Kani harnesses
+prove exact epoch admission, checked single-step handoff, and migration-floor preservation. The
+finding-blind public matrix rejects every stale handoff with exact rollback, a funded backing trace
+proves the incumbent can recover all 500 deposited atoms after a stale takeover rejects, and a
+funded resolve trace proves stale terminal consent rejects before the current authority completes a
+bounded user exit. Duplicate PR-specific fuzz worlds were deleted in favor of those generic
+oracles; the full branch diff currently deletes more test code than it adds.
+The exact rebuilt SBF is 1,242,608 bytes with SHA-256
+`dbca1f64656eb0d1e6aacdd1d4235cd831d99210c38fb6fbe9df8ebdbd2681cc`; the focused fixed-pin
+gates pass 3/3 deterministic public traces, 2/2 generated stateful campaigns, 93/93
+authority-matching LiteSVM/CU cases, and 3/3 INV-005 Kani harnesses.
+
+This is not yet INV-005 closure. A source-complete authority census found additional retained
+authority routes in reserve funding/withdrawal, auxiliary-ledger synchronization, fee and resolve
+policy, oracle configuration/push, lifecycle/restart, mint replacement, collateral swap, and
+terminal cleanup. Those routes still bind only the current key plus route-local generation or
+sequence fields. They must either bind the same exact epoch or receive a proof-backed
+non-retained classification. Full same-pubkey market recreation is separately blocked by INV-001:
+the market account currently resets asset IDs, authority epochs, and local replay watermarks when
+it is closed and initialized again, so no account-local epoch can establish market-incarnation
+identity by itself.
+
+A finding-blind INV-034 public-route campaign
 independently reproduced a cross-domain attribution loss on parent engine `b10b3454`: after a
 cross-margin account realized losses on two assets and detached the first loss-bearing leg, a later
 automatic liquidation attributed the remaining account deficit to the unrelated surviving asset.

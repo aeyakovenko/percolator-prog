@@ -1499,11 +1499,8 @@ impl V16CuEnv {
         insurance_share_bps: u16,
     ) -> u64 {
         let sequences = self.control_sequences(domain as usize / 2);
-        let policy_sequence = next_control_sequence(if domain % 2 == 0 {
-            sequences.backing_fee_long
-        } else {
-            sequences.backing_fee_short
-        });
+        let policy_sequence =
+            next_control_sequence(sequences.backing_fee.max(sequences.authority_epoch));
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1564,11 +1561,13 @@ impl V16CuEnv {
 
     fn update_asset_authority_with_cu(&mut self, new_authority: &Keypair) -> u64 {
         self.ensure_signer_account(new_authority.pubkey());
+        let authority_epoch = self.control_sequences(0).authority_epoch;
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::UpdateAuthority {
+                authority_epoch,
                 new_pubkey: new_authority.pubkey().to_bytes(),
             },
             vec![
@@ -1591,6 +1590,7 @@ impl V16CuEnv {
     ) -> Result<u64, String> {
         self.ensure_signer_account(signer.pubkey());
         let market_id = self.asset_market_id(asset_index);
+        let authority_epoch = self.control_sequences(asset_index as usize).authority_epoch;
         let mut signers = vec![signer];
         let new_authority_key = if let Some(new_authority) = new_authority {
             self.ensure_signer_account(new_authority.pubkey());
@@ -1603,6 +1603,7 @@ impl V16CuEnv {
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
                 market_id,
+                authority_epoch,
                 kind,
                 new_pubkey,
             },
@@ -2940,12 +2941,14 @@ impl V16CuEnv {
         let mut max_cu = 0;
         for _ in 0..max_attempts.max(1) {
             self.svm.expire_blockhash();
+            let authority_epoch = self.control_sequences(0).authority_epoch;
             let result = send_tx(
                 &mut self.svm,
                 self.program_id,
                 &self.payer,
                 ProgInstruction::ResolveMarket {
                     asset_generation_frontier: 0,
+                    authority_epoch,
                 },
                 vec![
                     AccountMeta::new(self.admin.pubkey(), true),
@@ -4811,17 +4814,18 @@ fn bind_current_generation_guards(
         }
     }
 
-    let asset_generation_frontier = match ix {
+    let market_wide_binding = match ix {
         ProgInstruction::ResolveMarket {
             asset_generation_frontier,
-        }
-        | ProgInstruction::ConfigurePermissionlessResolve {
+            authority_epoch,
+        } => Some((asset_generation_frontier, Some(authority_epoch))),
+        ProgInstruction::ConfigurePermissionlessResolve {
             asset_generation_frontier,
             ..
-        } => Some(asset_generation_frontier),
+        } => Some((asset_generation_frontier, None)),
         _ => None,
     };
-    if let Some(asset_generation_frontier) = asset_generation_frontier {
+    if let Some((asset_generation_frontier, authority_epoch)) = market_wide_binding {
         if *asset_generation_frontier != 0 {
             return;
         }
@@ -4835,6 +4839,11 @@ fn bind_current_generation_guards(
             *asset_generation_frontier, 0,
             "asset generation frontier must be nonzero"
         );
+        if let Some(authority_epoch) = authority_epoch {
+            *authority_epoch = state::read_asset_control_sequences(&market.data, 0)
+                .expect("valid asset-0 control sequences")
+                .authority_epoch;
+        }
         return;
     }
 

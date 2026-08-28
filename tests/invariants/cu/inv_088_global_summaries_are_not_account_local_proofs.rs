@@ -912,6 +912,7 @@ fn v16_program_resolved_blocker_summary_is_exact_in_every_two_asset_claimant_ord
         env.send(
             ProgInstruction::ResolveMarket {
                 asset_generation_frontier: 0,
+                authority_epoch: 0,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),

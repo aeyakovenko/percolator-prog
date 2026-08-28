@@ -2405,6 +2405,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         &env.payer,
         ProgInstruction::ResolveMarket {
             asset_generation_frontier: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -2579,6 +2580,7 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         &env.payer,
         ProgInstruction::ResolveMarket {
             asset_generation_frontier: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3901,6 +3903,7 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
         &env.payer,
         ProgInstruction::ResolveMarket {
             asset_generation_frontier: 0,
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
