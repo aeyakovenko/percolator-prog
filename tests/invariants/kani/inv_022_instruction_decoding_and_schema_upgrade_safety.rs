@@ -299,6 +299,70 @@ fn kani_v16_swap_secondary_for_primary_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(33)]
+fn kani_v16_update_asset_lifecycle_decode_preserves_wire_fields() {
+    let action: u8 = kani::any();
+    let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
+    let authority_epoch: u64 = kani::any();
+    let now_slot: u64 = kani::any();
+    let initial_price: u64 = kani::any();
+    let max_init_fee: u128 = kani::any();
+    let insurance_authority: [u8; 32] = kani::any();
+    let insurance_operator: [u8; 32] = kani::any();
+    let backing_bucket_authority: [u8; 32] = kani::any();
+    let oracle_authority: [u8; 32] = kani::any();
+
+    let mut data = [0u8; 179];
+    data[0] = action;
+    data[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    data[3..11].copy_from_slice(&market_id.to_le_bytes());
+    data[11..19].copy_from_slice(&authority_epoch.to_le_bytes());
+    data[19..27].copy_from_slice(&now_slot.to_le_bytes());
+    data[27..35].copy_from_slice(&initial_price.to_le_bytes());
+    data[35..51].copy_from_slice(&max_init_fee.to_le_bytes());
+    data[51..83].copy_from_slice(&insurance_authority);
+    data[83..115].copy_from_slice(&insurance_operator);
+    data[115..147].copy_from_slice(&backing_bucket_authority);
+    data[147..179].copy_from_slice(&oracle_authority);
+
+    match Instruction::decode_update_asset_lifecycle_body_for_proof(&data).unwrap() {
+        Instruction::UpdateAssetLifecycle {
+            action: got_action,
+            asset_index: got_asset_index,
+            market_id: got_market_id,
+            authority_epoch: got_authority_epoch,
+            now_slot: got_now_slot,
+            initial_price: got_initial_price,
+            max_init_fee: got_max_init_fee,
+            insurance_authority: got_insurance_authority,
+            insurance_operator: got_insurance_operator,
+            backing_bucket_authority: got_backing_bucket_authority,
+            oracle_authority: got_oracle_authority,
+        } => {
+            assert_eq!(got_action, action);
+            assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
+            assert_eq!(got_authority_epoch, authority_epoch);
+            assert_eq!(got_now_slot, now_slot);
+            assert_eq!(got_initial_price, initial_price);
+            assert_eq!(got_max_init_fee, max_init_fee);
+            assert_eq!(got_insurance_authority, insurance_authority);
+            assert_eq!(got_insurance_operator, insurance_operator);
+            assert_eq!(got_backing_bucket_authority, backing_bucket_authority);
+            assert_eq!(got_oracle_authority, oracle_authority);
+        }
+        _ => unreachable!(),
+    }
+
+    let extra: u8 = kani::any();
+    let mut trailing = [0u8; 180];
+    trailing[..179].copy_from_slice(&data);
+    trailing[179] = extra;
+    assert!(Instruction::decode_update_asset_lifecycle_body_for_proof(&trailing).is_err());
+}
+
+#[kani::proof]
 fn kani_v16_cure_and_cancel_close_decode_preserves_wire_fields() {
     let portfolio_id: u64 = kani::any();
     let position_epoch: u64 = kani::any();
@@ -2152,9 +2216,8 @@ fn kani_v16_core_payloads_reject_one_byte_truncation() {
     let crank = [5u8; 59];
     assert!(Instruction::decode(&crank).is_err());
 
-    // Keep this truncation before the four wide authority arrays; the host canonical corpus
-    // exhausts every one-byte prefix through the exact 172-byte lifecycle payload.
-    let asset_lifecycle = [40u8; 147];
+    // The shipping lifecycle instruction is exactly 180 bytes including its tag.
+    let asset_lifecycle = [40u8; 179];
     assert!(Instruction::decode(&asset_lifecycle).is_err());
 
     let trade = [6u8; 33];

@@ -1221,6 +1221,7 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
                     action: processor::ASSET_ACTION_ACTIVATE,
                     asset_index,
                     market_id,
+                    authority_epoch: 0,
                     now_slot: activation_slot,
                     initial_price: PRICE,
                     max_init_fee: u128::MAX,

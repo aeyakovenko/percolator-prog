@@ -318,6 +318,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             action: 0,
             asset_index: 1,
             market_id: 2,
+            authority_epoch: 0,
             now_slot: 2,
             initial_price: 100,
             max_init_fee: 1,

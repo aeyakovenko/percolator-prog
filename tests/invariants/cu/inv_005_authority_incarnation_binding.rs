@@ -311,8 +311,8 @@ const INV005_AUTHORITY_ROUTE_DISPOSITIONS: &[(&str, Inv005AuthorityDisposition, 
     ),
     (
         "UpdateAssetLifecycle",
-        Inv005AuthorityDisposition::OpenEpochGap,
-        "privileged lifecycle A-B-A replay",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "five privileged lifecycle scope/action cases",
     ),
     (
         "WithdrawInsuranceAsset",
@@ -357,9 +357,7 @@ fn v16_program_configured_authority_route_dispositions_are_source_complete() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(epoch_variants, classified_epoch_variants);
 
-    let expected_open = ["UpdateAssetLifecycle"]
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
+    let expected_open = std::collections::BTreeSet::new();
     let actual_open = dispositions
         .iter()
         .filter_map(|(variant, disposition)| {
@@ -396,9 +394,10 @@ fn v16_program_authority_epoch_matrix_is_source_complete() {
             counts
         });
     assert_eq!(semantic_counts.get("UpdateAssetAuthority"), Some(&5));
-    assert!(semantic_counts
-        .iter()
-        .all(|(variant, count)| *variant == "UpdateAssetAuthority" || *count == 1));
+    assert_eq!(semantic_counts.get("UpdateAssetLifecycle"), Some(&5));
+    assert!(semantic_counts.iter().all(|(variant, count)| {
+        matches!(*variant, "UpdateAssetAuthority" | "UpdateAssetLifecycle") || *count == 1
+    }));
 }
 
 #[test]
@@ -561,6 +560,7 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
             market_id: activation_market_id,
+            authority_epoch: 0,
             now_slot: 4,
             initial_price: 250,
             max_init_fee: u128::MAX,
@@ -1877,6 +1877,7 @@ fn v16_attack_retire_asset_authority_gated() {
             action: percolator_prog::processor::ASSET_ACTION_RETIRE,
             asset_index: 1,
             market_id,
+            authority_epoch: 0,
             now_slot: 5,
             initial_price: 0,
             max_init_fee: u128::MAX,
@@ -3214,6 +3215,7 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
             market_id: activation_market_id,
+            authority_epoch: 0,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -3270,6 +3272,7 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
             market_id: activation_market_id,
+            authority_epoch: 0,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -3289,6 +3292,63 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
         env.market_state().1.assets[1].lifecycle,
         AssetLifecycleV16::Active,
         "admin activation succeeds"
+    );
+}
+
+#[test]
+fn v16_program_permissionless_activation_requires_canonical_non_authority_epoch() {
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(1);
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let source = env.token_account(creator.pubkey(), 2);
+    let market_id = env.market_state().1.next_market_id;
+    let authority = creator.pubkey().to_bytes();
+    let instruction = |authority_epoch| ProgInstruction::UpdateAssetLifecycle {
+        action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+        asset_index: 1,
+        market_id,
+        authority_epoch,
+        now_slot: 1,
+        initial_price: 100,
+        max_init_fee: 1,
+        insurance_authority: authority,
+        insurance_operator: authority,
+        backing_bucket_authority: authority,
+        oracle_authority: authority,
+    };
+    let accounts = vec![
+        AccountMeta::new(creator.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(source, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale = env.send(instruction(1), accounts.clone(), &[&creator]);
+    assert!(
+        stale
+            .as_ref()
+            .is_err_and(|error| is_engine_stale_error(error)),
+        "permissionless activation must reject a noncanonical authority epoch: {stale:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.expire_blockhash();
+    env.send(instruction(0), accounts, &[&creator])
+        .expect("the same permissionless activation remains live with the canonical zero epoch");
+    assert_eq!(env.token_amount(source), 1);
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Active
     );
 }
 
@@ -4333,6 +4393,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
             action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
             asset_index: 0,
             market_id: asset_market_id,
+            authority_epoch: 0,
             now_slot: 2,
             initial_price: 0,
             max_init_fee: u128::MAX,
@@ -4363,6 +4424,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
     );
 
     env.svm.expire_blockhash();
+    let current_authority_epoch = env.control_sequences(0).authority_epoch;
     let fresh_shutdown = send_tx(
         &mut env.svm,
         env.program_id,
@@ -4371,6 +4433,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
             action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
             asset_index: 0,
             market_id: asset_market_id,
+            authority_epoch: current_authority_epoch,
             now_slot: 2,
             initial_price: 0,
             max_init_fee: u128::MAX,

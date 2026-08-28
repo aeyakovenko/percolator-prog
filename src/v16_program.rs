@@ -3150,6 +3150,7 @@ pub mod ix {
             action: u8,
             asset_index: u16,
             market_id: u64,
+            authority_epoch: u64,
             now_slot: u64,
             initial_price: u64,
             max_init_fee: u128,
@@ -3292,6 +3293,22 @@ pub mod ix {
             })
         }
 
+        fn decode_update_asset_lifecycle_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
+            Ok(Self::UpdateAssetLifecycle {
+                action: read_u8(rest)?,
+                asset_index: read_u16(rest)?,
+                market_id: read_u64(rest)?,
+                authority_epoch: read_u64(rest)?,
+                now_slot: read_u64(rest)?,
+                initial_price: read_u64(rest)?,
+                max_init_fee: read_u128(rest)?,
+                insurance_authority: read_bytes32(rest)?,
+                insurance_operator: read_bytes32(rest)?,
+                backing_bucket_authority: read_bytes32(rest)?,
+                oracle_authority: read_bytes32(rest)?,
+            })
+        }
+
         #[cfg(kani)]
         fn finish_proof_body(
             input: &[u8],
@@ -3343,6 +3360,14 @@ pub mod ix {
             input: &[u8],
         ) -> Result<Self, ProgramError> {
             Self::finish_proof_body(input, Self::decode_swap_secondary_for_primary_body)
+        }
+
+        #[doc(hidden)]
+        #[cfg(kani)]
+        pub fn decode_update_asset_lifecycle_body_for_proof(
+            input: &[u8],
+        ) -> Result<Self, ProgramError> {
+            Self::finish_proof_body(input, Self::decode_update_asset_lifecycle_body)
         }
 
         pub fn decode(input: &[u8]) -> Result<Self, ProgramError> {
@@ -3595,18 +3620,7 @@ pub mod ix {
                     observation_sequence: read_u64(&mut rest)?,
                     authority_epoch: read_u64(&mut rest)?,
                 },
-                40 => Self::UpdateAssetLifecycle {
-                    action: read_u8(&mut rest)?,
-                    asset_index: read_u16(&mut rest)?,
-                    market_id: read_u64(&mut rest)?,
-                    now_slot: read_u64(&mut rest)?,
-                    initial_price: read_u64(&mut rest)?,
-                    max_init_fee: read_u128(&mut rest)?,
-                    insurance_authority: read_bytes32(&mut rest)?,
-                    insurance_operator: read_bytes32(&mut rest)?,
-                    backing_bucket_authority: read_bytes32(&mut rest)?,
-                    oracle_authority: read_bytes32(&mut rest)?,
-                },
+                40 => Self::decode_update_asset_lifecycle_body(&mut rest)?,
                 57 => Self::WithdrawInsuranceAsset {
                     asset_index: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
@@ -4195,6 +4209,7 @@ pub mod ix {
                     action,
                     asset_index,
                     market_id,
+                    authority_epoch,
                     now_slot,
                     initial_price,
                     max_init_fee,
@@ -4207,6 +4222,7 @@ pub mod ix {
                     out.push(action);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, market_id);
+                    push_u64(&mut out, authority_epoch);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_price);
                     push_u128(&mut out, max_init_fee);
@@ -7266,6 +7282,7 @@ pub mod processor {
                 action,
                 asset_index,
                 market_id,
+                authority_epoch,
                 now_slot,
                 initial_price,
                 max_init_fee,
@@ -7279,6 +7296,7 @@ pub mod processor {
                 action,
                 asset_index,
                 market_id,
+                authority_epoch,
                 now_slot,
                 initial_price,
                 max_init_fee,
@@ -11867,6 +11885,7 @@ pub mod processor {
         action: u8,
         asset_index: u16,
         expected_market_id: u64,
+        expected_authority_epoch: u64,
         now_slot: u64,
         initial_price: u64,
         max_init_fee: u128,
@@ -11905,10 +11924,10 @@ pub mod processor {
         if mode_pre != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        let is_asset_authority =
+        let is_market_authority =
             cfg_pre.marketauth != [0u8; 32] && cfg_pre.marketauth == authority.key.to_bytes();
         let permissionless_reuse_target = action == ASSET_ACTION_ACTIVATE
-            && !is_asset_authority
+            && !is_market_authority
             && asset_index < configured_slots_pre
             && cfg_pre.free_market_slot_count != 0;
         if action == ASSET_ACTION_ACTIVATE
@@ -11922,7 +11941,7 @@ pub mod processor {
             if append_activation && cfg_pre.free_market_slot_count != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            let init_fee = if is_asset_authority {
+            let init_fee = if is_market_authority {
                 0
             } else {
                 let fee = policy_v16::permissionless_market_init_fee_for_asset(
@@ -11968,9 +11987,15 @@ pub mod processor {
                         true,
                         expected_market_id,
                     )?;
-                    let still_asset_authority =
+                    let still_market_authority =
                         cfg.marketauth != [0u8; 32] && cfg.marketauth == authority.key.to_bytes();
-                    if !still_asset_authority {
+                    if still_market_authority {
+                        require_authority_epoch_view(&group, 0, expected_authority_epoch)?;
+                    } else {
+                        // Permissionless activation is generation- and fee-bound, not authority
+                        // consent. Requiring the canonical zero value prevents this wire lane from
+                        // becoming an unaudited caller-controlled payload.
+                        state::require_current_authority_epoch(0, expected_authority_epoch)?;
                         let expected_fee = policy_v16::permissionless_market_init_fee_for_asset(
                             cfg.permissionless_market_init_fee,
                             asset_index,
@@ -11991,7 +12016,7 @@ pub mod processor {
                         if cfg.free_market_slot_count != 0 {
                             return Err(PercolatorError::EngineLockActive.into());
                         }
-                    } else if !still_asset_authority
+                    } else if !still_market_authority
                         && asset_index < configured_slots
                         && cfg.free_market_slot_count != 0
                     {
@@ -12074,7 +12099,7 @@ pub mod processor {
                         oracle_authority,
                     )?;
                     // Per-asset cold-storage admin: bootstrap to the activator (the permissionless
-                    // creator or the asset_authority); rotatable / burnable via UpdateAssetAuthority.
+                    // creator or market authority); rotatable / burnable via UpdateAssetAuthority.
                     profile.asset_admin = authority.key.to_bytes();
                     state::write_asset_oracle_profile(&mut data, asset_index, &profile)?;
                     if init_fee != 0 {
@@ -12127,6 +12152,12 @@ pub mod processor {
                 if !marketauth_authorized && !asset_admin_authorized {
                     return Err(PercolatorError::Unauthorized.into());
                 }
+                let epoch_asset_index = if marketauth_authorized {
+                    0
+                } else {
+                    asset_index
+                };
+                require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
                 if authenticated_slot < group.header.current_slot.get() {
                     return Err(PercolatorError::EngineStale.into());
                 }
@@ -12198,6 +12229,7 @@ pub mod processor {
             if !live_authority_matches(&cfg.marketauth, authority.key) {
                 return Err(PercolatorError::Unauthorized.into());
             }
+            require_authority_epoch_view(&group, 0, expected_authority_epoch)?;
             // Pre-collapse this was true only when the *admin* key (distinct from the *asset_authority*
             // key) retired an asset; the market authority itself was always "asset-authorized" so this
             // branch never fired for the init signer. With admin and asset_authority collapsed into the

@@ -159,6 +159,7 @@ fn host_asset_generation_wire_migrations_roundtrip_and_reject_legacy_payloads() 
         action: processor::ASSET_ACTION_ACTIVATE,
         asset_index: 1,
         market_id: 0x8877_6655_4433_2211,
+        authority_epoch: 0,
         now_slot: 7,
         initial_price: 100,
         max_init_fee: 13,
@@ -168,11 +169,14 @@ fn host_asset_generation_wire_migrations_roundtrip_and_reject_legacy_payloads() 
         oracle_authority: [0x44; 32],
     };
     let encoded_lifecycle = lifecycle.encode();
-    assert_eq!(encoded_lifecycle.len(), 172);
+    assert_eq!(encoded_lifecycle.len(), 180);
     assert_eq!(
         ProgInstruction::decode(&encoded_lifecycle).unwrap(),
         lifecycle
     );
+    let mut epochless_lifecycle = [0u8; 172];
+    epochless_lifecycle[0] = 40;
+    assert!(ProgInstruction::decode(&epochless_lifecycle).is_err());
     let mut legacy_lifecycle = [0u8; 164];
     legacy_lifecycle[0] = 40;
     assert!(ProgInstruction::decode(&legacy_lifecycle).is_err());

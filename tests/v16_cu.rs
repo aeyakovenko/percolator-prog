@@ -1184,6 +1184,7 @@ impl V16CuEnv {
             self.svm.warp_to_slot(now_slot);
         }
         let market_id = self.market_state().1.next_market_id;
+        let authority_epoch = self.control_sequences(0).authority_epoch;
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1192,6 +1193,7 @@ impl V16CuEnv {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index,
                 market_id,
+                authority_epoch,
                 now_slot,
                 initial_price,
                 max_init_fee: u128::MAX,
@@ -1247,6 +1249,7 @@ impl V16CuEnv {
             } else {
                 self.asset_market_id(asset_index)
             };
+            let authority_epoch = self.control_sequences(0).authority_epoch;
             let result = send_tx(
                 &mut self.svm,
                 self.program_id,
@@ -1255,6 +1258,7 @@ impl V16CuEnv {
                     action,
                     asset_index,
                     market_id,
+                    authority_epoch,
                     now_slot,
                     initial_price,
                     max_init_fee: u128::MAX,
@@ -1421,6 +1425,15 @@ impl V16CuEnv {
         now_slot: u64,
     ) -> Result<u64, String> {
         let market_id = self.asset_market_id(asset_index);
+        let market = self.svm.get_account(&self.market).expect("market account");
+        let (cfg, _, _, _) = state::read_market_config_mode_and_capacity(&market.data)
+            .expect("decode lifecycle market config");
+        let epoch_asset = if authority.pubkey().to_bytes() == cfg.marketauth {
+            0
+        } else {
+            asset_index as usize
+        };
+        let authority_epoch = self.control_sequences(epoch_asset).authority_epoch;
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1429,6 +1442,7 @@ impl V16CuEnv {
                 action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
                 asset_index,
                 market_id,
+                authority_epoch,
                 now_slot,
                 initial_price: 0,
                 max_init_fee: u128::MAX,
@@ -2083,6 +2097,7 @@ impl V16CuEnv {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index,
                 market_id,
+                authority_epoch: 0,
                 now_slot,
                 initial_price,
                 max_init_fee: fee,

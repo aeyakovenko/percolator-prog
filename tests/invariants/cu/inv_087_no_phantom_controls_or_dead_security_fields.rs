@@ -1312,6 +1312,7 @@ fn v16_program_asset_activation_cooldown_is_enforced_and_then_reopens() {
         action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
         asset_index: idx,
         market_id,
+        authority_epoch: 0,
         now_slot: slot,
         initial_price: price,
         max_init_fee: u128::MAX,

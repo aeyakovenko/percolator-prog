@@ -2617,6 +2617,7 @@ impl V16Svm {
                 action: percolator_prog::processor::ASSET_ACTION_RETIRE,
                 asset_index,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 now_slot,
                 initial_price: 0,
                 max_init_fee: u128::MAX,
@@ -2645,6 +2646,7 @@ impl V16Svm {
                 action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
                 asset_index,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 now_slot,
                 initial_price: 0,
                 max_init_fee: u128::MAX,
@@ -2669,6 +2671,7 @@ impl V16Svm {
                 action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
                 asset_index,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 now_slot,
                 initial_price: 0,
                 max_init_fee: u128::MAX,
@@ -2887,6 +2890,7 @@ impl V16Svm {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index,
                 market_id,
+                authority_epoch: 0,
                 now_slot,
                 initial_price,
                 max_init_fee: fee,
@@ -2937,6 +2941,7 @@ impl V16Svm {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index,
                 market_id,
+                authority_epoch: 0,
                 now_slot,
                 initial_price,
                 max_init_fee: fee,
@@ -3989,79 +3994,103 @@ impl V16Svm {
         )
     }
 
+    fn build_retained_asset_lifecycle_as(
+        &mut self,
+        authority: Keypair,
+        action: u8,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+    ) -> Transaction {
+        let group = self.primary_market_state().1;
+        let market_id = if action == percolator_prog::processor::ASSET_ACTION_ACTIVATE {
+            group.next_market_id
+        } else {
+            group.assets[asset_index as usize].market_id
+        };
+        self.build_program_transaction(
+            ProgInstruction::UpdateAssetLifecycle {
+                action,
+                asset_index,
+                market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
+                now_slot,
+                initial_price,
+                max_init_fee: u128::MAX,
+                insurance_authority: authority.pubkey().to_bytes(),
+                insurance_operator: authority.pubkey().to_bytes(),
+                backing_bucket_authority: authority.pubkey().to_bytes(),
+                oracle_authority: authority.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn build_retained_activate_asset(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+    ) -> Transaction {
+        self.build_retained_asset_lifecycle_as(
+            copy_keypair(&self.admin),
+            percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index,
+            now_slot,
+            initial_price,
+        )
+    }
+
     pub fn build_retained_shutdown_asset(
         &mut self,
         asset_index: u16,
         now_slot: u64,
     ) -> Transaction {
-        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
-        let admin = copy_keypair(&self.admin);
-        self.build_program_transaction(
-            ProgInstruction::UpdateAssetLifecycle {
-                action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
-                asset_index,
-                market_id,
-                now_slot,
-                initial_price: 0,
-                max_init_fee: u128::MAX,
-                insurance_authority: admin.pubkey().to_bytes(),
-                insurance_operator: admin.pubkey().to_bytes(),
-                backing_bucket_authority: admin.pubkey().to_bytes(),
-                oracle_authority: admin.pubkey().to_bytes(),
-            },
-            vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(self.market, false),
-            ],
-            &[admin],
+        self.build_retained_asset_lifecycle_as(
+            copy_keypair(&self.admin),
+            percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            asset_index,
+            now_slot,
+            0,
+        )
+    }
+
+    pub fn build_retained_shutdown_asset_for_actor(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+    ) -> Transaction {
+        self.build_retained_asset_lifecycle_as(
+            copy_keypair(&self.actors[actor_index].signer),
+            percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            asset_index,
+            now_slot,
+            0,
         )
     }
 
     pub fn build_retained_drain_only_asset(&mut self, asset_index: u16) -> Transaction {
-        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
-        let admin = copy_keypair(&self.admin);
-        self.build_program_transaction(
-            ProgInstruction::UpdateAssetLifecycle {
-                action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
-                asset_index,
-                market_id,
-                now_slot: 0,
-                initial_price: 0,
-                max_init_fee: u128::MAX,
-                insurance_authority: admin.pubkey().to_bytes(),
-                insurance_operator: admin.pubkey().to_bytes(),
-                backing_bucket_authority: admin.pubkey().to_bytes(),
-                oracle_authority: admin.pubkey().to_bytes(),
-            },
-            vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(self.market, false),
-            ],
-            &[admin],
+        self.build_retained_asset_lifecycle_as(
+            copy_keypair(&self.admin),
+            percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+            asset_index,
+            0,
+            0,
         )
     }
 
     pub fn build_retained_retire_asset(&mut self, asset_index: u16, now_slot: u64) -> Transaction {
-        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
-        let admin = copy_keypair(&self.admin);
-        self.build_program_transaction(
-            ProgInstruction::UpdateAssetLifecycle {
-                action: percolator_prog::processor::ASSET_ACTION_RETIRE,
-                asset_index,
-                market_id,
-                now_slot,
-                initial_price: 0,
-                max_init_fee: u128::MAX,
-                insurance_authority: admin.pubkey().to_bytes(),
-                insurance_operator: admin.pubkey().to_bytes(),
-                backing_bucket_authority: admin.pubkey().to_bytes(),
-                oracle_authority: admin.pubkey().to_bytes(),
-            },
-            vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(self.market, false),
-            ],
-            &[admin],
+        self.build_retained_asset_lifecycle_as(
+            copy_keypair(&self.admin),
+            percolator_prog::processor::ASSET_ACTION_RETIRE,
+            asset_index,
+            now_slot,
+            0,
         )
     }
 
@@ -4506,6 +4535,7 @@ impl V16Svm {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index,
                 market_id,
+                authority_epoch: 0,
                 now_slot,
                 initial_price,
                 max_init_fee,
@@ -5344,6 +5374,36 @@ impl V16Svm {
         }
     }
 
+    fn lifecycle_authority_epoch_asset(
+        &self,
+        accounts: &[AccountMeta],
+        action: u8,
+        asset_index: usize,
+    ) -> Option<usize> {
+        let authority = accounts
+            .first()
+            .map(|meta| meta.pubkey)
+            .expect("authority-bound lifecycle signer");
+        let market = accounts
+            .get(1)
+            .map(|meta| meta.pubkey)
+            .expect("authority-bound lifecycle market");
+        let account = self
+            .svm
+            .get_account(&market)
+            .expect("authority-bound lifecycle market account");
+        let (cfg, _, _, _) = state::read_market_config_mode_and_capacity(&account.data)
+            .expect("decode lifecycle market config");
+        if authority.to_bytes() == cfg.marketauth {
+            return Some(0);
+        }
+        if action == percolator_prog::processor::ASSET_ACTION_ACTIVATE {
+            None
+        } else {
+            Some(asset_index)
+        }
+    }
+
     fn bind_current_authority_epoch(
         &self,
         instruction: &mut ProgInstruction,
@@ -5451,6 +5511,21 @@ impl V16Svm {
                 ..
             } if *authority_epoch == CURRENT_AUTHORITY_EPOCH => {
                 Some((*asset_index as usize, authority_epoch))
+            }
+            ProgInstruction::UpdateAssetLifecycle {
+                action,
+                asset_index,
+                authority_epoch,
+                ..
+            } if *authority_epoch == CURRENT_AUTHORITY_EPOCH => {
+                match self.lifecycle_authority_epoch_asset(accounts, *action, *asset_index as usize)
+                {
+                    Some(asset_index) => Some((asset_index, authority_epoch)),
+                    None => {
+                        *authority_epoch = 0;
+                        None
+                    }
+                }
             }
             _ => None,
         };

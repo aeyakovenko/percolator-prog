@@ -301,6 +301,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             action: 0,
             asset_index: 1,
             market_id: 2,
+            authority_epoch: 0,
             now_slot: 2,
             initial_price: 100,
             max_init_fee: 1,
@@ -562,6 +563,9 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
     let mut epochless_asset_insurance_withdrawal = vec![0u8; 27];
     epochless_asset_insurance_withdrawal[0] = 57;
 
+    let mut epochless_asset_lifecycle = vec![0u8; 172];
+    epochless_asset_lifecycle[0] = 40;
+
     let mut removed_market_wide_insurance_withdrawal = vec![0u8; 17];
     removed_market_wide_insurance_withdrawal[0] = 41;
 
@@ -613,6 +617,10 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
         (
             "legacy WithdrawInsuranceAsset without authority epoch",
             epochless_asset_insurance_withdrawal,
+        ),
+        (
+            "legacy UpdateAssetLifecycle without authority epoch",
+            epochless_asset_lifecycle,
         ),
         (
             "removed market-wide WithdrawInsurance",

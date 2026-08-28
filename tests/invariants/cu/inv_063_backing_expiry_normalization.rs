@@ -767,6 +767,7 @@ fn v16_program_retire_normalizes_unreferenced_lapsed_backing() {
                 action: processor::ASSET_ACTION_RETIRE,
                 asset_index: ASSET,
                 market_id,
+                authority_epoch: 0,
                 now_slot,
                 initial_price: 0,
                 max_init_fee: u128::MAX,

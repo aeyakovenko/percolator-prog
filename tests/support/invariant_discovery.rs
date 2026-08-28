@@ -157,6 +157,11 @@ pub enum AuthorityIntentKind {
     InsuranceWithdrawal,
     BaseUnitMints,
     SecondaryReserveSwap,
+    LifecycleActivate,
+    LifecycleDrainOnly,
+    LifecycleRetire,
+    LifecycleShutdownMarket,
+    LifecycleShutdownAssetAdmin,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -592,7 +597,7 @@ impl RetryIntentKind {
 }
 
 impl AuthorityIntentKind {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 34] = [
         Self::MarketAuthorityHandoff,
         Self::AssetAdminHandoff,
         Self::InsuranceAuthorityHandoff,
@@ -622,6 +627,11 @@ impl AuthorityIntentKind {
         Self::InsuranceWithdrawal,
         Self::BaseUnitMints,
         Self::SecondaryReserveSwap,
+        Self::LifecycleActivate,
+        Self::LifecycleDrainOnly,
+        Self::LifecycleRetire,
+        Self::LifecycleShutdownMarket,
+        Self::LifecycleShutdownAssetAdmin,
     ];
 
     fn discriminator(self) -> u8 {
@@ -655,6 +665,11 @@ impl AuthorityIntentKind {
             Self::InsuranceWithdrawal => 26,
             Self::BaseUnitMints => 27,
             Self::SecondaryReserveSwap => 28,
+            Self::LifecycleActivate => 29,
+            Self::LifecycleDrainOnly => 30,
+            Self::LifecycleRetire => 31,
+            Self::LifecycleShutdownMarket => 32,
+            Self::LifecycleShutdownAssetAdmin => 33,
         }
     }
 
@@ -680,6 +695,7 @@ impl AuthorityIntentKind {
             Self::InsuranceWithdrawal => {
                 Some(percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR)
             }
+            Self::LifecycleShutdownAssetAdmin => Some(percolator_prog::processor::ASSET_AUTH_ADMIN),
             Self::MarketAuthorityHandoff
             | Self::ResolveMarket
             | Self::LiquidationFeePolicy
@@ -697,7 +713,11 @@ impl AuthorityIntentKind {
             | Self::RestartAssetOracle
             | Self::CloseSlab
             | Self::BaseUnitMints
-            | Self::SecondaryReserveSwap => None,
+            | Self::SecondaryReserveSwap
+            | Self::LifecycleActivate
+            | Self::LifecycleDrainOnly
+            | Self::LifecycleRetire
+            | Self::LifecycleShutdownMarket => None,
         }
     }
 
@@ -743,6 +763,11 @@ impl AuthorityIntentKind {
             Self::InsuranceWithdrawal => "WithdrawInsuranceAsset",
             Self::BaseUnitMints => "UpdateBaseUnitMints",
             Self::SecondaryReserveSwap => "SwapSecondaryForPrimary",
+            Self::LifecycleActivate
+            | Self::LifecycleDrainOnly
+            | Self::LifecycleRetire
+            | Self::LifecycleShutdownMarket
+            | Self::LifecycleShutdownAssetAdmin => "UpdateAssetLifecycle",
         }
     }
 }
@@ -4519,6 +4544,16 @@ fn prepare_authority_incarnation_route(
             env.fund_secondary_collateral_reserve(secondary_mint, 1_000);
             return Ok(Some(secondary_mint));
         }
+        AuthorityIntentKind::LifecycleActivate => {
+            env.retire_asset(1, 1)
+                .map_err(|error| format!("retire asset before retained reactivation: {error}"))?;
+            env.warp_to_slot(2);
+        }
+        AuthorityIntentKind::LifecycleShutdownMarket
+        | AuthorityIntentKind::LifecycleShutdownAssetAdmin => {
+            env.configure_permissionless_resolve(100, 5)
+                .map_err(|error| format!("configure retained lifecycle shutdown: {error}"))?;
+        }
         _ => {}
     }
     Ok(None)
@@ -4621,6 +4656,15 @@ fn build_authority_incarnation_intent(
             oracle_account.expect("secondary reserve fixture"),
             100,
         ),
+        AuthorityIntentKind::LifecycleActivate => {
+            env.build_retained_activate_asset(ASSET, 2, INITIAL_PRICE + 1)
+        }
+        AuthorityIntentKind::LifecycleDrainOnly => env.build_retained_drain_only_asset(ASSET),
+        AuthorityIntentKind::LifecycleRetire => env.build_retained_retire_asset(ASSET, 1),
+        AuthorityIntentKind::LifecycleShutdownMarket => env.build_retained_shutdown_asset(ASSET, 1),
+        AuthorityIntentKind::LifecycleShutdownAssetAdmin => {
+            env.build_retained_shutdown_asset_for_actor(AUTHORITY_A, ASSET, 1)
+        }
     }
 }
 

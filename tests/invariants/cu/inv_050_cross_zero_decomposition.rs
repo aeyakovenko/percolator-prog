@@ -1629,6 +1629,7 @@ fn run_retired_exposure_unreachability_world(route: AdlCrossZeroRoute, open_side
         action: percolator_prog::processor::ASSET_ACTION_RETIRE,
         asset_index: ASSET_INDEX,
         market_id,
+        authority_epoch: 0,
         now_slot,
         initial_price: 0,
         max_init_fee: u128::MAX,
