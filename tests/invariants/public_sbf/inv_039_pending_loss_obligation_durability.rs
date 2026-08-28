@@ -178,10 +178,11 @@ fn v16_program_multi_segment_funding_requires_catchup_before_reduction() {
         assert!(discovery.rejected_exact_rollback, "{discovery:?}");
         assert!(discovery.retry_landed, "{discovery:?}");
         assert!(!discovery.is_violation(), "{discovery:?}");
+        assert!(discovery.certifies_terminal_value(), "{discovery:?}");
         assert_eq!(discovery.reordered_paid, discovery.control_paid);
         assert_eq!(discovery.reordered_received, discovery.control_received);
-        assert_eq!(discovery.victim_claim_loss, 0);
-        assert_eq!(discovery.attacker_claim_gain, 0);
+        assert_eq!(discovery.victim_payout_loss, 0);
+        assert_eq!(discovery.coalition_payout_gain, 0);
     }
 }
 

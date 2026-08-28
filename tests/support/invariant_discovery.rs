@@ -1164,8 +1164,14 @@ pub struct AccrualOrderingDiscovery {
     pub control_received: u128,
     pub reordered_paid: u128,
     pub reordered_received: u128,
-    pub victim_claim_loss: u128,
-    pub attacker_claim_gain: u128,
+    pub victim_payout_loss: u128,
+    pub coalition_payout_gain: u128,
+    pub control_total_payout: u128,
+    pub reordered_total_payout: u128,
+    pub terminal_positive_claimants: u8,
+    pub max_destination_payout_loss: u128,
+    pub destination_payout_gain: u128,
+    pub terminal_evidence: PairedTerminalPayoutEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1229,8 +1235,9 @@ pub struct ShutdownCatchupDiscovery {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PairedTerminalPayoutEvidence {
-    pub victim_destination: Pubkey,
+    pub victim_destinations: Vec<Pubkey>,
     pub counterparty_destinations: Vec<Pubkey>,
+    pub terminal_rounding_residue_bound: u128,
     pub users_terminal: bool,
     pub terminal_classification: PublicTerminalClassification,
     pub control_public_trace: PublicTraceEvidence,
@@ -2338,22 +2345,24 @@ impl PendingMarkAdmissionDiscovery {
 
 impl PairedTerminalPayoutEvidence {
     fn traced_payouts(&self) -> Option<(u128, u128, u128, u128)> {
-        if self.counterparty_destinations.is_empty()
+        if self.victim_destinations.is_empty()
+            || self.counterparty_destinations.is_empty()
             || self
-                .counterparty_destinations
-                .contains(&self.victim_destination)
+                .victim_destinations
+                .iter()
+                .any(|destination| self.counterparty_destinations.contains(destination))
         {
             return None;
         }
         let control_victim = u128::try_from(
             self.control_public_trace
-                .token_delta_for_accounts(&[self.victim_destination])
+                .token_delta_for_accounts(&self.victim_destinations)
                 .ok()?,
         )
         .ok()?;
         let reordered_victim = u128::try_from(
             self.public_trace
-                .token_delta_for_accounts(&[self.victim_destination])
+                .token_delta_for_accounts(&self.victim_destinations)
                 .ok()?,
         )
         .ok()?;
@@ -2425,6 +2434,48 @@ impl PairedTerminalPayoutEvidence {
         };
         victim_payout_loss == 0
             && control_victim == reordered_victim
+            && control_coalition == reordered_coalition
+            && control_victim.checked_add(control_coalition) == Some(control_total_payout)
+            && reordered_victim.checked_add(reordered_coalition) == Some(reordered_total_payout)
+            && control_total_payout == reordered_total_payout
+            && self.users_terminal
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && self
+                .control_public_trace
+                .validate_public_execution()
+                .is_ok()
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+
+    pub fn certifies_bounded_residue(
+        &self,
+        victim_payout_loss: u128,
+        control_total_payout: u128,
+        reordered_total_payout: u128,
+    ) -> bool {
+        let Some((control_victim, reordered_victim, control_coalition, reordered_coalition)) =
+            self.traced_payouts()
+        else {
+            return false;
+        };
+        let Some(observed_victim_loss) = control_victim.checked_sub(reordered_victim) else {
+            return false;
+        };
+        let Some(observed_coalition_loss) = control_coalition.checked_sub(reordered_coalition)
+        else {
+            return false;
+        };
+        let Some(observed_residue) = control_total_payout.checked_sub(reordered_total_payout)
+        else {
+            return false;
+        };
+        victim_payout_loss != 0
+            && victim_payout_loss == observed_victim_loss
+            && observed_victim_loss.checked_add(observed_coalition_loss) == Some(observed_residue)
+            && observed_residue <= self.terminal_rounding_residue_bound
             && control_victim.checked_add(control_coalition) == Some(control_total_payout)
             && reordered_victim.checked_add(reordered_coalition) == Some(reordered_total_payout)
             && self.users_terminal
@@ -2442,8 +2493,9 @@ impl PairedTerminalPayoutEvidence {
 
 fn build_paired_terminal_payout_evidence(
     context: &str,
-    victim_destination: Pubkey,
+    victim_destinations: Vec<Pubkey>,
     counterparty_destinations: Vec<Pubkey>,
+    terminal_rounding_residue_bound: u128,
     users_terminal: bool,
     victim_payout_loss: u128,
     counterparty_payout_gain: u128,
@@ -2460,9 +2512,14 @@ fn build_paired_terminal_payout_evidence(
     let exact_terminal_loss = victim_payout_loss != 0
         && victim_payout_loss == counterparty_payout_gain
         && control_total_payout == reordered_total_payout;
-    if victim_payout_loss != 0 && !exact_terminal_loss {
+    let bounded_terminal_residue = victim_payout_loss != 0
+        && counterparty_payout_gain == 0
+        && control_total_payout
+            .checked_sub(reordered_total_payout)
+            .is_some_and(|residue| residue <= terminal_rounding_residue_bound);
+    if victim_payout_loss != 0 && !exact_terminal_loss && !bounded_terminal_residue {
         return Err(format!(
-            "{context} observed a victim payout loss without an exact conserved counterparty gain"
+            "{context} observed a victim payout loss without an exact counterparty gain or bounded terminal residue"
         ));
     }
     let terminal_classification = public_trace
@@ -2488,8 +2545,9 @@ fn build_paired_terminal_payout_evidence(
         })
         .map_err(|error| format!("{context} terminal evidence is invalid: {error}"))?;
     let evidence = PairedTerminalPayoutEvidence {
-        victim_destination,
+        victim_destinations,
         counterparty_destinations,
+        terminal_rounding_residue_bound,
         users_terminal,
         terminal_classification,
         control_public_trace,
@@ -2499,6 +2557,12 @@ fn build_paired_terminal_payout_evidence(
         evidence.certifies_exact_loss(
             victim_payout_loss,
             counterparty_payout_gain,
+            control_total_payout,
+            reordered_total_payout,
+        )
+    } else if bounded_terminal_residue {
+        evidence.certifies_bounded_residue(
+            victim_payout_loss,
             control_total_payout,
             reordered_total_payout,
         )
@@ -2637,8 +2701,43 @@ impl AccrualOrderingDiscovery {
             && self.control_paid == self.control_received
             && self.reordered_paid == self.reordered_received
             && matches!(omitted, Some(value) if value != 0
-                && value == self.victim_claim_loss
-                && value == self.attacker_claim_gain)
+                && value == self.victim_payout_loss
+                && value == self.coalition_payout_gain)
+            && self.terminal_evidence.certifies_exact_loss(
+                self.victim_payout_loss,
+                self.coalition_payout_gain,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            )
+    }
+
+    pub fn certifies_terminal_value(&self) -> bool {
+        let bounded_terminal_value = if self.victim_payout_loss == 0 {
+            self.terminal_evidence.certifies_bounded_exit(
+                self.victim_payout_loss,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            )
+        } else {
+            self.kind == AccrualOrderingKind::RecoveryForfeit
+                && self.terminal_positive_claimants != 0
+                && self.max_destination_payout_loss == 1
+                && self.destination_payout_gain == 0
+                && self.terminal_evidence.terminal_rounding_residue_bound
+                    == u128::from(self.terminal_positive_claimants)
+                && self.terminal_evidence.certifies_bounded_residue(
+                    self.victim_payout_loss,
+                    self.control_total_payout,
+                    self.reordered_total_payout,
+                )
+        };
+        !self.is_violation()
+            && self.control_paid != 0
+            && self.control_paid == self.control_received
+            && self.reordered_paid == self.control_paid
+            && self.reordered_received == self.control_received
+            && self.coalition_payout_gain == 0
+            && bounded_terminal_value
     }
 }
 
@@ -7045,15 +7144,22 @@ pub fn discover_backing_provider_consent_violations(
         .collect()
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct AccrualOrderingWorld {
-    attacker_claim: u128,
-    victim_claim: u128,
+    payouts: [u128; PRIMARY_ACTOR_COUNT],
+    coalition_payout: u128,
+    victim_payout: u128,
+    total_payout: u128,
+    positive_claimant_count: u8,
     paid: u128,
     received: u128,
     unsafe_action_rejected: bool,
     rejected_exact_rollback: bool,
     retry_landed: bool,
+    users_terminal: bool,
+    victim_destination: Pubkey,
+    coalition_destinations: Vec<Pubkey>,
+    public_trace: PublicTraceEvidence,
 }
 
 fn accrual_ordering_snapshot(env: &V16Svm) -> (Vec<u8>, Vec<Vec<u8>>, Vec<u64>, u128) {
@@ -7154,15 +7260,6 @@ fn settle_zero_move_actors(
     Ok(())
 }
 
-fn portfolio_claim(env: &V16Svm, actor: usize) -> Result<u128, String> {
-    let portfolio = env.primary_portfolio(actor);
-    let claim = i128::try_from(portfolio.capital.get())
-        .map_err(|_| format!("actor {actor} capital exceeds i128"))?
-        .checked_add(portfolio.pnl.get())
-        .ok_or_else(|| format!("actor {actor} claim overflow"))?;
-    u128::try_from(claim).map_err(|_| format!("actor {actor} claim became negative"))
-}
-
 fn funding_totals(env: &V16Svm, payer: usize, receiver: usize) -> (u128, u128) {
     (
         env.primary_portfolio(payer)
@@ -7172,6 +7269,97 @@ fn funding_totals(env: &V16Svm, payer: usize, receiver: usize) -> (u128, u128) {
             .funding_long_received_atoms_total
             .get(),
     )
+}
+
+fn finish_accrual_ordering_world(
+    env: &mut V16Svm,
+    context: &str,
+    victim: usize,
+    settlement_slot: u64,
+    supply_before: u128,
+    paid: u128,
+    received: u128,
+    unsafe_action_rejected: bool,
+    rejected_exact_rollback: bool,
+    retry_landed: bool,
+) -> Result<AccrualOrderingWorld, String> {
+    const ACTORS: [usize; PRIMARY_ACTOR_COUNT] = [0, 1, 2, 3, 4];
+    if !ACTORS.contains(&victim) {
+        return Err(format!(
+            "{context} victim actor {victim} is outside the payout set"
+        ));
+    }
+    let positive_claimant_count = u8::try_from(
+        ACTORS
+            .iter()
+            .filter(|actor| env.primary_portfolio(**actor).pnl.get() > 0)
+            .count(),
+    )
+    .map_err(|_| format!("{context} positive claimant count exceeds u8"))?;
+    env.resolve_market()
+        .map_err(|error| format!("resolve {context}: {error}"))?;
+    env.warp_to_slot(
+        settlement_slot
+            .checked_add(1)
+            .ok_or_else(|| format!("{context} terminal slot overflow"))?,
+    );
+    let payouts = drain_resolved_discovery_actors(env, ACTORS)?;
+    let victim_payout = payouts[victim];
+    let total_payout = payouts.into_iter().try_fold(0u128, |sum, payout| {
+        sum.checked_add(payout)
+            .ok_or_else(|| format!("{context} terminal payout overflow"))
+    })?;
+    let coalition_payout = total_payout
+        .checked_sub(victim_payout)
+        .ok_or_else(|| format!("{context} victim payout exceeded total payout"))?;
+    let users_terminal = ACTORS.iter().try_fold(true, |all_terminal, actor| {
+        discovery_portfolio_is_terminal(&env.primary_portfolio(*actor))
+            .map(|terminal| all_terminal && terminal)
+    })?;
+    if !users_terminal {
+        return Err(format!("{context} left a funded nonterminal portfolio"));
+    }
+    if env.token_supply_observed() != supply_before {
+        return Err(format!("{context} changed SPL supply"));
+    }
+
+    let victim_destination = env.actors[victim].destination_token;
+    let coalition_destinations = ACTORS
+        .into_iter()
+        .filter(|actor| *actor != victim)
+        .map(|actor| env.actors[actor].destination_token)
+        .collect::<Vec<_>>();
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("{context} public trace is invalid: {error}"))?;
+    let traced_victim_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&[victim_destination])?)
+            .map_err(|_| format!("{context} victim destination had a negative trace delta"))?;
+    let traced_coalition_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&coalition_destinations)?)
+            .map_err(|_| format!("{context} coalition destinations had a negative trace delta"))?;
+    if traced_victim_payout != victim_payout || traced_coalition_payout != coalition_payout {
+        return Err(format!(
+            "{context} payout observations disagree with public SPL deltas: victim={victim_payout}/{traced_victim_payout}, coalition={coalition_payout}/{traced_coalition_payout}"
+        ));
+    }
+    Ok(AccrualOrderingWorld {
+        payouts,
+        coalition_payout,
+        victim_payout,
+        total_payout,
+        positive_claimant_count,
+        paid,
+        received,
+        unsafe_action_rejected,
+        rejected_exact_rollback,
+        retry_landed,
+        users_terminal,
+        victim_destination,
+        coalition_destinations,
+        public_trace,
+    })
 }
 
 fn execute_cpi_close_kind(
@@ -7213,6 +7401,7 @@ fn run_trade_accrual_ordering_world(
     const PRICE: u64 = 2;
     const Q: i128 = 100 * POS_SCALE as i128;
     let mut env = zero_move_funding_discovery_world(seed)?;
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     execute_cpi_close_kind(&mut env, kind, -Q)?;
     prime_zero_move_funding_discovery(&mut env, settlement_slot)?;
@@ -7242,28 +7431,18 @@ fn run_trade_accrual_ordering_world(
         }
     }
     let (paid, received) = funding_totals(&env, 0, 1);
-    for actor in [0, 1] {
-        let pnl = env.primary_portfolio(actor).pnl.get();
-        if pnl > 0 {
-            env.convert_released_pnl(actor, pnl as u128)
-                .map_err(|error| format!("convert trade actor {actor} PnL: {error}"))?;
-        }
-        let capital = env.primary_portfolio(actor).capital.get();
-        env.withdraw_primary(actor, capital)
-            .map_err(|error| format!("withdraw trade actor {actor}: {error}"))?;
-    }
-    if env.token_supply_observed() != supply_before {
-        return Err("trade accrual-order world changed SPL supply".into());
-    }
-    Ok(AccrualOrderingWorld {
-        attacker_claim: u128::from(env.token_amount(env.actors[0].destination_token)),
-        victim_claim: u128::from(env.token_amount(env.actors[1].destination_token)),
+    finish_accrual_ordering_world(
+        &mut env,
+        &format!("{kind:?} accrual-order world"),
+        1,
+        settlement_slot,
+        supply_before,
         paid,
         received,
         unsafe_action_rejected,
         rejected_exact_rollback,
         retry_landed,
-    })
+    )
 }
 
 fn run_rebalance_accrual_ordering_world(
@@ -7275,6 +7454,7 @@ fn run_rebalance_accrual_ordering_world(
     const PRICE: u64 = 2;
     const Q: i128 = 100 * POS_SCALE as i128;
     let mut env = zero_move_funding_discovery_world(seed)?;
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     env.trade_no_cpi(0, 1, 0, -Q, PRICE, 0)
         .map_err(|error| format!("open rebalance accrual pair: {error}"))?;
@@ -7305,22 +7485,18 @@ fn run_rebalance_accrual_ordering_world(
         settle_zero_move_actors(&mut env, settlement_slot, &[1])?;
     }
     let (paid, received) = funding_totals(&env, 0, 1);
-    let victim_claim = portfolio_claim(&env, 1)?;
-    let attacker_capital = env.primary_portfolio(0).capital.get();
-    env.withdraw_primary(0, attacker_capital)
-        .map_err(|error| format!("withdraw rebalance actor: {error}"))?;
-    if env.token_supply_observed() != supply_before {
-        return Err("rebalance accrual-order world changed SPL supply".into());
-    }
-    Ok(AccrualOrderingWorld {
-        attacker_claim: u128::from(env.token_amount(env.actors[0].destination_token)),
-        victim_claim,
+    finish_accrual_ordering_world(
+        &mut env,
+        "rebalance accrual-order world",
+        1,
+        settlement_slot,
+        supply_before,
         paid,
         received,
         unsafe_action_rejected,
         rejected_exact_rollback,
         retry_landed,
-    })
+    )
 }
 
 fn run_forfeit_accrual_ordering_world(
@@ -7333,6 +7509,7 @@ fn run_forfeit_accrual_ordering_world(
     const Q_ATTACKER: i128 = 5 * POS_SCALE as i128;
     const Q_WHALE: i128 = 95 * POS_SCALE as i128;
     let mut env = zero_move_funding_discovery_world(seed)?;
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     env.trade_no_cpi(1, 2, 0, -Q_WHALE, PRICE, 0)
         .map_err(|error| format!("open forfeit whale pair: {error}"))?;
@@ -7370,22 +7547,18 @@ fn run_forfeit_accrual_ordering_world(
         .map_err(|error| format!("forfeit accrual-boundary recovery leg: {error}"))?;
     settle_zero_move_actors(&mut env, settlement_slot, &[3])?;
     let (paid, received) = funding_totals(&env, 0, 3);
-    let victim_claim = portfolio_claim(&env, 3)?;
-    let attacker_capital = env.primary_portfolio(0).capital.get();
-    env.withdraw_primary(0, attacker_capital)
-        .map_err(|error| format!("withdraw forfeit actor: {error}"))?;
-    if env.token_supply_observed() != supply_before {
-        return Err("forfeit accrual-order world changed SPL supply".into());
-    }
-    Ok(AccrualOrderingWorld {
-        attacker_claim: u128::from(env.token_amount(env.actors[0].destination_token)),
-        victim_claim,
+    finish_accrual_ordering_world(
+        &mut env,
+        "forfeit accrual-order world",
+        3,
+        settlement_slot,
+        supply_before,
         paid,
         received,
         unsafe_action_rejected,
         rejected_exact_rollback,
         retry_landed,
-    })
+    )
 }
 
 fn discover_one_accrual_ordering_violation(
@@ -7421,25 +7594,85 @@ fn discover_one_accrual_ordering_violation(
     };
     let control = run(false)?;
     let reordered = run(true)?;
-    let victim_claim_loss = control
-        .victim_claim
-        .checked_sub(reordered.victim_claim)
-        .ok_or_else(|| format!("{kind:?} reordered path increased victim claim"))?;
-    let attacker_claim_gain = reordered
-        .attacker_claim
-        .checked_sub(control.attacker_claim)
-        .ok_or_else(|| format!("{kind:?} reordered path decreased attacker claim"))?;
-    if control
-        .attacker_claim
-        .checked_add(control.victim_claim)
-        .ok_or_else(|| "control claim total overflow".to_string())?
-        != reordered
-            .attacker_claim
-            .checked_add(reordered.victim_claim)
-            .ok_or_else(|| "reordered claim total overflow".to_string())?
+    if control.victim_destination != reordered.victim_destination
+        || control.coalition_destinations != reordered.coalition_destinations
     {
-        return Err(format!("{kind:?} paired worlds did not conserve claims"));
+        return Err(format!(
+            "{kind:?} paired worlds used different payout accounts"
+        ));
     }
+    let fixed_victim_loss = control
+        .victim_payout
+        .saturating_sub(reordered.victim_payout);
+    let fixed_victim_gain = reordered
+        .victim_payout
+        .saturating_sub(control.victim_payout);
+    let coalition_loss = control
+        .coalition_payout
+        .saturating_sub(reordered.coalition_payout);
+    let coalition_gain = reordered
+        .coalition_payout
+        .saturating_sub(control.coalition_payout);
+    if control.positive_claimant_count != reordered.positive_claimant_count {
+        return Err(format!(
+            "{kind:?} paired worlds changed the positive terminal claimant count: {} != {}",
+            control.positive_claimant_count, reordered.positive_claimant_count
+        ));
+    }
+    let (max_destination_payout_loss, destination_payout_gain) = control
+        .payouts
+        .iter()
+        .zip(reordered.payouts.iter())
+        .try_fold(
+            (0u128, 0u128),
+            |(max_loss, total_gain), (control, reordered)| {
+                let loss = control.saturating_sub(*reordered);
+                let gain = reordered.saturating_sub(*control);
+                Ok::<_, String>((
+                    max_loss.max(loss),
+                    total_gain
+                        .checked_add(gain)
+                        .ok_or_else(|| format!("{kind:?} destination payout gain overflow"))?,
+                ))
+            },
+        )?;
+    let (victim_destinations, counterparty_destinations, victim_payout_loss, coalition_payout_gain) =
+        if fixed_victim_loss != 0 || coalition_loss == 0 {
+            (
+                vec![reordered.victim_destination],
+                reordered.coalition_destinations,
+                fixed_victim_loss,
+                coalition_gain,
+            )
+        } else {
+            (
+                reordered.coalition_destinations,
+                vec![reordered.victim_destination],
+                coalition_loss,
+                fixed_victim_gain,
+            )
+        };
+    let terminal_rounding_residue_bound = if kind == AccrualOrderingKind::RecoveryForfeit
+        && destination_payout_gain == 0
+        && max_destination_payout_loss == 1
+    {
+        u128::from(control.positive_claimant_count)
+    } else {
+        0
+    };
+    let terminal_evidence = build_paired_terminal_payout_evidence(
+        &format!("{kind:?} accrual ordering"),
+        victim_destinations,
+        counterparty_destinations,
+        terminal_rounding_residue_bound,
+        control.users_terminal && reordered.users_terminal,
+        victim_payout_loss,
+        coalition_payout_gain,
+        control.total_payout,
+        reordered.total_payout,
+        control.public_trace,
+        reordered.public_trace,
+    )?;
     Ok(AccrualOrderingDiscovery {
         kind,
         unsafe_action_rejected: reordered.unsafe_action_rejected,
@@ -7449,8 +7682,14 @@ fn discover_one_accrual_ordering_violation(
         control_received: control.received,
         reordered_paid: reordered.paid,
         reordered_received: reordered.received,
-        victim_claim_loss,
-        attacker_claim_gain,
+        victim_payout_loss,
+        coalition_payout_gain,
+        control_total_payout: control.total_payout,
+        reordered_total_payout: reordered.total_payout,
+        terminal_positive_claimants: control.positive_claimant_count,
+        max_destination_payout_loss,
+        destination_payout_gain,
+        terminal_evidence,
     })
 }
 
@@ -7739,8 +7978,9 @@ pub fn discover_terminal_commit_ordering(
     }
     let terminal_evidence = build_paired_terminal_payout_evidence(
         "terminal commit ordering",
-        reordered.victim_destination,
+        vec![reordered.victim_destination],
         reordered.counterparty_destinations,
+        0,
         committed.users_terminal && reordered.users_terminal,
         u128::from(victim_payout_loss),
         u128::from(counterparty_payout_gain),
@@ -7968,8 +8208,9 @@ pub fn discover_pending_zero_move_terminal_ordering(
     }
     let terminal_evidence = build_paired_terminal_payout_evidence(
         "zero-move terminal ordering",
-        reordered.victim_destination,
+        vec![reordered.victim_destination],
         reordered.counterparty_destinations,
+        0,
         control.users_terminal && reordered.users_terminal,
         victim_payout_loss,
         attacker_payout_gain,
@@ -8154,8 +8395,9 @@ pub fn discover_shutdown_commit_ordering(
     }
     let terminal_evidence = build_paired_terminal_payout_evidence(
         "shutdown commit ordering",
-        shutdown_first.victim_destination,
+        vec![shutdown_first.victim_destination],
         shutdown_first.counterparty_destinations,
+        0,
         control.users_terminal && shutdown_first.users_terminal,
         victim_payout_loss,
         counterparty_payout_gain,
@@ -8655,8 +8897,9 @@ fn discover_one_prospective_accrual_violation(
         .ok_or_else(|| "trade-first ordering decreased coalition payout".to_string())?;
     let terminal_evidence = build_paired_terminal_payout_evidence(
         &format!("{route:?} prospective accrual ordering"),
-        reordered.victim_destination,
+        vec![reordered.victim_destination],
         reordered.coalition_destinations.to_vec(),
+        0,
         control.users_terminal && reordered.users_terminal,
         victim_payout_loss,
         coalition_payout_gain,

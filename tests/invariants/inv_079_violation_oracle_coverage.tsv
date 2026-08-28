@@ -1,5 +1,5 @@
 # oracle	evidence	rationale
-AccrualOrderingDiscovery	ECONOMIC_DELTA_ONLY	claim transfer delta lacks normalized public terminal evidence
+AccrualOrderingDiscovery	TERMINAL_LOF	all four exposure-removal routes resolve every participant and exact destination-token traces bind any conserved control-relative payout loss/gain to the terminal classifier; bounded no-gain recovery residue cannot classify as LoF
 AssetGenerationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
 AuthorityIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
 AuthorityFundedHandoffDiscovery	TERMINAL_LOF	public trace binds stale authority-epoch handoff to exact incumbent backing-principal extraction

@@ -6,7 +6,10 @@
 //! `v16_program_accrual_boundary_operation_matrix_preserves_transfers` builds one
 //! zero-price-move funding checkpoint and permutes settlement against CPI close, batch CPI close,
 //! unilateral reduction, and recovery forfeit. The common oracle requires both sides to book the
-//! same nonzero transfer and compares conserved claims across the two orders.
+//! same nonzero transfer, resolves every participant, and compares exact destination-token payouts
+//! across the two orders. The recovery-forfeit route derives a two-atom aggregate terminal residue
+//! bound from its two positive terminal claimants: no destination may gain and each claimant may
+//! lose at most one floor atom. That residue cannot classify as LoF.
 //! `v16_program_prospective_accrual_route_matrix_preserves_elapsed_funding` independently varies
 //! all single/batch CPI/no-CPI trade routes around the same funding catch-up boundary. Every route
 //! requires identical funding indices and unrelated-victim payout, drains every actor through the
@@ -81,6 +84,35 @@ proptest! {
         prop_assert_eq!(discoveries.len(), AccrualOrderingKind::ALL.len());
         for (expected, discovery) in AccrualOrderingKind::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.kind, expected);
+            prop_assert!(discovery.certifies_terminal_value(), "{discovery:?}");
+            let mut wrong_payout_identity = discovery.clone();
+            wrong_payout_identity.terminal_evidence.victim_destinations =
+                vec![discovery.terminal_evidence.counterparty_destinations[0]];
+            prop_assert!(!wrong_payout_identity.is_violation());
+            prop_assert!(!wrong_payout_identity.certifies_terminal_value());
+            if discovery.terminal_evidence.terminal_rounding_residue_bound != 0 {
+                prop_assert_eq!(discovery.kind, AccrualOrderingKind::RecoveryForfeit);
+                prop_assert_eq!(discovery.terminal_positive_claimants, 2);
+                prop_assert_eq!(discovery.max_destination_payout_loss, 1);
+                prop_assert_eq!(discovery.destination_payout_gain, 0);
+                prop_assert_eq!(
+                    discovery.terminal_evidence.terminal_rounding_residue_bound,
+                    u128::from(discovery.terminal_positive_claimants)
+                );
+                let observed_residue = discovery.control_total_payout
+                    .checked_sub(discovery.reordered_total_payout)
+                    .ok_or_else(|| TestCaseError::fail(
+                        "reordered recovery payout exceeded its control"
+                    ))?;
+                prop_assert_ne!(observed_residue, 0);
+                prop_assert!(observed_residue
+                    <= discovery.terminal_evidence.terminal_rounding_residue_bound);
+                let mut insufficient_residue_bound = discovery.clone();
+                insufficient_residue_bound.terminal_evidence.terminal_rounding_residue_bound =
+                    observed_residue - 1;
+                prop_assert!(!insufficient_residue_bound.is_violation());
+                prop_assert!(!insufficient_residue_bound.certifies_terminal_value());
+            }
         }
         let violations: Vec<_> = discoveries
             .iter()
@@ -105,6 +137,7 @@ proptest! {
             prop_assert!(discovery.unsafe_action_rejected, "{discovery:?}");
             prop_assert!(discovery.rejected_exact_rollback, "{discovery:?}");
             prop_assert!(discovery.retry_landed, "{discovery:?}");
+            prop_assert!(discovery.certifies_terminal_value(), "{discovery:?}");
         }
         let violations: Vec<_> = discoveries
             .iter()
@@ -139,8 +172,8 @@ proptest! {
         prop_assert!(!discovery.is_violation(), "{discovery:?}");
         prop_assert!(discovery.certifies_terminal_ordering(), "{discovery:?}");
         let mut wrong_payout_identity = discovery.clone();
-        wrong_payout_identity.terminal_evidence.victim_destination =
-            discovery.terminal_evidence.counterparty_destinations[0];
+        wrong_payout_identity.terminal_evidence.victim_destinations =
+            vec![discovery.terminal_evidence.counterparty_destinations[0]];
         prop_assert!(!wrong_payout_identity.is_violation());
         prop_assert!(!wrong_payout_identity.certifies_terminal_ordering());
     }
@@ -215,8 +248,8 @@ proptest! {
         prop_assert!(!discovery.is_violation(), "{discovery:?}");
         prop_assert!(discovery.certifies_terminal_ordering(), "{discovery:?}");
         let mut wrong_payout_identity = discovery.clone();
-        wrong_payout_identity.terminal_evidence.victim_destination =
-            discovery.terminal_evidence.counterparty_destinations[0];
+        wrong_payout_identity.terminal_evidence.victim_destinations =
+            vec![discovery.terminal_evidence.counterparty_destinations[0]];
         prop_assert!(!wrong_payout_identity.is_violation());
         prop_assert!(!wrong_payout_identity.certifies_terminal_ordering());
     }
@@ -248,8 +281,8 @@ proptest! {
             prop_assert!(!discovery.is_violation(), "{discovery:?}");
             prop_assert!(discovery.certifies_terminal_ordering(), "{discovery:?}");
             let mut wrong_payout_identity = discovery.clone();
-            wrong_payout_identity.terminal_evidence.victim_destination =
-                discovery.terminal_evidence.counterparty_destinations[0];
+            wrong_payout_identity.terminal_evidence.victim_destinations =
+                vec![discovery.terminal_evidence.counterparty_destinations[0]];
             prop_assert!(!wrong_payout_identity.is_violation());
             prop_assert!(!wrong_payout_identity.certifies_terminal_ordering());
             prop_assert!(discovery.control_f_short_num > 0);
@@ -296,8 +329,8 @@ proptest! {
         );
         prop_assert!(discovery.certifies_terminal_ordering(), "{discovery:?}");
         let mut wrong_payout_identity = discovery.clone();
-        wrong_payout_identity.terminal_evidence.victim_destination =
-            discovery.terminal_evidence.counterparty_destinations[0];
+        wrong_payout_identity.terminal_evidence.victim_destinations =
+            vec![discovery.terminal_evidence.counterparty_destinations[0]];
         prop_assert!(!wrong_payout_identity.is_violation());
         prop_assert!(!wrong_payout_identity.certifies_terminal_ordering());
         prop_assert!(discovery.unsafe_resolve_rejected);
