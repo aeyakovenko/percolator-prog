@@ -18,7 +18,7 @@ MarkMovementReserveDiscovery	LOCAL_SAFETY_ONLY	reserve and withdrawal checks lac
 PendingMarkAdmissionDiscovery	LOCAL_SAFETY_ONLY	guard and round-trip checks lack normalized terminal evidence
 PendingMarkInheritanceDiscovery	LOCAL_SAFETY_ONLY	guard and round-trip checks lack normalized terminal evidence
 PendingTargetOverrideDiscovery	LOCAL_SAFETY_ONLY	target and payout checks lack normalized terminal evidence
-PendingZeroMoveTerminalDiscovery	ECONOMIC_DELTA_ONLY	terminal payout delta lacks normalized public terminal evidence
+PendingZeroMoveTerminalDiscovery	TERMINAL_LOF	paired public traces terminalize both users and bind exact zero-move ordering payout loss/gain to the same SPL identities
 ProspectiveAccrualDiscovery	TERMINAL_LOF	all four public trade routes resolve every actor and bind exact control-relative SPL payout loss/gain to the terminal classifier
 ShutdownCommitOrderingDiscovery	TERMINAL_LOF	paired public traces terminalize both users and bind exact shutdown-order payout loss/gain to the same SPL identities
 SourceFeeConsentDiscovery	TERMINAL_LOF	public trace binds the unconsented LP debit to the provider's exact SPL withdrawal

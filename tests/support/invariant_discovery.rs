@@ -1197,6 +1197,7 @@ pub struct PendingZeroMoveTerminalDiscovery {
     pub attacker_payout_gain: u128,
     pub control_total_payout: u128,
     pub reordered_total_payout: u128,
+    pub terminal_evidence: PairedTerminalPayoutEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2568,12 +2569,35 @@ impl TerminalCommitOrderingDiscovery {
 }
 
 impl PendingZeroMoveTerminalDiscovery {
-    pub fn is_violation(&self) -> bool {
+    pub fn has_funding_divergence(&self) -> bool {
         self.control_f_long_num != self.reordered_f_long_num
             || self.control_f_short_num != self.reordered_f_short_num
-            || self.victim_payout_loss != 0
-            || self.attacker_payout_gain != 0
-            || self.control_total_payout != self.reordered_total_payout
+    }
+
+    pub fn is_violation(&self) -> bool {
+        self.terminal_evidence.certifies_exact_loss(
+            self.victim_payout_loss,
+            self.attacker_payout_gain,
+            self.control_total_payout,
+            self.reordered_total_payout,
+        )
+    }
+
+    pub fn certifies_terminal_ordering(&self) -> bool {
+        !self.has_funding_divergence()
+            && !self.is_violation()
+            && self.control_f_long_num != 0
+            && self.control_f_short_num != 0
+            && self.unsafe_resolve_rejected
+            && self.rejected_exact_rollback
+            && (2..=16).contains(&self.catchup_steps)
+            && self.max_catchup_cu < 1_400_000
+            && self.attacker_payout_gain == 0
+            && self.terminal_evidence.certifies_bounded_exit(
+                self.victim_payout_loss,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            )
     }
 }
 
@@ -7448,29 +7472,67 @@ pub fn discover_multi_segment_accrual_ordering_violations(
         .collect()
 }
 
-fn drain_resolved_discovery_actor(env: &mut V16Svm, actor: usize) -> Result<u128, String> {
-    let destination = env.actors[actor].destination_token;
-    let payout_before = env.token_amount(destination);
-    for _ in 0..512 {
-        let market_before = env.market_data(false);
-        let portfolio_before = env.primary_portfolio_data(actor);
-        let destination_before = env.token_amount(destination);
-        let _ = env.close_resolved_primary(actor);
-        let _ = env.claim_resolved_payout_topup_primary(actor);
-        if env.market_data(false) == market_before
-            && env.primary_portfolio_data(actor) == portfolio_before
-            && env.token_amount(destination) == destination_before
-        {
-            return env
-                .token_amount(destination)
-                .checked_sub(payout_before)
-                .map(u128::from)
-                .ok_or_else(|| format!("resolved actor {actor} payout decreased"));
+fn drain_resolved_discovery_actors<const N: usize>(
+    env: &mut V16Svm,
+    actors: [usize; N],
+) -> Result<[u128; N], String> {
+    if N == 0 {
+        return Err("resolved payout drain requires at least one actor".into());
+    }
+    for (index, actor) in actors.iter().enumerate() {
+        if actors[..index].contains(actor) {
+            return Err(format!("resolved payout drain repeats actor {actor}"));
         }
     }
-    Err(format!(
-        "resolved actor {actor} did not reach a fixed point in 512 calls"
-    ))
+    let destinations = actors.map(|actor| env.actors[actor].destination_token);
+    let payouts_before = destinations.map(|destination| env.token_amount(destination));
+    for _ in 0..512 {
+        let all_terminal = actors.iter().try_fold(true, |all_terminal, actor| {
+            discovery_portfolio_is_terminal(&env.primary_portfolio(*actor))
+                .map(|terminal| all_terminal && terminal)
+        })?;
+        if all_terminal {
+            let mut payouts = [0u128; N];
+            for index in 0..N {
+                payouts[index] = u128::from(
+                    env.token_amount(destinations[index])
+                        .checked_sub(payouts_before[index])
+                        .ok_or_else(|| {
+                            format!("resolved actor {} payout decreased", actors[index])
+                        })?,
+                );
+            }
+            return Ok(payouts);
+        }
+
+        let market_before = env.market_data(false);
+        let portfolios_before: [Vec<u8>; N] =
+            std::array::from_fn(|index| env.primary_portfolio_data(actors[index]));
+        let destinations_before = destinations.map(|destination| env.token_amount(destination));
+        for actor in actors {
+            let _ = env.close_resolved_primary(actor);
+            let _ = env.claim_resolved_payout_topup_primary(actor);
+        }
+        let progressed = env.market_data(false) != market_before
+            || actors.iter().enumerate().any(|(index, actor)| {
+                env.primary_portfolio_data(*actor) != portfolios_before[index]
+                    || env.token_amount(destinations[index]) != destinations_before[index]
+            });
+        if !progressed {
+            let summaries = actors
+                .iter()
+                .map(|actor| {
+                    discovery_portfolio_terminal_summary(&env.primary_portfolio(*actor))
+                        .map(|summary| format!("actor {actor}: {summary}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Err(format!(
+                "resolved payout rails reached a nonterminal fixed point: {}",
+                summaries.join("; ")
+            ));
+        }
+    }
+    Err("resolved payout participants did not terminalize in 512 rounds".into())
 }
 
 #[derive(Clone, Debug)]
@@ -7610,8 +7672,7 @@ fn run_terminal_commit_world(
     }
     let effective_mark = resolved.assets[0].effective_price;
     env.warp_to_slot(RESOLVE_SLOT + 1);
-    let short_payout = drain_resolved_discovery_actor(&mut env, 1)?;
-    let long_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    let [short_payout, long_payout] = drain_resolved_discovery_actors(&mut env, [1, 0])?;
     let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(0))?
         && discovery_portfolio_is_terminal(&env.primary_portfolio(1))?;
     if env.token_supply_observed() != supply_before {
@@ -7703,7 +7764,7 @@ pub fn discover_terminal_commit_ordering(
     })
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PendingZeroMoveTerminalWorld {
     f_long_num: i128,
     f_short_num: i128,
@@ -7713,6 +7774,10 @@ struct PendingZeroMoveTerminalWorld {
     max_catchup_cu: u64,
     payer_payout: u128,
     receiver_payout: u128,
+    users_terminal: bool,
+    victim_destination: Pubkey,
+    counterparty_destinations: Vec<Pubkey>,
+    public_trace: PublicTraceEvidence,
 }
 
 fn run_pending_zero_move_terminal_world(
@@ -7737,6 +7802,7 @@ fn run_pending_zero_move_terminal_world(
             ..MarketConfig::default()
         },
     );
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     env.configure_permissionless_resolve(3, 1)
         .map_err(|error| format!("configure zero-move terminal resolve: {error}"))?;
@@ -7824,10 +7890,37 @@ fn run_pending_zero_move_terminal_world(
         return Err("zero-move terminal fixture unexpectedly moved effective price".into());
     }
     env.warp_to_slot(RESOLVE_SLOT + 1);
-    let receiver_payout = drain_resolved_discovery_actor(&mut env, 1)?;
-    let payer_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    let [receiver_payout, payer_payout] = drain_resolved_discovery_actors(&mut env, [1, 0])?;
+    let payer_portfolio = env.primary_portfolio(0);
+    let receiver_portfolio = env.primary_portfolio(1);
+    let users_terminal = discovery_portfolio_is_terminal(&payer_portfolio)?
+        && discovery_portfolio_is_terminal(&receiver_portfolio)?;
+    if !users_terminal {
+        return Err(format!(
+            "zero-move payout rails reached a nonterminal fixed point: payer={}, receiver={}",
+            discovery_portfolio_terminal_summary(&payer_portfolio)?,
+            discovery_portfolio_terminal_summary(&receiver_portfolio)?,
+        ));
+    }
     if env.token_supply_observed() != supply_before {
         return Err("zero-move terminal world changed SPL supply".into());
+    }
+    let victim_destination = env.actors[1].destination_token;
+    let counterparty_destinations = vec![env.actors[0].destination_token];
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("zero-move terminal public trace is invalid: {error}"))?;
+    let traced_receiver_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&[victim_destination])?)
+            .map_err(|_| "zero-move receiver destination had a negative trace delta".to_string())?;
+    let traced_payer_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&counterparty_destinations)?)
+            .map_err(|_| "zero-move payer destination had a negative trace delta".to_string())?;
+    if traced_receiver_payout != receiver_payout || traced_payer_payout != payer_payout {
+        return Err(format!(
+            "zero-move payout observations disagree with public SPL deltas: receiver={receiver_payout}/{traced_receiver_payout}, payer={payer_payout}/{traced_payer_payout}"
+        ));
     }
     Ok(PendingZeroMoveTerminalWorld {
         f_long_num,
@@ -7838,6 +7931,10 @@ fn run_pending_zero_move_terminal_world(
         max_catchup_cu,
         payer_payout,
         receiver_payout,
+        users_terminal,
+        victim_destination,
+        counterparty_destinations,
+        public_trace,
     })
 }
 
@@ -7864,6 +7961,23 @@ pub fn discover_pending_zero_move_terminal_ordering(
         .payer_payout
         .checked_add(reordered.receiver_payout)
         .ok_or_else(|| "zero-move reordered payout overflow".to_string())?;
+    if control.victim_destination != reordered.victim_destination
+        || control.counterparty_destinations != reordered.counterparty_destinations
+    {
+        return Err("zero-move paired worlds used different payout accounts".into());
+    }
+    let terminal_evidence = build_paired_terminal_payout_evidence(
+        "zero-move terminal ordering",
+        reordered.victim_destination,
+        reordered.counterparty_destinations,
+        control.users_terminal && reordered.users_terminal,
+        victim_payout_loss,
+        attacker_payout_gain,
+        control_total_payout,
+        reordered_total_payout,
+        control.public_trace,
+        reordered.public_trace,
+    )?;
     Ok(PendingZeroMoveTerminalDiscovery {
         control_f_long_num: control.f_long_num,
         control_f_short_num: control.f_short_num,
@@ -7877,6 +7991,7 @@ pub fn discover_pending_zero_move_terminal_ordering(
         attacker_payout_gain,
         control_total_payout,
         reordered_total_payout,
+        terminal_evidence,
     })
 }
 
@@ -7976,8 +8091,7 @@ fn run_shutdown_commit_world(
     env.resolve_market()
         .map_err(|error| format!("resolve shutdown fixture: {error}"))?;
     env.warp_to_slot(FORCE_CLOSE_SLOT + 1);
-    let long_payout = drain_resolved_discovery_actor(&mut env, LONG)?;
-    let short_payout = drain_resolved_discovery_actor(&mut env, SHORT)?;
+    let [long_payout, short_payout] = drain_resolved_discovery_actors(&mut env, [LONG, SHORT])?;
     let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(LONG))?
         && discovery_portfolio_is_terminal(&env.primary_portfolio(SHORT))?;
     if env.token_supply_observed() != supply_before {
@@ -8160,8 +8274,7 @@ pub fn discover_shutdown_catchup_liveness(
     env.resolve_market()
         .map_err(|error| format!("resolve shutdown catch-up market: {error}"))?;
     env.warp_to_slot(SHUTDOWN_SLOT + 2);
-    let long_payout = drain_resolved_discovery_actor(&mut env, LONG)?;
-    let short_payout = drain_resolved_discovery_actor(&mut env, SHORT)?;
+    let [long_payout, short_payout] = drain_resolved_discovery_actors(&mut env, [LONG, SHORT])?;
     let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(LONG))?
         && discovery_portfolio_is_terminal(&env.primary_portfolio(SHORT))?;
     let total_payout = long_payout
@@ -8452,10 +8565,8 @@ fn run_prospective_accrual_world(
     }
     env.resolve_market()
         .map_err(|error| format!("resolve prospective funding world: {error}"))?;
-    let stamper_short_payout = drain_resolved_discovery_actor(&mut env, 3)?;
-    let victim_payout = drain_resolved_discovery_actor(&mut env, 1)?;
-    let attacker_payout = drain_resolved_discovery_actor(&mut env, 0)?;
-    let stamper_long_payout = drain_resolved_discovery_actor(&mut env, 2)?;
+    let [stamper_short_payout, victim_payout, attacker_payout, stamper_long_payout] =
+        drain_resolved_discovery_actors(&mut env, [3, 1, 0, 2])?;
     let coalition_payout = attacker_payout
         .checked_add(stamper_long_payout)
         .and_then(|value| value.checked_add(stamper_short_payout))
@@ -9282,8 +9393,7 @@ fn run_pending_mark_fee_world(
     }
     env.resolve_market()
         .map_err(|error| format!("resolve fee-order world: {error}"))?;
-    let victim_payout = drain_resolved_discovery_actor(&mut env, 0)?;
-    let winner_payout = drain_resolved_discovery_actor(&mut env, 1)?;
+    let [victim_payout, winner_payout] = drain_resolved_discovery_actors(&mut env, [0, 1])?;
     if env.token_supply_observed() != supply_before {
         return Err("fee-order world changed SPL supply".into());
     }
@@ -10477,8 +10587,7 @@ pub fn verify_fractional_movement_convergence(
             .checked_add(1)
             .ok_or_else(|| "fractional close slot overflow".to_string())?,
     );
-    let long_payout = drain_resolved_discovery_actor(&mut env, 0)?;
-    let short_payout = drain_resolved_discovery_actor(&mut env, 1)?;
+    let [long_payout, short_payout] = drain_resolved_discovery_actors(&mut env, [0, 1])?;
     let target_long_payout = DEPOSIT
         .checked_sub(u128::from(OPEN_PRICE - TARGET_PRICE))
         .ok_or_else(|| "target long payout underflow".to_string())?;
@@ -10665,8 +10774,8 @@ pub fn verify_hybrid_terminal_time_coherence(
         .map_err(|error| format!("resolve coherent Hybrid market: {error}"))?;
     max_cu = max_cu.max(resolve.compute_units);
     let terminal_mark = env.primary_market_state().1.assets[0].effective_price;
-    let counterparty_payout = drain_resolved_discovery_actor(&mut env, COUNTERPARTY)?;
-    let victim_payout = drain_resolved_discovery_actor(&mut env, VICTIM)?;
+    let [counterparty_payout, victim_payout] =
+        drain_resolved_discovery_actors(&mut env, [COUNTERPARTY, VICTIM])?;
     if env.token_supply_observed() != supply_before
         || victim_payout
             .checked_add(counterparty_payout)
@@ -11232,9 +11341,8 @@ pub fn discover_cross_domain_insurance_violation(
 
     env.resolve_market()
         .map_err(|error| format!("resolve cross-domain world: {error}"))?;
-    let loser_payout = drain_resolved_discovery_actor(&mut env, 0)?;
-    let counterparty_payout = drain_resolved_discovery_actor(&mut env, 2)?;
-    let winner_payout = drain_resolved_discovery_actor(&mut env, 1)?;
+    let [loser_payout, counterparty_payout, winner_payout] =
+        drain_resolved_discovery_actors(&mut env, [0, 2, 1])?;
     let coalition_payout = loser_payout
         .checked_add(counterparty_payout)
         .and_then(|value| value.checked_add(winner_payout))
@@ -12593,6 +12701,35 @@ fn discovery_portfolio_is_terminal(
             .source_domains
             .iter()
             .all(|source| source.source_claim_bound_num.get() == 0))
+}
+
+fn discovery_portfolio_terminal_summary(
+    account: &percolator_prog::state::PortfolioAccountV16,
+) -> Result<String, String> {
+    let active_legs = account
+        .legs
+        .iter()
+        .map(|leg| {
+            leg.try_to_runtime()
+                .map_err(|error| format!("decode terminal portfolio leg: {error:?}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|leg| leg.active)
+        .map(|leg| (leg.asset_index, leg.basis_pos_q))
+        .collect::<Vec<_>>();
+    let source_claim_bound = account
+        .source_domains
+        .iter()
+        .try_fold(0u128, |sum, source| {
+            sum.checked_add(source.source_claim_bound_num.get())
+                .ok_or_else(|| "terminal source-claim summary overflow".to_string())
+        })?;
+    Ok(format!(
+        "capital={}, pnl={}, active_legs={active_legs:?}, source_claim_bound={source_claim_bound}",
+        account.capital.get(),
+        account.pnl.get(),
+    ))
 }
 
 fn discovery_portfolio_funded_value(

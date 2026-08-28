@@ -201,5 +201,7 @@ fn v16_program_pending_zero_move_mark_requires_terminal_funding_catchup() {
         discovery.reordered_f_short_num,
         discovery.control_f_short_num
     );
+    assert!(!discovery.has_funding_divergence(), "{discovery:?}");
     assert!(!discovery.is_violation(), "{discovery:?}");
+    assert!(discovery.certifies_terminal_ordering(), "{discovery:?}");
 }

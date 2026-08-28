@@ -211,7 +211,14 @@ proptest! {
             discovery.reordered_f_short_num,
             discovery.control_f_short_num
         );
+        prop_assert!(!discovery.has_funding_divergence(), "{discovery:?}");
         prop_assert!(!discovery.is_violation(), "{discovery:?}");
+        prop_assert!(discovery.certifies_terminal_ordering(), "{discovery:?}");
+        let mut wrong_payout_identity = discovery.clone();
+        wrong_payout_identity.terminal_evidence.victim_destination =
+            discovery.terminal_evidence.counterparty_destinations[0];
+        prop_assert!(!wrong_payout_identity.is_violation());
+        prop_assert!(!wrong_payout_identity.certifies_terminal_ordering());
     }
 }
 
