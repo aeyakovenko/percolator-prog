@@ -2973,15 +2973,19 @@ pub mod ix {
         TopUpInsurance {
             market_id: u64,
             intent_id: u64,
+            authority_epoch: u64,
             amount: u128,
         },
         TopUpInsuranceDomain {
             domain: u16,
             market_id: u64,
             intent_id: u64,
+            authority_epoch: u64,
             amount: u128,
         },
-        CloseSlab,
+        CloseSlab {
+            authority_epoch: u64,
+        },
         ResolveMarket {
             asset_generation_frontier: u64,
             authority_epoch: u64,
@@ -2990,6 +2994,7 @@ pub mod ix {
             domain: u16,
             market_id: u64,
             intent_id: u64,
+            authority_epoch: u64,
             amount: u128,
             expiry_slot: u64,
         },
@@ -3383,15 +3388,19 @@ pub mod ix {
                 9 => Self::TopUpInsurance {
                     market_id: read_u64(&mut rest)?,
                     intent_id: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 56 => Self::TopUpInsuranceDomain {
                     domain: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
                     intent_id: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
-                13 => Self::CloseSlab,
+                13 => Self::CloseSlab {
+                    authority_epoch: read_u64(&mut rest)?,
+                },
                 19 => Self::ResolveMarket {
                     asset_generation_frontier: read_u64(&mut rest)?,
                     authority_epoch: read_u64(&mut rest)?,
@@ -3400,6 +3409,7 @@ pub mod ix {
                     domain: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
                     intent_id: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                     expiry_slot: read_u64(&mut rest)?,
                 },
@@ -3803,26 +3813,33 @@ pub mod ix {
                 Self::TopUpInsurance {
                     market_id,
                     intent_id,
+                    authority_epoch,
                     amount,
                 } => {
                     out.push(9);
                     push_u64(&mut out, market_id);
                     push_u64(&mut out, intent_id);
+                    push_u64(&mut out, authority_epoch);
                     push_u128(&mut out, amount);
                 }
                 Self::TopUpInsuranceDomain {
                     domain,
                     market_id,
                     intent_id,
+                    authority_epoch,
                     amount,
                 } => {
                     out.push(56);
                     push_u16(&mut out, domain);
                     push_u64(&mut out, market_id);
                     push_u64(&mut out, intent_id);
+                    push_u64(&mut out, authority_epoch);
                     push_u128(&mut out, amount);
                 }
-                Self::CloseSlab => out.push(13),
+                Self::CloseSlab { authority_epoch } => {
+                    out.push(13);
+                    push_u64(&mut out, authority_epoch);
+                }
                 Self::ResolveMarket {
                     asset_generation_frontier,
                     authority_epoch,
@@ -3835,6 +3852,7 @@ pub mod ix {
                     domain,
                     market_id,
                     intent_id,
+                    authority_epoch,
                     amount,
                     expiry_slot,
                 } => {
@@ -3842,6 +3860,7 @@ pub mod ix {
                     push_u16(&mut out, domain);
                     push_u64(&mut out, market_id);
                     push_u64(&mut out, intent_id);
+                    push_u64(&mut out, authority_epoch);
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
                 }
@@ -7007,6 +7026,7 @@ pub mod processor {
             Instruction::TopUpInsurance {
                 market_id,
                 intent_id,
+                authority_epoch,
                 amount,
             } => handle_top_up_insurance(
                 program_id,
@@ -7014,12 +7034,14 @@ pub mod processor {
                 InsuranceTopUpScope::BaseMarket,
                 market_id,
                 intent_id,
+                authority_epoch,
                 amount,
             ),
             Instruction::TopUpInsuranceDomain {
                 domain,
                 market_id,
                 intent_id,
+                authority_epoch,
                 amount,
             } => handle_top_up_insurance(
                 program_id,
@@ -7027,9 +7049,12 @@ pub mod processor {
                 InsuranceTopUpScope::Domain(domain as usize),
                 market_id,
                 intent_id,
+                authority_epoch,
                 amount,
             ),
-            Instruction::CloseSlab => handle_close_slab(program_id, accounts),
+            Instruction::CloseSlab { authority_epoch } => {
+                handle_close_slab(program_id, accounts, authority_epoch)
+            }
             Instruction::ResolveMarket {
                 asset_generation_frontier,
                 authority_epoch,
@@ -7043,6 +7068,7 @@ pub mod processor {
                 domain,
                 market_id,
                 intent_id,
+                authority_epoch,
                 amount,
                 expiry_slot,
             } => handle_top_up_backing_bucket(
@@ -7051,6 +7077,7 @@ pub mod processor {
                 domain,
                 market_id,
                 intent_id,
+                authority_epoch,
                 amount,
                 expiry_slot,
             ),
@@ -9761,6 +9788,7 @@ pub mod processor {
         scope: InsuranceTopUpScope,
         expected_market_id: u64,
         intent_id: u64,
+        expected_authority_epoch: u64,
         amount: u128,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
@@ -9804,6 +9832,7 @@ pub mod processor {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
+            require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;
             let sequences = read_control_sequences_from_view(&group, asset_index)?;
             state::require_newer_control_sequence(sequences.insurance_top_up, intent_id)?;
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
@@ -9824,6 +9853,7 @@ pub mod processor {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
+            require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             if let InsuranceTopUpScope::Domain(domain) = scope {
                 require_domain_accepts_live_topup_view(&group, domain)?;
@@ -10150,6 +10180,7 @@ pub mod processor {
         domain: u16,
         expected_market_id: u64,
         intent_id: u64,
+        expected_authority_epoch: u64,
         amount: u128,
         expiry_slot: u64,
     ) -> ProgramResult {
@@ -10182,6 +10213,7 @@ pub mod processor {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
+            require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;
             let sequences = read_control_sequences_from_view(&group, asset_index)?;
             state::require_newer_control_sequence(sequences.backing_top_up, intent_id)?;
             if amount != 0 && expiry_slot <= authenticated_market_slot_or_fallback_view(&group) {
@@ -10206,6 +10238,7 @@ pub mod processor {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             require_asset_generation_view(&group, domain_usize / 2, expected_market_id)?;
+            require_authority_epoch_view(&group, domain_usize / 2, expected_authority_epoch)?;
             if expiry_slot <= authenticated_market_slot_or_fallback_view(&group) {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
@@ -10261,6 +10294,7 @@ pub mod processor {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (_, mut group) = state::market_view_mut(&mut market_data)?;
             require_asset_generation_view(&group, domain_usize / 2, expected_market_id)?;
+            require_authority_epoch_view(&group, domain_usize / 2, expected_authority_epoch)?;
             advance_control_sequence_view(
                 &mut group,
                 domain_usize / 2,
@@ -10875,6 +10909,7 @@ pub mod processor {
     fn handle_close_slab<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let admin_dest = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -10896,6 +10931,7 @@ pub mod processor {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             expect_live_authority(&cfg.marketauth, admin_dest.key)?;
+            require_authority_epoch_view(&group, 0, expected_authority_epoch)?;
             if group.header.mode != 1 {
                 return Err(PercolatorError::EngineLockActive.into());
             }

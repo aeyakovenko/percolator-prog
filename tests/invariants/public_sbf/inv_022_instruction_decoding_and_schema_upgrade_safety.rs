@@ -133,22 +133,25 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             position_epoch: 3,
         },
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 2,
             market_id: 1,
             amount: 1,
         },
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 3,
             domain: 0,
             market_id: 1,
             amount: 1,
         },
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch: 1 },
         ProgInstruction::ResolveMarket {
             asset_generation_frontier: 1,
             authority_epoch: 2,
         },
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 4,
             domain: 0,
             market_id: 1,
@@ -418,7 +421,7 @@ fn host_instruction_decoder_is_total_and_canonical_for_deterministic_arbitrary_b
     let mut accepted = 0usize;
     for data in [
         ProgInstruction::InitPortfolio.encode(),
-        ProgInstruction::CloseSlab.encode(),
+        ProgInstruction::CloseSlab { authority_epoch: 1 }.encode(),
         ProgInstruction::ClaimResolvedPayoutTopup.encode(),
         ProgInstruction::SyncInsuranceLedger.encode(),
     ] {

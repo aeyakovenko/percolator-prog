@@ -148,6 +148,10 @@ pub enum AuthorityIntentKind {
     ConfigureAuthMark,
     PushAuthMark,
     RestartAssetOracle,
+    CloseSlab,
+    InsuranceTopUp,
+    InsuranceDomainTopUp,
+    BackingTopUp,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -583,7 +587,7 @@ impl RetryIntentKind {
 }
 
 impl AuthorityIntentKind {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 24] = [
         Self::MarketAuthorityHandoff,
         Self::AssetAdminHandoff,
         Self::InsuranceAuthorityHandoff,
@@ -604,6 +608,10 @@ impl AuthorityIntentKind {
         Self::ConfigureAuthMark,
         Self::PushAuthMark,
         Self::RestartAssetOracle,
+        Self::CloseSlab,
+        Self::InsuranceTopUp,
+        Self::InsuranceDomainTopUp,
+        Self::BackingTopUp,
     ];
 
     fn discriminator(self) -> u8 {
@@ -628,6 +636,10 @@ impl AuthorityIntentKind {
             Self::ConfigureAuthMark => 17,
             Self::PushAuthMark => 18,
             Self::RestartAssetOracle => 19,
+            Self::CloseSlab => 20,
+            Self::InsuranceTopUp => 21,
+            Self::InsuranceDomainTopUp => 22,
+            Self::BackingTopUp => 23,
         }
     }
 
@@ -644,6 +656,10 @@ impl AuthorityIntentKind {
                 Some(percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET)
             }
             Self::OracleAuthorityHandoff => Some(percolator_prog::processor::ASSET_AUTH_ORACLE),
+            Self::InsuranceTopUp | Self::InsuranceDomainTopUp => {
+                Some(percolator_prog::processor::ASSET_AUTH_INSURANCE)
+            }
+            Self::BackingTopUp => Some(percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET),
             Self::MarketAuthorityHandoff
             | Self::ResolveMarket
             | Self::LiquidationFeePolicy
@@ -658,7 +674,15 @@ impl AuthorityIntentKind {
             | Self::PushEwmaMark
             | Self::ConfigureAuthMark
             | Self::PushAuthMark
-            | Self::RestartAssetOracle => None,
+            | Self::RestartAssetOracle
+            | Self::CloseSlab => None,
+        }
+    }
+
+    fn authority_asset_index(self) -> u16 {
+        match self {
+            Self::InsuranceTopUp => 0,
+            _ => 1,
         }
     }
 
@@ -688,6 +712,10 @@ impl AuthorityIntentKind {
             Self::ConfigureAuthMark => "ConfigureAuthMark",
             Self::PushAuthMark => "PushAuthMark",
             Self::RestartAssetOracle => "RestartAssetOracle",
+            Self::CloseSlab => "CloseSlab",
+            Self::InsuranceTopUp => "TopUpInsurance",
+            Self::InsuranceDomainTopUp => "TopUpInsuranceDomain",
+            Self::BackingTopUp => "TopUpBackingBucket",
         }
     }
 }
@@ -4412,6 +4440,23 @@ fn prepare_authority_incarnation_route(
             env.shutdown_asset(0, 1)
                 .map_err(|error| format!("enter Recovery before retained restart: {error}"))?;
         }
+        AuthorityIntentKind::CloseSlab => {
+            for actor_index in 0..PRIMARY_ACTOR_COUNT {
+                let amount = if actor_index + 1 == PRIMARY_ACTOR_COUNT {
+                    EXIT_MAKER_DEPOSIT
+                } else {
+                    USER_DEPOSIT
+                };
+                env.withdraw_primary(actor_index, amount).map_err(|error| {
+                    format!("drain actor {actor_index} before retained close: {error}")
+                })?;
+                env.close_primary_portfolio(actor_index).map_err(|error| {
+                    format!("close actor {actor_index} before retained close: {error}")
+                })?;
+            }
+            env.resolve_market()
+                .map_err(|error| format!("resolve empty market before retained close: {error}"))?;
+        }
         _ => {}
     }
     Ok(None)
@@ -4480,6 +4525,16 @@ fn build_authority_incarnation_intent(
         AuthorityIntentKind::RestartAssetOracle => {
             env.build_retained_restart_asset_oracle(0, 1, INITIAL_PRICE + 1)
         }
+        AuthorityIntentKind::CloseSlab => env.build_retained_close_primary_slab(),
+        AuthorityIntentKind::InsuranceTopUp => {
+            env.build_retained_insurance_top_up_for_actor(AUTHORITY_A, 1_000)
+        }
+        AuthorityIntentKind::InsuranceDomainTopUp => {
+            env.build_retained_insurance_domain_top_up_for_actor(AUTHORITY_A, ASSET * 2, 1_000)
+        }
+        AuthorityIntentKind::BackingTopUp => {
+            env.build_retained_backing_bucket_top_up_for_actor(AUTHORITY_A, ASSET * 2, 1_000, 100)
+        }
     }
 }
 
@@ -4487,7 +4542,6 @@ fn discover_one_authority_incarnation_replay(
     mut seed: [u8; 32],
     kind: AuthorityIntentKind,
 ) -> Result<AuthorityIncarnationDiscovery, String> {
-    const ASSET: u16 = 1;
     const AUTHORITY_A: usize = 0;
     const AUTHORITY_B: usize = 1;
     const TARGET: usize = 2;
@@ -4495,9 +4549,10 @@ fn discover_one_authority_incarnation_replay(
     seed[1] ^= kind.discriminator();
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
+    let asset = kind.authority_asset_index();
 
     if let Some(authority_kind) = kind.asset_authority_kind() {
-        env.update_asset_authority_from_admin(ASSET, authority_kind, AUTHORITY_A)
+        env.update_asset_authority_from_admin(asset, authority_kind, AUTHORITY_A)
             .map_err(|error| format!("install authority A: {error}"))?;
     }
     let oracle_account = prepare_authority_incarnation_route(&mut env, kind)?;
@@ -4512,9 +4567,9 @@ fn discover_one_authority_incarnation_replay(
         let authority_kind = kind
             .asset_authority_kind()
             .expect("asset authority operation");
-        env.update_asset_authority_between_actors(ASSET, authority_kind, AUTHORITY_A, AUTHORITY_B)
+        env.update_asset_authority_between_actors(asset, authority_kind, AUTHORITY_A, AUTHORITY_B)
             .map_err(|error| format!("rotate asset authority A to B: {error}"))?;
-        env.update_asset_authority_between_actors(ASSET, authority_kind, AUTHORITY_B, AUTHORITY_A)
+        env.update_asset_authority_between_actors(asset, authority_kind, AUTHORITY_B, AUTHORITY_A)
             .map_err(|error| format!("rotate asset authority B to A: {error}"))?;
     }
 
@@ -4561,8 +4616,13 @@ fn discover_one_authority_incarnation_replay(
     let (fresh_intent_landed, fresh_compute_units) = match fresh_result {
         Ok(success) => (true, Some(success.compute_units)),
         Err(error) => {
+            let group = env.primary_market_state().1;
             return Err(format!(
-                "{kind:?} current-incarnation control rejected after stale replay: {error}"
+                "{kind:?} current-incarnation control rejected after stale replay: {error}; mode={:?} vault={} insurance={} epoch={}",
+                group.mode,
+                group.vault,
+                group.insurance,
+                env.primary_control_sequences(0).authority_epoch,
             ));
         }
     };

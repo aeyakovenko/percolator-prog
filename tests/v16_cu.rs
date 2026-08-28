@@ -2998,11 +2998,12 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let authority_epoch = self.control_sequences(0).authority_epoch;
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::CloseSlab,
+            ProgInstruction::CloseSlab { authority_epoch },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3618,6 +3619,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpInsurance {
+                authority_epoch: 0,
                 intent_id: 0,
                 market_id: 0,
                 amount,
@@ -3646,6 +3648,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                authority_epoch: 0,
                 intent_id: 0,
                 market_id: 0,
                 domain,
@@ -3683,6 +3686,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpInsurance {
+                authority_epoch: 0,
                 intent_id: 0,
                 market_id: 0,
                 amount,
@@ -3723,6 +3727,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpInsurance {
+                authority_epoch: 0,
                 intent_id: 0,
                 market_id: 0,
                 amount,
@@ -3766,6 +3771,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpInsuranceDomain {
+                authority_epoch: 0,
                 intent_id: 0,
                 market_id: 0,
                 domain,
@@ -3810,6 +3816,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpInsuranceDomain {
+                authority_epoch: 0,
                 intent_id: 0,
                 market_id: 0,
                 domain,
@@ -3853,6 +3860,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                authority_epoch: 0,
                 intent_id: 0,
                 market_id: 0,
                 domain,
@@ -3897,6 +3905,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                authority_epoch: 0,
                 intent_id: 0,
                 market_id: 0,
                 domain,
@@ -3931,6 +3940,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                authority_epoch: 0,
                 intent_id: 0,
                 market_id: 0,
                 domain,
@@ -4802,20 +4812,31 @@ fn bind_current_generation_guards(
     ix: &mut ProgInstruction,
 ) {
     let top_up_intent = match ix {
-        ProgInstruction::TopUpInsurance { intent_id, .. } => Some((0usize, true, intent_id)),
+        ProgInstruction::TopUpInsurance {
+            intent_id,
+            authority_epoch,
+            ..
+        } => Some((0usize, true, intent_id, authority_epoch)),
         ProgInstruction::TopUpInsuranceDomain {
-            domain, intent_id, ..
-        } => Some((*domain as usize / 2, true, intent_id)),
+            domain,
+            intent_id,
+            authority_epoch,
+            ..
+        } => Some((*domain as usize / 2, true, intent_id, authority_epoch)),
         ProgInstruction::TopUpBackingBucket {
-            domain, intent_id, ..
-        } => Some((*domain as usize / 2, false, intent_id)),
+            domain,
+            intent_id,
+            authority_epoch,
+            ..
+        } => Some((*domain as usize / 2, false, intent_id, authority_epoch)),
         _ => None,
     };
-    if let Some((asset_index, insurance, intent_id)) = top_up_intent {
-        if *intent_id == 0 {
-            let market_key = accounts.get(1).expect("top-up market account").pubkey;
-            let market = svm.get_account(&market_key).expect("top-up market state");
-            if let Ok(sequences) = state::read_asset_control_sequences(&market.data, asset_index) {
+    if let Some((asset_index, insurance, intent_id, authority_epoch)) = top_up_intent {
+        let market_key = accounts.get(1).expect("top-up market account").pubkey;
+        let market = svm.get_account(&market_key).expect("top-up market state");
+        if let Ok(sequences) = state::read_asset_control_sequences(&market.data, asset_index) {
+            *authority_epoch = sequences.authority_epoch;
+            if *intent_id == 0 {
                 *intent_id = next_control_sequence(if insurance {
                     sequences.insurance_top_up
                 } else {
@@ -5277,6 +5298,7 @@ fn top_up_backing_bucket_to_market(
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain,

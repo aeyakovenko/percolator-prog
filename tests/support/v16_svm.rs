@@ -1360,6 +1360,25 @@ impl V16Svm {
         self.close_primary_slab_with_authority(authority, self.market_admin_destination_token)
     }
 
+    pub fn build_retained_close_primary_slab(&mut self) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::CloseSlab {
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new(self.market_admin_destination_token, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(self.mint, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn close_primary_slab_for_actor(
         &mut self,
         actor_index: usize,
@@ -1375,7 +1394,9 @@ impl V16Svm {
         destination_token: Pubkey,
     ) -> Result<TxSuccess, String> {
         self.send_program(
-            ProgInstruction::CloseSlab,
+            ProgInstruction::CloseSlab {
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3002,6 +3023,7 @@ impl V16Svm {
                 intent_id,
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
                 expiry_slot,
             },
@@ -3033,6 +3055,7 @@ impl V16Svm {
                 intent_id,
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
                 expiry_slot,
             },
@@ -3064,6 +3087,7 @@ impl V16Svm {
                 intent_id,
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
                 expiry_slot,
             },
@@ -3094,6 +3118,7 @@ impl V16Svm {
                 intent_id,
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -3122,6 +3147,7 @@ impl V16Svm {
                 intent_id,
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -3143,6 +3169,7 @@ impl V16Svm {
             ProgInstruction::TopUpInsurance {
                 market_id,
                 intent_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -3173,6 +3200,7 @@ impl V16Svm {
                 intent_id,
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
                 expiry_slot,
             },
@@ -4238,6 +4266,7 @@ impl V16Svm {
                 intent_id,
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -4263,6 +4292,7 @@ impl V16Svm {
             ProgInstruction::TopUpInsurance {
                 market_id,
                 intent_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -4292,6 +4322,7 @@ impl V16Svm {
             ProgInstruction::TopUpInsurance {
                 market_id,
                 intent_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -4307,6 +4338,7 @@ impl V16Svm {
                 domain,
                 market_id,
                 intent_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -4342,6 +4374,7 @@ impl V16Svm {
                 intent_id,
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
                 expiry_slot,
             },
@@ -5110,7 +5143,17 @@ impl V16Svm {
     pub fn token_supply_observed(&self) -> u128 {
         self.token_accounts
             .iter()
-            .map(|key| self.token_amount(*key) as u128)
+            .filter_map(|key| {
+                let account = self.svm.get_account(key).expect("tracked token account");
+                if account.lamports == 0 && account.data.is_empty() {
+                    return None;
+                }
+                Some(
+                    TokenAccount::unpack(&account.data)
+                        .expect("decode live tracked token account")
+                        .amount as u128,
+                )
+            })
             .sum()
     }
 
@@ -5189,8 +5232,26 @@ impl V16Svm {
             }
             | ProgInstruction::ConfigurePermissionlessResolve {
                 authority_epoch, ..
+            }
+            | ProgInstruction::CloseSlab {
+                authority_epoch, ..
+            }
+            | ProgInstruction::TopUpInsurance {
+                authority_epoch, ..
             } if *authority_epoch == CURRENT_AUTHORITY_EPOCH => Some((0usize, authority_epoch)),
             ProgInstruction::UpdateBackingFeePolicy {
+                domain,
+                authority_epoch,
+                ..
+            } if *authority_epoch == CURRENT_AUTHORITY_EPOCH => {
+                Some((*domain as usize / 2, authority_epoch))
+            }
+            ProgInstruction::TopUpInsuranceDomain {
+                domain,
+                authority_epoch,
+                ..
+            }
+            | ProgInstruction::TopUpBackingBucket {
                 domain,
                 authority_epoch,
                 ..

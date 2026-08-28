@@ -1692,6 +1692,7 @@ fn v16_bpf_failed_insurance_topup_transfer_preserves_same_intent_retry() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id,
             market_id,
             amount: 100,
@@ -1729,6 +1730,7 @@ fn v16_bpf_failed_insurance_topup_transfer_preserves_same_intent_retry() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id,
             market_id,
             amount: 100,
@@ -1782,6 +1784,7 @@ fn v16_bpf_failed_domain_insurance_topup_transfer_preserves_same_intent_retry() 
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id,
             market_id,
             domain: 1,
@@ -1822,6 +1825,7 @@ fn v16_bpf_failed_domain_insurance_topup_transfer_preserves_same_intent_retry() 
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id,
             market_id,
             domain: 1,
@@ -1878,6 +1882,7 @@ fn v16_bpf_failed_backing_topup_transfer_preserves_same_intent_retry() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id,
             market_id,
             domain: 1,
@@ -1921,6 +1926,7 @@ fn v16_bpf_failed_backing_topup_transfer_preserves_same_intent_retry() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id,
             market_id,
             domain: 1,

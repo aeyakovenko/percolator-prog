@@ -1290,6 +1290,7 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
     reject_alias(
         &mut env,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 500,
@@ -1299,6 +1300,7 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
     reject_alias(
         &mut env,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -1310,6 +1312,7 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
     reject_alias(
         &mut env,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 1,
@@ -1364,6 +1367,7 @@ fn v16_attack_insurance_topup_pinned_to_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 500,
@@ -1432,6 +1436,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -1476,6 +1481,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 1,
@@ -1573,7 +1579,7 @@ fn v16_attack_close_slab_rejects_delegated_or_closable_primary_vault() {
 
         env.svm.expire_blockhash();
         let rejected = env.send(
-            ProgInstruction::CloseSlab,
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -1608,7 +1614,7 @@ fn v16_attack_close_slab_rejects_delegated_or_closable_primary_vault() {
     env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch: 0 },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -1717,7 +1723,7 @@ fn v16_attack_close_slab_rejects_foreign_primary_vault() {
     let close_with_vault = |env: &mut V16CuEnv, vault: Pubkey| -> Result<u64, String> {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::CloseSlab,
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -2769,6 +2775,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 11,
@@ -2801,6 +2808,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -2834,6 +2842,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 1,
@@ -3464,7 +3473,7 @@ fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch: 0 },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -3519,7 +3528,7 @@ fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
         .unwrap();
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch: 0 },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -4461,7 +4470,7 @@ fn v16_primary_quote_routes_match_actual_spl_and_internal_accounting_deltas() {
     close_slab_env.svm.expire_blockhash();
     close_slab_env
         .send(
-            ProgInstruction::CloseSlab,
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(close_slab_env.market, false),
@@ -4915,6 +4924,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         program_id,
         &payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 1,
@@ -4974,6 +4984,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         program_id,
         &payer,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 33,

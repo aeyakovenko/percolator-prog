@@ -2905,6 +2905,7 @@ fn v16_program_live_value_paths_reject_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_global_insurance = env.send(
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 20,
@@ -2926,6 +2927,7 @@ fn v16_program_live_value_paths_reject_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_insurance = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -2948,6 +2950,7 @@ fn v16_program_live_value_paths_reject_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 1,

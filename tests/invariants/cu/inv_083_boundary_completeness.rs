@@ -7,7 +7,7 @@
 //! Evidence in this file (I/C): oversized batch leg vectors at the public decode
 //! boundary reject as instruction data errors rather than allocating a large
 //! vector or panicking the SBF program. The machine-readable class roster and
-//! source-locked caller-input inventory assign all 222 fields across 53 public
+//! source-locked caller-input inventory assign all 225 field-or-no-data subjects across 53 public
 //! input types to 20 semantic boundary profiles, per-field public evidence, and
 //! profile-level boundary evidence. InitMarket's complete validation predicate
 //! is exercised through public exact-rollback failures and live retries. Other
@@ -176,7 +176,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
     use std::collections::{BTreeMap, BTreeSet};
 
     const HEADER: &str = "type\tfields\tclassification\tevidence";
-    const EXPECTED_FIELD_COUNT: usize = 222;
+    const EXPECTED_FIELD_COUNT: usize = 225;
     const EXPECTED_TYPE_COUNT: usize = 53;
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -262,11 +262,11 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
         ("duration", 9),
         ("enum", 5),
         ("expiry", 1),
-        ("identity", 66),
+        ("identity", 70),
         ("ignored", 1),
         ("index", 24),
         ("key", 9),
-        ("no-data", 4),
+        ("no-data", 3),
         ("price", 12),
         ("rate", 2),
         ("ratio", 2),
@@ -619,6 +619,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: BAD_DOMAIN,
@@ -651,6 +652,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: BAD_DOMAIN,

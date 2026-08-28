@@ -321,11 +321,13 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let market_id: u64 = kani::any();
     let intent_id: u64 = kani::any();
+    let authority_epoch: u64 = kani::any();
     let amount: u128 = kani::any();
 
     let insurance = Instruction::TopUpInsurance {
         market_id,
         intent_id,
+        authority_epoch,
         amount,
     }
     .encode();
@@ -333,31 +335,36 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
         Instruction::TopUpInsurance {
             market_id: got_market_id,
             intent_id: got_intent_id,
+            authority_epoch: got_authority_epoch,
             amount: got_amount,
         } => {
             assert_eq!(got_market_id, market_id);
             assert_eq!(got_intent_id, intent_id);
+            assert_eq!(got_authority_epoch, authority_epoch);
             assert_eq!(got_amount, amount);
         }
         _ => unreachable!(),
     }
 
-    let mut top_up = [0u8; 35];
+    let mut top_up = [0u8; 43];
     top_up[0] = 56;
     top_up[1..3].copy_from_slice(&domain.to_le_bytes());
     top_up[3..11].copy_from_slice(&market_id.to_le_bytes());
     top_up[11..19].copy_from_slice(&intent_id.to_le_bytes());
-    top_up[19..35].copy_from_slice(&amount.to_le_bytes());
+    top_up[19..27].copy_from_slice(&authority_epoch.to_le_bytes());
+    top_up[27..43].copy_from_slice(&amount.to_le_bytes());
     match Instruction::decode(&top_up).unwrap() {
         Instruction::TopUpInsuranceDomain {
             domain: got_domain,
             market_id: got_market_id,
             intent_id: got_intent_id,
+            authority_epoch: got_authority_epoch,
             amount: got_amount,
         } => {
             assert_eq!(got_domain, domain);
             assert_eq!(got_market_id, market_id);
             assert_eq!(got_intent_id, intent_id);
+            assert_eq!(got_authority_epoch, authority_epoch);
             assert_eq!(got_amount, amount);
         }
         _ => unreachable!(),
@@ -496,28 +503,32 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let market_id: u64 = kani::any();
     let intent_id: u64 = kani::any();
+    let authority_epoch: u64 = kani::any();
     let amount: u128 = kani::any();
     let expiry_slot: u64 = kani::any();
 
-    let mut data = [0u8; 43];
+    let mut data = [0u8; 51];
     data[0] = 24;
     data[1..3].copy_from_slice(&domain.to_le_bytes());
     data[3..11].copy_from_slice(&market_id.to_le_bytes());
     data[11..19].copy_from_slice(&intent_id.to_le_bytes());
-    data[19..35].copy_from_slice(&amount.to_le_bytes());
-    data[35..43].copy_from_slice(&expiry_slot.to_le_bytes());
+    data[19..27].copy_from_slice(&authority_epoch.to_le_bytes());
+    data[27..43].copy_from_slice(&amount.to_le_bytes());
+    data[43..51].copy_from_slice(&expiry_slot.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TopUpBackingBucket {
             domain: got_domain,
             market_id: got_market_id,
             intent_id: got_intent_id,
+            authority_epoch: got_authority_epoch,
             amount: got_amount,
             expiry_slot: got_expiry,
         } => {
             assert_eq!(got_domain, domain);
             assert_eq!(got_market_id, market_id);
             assert_eq!(got_intent_id, intent_id);
+            assert_eq!(got_authority_epoch, authority_epoch);
             assert_eq!(got_amount, amount);
             assert_eq!(got_expiry, expiry_slot);
         }
@@ -1047,6 +1058,22 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
             assert_eq!(got_authority_epoch, authority_epoch);
             assert_eq!(got_pubkey, new_pubkey);
         }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(10)]
+fn kani_v16_close_slab_decode_preserves_authority_epoch() {
+    let authority_epoch: u64 = kani::any();
+    let mut data = [0u8; 9];
+    data[0] = 13;
+    data[1..9].copy_from_slice(&authority_epoch.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::CloseSlab {
+            authority_epoch: got_authority_epoch,
+        } => assert_eq!(got_authority_epoch, authority_epoch),
         _ => unreachable!(),
     }
 }
@@ -1675,6 +1702,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
         Instruction::TopUpInsurance {
             intent_id: 1,
             market_id: 1,
+            authority_epoch: 0,
             amount: 1,
         },
         extra,
@@ -1684,6 +1712,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
             intent_id: 1,
             domain: 1,
             market_id: 1,
+            authority_epoch: 0,
             amount: 1,
             expiry_slot: 10,
         },
@@ -1694,6 +1723,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
             intent_id: 1,
             domain: 1,
             market_id: 1,
+            authority_epoch: 0,
             amount: 1,
         },
         extra,
@@ -1777,7 +1807,7 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
 fn kani_v16_close_and_resolve_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
-    assert_rejects_trailing_byte(Instruction::CloseSlab, extra);
+    assert_rejects_trailing_byte(Instruction::CloseSlab { authority_epoch: 1 }, extra);
     assert_rejects_trailing_byte(
         Instruction::ResolveMarket {
             asset_generation_frontier: 1,
@@ -2060,13 +2090,13 @@ fn kani_v16_core_payloads_reject_one_byte_truncation() {
 
 #[kani::proof]
 fn kani_v16_funding_backing_payloads_reject_one_byte_truncation() {
-    let top_up = [9u8; 32];
+    let top_up = [9u8; 40];
     assert!(Instruction::decode(&top_up).is_err());
 
-    let top_up_domain = [56u8; 34];
+    let top_up_domain = [56u8; 42];
     assert!(Instruction::decode(&top_up_domain).is_err());
 
-    let top_up_backing = [24u8; 42];
+    let top_up_backing = [24u8; 50];
     assert!(Instruction::decode(&top_up_backing).is_err());
 
     let withdraw_insurance = [23u8; 16];

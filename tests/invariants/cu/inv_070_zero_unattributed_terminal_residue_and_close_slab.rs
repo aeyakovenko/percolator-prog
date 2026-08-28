@@ -31,7 +31,7 @@ fn v16_program_close_slab_rejects_until_market_has_zero_terminal_residue() {
     let try_close = |env: &mut V16CuEnv| -> Result<u64, String> {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::CloseSlab,
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(market, false),
@@ -124,7 +124,7 @@ fn v16_program_close_slab_final_dust_destination_validation_is_atomic() {
     let close_slab_to = |env: &mut V16CuEnv, dest: Pubkey| -> Result<u64, String> {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::CloseSlab,
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -226,7 +226,7 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
     let primary_dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
     let primary_only = env.send(
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch: 0 },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -268,7 +268,7 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
     let wrong_secondary_dest = env.token_account_for_mint(secondary_mint, Pubkey::new_unique(), 0);
     env.svm.expire_blockhash();
     let wrong_secondary_dest_close = env.send(
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch: 0 },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -315,7 +315,7 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
     let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
     env.svm.expire_blockhash();
     let close_both = env.send(
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch: 0 },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),

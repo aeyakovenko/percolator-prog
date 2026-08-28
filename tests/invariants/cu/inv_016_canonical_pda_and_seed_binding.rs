@@ -503,6 +503,7 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
             let substitutions = pda_substitution_accounts(&mut env, fault, None);
             let vault = substitute_vault(slot, env.vault, substitutions);
             let ix = ProgInstruction::TopUpInsurance {
+                authority_epoch: 0,
                 market_id: 0,
                 intent_id: 0,
                 amount: 100,
@@ -523,6 +524,7 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
             let substitutions = pda_substitution_accounts(&mut env, fault, None);
             let vault = substitute_vault(slot, env.vault, substitutions);
             let ix = ProgInstruction::TopUpInsuranceDomain {
+                authority_epoch: 0,
                 market_id: 0,
                 intent_id: 0,
                 domain: 0,
@@ -550,6 +552,7 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
             let substitutions = pda_substitution_accounts(&mut env, fault, None);
             let vault = substitute_vault(slot, env.vault, substitutions);
             let ix = ProgInstruction::TopUpBackingBucket {
+                authority_epoch: 0,
                 market_id: 0,
                 intent_id: 0,
                 domain: 0,
@@ -691,7 +694,7 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
             let vault = substitute_vault(slot, env.vault, substitutions);
             let vault_authority =
                 substitute_vault_authority(slot, env.vault_authority, substitutions);
-            let ix = ProgInstruction::CloseSlab;
+            let ix = ProgInstruction::CloseSlab { authority_epoch: 0 };
             let accounts = vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),

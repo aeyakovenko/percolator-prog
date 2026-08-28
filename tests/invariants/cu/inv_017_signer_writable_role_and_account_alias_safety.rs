@@ -1371,6 +1371,7 @@ fn reserve_custody_alias_instruction(
     match route {
         ReserveCustodyAliasRoute::TopUpInsurance
         | ReserveCustodyAliasRoute::TopUpInsuranceWithLedger => ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: fixture.env.asset_market_id(0),
             amount: fixture.amount,
@@ -1378,6 +1379,7 @@ fn reserve_custody_alias_instruction(
         ReserveCustodyAliasRoute::TopUpInsuranceDomain
         | ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger => {
             ProgInstruction::TopUpInsuranceDomain {
+                authority_epoch: 0,
                 intent_id: 0,
                 market_id: fixture.env.asset_market_id(0),
                 domain: 0,
@@ -1386,6 +1388,7 @@ fn reserve_custody_alias_instruction(
         }
         ReserveCustodyAliasRoute::TopUpBacking
         | ReserveCustodyAliasRoute::TopUpBackingWithLedger => ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: fixture.env.asset_market_id(0),
             domain: 0,
@@ -2406,7 +2409,7 @@ fn close_slab_alias_fixture(shape: CloseSlabAliasShape) -> CoreAccountAliasFixtu
     CoreAccountAliasFixture {
         env,
         signers: vec![authority],
-        instruction: ProgInstruction::CloseSlab,
+        instruction: ProgInstruction::CloseSlab { authority_epoch: 0 },
         accounts,
         tracked_accounts,
     }
@@ -4035,6 +4038,7 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_insurance = env.send(
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 25,
@@ -4064,6 +4068,7 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_domain = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -4094,6 +4099,7 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 1,
@@ -4261,6 +4267,7 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_insurance = env.send(
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 25,
@@ -4286,6 +4293,7 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_domain = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -4312,6 +4320,7 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 1,
@@ -5271,13 +5280,16 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
     let market_before = svm.get_account(&market.pubkey()).unwrap();
     let vault_before = svm.get_account(&vault).unwrap();
     let dest_before = svm.get_account(&dest).unwrap();
+    let authority_epoch = state::read_asset_control_sequences(&market_before.data, 0)
+        .unwrap()
+        .authority_epoch;
 
     svm.expire_blockhash();
     let rejected = send_tx(
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch },
         vec![
             AccountMeta::new(market.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),

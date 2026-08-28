@@ -42,8 +42,15 @@ fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
 }
 
 fn inv005_epoch_bearing_instruction_variants(source: &str) -> std::collections::BTreeSet<String> {
+    inv005_instruction_variant_bodies(source)
+        .into_iter()
+        .filter_map(|(name, body)| body.contains("authority_epoch").then_some(name))
+        .collect()
+}
+
+fn inv005_instruction_variant_bodies(source: &str) -> std::collections::BTreeMap<String, String> {
     let body = inv005_braced_block_after(source, "pub enum Instruction");
-    let mut variants = std::collections::BTreeSet::new();
+    let mut variants = std::collections::BTreeMap::new();
     let mut current_name: Option<String> = None;
     let mut current_body = String::new();
     let mut depth = 0i32;
@@ -69,11 +76,13 @@ fn inv005_epoch_bearing_instruction_variants(source: &str) -> std::collections::
                 depth = trimmed.matches('{').count() as i32 - trimmed.matches('}').count() as i32;
                 current_body.push_str(trimmed);
                 current_body.push('\n');
-                if depth == 0 && current_body.contains("authority_epoch") {
+                if depth == 0 {
                     if let Some(name) = current_name.take() {
-                        variants.insert(name);
+                        variants.insert(name, current_body.clone());
                     }
                 }
+            } else if trimmed.ends_with(',') {
+                variants.insert(name, String::new());
             }
             continue;
         }
@@ -82,15 +91,301 @@ fn inv005_epoch_bearing_instruction_variants(source: &str) -> std::collections::
         current_body.push('\n');
         depth += trimmed.matches('{').count() as i32 - trimmed.matches('}').count() as i32;
         if depth == 0 {
-            if current_body.contains("authority_epoch") {
-                variants.insert(current_name.take().expect("open variant name"));
-            } else {
-                current_name = None;
-            }
+            variants.insert(
+                current_name.take().expect("open variant name"),
+                current_body.clone(),
+            );
         }
     }
     assert_eq!(depth, 0, "instruction variant parser ended inside a body");
     variants
+}
+
+fn inv005_processor_functions(source: &str) -> std::collections::BTreeMap<String, String> {
+    let mut functions = std::collections::BTreeMap::new();
+    let mut cursor = 0usize;
+    const MARKER: &str = "\n    fn ";
+    while let Some(relative) = source[cursor..].find(MARKER) {
+        let start = cursor + relative + 1;
+        let name_start = start + "    fn ".len();
+        let name_end = source[name_start..]
+            .find(|character: char| character == '<' || character == '(')
+            .map(|offset| name_start + offset)
+            .expect("processor function name terminator");
+        let name = source[name_start..name_end].to_owned();
+        functions.insert(
+            name,
+            inv005_braced_block_after(source, &source[start..name_end]).to_owned(),
+        );
+        cursor = name_end;
+    }
+    functions
+}
+
+fn inv005_reaches_authority_check(
+    function: &str,
+    functions: &std::collections::BTreeMap<String, String>,
+    visiting: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    if function == "expect_live_authority"
+        || function == "live_authority_matches"
+        || function == "debit_terminal_insurance_budgets_for_authority_view"
+    {
+        return true;
+    }
+    if !visiting.insert(function.to_owned()) {
+        return false;
+    }
+    let Some(body) = functions.get(function) else {
+        return false;
+    };
+    functions.keys().any(|callee| {
+        body.contains(&format!("{callee}("))
+            && inv005_reaches_authority_check(callee, functions, visiting)
+    })
+}
+
+fn inv005_authority_route_handlers(source: &str) -> std::collections::BTreeMap<String, String> {
+    let process = inv005_braced_block_after(source, "pub fn process");
+    let variants = inv005_instruction_variant_bodies(source);
+    let functions = inv005_processor_functions(source);
+    variants
+        .keys()
+        .filter_map(|variant| {
+            let marker = format!("Instruction::{variant}");
+            let start = process
+                .find(&marker)
+                .unwrap_or_else(|| panic!("{variant} is not dispatched"));
+            let tail = &process[start..];
+            let end = tail[marker.len()..]
+                .find("Instruction::")
+                .map(|offset| marker.len() + offset)
+                .unwrap_or(tail.len());
+            let arm = &tail[..end];
+            let handler_start = arm.find("handle_")?;
+            let handler_end = arm[handler_start..]
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .map(|offset| handler_start + offset)
+                .unwrap_or(arm.len());
+            let handler = arm[handler_start..handler_end].to_owned();
+            inv005_reaches_authority_check(
+                &handler,
+                &functions,
+                &mut std::collections::BTreeSet::new(),
+            )
+            .then_some((variant.clone(), handler))
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Inv005AuthorityDisposition {
+    EpochMatrix,
+    IndependentPortfolioBinding,
+    CurrentStateSync,
+    OpenEpochGap,
+}
+
+const INV005_AUTHORITY_ROUTE_DISPOSITIONS: &[(&str, Inv005AuthorityDisposition, &str)] = &[
+    (
+        "ClosePortfolio",
+        Inv005AuthorityDisposition::IndependentPortfolioBinding,
+        "v16_program_retained_portfolio_binding_roster_is_source_complete",
+    ),
+    (
+        "TopUpInsurance",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "InsuranceTopUp",
+    ),
+    (
+        "TopUpInsuranceDomain",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "InsuranceDomainTopUp",
+    ),
+    (
+        "CloseSlab",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "CloseSlab",
+    ),
+    (
+        "ResolveMarket",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "ResolveMarket",
+    ),
+    (
+        "TopUpBackingBucket",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "BackingTopUp",
+    ),
+    (
+        "WithdrawBackingBucket",
+        Inv005AuthorityDisposition::OpenEpochGap,
+        "backing withdrawal A-B-A replay",
+    ),
+    (
+        "UpdateAuthority",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "MarketAuthorityHandoff",
+    ),
+    (
+        "UpdateAssetAuthority",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "five scoped handoff cases",
+    ),
+    (
+        "UpdateLiquidationFeePolicy",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "LiquidationFeePolicy",
+    ),
+    (
+        "UpdateMaintenanceFeePolicy",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "MaintenanceFeePolicy",
+    ),
+    (
+        "UpdateBackingFeePolicy",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "BackingFeePolicy",
+    ),
+    (
+        "UpdateTradeFeePolicy",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "TradeFeePolicy",
+    ),
+    (
+        "UpdateFeeRedirectPolicy",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "FeeRedirectPolicy",
+    ),
+    (
+        "UpdateMarketInitFeePolicy",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "MarketInitFeePolicy",
+    ),
+    (
+        "WithdrawBackingBucketEarnings",
+        Inv005AuthorityDisposition::OpenEpochGap,
+        "backing earnings A-B-A replay",
+    ),
+    (
+        "SyncBackingDomainLedger",
+        Inv005AuthorityDisposition::CurrentStateSync,
+        "v16_program_backing_domain_sync_reconciles_exact_stock",
+    ),
+    (
+        "SyncInsuranceLedger",
+        Inv005AuthorityDisposition::CurrentStateSync,
+        "v16_program_insurance_sync_reconciles_exact_stock",
+    ),
+    (
+        "ConfigurePermissionlessResolve",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "PermissionlessResolvePolicy",
+    ),
+    (
+        "ConfigureHybridOracle",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "ConfigureHybridOracle",
+    ),
+    (
+        "ConfigureEwmaMark",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "ConfigureEwmaMark",
+    ),
+    (
+        "PushEwmaMark",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "PushEwmaMark",
+    ),
+    (
+        "ConfigureAuthMark",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "ConfigureAuthMark",
+    ),
+    (
+        "PushAuthMark",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "PushAuthMark",
+    ),
+    (
+        "RestartAssetOracle",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "RestartAssetOracle",
+    ),
+    (
+        "UpdateAssetLifecycle",
+        Inv005AuthorityDisposition::OpenEpochGap,
+        "privileged lifecycle A-B-A replay",
+    ),
+    (
+        "WithdrawInsurance",
+        Inv005AuthorityDisposition::OpenEpochGap,
+        "terminal multi-domain authority A-B-A replay",
+    ),
+    (
+        "WithdrawInsuranceAsset",
+        Inv005AuthorityDisposition::OpenEpochGap,
+        "asset insurance authority A-B-A replay",
+    ),
+    (
+        "UpdateBaseUnitMints",
+        Inv005AuthorityDisposition::OpenEpochGap,
+        "base-unit policy A-B-A replay",
+    ),
+    (
+        "SwapSecondaryForPrimary",
+        Inv005AuthorityDisposition::OpenEpochGap,
+        "secondary reserve swap A-B-A replay",
+    ),
+];
+
+#[test]
+fn v16_program_configured_authority_route_dispositions_are_source_complete() {
+    let source = include_str!("../../../src/v16_program.rs");
+    let source_routes = inv005_authority_route_handlers(source);
+    let dispositions = INV005_AUTHORITY_ROUTE_DISPOSITIONS
+        .iter()
+        .map(|(variant, disposition, witness)| {
+            assert!(!witness.is_empty(), "{variant} needs named evidence");
+            ((*variant).to_owned(), *disposition)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        source_routes.keys().collect::<std::collections::BTreeSet<_>>(),
+        dispositions.keys().collect::<std::collections::BTreeSet<_>>(),
+        "every public route reaching configured-authority logic needs an explicit INV-005 disposition"
+    );
+
+    let epoch_variants = inv005_epoch_bearing_instruction_variants(source);
+    let classified_epoch_variants = dispositions
+        .iter()
+        .filter_map(|(variant, disposition)| {
+            (*disposition == Inv005AuthorityDisposition::EpochMatrix).then_some(variant.clone())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(epoch_variants, classified_epoch_variants);
+
+    let expected_open = [
+        "SwapSecondaryForPrimary",
+        "UpdateAssetLifecycle",
+        "UpdateBaseUnitMints",
+        "WithdrawBackingBucket",
+        "WithdrawBackingBucketEarnings",
+        "WithdrawInsurance",
+        "WithdrawInsuranceAsset",
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    let actual_open = dispositions
+        .iter()
+        .filter_map(|(variant, disposition)| {
+            (*disposition == Inv005AuthorityDisposition::OpenEpochGap).then_some(variant.as_str())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_open, expected_open,
+        "the explicit INV-005 gap queue changed"
+    );
 }
 
 #[test]
@@ -434,6 +729,7 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
     env.svm.expire_blockhash();
     let insurance_topup = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 2,
@@ -464,6 +760,7 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
     env.svm.expire_blockhash();
     let backing_topup = env.send(
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 2,
@@ -1110,6 +1407,7 @@ fn v16_attack_topup_insurance_domain_authority_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -1224,6 +1522,7 @@ fn v16_attack_topup_backing_bucket_authority_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -1395,6 +1694,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 2,
@@ -4333,7 +4633,7 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch: 0 },
         vec![
             AccountMeta::new(old_admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -4365,12 +4665,13 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
     );
 
     let new_dest = env.token_account(new_admin.pubkey(), 0);
+    let authority_epoch = env.control_sequences(0).authority_epoch;
     env.svm.expire_blockhash();
     let good_close = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch },
         vec![
             AccountMeta::new(new_admin.pubkey(), true),
             AccountMeta::new(env.market, false),

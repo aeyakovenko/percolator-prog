@@ -160,7 +160,7 @@ fn inv_022_known_public_tag(tag: u8) -> bool {
 }
 
 fn inv_022_zero_payload_public_tag(tag: u8) -> bool {
-    matches!(tag, 1 | 13 | 46 | 54)
+    matches!(tag, 1 | 46 | 54)
 }
 
 fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
@@ -224,6 +224,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             position_epoch: 3,
         },
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 2,
             market_id: 1,
             amount: 1,
@@ -239,12 +240,13 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             fee_bps: 0,
             limit_price: 100,
         },
-        ProgInstruction::CloseSlab,
+        ProgInstruction::CloseSlab { authority_epoch: 1 },
         ProgInstruction::ResolveMarket {
             asset_generation_frontier: 1,
             authority_epoch: 2,
         },
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 4,
             domain: 0,
             market_id: 1,
@@ -379,6 +381,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             authority_epoch: 0,
         },
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 3,
             domain: 0,
             market_id: 1,

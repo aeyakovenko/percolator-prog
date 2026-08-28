@@ -1201,6 +1201,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: market_b_market_id,
             domain: 1,
@@ -1679,6 +1680,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -1985,6 +1987,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 1,
             market_id: 0,
             amount: 25,
@@ -2016,6 +2019,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 25,
@@ -2049,6 +2053,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 1,
             market_id: 0,
             domain: 0,
@@ -2081,6 +2086,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -2115,6 +2121,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 1,
             market_id: 0,
             domain: 1,
@@ -2148,6 +2155,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 1,
@@ -2183,6 +2191,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 25,
@@ -2218,6 +2227,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 0,
@@ -2252,6 +2262,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             domain: 1,
@@ -2384,6 +2395,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 100,
@@ -2559,6 +2571,7 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            authority_epoch: 0,
             intent_id: 0,
             market_id: 0,
             amount: 100,
@@ -4519,7 +4532,7 @@ fn v16_attack_close_slab_rejects_foreign_market_vaults() {
      -> Result<u64, String> {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::CloseSlab,
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),

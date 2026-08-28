@@ -245,7 +245,7 @@ fn v16_program_abandoned_empty_portfolio_cannot_block_slab_close() {
         let dest = env.token_account(admin.pubkey(), 0);
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::CloseSlab,
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
