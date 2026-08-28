@@ -147,12 +147,14 @@ pub struct PublicTraceStep {
     pub rejected_exact_writable_rollback: Option<bool>,
     pub rejected_no_program_lamport_delta: Option<bool>,
     pub token_deltas: Vec<(Pubkey, i128)>,
+    pub token_authorities: Vec<(Pubkey, Pubkey)>,
     pub lamport_deltas: Vec<(Pubkey, i128)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicTraceEvidence {
     pub steps: Vec<PublicTraceStep>,
+    pub vault_authorities: Vec<Pubkey>,
     pub out_of_band_economic_mutations: usize,
 }
 
@@ -248,6 +250,9 @@ impl PublicTraceEvidence {
                         "successful trace step {index} carries rejection-only evidence"
                     ));
                 }
+                if step.program_id == percolator_prog::id() {
+                    self.validate_wrapper_token_flow(index, step)?;
+                }
             } else {
                 if step.compute_units.is_some()
                     || step.rejected_exact_writable_rollback != Some(true)
@@ -263,6 +268,92 @@ impl PublicTraceEvidence {
                     ));
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn validate_wrapper_token_flow(
+        &self,
+        index: usize,
+        step: &PublicTraceStep,
+    ) -> Result<(), String> {
+        let mut seen = Vec::with_capacity(step.token_deltas.len());
+        let mut net_delta = 0i128;
+        let mut changed = Vec::new();
+        for (key, delta) in &step.token_deltas {
+            if seen.contains(key) {
+                return Err(format!(
+                    "wrapper trace step {index} duplicates SPL account {key}"
+                ));
+            }
+            seen.push(*key);
+            net_delta = net_delta
+                .checked_add(*delta)
+                .ok_or_else(|| format!("wrapper trace step {index} SPL delta sum overflowed"))?;
+            if *delta != 0 {
+                changed.push(*key);
+            }
+        }
+        if net_delta != 0 {
+            return Err(format!(
+                "wrapper trace step {index} created or destroyed {net_delta} tracked quote atoms"
+            ));
+        }
+        if step.token_authorities.len() != changed.len() {
+            return Err(format!(
+                "wrapper trace step {index} must record one authority for each changed SPL account"
+            ));
+        }
+        let mut seen_authority_accounts = Vec::with_capacity(step.token_authorities.len());
+        for (key, _) in &step.token_authorities {
+            if !changed.contains(key) || seen_authority_accounts.contains(key) {
+                return Err(format!(
+                    "wrapper trace step {index} has an unexpected or duplicate authority record for SPL account {key}"
+                ));
+            }
+            seen_authority_accounts.push(*key);
+        }
+        if changed.is_empty() {
+            return Ok(());
+        }
+
+        let route_authority = step.accounts.first().map(|meta| meta.key).ok_or_else(|| {
+            format!("token-moving wrapper trace step {index} has no bound authority role")
+        })?;
+        let mut changed_vault_authorities = Vec::new();
+        for key in changed {
+            if !step
+                .accounts
+                .iter()
+                .any(|meta| meta.key == key && meta.is_writable)
+            {
+                return Err(format!(
+                    "wrapper trace step {index} changed non-writable SPL account {key}"
+                ));
+            }
+            let authority = step
+                .token_authorities
+                .iter()
+                .find_map(|(candidate, authority)| (candidate == &key).then_some(*authority))
+                .ok_or_else(|| {
+                    format!(
+                        "wrapper trace step {index} lacks the pre-state authority for changed SPL account {key}"
+                    )
+                })?;
+            if self.vault_authorities.contains(&authority) {
+                if !changed_vault_authorities.contains(&authority) {
+                    changed_vault_authorities.push(authority);
+                }
+            } else if authority != route_authority {
+                return Err(format!(
+                    "wrapper trace step {index} moved quote atoms for SPL authority {authority}, not route-bound authority {route_authority}"
+                ));
+            }
+        }
+        if changed_vault_authorities.len() != 1 {
+            return Err(format!(
+                "wrapper trace step {index} must balance through exactly one market vault authority, observed {changed_vault_authorities:?}"
+            ));
         }
         Ok(())
     }
@@ -359,6 +450,13 @@ struct TraceAccountState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TraceStateSnapshot(Vec<(Pubkey, Option<TraceAccountState>)>);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TraceTokenAccount {
+    key: Pubkey,
+    amount: u64,
+    authority: Pubkey,
+}
+
 struct PublicTraceCapture {
     expected_state: TraceStateSnapshot,
     steps: Vec<PublicTraceStep>,
@@ -372,7 +470,7 @@ struct PendingPublicTraceStep {
     transaction_signers: Vec<Pubkey>,
     accounts: Vec<PublicTraceAccountMeta>,
     writable_before: Vec<(Pubkey, Option<TraceAccountState>)>,
-    token_balances_before: Vec<(Pubkey, u64)>,
+    token_accounts_before: Vec<TraceTokenAccount>,
     lamports_before: Vec<(Pubkey, u64)>,
 }
 
@@ -4774,6 +4872,7 @@ impl V16Svm {
         }
         PublicTraceEvidence {
             steps: capture.steps,
+            vault_authorities: vec![self.vault_authority, self.foreign_vault_authority],
             out_of_band_economic_mutations: capture.out_of_band_economic_mutations,
         }
     }
@@ -4924,24 +5023,27 @@ impl V16Svm {
         snapshot
     }
 
-    fn trace_token_balances(&self) -> Vec<(Pubkey, u64)> {
-        let mut balances: Vec<_> = self
+    fn trace_token_accounts(&self) -> Vec<TraceTokenAccount> {
+        let mut accounts: Vec<_> = self
             .token_accounts
             .iter()
             .copied()
             .map(|key| {
-                let amount = self
+                let account = self
                     .svm
                     .get_account(&key)
                     .and_then(|account| TokenAccount::unpack(&account.data).ok())
-                    .map(|account| account.amount)
-                    .unwrap_or(0);
-                (key, amount)
+                    .unwrap_or_default();
+                TraceTokenAccount {
+                    key,
+                    amount: account.amount,
+                    authority: account.owner,
+                }
             })
             .collect();
-        balances.sort_unstable_by_key(|(key, _)| key.to_bytes());
-        balances.dedup_by_key(|(key, _)| *key);
-        balances
+        accounts.sort_unstable_by_key(|account| account.key.to_bytes());
+        accounts.dedup_by_key(|account| account.key);
+        accounts
     }
 
     fn prepare_public_trace_step(&mut self, tx: &Transaction) -> Option<PendingPublicTraceStep> {
@@ -5017,7 +5119,7 @@ impl V16Svm {
             transaction_signers,
             accounts,
             writable_before,
-            token_balances_before: self.trace_token_balances(),
+            token_accounts_before: self.trace_token_accounts(),
             lamports_before,
         })
     }
@@ -5049,17 +5151,27 @@ impl V16Svm {
                 }
             })
         });
-        let token_balances_after = self.trace_token_balances();
-        let token_deltas = pending
-            .token_balances_before
+        let token_accounts_after = self.trace_token_accounts();
+        let token_deltas: Vec<(Pubkey, i128)> = pending
+            .token_accounts_before
             .iter()
-            .map(|(key, before)| {
-                let after = token_balances_after
+            .map(|before| {
+                let after = token_accounts_after
                     .iter()
-                    .find_map(|(candidate, amount)| (candidate == key).then_some(*amount))
+                    .find_map(|candidate| (candidate.key == before.key).then_some(candidate.amount))
                     .unwrap_or(0);
-                (*key, i128::from(after) - i128::from(*before))
+                (before.key, i128::from(after) - i128::from(before.amount))
             })
+            .collect();
+        let token_authorities = pending
+            .token_accounts_before
+            .iter()
+            .filter(|account| {
+                token_deltas
+                    .iter()
+                    .any(|(key, delta)| *key == account.key && *delta != 0)
+            })
+            .map(|account| (account.key, account.authority))
             .collect();
         let lamport_deltas = pending
             .lamports_before
@@ -5096,6 +5208,7 @@ impl V16Svm {
             rejected_exact_writable_rollback,
             rejected_no_program_lamport_delta,
             token_deltas,
+            token_authorities,
             lamport_deltas,
         });
     }
