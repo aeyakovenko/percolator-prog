@@ -69,7 +69,7 @@
 //! LiteSVM routes; they are not exhaustive proofs over all full-width state combinations.
 
 use super::*;
-use crate::support::v16_svm::{MarketConfig, TxSuccess, V16Svm};
+use crate::support::v16_svm::{MarketConfig, PublicTerminalClassification, TxSuccess, V16Svm};
 use percolator::POS_SCALE;
 use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint};
 
@@ -2129,14 +2129,36 @@ proptest! {
         );
         for discovery in discoveries {
             prop_assert!(!discovery.is_violation(), "{discovery:?}");
+            prop_assert!(discovery.certifies_terminal_nonextraction(), "{discovery:?}");
             prop_assert!(discovery.queued_mark >= discovery.setup_mark);
             prop_assert_eq!(discovery.coalition_excess, 0);
             if discovery.queued_mark == discovery.setup_mark {
-                prop_assert_eq!(discovery.victim_loss, 0);
+                prop_assert_eq!(discovery.mark_victim_equity_loss, 0);
             }
             prop_assert!(discovery.extracted_tokens <= discovery.coalition_equity_before);
             prop_assert!(discovery.fee_counterparty_loss > 0);
             prop_assert!(discovery.insurance_gain > 0);
+            prop_assert!(discovery.users_terminal);
+            prop_assert!(matches!(
+                discovery.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            ));
+            prop_assert_eq!(
+                discovery
+                    .public_trace
+                    .token_delta_for_accounts(&discovery.victim_destinations)
+                    .map_err(TestCaseError::fail)?,
+                i128::try_from(discovery.victim_terminal_payout)
+                    .map_err(|_| TestCaseError::fail("victim payout exceeds i128"))?
+            );
+            prop_assert_eq!(
+                discovery
+                    .public_trace
+                    .token_delta_for_accounts(&discovery.coalition_destinations)
+                    .map_err(TestCaseError::fail)?,
+                i128::try_from(discovery.coalition_terminal_payout)
+                    .map_err(|_| TestCaseError::fail("coalition payout exceeds i128"))?
+            );
         }
     }
 }

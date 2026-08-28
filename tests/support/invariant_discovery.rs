@@ -1344,18 +1344,27 @@ pub struct TradeDrivenLiquidationDiscovery {
     pub max_crank_cu: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BilateralMarkFeeDiscovery {
     pub mode: TradeDrivenMarkMode,
     pub route: DiscoveryTradeRoute,
     pub setup_mark: u64,
     pub queued_mark: u64,
     pub coalition_equity_before: u128,
+    pub victim_equity_before: u128,
     pub coalition_excess: u128,
+    pub mark_victim_equity_loss: u128,
     pub victim_loss: u128,
     pub fee_counterparty_loss: u128,
     pub insurance_gain: u128,
     pub extracted_tokens: u128,
+    pub victim_terminal_payout: u128,
+    pub coalition_terminal_payout: u128,
+    pub users_terminal: bool,
+    pub victim_destinations: Vec<Pubkey>,
+    pub coalition_destinations: Vec<Pubkey>,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2236,13 +2245,72 @@ impl CompositeRoundingDiscovery {
 }
 
 impl BilateralMarkFeeDiscovery {
+    fn traced_terminal_payouts(&self) -> Option<(u128, u128)> {
+        let victim = u128::try_from(
+            self.public_trace
+                .token_delta_for_accounts(&self.victim_destinations)
+                .ok()?,
+        )
+        .ok()?;
+        let coalition = u128::try_from(
+            self.public_trace
+                .token_delta_for_accounts(&self.coalition_destinations)
+                .ok()?,
+        )
+        .ok()?;
+        Some((victim, coalition))
+    }
+
     pub fn is_violation(&self) -> bool {
+        let Some((traced_victim_payout, traced_coalition_payout)) = self.traced_terminal_payouts()
+        else {
+            return false;
+        };
         self.queued_mark > self.setup_mark
             && self.coalition_excess != 0
+            && self.mark_victim_equity_loss != 0
             && self.victim_loss != 0
             && self.fee_counterparty_loss != 0
             && self.insurance_gain != 0
             && self.extracted_tokens != 0
+            && self.users_terminal
+            && traced_victim_payout == self.victim_terminal_payout
+            && traced_coalition_payout == self.coalition_terminal_payout
+            && self
+                .victim_equity_before
+                .checked_sub(self.victim_terminal_payout)
+                == Some(self.victim_loss)
+            && self
+                .coalition_terminal_payout
+                .checked_sub(self.coalition_equity_before)
+                == Some(self.coalition_excess)
+            && self.public_trace.validate_public_execution().is_ok()
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == self.victim_loss
+                    && unauthorized_gain_atoms == self.coalition_excess
+            )
+    }
+
+    pub fn certifies_terminal_nonextraction(&self) -> bool {
+        let Some((traced_victim_payout, traced_coalition_payout)) = self.traced_terminal_payouts()
+        else {
+            return false;
+        };
+        !self.is_violation()
+            && self.coalition_excess == 0
+            && self.coalition_terminal_payout <= self.coalition_equity_before
+            && traced_victim_payout == self.victim_terminal_payout
+            && traced_coalition_payout == self.coalition_terminal_payout
+            && self.users_terminal
+            && self.public_trace.validate_public_execution().is_ok()
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
     }
 }
 
@@ -10266,12 +10334,21 @@ fn discover_one_bilateral_mark_fee_violation(
     let coalition_equity_before = discovery_portfolio_equity(&env, 0)?
         .checked_add(discovery_portfolio_equity(&env, 2)?)
         .ok_or_else(|| "coalition pre-equity overflow".to_string())?;
-    let victim_equity_before = discovery_portfolio_equity(&env, 3)?;
+    let victim_group_equity_before =
+        [1usize, 3, 4, close_lp]
+            .into_iter()
+            .try_fold(0i128, |total, actor| {
+                total
+                    .checked_add(discovery_portfolio_equity(&env, actor)?)
+                    .ok_or_else(|| "bilateral victim-group pre-equity overflow".to_string())
+            })?;
+    let mark_victim_equity_before = discovery_portfolio_equity(&env, 3)?;
     let fee_counterparty_equity_before = discovery_portfolio_equity(&env, 1)?;
     let insurance_before = env.primary_market_state().1.insurance;
 
     env.set_matcher_spreads(1, 9_000, 9_000)
         .map_err(|error| format!("configure exit matcher: {error}"))?;
+    env.begin_public_trace();
     match mode {
         TradeDrivenMarkMode::Ewma => env.warp_to_slot(20),
         TradeDrivenMarkMode::HybridAfterHours => env.set_clock(20, 1_000),
@@ -10296,8 +10373,8 @@ fn discover_one_bilateral_mark_fee_violation(
         .map_err(|error| format!("apply bilateral mark to actor {actor}: {error}"))?;
     }
 
-    let victim_loss = u128::try_from(
-        victim_equity_before
+    let mark_victim_equity_loss = u128::try_from(
+        mark_victim_equity_before
             .checked_sub(discovery_portfolio_equity(&env, 3)?)
             .ok_or_else(|| "bilateral mark increased victim equity".to_string())?,
     )
@@ -10339,21 +10416,92 @@ fn discover_one_bilateral_mark_fee_violation(
         .ok_or_else(|| "bilateral extracted SPL overflow".to_string())?;
     let coalition_equity_before = u128::try_from(coalition_equity_before)
         .map_err(|_| "coalition began insolvent".to_string())?;
-    let coalition_excess = extracted_tokens.saturating_sub(coalition_equity_before);
+    let victim_group_equity_before = u128::try_from(victim_group_equity_before)
+        .map_err(|_| "bilateral victim group began insolvent".to_string())?;
+
+    env.resolve_market()
+        .map_err(|error| format!("resolve bilateral mark-fee world: {error}"))?;
+    let actors = [0usize, 1, 2, 3, 4, close_lp];
+    drain_resolved_discovery_actors(&mut env, actors)?;
+    let coalition_destinations = [0usize, 2]
+        .into_iter()
+        .map(|actor| env.actors[actor].destination_token)
+        .collect::<Vec<_>>();
+    let victim_destinations = [1usize, 3, 4, close_lp]
+        .into_iter()
+        .map(|actor| env.actors[actor].destination_token)
+        .collect::<Vec<_>>();
+    let coalition_terminal_payout =
+        coalition_destinations
+            .iter()
+            .try_fold(0u128, |total, destination| {
+                total
+                    .checked_add(u128::from(env.token_amount(*destination)))
+                    .ok_or_else(|| "bilateral terminal coalition payout overflow".to_string())
+            })?;
+    let victim_terminal_payout =
+        victim_destinations
+            .iter()
+            .try_fold(0u128, |total, destination| {
+                total
+                    .checked_add(u128::from(env.token_amount(*destination)))
+                    .ok_or_else(|| "bilateral terminal victim payout overflow".to_string())
+            })?;
+    let coalition_excess = coalition_terminal_payout.saturating_sub(coalition_equity_before);
+    let victim_loss = victim_group_equity_before.saturating_sub(victim_terminal_payout);
+    let users_terminal = actors.iter().try_fold(true, |all_terminal, actor| {
+        discovery_portfolio_is_terminal(&env.primary_portfolio(*actor))
+            .map(|terminal| all_terminal && terminal)
+    })?;
     if env.token_supply_observed() != supply_before {
         return Err("bilateral mark-fee world changed SPL supply".into());
     }
+    let public_trace = env.finish_public_trace();
+    let candidate_violation = queued_mark > setup_mark
+        && coalition_excess != 0
+        && mark_victim_equity_loss != 0
+        && victim_loss != 0
+        && fee_counterparty_loss != 0
+        && insurance_gain != 0
+        && extracted_tokens != 0;
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: if candidate_violation { victim_loss } else { 0 },
+            unauthorized_gain_atoms: if candidate_violation {
+                coalition_excess
+            } else {
+                0
+            },
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: !candidate_violation,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("bilateral terminal evidence is invalid: {error}"))?;
     Ok(BilateralMarkFeeDiscovery {
         mode,
         route,
         setup_mark,
         queued_mark,
         coalition_equity_before,
+        victim_equity_before: victim_group_equity_before,
         coalition_excess,
+        mark_victim_equity_loss,
         victim_loss,
         fee_counterparty_loss,
         insurance_gain,
         extracted_tokens,
+        victim_terminal_payout,
+        coalition_terminal_payout,
+        users_terminal,
+        victim_destinations,
+        coalition_destinations,
+        terminal_classification,
+        public_trace,
     })
 }
 

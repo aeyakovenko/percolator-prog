@@ -5,7 +5,7 @@ AuthorityIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantif
 AuthorityFundedHandoffDiscovery	TERMINAL_LOF	public trace binds stale authority-epoch handoff to exact incumbent backing-principal extraction
 AuthorityResolveTerminalDiscovery	TERMINAL_LOF	public trace binds stale authority-epoch resolve to exact funded-user terminal loss
 BackingProviderConsentDiscovery	ECONOMIC_DELTA_ONLY	operator SPL gain is exact, but the LP authorized the fee and provider harm is counterfactual revenue under a privileged policy change
-BilateralMarkFeeDiscovery	ECONOMIC_DELTA_ONLY	victim and coalition deltas lack normalized public terminal evidence
+BilateralMarkFeeDiscovery	TERMINAL_LOF	all six portfolios resolve through public payout rails; exact destination-token traces bind terminal coalition excess and noncoalition loss to the classifier while ordinary fee loss remains bounded-exit evidence
 CompositeRoundingDiscovery	ECONOMIC_DELTA_ONLY	liquidation value delta lacks normalized public terminal evidence
 CrossDomainBackingDiscovery	TERMINAL_LOF	public trace binds excess domain backing consumption to winner excess gain
 FeeConsentDiscovery	ECONOMIC_DELTA_ONLY	unauthorized debit lacks normalized public terminal evidence
