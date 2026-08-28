@@ -55,8 +55,19 @@ fn v16_program_public_trace_enforces_authority_attributed_quote_flow() {
         .validate_public_execution()
         .expect("balanced owner/vault quote flows are valid public evidence");
 
-    let mut unbalanced = trace.clone();
     let source = env.actors[0].source_token;
+    assert_eq!(
+        trace
+            .token_delta_for_accounts(&[source])
+            .expect("source-token trace delta"),
+        -17
+    );
+    assert!(
+        trace.token_delta_for_accounts(&[source, source]).is_err(),
+        "a duplicated payout-account query must fail closed"
+    );
+
+    let mut unbalanced = trace.clone();
     let source_delta = unbalanced.steps[0]
         .token_deltas
         .iter_mut()

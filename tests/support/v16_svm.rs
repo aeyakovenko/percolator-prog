@@ -358,6 +358,25 @@ impl PublicTraceEvidence {
         Ok(())
     }
 
+    pub fn token_delta_for_accounts(&self, accounts: &[Pubkey]) -> Result<i128, String> {
+        self.validate_public_execution()?;
+        for (index, key) in accounts.iter().enumerate() {
+            if accounts[..index].contains(key) {
+                return Err(format!("duplicate token-delta query account {key}"));
+            }
+        }
+        self.steps.iter().try_fold(0i128, |total, step| {
+            step.token_deltas
+                .iter()
+                .filter(|(key, _)| accounts.contains(key))
+                .try_fold(total, |total, (_, delta)| {
+                    total
+                        .checked_add(*delta)
+                        .ok_or_else(|| "public trace token-delta query overflowed".to_string())
+                })
+        })
+    }
+
     pub fn classify_terminal(
         &self,
         observation: PublicTerminalObservation,

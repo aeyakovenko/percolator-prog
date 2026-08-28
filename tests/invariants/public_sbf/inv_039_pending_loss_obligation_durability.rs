@@ -82,6 +82,7 @@ fn v16_program_pr254_shutdown_preserves_committed_funding() {
     assert_eq!(discovery.victim_payout_loss, 0);
     assert_eq!(discovery.counterparty_payout_gain, 0);
     assert!(!discovery.is_violation(), "{discovery:?}");
+    assert!(discovery.certifies_terminal_ordering(), "{discovery:?}");
 }
 
 #[test]

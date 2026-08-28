@@ -9,9 +9,11 @@
 //! same nonzero transfer and compares conserved claims across the two orders.
 //! `v16_program_prospective_accrual_route_matrix_preserves_elapsed_funding` independently varies
 //! all single/batch CPI/no-CPI trade routes around the same funding catch-up boundary. Every route
-//! requires identical funding indices and unrelated-victim payout. No-CPI routes additionally
-//! require identical terminal prices and payouts because their signed execution price is fixed;
-//! CPI matcher quotes legitimately vary with the crank-first versus trade-first oracle input.
+//! requires identical funding indices and unrelated-victim payout, drains every actor through the
+//! public resolved rails, and recomputes both paired worlds' victim/coalition payouts from their
+//! exact destination-token trace deltas. No-CPI routes additionally require identical terminal
+//! prices and payouts because their signed execution price is fixed; CPI matcher quotes
+//! legitimately vary with the crank-first versus trade-first oracle input.
 //! `v16_program_shutdown_commit_ordering_preserves_committed_funding` applies the same ordering
 //! oracle to asset shutdown while constraining the effective price to remain unchanged. Any payout
 //! difference is therefore a committed funding transfer erased by the lifecycle transition.
@@ -135,6 +137,12 @@ proptest! {
         prop_assert_eq!(discovery.victim_payout_loss, 0);
         prop_assert_eq!(discovery.counterparty_payout_gain, 0);
         prop_assert!(!discovery.is_violation(), "{discovery:?}");
+        prop_assert!(discovery.certifies_terminal_ordering(), "{discovery:?}");
+        let mut wrong_payout_identity = discovery.clone();
+        wrong_payout_identity.terminal_evidence.victim_destination =
+            discovery.terminal_evidence.counterparty_destinations[0];
+        prop_assert!(!wrong_payout_identity.is_violation());
+        prop_assert!(!wrong_payout_identity.certifies_terminal_ordering());
     }
 }
 
@@ -231,6 +239,12 @@ proptest! {
         }
         for discovery in discoveries {
             prop_assert!(!discovery.is_violation(), "{discovery:?}");
+            prop_assert!(discovery.certifies_terminal_ordering(), "{discovery:?}");
+            let mut wrong_payout_identity = discovery.clone();
+            wrong_payout_identity.terminal_evidence.victim_destination =
+                discovery.terminal_evidence.counterparty_destinations[0];
+            prop_assert!(!wrong_payout_identity.is_violation());
+            prop_assert!(!wrong_payout_identity.certifies_terminal_ordering());
             prop_assert!(discovery.control_f_short_num > 0);
             prop_assert_eq!(
                 discovery.reordered_f_short_num,
@@ -273,6 +287,12 @@ proptest! {
             !discovery.is_violation(),
             "terminal-commit ordering still discards value: {discovery:?}"
         );
+        prop_assert!(discovery.certifies_terminal_ordering(), "{discovery:?}");
+        let mut wrong_payout_identity = discovery.clone();
+        wrong_payout_identity.terminal_evidence.victim_destination =
+            discovery.terminal_evidence.counterparty_destinations[0];
+        prop_assert!(!wrong_payout_identity.is_violation());
+        prop_assert!(!wrong_payout_identity.certifies_terminal_ordering());
         prop_assert!(discovery.unsafe_resolve_rejected);
         prop_assert!(discovery.rejected_exact_rollback);
         prop_assert!(discovery.catchup_steps > 0);

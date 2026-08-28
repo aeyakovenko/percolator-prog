@@ -236,7 +236,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 34,
+        consumers, 37,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
@@ -300,7 +300,10 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
             "AuthorityFundedHandoffDiscovery",
             "AuthorityResolveTerminalDiscovery",
             "CrossDomainBackingDiscovery",
+            "ProspectiveAccrualDiscovery",
+            "ShutdownCommitOrderingDiscovery",
             "SourceFeeConsentDiscovery",
+            "TerminalCommitOrderingDiscovery",
             "TerminalDustDiscovery",
             "TerminalGenerationDiscovery",
         ],
@@ -316,9 +319,29 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
             .find("\n}\n")
             .unwrap_or_else(|| panic!("unterminated impl for terminal oracle {oracle}"));
         let body = &body[..end];
-        assert!(body.contains("terminal_classification"));
-        assert!(body.contains("public_trace.validate_public_execution()"));
+        let direct_terminal_evidence = body.contains("terminal_classification")
+            && body.contains("public_trace.validate_public_execution()");
+        let shared_terminal_evidence =
+            body.contains("terminal_evidence") && body.contains("certifies_exact_loss");
+        assert!(
+            direct_terminal_evidence || shared_terminal_evidence,
+            "terminal oracle {oracle} does not bind exact loss to direct or shared public evidence"
+        );
     }
+    let shared_marker = "impl PairedTerminalPayoutEvidence {";
+    let shared_start = source
+        .find(shared_marker)
+        .expect("shared paired-terminal evidence implementation");
+    let shared_body = &source[shared_start..];
+    let shared_end = shared_body
+        .find("\n}\n")
+        .expect("terminated shared paired-terminal evidence implementation");
+    let shared_body = &shared_body[..shared_end];
+    assert!(shared_body.contains("terminal_classification"));
+    assert!(shared_body.contains("control_public_trace"));
+    assert!(shared_body.contains("public_trace"));
+    assert!(shared_body.contains("certifies_exact_loss"));
+    assert!(shared_body.matches("validate_public_execution()").count() >= 2);
     assert_eq!(roster.len(), 28, "finding-blind oracle inventory changed");
 }
 

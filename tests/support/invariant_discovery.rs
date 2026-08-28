@@ -1180,6 +1180,7 @@ pub struct TerminalCommitOrderingDiscovery {
     pub counterparty_payout_gain: u64,
     pub committed_total_payout: u128,
     pub reordered_total_payout: u128,
+    pub terminal_evidence: PairedTerminalPayoutEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1198,7 +1199,7 @@ pub struct PendingZeroMoveTerminalDiscovery {
     pub reordered_total_payout: u128,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShutdownCommitOrderingDiscovery {
     pub control_f_long_num: i128,
     pub control_f_short_num: i128,
@@ -1206,6 +1207,9 @@ pub struct ShutdownCommitOrderingDiscovery {
     pub shutdown_f_short_num: i128,
     pub victim_payout_loss: u128,
     pub counterparty_payout_gain: u128,
+    pub control_total_payout: u128,
+    pub shutdown_total_payout: u128,
+    pub terminal_evidence: PairedTerminalPayoutEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1223,6 +1227,16 @@ pub struct ShutdownCatchupDiscovery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairedTerminalPayoutEvidence {
+    pub victim_destination: Pubkey,
+    pub counterparty_destinations: Vec<Pubkey>,
+    pub users_terminal: bool,
+    pub terminal_classification: PublicTerminalClassification,
+    pub control_public_trace: PublicTraceEvidence,
+    pub public_trace: PublicTraceEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProspectiveAccrualDiscovery {
     pub route: ProspectiveAccrualRoute,
     pub control_f_short_num: i128,
@@ -1233,6 +1247,7 @@ pub struct ProspectiveAccrualDiscovery {
     pub reordered_total_payout: u128,
     pub final_mark: u64,
     pub final_effective_price: u64,
+    pub terminal_evidence: PairedTerminalPayoutEvidence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2320,22 +2335,235 @@ impl PendingMarkAdmissionDiscovery {
     }
 }
 
+impl PairedTerminalPayoutEvidence {
+    fn traced_payouts(&self) -> Option<(u128, u128, u128, u128)> {
+        if self.counterparty_destinations.is_empty()
+            || self
+                .counterparty_destinations
+                .contains(&self.victim_destination)
+        {
+            return None;
+        }
+        let control_victim = u128::try_from(
+            self.control_public_trace
+                .token_delta_for_accounts(&[self.victim_destination])
+                .ok()?,
+        )
+        .ok()?;
+        let reordered_victim = u128::try_from(
+            self.public_trace
+                .token_delta_for_accounts(&[self.victim_destination])
+                .ok()?,
+        )
+        .ok()?;
+        let control_coalition = u128::try_from(
+            self.control_public_trace
+                .token_delta_for_accounts(&self.counterparty_destinations)
+                .ok()?,
+        )
+        .ok()?;
+        let reordered_coalition = u128::try_from(
+            self.public_trace
+                .token_delta_for_accounts(&self.counterparty_destinations)
+                .ok()?,
+        )
+        .ok()?;
+        Some((
+            control_victim,
+            reordered_victim,
+            control_coalition,
+            reordered_coalition,
+        ))
+    }
+
+    pub fn certifies_exact_loss(
+        &self,
+        victim_payout_loss: u128,
+        counterparty_payout_gain: u128,
+        control_total_payout: u128,
+        reordered_total_payout: u128,
+    ) -> bool {
+        let Some((control_victim, reordered_victim, control_coalition, reordered_coalition)) =
+            self.traced_payouts()
+        else {
+            return false;
+        };
+        victim_payout_loss != 0
+            && victim_payout_loss == counterparty_payout_gain
+            && control_victim.checked_sub(reordered_victim) == Some(victim_payout_loss)
+            && reordered_coalition.checked_sub(control_coalition) == Some(counterparty_payout_gain)
+            && control_victim.checked_add(control_coalition) == Some(control_total_payout)
+            && reordered_victim.checked_add(reordered_coalition) == Some(reordered_total_payout)
+            && control_total_payout == reordered_total_payout
+            && self.users_terminal
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == victim_payout_loss
+                    && unauthorized_gain_atoms == counterparty_payout_gain
+            )
+            && self
+                .control_public_trace
+                .validate_public_execution()
+                .is_ok()
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+
+    pub fn certifies_bounded_exit(
+        &self,
+        victim_payout_loss: u128,
+        control_total_payout: u128,
+        reordered_total_payout: u128,
+    ) -> bool {
+        let Some((control_victim, reordered_victim, control_coalition, reordered_coalition)) =
+            self.traced_payouts()
+        else {
+            return false;
+        };
+        victim_payout_loss == 0
+            && control_victim == reordered_victim
+            && control_victim.checked_add(control_coalition) == Some(control_total_payout)
+            && reordered_victim.checked_add(reordered_coalition) == Some(reordered_total_payout)
+            && self.users_terminal
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && self
+                .control_public_trace
+                .validate_public_execution()
+                .is_ok()
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+}
+
+fn build_paired_terminal_payout_evidence(
+    context: &str,
+    victim_destination: Pubkey,
+    counterparty_destinations: Vec<Pubkey>,
+    users_terminal: bool,
+    victim_payout_loss: u128,
+    counterparty_payout_gain: u128,
+    control_total_payout: u128,
+    reordered_total_payout: u128,
+    control_public_trace: PublicTraceEvidence,
+    public_trace: PublicTraceEvidence,
+) -> Result<PairedTerminalPayoutEvidence, String> {
+    if !users_terminal {
+        return Err(format!(
+            "{context} did not terminalize every payout participant"
+        ));
+    }
+    let exact_terminal_loss = victim_payout_loss != 0
+        && victim_payout_loss == counterparty_payout_gain
+        && control_total_payout == reordered_total_payout;
+    if victim_payout_loss != 0 && !exact_terminal_loss {
+        return Err(format!(
+            "{context} observed a victim payout loss without an exact conserved counterparty gain"
+        ));
+    }
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: if exact_terminal_loss {
+                victim_payout_loss
+            } else {
+                0
+            },
+            unauthorized_gain_atoms: if exact_terminal_loss {
+                counterparty_payout_gain
+            } else {
+                0
+            },
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: !exact_terminal_loss,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("{context} terminal evidence is invalid: {error}"))?;
+    let evidence = PairedTerminalPayoutEvidence {
+        victim_destination,
+        counterparty_destinations,
+        users_terminal,
+        terminal_classification,
+        control_public_trace,
+        public_trace,
+    };
+    let certified = if exact_terminal_loss {
+        evidence.certifies_exact_loss(
+            victim_payout_loss,
+            counterparty_payout_gain,
+            control_total_payout,
+            reordered_total_payout,
+        )
+    } else {
+        evidence.certifies_bounded_exit(
+            victim_payout_loss,
+            control_total_payout,
+            reordered_total_payout,
+        )
+    };
+    if !certified {
+        return Err(format!(
+            "{context} payout observations disagree with the normalized public traces"
+        ));
+    }
+    Ok(evidence)
+}
+
 impl ProspectiveAccrualDiscovery {
     pub fn is_violation(&self) -> bool {
         self.control_f_short_num > 0
             && self.reordered_f_short_num == 0
-            && self.victim_payout_loss != 0
-            && self.victim_payout_loss == self.coalition_payout_gain
-            && self.control_total_payout == self.reordered_total_payout
+            && self.terminal_evidence.certifies_exact_loss(
+                self.victim_payout_loss,
+                self.coalition_payout_gain,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            )
+    }
+
+    pub fn certifies_terminal_ordering(&self) -> bool {
+        !self.is_violation()
+            && self.control_f_short_num > 0
+            && self.reordered_f_short_num == self.control_f_short_num
+            && self.terminal_evidence.certifies_bounded_exit(
+                self.victim_payout_loss,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            )
     }
 }
 
 impl TerminalCommitOrderingDiscovery {
     pub fn is_violation(&self) -> bool {
         self.committed_mark > self.reordered_mark
-            && self.victim_payout_loss != 0
-            && self.victim_payout_loss == self.counterparty_payout_gain
-            && self.committed_total_payout == self.reordered_total_payout
+            && self.terminal_evidence.certifies_exact_loss(
+                u128::from(self.victim_payout_loss),
+                u128::from(self.counterparty_payout_gain),
+                self.committed_total_payout,
+                self.reordered_total_payout,
+            )
+    }
+
+    pub fn certifies_terminal_ordering(&self) -> bool {
+        !self.is_violation()
+            && self.unsafe_resolve_rejected
+            && self.rejected_exact_rollback
+            && (1..=16).contains(&self.catchup_steps)
+            && self.max_catchup_cu < 1_400_000
+            && self.committed_mark == self.reordered_mark
+            && self.counterparty_payout_gain == 0
+            && self.terminal_evidence.certifies_bounded_exit(
+                u128::from(self.victim_payout_loss),
+                self.committed_total_payout,
+                self.reordered_total_payout,
+            )
     }
 }
 
@@ -2355,8 +2583,26 @@ impl ShutdownCommitOrderingDiscovery {
             && self.control_f_short_num < 0
             && self.shutdown_f_long_num == 0
             && self.shutdown_f_short_num == 0
-            && self.victim_payout_loss != 0
-            && self.victim_payout_loss == self.counterparty_payout_gain
+            && self.terminal_evidence.certifies_exact_loss(
+                self.victim_payout_loss,
+                self.counterparty_payout_gain,
+                self.control_total_payout,
+                self.shutdown_total_payout,
+            )
+    }
+
+    pub fn certifies_terminal_ordering(&self) -> bool {
+        !self.is_violation()
+            && self.control_f_long_num > 0
+            && self.control_f_short_num < 0
+            && self.shutdown_f_long_num == self.control_f_long_num
+            && self.shutdown_f_short_num == self.control_f_short_num
+            && self.counterparty_payout_gain == 0
+            && self.terminal_evidence.certifies_bounded_exit(
+                self.victim_payout_loss,
+                self.control_total_payout,
+                self.shutdown_total_payout,
+            )
     }
 }
 
@@ -7227,7 +7473,7 @@ fn drain_resolved_discovery_actor(env: &mut V16Svm, actor: usize) -> Result<u128
     ))
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct TerminalCommitWorld {
     effective_mark: u64,
     unsafe_resolve_rejected: bool,
@@ -7236,6 +7482,10 @@ struct TerminalCommitWorld {
     max_catchup_cu: u64,
     long_payout: u64,
     short_payout: u64,
+    users_terminal: bool,
+    victim_destination: Pubkey,
+    counterparty_destinations: Vec<Pubkey>,
+    public_trace: PublicTraceEvidence,
 }
 
 fn run_terminal_commit_world(
@@ -7268,6 +7518,7 @@ fn run_terminal_commit_world(
             ..MarketConfig::default()
         },
     );
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     env.configure_permissionless_resolve(3, 1)
         .map_err(|error| format!("configure terminal resolve: {error}"))?;
@@ -7361,8 +7612,27 @@ fn run_terminal_commit_world(
     env.warp_to_slot(RESOLVE_SLOT + 1);
     let short_payout = drain_resolved_discovery_actor(&mut env, 1)?;
     let long_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(0))?
+        && discovery_portfolio_is_terminal(&env.primary_portfolio(1))?;
     if env.token_supply_observed() != supply_before {
         return Err("terminal ordering world changed SPL supply".into());
+    }
+    let victim_destination = env.actors[0].destination_token;
+    let counterparty_destinations = vec![env.actors[1].destination_token];
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("terminal ordering public trace is invalid: {error}"))?;
+    let traced_long_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&[victim_destination])?)
+            .map_err(|_| "terminal long destination had a negative trace delta".to_string())?;
+    let traced_short_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&counterparty_destinations)?)
+            .map_err(|_| "terminal short destination had a negative trace delta".to_string())?;
+    if traced_long_payout != long_payout || traced_short_payout != short_payout {
+        return Err(format!(
+            "terminal payout observations disagree with public SPL deltas: long={long_payout}/{traced_long_payout}, short={short_payout}/{traced_short_payout}"
+        ));
     }
     Ok(TerminalCommitWorld {
         effective_mark,
@@ -7374,6 +7644,10 @@ fn run_terminal_commit_world(
             .map_err(|_| "long terminal payout exceeds SPL range")?,
         short_payout: u64::try_from(short_payout)
             .map_err(|_| "short terminal payout exceeds SPL range")?,
+        users_terminal,
+        victim_destination,
+        counterparty_destinations,
+        public_trace,
     })
 }
 
@@ -7397,6 +7671,23 @@ pub fn discover_terminal_commit_ordering(
     let reordered_total_payout = u128::from(reordered.long_payout)
         .checked_add(u128::from(reordered.short_payout))
         .ok_or_else(|| "reordered terminal payout overflow".to_string())?;
+    if committed.victim_destination != reordered.victim_destination
+        || committed.counterparty_destinations != reordered.counterparty_destinations
+    {
+        return Err("terminal paired worlds used different payout accounts".into());
+    }
+    let terminal_evidence = build_paired_terminal_payout_evidence(
+        "terminal commit ordering",
+        reordered.victim_destination,
+        reordered.counterparty_destinations,
+        committed.users_terminal && reordered.users_terminal,
+        u128::from(victim_payout_loss),
+        u128::from(counterparty_payout_gain),
+        committed_total_payout,
+        reordered_total_payout,
+        committed.public_trace,
+        reordered.public_trace,
+    )?;
     Ok(TerminalCommitOrderingDiscovery {
         committed_mark: committed.effective_mark,
         reordered_mark: reordered.effective_mark,
@@ -7408,6 +7699,7 @@ pub fn discover_terminal_commit_ordering(
         counterparty_payout_gain,
         committed_total_payout,
         reordered_total_payout,
+        terminal_evidence,
     })
 }
 
@@ -7588,12 +7880,16 @@ pub fn discover_pending_zero_move_terminal_ordering(
     })
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct ShutdownCommitWorld {
     f_long_num: i128,
     f_short_num: i128,
     long_payout: u128,
     short_payout: u128,
+    users_terminal: bool,
+    victim_destination: Pubkey,
+    counterparty_destinations: Vec<Pubkey>,
+    public_trace: PublicTraceEvidence,
 }
 
 fn run_shutdown_commit_world(
@@ -7611,7 +7907,6 @@ fn run_shutdown_commit_world(
     const SHUTDOWN_SLOT: u64 = 3;
     const FORCE_CLOSE_SLOT: u64 = 4;
     seed[0] ^= 0x54;
-    seed[1] ^= u8::from(commit_before_shutdown);
     let mut env = V16Svm::new(
         seed,
         MarketConfig {
@@ -7625,6 +7920,7 @@ fn run_shutdown_commit_world(
             ..MarketConfig::default()
         },
     );
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     env.configure_permissionless_resolve(1_000, 1)
         .map_err(|error| format!("configure shutdown recovery: {error}"))?;
@@ -7682,14 +7978,37 @@ fn run_shutdown_commit_world(
     env.warp_to_slot(FORCE_CLOSE_SLOT + 1);
     let long_payout = drain_resolved_discovery_actor(&mut env, LONG)?;
     let short_payout = drain_resolved_discovery_actor(&mut env, SHORT)?;
+    let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(LONG))?
+        && discovery_portfolio_is_terminal(&env.primary_portfolio(SHORT))?;
     if env.token_supply_observed() != supply_before {
         return Err("shutdown commit world changed SPL supply".into());
+    }
+    let victim_destination = env.actors[LONG].destination_token;
+    let counterparty_destinations = vec![env.actors[SHORT].destination_token];
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("shutdown commit public trace is invalid: {error}"))?;
+    let traced_long_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&[victim_destination])?)
+            .map_err(|_| "shutdown long destination had a negative trace delta".to_string())?;
+    let traced_short_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&counterparty_destinations)?)
+            .map_err(|_| "shutdown short destination had a negative trace delta".to_string())?;
+    if traced_long_payout != long_payout || traced_short_payout != short_payout {
+        return Err(format!(
+            "shutdown payout observations disagree with public SPL deltas: long={long_payout}/{traced_long_payout}, short={short_payout}/{traced_short_payout}"
+        ));
     }
     Ok(ShutdownCommitWorld {
         f_long_num,
         f_short_num,
         long_payout,
         short_payout,
+        users_terminal,
+        victim_destination,
+        counterparty_destinations,
+        public_trace,
     })
 }
 
@@ -7706,11 +8025,31 @@ pub fn discover_shutdown_commit_ordering(
         .short_payout
         .checked_sub(control.short_payout)
         .ok_or_else(|| "shutdown-first ordering decreased short payout".to_string())?;
-    if control.long_payout + control.short_payout
-        != shutdown_first.long_payout + shutdown_first.short_payout
+    let control_total_payout = control
+        .long_payout
+        .checked_add(control.short_payout)
+        .ok_or_else(|| "shutdown control payout overflow".to_string())?;
+    let shutdown_total_payout = shutdown_first
+        .long_payout
+        .checked_add(shutdown_first.short_payout)
+        .ok_or_else(|| "shutdown-first payout overflow".to_string())?;
+    if control.victim_destination != shutdown_first.victim_destination
+        || control.counterparty_destinations != shutdown_first.counterparty_destinations
     {
-        return Err("shutdown order worlds did not conserve terminal payouts".into());
+        return Err("shutdown paired worlds used different payout accounts".into());
     }
+    let terminal_evidence = build_paired_terminal_payout_evidence(
+        "shutdown commit ordering",
+        shutdown_first.victim_destination,
+        shutdown_first.counterparty_destinations,
+        control.users_terminal && shutdown_first.users_terminal,
+        victim_payout_loss,
+        counterparty_payout_gain,
+        control_total_payout,
+        shutdown_total_payout,
+        control.public_trace,
+        shutdown_first.public_trace,
+    )?;
     Ok(ShutdownCommitOrderingDiscovery {
         control_f_long_num: control.f_long_num,
         control_f_short_num: control.f_short_num,
@@ -7718,6 +8057,9 @@ pub fn discover_shutdown_commit_ordering(
         shutdown_f_short_num: shutdown_first.f_short_num,
         victim_payout_loss,
         counterparty_payout_gain,
+        control_total_payout,
+        shutdown_total_payout,
+        terminal_evidence,
     })
 }
 
@@ -7973,7 +8315,7 @@ fn build_retained_discovery_trade(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct ProspectiveAccrualWorld {
     coalition_payout: u128,
     victim_payout: u128,
@@ -7981,6 +8323,10 @@ struct ProspectiveAccrualWorld {
     final_effective_price: u64,
     f_short_num: i128,
     total_payout: u128,
+    users_terminal: bool,
+    victim_destination: Pubkey,
+    coalition_destinations: [Pubkey; 3],
+    public_trace: PublicTraceEvidence,
 }
 
 fn run_prospective_accrual_world(
@@ -8007,6 +8353,7 @@ fn run_prospective_accrual_world(
             ..MarketConfig::default()
         },
     );
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     let configured_slot = env.current_slot();
     env.configure_ewma_mark(0, configured_slot, PRICE, MARK_HALFLIFE, 0)
@@ -8119,6 +8466,35 @@ fn run_prospective_accrual_world(
     if env.token_supply_observed() != supply_before {
         return Err("prospective funding world changed SPL supply".into());
     }
+    let users_terminal = (0..4).try_fold(true, |all_terminal, actor| {
+        discovery_portfolio_is_terminal(&env.primary_portfolio(actor))
+            .map(|terminal| all_terminal && terminal)
+    })?;
+    if !users_terminal {
+        return Err("prospective funding world left a nonterminal funded portfolio".into());
+    }
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("prospective funding public trace is invalid: {error}"))?;
+    let victim_destination = env.actors[1].destination_token;
+    let coalition_destinations = [
+        env.actors[0].destination_token,
+        env.actors[2].destination_token,
+        env.actors[3].destination_token,
+    ];
+    let traced_victim_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&[victim_destination])?)
+            .map_err(|_| "prospective victim destination had a negative trace delta".to_string())?;
+    let traced_coalition_payout = u128::try_from(
+        public_trace.token_delta_for_accounts(&coalition_destinations)?,
+    )
+    .map_err(|_| "prospective coalition destinations had a negative trace delta".to_string())?;
+    if traced_victim_payout != victim_payout || traced_coalition_payout != coalition_payout {
+        return Err(format!(
+            "prospective payout observations disagree with public SPL deltas: victim={victim_payout}/{traced_victim_payout}, coalition={coalition_payout}/{traced_coalition_payout}"
+        ));
+    }
     Ok(ProspectiveAccrualWorld {
         coalition_payout,
         victim_payout,
@@ -8126,6 +8502,10 @@ fn run_prospective_accrual_world(
         final_effective_price: group_after.assets[0].effective_price,
         f_short_num: group_after.assets[0].f_short_num,
         total_payout,
+        users_terminal,
+        victim_destination,
+        coalition_destinations,
+        public_trace,
     })
 }
 
@@ -8141,6 +8521,11 @@ fn discover_one_prospective_accrual_violation(
         route,
         ProspectiveAccrualRoute::NoCpi | ProspectiveAccrualRoute::BatchNoCpi
     );
+    if control.victim_destination != reordered.victim_destination
+        || control.coalition_destinations != reordered.coalition_destinations
+    {
+        return Err("prospective paired worlds used different payout accounts".into());
+    }
     if fixed_execution_price
         && (control.final_mark != reordered.final_mark
             || control.final_effective_price != reordered.final_effective_price)
@@ -8157,6 +8542,18 @@ fn discover_one_prospective_accrual_violation(
         .coalition_payout
         .checked_sub(control.coalition_payout)
         .ok_or_else(|| "trade-first ordering decreased coalition payout".to_string())?;
+    let terminal_evidence = build_paired_terminal_payout_evidence(
+        &format!("{route:?} prospective accrual ordering"),
+        reordered.victim_destination,
+        reordered.coalition_destinations.to_vec(),
+        control.users_terminal && reordered.users_terminal,
+        victim_payout_loss,
+        coalition_payout_gain,
+        control.total_payout,
+        reordered.total_payout,
+        control.public_trace,
+        reordered.public_trace,
+    )?;
     Ok(ProspectiveAccrualDiscovery {
         route,
         control_f_short_num: control.f_short_num,
@@ -8167,6 +8564,7 @@ fn discover_one_prospective_accrual_violation(
         reordered_total_payout: reordered.total_payout,
         final_mark: reordered.final_mark,
         final_effective_price: reordered.final_effective_price,
+        terminal_evidence,
     })
 }
 
