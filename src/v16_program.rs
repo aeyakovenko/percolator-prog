@@ -3278,6 +3278,60 @@ pub mod ix {
             })
         }
 
+        #[inline(always)]
+        fn decode_init_market_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
+            Ok(Self::InitMarket {
+                max_portfolio_assets: read_u16(rest)?,
+                h_min: read_u64(rest)?,
+                h_max: read_u64(rest)?,
+                initial_price: read_u64(rest)?,
+                min_nonzero_mm_req: read_u128(rest)?,
+                min_nonzero_im_req: read_u128(rest)?,
+                maintenance_margin_bps: read_u64(rest)?,
+                initial_margin_bps: read_u64(rest)?,
+                max_trading_fee_bps: read_u64(rest)?,
+                trade_fee_base_bps: read_u64(rest)?,
+                liquidation_fee_bps: read_u64(rest)?,
+                liquidation_fee_cap: read_u128(rest)?,
+                min_liquidation_abs: read_u128(rest)?,
+                max_price_move_bps_per_slot: read_u64(rest)?,
+                max_accrual_dt_slots: read_u64(rest)?,
+                max_abs_funding_e9_per_slot: read_u64(rest)?,
+                min_funding_lifetime_slots: read_u64(rest)?,
+                max_account_b_settlement_chunks: read_u64(rest)?,
+                max_bankrupt_close_chunks: read_u64(rest)?,
+                max_bankrupt_close_lifetime_slots: read_u64(rest)?,
+                public_b_chunk_atoms: read_u128(rest)?,
+                maintenance_fee_per_slot: read_u128(rest)?,
+            })
+        }
+
+        #[inline(always)]
+        fn decode_configure_hybrid_oracle_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
+            Ok(Self::ConfigureHybridOracle {
+                asset_index: read_u16(rest)?,
+                market_id: read_u64(rest)?,
+                now_slot: read_u64(rest)?,
+                now_unix_ts: read_i64(rest)?,
+                oracle_leg_count: read_u8(rest)?,
+                oracle_leg_flags: read_u8(rest)?,
+                max_staleness_secs: read_u64(rest)?,
+                hybrid_soft_stale_slots: read_u64(rest)?,
+                mark_ewma_halflife_slots: read_u64(rest)?,
+                mark_min_fee: read_u64(rest)?,
+                invert: read_u8(rest)?,
+                unit_scale: read_u32(rest)?,
+                conf_filter_bps: read_u16(rest)?,
+                oracle_leg_feeds: [
+                    read_bytes32(rest)?,
+                    read_bytes32(rest)?,
+                    read_bytes32(rest)?,
+                ],
+                observation_sequence: read_u64(rest)?,
+                authority_epoch: read_u64(rest)?,
+            })
+        }
+
         fn decode_update_base_unit_mints_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
             Ok(Self::UpdateBaseUnitMints {
                 primary_mint: read_bytes32(rest)?,
@@ -3324,50 +3378,20 @@ pub mod ix {
 
         #[doc(hidden)]
         #[cfg(kani)]
-        pub fn decode_trade_nocpi_body_for_proof(input: &[u8]) -> Result<Self, ProgramError> {
-            Self::finish_proof_body(input, Self::decode_trade_nocpi_body)
-        }
-
-        #[doc(hidden)]
-        #[cfg(kani)]
-        pub fn decode_trade_cpi_body_for_proof(input: &[u8]) -> Result<Self, ProgramError> {
-            Self::finish_proof_body(input, Self::decode_trade_cpi_body)
-        }
-
-        #[doc(hidden)]
-        #[cfg(kani)]
-        pub fn decode_batch_trade_nocpi_body_for_proof(input: &[u8]) -> Result<Self, ProgramError> {
-            Self::finish_proof_body(input, Self::decode_batch_trade_nocpi_body)
-        }
-
-        #[doc(hidden)]
-        #[cfg(kani)]
-        pub fn decode_batch_trade_cpi_body_for_proof(input: &[u8]) -> Result<Self, ProgramError> {
-            Self::finish_proof_body(input, Self::decode_batch_trade_cpi_body)
-        }
-
-        #[doc(hidden)]
-        #[cfg(kani)]
-        pub fn decode_update_base_unit_mints_body_for_proof(
-            input: &[u8],
-        ) -> Result<Self, ProgramError> {
-            Self::finish_proof_body(input, Self::decode_update_base_unit_mints_body)
-        }
-
-        #[doc(hidden)]
-        #[cfg(kani)]
-        pub fn decode_swap_secondary_for_primary_body_for_proof(
-            input: &[u8],
-        ) -> Result<Self, ProgramError> {
-            Self::finish_proof_body(input, Self::decode_swap_secondary_for_primary_body)
-        }
-
-        #[doc(hidden)]
-        #[cfg(kani)]
-        pub fn decode_update_asset_lifecycle_body_for_proof(
-            input: &[u8],
-        ) -> Result<Self, ProgramError> {
-            Self::finish_proof_body(input, Self::decode_update_asset_lifecycle_body)
+        pub fn decode_body_for_proof(tag: u8, input: &[u8]) -> Result<Self, ProgramError> {
+            let decode: fn(&mut &[u8]) -> Result<Self, ProgramError> = match tag {
+                0 => Self::decode_init_market_body,
+                6 => Self::decode_trade_nocpi_body,
+                10 => Self::decode_trade_cpi_body,
+                34 => Self::decode_configure_hybrid_oracle_body,
+                40 => Self::decode_update_asset_lifecycle_body,
+                60 => Self::decode_update_base_unit_mints_body,
+                61 => Self::decode_swap_secondary_for_primary_body,
+                66 => Self::decode_batch_trade_nocpi_body,
+                67 => Self::decode_batch_trade_cpi_body,
+                _ => return Err(ProgramError::InvalidInstructionData),
+            };
+            Self::finish_proof_body(input, decode)
         }
 
         pub fn decode(input: &[u8]) -> Result<Self, ProgramError> {
@@ -3375,30 +3399,7 @@ pub mod ix {
                 .split_first()
                 .ok_or(ProgramError::InvalidInstructionData)?;
             let ix = match tag {
-                0 => Self::InitMarket {
-                    max_portfolio_assets: read_u16(&mut rest)?,
-                    h_min: read_u64(&mut rest)?,
-                    h_max: read_u64(&mut rest)?,
-                    initial_price: read_u64(&mut rest)?,
-                    min_nonzero_mm_req: read_u128(&mut rest)?,
-                    min_nonzero_im_req: read_u128(&mut rest)?,
-                    maintenance_margin_bps: read_u64(&mut rest)?,
-                    initial_margin_bps: read_u64(&mut rest)?,
-                    max_trading_fee_bps: read_u64(&mut rest)?,
-                    trade_fee_base_bps: read_u64(&mut rest)?,
-                    liquidation_fee_bps: read_u64(&mut rest)?,
-                    liquidation_fee_cap: read_u128(&mut rest)?,
-                    min_liquidation_abs: read_u128(&mut rest)?,
-                    max_price_move_bps_per_slot: read_u64(&mut rest)?,
-                    max_accrual_dt_slots: read_u64(&mut rest)?,
-                    max_abs_funding_e9_per_slot: read_u64(&mut rest)?,
-                    min_funding_lifetime_slots: read_u64(&mut rest)?,
-                    max_account_b_settlement_chunks: read_u64(&mut rest)?,
-                    max_bankrupt_close_chunks: read_u64(&mut rest)?,
-                    max_bankrupt_close_lifetime_slots: read_u64(&mut rest)?,
-                    public_b_chunk_atoms: read_u128(&mut rest)?,
-                    maintenance_fee_per_slot: read_u128(&mut rest)?,
-                },
+                0 => Self::decode_init_market_body(&mut rest)?,
                 1 => Self::InitPortfolio,
                 3 => Self::Deposit {
                     portfolio_id: read_u64(&mut rest)?,
@@ -3580,28 +3581,7 @@ pub mod ix {
                 39 => Self::ResolveStalePermissionless {
                     now_slot: read_u64(&mut rest)?,
                 },
-                34 => Self::ConfigureHybridOracle {
-                    asset_index: read_u16(&mut rest)?,
-                    market_id: read_u64(&mut rest)?,
-                    now_slot: read_u64(&mut rest)?,
-                    now_unix_ts: read_i64(&mut rest)?,
-                    oracle_leg_count: read_u8(&mut rest)?,
-                    oracle_leg_flags: read_u8(&mut rest)?,
-                    max_staleness_secs: read_u64(&mut rest)?,
-                    hybrid_soft_stale_slots: read_u64(&mut rest)?,
-                    mark_ewma_halflife_slots: read_u64(&mut rest)?,
-                    mark_min_fee: read_u64(&mut rest)?,
-                    invert: read_u8(&mut rest)?,
-                    unit_scale: read_u32(&mut rest)?,
-                    conf_filter_bps: read_u16(&mut rest)?,
-                    oracle_leg_feeds: [
-                        read_bytes32(&mut rest)?,
-                        read_bytes32(&mut rest)?,
-                        read_bytes32(&mut rest)?,
-                    ],
-                    observation_sequence: read_u64(&mut rest)?,
-                    authority_epoch: read_u64(&mut rest)?,
-                },
+                34 => Self::decode_configure_hybrid_oracle_body(&mut rest)?,
                 35 => Self::ConfigureEwmaMark {
                     asset_index: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,

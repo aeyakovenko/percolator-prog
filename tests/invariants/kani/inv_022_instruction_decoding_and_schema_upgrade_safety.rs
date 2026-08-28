@@ -40,32 +40,31 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
     let public_b_chunk_atoms: u128 = kani::any();
     let maintenance_fee_per_slot: u128 = kani::any();
 
-    let mut data = [0u8; 219];
-    data[0] = 0;
-    data[1..3].copy_from_slice(&max_portfolio_assets.to_le_bytes());
-    data[3..11].copy_from_slice(&h_min.to_le_bytes());
-    data[11..19].copy_from_slice(&h_max.to_le_bytes());
-    data[19..27].copy_from_slice(&initial_price.to_le_bytes());
-    data[27..43].copy_from_slice(&min_nonzero_mm_req.to_le_bytes());
-    data[43..59].copy_from_slice(&min_nonzero_im_req.to_le_bytes());
-    data[59..67].copy_from_slice(&maintenance_margin_bps.to_le_bytes());
-    data[67..75].copy_from_slice(&initial_margin_bps.to_le_bytes());
-    data[75..83].copy_from_slice(&max_trading_fee_bps.to_le_bytes());
-    data[83..91].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
-    data[91..99].copy_from_slice(&liquidation_fee_bps.to_le_bytes());
-    data[99..115].copy_from_slice(&liquidation_fee_cap.to_le_bytes());
-    data[115..131].copy_from_slice(&min_liquidation_abs.to_le_bytes());
-    data[131..139].copy_from_slice(&max_price_move_bps_per_slot.to_le_bytes());
-    data[139..147].copy_from_slice(&max_accrual_dt_slots.to_le_bytes());
-    data[147..155].copy_from_slice(&max_abs_funding_e9_per_slot.to_le_bytes());
-    data[155..163].copy_from_slice(&min_funding_lifetime_slots.to_le_bytes());
-    data[163..171].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
-    data[171..179].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
-    data[179..187].copy_from_slice(&max_bankrupt_close_lifetime_slots.to_le_bytes());
-    data[187..203].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
-    data[203..219].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
+    let mut data = [0u8; 218];
+    data[0..2].copy_from_slice(&max_portfolio_assets.to_le_bytes());
+    data[2..10].copy_from_slice(&h_min.to_le_bytes());
+    data[10..18].copy_from_slice(&h_max.to_le_bytes());
+    data[18..26].copy_from_slice(&initial_price.to_le_bytes());
+    data[26..42].copy_from_slice(&min_nonzero_mm_req.to_le_bytes());
+    data[42..58].copy_from_slice(&min_nonzero_im_req.to_le_bytes());
+    data[58..66].copy_from_slice(&maintenance_margin_bps.to_le_bytes());
+    data[66..74].copy_from_slice(&initial_margin_bps.to_le_bytes());
+    data[74..82].copy_from_slice(&max_trading_fee_bps.to_le_bytes());
+    data[82..90].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
+    data[90..98].copy_from_slice(&liquidation_fee_bps.to_le_bytes());
+    data[98..114].copy_from_slice(&liquidation_fee_cap.to_le_bytes());
+    data[114..130].copy_from_slice(&min_liquidation_abs.to_le_bytes());
+    data[130..138].copy_from_slice(&max_price_move_bps_per_slot.to_le_bytes());
+    data[138..146].copy_from_slice(&max_accrual_dt_slots.to_le_bytes());
+    data[146..154].copy_from_slice(&max_abs_funding_e9_per_slot.to_le_bytes());
+    data[154..162].copy_from_slice(&min_funding_lifetime_slots.to_le_bytes());
+    data[162..170].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
+    data[170..178].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
+    data[178..186].copy_from_slice(&max_bankrupt_close_lifetime_slots.to_le_bytes());
+    data[186..202].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
+    data[202..218].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
 
-    match Instruction::decode(&data).unwrap() {
+    match Instruction::decode_body_for_proof(0, &data).unwrap() {
         Instruction::InitMarket {
             max_portfolio_assets: got_max_assets,
             h_min: got_h_min,
@@ -115,6 +114,12 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
         }
         _ => unreachable!(),
     }
+
+    let extra: u8 = kani::any();
+    let mut trailing = [0u8; 219];
+    trailing[..218].copy_from_slice(&data);
+    trailing[218] = extra;
+    assert!(Instruction::decode_body_for_proof(0, &trailing).is_err());
 }
 
 #[kani::proof]
@@ -251,7 +256,7 @@ fn kani_v16_update_base_unit_mints_decode_preserves_wire_fields() {
     data[32..64].copy_from_slice(&secondary_mint);
     data[64..72].copy_from_slice(&authority_epoch.to_le_bytes());
 
-    match Instruction::decode_update_base_unit_mints_body_for_proof(&data).unwrap() {
+    match Instruction::decode_body_for_proof(60, &data).unwrap() {
         Instruction::UpdateBaseUnitMints {
             primary_mint: got_primary,
             secondary_mint: got_secondary,
@@ -268,7 +273,7 @@ fn kani_v16_update_base_unit_mints_decode_preserves_wire_fields() {
     let mut trailing = [0u8; 73];
     trailing[..72].copy_from_slice(&data);
     trailing[72] = extra;
-    assert!(Instruction::decode_update_base_unit_mints_body_for_proof(&trailing).is_err());
+    assert!(Instruction::decode_body_for_proof(60, &trailing).is_err());
 }
 
 #[kani::proof]
@@ -280,7 +285,7 @@ fn kani_v16_swap_secondary_for_primary_decode_preserves_wire_fields() {
     data[..16].copy_from_slice(&amount.to_le_bytes());
     data[16..24].copy_from_slice(&authority_epoch.to_le_bytes());
 
-    match Instruction::decode_swap_secondary_for_primary_body_for_proof(&data).unwrap() {
+    match Instruction::decode_body_for_proof(61, &data).unwrap() {
         Instruction::SwapSecondaryForPrimary {
             amount: got_amount,
             authority_epoch: got_epoch,
@@ -295,7 +300,7 @@ fn kani_v16_swap_secondary_for_primary_decode_preserves_wire_fields() {
     let mut trailing = [0u8; 25];
     trailing[..24].copy_from_slice(&data);
     trailing[24] = extra;
-    assert!(Instruction::decode_swap_secondary_for_primary_body_for_proof(&trailing).is_err());
+    assert!(Instruction::decode_body_for_proof(61, &trailing).is_err());
 }
 
 #[kani::proof]
@@ -326,7 +331,7 @@ fn kani_v16_update_asset_lifecycle_decode_preserves_wire_fields() {
     data[115..147].copy_from_slice(&backing_bucket_authority);
     data[147..179].copy_from_slice(&oracle_authority);
 
-    match Instruction::decode_update_asset_lifecycle_body_for_proof(&data).unwrap() {
+    match Instruction::decode_body_for_proof(40, &data).unwrap() {
         Instruction::UpdateAssetLifecycle {
             action: got_action,
             asset_index: got_asset_index,
@@ -359,7 +364,7 @@ fn kani_v16_update_asset_lifecycle_decode_preserves_wire_fields() {
     let mut trailing = [0u8; 180];
     trailing[..179].copy_from_slice(&data);
     trailing[179] = extra;
-    assert!(Instruction::decode_update_asset_lifecycle_body_for_proof(&trailing).is_err());
+    assert!(Instruction::decode_body_for_proof(40, &trailing).is_err());
 }
 
 #[kani::proof]
@@ -744,7 +749,7 @@ fn assert_single_nocpi_trade_decoder_preserves(fields: NoCpiTradeWireFields) {
     single[43..59].copy_from_slice(&fields.size_q.to_le_bytes());
     single[59..67].copy_from_slice(&fields.exec_price.to_le_bytes());
     single[67..75].copy_from_slice(&fields.fee_bps.to_le_bytes());
-    match Instruction::decode_trade_nocpi_body_for_proof(&single[1..]).unwrap() {
+    match Instruction::decode_body_for_proof(6, &single[1..]).unwrap() {
         Instruction::TradeNoCpi {
             account_a_portfolio_id,
             account_a_position_epoch,
@@ -783,7 +788,7 @@ fn assert_batch_nocpi_trade_decoder_preserves(fields: NoCpiTradeWireFields) {
     batch[52..60].copy_from_slice(&fields.account_a_position_epoch.to_le_bytes());
     batch[60..68].copy_from_slice(&fields.account_b_portfolio_id.to_le_bytes());
     batch[68..76].copy_from_slice(&fields.account_b_position_epoch.to_le_bytes());
-    match Instruction::decode_batch_trade_nocpi_body_for_proof(&batch[1..]).unwrap() {
+    match Instruction::decode_body_for_proof(66, &batch[1..]).unwrap() {
         Instruction::BatchTradeNoCpi {
             account_a_portfolio_id,
             account_a_position_epoch,
@@ -845,7 +850,7 @@ fn assert_single_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
     single[43..59].copy_from_slice(&fields.size_q.to_le_bytes());
     single[59..67].copy_from_slice(&fields.fee_bps.to_le_bytes());
     single[67..75].copy_from_slice(&fields.limit_price.to_le_bytes());
-    match Instruction::decode_trade_cpi_body_for_proof(&single[1..]).unwrap() {
+    match Instruction::decode_body_for_proof(10, &single[1..]).unwrap() {
         Instruction::TradeCpi {
             account_a_portfolio_id,
             account_a_position_epoch,
@@ -884,7 +889,7 @@ fn assert_batch_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
     batch[52..60].copy_from_slice(&fields.account_a_position_epoch.to_le_bytes());
     batch[60..68].copy_from_slice(&fields.account_b_portfolio_id.to_le_bytes());
     batch[68..76].copy_from_slice(&fields.account_b_position_epoch.to_le_bytes());
-    match Instruction::decode_batch_trade_cpi_body_for_proof(&batch[1..]).unwrap() {
+    match Instruction::decode_body_for_proof(67, &batch[1..]).unwrap() {
         Instruction::BatchTradeCpi {
             account_a_portfolio_id,
             account_a_position_epoch,
@@ -1547,28 +1552,27 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     kani::assume(feed_index < feeds.len());
     kani::assume(byte_index < feeds[0].len());
 
-    let mut data = [0u8; 180];
-    data[0] = 34;
-    data[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    data[3..11].copy_from_slice(&market_id.to_le_bytes());
-    data[11..19].copy_from_slice(&now_slot.to_le_bytes());
-    data[19..27].copy_from_slice(&now_unix_ts.to_le_bytes());
-    data[27] = oracle_leg_count;
-    data[28] = oracle_leg_flags;
-    data[29..37].copy_from_slice(&max_staleness_secs.to_le_bytes());
-    data[37..45].copy_from_slice(&hybrid_soft_stale_slots.to_le_bytes());
-    data[45..53].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
-    data[53..61].copy_from_slice(&mark_min_fee.to_le_bytes());
-    data[61] = invert;
-    data[62..66].copy_from_slice(&unit_scale.to_le_bytes());
-    data[66..68].copy_from_slice(&conf_filter_bps.to_le_bytes());
-    data[68..100].copy_from_slice(&feeds[0]);
-    data[100..132].copy_from_slice(&feeds[1]);
-    data[132..164].copy_from_slice(&feeds[2]);
-    data[164..172].copy_from_slice(&observation_sequence.to_le_bytes());
-    data[172..180].copy_from_slice(&authority_epoch.to_le_bytes());
+    let mut data = [0u8; 179];
+    data[0..2].copy_from_slice(&asset_index.to_le_bytes());
+    data[2..10].copy_from_slice(&market_id.to_le_bytes());
+    data[10..18].copy_from_slice(&now_slot.to_le_bytes());
+    data[18..26].copy_from_slice(&now_unix_ts.to_le_bytes());
+    data[26] = oracle_leg_count;
+    data[27] = oracle_leg_flags;
+    data[28..36].copy_from_slice(&max_staleness_secs.to_le_bytes());
+    data[36..44].copy_from_slice(&hybrid_soft_stale_slots.to_le_bytes());
+    data[44..52].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
+    data[52..60].copy_from_slice(&mark_min_fee.to_le_bytes());
+    data[60] = invert;
+    data[61..65].copy_from_slice(&unit_scale.to_le_bytes());
+    data[65..67].copy_from_slice(&conf_filter_bps.to_le_bytes());
+    data[67..99].copy_from_slice(&feeds[0]);
+    data[99..131].copy_from_slice(&feeds[1]);
+    data[131..163].copy_from_slice(&feeds[2]);
+    data[163..171].copy_from_slice(&observation_sequence.to_le_bytes());
+    data[171..179].copy_from_slice(&authority_epoch.to_le_bytes());
 
-    match Instruction::decode(&data).unwrap() {
+    match Instruction::decode_body_for_proof(34, &data).unwrap() {
         Instruction::ConfigureHybridOracle {
             asset_index: got_asset_index,
             market_id: got_market_id,
@@ -1611,6 +1615,18 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
         }
         _ => unreachable!(),
     }
+
+    let extra: u8 = kani::any();
+    let mut trailing = [0u8; 180];
+    trailing[..179].copy_from_slice(&data);
+    trailing[179] = extra;
+    assert!(Instruction::decode_body_for_proof(34, &trailing).is_err());
+}
+
+#[kani::proof]
+fn kani_v16_generationless_hybrid_oracle_payload_rejects() {
+    let legacy_body: [u8; 163] = kani::any();
+    assert!(Instruction::decode_body_for_proof(34, &legacy_body).is_err());
 }
 
 #[kani::proof]
@@ -1780,39 +1796,6 @@ fn kani_v16_decode_rejects_trailing_bytes() {
     let extra: u8 = kani::any();
     let data = [1u8, extra];
     assert!(Instruction::decode(&data).is_err());
-}
-
-#[kani::proof]
-#[kani::unwind(18)]
-fn kani_v16_init_market_payload_rejects_trailing_byte() {
-    let extra: u8 = kani::any();
-    assert_rejects_trailing_byte(
-        Instruction::InitMarket {
-            max_portfolio_assets: 1,
-            h_min: 1,
-            h_max: 2,
-            initial_price: 100,
-            min_nonzero_mm_req: 1,
-            min_nonzero_im_req: 2,
-            maintenance_margin_bps: 500,
-            initial_margin_bps: 1_000,
-            max_trading_fee_bps: 10_000,
-            trade_fee_base_bps: 0,
-            liquidation_fee_bps: 0,
-            liquidation_fee_cap: 0,
-            min_liquidation_abs: 0,
-            max_price_move_bps_per_slot: 100,
-            max_accrual_dt_slots: 10,
-            max_abs_funding_e9_per_slot: 0,
-            min_funding_lifetime_slots: 10,
-            max_account_b_settlement_chunks: 1,
-            max_bankrupt_close_chunks: 1,
-            max_bankrupt_close_lifetime_slots: 100,
-            public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
-            maintenance_fee_per_slot: 0,
-        },
-        extra,
-    );
 }
 
 #[kani::proof]

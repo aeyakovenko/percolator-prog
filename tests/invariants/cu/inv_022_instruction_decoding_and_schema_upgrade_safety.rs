@@ -508,6 +508,28 @@ fn v16_program_one_byte_decoder_roster_rejects_every_unknown_or_truncated_tag() 
             (false, true) => unreachable!("zero-payload tags must be public tags"),
         }
     }
+
+    let source = include_str!("../../../src/v16_program.rs");
+    for (tag, body) in [
+        (0, "decode_init_market_body"),
+        (6, "decode_trade_nocpi_body"),
+        (10, "decode_trade_cpi_body"),
+        (34, "decode_configure_hybrid_oracle_body"),
+        (40, "decode_update_asset_lifecycle_body"),
+        (60, "decode_update_base_unit_mints_body"),
+        (61, "decode_swap_secondary_for_primary_body"),
+        (66, "decode_batch_trade_nocpi_body"),
+        (67, "decode_batch_trade_cpi_body"),
+    ] {
+        assert!(
+            source.contains(&format!("{tag} => Self::{body}(&mut rest)?")),
+            "deployed tag {tag} no longer dispatches through {body}"
+        );
+        assert!(
+            source.contains(&format!("{tag} => Self::{body},")),
+            "proof tag {tag} no longer dispatches through {body}"
+        );
+    }
 }
 
 #[test]
