@@ -14,6 +14,495 @@
 use super::*;
 
 #[test]
+fn v16_program_cross_instance_role_roster_is_source_complete() {
+    let public_registry = include_str!("../public_instruction_coverage.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty() && !line.starts_with("tag\t"))
+        .map(|line| {
+            let fields = line.splitn(5, '\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 5, "malformed public registry row: {line}");
+            (fields[0].parse::<u8>().expect("numeric tag"), fields[1])
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let test_source = include_str!("inv_034_domain_and_instance_isolation.rs");
+    let mut roster = std::collections::BTreeMap::new();
+    let mut status_counts = std::collections::BTreeMap::<&str, usize>::new();
+
+    for line in include_str!("../inv_034_instance_role_coverage.tsv").lines() {
+        if line.starts_with('#') || line.is_empty() || line.starts_with("tag\t") {
+            continue;
+        }
+        let fields = line.splitn(6, '\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 6, "malformed INV-034 roster row: {line}");
+        let tag = fields[0].parse::<u8>().expect("numeric tag");
+        let variant = fields[1];
+        let status = fields[2];
+        let roles = fields[3];
+        let evidence = fields[4];
+        let gap = fields[5];
+        assert_eq!(public_registry.get(&tag), Some(&variant));
+        assert_ne!(roles, "-", "{variant} must classify its instance anchors");
+        assert!(
+            roster.insert(tag, variant).is_none(),
+            "duplicate INV-034 tag {tag}"
+        );
+        *status_counts.entry(status).or_default() += 1;
+
+        match status {
+            "NO_MIXED_ROLE" => {
+                assert_eq!(evidence, "-");
+                assert_eq!(gap, "-");
+            }
+            "EXHAUSTIVE" => {
+                assert_ne!(evidence, "-");
+                assert_eq!(gap, "-");
+            }
+            "PARTIAL" => {
+                assert_ne!(evidence, "-");
+                assert_ne!(gap, "-");
+            }
+            "OPEN" => {
+                assert_eq!(evidence, "-");
+                assert_ne!(gap, "-");
+            }
+            other => panic!("unknown INV-034 role status {other}"),
+        }
+        if evidence != "-" {
+            for test in evidence.split(',') {
+                assert!(
+                    test_source.contains(&format!("fn {test}")),
+                    "{variant} cites missing INV-034 evidence {test}"
+                );
+            }
+        }
+    }
+
+    assert_eq!(
+        roster, public_registry,
+        "every public variant needs one row"
+    );
+    assert_eq!(status_counts.get("NO_MIXED_ROLE"), Some(&20));
+    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&14));
+    assert_eq!(status_counts.get("PARTIAL"), Some(&16));
+    assert_eq!(status_counts.get("OPEN").copied().unwrap_or_default(), 0);
+}
+
+fn init_authenticated_matcher_context_on_market(
+    env: &mut V16CuEnv,
+    matcher_program: Pubkey,
+    market: Pubkey,
+    owner: &Keypair,
+    portfolio: Pubkey,
+) -> (Pubkey, Pubkey) {
+    env.ensure_signer_account(owner.pubkey());
+    let context = Keypair::new();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::create_account(
+            &env.payer.pubkey(),
+            &context.pubkey(),
+            1_000_000_000,
+            MATCHER_CONTEXT_LEN as u64,
+            &matcher_program,
+        ),
+        &[&context],
+    )
+    .expect("system-create authenticated matcher context");
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &market,
+        &portfolio,
+        &owner.pubkey(),
+        &matcher_program,
+        &context.pubkey(),
+    );
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: matcher_program,
+            accounts: vec![
+                AccountMeta::new_readonly(owner.pubkey(), true),
+                AccountMeta::new_readonly(delegate, false),
+                AccountMeta::new(context.pubkey(), false),
+                AccountMeta::new_readonly(env.program_id, false),
+                AccountMeta::new_readonly(market, false),
+                AccountMeta::new_readonly(portfolio, false),
+            ],
+            data: vec![2],
+        },
+        &[owner],
+    )
+    .expect("initialize authenticated matcher context");
+    (context.pubkey(), delegate)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_matcher_config_on_market(
+    env: &mut V16CuEnv,
+    market: Pubkey,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    matcher_program: Pubkey,
+    matcher_context: Pubkey,
+    matcher_delegate: Pubkey,
+) -> Result<u64, String> {
+    let portfolio_id = env.portfolio_id(portfolio);
+    let expected_sequence = env.portfolio_matcher_sequence(portfolio);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id,
+            expected_sequence,
+            enabled: 1,
+            trade_fee_cap_bps: 10_000,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new_readonly(market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new_readonly(matcher_context, false),
+            AccountMeta::new_readonly(matcher_delegate, false),
+        ],
+        &[owner],
+    )
+}
+
+#[test]
+fn v16_attack_set_matcher_config_rejects_cross_instance_capability_tuple() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher_program,
+        &std::fs::read(auth_matcher_program_path()).expect("read authenticated matcher SBF"),
+    );
+    let market_a = env.market;
+
+    let owner_a = Keypair::new();
+    let portfolio_a = env.create_portfolio(&owner_a);
+    let (context_a, delegate_a) = init_authenticated_matcher_context_on_market(
+        &mut env,
+        matcher_program,
+        market_a,
+        &owner_a,
+        portfolio_a,
+    );
+
+    let params = V16CuMarketParams::default();
+    let (market_b, _vault_authority_b, _vault_b) =
+        init_independent_market_same_mint(&mut env, params);
+    let owner_b = Keypair::new();
+    let portfolio_b = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &owner_b,
+        params.max_portfolio_assets as usize,
+    );
+    let (context_b, delegate_b) = init_authenticated_matcher_context_on_market(
+        &mut env,
+        matcher_program,
+        market_b,
+        &owner_b,
+        portfolio_b,
+    );
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let portfolio_a_before = env.svm.get_account(&portfolio_a).unwrap();
+    let portfolio_b_before = env.svm.get_account(&portfolio_b).unwrap();
+    let context_b_before = env.svm.get_account(&context_b).unwrap();
+    let foreign_portfolio = set_matcher_config_on_market(
+        &mut env,
+        market_a,
+        &owner_b,
+        portfolio_b,
+        matcher_program,
+        context_b,
+        delegate_b,
+    );
+    assert!(
+        foreign_portfolio.is_err(),
+        "market A must reject a portfolio initialized under market B"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(
+        env.svm.get_account(&portfolio_a).unwrap(),
+        portfolio_a_before
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio_b).unwrap(),
+        portfolio_b_before
+    );
+    assert_eq!(env.svm.get_account(&context_b).unwrap(), context_b_before);
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_a_before = env.svm.get_account(&portfolio_a).unwrap();
+    let context_b_before = env.svm.get_account(&context_b).unwrap();
+    let foreign_delegate = set_matcher_config_on_market(
+        &mut env,
+        market_a,
+        &owner_a,
+        portfolio_a,
+        matcher_program,
+        context_b,
+        delegate_b,
+    );
+    assert!(
+        foreign_delegate.is_err(),
+        "market B's delegate PDA must not install a capability under market A"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(
+        env.svm.get_account(&portfolio_a).unwrap(),
+        portfolio_a_before
+    );
+    assert_eq!(env.svm.get_account(&context_b).unwrap(), context_b_before);
+
+    let control_a = set_matcher_config_on_market(
+        &mut env,
+        market_a,
+        &owner_a,
+        portfolio_a,
+        matcher_program,
+        context_a,
+        delegate_a,
+    )
+    .expect("market-A matcher capability remains installable");
+    assert_cu_within(
+        "SetMatcherConfig market-A control",
+        control_a,
+        CUSTODY_CU_LIMIT,
+    );
+    let control_b = set_matcher_config_on_market(
+        &mut env,
+        market_b,
+        &owner_b,
+        portfolio_b,
+        matcher_program,
+        context_b,
+        delegate_b,
+    )
+    .expect("market-B matcher capability remains installable");
+    assert_cu_within(
+        "SetMatcherConfig market-B control",
+        control_b,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.portfolio_matcher_config(portfolio_a).matcher_delegate,
+        delegate_a.to_bytes()
+    );
+    assert_eq!(
+        env.portfolio_matcher_config(portfolio_b).matcher_delegate,
+        delegate_b.to_bytes()
+    );
+}
+
+#[test]
+fn v16_attack_update_base_unit_mints_rejects_foreign_old_reserve() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let old_secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, old_secondary);
+
+    let params = V16CuMarketParams::default();
+    let (market_b, vault_authority_b, _primary_vault_b) =
+        init_independent_market_same_mint(&mut env, params);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: old_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(old_secondary, false),
+        ],
+        &[&admin],
+    )
+    .expect("configure market B with the same secondary mint");
+
+    let old_reserve_a =
+        create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, old_secondary);
+    let old_reserve_b =
+        create_ata_for_test(&mut env.svm, &env.payer, vault_authority_b, old_secondary);
+    assert_eq!(env.token_amount(old_reserve_a), 0);
+    assert_eq!(env.token_amount(old_reserve_b), 0);
+
+    let replacement = env.create_mint();
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let reserve_a_before = env.svm.get_account(&old_reserve_a).unwrap();
+    let reserve_b_before = env.svm.get_account(&old_reserve_b).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: replacement.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(replacement, false),
+            AccountMeta::new_readonly(old_reserve_b, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "market B's canonical reserve must not satisfy market A's old-reserve guard"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(
+        env.svm.get_account(&old_reserve_a).unwrap(),
+        reserve_a_before
+    );
+    assert_eq!(
+        env.svm.get_account(&old_reserve_b).unwrap(),
+        reserve_b_before
+    );
+
+    env.svm.expire_blockhash();
+    let control = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: replacement.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(replacement, false),
+            AccountMeta::new_readonly(old_reserve_a, false),
+        ],
+        &[&admin],
+    )
+    .expect("market A accepts its own empty old reserve");
+    assert_cu_within(
+        "UpdateBaseUnitMints same-market old reserve",
+        control,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        replacement.to_bytes()
+    );
+    let (_, market_b_group) =
+        state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
+    assert_eq!(
+        market_b_group.vault, 0,
+        "market B remains independently empty"
+    );
+}
+
+#[test]
+fn v16_attack_permissionless_activation_rejects_foreign_fee_vault() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+    env.svm.warp_to_slot(1);
+    let params = V16CuMarketParams::default();
+    let (market_b, _vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, params);
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let source = env.token_account(creator.pubkey(), FEE as u64);
+    let activation_market_id = env.market_state().1.next_market_id;
+    let activation = ProgInstruction::UpdateAssetLifecycle {
+        action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+        asset_index: 1,
+        market_id: activation_market_id,
+        now_slot: 1,
+        initial_price: 100,
+        max_init_fee: FEE,
+        insurance_authority: creator.pubkey().to_bytes(),
+        insurance_operator: creator.pubkey().to_bytes(),
+        backing_bucket_authority: creator.pubkey().to_bytes(),
+        oracle_authority: creator.pubkey().to_bytes(),
+    };
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        activation.clone(),
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        rejected.is_err(),
+        "market B's canonical vault must not collect market A's activation fee"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+
+    env.svm.expire_blockhash();
+    let control = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        activation,
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    )
+    .expect("market A accepts its canonical activation-fee vault");
+    assert_cu_within(
+        "UpdateAssetLifecycle same-market fee vault",
+        control,
+        CUSTODY_CU_LIMIT,
+    );
+    let (_, group_a) = env.market_state();
+    assert_eq!(group_a.config.max_market_slots, 2);
+    assert_eq!(group_a.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), FEE as u64);
+    assert_eq!(env.token_amount(vault_b), 0);
+    assert_eq!(group_a.vault, FEE);
+    assert_eq!(group_a.insurance, FEE);
+}
+
+#[test]
 fn v16_attack_sync_maintenance_rejects_cross_market_payer_substitution() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 58,
