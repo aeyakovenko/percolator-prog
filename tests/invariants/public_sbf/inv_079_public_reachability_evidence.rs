@@ -236,7 +236,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 34,
+        consumers, 32,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
@@ -269,7 +269,11 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
         assert!(
             matches!(
                 fields[1],
-                "TERMINAL_LOF" | "ECONOMIC_DELTA_ONLY" | "LOCAL_SAFETY_ONLY" | "REPLAY_ONLY"
+                "TERMINAL_LOF"
+                    | "PRIVILEGED_TRANSFER"
+                    | "ECONOMIC_DELTA_ONLY"
+                    | "LOCAL_SAFETY_ONLY"
+                    | "REPLAY_ONLY"
             ),
             "unknown INV-079 evidence class in row: {line}"
         );
@@ -293,6 +297,7 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
     assert_eq!(
         terminal,
         [
+            "AuthorityResolveTerminalDiscovery",
             "CrossDomainBackingDiscovery",
             "SourceFeeConsentDiscovery",
             "TerminalDustDiscovery",
@@ -313,7 +318,7 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
         assert!(body.contains("terminal_classification"));
         assert!(body.contains("public_trace.validate_public_execution()"));
     }
-    assert_eq!(roster.len(), 26, "finding-blind oracle inventory changed");
+    assert_eq!(roster.len(), 27, "finding-blind oracle inventory changed");
 }
 
 #[test]

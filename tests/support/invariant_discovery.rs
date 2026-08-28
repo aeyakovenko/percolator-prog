@@ -807,6 +807,17 @@ pub struct AuthorityIncarnationDiscovery {
     pub compute_units: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorityResolveTerminalDiscovery {
+    pub stale_resolve_landed: bool,
+    pub victim_payout: u128,
+    pub winner_payout: u128,
+    pub victim_loss: u128,
+    pub winner_gain: u128,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FundedRoleDiscovery {
     pub kind: FundedRoleKind,
@@ -2274,6 +2285,23 @@ impl AuthorityIncarnationDiscovery {
     }
 }
 
+impl AuthorityResolveTerminalDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.stale_resolve_landed
+            && self.victim_loss != 0
+            && self.victim_loss == self.winner_gain
+            && self.victim_payout < self.winner_payout
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms: 0,
+                } if victim_loss_atoms == self.victim_loss
+            )
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+}
+
 impl FundedRoleDiscovery {
     pub fn is_violation(&self) -> bool {
         self.takeover_landed
@@ -3134,15 +3162,17 @@ pub fn discover_market_incarnation_replays(
         .collect()
 }
 
-fn finish_terminal_generation_evidence(
+fn finish_public_terminal_loss_evidence(
     env: &mut V16Svm,
     victim_loss_atoms: u128,
+    unauthorized_gain_atoms: u128,
+    context: &str,
 ) -> Result<(PublicTerminalClassification, PublicTraceEvidence), String> {
     let public_trace = env.finish_public_trace();
     let terminal_classification = public_trace
         .classify_terminal(PublicTerminalObservation {
             victim_loss_atoms,
-            unauthorized_gain_atoms: 0,
+            unauthorized_gain_atoms,
             funded_value_remaining: 0,
             unresolved_obligation: 0,
             bounded_exit_succeeded: false,
@@ -3152,7 +3182,7 @@ fn finish_terminal_generation_evidence(
             attempted_exit_routes: 0,
             progressing_exit_routes: 0,
         })
-        .map_err(|error| format!("terminal-generation evidence is invalid: {error}"))?;
+        .map_err(|error| format!("{context} terminal evidence is invalid: {error}"))?;
     Ok((terminal_classification, public_trace))
 }
 
@@ -3309,7 +3339,7 @@ pub fn discover_terminal_generation_replay(
             return Err("asset-generation resolve-policy protection changed SPL supply".into());
         }
         let (terminal_classification, public_trace) =
-            finish_terminal_generation_evidence(&mut env, 0)?;
+            finish_public_terminal_loss_evidence(&mut env, 0, 0, "terminal generation")?;
         return Ok(TerminalGenerationDiscovery {
             kind,
             old_generation,
@@ -3361,7 +3391,7 @@ pub fn discover_terminal_generation_replay(
         return Err("terminal generation replay changed SPL supply".into());
     }
     let (terminal_classification, public_trace) =
-        finish_terminal_generation_evidence(&mut env, victim_loss)?;
+        finish_public_terminal_loss_evidence(&mut env, victim_loss, 0, "terminal generation")?;
     Ok(TerminalGenerationDiscovery {
         kind,
         old_generation,
@@ -4276,6 +4306,102 @@ pub fn discover_authority_incarnation_replays(
         .into_iter()
         .map(|kind| discover_one_authority_incarnation_replay(seed, kind))
         .collect()
+}
+
+pub fn discover_authority_resolve_terminal_replay(
+    mut seed: [u8; 32],
+) -> Result<AuthorityResolveTerminalDiscovery, String> {
+    const WINNER: usize = 0;
+    const VICTIM: usize = 1;
+    const INTERMEDIATE_AUTHORITY: usize = 2;
+    const PRICE: u64 = 100;
+    const TERMINAL_MARK: u64 = 110;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+    const MARK_SLOT: u64 = 2;
+
+    seed[0] ^= 0x5d;
+    seed[1] ^= 0xa7;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            actor_deposits: [DEPOSIT, DEPOSIT, 0, 0, 0],
+            actor_token_balances: [2_000_000, 2_000_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    env.begin_public_trace();
+    let supply_before = env.token_supply_observed();
+    env.configure_auth_mark(false, 0, 1, PRICE)
+        .map_err(|error| format!("configure authority-epoch terminal mark: {error}"))?;
+    let retained_resolve = env.build_retained_resolve_market();
+    env.update_market_authority_from_admin(INTERMEDIATE_AUTHORITY)
+        .map_err(|error| format!("rotate terminal authority A to B: {error}"))?;
+    env.update_market_authority_to_admin(INTERMEDIATE_AUTHORITY)
+        .map_err(|error| format!("rotate terminal authority B to A: {error}"))?;
+
+    env.trade_no_cpi(WINNER, VICTIM, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open post-rotation user positions: {error}"))?;
+    env.warp_to_slot(MARK_SLOT);
+    env.push_auth_mark(0, MARK_SLOT, TERMINAL_MARK)
+        .map_err(|error| format!("publish post-rotation terminal mark: {error}"))?;
+    let observation = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    env.crank(WINNER, MARK_SLOT, observation.clone())
+        .map_err(|error| format!("refresh authority-epoch winner: {error}"))?;
+    env.crank(VICTIM, MARK_SLOT, observation)
+        .map_err(|error| format!("refresh authority-epoch victim: {error}"))?;
+    if env.primary_market_state().1.assets[0].effective_price != TERMINAL_MARK {
+        return Err("authority-epoch market did not commit the terminal mark".into());
+    }
+
+    let before_replay = fingerprint(&env);
+    env.land_retained(retained_resolve)
+        .map_err(|error| format!("old-authority resolve request rejected: {error}"))?;
+    let stale_resolve_landed = before_replay != fingerprint(&env)
+        && env.primary_market_state().1.mode == MarketModeV16::Resolved;
+    if !stale_resolve_landed {
+        return Err("old-authority resolve did not terminalize the funded market".into());
+    }
+
+    env.warp_to_slot(MARK_SLOT + 1);
+    let victim_destination = env.actors[VICTIM].destination_token;
+    let winner_destination = env.actors[WINNER].destination_token;
+    let victim_before = env.token_amount(victim_destination);
+    let winner_before = env.token_amount(winner_destination);
+    env.close_resolved_primary(VICTIM)
+        .map_err(|error| format!("close authority-epoch victim: {error}"))?;
+    env.close_resolved_primary(WINNER)
+        .map_err(|error| format!("close authority-epoch winner: {error}"))?;
+    let victim_payout = u128::from(
+        env.token_amount(victim_destination)
+            .checked_sub(victim_before)
+            .ok_or_else(|| "authority-epoch victim destination decreased".to_string())?,
+    );
+    let winner_payout = u128::from(
+        env.token_amount(winner_destination)
+            .checked_sub(winner_before)
+            .ok_or_else(|| "authority-epoch winner destination decreased".to_string())?,
+    );
+    let victim_loss = DEPOSIT.saturating_sub(victim_payout);
+    let winner_gain = winner_payout.saturating_sub(DEPOSIT);
+    if env.token_supply_observed() != supply_before {
+        return Err("authority-epoch terminal replay changed SPL supply".into());
+    }
+    let (terminal_classification, public_trace) =
+        finish_public_terminal_loss_evidence(&mut env, victim_loss, 0, "authority epoch")?;
+    Ok(AuthorityResolveTerminalDiscovery {
+        stale_resolve_landed,
+        victim_payout,
+        winner_payout,
+        victim_loss,
+        winner_gain,
+        terminal_classification,
+        public_trace,
+    })
 }
 
 fn discover_one_funded_role_seizure(
@@ -5704,21 +5830,12 @@ fn discover_one_source_fee_consent_violation(
             env.token_supply_observed()
         ));
     }
-    let public_trace = env.finish_public_trace();
-    let terminal_classification = public_trace
-        .classify_terminal(PublicTerminalObservation {
-            victim_loss_atoms: lp_capital_debit,
-            unauthorized_gain_atoms: extracted_provider_tokens,
-            funded_value_remaining: 0,
-            unresolved_obligation: 0,
-            bounded_exit_succeeded: false,
-            terminal_receipt_created: false,
-            authorized_forfeit: false,
-            required_exit_routes: 0,
-            attempted_exit_routes: 0,
-            progressing_exit_routes: 0,
-        })
-        .map_err(|error| format!("source-fee terminal evidence is invalid: {error}"))?;
+    let (terminal_classification, public_trace) = finish_public_terminal_loss_evidence(
+        &mut env,
+        lp_capital_debit,
+        extracted_provider_tokens,
+        "source fee",
+    )?;
     Ok(SourceFeeConsentDiscovery {
         kind,
         accepted_unconsented_fee,
@@ -10218,21 +10335,12 @@ pub fn discover_cross_domain_backing_violation(
     let unauthorized_gain_atoms = winner_capital_gain
         .checked_sub(authorized_gain_atoms)
         .ok_or_else(|| "cross-domain winner gain stayed within funded claim".to_string())?;
-    let public_trace = env.finish_public_trace();
-    let terminal_classification = public_trace
-        .classify_terminal(PublicTerminalObservation {
-            victim_loss_atoms,
-            unauthorized_gain_atoms,
-            funded_value_remaining: 0,
-            unresolved_obligation: 0,
-            bounded_exit_succeeded: false,
-            terminal_receipt_created: false,
-            authorized_forfeit: false,
-            required_exit_routes: 0,
-            attempted_exit_routes: 0,
-            progressing_exit_routes: 0,
-        })
-        .map_err(|error| format!("cross-domain backing terminal evidence is invalid: {error}"))?;
+    let (terminal_classification, public_trace) = finish_public_terminal_loss_evidence(
+        &mut env,
+        victim_loss_atoms,
+        unauthorized_gain_atoms,
+        "cross-domain backing",
+    )?;
     Ok(CrossDomainBackingDiscovery {
         unfunded_claim_before_num,
         funded_claim_before_num,

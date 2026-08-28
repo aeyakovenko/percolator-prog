@@ -5,6 +5,9 @@
 //! Evidence in this file (F over public I routes):
 //! `v16_program_authority_incarnation_operation_matrix_discovers_aba_replays` enumerates market
 //! and asset authority scopes without finding metadata.
+//! The same generated seed also drives a funded authority A-to-B-to-A market: an old resolve
+//! request lands after two users trade, and exact terminal SPL payouts bind the victim's loss to
+//! the beneficiary's gain through the shared public terminal classifier.
 //! `v16_program_funded_role_matrix_discovers_admin_seizure` independently funds each value-bearing
 //! asset role, delegates a distinct cold asset admin, and measures whether that admin can redirect
 //! the incumbent's principal to a replacement key. The economic oracle requires an exact provider
@@ -53,6 +56,15 @@ proptest! {
             AuthorityIntentKind::ALL.to_vec(),
             "vulnerable-pin authority-incarnation discovery corpus changed"
         );
+        let terminal = crate::support::invariant_discovery::discover_authority_resolve_terminal_replay(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(
+            terminal.is_violation(),
+            "old-authority resolve did not produce exact funded terminal evidence: {:?}",
+            terminal
+        );
+        prop_assert_eq!(terminal.victim_loss, 100_000);
+        prop_assert_eq!(terminal.winner_gain, terminal.victim_loss);
     }
 
     #[test]

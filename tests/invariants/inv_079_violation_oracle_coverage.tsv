@@ -2,13 +2,14 @@
 AccrualOrderingDiscovery	ECONOMIC_DELTA_ONLY	claim transfer delta lacks normalized public terminal evidence
 AssetGenerationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
 AuthorityIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
-BackingProviderConsentDiscovery	ECONOMIC_DELTA_ONLY	provider value delta lacks normalized public terminal evidence
+AuthorityResolveTerminalDiscovery	TERMINAL_LOF	public trace binds stale authority-epoch resolve to exact funded-user terminal loss
+BackingProviderConsentDiscovery	ECONOMIC_DELTA_ONLY	operator SPL gain is exact, but the LP authorized the fee and provider harm is counterfactual revenue under a privileged policy change
 BilateralMarkFeeDiscovery	ECONOMIC_DELTA_ONLY	victim and coalition deltas lack normalized public terminal evidence
 CompositeRoundingDiscovery	ECONOMIC_DELTA_ONLY	liquidation value delta lacks normalized public terminal evidence
 CrossDomainBackingDiscovery	TERMINAL_LOF	public trace binds excess domain backing consumption to winner excess gain
 FeeConsentDiscovery	ECONOMIC_DELTA_ONLY	unauthorized debit lacks normalized public terminal evidence
 FractionalMovementDiscovery	LOCAL_SAFETY_ONLY	stall and settlement mismatch lack a complete terminal route mask
-FundedRoleDiscovery	ECONOMIC_DELTA_ONLY	funded-role transfer lacks normalized public terminal evidence
+FundedRoleDiscovery	PRIVILEGED_TRANSFER	exact principal transfer requires the currently authorized asset admin to rotate the funded role
 IncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
 IntentReplayDiscovery	REPLAY_ONLY	duplicate economic mutation is not itself quantified LoF or persistent DoS
 MarketIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
