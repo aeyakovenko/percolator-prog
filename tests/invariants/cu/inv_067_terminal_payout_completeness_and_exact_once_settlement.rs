@@ -1272,7 +1272,7 @@ fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
 // finalize. If that is a real gap, the winner's portfolio can never be
 // dematerialized (engine dematerialization requires a finalized-or-absent
 // receipt), materialized_portfolio_count is stuck >= 1, and the market can never
-// WithdrawInsurance or CloseSlab -> permanent fund/rent strand.
+// WithdrawInsuranceAsset or CloseSlab -> permanent fund/rent strand.
 //
 // This test asserts the CORRECT end-state (the fully-settled winner reaches a
 // closable receipt state and the portfolio can be reclaimed).
@@ -1300,7 +1300,7 @@ fn v16_audit_insolvent_resolved_winner_can_dematerialize() {
     // A fully-paid (haircut) resolved winner must reach a CLOSABLE receipt state so the
     // portfolio can dematerialize: either finalized, or cleared/absent once it has been
     // paid its full entitlement at the terminal rate. If it can't, materialized_portfolio_count
-    // stays >= 1 and the market is permanently un-drainable (no WithdrawInsurance, no CloseSlab).
+    // stays >= 1 and the market is permanently un-drainable (no WithdrawInsuranceAsset, no CloseSlab).
     assert!(
         !resolved_receipt(&account).present || resolved_receipt(&account).finalized,
         "haircut winner's receipt must be closable (finalized or cleared at the terminal rate); \
@@ -1317,7 +1317,7 @@ fn v16_audit_insolvent_resolved_winner_can_dematerialize() {
 // Coverage probe (audit, Finding G): close_resolved_account_not_atomic charges an
 // accrued maintenance fee into group.insurance (handle_close_resolved passes
 // cfg.maintenance_fee_per_slot) but the wrapper does NOT credit any per-domain
-// insurance budget for it. WithdrawInsurance caps each authority's claim through
+// insurance budget for it. WithdrawInsuranceAsset caps each authority's claim through
 // terminal_insurance_withdraw_capacity_for_authority_view,
 // not group.insurance, so this fee is withdrawable by NOBODY and permanently
 // blocks CloseSlab (requires insurance==0). This asserts the CORRECT invariant

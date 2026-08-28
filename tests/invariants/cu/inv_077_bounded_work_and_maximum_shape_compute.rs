@@ -4577,14 +4577,15 @@ fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market()
     );
 
     env.resolve();
-    let (dest, withdraw_cu) = env.withdraw_terminal_insurance_with_authority(&admin, FUNDED);
+    let (dest, withdraw_cu) =
+        env.withdraw_terminal_insurance_with_authority(&admin, HIGH_ASSET as u16, FUNDED);
     println!(
-        "v16 10MiB terminal WithdrawInsurance: domains={}, funded_domain={}, CU={withdraw_cu}",
+        "v16 10MiB resolved WithdrawInsuranceAsset: domains={}, funded_domain={}, CU={withdraw_cu}",
         2 * N,
         last_domain
     );
     assert_cu_within(
-        "10MiB terminal last-domain WithdrawInsurance",
+        "10MiB resolved last-domain WithdrawInsuranceAsset",
         withdraw_cu,
         CUSTODY_CU_LIMIT,
     );
@@ -4678,15 +4679,19 @@ fn v16_bpf_terminal_insurance_ledger_last_domain_withdraw_stays_bounded_on_10m_m
     let ledger = env.insurance_ledger_account();
 
     env.resolve();
-    let (dest, withdraw_cu) =
-        env.withdraw_terminal_insurance_with_authority_and_ledger(&admin, ledger, FUNDED);
+    let (dest, withdraw_cu) = env.withdraw_terminal_insurance_with_authority_and_ledger(
+        &admin,
+        HIGH_ASSET as u16,
+        ledger,
+        FUNDED,
+    );
     println!(
-        "v16 10MiB terminal WithdrawInsurance + ledger: domains={}, funded_domain={}, CU={withdraw_cu}",
+        "v16 10MiB resolved WithdrawInsuranceAsset + ledger: domains={}, funded_domain={}, CU={withdraw_cu}",
         2 * N,
         last_domain
     );
     assert_cu_within(
-        "10MiB terminal last-domain WithdrawInsurance with ledger",
+        "10MiB resolved last-domain WithdrawInsuranceAsset with ledger",
         withdraw_cu,
         CUSTODY_CU_LIMIT,
     );
@@ -4777,15 +4782,19 @@ fn v16_bpf_terminal_insurance_initialized_ledger_full_drain_stays_bounded_on_10m
     assert_eq!(ledger_state.total_withdrawn_atoms, 0);
 
     env.resolve();
-    let (dest, withdraw_cu) =
-        env.withdraw_terminal_insurance_with_authority_and_ledger(&admin, ledger, FUNDED);
+    let (dest, withdraw_cu) = env.withdraw_terminal_insurance_with_authority_and_ledger(
+        &admin,
+        HIGH_ASSET as u16,
+        ledger,
+        FUNDED,
+    );
     println!(
-        "v16 10MiB terminal WithdrawInsurance + initialized ledger: domains={}, funded_domain={}, CU={withdraw_cu}",
+        "v16 10MiB resolved WithdrawInsuranceAsset + initialized ledger: domains={}, funded_domain={}, CU={withdraw_cu}",
         2 * N,
         last_domain
     );
     assert_cu_within(
-        "10MiB terminal last-domain WithdrawInsurance with initialized ledger",
+        "10MiB resolved last-domain WithdrawInsuranceAsset with initialized ledger",
         withdraw_cu,
         CUSTODY_CU_LIMIT,
     );
@@ -4862,15 +4871,19 @@ fn v16_bpf_terminal_insurance_partial_ledger_withdraw_stays_bounded_on_10m_marke
     let ledger = env.insurance_ledger_account();
 
     env.resolve();
-    let (dest, withdraw_cu) =
-        env.withdraw_terminal_insurance_with_authority_and_ledger(&admin, ledger, PARTIAL);
+    let (dest, withdraw_cu) = env.withdraw_terminal_insurance_with_authority_and_ledger(
+        &admin,
+        HIGH_ASSET as u16,
+        ledger,
+        PARTIAL,
+    );
     println!(
-        "v16 10MiB terminal partial WithdrawInsurance + ledger: domains={}, funded_domain={}, CU={withdraw_cu}",
+        "v16 10MiB resolved partial WithdrawInsuranceAsset + ledger: domains={}, funded_domain={}, CU={withdraw_cu}",
         2 * N,
         last_domain
     );
     assert_cu_within(
-        "10MiB terminal partial WithdrawInsurance with ledger",
+        "10MiB resolved partial WithdrawInsuranceAsset with ledger",
         withdraw_cu,
         CUSTODY_CU_LIMIT,
     );
@@ -4943,14 +4956,18 @@ fn v16_bpf_terminal_insurance_partial_ledger_ignores_other_authority_budget_on_1
 
     let ledger = env.insurance_ledger_account();
     env.resolve();
-    let (dest, withdraw_cu) =
-        env.withdraw_terminal_insurance_with_authority_and_ledger(&tail_authority, ledger, PARTIAL);
+    let (dest, withdraw_cu) = env.withdraw_terminal_insurance_with_authority_and_ledger(
+        &tail_authority,
+        HIGH_ASSET as u16,
+        ledger,
+        PARTIAL,
+    );
     println!(
-        "v16 10MiB terminal mixed-authority partial WithdrawInsurance + ledger: \
+        "v16 10MiB resolved mixed-authority partial WithdrawInsuranceAsset + ledger: \
          assets={N}, account_len={account_len}, tail_domain={tail_domain}, CU={withdraw_cu}"
     );
     assert_cu_within(
-        "10MiB mixed-authority terminal partial WithdrawInsurance with ledger",
+        "10MiB mixed-authority resolved partial WithdrawInsuranceAsset with ledger",
         withdraw_cu,
         CUSTODY_CU_LIMIT,
     );

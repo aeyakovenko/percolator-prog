@@ -87,7 +87,7 @@ fn v16_program_cross_instance_role_roster_is_source_complete() {
         "every public variant needs one row"
     );
     assert_eq!(status_counts.get("NO_MIXED_ROLE"), Some(&20));
-    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&30));
+    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&29));
     assert_eq!(status_counts.get("PARTIAL").copied().unwrap_or_default(), 0);
     assert_eq!(status_counts.get("OPEN").copied().unwrap_or_default(), 0);
 }
@@ -2316,7 +2316,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
     assert_eq!(env.token_amount(vault_b), 95);
 }
 
-// full-interface sweep (cron28): terminal WithdrawInsurance is a separate wind-down path from live
+// full-interface sweep (cron28): resolved WithdrawInsuranceAsset shares the scoped route used live
 // domain withdrawals. A real market-A insurance ledger must not authorize or record market-B terminal
 // insurance withdrawals, even when the same authority controls both markets and market B is otherwise
 // fully withdrawable.
@@ -2441,6 +2441,12 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
     assert_eq!(group_b.mode, percolator::MarketModeV16::Resolved);
     assert_eq!(group_b.insurance, 100);
     assert_eq!(group_b.vault, 100);
+    let withdraw = || ProgInstruction::WithdrawInsuranceAsset {
+        asset_index: 0,
+        market_id: group_b.assets[0].market_id,
+        authority_epoch: 0,
+        amount: 40,
+    };
 
     let dest = env.token_account(admin.pubkey(), 0);
     let market_a_before = env.svm.get_account(&env.market).unwrap();
@@ -2454,7 +2460,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw(),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -2468,7 +2474,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
     );
     assert!(
         rejected.is_err(),
-        "market B terminal WithdrawInsurance must reject market A's insurance ledger"
+        "market B resolved WithdrawInsuranceAsset must reject market A's insurance ledger"
     );
     assert_eq!(
         env.svm.get_account(&market_b).unwrap(),
@@ -2498,7 +2504,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw(),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -2512,7 +2518,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
     );
     assert!(
         foreign_vault.is_err(),
-        "market B terminal WithdrawInsurance must reject market A's canonical vault"
+        "market B resolved WithdrawInsuranceAsset must reject market A's canonical vault"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
     assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
@@ -2527,7 +2533,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw(),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -2541,7 +2547,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
     );
     assert!(
         ok.is_ok(),
-        "same-market terminal WithdrawInsurance works: {ok:?}"
+        "same-market resolved WithdrawInsuranceAsset works: {ok:?}"
     );
     assert_eq!(env.token_amount(dest), 40);
     assert_eq!(env.token_amount(vault_b), 60);
@@ -2558,7 +2564,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
 }
 
 // security.md sweep — terminal optional-ledger account-kind confusion (#35/#44): terminal
-// WithdrawInsurance is separate from live domain withdrawals and may rewrite an optional ledger before
+// Resolved WithdrawInsuranceAsset may rewrite an optional ledger before
 // paying SPL tokens. A funded portfolio from another market must not be accepted as that ledger, or a
 // wind-down helper could corrupt a user portfolio while draining terminal insurance.
 #[test]
@@ -2617,6 +2623,12 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
     assert_eq!(group_b.mode, percolator::MarketModeV16::Resolved);
     assert_eq!(group_b.insurance, 100);
     assert_eq!(group_b.vault, 100);
+    let withdraw = || ProgInstruction::WithdrawInsuranceAsset {
+        asset_index: 0,
+        market_id: group_b.assets[0].market_id,
+        authority_epoch: 0,
+        amount: 40,
+    };
 
     let dest = env.token_account(admin.pubkey(), 0);
     let market_b_before = env.svm.get_account(&market_b).unwrap();
@@ -2627,7 +2639,7 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw(),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -2641,7 +2653,7 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
     );
     assert!(
         rejected.is_err(),
-        "terminal WithdrawInsurance must reject a portfolio account as the optional ledger"
+        "resolved WithdrawInsuranceAsset must reject a portfolio account as the optional ledger"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
@@ -2679,7 +2691,7 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw(),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -2693,7 +2705,7 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
     );
     assert!(
         market_alias.is_err(),
-        "terminal WithdrawInsurance must reject the market account as the optional ledger"
+        "resolved WithdrawInsuranceAsset must reject the market account as the optional ledger"
     );
     assert_eq!(
         env.svm.get_account(&market_b).unwrap(),
@@ -2722,7 +2734,7 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw(),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),

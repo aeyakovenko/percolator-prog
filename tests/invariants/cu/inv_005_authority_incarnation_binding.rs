@@ -127,10 +127,7 @@ fn inv005_reaches_authority_check(
     functions: &std::collections::BTreeMap<String, String>,
     visiting: &mut std::collections::BTreeSet<String>,
 ) -> bool {
-    if function == "expect_live_authority"
-        || function == "live_authority_matches"
-        || function == "debit_terminal_insurance_budgets_for_authority_view"
-    {
+    if function == "expect_live_authority" || function == "live_authority_matches" {
         return true;
     }
     if !visiting.insert(function.to_owned()) {
@@ -318,11 +315,6 @@ const INV005_AUTHORITY_ROUTE_DISPOSITIONS: &[(&str, Inv005AuthorityDisposition, 
         "privileged lifecycle A-B-A replay",
     ),
     (
-        "WithdrawInsurance",
-        Inv005AuthorityDisposition::OpenEpochGap,
-        "terminal multi-domain authority A-B-A replay",
-    ),
-    (
         "WithdrawInsuranceAsset",
         Inv005AuthorityDisposition::EpochMatrix,
         "InsuranceWithdrawal",
@@ -369,7 +361,6 @@ fn v16_program_configured_authority_route_dispositions_are_source_complete() {
         "SwapSecondaryForPrimary",
         "UpdateAssetLifecycle",
         "UpdateBaseUnitMints",
-        "WithdrawInsurance",
     ]
     .into_iter()
     .collect::<std::collections::BTreeSet<_>>();
@@ -3052,7 +3043,7 @@ fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
 
     env.resolve();
     let (insurance_dest, insurance_cu) =
-        env.withdraw_terminal_insurance_with_authority(&admin, 500);
+        env.withdraw_terminal_insurance_with_authority(&admin, 0, 500);
     assert_cu_within(
         "terminal insurance after rejected zero-authority burn",
         insurance_cu,

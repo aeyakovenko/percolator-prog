@@ -652,7 +652,7 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
     assert_eq!(topup_env.market_state().1.vault, 0);
 }
 
-// security.md sweep - terminal insurance secondary reserve binding (#44/#48): WithdrawInsurance is a
+// security.md sweep - resolved insurance secondary reserve binding (#44/#48): WithdrawInsuranceAsset is a
 // separate resolved-mode payout rail. If it accepted any vault-PDA-owned secondary token account, an
 // authority could debit terminal insurance accounting while paying from or fragmenting a non-canonical
 // reserve. Rejection must roll back both market and optional ledger state.
@@ -702,11 +702,12 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_secondary_vault() {
     let ledger_before = env.svm.get_account(&ledger).unwrap();
 
     env.svm.expire_blockhash();
+    let withdraw = env.withdraw_insurance_asset_instruction(admin.pubkey(), 0, 40);
     let rejected = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw,
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -720,7 +721,7 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_secondary_vault() {
     );
     assert!(
         rejected.is_err(),
-        "terminal WithdrawInsurance must reject a non-canonical secondary reserve"
+        "resolved WithdrawInsuranceAsset must reject a non-canonical secondary reserve"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(
@@ -749,11 +750,12 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_secondary_vault() {
     );
 
     env.svm.expire_blockhash();
+    let withdraw = env.withdraw_insurance_asset_instruction(admin.pubkey(), 0, 40);
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw,
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -765,7 +767,7 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_secondary_vault() {
         ],
         &[&admin],
     )
-    .expect("terminal WithdrawInsurance through canonical secondary reserve");
+    .expect("resolved WithdrawInsuranceAsset through canonical secondary reserve");
     assert_eq!(env.token_amount(dest), 40);
     assert_eq!(env.token_amount(canonical_secondary_vault), 60);
     let ledger_state =
@@ -777,7 +779,7 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_secondary_vault() {
     assert_eq!(group.vault, 60);
 }
 
-// security.md sweep - terminal insurance primary vault binding (#44/#48): WithdrawInsurance mutates
+// security.md sweep - resolved insurance primary vault binding (#44/#48): WithdrawInsuranceAsset mutates
 // terminal insurance budgets and the optional ledger before SPL vault validation. A fake primary vault
 // owned by the market PDA must reject transaction-atomically, leaving terminal accounting and ledger
 // state recoverable.
@@ -811,11 +813,12 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_primary_vault() {
     let ledger_before = env.svm.get_account(&ledger).unwrap();
 
     env.svm.expire_blockhash();
+    let withdraw = env.withdraw_insurance_asset_instruction(admin.pubkey(), 0, 40);
     let rejected = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw,
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -829,7 +832,7 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_primary_vault() {
     );
     assert!(
         rejected.is_err(),
-        "terminal WithdrawInsurance must reject a non-canonical primary vault"
+        "resolved WithdrawInsuranceAsset must reject a non-canonical primary vault"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
@@ -858,11 +861,12 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_primary_vault() {
     );
 
     env.svm.expire_blockhash();
+    let withdraw = env.withdraw_insurance_asset_instruction(admin.pubkey(), 0, 40);
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw,
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -874,7 +878,7 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_primary_vault() {
         ],
         &[&admin],
     )
-    .expect("terminal WithdrawInsurance through canonical primary vault");
+    .expect("resolved WithdrawInsuranceAsset through canonical primary vault");
     assert_eq!(env.token_amount(dest), 40);
     assert_eq!(env.token_amount(fake_vault), 100);
     let ledger_state =
@@ -3032,7 +3036,7 @@ fn v16_attack_close_resolved_rejects_delegated_vault_without_burning_payout() {
 // security.md sweep - resolved top-up vault custody (#33/#44/#48): ClaimResolvedPayoutTopup is
 // unsigned and updates the pending receipt before validating the vault token account. A delegated
 // [from pr114]
-// security.md sweep - terminal insurance vault custody (#33/#44/#48): terminal WithdrawInsurance
+// security.md sweep - resolved insurance vault custody (#33/#44/#48): WithdrawInsuranceAsset
 // debits resolved insurance and the optional ledger before validating token custody. A canonical vault
 // that carries a delegate is still unsafe; rejection must roll back market and ledger accounting.
 #[test]
@@ -3076,11 +3080,12 @@ fn v16_attack_terminal_insurance_withdraw_rejects_delegated_vault_without_debiti
     let dest_before = env.svm.get_account(&dest).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     env.svm.expire_blockhash();
+    let withdraw = env.withdraw_insurance_asset_instruction(env.admin.pubkey(), 0, 40);
     let rejected = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw,
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -3094,7 +3099,7 @@ fn v16_attack_terminal_insurance_withdraw_rejects_delegated_vault_without_debiti
     );
     assert!(
         rejected.is_err(),
-        "terminal WithdrawInsurance must reject a delegated canonical vault"
+        "resolved WithdrawInsuranceAsset must reject a delegated canonical vault"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
@@ -3133,11 +3138,12 @@ fn v16_attack_terminal_insurance_withdraw_rejects_delegated_vault_without_debiti
         )
         .unwrap();
     env.svm.expire_blockhash();
+    let withdraw = env.withdraw_insurance_asset_instruction(env.admin.pubkey(), 0, 40);
     let ok = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw,
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -3151,7 +3157,7 @@ fn v16_attack_terminal_insurance_withdraw_rejects_delegated_vault_without_debiti
     );
     assert!(
         ok.is_ok(),
-        "terminal WithdrawInsurance succeeds once the vault is restored clean: {ok:?}"
+        "resolved WithdrawInsuranceAsset succeeds once the vault is restored clean: {ok:?}"
     );
     assert_eq!(env.token_amount(dest), 40);
     let (_, group) = env.market_state();
@@ -4306,10 +4312,10 @@ fn v16_primary_quote_routes_match_actual_spl_and_internal_accounting_deltas() {
     insurance_env.resolve();
     let before = primary_quote_snapshot(&insurance_env);
     let admin = insurance_env.admin.insecure_clone();
-    let (destination, _) = insurance_env.withdraw_terminal_insurance_with_authority(&admin, 41);
+    let (destination, _) = insurance_env.withdraw_terminal_insurance_with_authority(&admin, 0, 41);
     assert_eq!(insurance_env.token_amount(destination), 41);
     assert_primary_quote_delta(
-        "WithdrawInsurance",
+        "WithdrawInsuranceAsset",
         before,
         primary_quote_snapshot(&insurance_env),
         -41,

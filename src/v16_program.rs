@@ -3158,9 +3158,6 @@ pub mod ix {
             backing_bucket_authority: [u8; 32],
             oracle_authority: [u8; 32],
         },
-        WithdrawInsurance {
-            amount: u128,
-        },
         WithdrawInsuranceAsset {
             asset_index: u16,
             market_id: u64,
@@ -3581,9 +3578,6 @@ pub mod ix {
                     insurance_operator: read_bytes32(&mut rest)?,
                     backing_bucket_authority: read_bytes32(&mut rest)?,
                     oracle_authority: read_bytes32(&mut rest)?,
-                },
-                41 => Self::WithdrawInsurance {
-                    amount: read_u128(&mut rest)?,
                 },
                 57 => Self::WithdrawInsuranceAsset {
                     asset_index: read_u16(&mut rest)?,
@@ -4186,10 +4180,6 @@ pub mod ix {
                     out.extend_from_slice(&insurance_operator);
                     out.extend_from_slice(&backing_bucket_authority);
                     out.extend_from_slice(&oracle_authority);
-                }
-                Self::WithdrawInsurance { amount } => {
-                    out.push(41);
-                    push_u128(&mut out, amount);
                 }
                 Self::WithdrawInsuranceAsset {
                     asset_index,
@@ -6279,157 +6269,6 @@ pub mod processor {
         Ok(capacity.min(global_available).min(group.header.vault.get()))
     }
 
-    fn debit_terminal_insurance_domain_for_authority_view(
-        group: &mut state::MarketViewMutV16<'_>,
-        domain: usize,
-        amount: &mut u128,
-        observed_total: &mut u128,
-    ) -> ProgramResult {
-        let remaining = domain_withdraw_capacity_view(group, domain)?;
-        if remaining == 0 {
-            return Ok(());
-        }
-        *observed_total = observed_total
-            .checked_add(remaining)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let debit = remaining.min(*amount);
-        if debit != 0 {
-            group
-                .withdraw_domain_insurance_not_atomic(domain, debit)
-                .map_err(map_v16_error)?;
-            *amount = amount
-                .checked_sub(debit)
-                .ok_or(PercolatorError::EngineCounterUnderflow)?;
-        }
-        Ok(())
-    }
-
-    fn debit_terminal_insurance_asset_for_authority_view(
-        group: &mut state::MarketViewMutV16<'_>,
-        cfg: &WrapperConfigV16,
-        authority_bytes: [u8; 32],
-        asset_index: usize,
-        amount: &mut u128,
-        observed_total: &mut u128,
-        observe_all_matching_domains: bool,
-    ) -> ProgramResult {
-        let long_domain = asset_index
-            .checked_mul(2)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let short_domain = long_domain
-            .checked_add(1)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let slot = &group.markets[asset_index].engine;
-        let long_budget_remaining = slot
-            .insurance_domain_budget_long
-            .get()
-            .checked_sub(slot.insurance_domain_spent_long.get())
-            .ok_or(PercolatorError::EngineCounterUnderflow)?;
-        let short_budget_remaining = slot
-            .insurance_domain_budget_short
-            .get()
-            .checked_sub(slot.insurance_domain_spent_short.get())
-            .ok_or(PercolatorError::EngineCounterUnderflow)?;
-        if long_budget_remaining == 0 && short_budget_remaining == 0 {
-            return Ok(());
-        }
-        let authorities = domain_authorities_from_view(group, cfg, long_domain)?;
-        if authorities.insurance_authority != authority_bytes {
-            return Ok(());
-        }
-        if long_budget_remaining != 0 && (*amount != 0 || observe_all_matching_domains) {
-            debit_terminal_insurance_domain_for_authority_view(
-                group,
-                long_domain,
-                amount,
-                observed_total,
-            )?;
-        }
-        if short_budget_remaining != 0 && (*amount != 0 || observe_all_matching_domains) {
-            debit_terminal_insurance_domain_for_authority_view(
-                group,
-                short_domain,
-                amount,
-                observed_total,
-            )?;
-        }
-        Ok(())
-    }
-
-    fn debit_terminal_insurance_budgets_for_authority_view(
-        group: &mut state::MarketViewMutV16<'_>,
-        cfg: &WrapperConfigV16,
-        authority: &Pubkey,
-        mut amount: u128,
-        observe_matching_until: Option<u128>,
-    ) -> Result<u128, ProgramError> {
-        if amount == 0 {
-            return Ok(0);
-        }
-        let authority_bytes = authority.to_bytes();
-        if authority_bytes == [0u8; 32] {
-            return Err(PercolatorError::Unauthorized.into());
-        }
-        let global_available_before = group.header.insurance.get().saturating_sub(
-            group
-                .header
-                .source_insurance_credit_reserved_total_atoms
-                .get(),
-        );
-        let vault_before = group.header.vault.get();
-        let asset_count = group.header.config.max_market_slots.get() as usize;
-        if asset_count > group.markets.len() {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        let observed_cap = observe_matching_until
-            .unwrap_or(0)
-            .min(global_available_before)
-            .min(vault_before);
-        let mut observed_total = 0u128;
-        let mut front = 0usize;
-        let mut back = asset_count;
-        // Sweep from both ends so sparse terminal budgets at either edge cannot force a full
-        // near-10 MiB account walk before making progress.
-        while front < back && (amount != 0 || observed_total < observed_cap) {
-            let observe_front = observed_total < observed_cap;
-            debit_terminal_insurance_asset_for_authority_view(
-                group,
-                cfg,
-                authority_bytes,
-                front,
-                &mut amount,
-                &mut observed_total,
-                observe_front,
-            )?;
-            if amount == 0 && observed_total >= observed_cap {
-                break;
-            }
-            back -= 1;
-            if back != front {
-                let observe_back = observed_total < observed_cap;
-                debit_terminal_insurance_asset_for_authority_view(
-                    group,
-                    cfg,
-                    authority_bytes,
-                    back,
-                    &mut amount,
-                    &mut observed_total,
-                    observe_back,
-                )?;
-            }
-            if amount == 0 && observed_total >= observed_cap {
-                break;
-            }
-            front += 1;
-        }
-        if amount != 0 {
-            return Err(PercolatorError::EngineCounterUnderflow.into());
-        }
-        Ok(observed_total
-            .min(global_available_before)
-            .min(vault_before))
-    }
-
     fn debit_market_insurance_budget_view(
         group: &mut state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -7414,9 +7253,6 @@ pub mod processor {
                 backing_bucket_authority,
                 oracle_authority,
             ),
-            Instruction::WithdrawInsurance { amount } => {
-                handle_withdraw_insurance(program_id, accounts, amount)
-            }
             Instruction::WithdrawInsuranceAsset {
                 asset_index,
                 market_id,
@@ -10659,135 +10495,6 @@ pub mod processor {
         )?;
         sync_insurance_ledger(&mut ledger, observed)?;
         write_or_init_insurance_ledger(&mut ledger_data, &ledger, initialized)
-    }
-
-    #[inline(never)]
-    fn handle_withdraw_insurance<'a>(
-        program_id: &Pubkey,
-        accounts: &'a [AccountInfo<'a>],
-        amount: u128,
-    ) -> ProgramResult {
-        let authority = account(accounts, 0)?;
-        let market_ai = account(accounts, 1)?;
-        let dest_token = account(accounts, 2)?;
-        let vault_token = account(accounts, 3)?;
-        let vault_authority_ai = account(accounts, 4)?;
-        let token_program = account(accounts, 5)?;
-        let ledger_ai = accounts.get(6);
-        expect_signer(authority)?;
-        expect_writable(market_ai)?;
-        expect_writable(dest_token)?;
-        expect_writable(vault_token)?;
-        expect_owner(market_ai, program_id)?;
-        if let Some(ledger_ai) = ledger_ai {
-            expect_writable(ledger_ai)?;
-            expect_owner(ledger_ai, program_id)?;
-        }
-        verify_token_program(token_program)?;
-        if amount == 0 {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-
-        let cfg_pre = {
-            let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            if group.header.mode != 1
-                || group.header.materialized_portfolio_count.get() != 0
-                || group.header.c_tot.get() != 0
-                || amount > group.header.insurance.get()
-                || amount > group.header.vault.get()
-            {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
-                Some(ledger_ai.try_borrow_mut_data()?)
-            } else {
-                None
-            };
-            let observe_matching_until = if let Some(data) = ledger_data.as_deref() {
-                if amount == group.header.insurance.get() {
-                    None
-                } else if state::is_initialized(data) {
-                    let ledger = state::read_insurance_ledger(data)?;
-                    if ledger.market_group != market_ai.key.to_bytes()
-                        || ledger.authority != authority.key.to_bytes()
-                    {
-                        return Err(PercolatorError::Unauthorized.into());
-                    }
-                    Some(ledger.last_observed_insurance_atoms.max(amount))
-                } else {
-                    Some(amount)
-                }
-            } else {
-                None
-            };
-            // A terminal ledger full-drain has no remaining observation to reconcile; use the
-            // progress-making scan instead of walking every market slot. Partial withdrawals observe
-            // matching authority domains only up to the ledger's own horizon, not global insurance,
-            // so unrelated authorities cannot force a full sparse-market scan.
-            // insurance + vault + per-domain budget all decremented atomically inside the engine
-            // withdraw (called per domain by the helper); no separate header decrement here.
-            let observed_insurance = debit_terminal_insurance_budgets_for_authority_view(
-                &mut group,
-                &cfg,
-                authority.key,
-                amount,
-                observe_matching_until,
-            )?;
-            let mut ledger_state = if let Some(data) = ledger_data.as_deref() {
-                let (mut ledger, initialized) = read_or_new_insurance_ledger(
-                    data,
-                    market_ai.key.to_bytes(),
-                    authority.key.to_bytes(),
-                    observed_insurance,
-                )?;
-                sync_insurance_ledger(&mut ledger, observed_insurance)?;
-                Some((ledger, initialized))
-            } else {
-                None
-            };
-            if let Some((ledger, _)) = ledger_state.as_mut() {
-                ledger.total_withdrawn_atoms = ledger
-                    .total_withdrawn_atoms
-                    .checked_add(amount)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                ledger.total_principal_atoms = ledger.total_principal_atoms.saturating_sub(amount);
-                ledger.last_observed_insurance_atoms = ledger
-                    .last_observed_insurance_atoms
-                    .checked_sub(amount)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?;
-            }
-            group.validate_shape().map_err(map_v16_error)?;
-            if let (Some(data), Some((ledger, initialized))) =
-                (ledger_data.as_deref_mut(), ledger_state.as_ref())
-            {
-                write_or_init_insurance_ledger(data, ledger, *initialized)?;
-            }
-            cfg
-        };
-
-        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
-        expect_key(vault_authority_ai, &vault_authority)?;
-        verify_withdrawable_token_accounts(
-            dest_token,
-            authority.key,
-            vault_token,
-            &vault_authority,
-            &cfg_pre,
-        )?;
-        let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(vault_token, amount_u64)?;
-        let bump_arr = [bump];
-        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
-        transfer_tokens_signed(
-            token_program,
-            vault_token,
-            dest_token,
-            vault_authority_ai,
-            amount_u64,
-            signer_seeds,
-        )?;
-        Ok(())
     }
 
     #[inline(never)]

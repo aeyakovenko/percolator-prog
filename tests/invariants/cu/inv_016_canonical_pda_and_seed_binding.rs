@@ -103,7 +103,7 @@ enum PdaRoute {
     Withdraw,
     WithdrawInsuranceAsset,
     WithdrawBackingBucket,
-    WithdrawInsurance,
+    WithdrawResolvedInsuranceAsset,
     CloseResolved,
     CloseSlab,
     SwapSecondaryForPrimary,
@@ -122,7 +122,7 @@ const PDA_ROUTES: [PdaRoute; 11] = [
     PdaRoute::Withdraw,
     PdaRoute::WithdrawInsuranceAsset,
     PdaRoute::WithdrawBackingBucket,
-    PdaRoute::WithdrawInsurance,
+    PdaRoute::WithdrawResolvedInsuranceAsset,
     PdaRoute::CloseResolved,
     PdaRoute::CloseSlab,
     PdaRoute::SwapSecondaryForPrimary,
@@ -146,7 +146,7 @@ impl PdaRoute {
             PdaRoute::Withdraw
             | PdaRoute::WithdrawInsuranceAsset
             | PdaRoute::WithdrawBackingBucket
-            | PdaRoute::WithdrawInsurance
+            | PdaRoute::WithdrawResolvedInsuranceAsset
             | PdaRoute::CloseResolved
             | PdaRoute::CloseSlab => VAULT_TOKEN_AND_AUTHORITY,
         }
@@ -642,7 +642,7 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
 
             assert_public_pda_rejects_without_mutation(&mut env, &label, ix, accounts, &[&admin]);
         }
-        PdaRoute::WithdrawInsurance => {
+        PdaRoute::WithdrawResolvedInsuranceAsset => {
             let admin = env.admin.insecure_clone();
             env.top_up_insurance(1_000);
             env.resolve();
@@ -651,7 +651,7 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
             let vault = substitute_vault(slot, env.vault, substitutions);
             let vault_authority =
                 substitute_vault_authority(slot, env.vault_authority, substitutions);
-            let ix = ProgInstruction::WithdrawInsurance { amount: 100 };
+            let ix = env.withdraw_insurance_asset_instruction(admin.pubkey(), 0, 100);
             let accounts = vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -1008,7 +1008,6 @@ fn v16_program_pda_and_token_move_callsite_roster_is_source_complete() {
         "withdraw",
         "withdraw_backing_bucket",
         "withdraw_backing_bucket_earnings",
-        "withdraw_insurance",
         "withdraw_insurance_asset",
     ];
     expected_token_move_handlers.sort_unstable();
@@ -1029,7 +1028,6 @@ fn v16_program_pda_and_token_move_callsite_roster_is_source_complete() {
         "update_asset_lifecycle",
         "update_base_unit_mints",
         "withdraw",
-        "withdraw_insurance",
         "withdraw_insurance_asset",
     ];
     expected_direct_vault_derivations.sort_unstable();

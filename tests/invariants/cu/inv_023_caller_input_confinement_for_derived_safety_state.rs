@@ -6,7 +6,7 @@
 //! caller-controlled hint proves malformed. These tests intentionally place a valid
 //! observation before a bad one so the only correct outcome is full instruction
 //! failure and exact SVM rollback. A production-source-bound roster also assigns
-//! every field in all 50 public instructions and their nested batch/hint structs to
+//! every field in all 49 public instructions and their nested batch/hint structs to
 //! one semantic trust class and one executable invariant witness. The only public
 //! B-settlement work cap is additionally compared with a one-atom cap versus an
 //! unbounded cap on the first canonical chunk from the same publicly reached state;
@@ -387,7 +387,7 @@ fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes() {
         .into_iter()
         .map(|(variant, _)| variant)
         .collect::<BTreeSet<_>>();
-    assert_eq!(production_variants.len(), 50);
+    assert_eq!(production_variants.len(), 49);
 
     // Compose INV-017 without duplicating its dynamic pairwise matrix: its source-locked
     // roster must remain exhaustive for exactly the same production variants, and every
@@ -417,14 +417,14 @@ fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes() {
     }
     assert_eq!(role_variants, production_variants);
 
-    // INV-083 owns the 228 field-or-no-data boundary matrix. Source-lock the composition edge so
+    // INV-083 owns the 227 field-or-no-data boundary matrix. Source-lock the composition edge so
     // its closure cannot silently disappear while INV-023 continues to claim it.
     assert!(inv023_source_contains_test(
         BOUNDARY_TESTS,
         "v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness",
     ));
-    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 228;"));
-    assert!(BOUNDARY_TESTS.contains("const EXPECTED_TYPE_COUNT: usize = 53;"));
+    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 227;"));
+    assert!(BOUNDARY_TESTS.contains("const EXPECTED_TYPE_COUNT: usize = 52;"));
 
     let dispatcher = inv023_dispatcher_source(PRODUCTION);
     let mut variants_by_handler = BTreeMap::<String, BTreeSet<String>>::new();
@@ -538,7 +538,7 @@ fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes() {
         ),
         (
             INSURANCE_TESTS,
-            "v16_program_live_and_terminal_insurance_routes_share_one_finite_budget",
+            "v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget",
         ),
         (
             THIS_SOURCE,
@@ -811,7 +811,7 @@ fn v16_program_caller_input_roster_owns_every_production_field() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         instruction_types.len(),
-        50,
+        49,
         "roster must remain bound to every public instruction variant",
     );
 }

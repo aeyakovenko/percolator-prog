@@ -1206,7 +1206,7 @@ pub enum Action {
         amount: u16,
         expiry_delta: u8,
     },
-    WithdrawInsurance {
+    WithdrawInsuranceAsset {
         asset: u8,
         amount: u16,
     },
@@ -3237,7 +3237,7 @@ impl ScenarioRunner {
                 }
                 Ok(())
             }
-            Action::WithdrawInsurance { asset, amount } => {
+            Action::WithdrawInsuranceAsset { asset, amount } => {
                 self.coverage.extended_action_attempts[8] += 1;
                 self.execute_insurance_withdrawal(
                     asset as usize % ASSET_COUNT,
@@ -6710,7 +6710,7 @@ pub fn run_value_withdrawal_route_oracle() -> Result<Coverage, String> {
             domain: 0,
             amount: 1_000,
         },
-        Action::WithdrawInsurance {
+        Action::WithdrawInsuranceAsset {
             asset: 0,
             amount: 400,
         },
@@ -27299,7 +27299,7 @@ fn action_strategy() -> impl Strategy<Value = Action> {
             },
         ),
         2 => (any::<u8>(), 1u16..=500)
-            .prop_map(|(asset, amount)| Action::WithdrawInsurance { asset, amount }),
+            .prop_map(|(asset, amount)| Action::WithdrawInsuranceAsset { asset, amount }),
         2 => (any::<u8>(), 1u16..=500)
             .prop_map(|(domain, amount)| Action::WithdrawBacking { domain, amount }),
         2 => (

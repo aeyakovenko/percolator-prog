@@ -230,17 +230,13 @@ fn kani_v16_close_resolved_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v16_withdraw_insurance_decode_preserves_wire_fields() {
+fn kani_v16_removed_withdraw_insurance_payload_rejects() {
     let amount: u128 = kani::any();
 
     let mut data = [0u8; 17];
     data[0] = 41;
     data[1..17].copy_from_slice(&amount.to_le_bytes());
-
-    match Instruction::decode(&data).unwrap() {
-        Instruction::WithdrawInsurance { amount: got } => assert_eq!(got, amount),
-        _ => unreachable!(),
-    }
+    assert!(Instruction::decode(&data).is_err());
 }
 
 #[kani::proof]
@@ -1766,7 +1762,6 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
         },
         extra,
     );
-    assert_rejects_trailing_byte(Instruction::WithdrawInsurance { amount: 1 }, extra);
     assert_rejects_trailing_byte(
         Instruction::WithdrawInsuranceAsset {
             asset_index: 0,

@@ -142,7 +142,7 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 amount: 500,
                 expiry_delta: 200,
             },
-            Action::WithdrawInsurance {
+            Action::WithdrawInsuranceAsset {
                 asset: 0,
                 amount: 3,
             },

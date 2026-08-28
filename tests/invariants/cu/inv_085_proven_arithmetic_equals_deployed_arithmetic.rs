@@ -1141,7 +1141,6 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         ArithmeticOwner { function: "dynamic_fee_bps_with_externality_floor", class: "POLICY", evidence: "v16_program_dynamic_externality_fee_matches_exhaustive_search_on_generated_inputs" },
         ArithmeticOwner { function: "domain_authorities_from_view", class: "STRUCTURAL", evidence: "INV-034" },
         ArithmeticOwner { function: "require_domain_accepts_live_topup_view", class: "STRUCTURAL", evidence: "INV-034" },
-        ArithmeticOwner { function: "debit_terminal_insurance_asset_for_authority_view", class: "STRUCTURAL", evidence: "INV-064" },
         ArithmeticOwner { function: "handle_batch_execute_zero_copy", class: "STRUCTURAL", evidence: "INV-077" },
         ArithmeticOwner { function: "handle_batch_trade_cpi", class: "STRUCTURAL", evidence: "INV-077" },
         ArithmeticOwner { function: "handle_top_up_insurance", class: "STRUCTURAL", evidence: "INV-034" },

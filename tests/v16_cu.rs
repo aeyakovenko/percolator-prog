@@ -1832,6 +1832,20 @@ impl V16CuEnv {
         self.control_sequences(epoch_asset).authority_epoch
     }
 
+    fn withdraw_insurance_asset_instruction(
+        &self,
+        authority: Pubkey,
+        asset_index: u16,
+        amount: u128,
+    ) -> ProgInstruction {
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index,
+            market_id: self.asset_market_id(asset_index),
+            authority_epoch: self.withdrawal_authority_epoch(authority, asset_index as usize, true),
+            amount,
+        }
+    }
+
     fn portfolio_position_epoch(&self, portfolio: Pubkey) -> u64 {
         let account = self.svm.get_account(&portfolio).expect("portfolio account");
         state::read_portfolio_position_epoch(&account.data).unwrap()
@@ -4249,6 +4263,7 @@ impl V16CuEnv {
     fn withdraw_terminal_insurance_with_authority(
         &mut self,
         authority: &Keypair,
+        asset_index: u16,
         amount: u128,
     ) -> (Pubkey, u64) {
         let dest = Pubkey::new_unique();
@@ -4264,11 +4279,19 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let market_id = self.asset_market_id(asset_index);
+        let authority_epoch =
+            self.withdrawal_authority_epoch(authority.pubkey(), asset_index as usize, true);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::WithdrawInsurance { amount },
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index,
+                market_id,
+                authority_epoch,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -4286,6 +4309,7 @@ impl V16CuEnv {
     fn withdraw_terminal_insurance_with_authority_and_ledger(
         &mut self,
         authority: &Keypair,
+        asset_index: u16,
         ledger: Pubkey,
         amount: u128,
     ) -> (Pubkey, u64) {
@@ -4302,11 +4326,19 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let market_id = self.asset_market_id(asset_index);
+        let authority_epoch =
+            self.withdrawal_authority_epoch(authority.pubkey(), asset_index as usize, true);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::WithdrawInsurance { amount },
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index,
+                market_id,
+                authority_epoch,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),

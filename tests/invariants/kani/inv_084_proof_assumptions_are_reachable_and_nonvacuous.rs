@@ -481,18 +481,19 @@ fn kani_v16_inv084_decoder_tag_assumptions_have_concrete_witnesses() {
         _ => unreachable!(),
     }
 
-    for (tag, amount) in [(30u8, 21u128), (41u8, 22u128)] {
-        let mut data = [0u8; 17];
-        data[0] = tag;
-        data[1..17].copy_from_slice(&amount.to_le_bytes());
-        match (tag, Instruction::decode(&data).unwrap()) {
-            (30, Instruction::CloseResolved { fee_rate_per_slot }) => {
-                assert_eq!(fee_rate_per_slot, amount)
-            }
-            (41, Instruction::WithdrawInsurance { amount: got }) => assert_eq!(got, amount),
-            _ => unreachable!(),
+    let amount = 21u128;
+    let mut data = [0u8; 17];
+    data[0] = 30;
+    data[1..17].copy_from_slice(&amount.to_le_bytes());
+    match Instruction::decode(&data).unwrap() {
+        Instruction::CloseResolved { fee_rate_per_slot } => {
+            assert_eq!(fee_rate_per_slot, amount)
         }
+        _ => unreachable!(),
     }
+
+    data[0] = 41;
+    assert!(Instruction::decode(&data).is_err());
 
     let portfolio_id = 24u64;
     let position_epoch = 25u64;

@@ -24,7 +24,6 @@ tag	variant	disposition	boundary
 38	ConfigurePermissionlessResolve	supersession:ResolvePolicy	Scope-local policy sequence is exercised by the supersession matrix.
 39	ResolveStalePermissionless	state-derived	Authenticated current time and current stale state gate permissionless resolution.
 40	UpdateAssetLifecycle	retry:AssetActivation	Activation frontier retries are exercised directly; other actions bind current generation and state.
-41	WithdrawInsurance	live-authority	Current terminal insurance authority and available terminal balance gate each debit.
 42	CureAndCancelClose	incarnation-episode	Portfolio incarnation and exact close/position episode bind the cure.
 43	ForfeitRecoveryLeg	incarnation-episode	Portfolio incarnation and exact recovery/position episode bind the forfeit.
 44	RebalanceReduce	retry:RebalanceReduce	Portfolio incarnation and position episode are exercised by the retry matrix.

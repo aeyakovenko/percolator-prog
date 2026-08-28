@@ -309,7 +309,6 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             backing_bucket_authority: [1u8; 32],
             oracle_authority: [1u8; 32],
         },
-        ProgInstruction::WithdrawInsurance { amount: 1 },
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
             market_id: 1,
@@ -487,7 +486,7 @@ fn host_instruction_decoder_rejects_unknown_one_byte_tags() {
         .collect();
     assert_eq!(
         known_tags.len(),
-        50,
+        49,
         "corpus must list every public instruction tag"
     );
 
@@ -559,6 +558,9 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
     let mut epochless_asset_insurance_withdrawal = vec![0u8; 27];
     epochless_asset_insurance_withdrawal[0] = 57;
 
+    let mut removed_market_wide_insurance_withdrawal = vec![0u8; 17];
+    removed_market_wide_insurance_withdrawal[0] = 41;
+
     for (label, data) in [
         (
             "legacy TradeNoCpi without portfolio and asset generations",
@@ -607,6 +609,10 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
         (
             "legacy WithdrawInsuranceAsset without authority epoch",
             epochless_asset_insurance_withdrawal,
+        ),
+        (
+            "removed market-wide WithdrawInsurance",
+            removed_market_wide_insurance_withdrawal,
         ),
         (
             "generationless ConfigureHybridOracle",

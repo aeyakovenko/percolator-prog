@@ -326,7 +326,6 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             backing_bucket_authority: [1u8; 32],
             oracle_authority: [1u8; 32],
         },
-        ProgInstruction::WithdrawInsurance { amount: 1 },
         ProgInstruction::CureAndCancelClose {
             portfolio_id: 1,
             position_epoch: 1,
@@ -534,7 +533,7 @@ fn v16_program_encoded_public_instruction_roster_rejects_trailing_bytes() {
 #[test]
 fn v16_host_decoder_exhausts_single_edit_neighborhood_for_every_schema() {
     let representatives = inv_022_representative_public_instructions();
-    assert_eq!(representatives.len(), 50, "every public schema is owned");
+    assert_eq!(representatives.len(), 49, "every public schema is owned");
 
     let mut proper_prefixes = 0usize;
     let mut byte_deletions = 0usize;
@@ -633,7 +632,7 @@ fn v16_host_decoder_exhausts_single_edit_neighborhood_for_every_schema() {
     );
     assert_eq!(proper_prefixes, canonical_bytes);
     assert_eq!(byte_deletions, canonical_bytes);
-    assert_eq!(byte_insertions, (canonical_bytes + 50) * 256);
+    assert_eq!(byte_insertions, (canonical_bytes + 49) * 256);
     assert_eq!(byte_substitutions, canonical_bytes * 255);
     assert!(
         accepted_canonical_mutations > 0,
@@ -654,7 +653,7 @@ fn v16_program_deployed_decoder_bit_mutation_matrix_is_total_canonical_and_atomi
         .collect();
     assert_eq!(
         canonical_tags.len(),
-        50,
+        49,
         "mutation roster must own every public instruction tag",
     );
 

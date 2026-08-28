@@ -7,7 +7,7 @@
 //! Evidence in this file (I/C): oversized batch leg vectors at the public decode
 //! boundary reject as instruction data errors rather than allocating a large
 //! vector or panicking the SBF program. The machine-readable class roster and
-//! source-locked caller-input inventory assign all 228 field-or-no-data subjects across 53 public
+//! source-locked caller-input inventory assign all 227 field-or-no-data subjects across 52 public
 //! input types to 20 semantic boundary profiles, per-field public evidence, and
 //! profile-level boundary evidence. InitMarket's complete validation predicate
 //! is exercised through public exact-rollback failures and live retries. Other
@@ -176,8 +176,8 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
     use std::collections::{BTreeMap, BTreeSet};
 
     const HEADER: &str = "type\tfields\tclassification\tevidence";
-    const EXPECTED_FIELD_COUNT: usize = 228;
-    const EXPECTED_TYPE_COUNT: usize = 53;
+    const EXPECTED_FIELD_COUNT: usize = 227;
+    const EXPECTED_TYPE_COUNT: usize = 52;
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let profile_names = INV_083_BOUNDARY_PROFILES
@@ -254,7 +254,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
         "every boundary profile must own at least one current public input field"
     );
     let expected_profile_counts = BTreeMap::from([
-        ("amount", 24),
+        ("amount", 23),
         ("authenticated-time", 12),
         ("basis-points", 17),
         ("bitmask", 1),

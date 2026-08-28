@@ -332,7 +332,7 @@ fn v16_program_dual_mint_terminal_insurance_no_double_withdraw() {
     let primary_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
     env.svm.expire_blockhash();
     let primary = env.send(
-        ProgInstruction::WithdrawInsurance { amount: 99 },
+        env.withdraw_insurance_asset_instruction(admin.pubkey(), 0, 99),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -357,7 +357,7 @@ fn v16_program_dual_mint_terminal_insurance_no_double_withdraw() {
     let secondary_dest = env.token_account_for_mint(secondary, admin.pubkey(), 0);
     env.svm.expire_blockhash();
     let secondary_withdraw = env.send(
-        ProgInstruction::WithdrawInsurance { amount: 1 },
+        env.withdraw_insurance_asset_instruction(admin.pubkey(), 0, 1),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -383,7 +383,7 @@ fn v16_program_dual_mint_terminal_insurance_no_double_withdraw() {
     let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
     env.svm.expire_blockhash();
     let double_withdraw = env.send(
-        ProgInstruction::WithdrawInsurance { amount: 1 },
+        env.withdraw_insurance_asset_instruction(admin.pubkey(), 0, 1),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),

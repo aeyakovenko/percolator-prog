@@ -65,7 +65,7 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
     );
     assert_eq!(
         production.matches("map_err(map_v16_error)").count(),
-        137,
+        135,
         "engine-result mapping drift requires an INV-080 disposition review"
     );
     assert!(
@@ -130,8 +130,8 @@ fn v16_program_dispatch_and_entrypoints_preserve_every_handler_error() {
     }
     assert_eq!(
         dispatcher.matches("handle_").count(),
-        50,
-        "all 50 public variants must return a handler result"
+        49,
+        "all 49 public variants must return a handler result"
     );
     for (shared_handler, variant_count) in [
         ("handle_top_up_insurance(", 2),
@@ -147,13 +147,13 @@ fn v16_program_dispatch_and_entrypoints_preserve_every_handler_error() {
     }
     assert_eq!(
         handlers.len(),
-        44,
+        43,
         "dispatcher implementation count drift requires a shared-handler review"
     );
     assert_eq!(
         dispatcher.matches("Instruction::").count(),
-        51,
-        "the dispatcher must contain decode plus exactly 50 variant arms"
+        50,
+        "the dispatcher must contain decode plus exactly 49 variant arms"
     );
     for forbidden in ["Ok(())", ".ok()", "is_err()", "unwrap_or", "let _ ="] {
         assert!(
@@ -2476,11 +2476,12 @@ fn v16_bpf_failed_terminal_insurance_withdraw_rolls_back_market_and_ledger() {
     let ledger_before = env.svm.get_account(&ledger).unwrap();
     let dest_before = env.svm.get_account(&dest).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let withdraw = env.withdraw_insurance_asset_instruction(env.admin.pubkey(), 0, 40);
     let result = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsurance { amount: 40 },
+        withdraw,
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),

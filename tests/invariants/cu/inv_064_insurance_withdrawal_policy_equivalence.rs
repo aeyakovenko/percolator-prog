@@ -1,77 +1,16 @@
 //! INV-064 - insurance-withdrawal policy equivalence.
 //!
-//! The current wrapper exposes one live insurance withdrawal route
-//! (`WithdrawInsuranceAsset`) and one terminal market-wide route (`WithdrawInsurance`).
-//! The terminal route must not be usable while the market is live, otherwise it would
-//! bypass the asset-domain operator and budget checks that protect live funds.
+//! The wrapper exposes one asset-scoped insurance withdrawal route in both live and resolved
+//! modes. The same authority, budget, custody, and rollback rules must apply in either mode.
 
 use super::*;
 
+// The asset-scoped route is intentionally usable under the healthy-live withdrawal policy, but after
+// resolution it must reject while c_tot != 0 (open capital still backed). Attacker goal: drain
+// insurance out from under accounts that still hold capital. We pre-fund domain-0's budget so the
+// available-amount gate passes in every world, isolating the resolved wind-down gate.
 #[test]
-fn v16_program_terminal_insurance_withdraw_cannot_bypass_live_asset_withdrawal_policy() {
-    let mut env = V16CuEnv::new();
-    let admin = env.admin.insecure_clone();
-    env.top_up_insurance_domain_with_authority(&admin, 0, 100);
-    let (_, funded) = env.market_state();
-    assert_eq!(funded.insurance_domain_budget[0], 100);
-    assert_eq!(funded.insurance, 100);
-
-    let dest = env.token_account(admin.pubkey(), 0);
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let vault_before = env.svm.get_account(&env.vault).unwrap();
-    let dest_before = env.svm.get_account(&dest).unwrap();
-    env.svm.expire_blockhash();
-    let rejected = env.send(
-        ProgInstruction::WithdrawInsurance { amount: 10 },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(dest, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&admin],
-    );
-    assert!(
-        rejected.is_err(),
-        "terminal WithdrawInsurance must not bypass live asset-withdrawal policy",
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "rejected terminal-route live withdraw rolls back market state",
-    );
-    assert_eq!(
-        env.svm.get_account(&env.vault).unwrap(),
-        vault_before,
-        "rejected terminal-route live withdraw moves no custody",
-    );
-    assert_eq!(
-        env.svm.get_account(&dest).unwrap(),
-        dest_before,
-        "rejected terminal-route live withdraw pays no tokens",
-    );
-
-    let (asset_dest, _) = env.withdraw_insurance_with_cu(10);
-    assert_eq!(
-        env.token_amount(asset_dest),
-        10,
-        "the intended live asset-domain route remains usable",
-    );
-    let (_, after) = env.market_state();
-    assert_eq!(after.insurance_domain_budget[0], 90);
-    assert_eq!(after.insurance, 90);
-    assert_eq!(after.vault as u64, env.token_amount(env.vault));
-}
-
-// security.md sweep — WithdrawInsurance wind-down gate: the global terminal WithdrawInsurance must be
-// rejected (a) while the market is Live (mode != 1), and (b) after resolution while c_tot != 0 (open
-// capital still backed). Attacker goal: drain insurance out from under accounts that still hold capital.
-// We pre-fund domain-0's budget so the available-amount gate PASSES — isolating the wind-down gate as
-// the sole reason for rejection. The same amount is then shown to SUCCEED once c_tot reaches 0.
-#[test]
-fn v16_attack_withdraw_insurance_requires_full_wind_down() {
+fn v16_attack_resolved_asset_insurance_withdraw_requires_full_wind_down() {
     let mut env = V16CuEnv::new();
     // Fund domain-0 insurance budget so available_insurance(admin) >= the amount we attempt.
     env.top_up_insurance_domain_with_authority(&env.admin.insecure_clone(), 0, 1_000_000);
@@ -79,11 +18,12 @@ fn v16_attack_withdraw_insurance_requires_full_wind_down() {
 
     let attempt = |env: &mut V16CuEnv| {
         let dest = env.token_account(env.admin.pubkey(), 0);
+        let withdraw = env.withdraw_insurance_asset_instruction(env.admin.pubkey(), 0, amount);
         send_tx(
             &mut env.svm,
             env.program_id,
             &env.payer,
-            ProgInstruction::WithdrawInsurance { amount },
+            withdraw,
             vec![
                 AccountMeta::new(env.admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -96,16 +36,13 @@ fn v16_attack_withdraw_insurance_requires_full_wind_down() {
         )
     };
 
-    // (a) Live mode (mode==0): must reject — insurance is not withdrawable before resolution.
+    // Live mode is a discriminating control: the healthy-live policy admits this exact withdrawal.
     assert_eq!(
         env.market_state().1.mode,
         percolator::MarketModeV16::Live,
         "starts Live"
     );
-    assert!(
-        attempt(&mut env).is_err(),
-        "WithdrawInsurance must reject while Live"
-    );
+    assert!(attempt(&mut env).is_ok(), "healthy live withdrawal works");
 
     // Open capital, then resolve. c_tot stays > 0 (depositor's capital is still on the book).
     let owner = Keypair::new();
@@ -119,15 +56,14 @@ fn v16_attack_withdraw_insurance_requires_full_wind_down() {
         "capital still open after resolve (non-vacuous gate)"
     );
 
-    // (b) Resolved but c_tot != 0: still must reject — can't drain insurance from under open capital.
+    // Resolved but c_tot != 0 must reject: insurance still backs open capital.
     assert!(
         attempt(&mut env).is_err(),
-        "WithdrawInsurance must reject while c_tot != 0 (capital still backed)"
+        "WithdrawInsuranceAsset must reject while c_tot != 0 (capital still backed)"
     );
 
-    // Control: a FRESH env, identically funded, but fully wound down (no open capital, so c_tot == 0
-    // after resolve). The SAME amount now SUCCEEDS — proving (a)/(b) rejected on the wind-down gate,
-    // not the available-amount gate (the amount/budget is identical in all three).
+    // A fresh, identically funded, fully wound-down market admits the same amount, proving the
+    // rejection above is the wind-down gate rather than authority, custody, or capacity.
     let mut env2 = V16CuEnv::new();
     env2.top_up_insurance_domain_with_authority(&env2.admin.insecure_clone(), 0, 1_000_000);
     env2.resolve();
@@ -140,7 +76,7 @@ fn v16_attack_withdraw_insurance_requires_full_wind_down() {
     assert_eq!(g2.c_tot, 0, "control fully wound down");
     assert!(
         attempt(&mut env2).is_ok(),
-        "WithdrawInsurance succeeds once fully wound down (discriminating control)"
+        "WithdrawInsuranceAsset succeeds once fully wound down (discriminating control)"
     );
 
     let g = env2.market_state().1;
@@ -380,30 +316,18 @@ fn v16_attack_live_insurance_asset_withdraw_uniform_for_asset0_and_permissionles
 }
 
 #[test]
-fn v16_program_live_and_terminal_insurance_routes_share_one_finite_budget() {
+fn v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget() {
     const DOMAIN_BUDGETS: [u128; 4] = [11, 13, 17, 19];
     const FUNDED: u128 = 60;
     const LIVE_WITHDRAW: u128 = 7;
     const TERMINAL_REMAINING: u128 = FUNDED - LIVE_WITHDRAW;
 
-    // None is the terminal market-wide route; Some(asset) is the terminal asset route.
-    // The plans cross both asset orders, each intra-asset domain boundary, and partial
-    // market-wide scans that stop within asset 0 or continue into asset 1.
-    let plans: Vec<(&str, Vec<(Option<u16>, u128)>)> = vec![
-        ("global-full", vec![(None, 53)]),
-        ("asset-forward", vec![(Some(0), 17), (Some(1), 36)]),
-        ("asset-reverse", vec![(Some(1), 36), (Some(0), 17)]),
-        (
-            "global-then-assets",
-            vec![(None, 5), (Some(0), 12), (Some(1), 36)],
-        ),
-        ("asset1-then-global", vec![(Some(1), 20), (None, 33)]),
-        ("asset0-then-global", vec![(Some(0), 8), (None, 45)]),
-        ("global-cross-asset", vec![(None, 18), (Some(1), 35)]),
-        (
-            "both-assets-then-global",
-            vec![(Some(1), 20), (Some(0), 17), (None, 16)],
-        ),
+    // The plans cross both asset orders and split execution without a market-wide selector.
+    let plans: Vec<(&str, Vec<(u16, u128)>)> = vec![
+        ("asset-forward", vec![(0, 17), (1, 36)]),
+        ("asset-reverse", vec![(1, 36), (0, 17)]),
+        ("split-forward", vec![(0, 5), (1, 20), (0, 12), (1, 16)]),
+        ("split-reverse", vec![(1, 16), (0, 12), (1, 20), (0, 5)]),
     ];
 
     for (world, plan) in plans {
@@ -434,13 +358,10 @@ fn v16_program_live_and_terminal_insurance_routes_share_one_finite_budget() {
 
         env.resolve();
         let mut terminal_paid = 0u128;
-        for (route, amount) in plan {
-            let (destination, cu) = match route {
-                Some(asset_index) => env
-                    .try_withdraw_insurance_asset_with_authority(&admin, asset_index, amount)
-                    .expect("terminal asset route must consume the current domain budget"),
-                None => env.withdraw_terminal_insurance_with_authority(&admin, amount),
-            };
+        for (asset_index, amount) in plan {
+            let (destination, cu) = env
+                .try_withdraw_insurance_asset_with_authority(&admin, asset_index, amount)
+                .expect("resolved asset route must consume the current domain budget");
             assert_cu_within(
                 &format!("{world}: terminal insurance withdrawal"),
                 cu,
@@ -469,8 +390,8 @@ fn v16_program_live_and_terminal_insurance_routes_share_one_finite_budget() {
             .iter()
             .all(|amount| *amount == 0));
 
-        // Both public tags observe the same exhausted budget and reject atomically. A route
-        // transition cannot reset allowance or make the same insurance atom withdrawable twice.
+        // A mode transition cannot reset allowance or make the same insurance atom withdrawable
+        // twice.
         let market_before = env.svm.get_account(&env.market).unwrap();
         let vault_before = env.svm.get_account(&env.vault).unwrap();
         assert!(env
@@ -478,35 +399,12 @@ fn v16_program_live_and_terminal_insurance_routes_share_one_finite_budget() {
             .is_err());
         assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
         assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
-
-        let retry_destination = env.token_account(admin.pubkey(), 0);
-        let retry_destination_before = env.svm.get_account(&retry_destination).unwrap();
-        env.svm.expire_blockhash();
-        let terminal_retry = env.send(
-            ProgInstruction::WithdrawInsurance { amount: 1 },
-            vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(retry_destination, false),
-                AccountMeta::new(env.vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[&admin],
-        );
-        assert!(terminal_retry.is_err(), "{world}: exhausted global retry");
-        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
-        assert_eq!(
-            env.svm.get_account(&retry_destination).unwrap(),
-            retry_destination_before
-        );
     }
 }
 
-// security.md sweep — removed live-insurance policy tags (#6/#23): live insurance withdrawal is now
-// uniformly asset-scoped through tag 57. The old asset-0-only rate-limit tag and its policy-update tag
-// must reject raw instruction bytes without mutating state.
+// Live and resolved insurance withdrawal is uniformly asset-scoped through tag 57. The old
+// asset-0-only rate-limit tag, its policy-update tag, and the market-wide terminal tag must reject
+// raw instruction bytes without mutating state.
 #[test]
 fn v16_attack_removed_limited_insurance_tags_reject_without_mutation() {
     let mut env = V16CuEnv::new();
@@ -557,6 +455,28 @@ fn v16_attack_removed_limited_insurance_tags_reject_without_mutation() {
         &[&admin],
     );
     assert!(policy.is_err(), "old tag 33 must reject");
+
+    let mut old_market_wide = vec![41u8];
+    old_market_wide.extend_from_slice(&100u128.to_le_bytes());
+    env.svm.expire_blockhash();
+    let market_wide = send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: env.program_id,
+            data: old_market_wide,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+        },
+        &[&admin],
+    );
+    assert!(market_wide.is_err(), "removed tag 41 must reject");
 
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
@@ -871,7 +791,7 @@ fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_clo
 
     env.resolve();
     let (insurance_dest, _) =
-        env.withdraw_terminal_insurance_with_authority(&insurance_authority, 100);
+        env.withdraw_terminal_insurance_with_authority(&insurance_authority, 1, 100);
     assert_eq!(env.token_amount(insurance_dest), 100);
     assert_eq!(env.token_amount(env.vault), 0);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
