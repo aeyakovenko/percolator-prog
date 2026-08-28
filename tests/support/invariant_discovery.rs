@@ -740,7 +740,7 @@ pub struct AssetGenerationDiscovery {
     pub fresh_intent_mutated_economic_state: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalGenerationDiscovery {
     pub kind: TerminalGenerationKind,
     pub old_generation: u64,
@@ -753,6 +753,8 @@ pub struct TerminalGenerationDiscovery {
     pub winner_payout: u128,
     pub victim_loss: u128,
     pub winner_gain: u128,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -786,6 +788,14 @@ impl TerminalGenerationDiscovery {
         self.victim_loss != 0
             && self.victim_loss == self.winner_gain
             && self.victim_payout < self.winner_payout
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms: 0,
+                } if victim_loss_atoms == self.victim_loss
+            )
+            && self.public_trace.validate_public_execution().is_ok()
     }
 }
 
@@ -934,7 +944,10 @@ pub struct SourceFeeConsentDiscovery {
     pub accepted_unconsented_fee: bool,
     pub lp_capital_debit: u128,
     pub provider_earnings_credit: u128,
+    pub extracted_provider_tokens: u128,
     pub compute_units: Option<u64>,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1198,7 +1211,7 @@ pub struct HybridTerminalCoherenceEvidence {
     pub max_cu: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalDustDiscovery {
     pub route: ProspectiveAccrualRoute,
     pub attacker_loss: u128,
@@ -1207,6 +1220,8 @@ pub struct TerminalDustDiscovery {
     pub control_vault_remaining: u128,
     pub control_supply: u128,
     pub dust_supply: u128,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1263,13 +1278,17 @@ impl std::fmt::Debug for CrossDomainInsuranceDiscovery {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CrossDomainBackingDiscovery {
     pub unfunded_claim_before_num: u128,
     pub funded_claim_before_num: u128,
     pub funded_backing_consumed_num: u128,
     pub winner_capital_gain: u128,
     pub extracted_tokens: u64,
+    pub victim_loss_atoms: u128,
+    pub unauthorized_gain_atoms: u128,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1530,6 +1549,10 @@ impl SourceLienReversalExitRoute {
             Self::BatchCpi => 5,
         }
     }
+
+    fn evidence_bit(self) -> u64 {
+        1u64 << self.discriminator()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1589,7 +1612,7 @@ impl CrossDomainRoundingOrder {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CrossDomainRoundingDiscovery {
     pub order: CrossDomainRoundingOrder,
     pub fractional_source_domains: u8,
@@ -1598,9 +1621,14 @@ pub struct CrossDomainRoundingDiscovery {
     pub stranded_position_q: u128,
     pub blocked_public_routes: u8,
     pub later_honest_crank_blocked: bool,
+    pub attempted_exit_routes: u64,
+    pub required_exit_routes: u64,
+    pub progressing_exit_routes: u64,
     pub exact_rollback: bool,
     pub canonical_vault_liquidity: u128,
     pub token_supply_conserved: bool,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
 }
 
 impl CrossDomainRoundingDiscovery {
@@ -1611,9 +1639,16 @@ impl CrossDomainRoundingDiscovery {
             && self.stranded_position_q != 0
             && self.blocked_public_routes == 6
             && self.later_honest_crank_blocked
+            && self.required_exit_routes != 0
+            && self.attempted_exit_routes & self.required_exit_routes == self.required_exit_routes
+            && self.progressing_exit_routes & self.required_exit_routes == 0
             && self.exact_rollback
             && self.canonical_vault_liquidity >= self.funded_capital
             && self.token_supply_conserved
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::PersistentFundedLock { .. }
+            )
     }
 
     pub fn preserves_bounded_funded_exit(&self) -> bool {
@@ -1623,9 +1658,15 @@ impl CrossDomainRoundingDiscovery {
             && self.stranded_position_q != 0
             && self.blocked_public_routes < SourceLienReversalExitRoute::ALL.len() as u8
             && !self.later_honest_crank_blocked
+            && self.progressing_exit_routes != 0
+            && self.progressing_exit_routes & !self.attempted_exit_routes == 0
             && self.exact_rollback
             && self.canonical_vault_liquidity >= self.funded_capital
             && self.token_supply_conserved
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::Progressing
+            )
     }
 }
 
@@ -1849,6 +1890,17 @@ impl CrossDomainBackingDiscovery {
                     .checked_div(percolator::BOUND_SCALE)
                     .unwrap_or(0)
             && u128::from(self.extracted_tokens) > self.winner_capital_gain
+            && self.victim_loss_atoms != 0
+            && self.victim_loss_atoms == self.unauthorized_gain_atoms
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == self.victim_loss_atoms
+                    && unauthorized_gain_atoms == self.unauthorized_gain_atoms
+            )
+            && self.public_trace.validate_public_execution().is_ok()
     }
 }
 
@@ -1879,6 +1931,14 @@ impl TerminalDustDiscovery {
             && self.control_vault_remaining == 0
             && self.vault_remaining == self.attacker_loss + self.victim_loss
             && self.control_supply == self.dust_supply
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms: 0,
+                } if victim_loss_atoms == self.victim_loss
+            )
+            && self.public_trace.validate_public_execution().is_ok()
     }
 }
 
@@ -2134,6 +2194,16 @@ impl SourceFeeConsentDiscovery {
         self.accepted_unconsented_fee
             && self.lp_capital_debit != 0
             && self.lp_capital_debit == self.provider_earnings_credit
+            && self.provider_earnings_credit == self.extracted_provider_tokens
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == self.lp_capital_debit
+                    && unauthorized_gain_atoms == self.extracted_provider_tokens
+            )
+            && self.public_trace.validate_public_execution().is_ok()
     }
 }
 
@@ -3064,6 +3134,28 @@ pub fn discover_market_incarnation_replays(
         .collect()
 }
 
+fn finish_terminal_generation_evidence(
+    env: &mut V16Svm,
+    victim_loss_atoms: u128,
+) -> Result<(PublicTerminalClassification, PublicTraceEvidence), String> {
+    let public_trace = env.finish_public_trace();
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms,
+            unauthorized_gain_atoms: 0,
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: false,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("terminal-generation evidence is invalid: {error}"))?;
+    Ok((terminal_classification, public_trace))
+}
+
 pub fn discover_terminal_generation_replay(
     mut seed: [u8; 32],
     kind: TerminalGenerationKind,
@@ -3084,6 +3176,7 @@ pub fn discover_terminal_generation_replay(
         ..MarketConfig::default()
     };
     let mut env = V16Svm::new(seed, config);
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     if kind == TerminalGenerationKind::AssetResolvePolicy {
         env.configure_permissionless_resolve(1_000_000, 1)
@@ -3215,6 +3308,8 @@ pub fn discover_terminal_generation_replay(
         if env.token_supply_observed() != supply_before {
             return Err("asset-generation resolve-policy protection changed SPL supply".into());
         }
+        let (terminal_classification, public_trace) =
+            finish_terminal_generation_evidence(&mut env, 0)?;
         return Ok(TerminalGenerationDiscovery {
             kind,
             old_generation,
@@ -3227,6 +3322,8 @@ pub fn discover_terminal_generation_replay(
             winner_payout: 0,
             victim_loss: 0,
             winner_gain: 0,
+            terminal_classification,
+            public_trace,
         });
     }
     replay_result.map_err(|error| format!("old-generation terminal intent rejected: {error}"))?;
@@ -3263,6 +3360,8 @@ pub fn discover_terminal_generation_replay(
     if env.token_supply_observed() != supply_before {
         return Err("terminal generation replay changed SPL supply".into());
     }
+    let (terminal_classification, public_trace) =
+        finish_terminal_generation_evidence(&mut env, victim_loss)?;
     Ok(TerminalGenerationDiscovery {
         kind,
         old_generation,
@@ -3275,6 +3374,8 @@ pub fn discover_terminal_generation_replay(
         winner_payout,
         victim_loss,
         winner_gain,
+        terminal_classification,
+        public_trace,
     })
 }
 
@@ -5500,7 +5601,10 @@ fn discover_one_source_fee_consent_violation(
     seed[0] ^= 0x7b;
     seed[1] ^= kind.discriminator();
     let mut env = prepare_source_backed_fee_world(seed)?;
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
+    let provider_destination = env.actors[PROVIDER].destination_token;
+    let provider_tokens_before = env.token_amount(provider_destination);
     let retained = match kind {
         SourceFeeConsentKind::NoCpi => {
             Some(env.build_retained_no_cpi_trade(PROVIDER, LP, 0, -INCREASE_Q, EXEC_PRICE))
@@ -5557,20 +5661,14 @@ fn discover_one_source_fee_consent_violation(
             env.token_supply_observed()
         ));
     }
-    match execution {
+    let (accepted_unconsented_fee, compute_units) = match execution {
         Ok(compute_units) => {
             if before == after {
                 return Err(format!(
                     "{kind:?} source-fee trade succeeded without state mutation"
                 ));
             }
-            Ok(SourceFeeConsentDiscovery {
-                kind,
-                accepted_unconsented_fee: true,
-                lp_capital_debit,
-                provider_earnings_credit,
-                compute_units: Some(compute_units),
-            })
+            (true, Some(compute_units))
         }
         Err(_) => {
             if before != after || lp_capital_debit != 0 || provider_earnings_credit != 0 {
@@ -5578,15 +5676,59 @@ fn discover_one_source_fee_consent_violation(
                     "{kind:?} rejected source-fee trade did not roll back exactly"
                 ));
             }
-            Ok(SourceFeeConsentDiscovery {
-                kind,
-                accepted_unconsented_fee: false,
-                lp_capital_debit: 0,
-                provider_earnings_credit: 0,
-                compute_units: None,
-            })
+            (false, None)
         }
+    };
+    if provider_earnings_credit != 0 {
+        env.withdraw_backing_bucket_earnings_for_actor(
+            PROVIDER,
+            WINNING_DOMAIN,
+            provider_earnings_credit,
+        )
+        .map_err(|error| format!("withdraw source-fee provider earnings: {error}"))?;
     }
+    let extracted_provider_tokens = u128::from(
+        env.token_amount(provider_destination)
+            .checked_sub(provider_tokens_before)
+            .ok_or_else(|| "source-fee provider destination decreased".to_string())?,
+    );
+    if extracted_provider_tokens != provider_earnings_credit {
+        return Err(format!(
+            "{kind:?} source-fee earnings were not exactly withdrawable: \
+             earnings={provider_earnings_credit}, extracted={extracted_provider_tokens}"
+        ));
+    }
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} source-fee extraction changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+    let public_trace = env.finish_public_trace();
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: lp_capital_debit,
+            unauthorized_gain_atoms: extracted_provider_tokens,
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: false,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("source-fee terminal evidence is invalid: {error}"))?;
+    Ok(SourceFeeConsentDiscovery {
+        kind,
+        accepted_unconsented_fee,
+        lp_capital_debit,
+        provider_earnings_credit,
+        extracted_provider_tokens,
+        compute_units,
+        terminal_classification,
+        public_trace,
+    })
 }
 
 pub fn discover_source_fee_consent_violations(
@@ -9559,13 +9701,14 @@ pub fn verify_composite_time_coherence(
     })
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct TerminalDustWorld {
     low_price: u64,
     victim_payout: u128,
     coalition_payout: u128,
     vault_remaining: u128,
     supply: u128,
+    public_trace: PublicTraceEvidence,
 }
 
 fn run_terminal_dust_world(
@@ -9598,6 +9741,7 @@ fn run_terminal_dust_world(
             ..MarketConfig::default()
         },
     );
+    env.begin_public_trace();
     env.configure_ewma_mark(0, 1, BASIS, 1, 0)
         .map_err(|error| format!("{route:?} configure terminal EWMA: {error}"))?;
     env.trade_no_cpi(0, 1, 0, DIRECTIONAL_Q, BASIS, 0)
@@ -9705,12 +9849,17 @@ fn run_terminal_dust_world(
     if vault_remaining != u128::from(env.token_amount(env.vault)) {
         return Err("terminal-dust engine/SPL vault mismatch".into());
     }
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("{route:?} terminal-dust trace is invalid: {error}"))?;
     Ok(TerminalDustWorld {
         low_price,
         victim_payout,
         coalition_payout,
         vault_remaining,
         supply: env.token_supply_observed(),
+        public_trace,
     })
 }
 
@@ -9738,6 +9887,21 @@ fn discover_one_terminal_dust_violation(
     let victim_loss = VICTIM_DEPOSIT
         .checked_sub(dust.victim_payout)
         .ok_or_else(|| "dust round trip increased victim payout".to_string())?;
+    let terminal_classification = dust
+        .public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: victim_loss,
+            unauthorized_gain_atoms: 0,
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: victim_loss == 0,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("{route:?} terminal-dust evidence is invalid: {error}"))?;
     Ok(TerminalDustDiscovery {
         route,
         attacker_loss,
@@ -9746,6 +9910,8 @@ fn discover_one_terminal_dust_violation(
         control_vault_remaining: control.vault_remaining,
         control_supply: control.supply,
         dust_supply: dust.supply,
+        terminal_classification,
+        public_trace: dust.public_trace,
     })
 }
 
@@ -9899,7 +10065,7 @@ pub fn discover_cross_domain_insurance_violation(
             authorized_forfeit: false,
             required_exit_routes: 1,
             attempted_exit_routes: 1,
-            honest_continuation_failed: false,
+            progressing_exit_routes: u64::from(remaining_position_q == 0),
         })
         .map_err(|error| format!("cross-domain terminal evidence is invalid: {error}"))?;
     Ok(CrossDomainInsuranceDiscovery {
@@ -9945,6 +10111,7 @@ pub fn discover_cross_domain_backing_violation(
             ..MarketConfig::default()
         },
     );
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     let provider_source_before = env.token_amount(env.provider_source_token);
     env.top_up_backing_bucket(FUNDED_SOURCE_DOMAIN as u16, 2 * CLAIM_PER_ASSET, 10)
@@ -10041,12 +10208,41 @@ pub fn discover_cross_domain_backing_violation(
     if env.token_supply_observed() != supply_before {
         return Err("cross-domain backing world changed SPL supply".into());
     }
+    let victim_loss_atoms = funded_backing_consumed_num
+        .checked_sub(funded_claim_before_num)
+        .and_then(|value| value.checked_div(percolator::BOUND_SCALE))
+        .ok_or_else(|| "cross-domain backing victim-loss reconstruction failed".to_string())?;
+    let authorized_gain_atoms = funded_claim_before_num
+        .checked_div(percolator::BOUND_SCALE)
+        .ok_or_else(|| "cross-domain authorized gain reconstruction failed".to_string())?;
+    let unauthorized_gain_atoms = winner_capital_gain
+        .checked_sub(authorized_gain_atoms)
+        .ok_or_else(|| "cross-domain winner gain stayed within funded claim".to_string())?;
+    let public_trace = env.finish_public_trace();
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms,
+            unauthorized_gain_atoms,
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: false,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("cross-domain backing terminal evidence is invalid: {error}"))?;
     Ok(CrossDomainBackingDiscovery {
         unfunded_claim_before_num,
         funded_claim_before_num,
         funded_backing_consumed_num,
         winner_capital_gain,
         extracted_tokens,
+        victim_loss_atoms,
+        unauthorized_gain_atoms,
+        terminal_classification,
+        public_trace,
     })
 }
 
@@ -12002,10 +12198,15 @@ fn discover_one_cross_domain_rounding_exit_lock(
         return Err("cross-domain rounding vault diverged from SPL custody".into());
     }
 
+    env.begin_public_trace();
     let mut blocked_public_routes = 0u8;
+    let mut attempted_exit_routes = 0u64;
+    let mut progressing_exit_routes = 0u64;
     let mut exact_rollback = true;
     let trade_market_id = env.primary_market_state().1.assets[affected_asset as usize].market_id;
     for route in SourceLienReversalExitRoute::ALL {
+        let route_bit = route.evidence_bit();
+        attempted_exit_routes |= route_bit;
         let before = fingerprint(&env);
         let result = match route {
             SourceLienReversalExitRoute::PermissionlessCrank => {
@@ -12055,7 +12256,10 @@ fn discover_one_cross_domain_rounding_exit_lock(
         };
         let after = fingerprint(&env);
         match result {
-            Ok(_) if after != before => break,
+            Ok(_) if after != before => {
+                progressing_exit_routes |= route_bit;
+                break;
+            }
             Ok(_) => blocked_public_routes = blocked_public_routes.saturating_add(1),
             Err(_) => {
                 blocked_public_routes = blocked_public_routes.saturating_add(1);
@@ -12066,6 +12270,8 @@ fn discover_one_cross_domain_rounding_exit_lock(
 
     let mut later_honest_crank_blocked = false;
     if blocked_public_routes == SourceLienReversalExitRoute::ALL.len() as u8 {
+        const LATER_HONEST_CRANK_BIT: u64 = 1 << 6;
+        attempted_exit_routes |= LATER_HONEST_CRANK_BIT;
         slot = slot
             .checked_add(1)
             .ok_or_else(|| "cross-domain later slot overflow".to_string())?;
@@ -12077,13 +12283,45 @@ fn discover_one_cross_domain_rounding_exit_lock(
         let result = env.crank(TARGET, slot, observation(affected_asset));
         let after = fingerprint(&env);
         later_honest_crank_blocked = match result {
-            Ok(_) => after == before,
+            Ok(_) if after != before => {
+                progressing_exit_routes |= LATER_HONEST_CRANK_BIT;
+                false
+            }
+            Ok(_) => true,
             Err(_) => {
                 exact_rollback &= after == before;
                 true
             }
         };
     }
+
+    const LATER_HONEST_CRANK_BIT: u64 = 1 << 6;
+    let required_exit_routes = SourceLienReversalExitRoute::ALL
+        .into_iter()
+        .fold(LATER_HONEST_CRANK_BIT, |mask, route| {
+            mask | route.evidence_bit()
+        });
+    let remaining = env.primary_portfolio(TARGET);
+    let remaining_funded_value = remaining.capital.get();
+    let remaining_obligation = assets.into_iter().try_fold(0u128, |sum, asset_index| {
+        sum.checked_add(discovery_position(&remaining, asset_index)?.unsigned_abs())
+            .ok_or_else(|| "cross-domain remaining position total overflow".to_string())
+    })?;
+    let public_trace = env.finish_public_trace();
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: 0,
+            unauthorized_gain_atoms: 0,
+            funded_value_remaining: remaining_funded_value,
+            unresolved_obligation: remaining_obligation,
+            bounded_exit_succeeded: false,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes,
+            attempted_exit_routes,
+            progressing_exit_routes,
+        })
+        .map_err(|error| format!("cross-domain terminal evidence invalid: {error}"))?;
 
     Ok(CrossDomainRoundingDiscovery {
         order,
@@ -12093,9 +12331,14 @@ fn discover_one_cross_domain_rounding_exit_lock(
         stranded_position_q,
         blocked_public_routes,
         later_honest_crank_blocked,
+        attempted_exit_routes,
+        required_exit_routes,
+        progressing_exit_routes,
         exact_rollback,
         canonical_vault_liquidity,
         token_supply_conserved: env.token_supply_observed() == supply_before,
+        terminal_classification,
+        public_trace,
     })
 }
 
@@ -12368,9 +12611,22 @@ fn discover_one_flat_source_lien_bounded_exit(
         | CONVERT_EXIT_BIT
         | WITHDRAW_EXIT_BIT
         | CLOSE_EXIT_BIT;
-    let honest_continuation_failed = !close_succeeded
-        && attempted_exit_routes & required_exit_routes == required_exit_routes
-        && (remaining_funded_value != 0 || remaining_lien_num != 0);
+    let mut progressing_exit_routes = 0u64;
+    if route_round_trip_completed {
+        progressing_exit_routes |= escape_route.evidence_bit();
+    }
+    if crank_successes_mutated && crank_released_lien {
+        progressing_exit_routes |= CRANK_EXIT_BIT;
+    }
+    if converted_pnl != 0 {
+        progressing_exit_routes |= CONVERT_EXIT_BIT;
+    }
+    if capital_withdrawal_succeeded {
+        progressing_exit_routes |= WITHDRAW_EXIT_BIT;
+    }
+    if close_succeeded {
+        progressing_exit_routes |= CLOSE_EXIT_BIT;
+    }
     let public_trace = env.finish_public_trace();
     let terminal_classification = public_trace
         .classify_terminal(PublicTerminalObservation {
@@ -12383,7 +12639,7 @@ fn discover_one_flat_source_lien_bounded_exit(
             authorized_forfeit: false,
             required_exit_routes,
             attempted_exit_routes,
-            honest_continuation_failed,
+            progressing_exit_routes,
         })
         .map_err(|error| format!("flat source-lien terminal evidence is invalid: {error}"))?;
     Ok(FlatSourceLienDiscovery {

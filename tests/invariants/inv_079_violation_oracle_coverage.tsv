@@ -1,0 +1,27 @@
+# oracle	evidence	rationale
+AccrualOrderingDiscovery	ECONOMIC_DELTA_ONLY	claim transfer delta lacks normalized public terminal evidence
+AssetGenerationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
+AuthorityIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
+BackingProviderConsentDiscovery	ECONOMIC_DELTA_ONLY	provider value delta lacks normalized public terminal evidence
+BilateralMarkFeeDiscovery	ECONOMIC_DELTA_ONLY	victim and coalition deltas lack normalized public terminal evidence
+CompositeRoundingDiscovery	ECONOMIC_DELTA_ONLY	liquidation value delta lacks normalized public terminal evidence
+CrossDomainBackingDiscovery	TERMINAL_LOF	public trace binds excess domain backing consumption to winner excess gain
+FeeConsentDiscovery	ECONOMIC_DELTA_ONLY	unauthorized debit lacks normalized public terminal evidence
+FractionalMovementDiscovery	LOCAL_SAFETY_ONLY	stall and settlement mismatch lack a complete terminal route mask
+FundedRoleDiscovery	ECONOMIC_DELTA_ONLY	funded-role transfer lacks normalized public terminal evidence
+IncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
+IntentReplayDiscovery	REPLAY_ONLY	duplicate economic mutation is not itself quantified LoF or persistent DoS
+MarketIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
+MarkMovementReserveDiscovery	LOCAL_SAFETY_ONLY	reserve and withdrawal checks lack normalized terminal evidence
+PendingMarkAdmissionDiscovery	LOCAL_SAFETY_ONLY	guard and round-trip checks lack normalized terminal evidence
+PendingMarkInheritanceDiscovery	LOCAL_SAFETY_ONLY	guard and round-trip checks lack normalized terminal evidence
+PendingTargetOverrideDiscovery	LOCAL_SAFETY_ONLY	target and payout checks lack normalized terminal evidence
+PendingZeroMoveTerminalDiscovery	ECONOMIC_DELTA_ONLY	terminal payout delta lacks normalized public terminal evidence
+ProspectiveAccrualDiscovery	ECONOMIC_DELTA_ONLY	payout transfer delta lacks normalized public terminal evidence
+ShutdownCommitOrderingDiscovery	ECONOMIC_DELTA_ONLY	payout transfer delta lacks normalized public terminal evidence
+SourceFeeConsentDiscovery	TERMINAL_LOF	public trace binds the unconsented LP debit to the provider's exact SPL withdrawal
+SupersessionDiscovery	REPLAY_ONLY	stale overwrite is not itself quantified LoF or persistent DoS
+TerminalCommitOrderingDiscovery	ECONOMIC_DELTA_ONLY	terminal payout delta lacks normalized public terminal evidence
+TerminalDustDiscovery	TERMINAL_LOF	public trace and exact victim loss are classifier-bound
+TerminalGenerationDiscovery	TERMINAL_LOF	public trace and exact replacement-user loss are classifier-bound
+TradeDrivenLiquidationDiscovery	LOCAL_SAFETY_ONLY	liquidation and CU checks lack normalized terminal evidence

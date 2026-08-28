@@ -162,7 +162,7 @@ pub struct PublicTerminalObservation {
     pub authorized_forfeit: bool,
     pub required_exit_routes: u64,
     pub attempted_exit_routes: u64,
-    pub honest_continuation_failed: bool,
+    pub progressing_exit_routes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,7 +273,6 @@ impl PublicTraceEvidence {
                 .filter(|step| step.program_id == percolator_prog::id())
         };
         let any_success = wrapper_steps().any(|step| step.succeeded);
-        let any_rejection = wrapper_steps().any(|step| !step.succeeded);
 
         if observation.victim_loss_atoms != 0 || observation.unauthorized_gain_atoms != 0 {
             if observation.authorized_forfeit {
@@ -288,15 +287,14 @@ impl PublicTraceEvidence {
             });
         }
 
-        if observation.honest_continuation_failed {
-            let complete_exit_coverage = observation.required_exit_routes != 0
-                && observation.attempted_exit_routes & observation.required_exit_routes
-                    == observation.required_exit_routes;
+        let complete_exit_coverage = observation.required_exit_routes != 0
+            && observation.attempted_exit_routes & observation.required_exit_routes
+                == observation.required_exit_routes;
+        let progressing_required_routes =
+            observation.progressing_exit_routes & observation.required_exit_routes;
+        if complete_exit_coverage && progressing_required_routes == 0 {
             if observation.funded_value_remaining == 0
                 || observation.unresolved_obligation == 0
-                || !observation.honest_continuation_failed
-                || !complete_exit_coverage
-                || !any_rejection
                 || observation.bounded_exit_succeeded
                 || observation.terminal_receipt_created
                 || observation.authorized_forfeit

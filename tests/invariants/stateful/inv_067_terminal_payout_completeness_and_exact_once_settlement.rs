@@ -15,6 +15,7 @@
 //! invariant roadmap.
 
 use super::*;
+use crate::support::v16_svm::PublicTerminalClassification;
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -42,6 +43,10 @@ proptest! {
             prop_assert_eq!(discovery.control_vault_remaining, 0);
             prop_assert_eq!(discovery.vault_remaining, discovery.attacker_loss);
             prop_assert_eq!(discovery.control_supply, discovery.dust_supply);
+            prop_assert_eq!(
+                discovery.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            );
         }
         let violations: Vec<_> = discoveries
             .iter()

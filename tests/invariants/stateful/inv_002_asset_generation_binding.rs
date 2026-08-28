@@ -18,6 +18,7 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+use crate::support::v16_svm::PublicTerminalClassification;
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -82,6 +83,10 @@ proptest! {
             prop_assert!(discovery.exact_rollback);
             prop_assert!(discovery.rejection_was_generation_mismatch);
             prop_assert!(discovery.fresh_intent_landed);
+            prop_assert_eq!(
+                discovery.terminal_classification,
+                PublicTerminalClassification::Progressing
+            );
         }
     }
 }

@@ -663,6 +663,16 @@ proptest! {
             "vulnerable-pin source backing attribution changed: {:?}",
             discovery
         );
+        prop_assert_eq!(discovery.victim_loss_atoms, 100);
+        prop_assert_eq!(discovery.unauthorized_gain_atoms, 100);
+        let exact_terminal_loss = matches!(
+            discovery.terminal_classification,
+            crate::support::v16_svm::PublicTerminalClassification::LossOfFunds {
+                victim_loss_atoms: 100,
+                unauthorized_gain_atoms: 100,
+            }
+        );
+        prop_assert!(exact_terminal_loss);
     }
 }
 

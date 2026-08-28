@@ -6,6 +6,7 @@
 //! `v16_public_trace_schema_detects_out_of_band_economic_mutation`,
 //! `v16_public_trace_terminal_classifier_requires_complete_economic_evidence`,
 //! `v16_every_public_trace_consumer_validates_reachability_evidence`,
+//! `v16_finding_blind_violation_oracle_evidence_roster_is_source_complete`,
 //! `v16_program_fixed_blockers_remain_progressing`,
 //! `v16_program_open_lof_manifest_snapshot_is_structurally_honest`,
 //! `v16_open_security_finding_benchmark_is_complete_and_non_overclaiming`, and
@@ -121,7 +122,7 @@ fn v16_public_trace_terminal_classifier_requires_complete_economic_evidence() {
                 authorized_forfeit: false,
                 required_exit_routes: 0,
                 attempted_exit_routes: 0,
-                honest_continuation_failed: false,
+                progressing_exit_routes: 0,
             })
             .expect("complete public exit evidence classifies"),
         PublicTerminalClassification::BoundedExit
@@ -141,7 +142,7 @@ fn v16_public_trace_terminal_classifier_requires_complete_economic_evidence() {
         authorized_forfeit: false,
         required_exit_routes: 0,
         attempted_exit_routes: 0,
-        honest_continuation_failed: false,
+        progressing_exit_routes: 0,
     };
     assert_eq!(
         rejected_trace
@@ -166,11 +167,28 @@ fn v16_public_trace_terminal_classifier_requires_complete_economic_evidence() {
                 unresolved_obligation: 1,
                 required_exit_routes: 0b11,
                 attempted_exit_routes: 0b01,
-                honest_continuation_failed: true,
+                progressing_exit_routes: 0,
                 ..rejection
             })
             .is_err(),
         "one rejected route cannot be promoted to persistent DoS"
+    );
+
+    assert_eq!(
+        rejected_trace
+            .classify_terminal(PublicTerminalObservation {
+                funded_value_remaining: 1,
+                unresolved_obligation: 1,
+                required_exit_routes: 0b11,
+                attempted_exit_routes: 0b11,
+                progressing_exit_routes: 0,
+                ..rejection
+            })
+            .expect("complete nonprogressing route evidence classifies"),
+        PublicTerminalClassification::PersistentFundedLock {
+            funded_value_remaining: 1,
+            unresolved_obligation: 1,
+        }
     );
 }
 
@@ -218,9 +236,84 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 29,
+        consumers, 34,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
+}
+
+#[test]
+fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
+    let source = include_str!("../../support/invariant_discovery.rs");
+    let mut current_impl = None;
+    let mut discovered = std::collections::BTreeSet::new();
+    for line in source.lines() {
+        if let Some(rest) = line.strip_prefix("impl ") {
+            current_impl = rest.split_whitespace().next();
+        }
+        if line.contains("pub fn is_violation(&self)") {
+            let oracle = current_impl.expect("is_violation must be inside a named impl");
+            assert!(
+                discovered.insert(oracle),
+                "duplicate is_violation oracle {oracle}"
+            );
+        }
+    }
+
+    let mut roster = std::collections::BTreeMap::new();
+    for line in include_str!("../inv_079_violation_oracle_coverage.tsv").lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 3, "malformed INV-079 oracle row: {line}");
+        assert!(
+            matches!(
+                fields[1],
+                "TERMINAL_LOF" | "ECONOMIC_DELTA_ONLY" | "LOCAL_SAFETY_ONLY" | "REPLAY_ONLY"
+            ),
+            "unknown INV-079 evidence class in row: {line}"
+        );
+        assert!(!fields[2].is_empty(), "oracle row needs a stated boundary");
+        assert!(
+            roster.insert(fields[0], fields[1]).is_none(),
+            "duplicate INV-079 oracle row {}",
+            fields[0]
+        );
+    }
+
+    assert_eq!(
+        discovered,
+        roster.keys().copied().collect(),
+        "every finding-blind is_violation oracle needs an explicit terminal-evidence disposition"
+    );
+    let terminal = roster
+        .iter()
+        .filter_map(|(oracle, evidence)| (*evidence == "TERMINAL_LOF").then_some(*oracle))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal,
+        [
+            "CrossDomainBackingDiscovery",
+            "SourceFeeConsentDiscovery",
+            "TerminalDustDiscovery",
+            "TerminalGenerationDiscovery",
+        ],
+        "terminal promotions require public trace plus classifier-bound exact impact"
+    );
+    for oracle in terminal {
+        let marker = format!("impl {oracle} {{");
+        let start = source
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing impl for terminal oracle {oracle}"));
+        let body = &source[start..];
+        let end = body
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("unterminated impl for terminal oracle {oracle}"));
+        let body = &body[..end];
+        assert!(body.contains("terminal_classification"));
+        assert!(body.contains("public_trace.validate_public_execution()"));
+    }
+    assert_eq!(roster.len(), 26, "finding-blind oracle inventory changed");
 }
 
 #[test]

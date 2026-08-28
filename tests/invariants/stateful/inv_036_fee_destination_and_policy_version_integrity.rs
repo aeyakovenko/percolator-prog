@@ -5,8 +5,9 @@
 //! Evidence in this file (F over public I routes):
 //! `v16_program_source_fee_consent_route_matrix_discovers_unsigned_debits` constructs positive
 //! source-backed PnL and varies the consuming trade across CPI/no-CPI and single/batch routes. Its
-//! common oracle requires the LP debit to stay within prior consent and traces any debit into the
-//! backing provider's earnings. Finding-specific impact regressions remain below. These tests exercise the deployed public
+//! common oracle requires the LP debit to stay within prior consent and traces any debit through
+//! the backing provider's earnings into an exact public SPL withdrawal. Finding-specific impact
+//! regressions remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //! Secondary coverage: INV-014 because the same route matrix varies the policy state retained by
@@ -47,6 +48,21 @@ proptest! {
             .map(|discovery| discovery.kind)
             .collect();
         eprintln!("independent source-fee consent discoveries: {violations:?}");
+        let no_cpi = &discoveries[0];
+        prop_assert_eq!(no_cpi.lp_capital_debit, no_cpi.provider_earnings_credit);
+        prop_assert_eq!(
+            no_cpi.provider_earnings_credit,
+            no_cpi.extracted_provider_tokens
+        );
+        let exact_terminal_loss = matches!(
+            no_cpi.terminal_classification,
+            crate::support::v16_svm::PublicTerminalClassification::LossOfFunds {
+                victim_loss_atoms,
+                unauthorized_gain_atoms,
+            } if victim_loss_atoms == no_cpi.lp_capital_debit
+                && unauthorized_gain_atoms == no_cpi.extracted_provider_tokens
+        );
+        prop_assert!(exact_terminal_loss);
         prop_assert_eq!(
             violations,
             vec![SourceFeeConsentKind::NoCpi],
