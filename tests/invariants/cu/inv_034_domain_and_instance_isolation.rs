@@ -24,7 +24,10 @@ fn v16_program_cross_instance_role_roster_is_source_complete() {
             (fields[0].parse::<u8>().expect("numeric tag"), fields[1])
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let test_source = include_str!("inv_034_domain_and_instance_isolation.rs");
+    let test_sources = [
+        include_str!("inv_034_domain_and_instance_isolation.rs"),
+        include_str!("../stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs"),
+    ];
     let mut roster = std::collections::BTreeMap::new();
     let mut status_counts = std::collections::BTreeMap::<&str, usize>::new();
 
@@ -70,7 +73,9 @@ fn v16_program_cross_instance_role_roster_is_source_complete() {
         if evidence != "-" {
             for test in evidence.split(',') {
                 assert!(
-                    test_source.contains(&format!("fn {test}")),
+                    test_sources
+                        .iter()
+                        .any(|source| source.contains(&format!("fn {test}"))),
                     "{variant} cites missing INV-034 evidence {test}"
                 );
             }
@@ -82,8 +87,8 @@ fn v16_program_cross_instance_role_roster_is_source_complete() {
         "every public variant needs one row"
     );
     assert_eq!(status_counts.get("NO_MIXED_ROLE"), Some(&20));
-    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&14));
-    assert_eq!(status_counts.get("PARTIAL"), Some(&16));
+    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&30));
+    assert_eq!(status_counts.get("PARTIAL").copied().unwrap_or_default(), 0);
     assert_eq!(status_counts.get("OPEN").copied().unwrap_or_default(), 0);
 }
 
@@ -600,258 +605,6 @@ fn v16_attack_sync_maintenance_rejects_cross_market_payer_substitution() {
     assert_eq!(market_b_after.vault as u64, env.token_amount(vault_b));
 }
 
-// market's pending receipt by mixing otherwise-valid accounts.
-#[test]
-fn v16_program_claim_resolved_topup_rejects_cross_market_portfolio_payout() {
-    let mut env = V16CuEnv::new();
-
-    let owner_a = Keypair::new();
-    let pa = env.create_portfolio(&owner_a);
-
-    let market_b = Pubkey::new_unique();
-    let vault_authority_b =
-        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
-    let vault_b = canonical_vault_ata(vault_authority_b, env.mint);
-    env.svm
-        .set_account(
-            market_b,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
-                owner: env.program_id,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.svm
-        .set_account(
-            vault_b,
-            Account {
-                lamports: 1_000_000_000,
-                data: make_token_data(env.mint, vault_authority_b, 0),
-                owner: spl_token::ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let p = V16CuMarketParams::default();
-    env.svm.expire_blockhash();
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::InitMarket {
-            max_portfolio_assets: p.max_portfolio_assets,
-            h_min: p.h_min,
-            h_max: p.h_max,
-            initial_price: p.initial_price,
-            min_nonzero_mm_req: p.min_nonzero_mm_req,
-            min_nonzero_im_req: p.min_nonzero_im_req,
-            maintenance_margin_bps: p.maintenance_margin_bps,
-            initial_margin_bps: p.initial_margin_bps,
-            max_trading_fee_bps: p.max_trading_fee_bps,
-            trade_fee_base_bps: p.trade_fee_base_bps,
-            liquidation_fee_bps: p.liquidation_fee_bps,
-            liquidation_fee_cap: p.liquidation_fee_cap,
-            min_liquidation_abs: p.min_liquidation_abs,
-            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
-            max_accrual_dt_slots: p.max_accrual_dt_slots,
-            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
-            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
-            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
-            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
-            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
-            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
-        },
-        vec![
-            AccountMeta::new(env.admin.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new_readonly(env.mint, false),
-        ],
-        &[&env.admin],
-    )
-    .expect("init market B");
-    let owner_b = Keypair::new();
-    env.ensure_signer_account(owner_b.pubkey());
-    let pb = Pubkey::new_unique();
-    env.svm
-        .set_account(
-            pb,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![0u8; env.portfolio_account_len],
-                owner: env.program_id,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.svm.expire_blockhash();
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::InitPortfolio,
-        vec![
-            AccountMeta::new(owner_b.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new(pb, false),
-        ],
-        &[&owner_b],
-    )
-    .expect("init market-B portfolio");
-
-    fn seed_pending_topup(
-        env: &mut V16CuEnv,
-        market: Pubkey,
-        portfolio: Pubkey,
-        vault: Pubkey,
-        vault_authority: Pubkey,
-    ) {
-        let mut market_account = env.svm.get_account(&market).expect("market account");
-        let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
-        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
-        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
-        group.mode = MarketModeV16::Resolved;
-        group.resolved_slot = 1;
-        group.current_slot = 1;
-        group.vault = 60;
-        group.payout_snapshot_captured = true;
-        group.payout_snapshot = 100;
-        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
-            snapshot_residual: 100,
-            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
-            terminal_claim_bound_unreceipted_num: 0,
-            current_payout_rate_num: 100 * BOUND_SCALE,
-            current_payout_rate_den: 100 * BOUND_SCALE,
-            snapshot_slot: 1,
-            payout_halted: false,
-            finalized: false,
-        };
-        account.resolved_payout_receipt =
-            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
-                present: true,
-                prior_bound_contribution_num: 100 * BOUND_SCALE,
-                live_released_face_at_receipt: 0,
-                terminal_positive_claim_face: 100,
-                paid_effective: 40,
-                finalized: false,
-            });
-        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
-        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
-        env.svm.set_account(market, market_account).unwrap();
-        env.svm.set_account(portfolio, portfolio_account).unwrap();
-        env.set_token_account_amount(vault, env.mint, vault_authority, 60);
-    }
-
-    let market_a = env.market;
-    let vault_a = env.vault;
-    let vault_authority_a = env.vault_authority;
-    seed_pending_topup(&mut env, market_a, pa, vault_a, vault_authority_a);
-    seed_pending_topup(&mut env, market_b, pb, vault_b, vault_authority_b);
-
-    let attack_dest = env.token_account_for_mint(env.mint, owner_a.pubkey(), 0);
-    let market_a_before = env.svm.get_account(&env.market).unwrap();
-    let market_b_before = env.svm.get_account(&market_b).unwrap();
-    let pa_before = env.svm.get_account(&pa).unwrap();
-    let pb_before = env.svm.get_account(&pb).unwrap();
-    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
-    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
-
-    env.svm.expire_blockhash();
-    let rejected = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::ClaimResolvedPayoutTopup,
-        vec![
-            AccountMeta::new_readonly(owner_a.pubkey(), false),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new(pa, false),
-            AccountMeta::new(attack_dest, false),
-            AccountMeta::new(vault_b, false),
-            AccountMeta::new_readonly(vault_authority_b, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[],
-    );
-    assert!(
-        rejected.is_err(),
-        "market-B ClaimResolvedPayoutTopup must reject a market-A-bound receipt"
-    );
-    assert_eq!(
-        env.token_amount(attack_dest),
-        0,
-        "attacker receives no market-B top-up"
-    );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
-    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
-    assert_eq!(
-        env.svm.get_account(&pa).unwrap(),
-        pa_before,
-        "rejected cross-market top-up leaves market-A receipt byte-identical"
-    );
-    assert_eq!(env.svm.get_account(&pb).unwrap(), pb_before);
-    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
-    assert_eq!(
-        env.svm.get_account(&vault_b).unwrap(),
-        vault_b_before,
-        "market-B vault remains intact"
-    );
-
-    let dest_b = Pubkey::new_unique();
-    env.svm
-        .set_account(
-            dest_b,
-            Account {
-                lamports: 1_000_000_000,
-                data: make_token_data(env.mint, owner_b.pubkey(), 0),
-                owner: spl_token::ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.svm.expire_blockhash();
-    let claim_b = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::ClaimResolvedPayoutTopup,
-        vec![
-            AccountMeta::new_readonly(owner_b.pubkey(), false),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new(pb, false),
-            AccountMeta::new(dest_b, false),
-            AccountMeta::new(vault_b, false),
-            AccountMeta::new_readonly(vault_authority_b, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[],
-    );
-    assert!(
-        claim_b.is_ok(),
-        "real market-B top-up still pays: {claim_b:?}"
-    );
-    assert_eq!(env.token_amount(dest_b), 60);
-
-    let dest_a = env.token_account_for_mint(env.mint, owner_a.pubkey(), 0);
-    let claim_a_cu = env.claim_resolved_payout_topup_with_cu(owner_a.pubkey(), pa, dest_a);
-    assert_cu_within(
-        "same-market ClaimResolvedPayoutTopup after rejected cross-market attempt",
-        claim_a_cu,
-        CUSTODY_CU_LIMIT,
-    );
-    assert_eq!(
-        env.token_amount(dest_a),
-        60,
-        "market-A receipt remains claimable on its real market"
-    );
-}
-
 #[test]
 fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
@@ -1163,92 +916,59 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
 #[test]
 fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
     let mut env = V16CuEnv::new();
-    let admin = env.admin.insecure_clone();
     let owner = Keypair::new();
 
     let portfolio_a = env.create_portfolio(&owner);
     env.deposit(&owner, portfolio_a, 100);
     env.seed_cancellable_close_progress(portfolio_a);
 
-    let market_b = Pubkey::new_unique();
-    let vault_authority_b =
-        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
-    let vault_b = canonical_vault_ata(vault_authority_b, env.mint);
-    env.svm
-        .set_account(
-            market_b,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
-                owner: env.program_id,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.svm
-        .set_account(
-            vault_b,
-            Account {
-                lamports: 1_000_000_000,
-                data: make_token_data(env.mint, vault_authority_b, 0),
-                owner: spl_token::ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let p = V16CuMarketParams::default();
-    env.svm.expire_blockhash();
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::InitMarket {
-            max_portfolio_assets: p.max_portfolio_assets,
-            h_min: p.h_min,
-            h_max: p.h_max,
-            initial_price: p.initial_price,
-            min_nonzero_mm_req: p.min_nonzero_mm_req,
-            min_nonzero_im_req: p.min_nonzero_im_req,
-            maintenance_margin_bps: p.maintenance_margin_bps,
-            initial_margin_bps: p.initial_margin_bps,
-            max_trading_fee_bps: p.max_trading_fee_bps,
-            trade_fee_base_bps: p.trade_fee_base_bps,
-            liquidation_fee_bps: p.liquidation_fee_bps,
-            liquidation_fee_cap: p.liquidation_fee_cap,
-            min_liquidation_abs: p.min_liquidation_abs,
-            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
-            max_accrual_dt_slots: p.max_accrual_dt_slots,
-            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
-            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
-            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
-            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
-            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
-            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
-        },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new_readonly(env.mint, false),
-        ],
-        &[&admin],
-    )
-    .expect("init market B");
+    let (market_b, _vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, V16CuMarketParams::default());
 
     let source = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
-    let market_a_before = env.svm.get_account(&env.market).unwrap();
-    let market_b_before = env.svm.get_account(&market_b).unwrap();
-    let portfolio_a_before = env.svm.get_account(&portfolio_a).unwrap();
-    let source_before = env.svm.get_account(&source).unwrap();
-    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
-    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
     let portfolio_a_id = env.portfolio_id(portfolio_a);
     let portfolio_a_position_epoch = env.portfolio_position_epoch(portfolio_a);
+    for (label, market, vault) in [
+        ("foreign portfolio", market_b, vault_b),
+        ("foreign vault", env.market, vault_b),
+    ] {
+        let market_a_before = env.svm.get_account(&env.market).unwrap();
+        let market_b_before = env.svm.get_account(&market_b).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio_a).unwrap();
+        let source_before = env.svm.get_account(&source).unwrap();
+        let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+        let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::CureAndCancelClose {
+                portfolio_id: portfolio_a_id,
+                position_epoch: portfolio_a_position_epoch,
+                optional_deposit: 50,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(market, false),
+                AccountMeta::new(portfolio_a, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        );
+        assert!(rejected.is_err(), "CureAndCancelClose must reject {label}");
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+        assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+        assert_eq!(env.svm.get_account(&portfolio_a).unwrap(), portfolio_before);
+        assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+        assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    }
 
     env.svm.expire_blockhash();
-    let rejected = send_tx(
+    let control = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
@@ -1259,145 +979,24 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
         },
         vec![
             AccountMeta::new(owner.pubkey(), true),
-            AccountMeta::new(market_b, false),
+            AccountMeta::new(env.market, false),
             AccountMeta::new(portfolio_a, false),
             AccountMeta::new(source, false),
-            AccountMeta::new(vault_b, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&owner],
-    );
-    assert!(
-        rejected.is_err(),
-        "CureAndCancelClose must reject a portfolio bound to another market"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_a_before,
-        "rejected cross-market cure must not mutate market A"
-    );
-    assert_eq!(
-        env.svm.get_account(&market_b).unwrap(),
-        market_b_before,
-        "rejected cross-market cure must not mutate market B"
-    );
-    assert_eq!(
-        env.svm.get_account(&portfolio_a).unwrap(),
-        portfolio_a_before,
-        "rejected cross-market cure must not cancel or credit the market-A portfolio"
-    );
-    assert_eq!(
-        env.svm.get_account(&source).unwrap(),
-        source_before,
-        "rejected cross-market cure must not pull the optional deposit"
-    );
-    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
-    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
-
-    let portfolio_b =
-        env.program_account(state::portfolio_account_len_for_market_slots(1).unwrap());
-    env.ensure_signer_account(owner.pubkey());
-    env.svm.expire_blockhash();
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::InitPortfolio,
-        vec![
-            AccountMeta::new(owner.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new(portfolio_b, false),
-        ],
-        &[&owner],
-    )
-    .expect("init market-B portfolio");
-    let portfolio_b_id = env.portfolio_id(portfolio_b);
-    let deposit_b = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
-    env.svm.expire_blockhash();
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::Deposit {
-            portfolio_id: portfolio_b_id,
-            expected_sequence: 0,
-            amount: 100,
-        },
-        vec![
-            AccountMeta::new(owner.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new(portfolio_b, false),
-            AccountMeta::new(deposit_b, false),
-            AccountMeta::new(vault_b, false),
+            AccountMeta::new(env.vault, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
         &[&owner],
     )
-    .expect("deposit into market-B portfolio");
-    {
-        let mut market_b_account = env.svm.get_account(&market_b).unwrap();
-        let mut portfolio_b_account = env.svm.get_account(&portfolio_b).unwrap();
-        let (cfg_b, mut group_b) = state::read_market(&market_b_account.data).unwrap();
-        let mut account_b = state::read_portfolio(&portfolio_b_account.data).unwrap();
-        account_b.close_progress =
-            percolator::CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
-                active: true,
-                finalized: false,
-                canceled: false,
-                close_id: 1,
-                asset_index: 0,
-                market_id: group_b.assets[0].market_id,
-                domain_side: SideV16::Long,
-                gross_loss_at_close_start: 10,
-                drift_reference_slot: 0,
-                max_close_slot: 10,
-                residual_remaining: 10,
-                ..CloseProgressLedgerV16::EMPTY
-            });
-        group_b.pending_domain_loss_barriers[0] = 1;
-        state::write_market(&mut market_b_account.data, &cfg_b, &group_b).unwrap();
-        state::write_portfolio(&mut portfolio_b_account.data, &account_b).unwrap();
-        env.svm.set_account(market_b, market_b_account).unwrap();
-        env.svm
-            .set_account(portfolio_b, portfolio_b_account)
-            .unwrap();
-    }
-    let source_b = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
-    let portfolio_b_id = env.portfolio_id(portfolio_b);
-    let portfolio_b_position_epoch = env.portfolio_position_epoch(portfolio_b);
-    env.svm.expire_blockhash();
-    let ok = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::CureAndCancelClose {
-            portfolio_id: portfolio_b_id,
-            position_epoch: portfolio_b_position_epoch,
-            optional_deposit: 50,
-        },
-        vec![
-            AccountMeta::new(owner.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new(portfolio_b, false),
-            AccountMeta::new(source_b, false),
-            AccountMeta::new(vault_b, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&owner],
-    );
-    assert!(
-        ok.is_ok(),
-        "same-market CureAndCancelClose succeeds: {ok:?}"
-    );
-    assert_eq!(env.token_amount(source_b), 0);
-    assert_eq!(env.token_amount(vault_b), 150);
-    let account_b = state::read_portfolio(&env.svm.get_account(&portfolio_b).unwrap().data)
-        .expect("market-B portfolio after cure");
-    assert_eq!(account_b.capital.get(), 150);
-    assert!(close_progress(&account_b).canceled);
-    let (_, group_b) = state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
-    assert_eq!(group_b.vault, 150);
-    assert_eq!(group_b.c_tot, 150);
+    .expect("same-market CureAndCancelClose remains live");
+    assert_cu_within("CureAndCancelClose control", control, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), 150);
+    let account = env.portfolio_state(portfolio_a);
+    assert_eq!(account.capital.get(), 150);
+    assert!(close_progress(&account).canceled);
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 150);
+    assert_eq!(group.c_tot, 150);
 }
 
 // security.md sweep — ledger account binding (#44, F-VAULT-FRAG sibling): a backing-domain ledger is
@@ -1693,6 +1292,46 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
     assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
     assert_eq!(env.token_amount(bad_dest), 0);
 
+    for (label, vault, optional_ledger) in [
+        ("foreign ledger", vault_b, Some(ledger_a)),
+        ("foreign vault", env.vault, None),
+    ] {
+        let mut accounts = vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(bad_dest, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        if let Some(ledger) = optional_ledger {
+            accounts.push(AccountMeta::new(ledger, false));
+        }
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 1,
+                market_id: market_b_market_id,
+                amount: 10,
+            },
+            accounts,
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "market B principal withdrawal must reject {label}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+        assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+        assert_eq!(env.svm.get_account(&ledger_a).unwrap(), ledger_a_before);
+        assert_eq!(env.svm.get_account(&bad_dest).unwrap(), bad_dest_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+        assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    }
+
     let ledger_b = env.backing_domain_ledger_account();
     env.svm.expire_blockhash();
     let sync_b = send_tx(
@@ -1719,6 +1358,42 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
     assert_eq!(ledger_b_state.last_observed_bucket_earnings_atoms, 30);
 
     let good_dest = env.token_account(admin.pubkey(), 0);
+    let market_b_ready = env.svm.get_account(&market_b).unwrap();
+    let ledger_b_ready = env.svm.get_account(&ledger_b).unwrap();
+    let good_dest_before = env.svm.get_account(&good_dest).unwrap();
+    env.svm.expire_blockhash();
+    let foreign_earnings_vault = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            market_id: market_b_market_id,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(ledger_b, false),
+            AccountMeta::new(good_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        foreign_earnings_vault.is_err(),
+        "market B earnings withdrawal must reject market A's canonical vault"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_ready);
+    assert_eq!(env.svm.get_account(&ledger_a).unwrap(), ledger_a_before);
+    assert_eq!(env.svm.get_account(&ledger_b).unwrap(), ledger_b_ready);
+    assert_eq!(env.svm.get_account(&good_dest).unwrap(), good_dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+
     env.svm.expire_blockhash();
     let withdraw_b = send_tx(
         &mut env.svm,
@@ -1757,6 +1432,41 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         state::read_backing_domain_ledger(&env.svm.get_account(&ledger_b).unwrap().data).unwrap();
     assert_eq!(ledger_b_after.total_earnings_withdrawn_atoms, 10);
     assert_eq!(ledger_b_after.last_observed_bucket_earnings_atoms, 20);
+
+    let principal_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let principal_withdraw = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            market_id: market_b_market_id,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(principal_dest, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        principal_withdraw.is_ok(),
+        "same-market backing principal withdrawal works: {principal_withdraw:?}"
+    );
+    assert_eq!(env.token_amount(principal_dest), 10);
+    let (_, final_group_b) =
+        state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
+    assert_eq!(
+        final_group_b.source_backing_buckets[1].fresh_unliened_backing_num,
+        90 * BOUND_SCALE
+    );
+    assert_eq!(final_group_b.vault, 110);
+    assert_eq!(env.token_amount(vault_b), 110);
 }
 
 #[test]
@@ -2080,6 +1790,42 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
     assert_eq!(ledger_b_state.last_observed_insurance_atoms, 100);
 
     let good_dest = env.token_account(admin.pubkey(), 0);
+    let market_b_ready = env.svm.get_account(&market_b).unwrap();
+    let ledger_b_ready = env.svm.get_account(&ledger_b).unwrap();
+    let good_dest_before = env.svm.get_account(&good_dest).unwrap();
+    env.svm.expire_blockhash();
+    let foreign_vault = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
+            asset_index: 0,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(good_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger_b, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        foreign_vault.is_err(),
+        "market B must reject market A's canonical vault on domain insurance withdrawal"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_ready);
+    assert_eq!(env.svm.get_account(&ledger_a).unwrap(), ledger_a_before);
+    assert_eq!(env.svm.get_account(&ledger_b).unwrap(), ledger_b_ready);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    assert_eq!(env.svm.get_account(&good_dest).unwrap(), good_dest_before);
+
     env.svm.expire_blockhash();
     let withdraw_b = send_tx(
         &mut env.svm,
@@ -2234,6 +1980,37 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
     let insurance_source = env.token_account(admin.pubkey(), 25);
     let insurance_source_before = env.svm.get_account(&insurance_source).unwrap();
     env.svm.expire_blockhash();
+    let insurance_vault_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance {
+            intent_id: 1,
+            market_id: 0,
+            amount: 25,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger_a, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        insurance_vault_reject.is_err(),
+        "market A TopUpInsurance must reject market B's canonical vault"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.svm.get_account(&insurance_source).unwrap(),
+        insurance_source_before,
+        "rejected foreign-vault insurance top-up must not pull source tokens"
+    );
+
+    env.svm.expire_blockhash();
     let insurance_reject = send_tx(
         &mut env.svm,
         env.program_id,
@@ -2266,6 +2043,38 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
 
     let domain_source = env.token_account(admin.pubkey(), 30);
     let domain_source_before = env.svm.get_account(&domain_source).unwrap();
+    env.svm.expire_blockhash();
+    let domain_vault_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 1,
+            market_id: 0,
+            domain: 0,
+            amount: 30,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger_a, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        domain_vault_reject.is_err(),
+        "market A TopUpInsuranceDomain must reject market B's canonical vault"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.svm.get_account(&domain_source).unwrap(),
+        domain_source_before,
+        "rejected foreign-vault domain top-up must not pull source tokens"
+    );
+
     env.svm.expire_blockhash();
     let domain_reject = send_tx(
         &mut env.svm,
@@ -2300,6 +2109,39 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
 
     let backing_source = env.token_account(admin.pubkey(), 40);
     let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+    env.svm.expire_blockhash();
+    let backing_vault_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            intent_id: 1,
+            market_id: 0,
+            domain: 1,
+            amount: 40,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger_a, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_vault_reject.is_err(),
+        "market A TopUpBackingBucket must reject market B's canonical vault"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.svm.get_account(&backing_source).unwrap(),
+        backing_source_before,
+        "rejected foreign-vault backing top-up must not pull source tokens"
+    );
+
     env.svm.expire_blockhash();
     let backing_reject = send_tx(
         &mut env.svm,
@@ -2577,7 +2419,9 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
     assert_eq!(group_b.vault, 100);
 
     let dest = env.token_account(admin.pubkey(), 0);
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
     let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
     let vault_b_before = env.svm.get_account(&vault_b).unwrap();
     let ledger_a_before = env.svm.get_account(&ledger_a).unwrap();
     let dest_before = env.svm.get_account(&dest).unwrap();
@@ -2624,6 +2468,36 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
     );
 
     let ledger_b = env.insurance_ledger_account();
+    let ledger_b_before = env.svm.get_account(&ledger_b).unwrap();
+    env.svm.expire_blockhash();
+    let foreign_vault = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger_b, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        foreign_vault.is_err(),
+        "market B terminal WithdrawInsurance must reject market A's canonical vault"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    assert_eq!(env.svm.get_account(&ledger_a).unwrap(), ledger_a_before);
+    assert_eq!(env.svm.get_account(&ledger_b).unwrap(), ledger_b_before);
+    assert_eq!(env.svm.get_account(&dest).unwrap(), dest_before);
+
     env.svm.expire_blockhash();
     let ok = send_tx(
         &mut env.svm,
@@ -3221,143 +3095,97 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
     env.deposit(&attacker, pa, 1_000_000);
 
     // --- Stand up an independent market B in the SAME svm, reusing the same mint. ---
-    let market_b = Pubkey::new_unique();
-    let vault_authority_b =
-        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
-    let vault_b = canonical_vault_ata(vault_authority_b, env.mint);
-    env.svm
-        .set_account(
-            market_b,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
-                owner: env.program_id,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.svm
-        .set_account(
-            vault_b,
-            Account {
-                lamports: 1_000_000_000,
-                data: make_token_data(env.mint, vault_authority_b, 0),
-                owner: spl_token::ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let p = V16CuMarketParams::default();
-    env.svm.expire_blockhash();
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::InitMarket {
-            max_portfolio_assets: p.max_portfolio_assets,
-            h_min: p.h_min,
-            h_max: p.h_max,
-            initial_price: p.initial_price,
-            min_nonzero_mm_req: p.min_nonzero_mm_req,
-            min_nonzero_im_req: p.min_nonzero_im_req,
-            maintenance_margin_bps: p.maintenance_margin_bps,
-            initial_margin_bps: p.initial_margin_bps,
-            max_trading_fee_bps: p.max_trading_fee_bps,
-            trade_fee_base_bps: p.trade_fee_base_bps,
-            liquidation_fee_bps: p.liquidation_fee_bps,
-            liquidation_fee_cap: p.liquidation_fee_cap,
-            min_liquidation_abs: p.min_liquidation_abs,
-            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
-            max_accrual_dt_slots: p.max_accrual_dt_slots,
-            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
-            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
-            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
-            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
-            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
-            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
-        },
-        vec![
-            AccountMeta::new(env.admin.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new_readonly(env.mint, false),
-        ],
-        &[&env.admin],
-    )
-    .expect("init market B");
+    let params = V16CuMarketParams::default();
+    let (market_b, vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, params);
 
     // Market B: a legit victim funds B's vault (1_000_000) via a portfolio bound to B.
     let victim = Keypair::new();
-    let pb = Pubkey::new_unique();
-    env.ensure_signer_account(victim.pubkey());
-    env.svm
-        .set_account(
-            pb,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![0u8; env.portfolio_account_len],
-                owner: env.program_id,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.svm.expire_blockhash();
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::InitPortfolio,
-        vec![
-            AccountMeta::new(victim.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new(pb, false),
-        ],
-        &[&victim],
-    )
-    .expect("init pb on market B");
-    let pb_deposit_portfolio_id = env.portfolio_id(pb);
-    let src_b = Pubkey::new_unique();
-    env.svm
-        .set_account(
-            src_b,
-            Account {
-                lamports: 1_000_000_000,
-                data: make_token_data(env.mint, victim.pubkey(), 1_000_000),
-                owner: spl_token::ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.svm.expire_blockhash();
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::Deposit {
-            portfolio_id: pb_deposit_portfolio_id,
-            expected_sequence: 0,
-            amount: 1_000_000,
-        },
-        vec![
-            AccountMeta::new(victim.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new(pb, false),
-            AccountMeta::new(src_b, false),
-            AccountMeta::new(vault_b, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&victim],
-    )
-    .expect("victim deposits into market B");
+    let pb = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &victim,
+        params.max_portfolio_assets as usize,
+    );
+    deposit_to_market(&mut env, market_b, vault_b, &victim, pb, 1_000_000);
     assert_eq!(
         env.token_amount(vault_b),
         1_000_000,
         "market B vault funded"
     );
+
+    let attack_source = env.token_account(attacker.pubkey(), 11);
+    let pa_portfolio_id = env.portfolio_id(pa);
+    let pa_sequence = env.portfolio_matcher_sequence(pa);
+    for (label, market, vault) in [
+        ("foreign portfolio", market_b, vault_b),
+        ("foreign vault", env.market, vault_b),
+    ] {
+        let market_a_before = env.svm.get_account(&env.market).unwrap();
+        let market_b_before = env.svm.get_account(&market_b).unwrap();
+        let pa_before = env.svm.get_account(&pa).unwrap();
+        let pb_before = env.svm.get_account(&pb).unwrap();
+        let source_before = env.svm.get_account(&attack_source).unwrap();
+        let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+        let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::Deposit {
+                portfolio_id: pa_portfolio_id,
+                expected_sequence: pa_sequence,
+                amount: 11,
+            },
+            vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(market, false),
+                AccountMeta::new(pa, false),
+                AccountMeta::new(attack_source, false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&attacker],
+        );
+        assert!(rejected.is_err(), "Deposit must reject {label}");
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+        assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+        assert_eq!(env.svm.get_account(&pa).unwrap(), pa_before);
+        assert_eq!(env.svm.get_account(&pb).unwrap(), pb_before);
+        assert_eq!(env.svm.get_account(&attack_source).unwrap(), source_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+        assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    }
+
+    env.svm.expire_blockhash();
+    let deposit_control = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::Deposit {
+            portfolio_id: pa_portfolio_id,
+            expected_sequence: pa_sequence,
+            amount: 11,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(pa, false),
+            AccountMeta::new(attack_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&attacker],
+    )
+    .expect("same-market Deposit remains live");
+    assert_cu_within(
+        "Deposit same-market control",
+        deposit_control,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(attack_source), 0);
+    assert_eq!(env.portfolio_state(pa).capital.get(), 1_000_011);
 
     // --- ATTACK: withdraw from market B's vault using the market-A-bound portfolio P_a. ---
     let dest = Pubkey::new_unique();
@@ -3409,10 +3237,10 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
     // Make P_a otherwise closeable on its real market, then try to close it through market B.
     // If the market provenance check were missing, this could zero the market-A portfolio while
     // sweeping its rent to market B and leaving market A's materialized count stale.
-    let (a_dest, _) = env.withdraw_with_cu(&attacker, pa, 1_000_000);
+    let (a_dest, _) = env.withdraw_with_cu(&attacker, pa, 1_000_011);
     assert_eq!(
         env.token_amount(a_dest),
-        1_000_000,
+        1_000_011,
         "market-A funds recovered before close probe"
     );
     assert_eq!(
@@ -3474,6 +3302,7 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
 #[test]
 fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
     let mut env = V16CuEnv::new();
+    let market_a = env.market;
     let attacker = Keypair::new();
     let pa = env.create_portfolio(&attacker);
     env.deposit(&attacker, pa, 1_000_000);
@@ -3505,46 +3334,35 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         "counterparty is bound to market B"
     );
 
-    let hostile = Pubkey::new_unique();
+    let matcher_program = Pubkey::new_unique();
     env.svm.add_program(
-        hostile,
-        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+        matcher_program,
+        &std::fs::read(auth_matcher_program_path()).expect("read authenticated matcher SBF"),
     );
-    let ctx = Pubkey::new_unique();
-    let delegate = matcher_delegate_key(
-        &env.program_id,
-        &market_b,
-        &pb,
-        &victim.pubkey(),
-        &hostile,
-        &ctx,
+    let (ctx_a, delegate_a) = init_authenticated_matcher_context_on_market(
+        &mut env,
+        matcher_program,
+        market_a,
+        &attacker,
+        pa,
     );
-    env.svm
-        .set_account(
-            delegate,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![],
-                owner: Pubkey::default(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
-    ctx_data[0] = 9; // hostile fixture's faithful mode: returns a valid oracle-priced fill.
-    env.svm
-        .set_account(
-            ctx,
-            Account {
-                lamports: 1_000_000_000,
-                data: ctx_data,
-                owner: hostile,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
+    let (ctx, delegate) = init_authenticated_matcher_context_on_market(
+        &mut env,
+        matcher_program,
+        market_b,
+        &victim,
+        pb,
+    );
+    set_matcher_config_on_market(
+        &mut env,
+        market_b,
+        &victim,
+        pb,
+        matcher_program,
+        ctx,
+        delegate,
+    )
+    .expect("bind the market-B counterparty before cross-market probes");
 
     {
         let pa_portfolio_id = env.portfolio_id(pa);
@@ -3666,7 +3484,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 AccountMeta::new(market_b, false),
                 AccountMeta::new(pa, false),
                 AccountMeta::new(pb, false),
-                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new_readonly(matcher_program, false),
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
             ],
@@ -3692,7 +3510,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 AccountMeta::new(market_b, false),
                 AccountMeta::new(pa, false),
                 AccountMeta::new(pb, false),
-                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new_readonly(matcher_program, false),
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
             ],
@@ -3771,71 +3589,78 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         1_000_000,
     );
     deposit_to_market(&mut env, market_b, vault_b, &cpi_lp, p_cpi_lp, 1_000_000);
-    let ctx_ok = Pubkey::new_unique();
-    let delegate_ok = matcher_delegate_key(
-        &env.program_id,
-        &market_b,
-        &p_cpi_lp,
-        &cpi_lp.pubkey(),
-        &hostile,
-        &ctx_ok,
+    let (ctx_ok, delegate_ok) = init_authenticated_matcher_context_on_market(
+        &mut env,
+        matcher_program,
+        market_b,
+        &cpi_lp,
+        p_cpi_lp,
     );
-    env.svm
-        .set_account(
-            delegate_ok,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![],
-                owner: Pubkey::default(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let mut ctx_ok_data = vec![0u8; MATCHER_CONTEXT_LEN];
-    ctx_ok_data[0] = 9;
-    env.svm
-        .set_account(
-            ctx_ok,
-            Account {
-                lamports: 1_000_000_000,
-                data: ctx_ok_data,
-                owner: hostile,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let cpi_lp_portfolio_id = env.portfolio_id(p_cpi_lp);
-    let cpi_lp_matcher_sequence = env.portfolio_matcher_sequence(p_cpi_lp);
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::SetMatcherConfig {
-            portfolio_id: cpi_lp_portfolio_id,
-            expected_sequence: cpi_lp_matcher_sequence,
-            enabled: 1,
-            trade_fee_cap_bps: 10_000,
-        },
-        vec![
-            AccountMeta::new(cpi_lp.pubkey(), true),
-            AccountMeta::new_readonly(market_b, false),
-            AccountMeta::new(p_cpi_lp, false),
-            AccountMeta::new_readonly(hostile, false),
-            AccountMeta::new_readonly(ctx_ok, false),
-            AccountMeta::new_readonly(delegate_ok, false),
-        ],
-        &[&cpi_lp],
+    set_matcher_config_on_market(
+        &mut env,
+        market_b,
+        &cpi_lp,
+        p_cpi_lp,
+        matcher_program,
+        ctx_ok,
+        delegate_ok,
     )
     .expect("set market-B LP matcher config");
-    env.svm.expire_blockhash();
     let cpi_taker_portfolio_id = env.portfolio_id(p_cpi_taker);
     let cpi_lp_account_portfolio_id = env.portfolio_id(p_cpi_lp);
-    let batch_cpi_ok = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
+    let mut reject_foreign_matcher_tuple = |label: &str, instruction: ProgInstruction| {
+        let market_a_before = env.svm.get_account(&market_a).unwrap();
+        let market_b_before = env.svm.get_account(&market_b).unwrap();
+        let taker_before = env.svm.get_account(&p_cpi_taker).unwrap();
+        let lp_before = env.svm.get_account(&p_cpi_lp).unwrap();
+        let ctx_a_before = env.svm.get_account(&ctx_a).unwrap();
+        let ctx_b_before = env.svm.get_account(&ctx_ok).unwrap();
+        let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            instruction,
+            vec![
+                AccountMeta::new(cpi_taker.pubkey(), true),
+                AccountMeta::new(market_b, false),
+                AccountMeta::new(p_cpi_taker, false),
+                AccountMeta::new(p_cpi_lp, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx_a, false),
+                AccountMeta::new_readonly(delegate_a, false),
+            ],
+            &[&cpi_taker],
+        );
+        assert!(
+            rejected.is_err(),
+            "{label} must reject market A's matcher tuple under market B"
+        );
+        assert_eq!(env.svm.get_account(&market_a).unwrap(), market_a_before);
+        assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+        assert_eq!(env.svm.get_account(&p_cpi_taker).unwrap(), taker_before);
+        assert_eq!(env.svm.get_account(&p_cpi_lp).unwrap(), lp_before);
+        assert_eq!(env.svm.get_account(&ctx_a).unwrap(), ctx_a_before);
+        assert_eq!(env.svm.get_account(&ctx_ok).unwrap(), ctx_b_before);
+        assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    };
+    reject_foreign_matcher_tuple(
+        "TradeCpi",
+        ProgInstruction::TradeCpi {
+            account_a_portfolio_id: cpi_taker_portfolio_id,
+            account_a_position_epoch: 0,
+            account_b_portfolio_id: cpi_lp_account_portfolio_id,
+            account_b_position_epoch: 0,
+            asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
+            size_q: POS_SCALE as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+    );
+    reject_foreign_matcher_tuple(
+        "BatchTradeCpi",
         ProgInstruction::BatchTradeCpi {
             account_a_portfolio_id: cpi_taker_portfolio_id,
             account_a_position_epoch: 0,
@@ -3849,12 +3674,66 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 limit_price: 0,
             }],
         },
+    );
+
+    env.svm.expire_blockhash();
+    let single_cpi_ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TradeCpi {
+            account_a_portfolio_id: cpi_taker_portfolio_id,
+            account_a_position_epoch: 0,
+            account_b_portfolio_id: cpi_lp_account_portfolio_id,
+            account_b_position_epoch: 0,
+            asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
+            size_q: POS_SCALE as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        },
         vec![
             AccountMeta::new(cpi_taker.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new(p_cpi_taker, false),
             AccountMeta::new(p_cpi_lp, false),
-            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx_ok, false),
+            AccountMeta::new_readonly(delegate_ok, false),
+        ],
+        &[&cpi_taker],
+    );
+    assert!(
+        single_cpi_ok.is_ok(),
+        "same-market TradeCpi control must execute: {single_cpi_ok:?}"
+    );
+
+    let cpi_taker_position_epoch = env.portfolio_position_epoch(p_cpi_taker);
+    let cpi_lp_position_epoch = env.portfolio_position_epoch(p_cpi_lp);
+    env.svm.expire_blockhash();
+    let batch_cpi_ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::BatchTradeCpi {
+            account_a_portfolio_id: cpi_taker_portfolio_id,
+            account_a_position_epoch: cpi_taker_position_epoch,
+            account_b_portfolio_id: cpi_lp_account_portfolio_id,
+            account_b_position_epoch: cpi_lp_position_epoch,
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(cpi_taker.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(p_cpi_taker, false),
+            AccountMeta::new(p_cpi_lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
             AccountMeta::new(ctx_ok, false),
             AccountMeta::new_readonly(delegate_ok, false),
         ],
@@ -4080,6 +3959,43 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
         env.svm.get_account(&vault_b).unwrap(),
         vault_b_before,
         "market-B vault remains intact"
+    );
+
+    let vault_probe_dest = env.token_account_for_mint(env.mint, victim.pubkey(), 0);
+    let vault_probe_dest_before = env.svm.get_account(&vault_probe_dest).unwrap();
+    env.svm.expire_blockhash();
+    let foreign_vault = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(victim.pubkey(), false),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(pb, false),
+            AccountMeta::new(vault_probe_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        foreign_vault.is_err(),
+        "market-B CloseResolved must reject market A's canonical vault"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(env.svm.get_account(&pa).unwrap(), pa_before);
+    assert_eq!(env.svm.get_account(&pb).unwrap(), pb_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    assert_eq!(
+        env.svm.get_account(&vault_probe_dest).unwrap(),
+        vault_probe_dest_before,
+        "foreign-vault rejection must not pay or rewrite the victim destination"
     );
 
     let victim_dest = Pubkey::new_unique();
@@ -4411,60 +4327,9 @@ fn v16_attack_swap_secondary_rejects_foreign_market_vault() {
         )
         .unwrap();
 
-    let market_b = Pubkey::new_unique();
-    let vault_authority_b =
-        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
+    let (market_b, vault_authority_b, primary_vault_b) =
+        init_independent_market_same_mint(&mut env, V16CuMarketParams::default());
     let secondary_vault_b = canonical_vault_ata(vault_authority_b, secondary_mint);
-    env.svm
-        .set_account(
-            market_b,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
-                owner: env.program_id,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let p = V16CuMarketParams::default();
-    env.svm.expire_blockhash();
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::InitMarket {
-            max_portfolio_assets: p.max_portfolio_assets,
-            h_min: p.h_min,
-            h_max: p.h_max,
-            initial_price: p.initial_price,
-            min_nonzero_mm_req: p.min_nonzero_mm_req,
-            min_nonzero_im_req: p.min_nonzero_im_req,
-            maintenance_margin_bps: p.maintenance_margin_bps,
-            initial_margin_bps: p.initial_margin_bps,
-            max_trading_fee_bps: p.max_trading_fee_bps,
-            trade_fee_base_bps: p.trade_fee_base_bps,
-            liquidation_fee_bps: p.liquidation_fee_bps,
-            liquidation_fee_cap: p.liquidation_fee_cap,
-            min_liquidation_abs: p.min_liquidation_abs,
-            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
-            max_accrual_dt_slots: p.max_accrual_dt_slots,
-            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
-            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
-            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
-            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
-            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
-            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
-        },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new_readonly(env.mint, false),
-        ],
-        &[&admin],
-    )
-    .expect("init market B");
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
@@ -4499,65 +4364,71 @@ fn v16_attack_swap_secondary_rejects_foreign_market_vault() {
     let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
     let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
     let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let foreign_primary_vault_before = env.svm.get_account(&primary_vault_b).unwrap();
     let secondary_vault_a_before = env.svm.get_account(&secondary_vault_a).unwrap();
     let secondary_vault_b_before = env.svm.get_account(&secondary_vault_b).unwrap();
     let source_before = env.svm.get_account(&primary_source).unwrap();
     let dest_before = env.svm.get_account(&secondary_dest).unwrap();
 
-    let swap_with_secondary_vault =
-        |env: &mut V16CuEnv, secondary_vault: Pubkey| -> Result<u64, String> {
-            env.svm.expire_blockhash();
-            send_tx(
-                &mut env.svm,
-                env.program_id,
-                &env.payer,
-                ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
-                vec![
-                    AccountMeta::new(admin.pubkey(), true),
-                    AccountMeta::new_readonly(env.market, false),
-                    AccountMeta::new(primary_source, false),
-                    AccountMeta::new(env.vault, false),
-                    AccountMeta::new(secondary_dest, false),
-                    AccountMeta::new(secondary_vault, false),
-                    AccountMeta::new_readonly(env.vault_authority, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ],
-                &[&admin],
-            )
-        };
+    let swap_with_vaults = |env: &mut V16CuEnv,
+                            primary_vault: Pubkey,
+                            secondary_vault: Pubkey|
+     -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(primary_source, false),
+                AccountMeta::new(primary_vault, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
 
-    let rejected = swap_with_secondary_vault(&mut env, secondary_vault_b);
-    assert!(
-        rejected.is_err(),
-        "SwapSecondaryForPrimary must reject a reserve owned by a foreign market vault PDA"
-    );
-    assert_eq!(
-        env.svm.get_account(&primary_source).unwrap(),
-        source_before,
-        "rejected foreign-vault swap must not pull primary collateral"
-    );
-    assert_eq!(
-        env.svm.get_account(&secondary_dest).unwrap(),
-        dest_before,
-        "rejected foreign-vault swap must not pay secondary collateral"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.vault).unwrap(),
-        primary_vault_before,
-        "rejected foreign-vault swap must not credit the current primary vault"
-    );
-    assert_eq!(
-        env.svm.get_account(&secondary_vault_a).unwrap(),
-        secondary_vault_a_before,
-        "current market secondary reserve is untouched"
-    );
-    assert_eq!(
-        env.svm.get_account(&secondary_vault_b).unwrap(),
-        secondary_vault_b_before,
-        "foreign market secondary reserve is untouched"
-    );
+    for (label, primary_vault, secondary_vault) in [
+        ("foreign secondary reserve", env.vault, secondary_vault_b),
+        (
+            "foreign primary reserve",
+            primary_vault_b,
+            secondary_vault_a,
+        ),
+    ] {
+        let rejected = swap_with_vaults(&mut env, primary_vault, secondary_vault);
+        assert!(
+            rejected.is_err(),
+            "SwapSecondaryForPrimary must reject {label}"
+        );
+        assert_eq!(env.svm.get_account(&primary_source).unwrap(), source_before);
+        assert_eq!(env.svm.get_account(&secondary_dest).unwrap(), dest_before);
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            primary_vault_before
+        );
+        assert_eq!(
+            env.svm.get_account(&primary_vault_b).unwrap(),
+            foreign_primary_vault_before
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault_a).unwrap(),
+            secondary_vault_a_before
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault_b).unwrap(),
+            secondary_vault_b_before
+        );
+    }
 
-    let ok = swap_with_secondary_vault(&mut env, secondary_vault_a);
+    let primary_vault_a = env.vault;
+    let ok = swap_with_vaults(&mut env, primary_vault_a, secondary_vault_a);
     assert!(
         ok.is_ok(),
         "same-market secondary reserve swap succeeds: {ok:?}"
@@ -4569,12 +4440,11 @@ fn v16_attack_swap_secondary_rejects_foreign_market_vault() {
     assert_eq!(env.token_amount(secondary_vault_b), 70);
 }
 
-// full-interface sweep (cron32): CloseSlab's optional secondary vault must be bound to the current
-// market's vault PDA, not merely be a valid token account for the configured secondary mint. A foreign
-// market's canonical secondary reserve must reject before primary dust is swept or either vault/market
-// is closed.
+// full-interface sweep (cron32): CloseSlab must bind both primary and optional secondary reserves to
+// the current market's vault PDA. Either canonical reserve from another market must reject before
+// primary dust is swept or either vault/market is closed.
 #[test]
-fn v16_attack_close_slab_rejects_foreign_secondary_vault() {
+fn v16_attack_close_slab_rejects_foreign_market_vaults() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
     let secondary_mint = env.create_mint();
@@ -4593,60 +4463,9 @@ fn v16_attack_close_slab_rejects_foreign_secondary_vault() {
         )
         .unwrap();
 
-    let market_b = Pubkey::new_unique();
-    let vault_authority_b =
-        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
+    let (market_b, vault_authority_b, primary_vault_b) =
+        init_independent_market_same_mint(&mut env, V16CuMarketParams::default());
     let secondary_vault_b = canonical_vault_ata(vault_authority_b, secondary_mint);
-    env.svm
-        .set_account(
-            market_b,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
-                owner: env.program_id,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let p = V16CuMarketParams::default();
-    env.svm.expire_blockhash();
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::InitMarket {
-            max_portfolio_assets: p.max_portfolio_assets,
-            h_min: p.h_min,
-            h_max: p.h_max,
-            initial_price: p.initial_price,
-            min_nonzero_mm_req: p.min_nonzero_mm_req,
-            min_nonzero_im_req: p.min_nonzero_im_req,
-            maintenance_margin_bps: p.maintenance_margin_bps,
-            initial_margin_bps: p.initial_margin_bps,
-            max_trading_fee_bps: p.max_trading_fee_bps,
-            trade_fee_base_bps: p.trade_fee_base_bps,
-            liquidation_fee_bps: p.liquidation_fee_bps,
-            liquidation_fee_cap: p.liquidation_fee_cap,
-            min_liquidation_abs: p.min_liquidation_abs,
-            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
-            max_accrual_dt_slots: p.max_accrual_dt_slots,
-            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
-            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
-            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
-            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
-            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
-            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
-        },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(market_b, false),
-            AccountMeta::new_readonly(env.mint, false),
-        ],
-        &[&admin],
-    )
-    .expect("init market B");
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
@@ -4685,72 +4504,73 @@ fn v16_attack_close_slab_rejects_foreign_secondary_vault() {
     let market_a_before = env.svm.get_account(&env.market).unwrap();
     let market_b_before = env.svm.get_account(&market_b).unwrap();
     let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let primary_vault_b_before = env.svm.get_account(&primary_vault_b).unwrap();
     let secondary_vault_a_before = env.svm.get_account(&secondary_vault_a).unwrap();
     let secondary_vault_b_before = env.svm.get_account(&secondary_vault_b).unwrap();
     let primary_dest_before = env.svm.get_account(&primary_dest).unwrap();
     let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
 
-    let close_with_secondary_vault =
-        |env: &mut V16CuEnv, secondary_vault: Pubkey| -> Result<u64, String> {
-            env.svm.expire_blockhash();
-            env.send(
-                ProgInstruction::CloseSlab,
-                vec![
-                    AccountMeta::new(admin.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(env.vault, false),
-                    AccountMeta::new_readonly(env.vault_authority, false),
-                    AccountMeta::new(primary_dest, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                    AccountMeta::new(secondary_vault, false),
-                    AccountMeta::new(secondary_dest, false),
-                ],
-                &[&admin],
-            )
-        };
+    let close_with_vaults = |env: &mut V16CuEnv,
+                             primary_vault: Pubkey,
+                             secondary_vault: Pubkey|
+     -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(primary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(primary_dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new(secondary_dest, false),
+            ],
+            &[&admin],
+        )
+    };
 
-    let rejected = close_with_secondary_vault(&mut env, secondary_vault_b);
-    assert!(
-        rejected.is_err(),
-        "CloseSlab must reject a secondary reserve owned by a foreign market vault PDA"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_a_before,
-        "rejected foreign-secondary close must not reclaim market A"
-    );
-    assert_eq!(
-        env.svm.get_account(&market_b).unwrap(),
-        market_b_before,
-        "rejected foreign-secondary close must not mutate market B"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.vault).unwrap(),
-        primary_vault_before,
-        "primary vault dust is not swept before secondary validation"
-    );
-    assert_eq!(
-        env.svm.get_account(&secondary_vault_a).unwrap(),
-        secondary_vault_a_before,
-        "current market secondary vault remains recoverable"
-    );
-    assert_eq!(
-        env.svm.get_account(&secondary_vault_b).unwrap(),
-        secondary_vault_b_before,
-        "foreign secondary vault is not drained or closed"
-    );
-    assert_eq!(
-        env.svm.get_account(&primary_dest).unwrap(),
-        primary_dest_before,
-        "primary destination receives nothing on rejected foreign-secondary close"
-    );
-    assert_eq!(
-        env.svm.get_account(&secondary_dest).unwrap(),
-        secondary_dest_before,
-        "secondary destination receives nothing on rejected foreign-secondary close"
-    );
+    for (label, primary_vault, secondary_vault) in [
+        (
+            "foreign primary reserve",
+            primary_vault_b,
+            secondary_vault_a,
+        ),
+        ("foreign secondary reserve", env.vault, secondary_vault_b),
+    ] {
+        let rejected = close_with_vaults(&mut env, primary_vault, secondary_vault);
+        assert!(rejected.is_err(), "CloseSlab must reject {label}");
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+        assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            primary_vault_before
+        );
+        assert_eq!(
+            env.svm.get_account(&primary_vault_b).unwrap(),
+            primary_vault_b_before
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault_a).unwrap(),
+            secondary_vault_a_before
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault_b).unwrap(),
+            secondary_vault_b_before
+        );
+        assert_eq!(
+            env.svm.get_account(&primary_dest).unwrap(),
+            primary_dest_before
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_dest).unwrap(),
+            secondary_dest_before
+        );
+    }
 
-    let ok = close_with_secondary_vault(&mut env, secondary_vault_a);
+    let primary_vault_a = env.vault;
+    let ok = close_with_vaults(&mut env, primary_vault_a, secondary_vault_a);
     assert!(
         ok.is_ok(),
         "same-market secondary reserve CloseSlab succeeds: {ok:?}"
