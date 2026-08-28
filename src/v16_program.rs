@@ -7583,10 +7583,10 @@ pub mod processor {
         }
         let mint = primary_collateral_mint(&cfg);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
-        verify_user_token_account(source_token, owner.key, &mint)?;
+        let source_balance = verify_user_token_account(source_token, owner.key, &mint)?;
         verify_vault_token_account(vault_token, &vault_authority, &mint)?;
         let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(source_token, amount_u64)?;
+        require_token_balance(source_balance, amount_u64)?;
 
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
         {
@@ -7655,12 +7655,13 @@ pub mod processor {
         }
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        verify_withdrawable_token_accounts(
+        let vault_balance = verify_withdrawable_token_accounts(
             dest_token,
             owner.key,
             vault_token,
             &vault_authority,
             &cfg,
+            false,
         )?;
         if amount == 0 {
             return Ok(());
@@ -7702,7 +7703,7 @@ pub mod processor {
             withdrawn_amount
         };
         let amount_u64 = amount_to_u64(withdrawn_amount)?;
-        require_token_balance(vault_token, amount_u64)?;
+        require_token_balance(vault_balance, amount_u64)?;
         let bump_arr = [bump];
         let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
         transfer_tokens_signed(
@@ -9746,10 +9747,10 @@ pub mod processor {
         expect_live_authority(&insurance_authority, signer.key)?;
         let mint = primary_collateral_mint(&cfg_pre);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
-        verify_user_token_account(source_token, signer.key, &mint)?;
+        let source_balance = verify_user_token_account(source_token, signer.key, &mint)?;
         verify_vault_token_account(vault_token, &vault_authority, &mint)?;
         let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(source_token, amount_u64)?;
+        require_token_balance(source_balance, amount_u64)?;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
@@ -10065,15 +10066,16 @@ pub mod processor {
         }
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        verify_withdrawable_token_accounts(
+        let vault_balance = verify_withdrawable_token_accounts(
             dest_token,
             authority.key,
             vault_token,
             &vault_authority,
             &cfg,
+            false,
         )?;
         let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(vault_token, amount_u64)?;
+        require_token_balance(vault_balance, amount_u64)?;
         Ok((bump, amount_u64))
     }
 
@@ -10131,10 +10133,10 @@ pub mod processor {
         expect_live_authority(&authorities.backing_bucket_authority, signer.key)?;
         let mint = primary_collateral_mint(&cfg_pre);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
-        verify_user_token_account(source_token, signer.key, &mint)?;
+        let source_balance = verify_user_token_account(source_token, signer.key, &mint)?;
         verify_vault_token_account(vault_token, &vault_authority, &mint)?;
         let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(source_token, amount_u64)?;
+        require_token_balance(source_balance, amount_u64)?;
         if amount != 0 {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
@@ -10583,14 +10585,15 @@ pub mod processor {
             }
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
-            verify_withdrawable_token_accounts(
+            let vault_balance = verify_withdrawable_token_accounts(
                 dest_token,
                 operator.key,
                 vault_token,
                 &vault_authority,
                 &cfg,
+                false,
             )?;
-            require_token_balance(vault_token, amount_u64)?;
+            require_token_balance(vault_balance, amount_u64)?;
         }
         let (_, bump) = derive_vault_authority(program_id, market_ai.key);
         {
@@ -10748,12 +10751,11 @@ pub mod processor {
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
         let primary_mint = primary_collateral_mint(&cfg_pre);
-        verify_vault_token_account(vault_token, &vault_authority, &primary_mint)?;
-        let vault_account = unpack_token_account(vault_token)?;
+        let vault_balance =
+            verify_vault_token_account(vault_token, &vault_authority, &primary_mint)?;
         verify_user_token_account(dest_token, admin_dest.key, &primary_mint)?;
         let retired_u64 = amount_to_u64(retired_unbudgeted_insurance)?;
-        let primary_sweep_amount = vault_account
-            .amount
+        let primary_sweep_amount = vault_balance
             .checked_sub(retired_u64)
             .ok_or(PercolatorError::InvalidTokenAccount)?;
         let bump_arr = [bump];
@@ -10769,13 +10771,16 @@ pub mod processor {
                 return Err(PercolatorError::InvalidVaultAccount.into());
             }
             let secondary_mint = secondary_collateral_mint(&cfg_pre)?;
-            verify_vault_token_account(secondary_vault_token, &vault_authority, &secondary_mint)?;
-            let secondary_vault_account = unpack_token_account(secondary_vault_token)?;
+            let secondary_vault_balance = verify_vault_token_account(
+                secondary_vault_token,
+                &vault_authority,
+                &secondary_mint,
+            )?;
             verify_user_token_account(secondary_dest_token, admin_dest.key, &secondary_mint)?;
             Some((
                 secondary_vault_token,
                 secondary_dest_token,
-                secondary_vault_account.amount,
+                secondary_vault_balance,
             ))
         } else {
             None
@@ -10987,10 +10992,10 @@ pub mod processor {
                 state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?.0;
             let mint = primary_collateral_mint(&cfg_pre);
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
-            verify_user_token_account(source_token, owner.key, &mint)?;
+            let source_balance = verify_user_token_account(source_token, owner.key, &mint)?;
             verify_vault_token_account(vault_token, &vault_authority, &mint)?;
             let amount_u64 = amount_to_u64(optional_deposit)?;
-            require_token_balance(source_token, amount_u64)?;
+            require_token_balance(source_balance, amount_u64)?;
             Some((amount_u64, source_token, vault_token, token_program))
         } else {
             None
@@ -11703,12 +11708,14 @@ pub mod processor {
         let secondary_mint = secondary_collateral_mint(&cfg)?;
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        verify_user_token_account(primary_source_token, authority.key, &primary_mint)?;
+        let primary_source_balance =
+            verify_user_token_account(primary_source_token, authority.key, &primary_mint)?;
         verify_vault_token_account(primary_vault_token, &vault_authority, &primary_mint)?;
         verify_user_token_account(secondary_dest_token, authority.key, &secondary_mint)?;
-        verify_vault_token_account(secondary_vault_token, &vault_authority, &secondary_mint)?;
-        require_token_balance(primary_source_token, amount_u64)?;
-        require_token_balance(secondary_vault_token, amount_u64)?;
+        let secondary_vault_balance =
+            verify_vault_token_account(secondary_vault_token, &vault_authority, &secondary_mint)?;
+        require_token_balance(primary_source_balance, amount_u64)?;
+        require_token_balance(secondary_vault_balance, amount_u64)?;
 
         transfer_tokens(
             token_program,
@@ -11945,10 +11952,10 @@ pub mod processor {
                 verify_token_program(token_program)?;
                 let mint = primary_collateral_mint(&cfg_pre);
                 let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
-                verify_user_token_account(source_token, authority.key, &mint)?;
+                let source_balance = verify_user_token_account(source_token, authority.key, &mint)?;
                 verify_vault_token_account(vault_token, &vault_authority, &mint)?;
                 let amount_u64 = amount_to_u64(init_fee)?;
-                require_token_balance(source_token, amount_u64)?;
+                require_token_balance(source_balance, amount_u64)?;
                 Some((source_token, vault_token, token_program, amount_u64))
             };
             if asset_index >= capacity_pre {
@@ -13153,16 +13160,16 @@ pub mod processor {
             verify_token_program(token_program)?;
             let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
-            verify_withdrawable_token_accounts(
+            let vault_balance = verify_withdrawable_token_accounts(
                 dest_token,
                 owner.key,
                 vault_token,
                 &vault_authority,
                 &cfg_after,
+                true,
             )?;
-            verify_permissionless_payout_dest_token_account(dest_token)?;
             let payout_u64 = amount_to_u64(payout)?;
-            require_token_balance(vault_token, payout_u64)?;
+            require_token_balance(vault_balance, payout_u64)?;
             let bump_arr = [bump];
             let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
             transfer_tokens_signed(
@@ -13220,16 +13227,16 @@ pub mod processor {
             verify_token_program(token_program)?;
             let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
-            verify_withdrawable_token_accounts(
+            let vault_balance = verify_withdrawable_token_accounts(
                 dest_token,
                 owner.key,
                 vault_token,
                 &vault_authority,
                 &cfg,
+                true,
             )?;
-            verify_permissionless_payout_dest_token_account(dest_token)?;
             let payout_u64 = amount_to_u64(payout)?;
-            require_token_balance(vault_token, payout_u64)?;
+            require_token_balance(vault_balance, payout_u64)?;
             let bump_arr = [bump];
             let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
             transfer_tokens_signed(
@@ -15528,7 +15535,7 @@ pub mod processor {
         token_ai: &AccountInfo,
         expected_owner: &Pubkey,
         expected_mint: &Pubkey,
-    ) -> Result<(), ProgramError> {
+    ) -> Result<u64, ProgramError> {
         let token = unpack_token_account(token_ai)?;
         if token.mint != *expected_mint {
             return Err(PercolatorError::InvalidMint.into());
@@ -15538,7 +15545,7 @@ pub mod processor {
         {
             return Err(PercolatorError::InvalidTokenAccount.into());
         }
-        Ok(())
+        Ok(token.amount)
     }
 
     fn primary_collateral_mint(cfg: &WrapperConfigV16) -> Pubkey {
@@ -15564,7 +15571,8 @@ pub mod processor {
         vault_token_ai: &AccountInfo,
         expected_vault_owner: &Pubkey,
         cfg: &WrapperConfigV16,
-    ) -> Result<(), ProgramError> {
+        require_unencumbered_dest: bool,
+    ) -> Result<u64, ProgramError> {
         let dest = unpack_token_account(dest_token_ai)?;
         let vault = unpack_token_account(vault_token_ai)?;
         if dest.mint != vault.mint || !is_withdrawable_collateral_mint(cfg, &dest.mint) {
@@ -15586,24 +15594,18 @@ pub mod processor {
         {
             return Err(PercolatorError::InvalidVaultAccount.into());
         }
-        Ok(())
-    }
-
-    fn verify_permissionless_payout_dest_token_account(
-        dest_token_ai: &AccountInfo,
-    ) -> Result<(), ProgramError> {
-        let dest = unpack_token_account(dest_token_ai)?;
-        if dest.delegate.is_some() || dest.close_authority.is_some() {
+        if require_unencumbered_dest && (dest.delegate.is_some() || dest.close_authority.is_some())
+        {
             return Err(PercolatorError::InvalidTokenAccount.into());
         }
-        Ok(())
+        Ok(vault.amount)
     }
 
     fn verify_vault_token_account(
         token_ai: &AccountInfo,
         expected_owner: &Pubkey,
         expected_mint: &Pubkey,
-    ) -> Result<(), ProgramError> {
+    ) -> Result<u64, ProgramError> {
         let token = unpack_token_account(token_ai)?;
         if token.mint != *expected_mint {
             return Err(PercolatorError::InvalidMint.into());
@@ -15617,7 +15619,7 @@ pub mod processor {
         {
             return Err(PercolatorError::InvalidVaultAccount.into());
         }
-        Ok(())
+        Ok(token.amount)
     }
 
     fn require_empty_vault_token_account(
@@ -15625,17 +15627,14 @@ pub mod processor {
         expected_owner: &Pubkey,
         expected_mint: &Pubkey,
     ) -> Result<(), ProgramError> {
-        verify_vault_token_account(token_ai, expected_owner, expected_mint)?;
-        let token = unpack_token_account(token_ai)?;
-        if token.amount != 0 {
+        if verify_vault_token_account(token_ai, expected_owner, expected_mint)? != 0 {
             return Err(PercolatorError::EngineLockActive.into());
         }
         Ok(())
     }
 
-    fn require_token_balance(token_ai: &AccountInfo, amount: u64) -> Result<(), ProgramError> {
-        let token = unpack_token_account(token_ai)?;
-        if token.amount < amount {
+    fn require_token_balance(balance: u64, amount: u64) -> ProgramResult {
+        if balance < amount {
             return Err(PercolatorError::InvalidTokenAccount.into());
         }
         Ok(())

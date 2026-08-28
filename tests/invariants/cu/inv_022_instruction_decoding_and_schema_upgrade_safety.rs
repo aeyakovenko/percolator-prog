@@ -510,6 +510,20 @@ fn v16_program_one_byte_decoder_roster_rejects_every_unknown_or_truncated_tag() 
     }
 
     let source = include_str!("../../../src/v16_program.rs");
+    assert_eq!(
+        source
+            .matches("processor::process_instruction(program_id, ")
+            .count(),
+        2,
+        "both deployed entrypoint adapters must delegate to the canonical processor",
+    );
+    assert_eq!(
+        source
+            .matches("match Instruction::decode(instruction_data)? {")
+            .count(),
+        1,
+        "the canonical processor must have exactly one instruction decoder boundary",
+    );
     for (tag, body) in [
         (0, "decode_init_market_body"),
         (6, "decode_trade_nocpi_body"),

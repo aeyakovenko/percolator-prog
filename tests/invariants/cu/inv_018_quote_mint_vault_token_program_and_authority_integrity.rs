@@ -11,11 +11,53 @@
 //! on a live value route with exact rollback. Existing tests in this file exhaust canonical-vault,
 //! mint, owner, delegate, close-authority, frozen-account, and token-program substitutions.
 //!
-//! Guarantee boundary: these tests do not formally compose the private `AccountInfo` parsers and
-//! downstream SPL CPI semantics into one theorem, and do not prove arbitrary future token programs
-//! safe; production deliberately accepts classic SPL Token only.
+//! The source-complete gateway guard additionally proves every handler receives only facts returned
+//! by one classic-SPL parser and reuses those validated facts for balance and permissionless-payout
+//! checks. The remaining formal boundary is equivalence of SPL Token's trusted `Account::unpack`
+//! and CPI execution semantics, not a second wrapper parser. Arbitrary future token programs remain
+//! out of scope; production deliberately accepts classic SPL Token only.
 
 use super::*;
+
+#[test]
+fn v16_program_spl_account_parser_is_single_gateway_and_reuses_validated_state() {
+    let source = include_str!("../../../src/v16_program.rs");
+    assert_eq!(
+        source
+            .matches("spl_token::state::Account::unpack(&data)")
+            .count(),
+        1,
+        "classic SPL account bytes must have one production parser",
+    );
+
+    let gateway_start = source
+        .find("fn unpack_token_account(")
+        .expect("canonical SPL account parser");
+    let gateway_end = source[gateway_start..]
+        .find("fn transfer_tokens")
+        .map(|offset| gateway_start + offset)
+        .expect("token CPI boundary follows parser helpers");
+    let parser_sites: Vec<_> = source.match_indices("unpack_token_account(").collect();
+    assert_eq!(
+        parser_sites.len(),
+        5,
+        "one parser definition plus four canonical validation call sites",
+    );
+    assert!(
+        parser_sites
+            .iter()
+            .all(|(offset, _)| *offset >= gateway_start && *offset < gateway_end),
+        "handlers must consume validated SPL state instead of unpacking account bytes directly",
+    );
+    assert!(
+        source.contains("fn require_token_balance(balance: u64"),
+        "balance checks must consume the already validated SPL state",
+    );
+    assert!(
+        source.contains("require_unencumbered_dest: bool"),
+        "permissionless payout checks must consume the already validated destination state",
+    );
+}
 
 #[test]
 fn v16_attack_base_unit_mints_reject_post_resolve_with_user_value() {
