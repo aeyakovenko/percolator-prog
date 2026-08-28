@@ -447,8 +447,8 @@ fn v16_program_liquidation_fee_surface_is_single_route_and_engine_selected() {
         "caller-selected close quantity would make liquidation partitioning public"
     );
     assert!(ENGINE_LOCK.contains(
-        "git+https://github.com/aeyakovenko/percolator?rev=b10b3454#\
-         b10b3454dd03dcf4c04a020dc1a90381ff179200"
+        "git+https://github.com/aeyakovenko/percolator?rev=9b737fd#\
+         9b737fdcec16f3709c0651f4ecc7488b4917f2d8"
     ));
 }
 

@@ -238,8 +238,8 @@ fn v16_program_public_source_lien_classification_never_double_counts_insurance()
     let lock = include_str!("../../../Cargo.lock");
     assert!(
         lock.contains(
-            "git+https://github.com/aeyakovenko/percolator?rev=b10b3454#\
-             b10b3454dd03dcf4c04a020dc1a90381ff179200"
+            "git+https://github.com/aeyakovenko/percolator?rev=9b737fd#\
+             9b737fdcec16f3709c0651f4ecc7488b4917f2d8"
         ),
         "INV-033 engine-contract evidence is bound to the exact certified engine pin",
     );

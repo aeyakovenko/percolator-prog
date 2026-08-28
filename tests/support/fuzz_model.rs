@@ -578,18 +578,6 @@ pub struct TerminalDustPayoutProtection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CrossMarginInsuranceDrainReproduction {
-    pub blocker: KnownBlocker,
-    pub unrelated_insurance_spent: u128,
-    pub attacker_payout: u128,
-    pub attacker_profit: u128,
-    pub liquidation_calls: u16,
-    pub loser_close_calls: u16,
-    pub counterparty_close_calls: u16,
-    pub winner_close_calls: u16,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetStagingReproduction {
     pub blocker: KnownBlocker,
     pub case: TargetStagingCase,
@@ -25114,149 +25102,6 @@ fn run_terminal_dust_payout_world(
     })
 }
 
-pub fn reproduce_cross_margin_insurance_drain(
-    mut seed: [u8; 32],
-) -> Result<CrossMarginInsuranceDrainReproduction, String> {
-    seed[0] ^= 0x90;
-    const MARK: u64 = 100;
-    const ATTACKER_DEPOSIT: u128 = 20_200;
-    const INSURANCE_TOPUP: u128 = 100_000;
-
-    let mut env = V16Svm::new(
-        seed,
-        MarketConfig {
-            initial_price: MARK,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            min_funding_lifetime_slots: 1,
-            maintenance_fee_per_slot: 200,
-            actor_deposits: [200, 10_000, 10_000, 1, 1],
-            actor_token_balances: [1_000, 20_000, 20_000, 10, 10],
-            ..MarketConfig::default()
-        },
-    );
-    let supply_before = env.token_supply_observed();
-    env.top_up_insurance_domain(1, INSURANCE_TOPUP)
-        .map_err(|error| format!("PR 290 fund unrelated asset-0 insurance: {error}"))?;
-    env.trade_no_cpi(0, 2, 0, POS_SCALE as i128, MARK, 0)
-        .map_err(|error| format!("PR 290 open unrelated asset-0 leg: {error}"))?;
-    env.trade_no_cpi(0, 1, 1, -(POS_SCALE as i128), MARK, 0)
-        .map_err(|error| format!("PR 290 open loss-bearing asset-1 leg: {error}"))?;
-
-    env.warp_to_slot(2);
-    for asset_index in [0, 1] {
-        let observations = vec![CrankObservationHint {
-            asset_index,
-            oracle_accounts: 0,
-        }];
-        env.crank(3, 2, observations)
-            .map_err(|error| format!("PR 290 accrue asset {asset_index}: {error}"))?;
-    }
-    env.sync_maintenance_fee(0, 2)
-        .map_err(|error| format!("PR 290 exhaust loser capital: {error}"))?;
-    let fee_drained = env.primary_portfolio(0);
-    if fee_drained.capital.get() != 0
-        || !portfolio_has_active_asset(&fee_drained, 0)
-        || !portfolio_has_active_asset(&fee_drained, 1)
-    {
-        return Err(format!(
-            "PR 290 maintenance setup did not retain both zero-capital legs: capital={}, asset0={}, asset1={}",
-            fee_drained.capital.get(),
-            portfolio_has_active_asset(&fee_drained, 0),
-            portfolio_has_active_asset(&fee_drained, 1)
-        ));
-    }
-
-    let mut mark = MARK;
-    for slot in 3..=12 {
-        mark = mark.checked_mul(2).ok_or("PR 290 adverse mark overflow")?;
-        env.warp_to_slot(slot);
-        env.push_auth_mark(1, slot, mark)
-            .map_err(|error| format!("PR 290 publish asset-1 mark at slot {slot}: {error}"))?;
-        env.crank(
-            3,
-            slot,
-            vec![CrankObservationHint {
-                asset_index: 1,
-                oracle_accounts: 0,
-            }],
-        )
-        .map_err(|error| format!("PR 290 advance asset-1 mark at slot {slot}: {error}"))?;
-    }
-    env.rebalance_reduce(0, 1, POS_SCALE)
-        .map_err(|error| format!("PR 290 owner flattens loss-bearing asset-1 leg: {error}"))?;
-    let flattened = env.primary_portfolio(0);
-    if portfolio_has_active_asset(&flattened, 1)
-        || !portfolio_has_active_asset(&flattened, 0)
-        || flattened.pnl.get() >= 0
-        || flattened.capital.get() != 0
-    {
-        return Err(format!(
-            "PR 290 did not isolate account debt from the surviving asset-0 leg: capital={}, pnl={}, asset0={}, asset1={}",
-            flattened.capital.get(),
-            flattened.pnl.get(),
-            portfolio_has_active_asset(&flattened, 0),
-            portfolio_has_active_asset(&flattened, 1)
-        ));
-    }
-
-    let spent_before = env.primary_market_state().1.insurance_domain_spent[1];
-    let mut liquidation_calls = 0u16;
-    for _ in 0..512 {
-        let account = env.primary_portfolio(0);
-        if account.pnl.get() >= 0 && !portfolio_has_active_asset(&account, 0) {
-            break;
-        }
-        match env.crank(0, 12, vec![]) {
-            Ok(_) => {
-                liquidation_calls = liquidation_calls
-                    .checked_add(1)
-                    .ok_or("PR 290 liquidation call count overflow")?;
-            }
-            Err(error) if error.contains("Custom(23)") => break,
-            Err(error) => return Err(format!("PR 290 public liquidation failed: {error}")),
-        }
-    }
-    let unrelated_insurance_spent = env.primary_market_state().1.insurance_domain_spent[1]
-        .checked_sub(spent_before)
-        .ok_or("PR 290 insurance spent counter decreased")?;
-    if liquidation_calls == 0 || unrelated_insurance_spent == 0 {
-        return Err(format!(
-            "PR 290 no longer drains unrelated insurance: calls={liquidation_calls}, spent={unrelated_insurance_spent}"
-        ));
-    }
-
-    env.resolve_market()
-        .map_err(|error| format!("PR 290 resolve drained market: {error}"))?;
-    let (loser_payout, loser_close_calls) = drain_resolved_actor(&mut env, 0)?;
-    let (counterparty_payout, counterparty_close_calls) = drain_resolved_actor(&mut env, 2)?;
-    let (winner_payout, winner_close_calls) = drain_resolved_actor(&mut env, 1)?;
-    let attacker_payout = loser_payout
-        .checked_add(counterparty_payout)
-        .and_then(|value| value.checked_add(winner_payout))
-        .ok_or("PR 290 attacker payout overflow")?;
-    let attacker_profit = attacker_payout
-        .checked_sub(ATTACKER_DEPOSIT)
-        .ok_or("PR 290 attacker coalition did not recover deposits")?;
-    if attacker_profit == 0 || env.token_supply_observed() != supply_before {
-        return Err(format!(
-            "PR 290 cross-domain spend was not publicly extractable: payout={attacker_payout}, profit={attacker_profit}, supply={}/{}",
-            env.token_supply_observed(),
-            supply_before
-        ));
-    }
-    Ok(CrossMarginInsuranceDrainReproduction {
-        blocker: KnownBlocker::CrossMarginInsuranceDrain,
-        unrelated_insurance_spent,
-        attacker_payout,
-        attacker_profit,
-        liquidation_calls,
-        loser_close_calls,
-        counterparty_close_calls,
-        winner_close_calls,
-    })
-}
-
 fn drain_resolved_actor(env: &mut V16Svm, actor: usize) -> Result<(u128, u16), String> {
     let destination = env.actors[actor].destination_token;
     let payout_before = env.token_amount(destination);
@@ -27779,11 +27624,6 @@ pub fn terminal_dust_payout_protection_strategy() -> impl Strategy<Value = ([u8;
         any::<[u8; 32]>(),
         prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),
     )
-}
-
-#[allow(dead_code)]
-pub fn cross_margin_insurance_drain_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
-    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

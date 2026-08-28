@@ -451,7 +451,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
     ),
     OpenLof::nonqualifying(286, Blocker, RecoveryTerminal),
     OpenLof::nonqualifying(287, Blocker, RecoveryTerminal),
-    OpenLof::quarantined(
+    OpenLof::certified(
         290,
         Blocker,
         DomainValue,

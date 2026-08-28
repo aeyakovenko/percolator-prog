@@ -1209,12 +1209,58 @@ pub struct TerminalDustDiscovery {
     pub dust_supply: u128,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CrossDomainInsuranceDiscovery {
+    pub unattributed_loss_lock_set: bool,
+    pub risk_reducing_crank_landed: bool,
+    pub settled_crank_rejected_nonprogress: bool,
+    pub settled_crank_exact_rollback: bool,
+    pub owner_fallback_exit_landed: bool,
+    pub remaining_position_q: u128,
     pub unrelated_insurance_spent: u128,
     pub coalition_payout: u128,
     pub coalition_profit: u128,
+    pub coalition_loss: u128,
     pub progress_calls: u16,
+    pub token_supply_conserved: bool,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
+}
+
+impl std::fmt::Debug for CrossDomainInsuranceDiscovery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CrossDomainInsuranceDiscovery")
+            .field(
+                "unattributed_loss_lock_set",
+                &self.unattributed_loss_lock_set,
+            )
+            .field(
+                "risk_reducing_crank_landed",
+                &self.risk_reducing_crank_landed,
+            )
+            .field(
+                "settled_crank_rejected_nonprogress",
+                &self.settled_crank_rejected_nonprogress,
+            )
+            .field(
+                "settled_crank_exact_rollback",
+                &self.settled_crank_exact_rollback,
+            )
+            .field(
+                "owner_fallback_exit_landed",
+                &self.owner_fallback_exit_landed,
+            )
+            .field("remaining_position_q", &self.remaining_position_q)
+            .field("unrelated_insurance_spent", &self.unrelated_insurance_spent)
+            .field("coalition_payout", &self.coalition_payout)
+            .field("coalition_profit", &self.coalition_profit)
+            .field("coalition_loss", &self.coalition_loss)
+            .field("progress_calls", &self.progress_calls)
+            .field("token_supply_conserved", &self.token_supply_conserved)
+            .field("terminal_classification", &self.terminal_classification)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1807,11 +1853,22 @@ impl CrossDomainBackingDiscovery {
 }
 
 impl CrossDomainInsuranceDiscovery {
-    pub fn is_violation(&self) -> bool {
-        self.unrelated_insurance_spent != 0
-            && self.coalition_profit != 0
-            && self.progress_calls != 0
+    pub fn preserves_domain_isolation_and_exit(&self) -> bool {
+        self.unattributed_loss_lock_set
+            && self.risk_reducing_crank_landed
+            && self.progress_calls == 1
+            && self.settled_crank_rejected_nonprogress
+            && self.settled_crank_exact_rollback
+            && self.remaining_position_q == 0
+            && self.unrelated_insurance_spent == 0
+            && self.coalition_profit == 0
             && self.coalition_payout != 0
+            && self.token_supply_conserved
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && self.public_trace.validate_public_execution().is_ok()
     }
 }
 
@@ -9723,6 +9780,7 @@ pub fn discover_cross_domain_insurance_violation(
         },
     );
     let supply_before = env.token_supply_observed();
+    env.begin_public_trace();
     env.top_up_insurance_domain(1, INSURANCE_TOP_UP)
         .map_err(|error| format!("fund unrelated insurance domain: {error}"))?;
     env.trade_no_cpi(0, 2, 0, POS_SCALE as i128, MARK, 0)
@@ -9775,26 +9833,44 @@ pub fn discover_cross_domain_insurance_violation(
             "cross-domain setup did not retain debt plus surviving asset-0 exposure".into(),
         );
     }
+    let unattributed_loss_lock_set = env.primary_portfolio(0).liquidation_lock != 0;
 
     let spent_before = env.primary_market_state().1.insurance_domain_spent[1];
     let mut progress_calls = 0u16;
-    for _ in 0..512 {
-        let account = env.primary_portfolio(0);
-        if account.pnl.get() >= 0
-            && env.primary_market_state().1.assets[0].stored_pos_count_long == 0
-        {
-            break;
-        }
-        match env.crank(0, 12, Vec::new()) {
-            Ok(_) => {
-                progress_calls = progress_calls
-                    .checked_add(1)
-                    .ok_or_else(|| "cross-domain progress count overflow".to_string())?;
-            }
-            Err(error) if error.contains("Custom(23)") => break,
-            Err(error) => return Err(format!("cross-domain liquidation failed: {error}")),
-        }
+    let risk_reducing_crank = env.crank(0, 12, Vec::new());
+    let risk_reducing_crank_landed = risk_reducing_crank.is_ok();
+    if risk_reducing_crank_landed {
+        progress_calls = 1;
+    } else if !matches!(
+        risk_reducing_crank.as_ref(),
+        Err(error)
+            if error.contains("Custom(22)")
+                || error.contains("custom program error: 0x16")
+    ) {
+        return Err(format!(
+            "cross-domain attack crank failed unexpectedly: {}",
+            risk_reducing_crank.unwrap_err()
+        ));
     }
+
+    let before_settled_crank = fingerprint(&env);
+    let settled_crank = env.crank(0, 12, Vec::new());
+    let settled_crank_rejected_nonprogress = matches!(
+        settled_crank.as_ref(),
+        Err(error)
+            if error.contains("Custom(22)")
+                || error.contains("custom program error: 0x16")
+    );
+    let settled_crank_exact_rollback =
+        settled_crank_rejected_nonprogress && fingerprint(&env) == before_settled_crank;
+
+    let position_after_crank = discovery_total_abs_position(&env.primary_portfolio(0))?;
+    let owner_fallback_exit_landed = if position_after_crank == 0 {
+        false
+    } else {
+        env.rebalance_reduce(0, 0, position_after_crank).is_ok()
+    };
+    let remaining_position_q = discovery_total_abs_position(&env.primary_portfolio(0))?;
     let unrelated_insurance_spent = env.primary_market_state().1.insurance_domain_spent[1]
         .checked_sub(spent_before)
         .ok_or_else(|| "unrelated insurance spent counter decreased".to_string())?;
@@ -9808,17 +9884,39 @@ pub fn discover_cross_domain_insurance_violation(
         .checked_add(counterparty_payout)
         .and_then(|value| value.checked_add(winner_payout))
         .ok_or_else(|| "cross-domain coalition payout overflow".to_string())?;
-    let coalition_profit = coalition_payout
-        .checked_sub(COALITION_DEPOSIT)
-        .ok_or_else(|| "cross-domain coalition did not recover deposits".to_string())?;
-    if env.token_supply_observed() != supply_before {
-        return Err("cross-domain insurance world changed SPL supply".into());
-    }
+    let coalition_profit = coalition_payout.saturating_sub(COALITION_DEPOSIT);
+    let coalition_loss = COALITION_DEPOSIT.saturating_sub(coalition_payout);
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    let public_trace = env.finish_public_trace();
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: unrelated_insurance_spent,
+            unauthorized_gain_atoms: coalition_profit,
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: remaining_position_q == 0,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 1,
+            attempted_exit_routes: 1,
+            honest_continuation_failed: false,
+        })
+        .map_err(|error| format!("cross-domain terminal evidence is invalid: {error}"))?;
     Ok(CrossDomainInsuranceDiscovery {
+        unattributed_loss_lock_set,
+        risk_reducing_crank_landed,
+        settled_crank_rejected_nonprogress,
+        settled_crank_exact_rollback,
+        owner_fallback_exit_landed,
+        remaining_position_q,
         unrelated_insurance_spent,
         coalition_payout,
         coalition_profit,
+        coalition_loss,
         progress_calls,
+        token_supply_conserved,
+        terminal_classification,
+        public_trace,
     })
 }
 

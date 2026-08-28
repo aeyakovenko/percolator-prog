@@ -2835,8 +2835,11 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         ),
         Err(error) => {
             assert!(
-                error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
-                "an unavailable conversion must fail at the realizability lock: {error}"
+                error.contains("Custom(19)")
+                    || error.contains("custom program error: 0x13")
+                    || error.contains("Custom(21)")
+                    || error.contains("custom program error: 0x15"),
+                "an unavailable conversion must fail at stale-state or realizability admission: {error}"
             );
             assert_eq!(
                 env.svm.get_account(&env.market).unwrap(),
@@ -2903,8 +2906,11 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         Ok(_) => assert!(out > 0, "an accepted withdrawal must move SPL value"),
         Err(error) => {
             assert!(
-                error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
-                "an unavailable withdrawal must fail at the realizability lock: {error}"
+                error.contains("Custom(19)")
+                    || error.contains("custom program error: 0x13")
+                    || error.contains("Custom(21)")
+                    || error.contains("custom program error: 0x15"),
+                "an unavailable withdrawal must fail at stale-state or realizability admission: {error}"
             );
             assert_eq!(
                 env.svm.get_account(&env.market).unwrap(),

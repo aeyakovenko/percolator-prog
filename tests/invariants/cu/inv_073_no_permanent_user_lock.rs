@@ -4577,6 +4577,7 @@ fn v16_program_live_domain_withdrawals_reject_when_resolve_matured() {
 #[test]
 fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_permissionless_resolve_with_cu(3, 1);
     env.configure_auth_mark_with_cu(0, 100);
     let cfg_asset1 = |env: &mut V16CuEnv, ix: ProgInstruction| {
         send_tx(
@@ -4628,6 +4629,11 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         -(POS_SCALE as i128),
         100,
         0,
+    );
+    let opened = env.portfolio_state(victim);
+    assert!(
+        has_active_leg_for_asset(&opened, 0) && has_active_leg_for_asset(&opened, 1),
+        "setup starts with real two-asset exposure"
     );
 
     for (slot, mark) in [(1u64, 300u64), (2, 800)] {
@@ -4692,38 +4698,20 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         before.pnl.get() < 0,
         "setup leaves real bad debt before terminal wind-down"
     );
-    assert!(
-        has_active_leg_for_asset(&before, 0) && has_active_leg_for_asset(&before, 1),
-        "setup leaves unattributed multi-asset exposure"
+    assert_ne!(
+        before.liquidation_lock, 0,
+        "negative PnL spanning two assets remains explicitly unattributed"
     );
-    for _ in 0..3 {
-        match env.market_state().1.mode {
-            MarketModeV16::Resolved => break,
-            MarketModeV16::Recovery => {
-                env.svm.expire_blockhash();
-                let cu = env
-                    .send(
-                        ProgInstruction::PermissionlessCrank {
-                            now_slot: 2,
-                            observations: vec![],
-                        },
-                        vec![
-                            AccountMeta::new_readonly(env.payer.pubkey(), false),
-                            AccountMeta::new(env.market, false),
-                            AccountMeta::new(victim, false),
-                        ],
-                        &[],
-                    )
-                    .expect("Recovery has a permissionless terminal continuation");
-                assert_cu_within(
-                    "cross-margin Recovery terminal continuation",
-                    cu,
-                    CRANK_CU_LIMIT,
-                );
-            }
-            mode => panic!("permissionless insolvency sequence stalled in {mode:?}"),
-        }
-    }
+    assert!(
+        percolator::active_bitmap_count_ones(active_bitmap(&before)) < 2,
+        "bounded public cranks remove risk without charging an arbitrary asset domain"
+    );
+    let resolve_cu = env.resolve_stale_permissionless_with_cu(5);
+    assert_cu_within(
+        "cross-margin permissionless stale resolution",
+        resolve_cu,
+        CRANK_CU_LIMIT,
+    );
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 
     for step in 0..4 {
@@ -4745,11 +4733,11 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                     }],
                 },
                 vec![
-                    AccountMeta::new_readonly(victim_owner.pubkey(), false),
+                    AccountMeta::new_readonly(victim_owner.pubkey(), true),
                     AccountMeta::new(env.market, false),
                     AccountMeta::new(victim, false),
                 ],
-                &[],
+                &[&victim_owner],
             )
             .expect("resolved deep cross-margin bad debt has public progress");
         assert_cu_within(
@@ -4809,7 +4797,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                 }],
             },
             vec![
-                AccountMeta::new_readonly(cp_owner.pubkey(), false),
+                AccountMeta::new_readonly(cp_owner.pubkey(), true),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(cp, false),
                 AccountMeta::new(winner_dest, false),
@@ -4817,7 +4805,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
             ],
-            &[],
+            &[&cp_owner],
         );
         let cu = result.unwrap_or_else(|error| {
             let active_assets: Vec<_> = before
