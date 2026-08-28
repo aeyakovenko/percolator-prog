@@ -1805,6 +1805,33 @@ impl V16CuEnv {
         state::read_asset_control_sequences(&account.data, asset_index).unwrap()
     }
 
+    fn withdrawal_authority_epoch(
+        &self,
+        authority: Pubkey,
+        asset_index: usize,
+        insurance: bool,
+    ) -> u64 {
+        let account = self.svm.get_account(&self.market).expect("market account");
+        let (_, group) = state::read_market(&account.data).expect("decode withdrawal market");
+        let profile = state::read_asset_oracle_profile(&account.data, asset_index)
+            .expect("decode withdrawal authority profile");
+        let local_authority = if insurance {
+            if group.mode == MarketModeV16::Live {
+                profile.insurance_operator
+            } else {
+                profile.insurance_authority
+            }
+        } else {
+            profile.backing_bucket_authority
+        };
+        let epoch_asset = if authority.to_bytes() == local_authority {
+            asset_index
+        } else {
+            0
+        };
+        self.control_sequences(epoch_asset).authority_epoch
+    }
+
     fn portfolio_position_epoch(&self, portfolio: Pubkey) -> u64 {
         let account = self.svm.get_account(&portfolio).expect("portfolio account");
         state::read_portfolio_position_epoch(&account.data).unwrap()
@@ -3974,12 +4001,15 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let market_id = self.asset_market_id(0);
+        let authority_epoch = self.withdrawal_authority_epoch(self.admin.pubkey(), 0, true);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
-                market_id: 0,
+                market_id,
+                authority_epoch,
                 asset_index: 0,
                 amount,
             },
@@ -4003,13 +4033,18 @@ impl V16CuEnv {
         domain: u16,
         amount: u128,
     ) -> u64 {
+        let asset_index = (domain / 2) as u16;
+        let market_id = self.asset_market_id(asset_index);
+        let authority_epoch =
+            self.withdrawal_authority_epoch(self.admin.pubkey(), asset_index as usize, true);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
-                market_id: 0,
-                asset_index: (domain / 2) as u16,
+                market_id,
+                authority_epoch,
+                asset_index,
                 amount,
             },
             vec![
@@ -4032,6 +4067,8 @@ impl V16CuEnv {
         amount: u128,
     ) -> u64 {
         let market_id = self.asset_market_id(domain / 2);
+        let authority_epoch =
+            self.withdrawal_authority_epoch(self.admin.pubkey(), domain as usize / 2, false);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -4039,6 +4076,7 @@ impl V16CuEnv {
             ProgInstruction::WithdrawBackingBucket {
                 domain,
                 market_id,
+                authority_epoch,
                 amount,
             },
             vec![
@@ -4062,6 +4100,8 @@ impl V16CuEnv {
         amount: u128,
     ) -> u64 {
         let market_id = self.asset_market_id(domain / 2);
+        let authority_epoch =
+            self.withdrawal_authority_epoch(self.admin.pubkey(), domain as usize / 2, false);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -4069,6 +4109,7 @@ impl V16CuEnv {
             ProgInstruction::WithdrawBackingBucket {
                 domain,
                 market_id,
+                authority_epoch,
                 amount,
             },
             vec![
@@ -4109,6 +4150,8 @@ impl V16CuEnv {
         amount: u128,
     ) -> u64 {
         let market_id = self.asset_market_id(domain / 2);
+        let authority_epoch =
+            self.withdrawal_authority_epoch(self.admin.pubkey(), domain as usize / 2, false);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -4116,6 +4159,7 @@ impl V16CuEnv {
             ProgInstruction::WithdrawBackingBucketEarnings {
                 domain,
                 market_id,
+                authority_epoch,
                 amount,
             },
             vec![
@@ -4176,12 +4220,16 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let market_id = self.asset_market_id(asset_index);
+        let authority_epoch =
+            self.withdrawal_authority_epoch(authority.pubkey(), asset_index as usize, true);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
-                market_id: 0,
+                market_id,
+                authority_epoch,
                 asset_index,
                 amount,
             },
@@ -4914,6 +4962,7 @@ fn bind_current_generation_guards(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index,
             market_id,
+            authority_epoch: 0,
             ..
         } => (*asset_index as usize, market_id),
         ProgInstruction::TopUpInsuranceDomain {

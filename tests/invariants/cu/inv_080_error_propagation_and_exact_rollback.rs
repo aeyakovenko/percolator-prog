@@ -2529,6 +2529,7 @@ fn v16_bpf_failed_backing_withdraw_transfer_rolls_back_bucket_and_ledger() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: 40,
         },
         vec![
@@ -2593,6 +2594,7 @@ fn v16_bpf_failed_backing_earnings_withdraw_rolls_back_bucket_and_ledger() {
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![

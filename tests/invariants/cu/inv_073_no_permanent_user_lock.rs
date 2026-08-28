@@ -216,12 +216,14 @@ fn v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_pr
     let provider_destination = env.token_account(backing_provider.pubkey(), 0);
     let vault_atoms_before = env.token_amount(env.vault);
     let market_id = recovered.assets[0].market_id;
+    let authority_epoch = env.control_sequences(0).authority_epoch;
     env.svm.expire_blockhash();
     let withdrawal_cu = env
         .send(
             ProgInstruction::WithdrawBackingBucket {
                 domain: 0,
                 market_id,
+                authority_epoch,
                 amount: principal,
             },
             vec![
@@ -4474,6 +4476,7 @@ fn v16_program_live_domain_withdrawals_reject_when_resolve_matured() {
     let stale_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 20,
         },
@@ -4498,6 +4501,7 @@ fn v16_program_live_domain_withdrawals_reject_when_resolve_matured() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: 20,
         },
         vec![
@@ -4520,6 +4524,7 @@ fn v16_program_live_domain_withdrawals_reject_when_resolve_matured() {
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![

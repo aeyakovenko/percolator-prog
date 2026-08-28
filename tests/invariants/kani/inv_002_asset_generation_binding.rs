@@ -84,10 +84,12 @@ fn kani_v16_asset_authority_preserves_generation_and_rejects_legacy() {
 fn kani_v16_backing_principal_withdrawal_preserves_generation_and_rejects_legacy() {
     let domain: u16 = kani::any();
     let market_id: u64 = kani::any();
+    let authority_epoch: u64 = kani::any();
     let amount: u128 = kani::any();
     let encoded = Instruction::WithdrawBackingBucket {
         domain,
         market_id,
+        authority_epoch,
         amount,
     }
     .encode();
@@ -96,10 +98,12 @@ fn kani_v16_backing_principal_withdrawal_preserves_generation_and_rejects_legacy
         Instruction::WithdrawBackingBucket {
             domain: decoded_domain,
             market_id: decoded_market_id,
+            authority_epoch: decoded_authority_epoch,
             amount: decoded_amount,
         } => {
             assert_eq!(decoded_domain, domain);
             assert_eq!(decoded_market_id, market_id);
+            assert_eq!(decoded_authority_epoch, authority_epoch);
             assert_eq!(decoded_amount, amount);
         }
         _ => unreachable!(),
@@ -115,10 +119,12 @@ fn kani_v16_backing_principal_withdrawal_preserves_generation_and_rejects_legacy
 fn kani_v16_backing_earnings_withdrawal_preserves_generation_and_rejects_legacy() {
     let domain: u16 = kani::any();
     let market_id: u64 = kani::any();
+    let authority_epoch: u64 = kani::any();
     let amount: u128 = kani::any();
     let encoded = Instruction::WithdrawBackingBucketEarnings {
         domain,
         market_id,
+        authority_epoch,
         amount,
     }
     .encode();
@@ -127,10 +133,12 @@ fn kani_v16_backing_earnings_withdrawal_preserves_generation_and_rejects_legacy(
         Instruction::WithdrawBackingBucketEarnings {
             domain: decoded_domain,
             market_id: decoded_market_id,
+            authority_epoch: decoded_authority_epoch,
             amount: decoded_amount,
         } => {
             assert_eq!(decoded_domain, domain);
             assert_eq!(decoded_market_id, market_id);
+            assert_eq!(decoded_authority_epoch, authority_epoch);
             assert_eq!(decoded_amount, amount);
         }
         _ => unreachable!(),

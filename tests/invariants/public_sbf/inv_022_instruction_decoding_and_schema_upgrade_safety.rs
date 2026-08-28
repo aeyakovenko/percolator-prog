@@ -161,6 +161,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             market_id: 1,
+            authority_epoch: 0,
             amount: 1,
         },
         ProgInstruction::ConvertReleasedPnl {
@@ -218,6 +219,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 0,
             market_id: 1,
+            authority_epoch: 0,
             amount: 1,
         },
         ProgInstruction::SyncBackingDomainLedger { domain: 0 },
@@ -311,6 +313,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
             market_id: 1,
+            authority_epoch: 0,
             amount: 1,
         },
         ProgInstruction::CureAndCancelClose {
@@ -547,6 +550,15 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
     let mut intentless_backing_top_up = vec![0u8; 35];
     intentless_backing_top_up[0] = 24;
 
+    let mut epochless_backing_withdrawal = vec![0u8; 27];
+    epochless_backing_withdrawal[0] = 50;
+
+    let mut epochless_backing_earnings_withdrawal = vec![0u8; 27];
+    epochless_backing_earnings_withdrawal[0] = 52;
+
+    let mut epochless_asset_insurance_withdrawal = vec![0u8; 27];
+    epochless_asset_insurance_withdrawal[0] = 57;
+
     for (label, data) in [
         (
             "legacy TradeNoCpi without portfolio and asset generations",
@@ -583,6 +595,18 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
         (
             "legacy TopUpBackingBucket without intent ID",
             intentless_backing_top_up,
+        ),
+        (
+            "legacy WithdrawBackingBucket without authority epoch",
+            epochless_backing_withdrawal,
+        ),
+        (
+            "legacy WithdrawBackingBucketEarnings without authority epoch",
+            epochless_backing_earnings_withdrawal,
+        ),
+        (
+            "legacy WithdrawInsuranceAsset without authority epoch",
+            epochless_asset_insurance_withdrawal,
         ),
         (
             "generationless ConfigureHybridOracle",

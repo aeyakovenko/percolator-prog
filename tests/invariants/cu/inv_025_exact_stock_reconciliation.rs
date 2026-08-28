@@ -101,6 +101,7 @@ fn v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             market_id,
+            authority_epoch: 0,
             amount: 7_001,
         },
         vec![

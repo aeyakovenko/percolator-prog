@@ -909,6 +909,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
             market_id: asset1_market_id,
+            authority_epoch: 0,
             amount: PRINCIPAL,
         },
         vec![
@@ -974,6 +975,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
             market_id: asset1_market_id,
+            authority_epoch: 0,
             amount: PRINCIPAL,
         },
         vec![
@@ -1201,6 +1203,7 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             market_id: g.assets[0].market_id,
+            authority_epoch: 0,
             amount: 1_000_001,
         },
         vec![

@@ -5036,11 +5036,14 @@ fn v16_bpf_terminal_asset_insurance_partial_ledger_middle_domain_stays_bounded_o
     let ledger = env.insurance_ledger_account();
     env.resolve();
     let dest = env.token_account_for_mint(env.mint, middle_authority.pubkey(), 0);
+    let market_id = env.asset_market_id(MIDDLE_ASSET as u16);
+    let authority_epoch = env.control_sequences(MIDDLE_ASSET).authority_epoch;
     env.svm.expire_blockhash();
     let withdraw_cu = env
         .send(
             ProgInstruction::WithdrawInsuranceAsset {
-                market_id: 0,
+                market_id,
+                authority_epoch,
                 asset_index: MIDDLE_ASSET as u16,
                 amount: PARTIAL,
             },

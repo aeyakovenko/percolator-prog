@@ -219,8 +219,8 @@ const INV005_AUTHORITY_ROUTE_DISPOSITIONS: &[(&str, Inv005AuthorityDisposition, 
     ),
     (
         "WithdrawBackingBucket",
-        Inv005AuthorityDisposition::OpenEpochGap,
-        "backing withdrawal A-B-A replay",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "BackingWithdrawal",
     ),
     (
         "UpdateAuthority",
@@ -264,8 +264,8 @@ const INV005_AUTHORITY_ROUTE_DISPOSITIONS: &[(&str, Inv005AuthorityDisposition, 
     ),
     (
         "WithdrawBackingBucketEarnings",
-        Inv005AuthorityDisposition::OpenEpochGap,
-        "backing earnings A-B-A replay",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "BackingEarningsWithdrawal",
     ),
     (
         "SyncBackingDomainLedger",
@@ -324,8 +324,8 @@ const INV005_AUTHORITY_ROUTE_DISPOSITIONS: &[(&str, Inv005AuthorityDisposition, 
     ),
     (
         "WithdrawInsuranceAsset",
-        Inv005AuthorityDisposition::OpenEpochGap,
-        "asset insurance authority A-B-A replay",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "InsuranceWithdrawal",
     ),
     (
         "UpdateBaseUnitMints",
@@ -369,10 +369,7 @@ fn v16_program_configured_authority_route_dispositions_are_source_complete() {
         "SwapSecondaryForPrimary",
         "UpdateAssetLifecycle",
         "UpdateBaseUnitMints",
-        "WithdrawBackingBucket",
-        "WithdrawBackingBucketEarnings",
         "WithdrawInsurance",
-        "WithdrawInsuranceAsset",
     ]
     .into_iter()
     .collect::<std::collections::BTreeSet<_>>();
@@ -477,6 +474,7 @@ fn v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers() {
     let withdrawal = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 1,
         },
@@ -1263,6 +1261,7 @@ fn v16_attack_withdraw_insurance_asset_operator_gated() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 500_000,
         },
@@ -1347,6 +1346,7 @@ fn v16_attack_live_asset_insurance_withdraw_uses_operator_not_authority() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 1,
             amount: 40,
         },
@@ -1596,6 +1596,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             market_id: asset0_market_id,
+            authority_epoch: 0,
             amount: 100,
         },
         vec![
@@ -1636,6 +1637,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
             market_id: asset1_market_id,
+            authority_epoch: 0,
             amount: 100,
         },
         vec![
@@ -1751,6 +1753,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 0,
             market_id: asset0_market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -1802,6 +1805,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 2,
             market_id: asset1_market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -3111,6 +3115,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     let r_foreign = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 1,
             amount: 500,
         },
@@ -3140,6 +3145,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     let r_owner = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 1,
             amount: 200,
         },
@@ -3950,6 +3956,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
     )
     .expect("asset-0 admin rotates the live insurance operator");
     env.top_up_insurance_domain_with_authority(&admin, 0, 500);
+    let asset0_market_id = env.asset_market_id(0);
 
     let (_, group_before) = env.market_state();
     assert_eq!(
@@ -3967,7 +3974,8 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
-            market_id: 0,
+            market_id: asset0_market_id,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 100,
         },
@@ -4002,13 +4010,15 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
     );
 
     let operator_dest = env.token_account(new_operator.pubkey(), 0);
+    let current_authority_epoch = env.control_sequences(0).authority_epoch;
     env.svm.expire_blockhash();
     let operator_withdraw = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
-            market_id: 0,
+            market_id: asset0_market_id,
+            authority_epoch: current_authority_epoch,
             asset_index: 0,
             amount: 100,
         },
@@ -4082,6 +4092,7 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             market_id: asset0_market_id,
+            authority_epoch: 0,
             amount: 100,
         },
         vec![
@@ -4115,6 +4126,7 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
     );
 
     let backing_dest = env.token_account(new_backing.pubkey(), 0);
+    let current_authority_epoch = env.control_sequences(0).authority_epoch;
     env.svm.expire_blockhash();
     let backing_withdraw = send_tx(
         &mut env.svm,
@@ -4123,6 +4135,7 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             market_id: asset0_market_id,
+            authority_epoch: current_authority_epoch,
             amount: 100,
         },
         vec![

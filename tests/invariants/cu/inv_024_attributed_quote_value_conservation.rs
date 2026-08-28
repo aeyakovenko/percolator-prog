@@ -716,6 +716,7 @@ fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
             ProgInstruction::WithdrawBackingBucket {
                 domain: 1,
                 market_id,
+                authority_epoch: 0,
                 amount: amt,
             },
             vec![

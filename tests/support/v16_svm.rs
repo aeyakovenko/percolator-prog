@@ -2855,6 +2855,7 @@ impl V16Svm {
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -2880,6 +2881,7 @@ impl V16Svm {
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -3228,6 +3230,7 @@ impl V16Svm {
             ProgInstruction::WithdrawBackingBucket {
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -3254,6 +3257,7 @@ impl V16Svm {
             ProgInstruction::WithdrawBackingBucket {
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -3279,6 +3283,7 @@ impl V16Svm {
             ProgInstruction::WithdrawBackingBucket {
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -3304,6 +3309,7 @@ impl V16Svm {
             ProgInstruction::WithdrawBackingBucketEarnings {
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -3331,6 +3337,7 @@ impl V16Svm {
             ProgInstruction::WithdrawBackingBucketEarnings {
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -3358,6 +3365,7 @@ impl V16Svm {
             ProgInstruction::WithdrawBackingBucketEarnings {
                 domain,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -4452,6 +4460,7 @@ impl V16Svm {
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index,
                 market_id,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
                 amount,
             },
             vec![
@@ -5209,6 +5218,43 @@ impl V16Svm {
         self.build_program_instructions_transaction(vec![(instruction, accounts)], extra_signers)
     }
 
+    fn withdrawal_authority_epoch_asset(
+        &self,
+        accounts: &[AccountMeta],
+        target_asset: usize,
+        insurance: bool,
+    ) -> usize {
+        let authority = accounts
+            .first()
+            .map(|meta| meta.pubkey)
+            .expect("authority-bound withdrawal signer");
+        let market = accounts
+            .get(1)
+            .map(|meta| meta.pubkey)
+            .expect("authority-bound withdrawal market");
+        let account = self
+            .svm
+            .get_account(&market)
+            .expect("authority-bound withdrawal market account");
+        let (_, group) = state::read_market(&account.data).expect("decode withdrawal market");
+        let profile = state::read_asset_oracle_profile(&account.data, target_asset)
+            .expect("decode withdrawal authority profile");
+        let local_authority = if insurance {
+            if group.mode == percolator::MarketModeV16::Live {
+                profile.insurance_operator
+            } else {
+                profile.insurance_authority
+            }
+        } else {
+            profile.backing_bucket_authority
+        };
+        if authority.to_bytes() == local_authority {
+            target_asset
+        } else {
+            0
+        }
+    }
+
     fn bind_current_authority_epoch(
         &self,
         instruction: &mut ProgInstruction,
@@ -5258,6 +5304,27 @@ impl V16Svm {
             } if *authority_epoch == CURRENT_AUTHORITY_EPOCH => {
                 Some((*domain as usize / 2, authority_epoch))
             }
+            ProgInstruction::WithdrawBackingBucket {
+                domain,
+                authority_epoch,
+                ..
+            }
+            | ProgInstruction::WithdrawBackingBucketEarnings {
+                domain,
+                authority_epoch,
+                ..
+            } if *authority_epoch == CURRENT_AUTHORITY_EPOCH => Some((
+                self.withdrawal_authority_epoch_asset(accounts, *domain as usize / 2, false),
+                authority_epoch,
+            )),
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index,
+                authority_epoch,
+                ..
+            } if *authority_epoch == CURRENT_AUTHORITY_EPOCH => Some((
+                self.withdrawal_authority_epoch_asset(accounts, *asset_index as usize, true),
+                authority_epoch,
+            )),
             ProgInstruction::ConfigureHybridOracle {
                 asset_index,
                 authority_epoch,

@@ -3001,6 +3001,7 @@ pub mod ix {
         WithdrawBackingBucket {
             domain: u16,
             market_id: u64,
+            authority_epoch: u64,
             amount: u128,
         },
         ConvertReleasedPnl {
@@ -3063,6 +3064,7 @@ pub mod ix {
         WithdrawBackingBucketEarnings {
             domain: u16,
             market_id: u64,
+            authority_epoch: u64,
             amount: u128,
         },
         SyncBackingDomainLedger {
@@ -3162,6 +3164,7 @@ pub mod ix {
         WithdrawInsuranceAsset {
             asset_index: u16,
             market_id: u64,
+            authority_epoch: u64,
             amount: u128,
         },
         CureAndCancelClose {
@@ -3416,6 +3419,7 @@ pub mod ix {
                 50 => Self::WithdrawBackingBucket {
                     domain: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 28 => Self::ConvertReleasedPnl {
@@ -3509,6 +3513,7 @@ pub mod ix {
                 52 => Self::WithdrawBackingBucketEarnings {
                     domain: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 53 => Self::SyncBackingDomainLedger {
@@ -3583,6 +3588,7 @@ pub mod ix {
                 57 => Self::WithdrawInsuranceAsset {
                     asset_index: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 42 => Self::CureAndCancelClose {
@@ -3867,11 +3873,13 @@ pub mod ix {
                 Self::WithdrawBackingBucket {
                     domain,
                     market_id,
+                    authority_epoch,
                     amount,
                 } => {
                     out.push(50);
                     push_u16(&mut out, domain);
                     push_u64(&mut out, market_id);
+                    push_u64(&mut out, authority_epoch);
                     push_u128(&mut out, amount);
                 }
                 Self::ConvertReleasedPnl {
@@ -3991,11 +3999,13 @@ pub mod ix {
                 Self::WithdrawBackingBucketEarnings {
                     domain,
                     market_id,
+                    authority_epoch,
                     amount,
                 } => {
                     out.push(52);
                     push_u16(&mut out, domain);
                     push_u64(&mut out, market_id);
+                    push_u64(&mut out, authority_epoch);
                     push_u128(&mut out, amount);
                 }
                 Self::SyncBackingDomainLedger { domain } => {
@@ -4184,11 +4194,13 @@ pub mod ix {
                 Self::WithdrawInsuranceAsset {
                     asset_index,
                     market_id,
+                    authority_epoch,
                     amount,
                 } => {
                     out.push(57);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, market_id);
+                    push_u64(&mut out, authority_epoch);
                     push_u128(&mut out, amount);
                 }
                 Self::CureAndCancelClose {
@@ -7084,8 +7096,16 @@ pub mod processor {
             Instruction::WithdrawBackingBucket {
                 domain,
                 market_id,
+                authority_epoch,
                 amount,
-            } => handle_withdraw_backing_bucket(program_id, accounts, domain, market_id, amount),
+            } => handle_withdraw_backing_bucket(
+                program_id,
+                accounts,
+                domain,
+                market_id,
+                authority_epoch,
+                amount,
+            ),
             Instruction::ConvertReleasedPnl {
                 portfolio_id,
                 position_epoch,
@@ -7194,9 +7214,15 @@ pub mod processor {
             Instruction::WithdrawBackingBucketEarnings {
                 domain,
                 market_id,
+                authority_epoch,
                 amount,
             } => handle_withdraw_backing_bucket_earnings(
-                program_id, accounts, domain, market_id, amount,
+                program_id,
+                accounts,
+                domain,
+                market_id,
+                authority_epoch,
+                amount,
             ),
             Instruction::SyncBackingDomainLedger { domain } => {
                 handle_sync_backing_domain_ledger(program_id, accounts, domain)
@@ -7394,12 +7420,14 @@ pub mod processor {
             Instruction::WithdrawInsuranceAsset {
                 asset_index,
                 market_id,
+                authority_epoch,
                 amount,
             } => handle_withdraw_insurance_asset(
                 program_id,
                 accounts,
                 asset_index,
                 market_id,
+                authority_epoch,
                 amount,
             ),
             Instruction::CureAndCancelClose {
@@ -10312,6 +10340,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
         expected_market_id: u64,
+        expected_authority_epoch: u64,
         amount: u128,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
@@ -10374,6 +10403,12 @@ pub mod processor {
             if !local_authorized && !admin_shutdown_authorized {
                 return Err(PercolatorError::Unauthorized.into());
             }
+            let epoch_asset_index = if local_authorized {
+                domain_usize / 2
+            } else {
+                0
+            };
+            require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
             let ledger_authority = if admin_shutdown_authorized && !local_authorized {
                 cfg.marketauth
             } else {
@@ -10448,6 +10483,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
         expected_market_id: u64,
+        expected_authority_epoch: u64,
         amount: u128,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
@@ -10508,6 +10544,12 @@ pub mod processor {
             if !local_authorized && !admin_shutdown_authorized {
                 return Err(PercolatorError::Unauthorized.into());
             }
+            let epoch_asset_index = if local_authorized {
+                domain_usize / 2
+            } else {
+                0
+            };
+            require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
             let ledger_authority = if admin_shutdown_authorized && !local_authorized {
                 cfg.marketauth
             } else {
@@ -10754,6 +10796,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
         expected_market_id: u64,
+        expected_authority_epoch: u64,
         amount: u128,
     ) -> ProgramResult {
         let operator = account(accounts, 0)?;
@@ -10828,6 +10871,8 @@ pub mod processor {
                 if !local_authorized && !admin_shutdown_authorized {
                     return Err(PercolatorError::Unauthorized.into());
                 }
+                let epoch_asset_index = if local_authorized { asset_index } else { 0 };
+                require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
                 if admin_shutdown_authorized && !local_authorized {
                     cfg.marketauth
                 } else {
@@ -10842,6 +10887,7 @@ pub mod processor {
                 if !live_authority_matches(&authorities.insurance_authority, operator.key) {
                     return Err(PercolatorError::Unauthorized.into());
                 }
+                require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;
                 group
                     .recredit_terminal_claim_free_residual_for_asset_not_atomic(asset_index)
                     .map_err(map_v16_error)?;

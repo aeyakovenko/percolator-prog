@@ -610,9 +610,12 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
     );
 
     let provider_destination = env.token_account(provider.pubkey(), 0);
+    let asset0_market_id = env.asset_market_id(0);
+    let authority_epoch = env.control_sequences(0).authority_epoch;
     env.send(
         ProgInstruction::WithdrawInsuranceAsset {
-            market_id: 0,
+            market_id: asset0_market_id,
+            authority_epoch,
             asset_index: 0,
             amount: 2 * DOMAIN_TRANCHE,
         },
@@ -637,6 +640,7 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
                 ProgInstruction::WithdrawBackingBucket {
                     domain,
                     market_id,
+                    authority_epoch,
                     amount: backing,
                 },
                 vec![

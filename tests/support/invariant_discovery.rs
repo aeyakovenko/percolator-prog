@@ -152,6 +152,9 @@ pub enum AuthorityIntentKind {
     InsuranceTopUp,
     InsuranceDomainTopUp,
     BackingTopUp,
+    BackingWithdrawal,
+    BackingEarningsWithdrawal,
+    InsuranceWithdrawal,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -587,7 +590,7 @@ impl RetryIntentKind {
 }
 
 impl AuthorityIntentKind {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 27] = [
         Self::MarketAuthorityHandoff,
         Self::AssetAdminHandoff,
         Self::InsuranceAuthorityHandoff,
@@ -612,6 +615,9 @@ impl AuthorityIntentKind {
         Self::InsuranceTopUp,
         Self::InsuranceDomainTopUp,
         Self::BackingTopUp,
+        Self::BackingWithdrawal,
+        Self::BackingEarningsWithdrawal,
+        Self::InsuranceWithdrawal,
     ];
 
     fn discriminator(self) -> u8 {
@@ -640,6 +646,9 @@ impl AuthorityIntentKind {
             Self::InsuranceTopUp => 21,
             Self::InsuranceDomainTopUp => 22,
             Self::BackingTopUp => 23,
+            Self::BackingWithdrawal => 24,
+            Self::BackingEarningsWithdrawal => 25,
+            Self::InsuranceWithdrawal => 26,
         }
     }
 
@@ -659,7 +668,12 @@ impl AuthorityIntentKind {
             Self::InsuranceTopUp | Self::InsuranceDomainTopUp => {
                 Some(percolator_prog::processor::ASSET_AUTH_INSURANCE)
             }
-            Self::BackingTopUp => Some(percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET),
+            Self::BackingTopUp | Self::BackingWithdrawal | Self::BackingEarningsWithdrawal => {
+                Some(percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET)
+            }
+            Self::InsuranceWithdrawal => {
+                Some(percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR)
+            }
             Self::MarketAuthorityHandoff
             | Self::ResolveMarket
             | Self::LiquidationFeePolicy
@@ -716,6 +730,9 @@ impl AuthorityIntentKind {
             Self::InsuranceTopUp => "TopUpInsurance",
             Self::InsuranceDomainTopUp => "TopUpInsuranceDomain",
             Self::BackingTopUp => "TopUpBackingBucket",
+            Self::BackingWithdrawal => "WithdrawBackingBucket",
+            Self::BackingEarningsWithdrawal => "WithdrawBackingBucketEarnings",
+            Self::InsuranceWithdrawal => "WithdrawInsuranceAsset",
         }
     }
 }
@@ -4457,6 +4474,31 @@ fn prepare_authority_incarnation_route(
             env.resolve_market()
                 .map_err(|error| format!("resolve empty market before retained close: {error}"))?;
         }
+        AuthorityIntentKind::BackingWithdrawal => {
+            env.top_up_backing_bucket_for_actor(0, 2, 1_000, 100)
+                .map_err(|error| format!("fund retained backing withdrawal: {error}"))?;
+        }
+        AuthorityIntentKind::InsuranceWithdrawal => {
+            env.top_up_insurance_domain(2, 1_000)
+                .map_err(|error| format!("fund retained insurance withdrawal: {error}"))?;
+        }
+        AuthorityIntentKind::BackingEarningsWithdrawal => {
+            const PROVIDER: usize = 0;
+            const LP: usize = 2;
+            const WINNING_DOMAIN: u16 = 3;
+            const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+            env.update_backing_fee_policy_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 0)
+                .map_err(|error| format!("install retained backing earnings fee: {error}"))?;
+            env.warp_to_slot(6);
+            env.trade_no_cpi(PROVIDER, LP, 0, -INCREASE_Q, 95, 0)
+                .map_err(|error| format!("realize retained backing earnings: {error}"))?;
+            let earnings = env.primary_market_state().1.source_backing_buckets
+                [WINNING_DOMAIN as usize]
+                .utilization_fee_earnings;
+            if earnings == 0 {
+                return Err("retained backing earnings fixture produced no earnings".to_string());
+            }
+        }
         _ => {}
     }
     Ok(None)
@@ -4535,6 +4577,23 @@ fn build_authority_incarnation_intent(
         AuthorityIntentKind::BackingTopUp => {
             env.build_retained_backing_bucket_top_up_for_actor(AUTHORITY_A, ASSET * 2, 1_000, 100)
         }
+        AuthorityIntentKind::BackingWithdrawal => {
+            env.build_retained_backing_bucket_withdrawal_for_actor(AUTHORITY_A, ASSET * 2, 100)
+        }
+        AuthorityIntentKind::BackingEarningsWithdrawal => {
+            const WINNING_DOMAIN: u16 = 3;
+            let earnings = env.primary_market_state().1.source_backing_buckets
+                [WINNING_DOMAIN as usize]
+                .utilization_fee_earnings;
+            env.build_retained_backing_bucket_earnings_withdrawal_for_actor(
+                AUTHORITY_A,
+                WINNING_DOMAIN,
+                earnings,
+            )
+        }
+        AuthorityIntentKind::InsuranceWithdrawal => {
+            env.build_retained_insurance_withdrawal_for_actor(AUTHORITY_A, ASSET, 100)
+        }
     }
 }
 
@@ -4547,13 +4606,19 @@ fn discover_one_authority_incarnation_replay(
     const TARGET: usize = 2;
     seed[0] ^= 0xd5;
     seed[1] ^= kind.discriminator();
-    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let mut env = if kind == AuthorityIntentKind::BackingEarningsWithdrawal {
+        prepare_source_backed_fee_world(seed)?
+    } else {
+        V16Svm::new(seed, MarketConfig::default())
+    };
     let supply_before = env.token_supply_observed();
     let asset = kind.authority_asset_index();
 
-    if let Some(authority_kind) = kind.asset_authority_kind() {
-        env.update_asset_authority_from_admin(asset, authority_kind, AUTHORITY_A)
-            .map_err(|error| format!("install authority A: {error}"))?;
+    if kind != AuthorityIntentKind::BackingEarningsWithdrawal {
+        if let Some(authority_kind) = kind.asset_authority_kind() {
+            env.update_asset_authority_from_admin(asset, authority_kind, AUTHORITY_A)
+                .map_err(|error| format!("install authority A: {error}"))?;
+        }
     }
     let oracle_account = prepare_authority_incarnation_route(&mut env, kind)?;
     let retained = build_authority_incarnation_intent(&mut env, kind, oracle_account);

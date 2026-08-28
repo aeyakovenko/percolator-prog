@@ -1044,6 +1044,7 @@ fn v16_attack_backing_ledger_domain_binding_enforced() {
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 2,
             market_id: g_before_spend.assets[1].market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -1268,6 +1269,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
             market_id: market_b_market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -1316,6 +1318,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
             ProgInstruction::WithdrawBackingBucket {
                 domain: 1,
                 market_id: market_b_market_id,
+                authority_epoch: 0,
                 amount: 10,
             },
             accounts,
@@ -1370,6 +1373,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
             market_id: market_b_market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -1403,6 +1407,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
             market_id: market_b_market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -1443,6 +1448,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             market_id: market_b_market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -1508,6 +1514,7 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -1556,6 +1563,7 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -1740,6 +1748,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -1802,6 +1811,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -1835,6 +1845,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 40,
         },

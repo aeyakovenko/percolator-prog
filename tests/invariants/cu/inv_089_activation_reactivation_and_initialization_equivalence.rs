@@ -47,6 +47,7 @@ fn withdraw_backing_with_authority(
         ProgInstruction::WithdrawBackingBucket {
             domain,
             market_id: env.asset_market_id(domain / 2),
+            authority_epoch: 0,
             amount,
         },
         vec![

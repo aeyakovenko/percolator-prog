@@ -1399,6 +1399,7 @@ fn reserve_custody_alias_instruction(
         | ReserveCustodyAliasRoute::WithdrawInsuranceWithLedger => {
             ProgInstruction::WithdrawInsuranceAsset {
                 market_id: fixture.env.asset_market_id(0),
+                authority_epoch: 0,
                 asset_index: 0,
                 amount: fixture.amount,
             }
@@ -1414,6 +1415,7 @@ fn reserve_custody_alias_instruction(
             ProgInstruction::WithdrawBackingBucket {
                 domain: 0,
                 market_id: fixture.env.asset_market_id(0),
+                authority_epoch: 0,
                 amount: fixture.amount,
             }
         }
@@ -1421,6 +1423,7 @@ fn reserve_custody_alias_instruction(
             ProgInstruction::WithdrawBackingBucketEarnings {
                 domain: fixture.domain,
                 market_id: fixture.env.asset_market_id(fixture.domain / 2),
+                authority_epoch: 0,
                 amount: fixture.amount,
             }
         }
@@ -4132,6 +4135,7 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let withdraw_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 10,
         },
@@ -4164,6 +4168,7 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -4194,6 +4199,7 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -4349,6 +4355,7 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
     let withdraw_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 10,
         },
@@ -4377,6 +4384,7 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -4403,6 +4411,7 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![

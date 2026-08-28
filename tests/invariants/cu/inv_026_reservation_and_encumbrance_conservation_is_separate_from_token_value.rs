@@ -242,6 +242,7 @@ fn v16_program_source_credit_reservation_labels_do_not_free_backing_value() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: over_watermark_amount,
         },
         vec![

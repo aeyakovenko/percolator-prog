@@ -933,6 +933,7 @@ fn v16_attack_backing_earnings_reject_noncanonical_vault() {
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: 10,
         },
         vec![
@@ -1818,6 +1819,7 @@ fn v16_attack_withdraw_insurance_asset_rejects_noncanonical_vault() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -1869,6 +1871,7 @@ fn v16_attack_withdraw_insurance_asset_rejects_noncanonical_vault() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            authority_epoch: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -2011,6 +2014,7 @@ fn v16_attack_backing_withdraw_pinned_to_canonical_vault() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             market_id,
+            authority_epoch: 0,
             amount: 500,
         },
         vec![
