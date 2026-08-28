@@ -2,6 +2,7 @@
 AccrualOrderingDiscovery	ECONOMIC_DELTA_ONLY	claim transfer delta lacks normalized public terminal evidence
 AssetGenerationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
 AuthorityIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
+AuthorityFundedHandoffDiscovery	TERMINAL_LOF	public trace binds stale authority-epoch handoff to exact incumbent backing-principal extraction
 AuthorityResolveTerminalDiscovery	TERMINAL_LOF	public trace binds stale authority-epoch resolve to exact funded-user terminal loss
 BackingProviderConsentDiscovery	ECONOMIC_DELTA_ONLY	operator SPL gain is exact, but the LP authorized the fee and provider harm is counterfactual revenue under a privileged policy change
 BilateralMarkFeeDiscovery	ECONOMIC_DELTA_ONLY	victim and coalition deltas lack normalized public terminal evidence

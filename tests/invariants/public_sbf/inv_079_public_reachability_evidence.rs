@@ -297,6 +297,7 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
     assert_eq!(
         terminal,
         [
+            "AuthorityFundedHandoffDiscovery",
             "AuthorityResolveTerminalDiscovery",
             "CrossDomainBackingDiscovery",
             "SourceFeeConsentDiscovery",
@@ -318,7 +319,7 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
         assert!(body.contains("terminal_classification"));
         assert!(body.contains("public_trace.validate_public_execution()"));
     }
-    assert_eq!(roster.len(), 27, "finding-blind oracle inventory changed");
+    assert_eq!(roster.len(), 28, "finding-blind oracle inventory changed");
 }
 
 #[test]

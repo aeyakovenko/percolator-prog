@@ -818,6 +818,15 @@ pub struct AuthorityResolveTerminalDiscovery {
     pub public_trace: PublicTraceEvidence,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorityFundedHandoffDiscovery {
+    pub provider_source_debit: u128,
+    pub stale_handoff_landed: bool,
+    pub replacement_gain: u128,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FundedRoleDiscovery {
     pub kind: FundedRoleKind,
@@ -2297,6 +2306,23 @@ impl AuthorityResolveTerminalDiscovery {
                     victim_loss_atoms,
                     unauthorized_gain_atoms: 0,
                 } if victim_loss_atoms == self.victim_loss
+            )
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+}
+
+impl AuthorityFundedHandoffDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.stale_handoff_landed
+            && self.provider_source_debit != 0
+            && self.provider_source_debit == self.replacement_gain
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == self.provider_source_debit
+                    && unauthorized_gain_atoms == self.replacement_gain
             )
             && self.public_trace.validate_public_execution().is_ok()
     }
@@ -4399,6 +4425,102 @@ pub fn discover_authority_resolve_terminal_replay(
         winner_payout,
         victim_loss,
         winner_gain,
+        terminal_classification,
+        public_trace,
+    })
+}
+
+pub fn discover_authority_funded_handoff_replay(
+    mut seed: [u8; 32],
+) -> Result<AuthorityFundedHandoffDiscovery, String> {
+    const PROVIDER: usize = 0;
+    const INTERMEDIATE_AUTHORITY: usize = 1;
+    const REPLACEMENT: usize = 2;
+    const ASSET: u16 = 0;
+    const DOMAIN: u16 = 0;
+    const PRINCIPAL: u128 = 500;
+
+    seed[0] ^= 0x81;
+    seed[1] ^= 0x5a;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            actor_deposits: [1; PRIMARY_ACTOR_COUNT],
+            ..MarketConfig::default()
+        },
+    );
+    env.begin_public_trace();
+    let supply_before = env.token_supply_observed();
+
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+    )
+    .map_err(|error| format!("install incumbent backing provider: {error}"))?;
+
+    let provider_source = env.actors[PROVIDER].source_token;
+    let provider_source_before = u128::from(env.token_amount(provider_source));
+    env.top_up_backing_bucket_for_actor(PROVIDER, DOMAIN, PRINCIPAL, 100_000)
+        .map_err(|error| format!("fund incumbent backing principal: {error}"))?;
+    let provider_source_debit = provider_source_before
+        .checked_sub(u128::from(env.token_amount(provider_source)))
+        .ok_or_else(|| "authority-handoff provider source increased".to_string())?;
+    if provider_source_debit != PRINCIPAL {
+        return Err(format!(
+            "authority-handoff fixture committed {provider_source_debit}, expected {PRINCIPAL}"
+        ));
+    }
+
+    let retained_handoff = env.build_retained_asset_authority_handoff_between_actors(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+        REPLACEMENT,
+    );
+    env.update_asset_authority_between_actors(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+        INTERMEDIATE_AUTHORITY,
+    )
+    .map_err(|error| format!("rotate backing authority A to B: {error}"))?;
+    env.update_asset_authority_between_actors(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        INTERMEDIATE_AUTHORITY,
+        PROVIDER,
+    )
+    .map_err(|error| format!("rotate backing authority B to A: {error}"))?;
+
+    let before_replay = fingerprint(&env);
+    env.land_retained(retained_handoff)
+        .map_err(|error| format!("old-authority backing handoff rejected: {error}"))?;
+    let stale_handoff_landed = before_replay != fingerprint(&env);
+    if !stale_handoff_landed {
+        return Err("old-authority backing handoff succeeded without changing authority".into());
+    }
+
+    let replacement_destination = env.actors[REPLACEMENT].destination_token;
+    let replacement_before = u128::from(env.token_amount(replacement_destination));
+    env.withdraw_backing_bucket_for_actor(REPLACEMENT, DOMAIN, PRINCIPAL)
+        .map_err(|error| format!("replacement withdraw backing principal: {error}"))?;
+    let replacement_gain = u128::from(env.token_amount(replacement_destination))
+        .checked_sub(replacement_before)
+        .ok_or_else(|| "authority-handoff replacement destination decreased".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err("authority-handoff terminal replay changed SPL supply".into());
+    }
+    let (terminal_classification, public_trace) = finish_public_terminal_loss_evidence(
+        &mut env,
+        provider_source_debit,
+        replacement_gain,
+        "authority funded handoff",
+    )?;
+    Ok(AuthorityFundedHandoffDiscovery {
+        provider_source_debit,
+        stale_handoff_landed,
+        replacement_gain,
         terminal_classification,
         public_trace,
     })

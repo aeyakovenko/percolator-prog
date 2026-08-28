@@ -8,6 +8,9 @@
 //! The same generated seed also drives a funded authority A-to-B-to-A market: an old resolve
 //! request lands after two users trade, and exact terminal SPL payouts bind the victim's loss to
 //! the beneficiary's gain through the shared public terminal classifier.
+//! A second funded A-to-B-to-A route retains a backing-authority handoff, funds principal under the
+//! incumbent, lands the stale handoff after the authority returns, and binds the incumbent's exact
+//! source debit to the replacement authority's exact SPL withdrawal.
 //! `v16_program_funded_role_matrix_discovers_admin_seizure` independently funds each value-bearing
 //! asset role, delegates a distinct cold asset admin, and measures whether that admin can redirect
 //! the incumbent's principal to a replacement key. The economic oracle requires an exact provider
@@ -65,6 +68,17 @@ proptest! {
         );
         prop_assert_eq!(terminal.victim_loss, 100_000);
         prop_assert_eq!(terminal.winner_gain, terminal.victim_loss);
+
+        let funded_handoff =
+            crate::support::invariant_discovery::discover_authority_funded_handoff_replay(seed)
+                .map_err(TestCaseError::fail)?;
+        prop_assert!(
+            funded_handoff.is_violation(),
+            "old-authority handoff did not transfer exact funded principal: {:?}",
+            funded_handoff
+        );
+        prop_assert_eq!(funded_handoff.provider_source_debit, 500);
+        prop_assert_eq!(funded_handoff.replacement_gain, funded_handoff.provider_source_debit);
     }
 
     #[test]
