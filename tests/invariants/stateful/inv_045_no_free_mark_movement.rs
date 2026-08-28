@@ -2138,25 +2138,29 @@ proptest! {
             prop_assert!(discovery.extracted_tokens <= discovery.coalition_equity_before);
             prop_assert!(discovery.fee_counterparty_loss > 0);
             prop_assert!(discovery.insurance_gain > 0);
-            prop_assert!(discovery.users_terminal);
+            prop_assert!(discovery.terminal_evidence.users_terminal);
             prop_assert!(matches!(
-                discovery.terminal_classification,
+                discovery.terminal_evidence.terminal_classification,
                 PublicTerminalClassification::BoundedExit
             ));
             prop_assert_eq!(
                 discovery
+                    .terminal_evidence
                     .public_trace
-                    .token_delta_for_accounts(&discovery.victim_destinations)
+                    .token_delta_for_accounts(&discovery.terminal_evidence.victim_destinations)
                     .map_err(TestCaseError::fail)?,
-                i128::try_from(discovery.victim_terminal_payout)
+                i128::try_from(discovery.terminal_evidence.victim_terminal_payout)
                     .map_err(|_| TestCaseError::fail("victim payout exceeds i128"))?
             );
             prop_assert_eq!(
                 discovery
+                    .terminal_evidence
                     .public_trace
-                    .token_delta_for_accounts(&discovery.coalition_destinations)
+                    .token_delta_for_accounts(
+                        &discovery.terminal_evidence.beneficiary_destinations
+                    )
                     .map_err(TestCaseError::fail)?,
-                i128::try_from(discovery.coalition_terminal_payout)
+                i128::try_from(discovery.terminal_evidence.beneficiary_terminal_payout)
                     .map_err(|_| TestCaseError::fail("coalition payout exceeds i128"))?
             );
         }

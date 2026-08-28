@@ -1245,6 +1245,19 @@ pub struct PairedTerminalPayoutEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalCohortPayoutEvidence {
+    pub victim_destinations: Vec<Pubkey>,
+    pub beneficiary_destinations: Vec<Pubkey>,
+    pub victim_value_before: u128,
+    pub beneficiary_value_before: u128,
+    pub victim_terminal_payout: u128,
+    pub beneficiary_terminal_payout: u128,
+    pub users_terminal: bool,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProspectiveAccrualDiscovery {
     pub route: ProspectiveAccrualRoute,
     pub control_f_short_num: i128,
@@ -1358,16 +1371,10 @@ pub struct BilateralMarkFeeDiscovery {
     pub fee_counterparty_loss: u128,
     pub insurance_gain: u128,
     pub extracted_tokens: u128,
-    pub victim_terminal_payout: u128,
-    pub coalition_terminal_payout: u128,
-    pub users_terminal: bool,
-    pub victim_destinations: Vec<Pubkey>,
-    pub coalition_destinations: Vec<Pubkey>,
-    pub terminal_classification: PublicTerminalClassification,
-    pub public_trace: PublicTraceEvidence,
+    pub terminal_evidence: TerminalCohortPayoutEvidence,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompositeRoundingDiscovery {
     pub scale: CompositeRoundingScale,
     pub exact_mark: u64,
@@ -1378,6 +1385,11 @@ pub struct CompositeRoundingDiscovery {
     pub oi_reduction_q: u128,
     pub cranker_reward: u128,
     pub extracted_tokens: u64,
+    pub victim_equity_before: u128,
+    pub cranker_equity_before: u128,
+    pub victim_loss: u128,
+    pub cranker_excess: u128,
+    pub terminal_evidence: TerminalCohortPayoutEvidence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2232,6 +2244,71 @@ impl ObservationOmissionDiscovery {
     }
 }
 
+impl TerminalCohortPayoutEvidence {
+    fn traced_terminal_payouts(&self) -> Option<(u128, u128)> {
+        let victim = u128::try_from(
+            self.public_trace
+                .token_delta_for_accounts(&self.victim_destinations)
+                .ok()?,
+        )
+        .ok()?;
+        let beneficiary = u128::try_from(
+            self.public_trace
+                .token_delta_for_accounts(&self.beneficiary_destinations)
+                .ok()?,
+        )
+        .ok()?;
+        Some((victim, beneficiary))
+    }
+
+    pub fn certifies_exact_loss(&self, victim_loss: u128, beneficiary_gain: u128) -> bool {
+        let Some((traced_victim_payout, traced_beneficiary_payout)) =
+            self.traced_terminal_payouts()
+        else {
+            return false;
+        };
+        victim_loss != 0
+            && beneficiary_gain != 0
+            && self.users_terminal
+            && traced_victim_payout == self.victim_terminal_payout
+            && traced_beneficiary_payout == self.beneficiary_terminal_payout
+            && self
+                .victim_value_before
+                .checked_sub(self.victim_terminal_payout)
+                == Some(victim_loss)
+            && self
+                .beneficiary_terminal_payout
+                .checked_sub(self.beneficiary_value_before)
+                == Some(beneficiary_gain)
+            && self.public_trace.validate_public_execution().is_ok()
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == victim_loss
+                    && unauthorized_gain_atoms == beneficiary_gain
+            )
+    }
+
+    pub fn certifies_nonextraction(&self) -> bool {
+        let Some((traced_victim_payout, traced_beneficiary_payout)) =
+            self.traced_terminal_payouts()
+        else {
+            return false;
+        };
+        self.beneficiary_terminal_payout <= self.beneficiary_value_before
+            && traced_victim_payout == self.victim_terminal_payout
+            && traced_beneficiary_payout == self.beneficiary_terminal_payout
+            && self.users_terminal
+            && self.public_trace.validate_public_execution().is_ok()
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+    }
+}
+
 impl CompositeRoundingDiscovery {
     pub fn is_violation(&self) -> bool {
         self.rounded_target != self.exact_mark
@@ -2241,31 +2318,28 @@ impl CompositeRoundingDiscovery {
             && self.oi_reduction_q != 0
             && self.cranker_reward != 0
             && self.cranker_reward == u128::from(self.extracted_tokens)
+            && self
+                .terminal_evidence
+                .certifies_exact_loss(self.victim_loss, self.cranker_excess)
+    }
+
+    pub fn certifies_exact_composition_and_exit(&self) -> bool {
+        !self.is_violation()
+            && self.rounded_target == self.exact_mark
+            && self.rounded_mark == self.exact_mark
+            && self.certified_liq_deficit == 0
+            && self.victim_capital_loss == 0
+            && self.oi_reduction_q == 0
+            && self.cranker_reward == 0
+            && self.extracted_tokens == 0
+            && self.victim_loss == 0
+            && self.cranker_excess == 0
+            && self.terminal_evidence.certifies_nonextraction()
     }
 }
 
 impl BilateralMarkFeeDiscovery {
-    fn traced_terminal_payouts(&self) -> Option<(u128, u128)> {
-        let victim = u128::try_from(
-            self.public_trace
-                .token_delta_for_accounts(&self.victim_destinations)
-                .ok()?,
-        )
-        .ok()?;
-        let coalition = u128::try_from(
-            self.public_trace
-                .token_delta_for_accounts(&self.coalition_destinations)
-                .ok()?,
-        )
-        .ok()?;
-        Some((victim, coalition))
-    }
-
     pub fn is_violation(&self) -> bool {
-        let Some((traced_victim_payout, traced_coalition_payout)) = self.traced_terminal_payouts()
-        else {
-            return false;
-        };
         self.queued_mark > self.setup_mark
             && self.coalition_excess != 0
             && self.mark_victim_equity_loss != 0
@@ -2273,44 +2347,15 @@ impl BilateralMarkFeeDiscovery {
             && self.fee_counterparty_loss != 0
             && self.insurance_gain != 0
             && self.extracted_tokens != 0
-            && self.users_terminal
-            && traced_victim_payout == self.victim_terminal_payout
-            && traced_coalition_payout == self.coalition_terminal_payout
             && self
-                .victim_equity_before
-                .checked_sub(self.victim_terminal_payout)
-                == Some(self.victim_loss)
-            && self
-                .coalition_terminal_payout
-                .checked_sub(self.coalition_equity_before)
-                == Some(self.coalition_excess)
-            && self.public_trace.validate_public_execution().is_ok()
-            && matches!(
-                self.terminal_classification,
-                PublicTerminalClassification::LossOfFunds {
-                    victim_loss_atoms,
-                    unauthorized_gain_atoms,
-                } if victim_loss_atoms == self.victim_loss
-                    && unauthorized_gain_atoms == self.coalition_excess
-            )
+                .terminal_evidence
+                .certifies_exact_loss(self.victim_loss, self.coalition_excess)
     }
 
     pub fn certifies_terminal_nonextraction(&self) -> bool {
-        let Some((traced_victim_payout, traced_coalition_payout)) = self.traced_terminal_payouts()
-        else {
-            return false;
-        };
         !self.is_violation()
             && self.coalition_excess == 0
-            && self.coalition_terminal_payout <= self.coalition_equity_before
-            && traced_victim_payout == self.victim_terminal_payout
-            && traced_coalition_payout == self.coalition_terminal_payout
-            && self.users_terminal
-            && self.public_trace.validate_public_execution().is_ok()
-            && matches!(
-                self.terminal_classification,
-                PublicTerminalClassification::BoundedExit
-            )
+            && self.terminal_evidence.certifies_nonextraction()
     }
 }
 
@@ -2557,6 +2602,80 @@ impl PairedTerminalPayoutEvidence {
                 .is_ok()
             && self.public_trace.validate_public_execution().is_ok()
     }
+}
+
+fn build_terminal_cohort_payout_evidence(
+    context: &str,
+    victim_destinations: Vec<Pubkey>,
+    beneficiary_destinations: Vec<Pubkey>,
+    victim_value_before: u128,
+    beneficiary_value_before: u128,
+    users_terminal: bool,
+    classify_if_value_transfer: bool,
+    public_trace: PublicTraceEvidence,
+) -> Result<TerminalCohortPayoutEvidence, String> {
+    if victim_destinations.is_empty()
+        || beneficiary_destinations.is_empty()
+        || victim_destinations
+            .iter()
+            .any(|destination| beneficiary_destinations.contains(destination))
+    {
+        return Err(format!(
+            "{context} requires disjoint nonempty payout cohorts"
+        ));
+    }
+    if !users_terminal {
+        return Err(format!("{context} left a payout participant nonterminal"));
+    }
+    let victim_terminal_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&victim_destinations)?)
+            .map_err(|_| format!("{context} victim cohort had a negative payout delta"))?;
+    let beneficiary_terminal_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&beneficiary_destinations)?)
+            .map_err(|_| format!("{context} beneficiary cohort had a negative payout delta"))?;
+    let victim_loss = victim_value_before
+        .checked_sub(victim_terminal_payout)
+        .unwrap_or(0);
+    let beneficiary_gain = beneficiary_terminal_payout
+        .checked_sub(beneficiary_value_before)
+        .unwrap_or(0);
+    let exact_loss = classify_if_value_transfer && victim_loss != 0 && beneficiary_gain != 0;
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: if exact_loss { victim_loss } else { 0 },
+            unauthorized_gain_atoms: if exact_loss { beneficiary_gain } else { 0 },
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: !exact_loss,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("{context} terminal evidence is invalid: {error}"))?;
+    let evidence = TerminalCohortPayoutEvidence {
+        victim_destinations,
+        beneficiary_destinations,
+        victim_value_before,
+        beneficiary_value_before,
+        victim_terminal_payout,
+        beneficiary_terminal_payout,
+        users_terminal,
+        terminal_classification,
+        public_trace,
+    };
+    let certified = if exact_loss {
+        evidence.certifies_exact_loss(victim_loss, beneficiary_gain)
+    } else {
+        evidence.certifies_nonextraction()
+    };
+    if !certified {
+        return Err(format!(
+            "{context} payout observations do not certify exact loss or nonextraction"
+        ));
+    }
+    Ok(evidence)
 }
 
 fn build_paired_terminal_payout_evidence(
@@ -10431,24 +10550,6 @@ fn discover_one_bilateral_mark_fee_violation(
         .into_iter()
         .map(|actor| env.actors[actor].destination_token)
         .collect::<Vec<_>>();
-    let coalition_terminal_payout =
-        coalition_destinations
-            .iter()
-            .try_fold(0u128, |total, destination| {
-                total
-                    .checked_add(u128::from(env.token_amount(*destination)))
-                    .ok_or_else(|| "bilateral terminal coalition payout overflow".to_string())
-            })?;
-    let victim_terminal_payout =
-        victim_destinations
-            .iter()
-            .try_fold(0u128, |total, destination| {
-                total
-                    .checked_add(u128::from(env.token_amount(*destination)))
-                    .ok_or_else(|| "bilateral terminal victim payout overflow".to_string())
-            })?;
-    let coalition_excess = coalition_terminal_payout.saturating_sub(coalition_equity_before);
-    let victim_loss = victim_group_equity_before.saturating_sub(victim_terminal_payout);
     let users_terminal = actors.iter().try_fold(true, |all_terminal, actor| {
         discovery_portfolio_is_terminal(&env.primary_portfolio(*actor))
             .map(|terminal| all_terminal && terminal)
@@ -10457,31 +10558,26 @@ fn discover_one_bilateral_mark_fee_violation(
         return Err("bilateral mark-fee world changed SPL supply".into());
     }
     let public_trace = env.finish_public_trace();
-    let candidate_violation = queued_mark > setup_mark
-        && coalition_excess != 0
+    let classify_if_value_transfer = queued_mark > setup_mark
         && mark_victim_equity_loss != 0
-        && victim_loss != 0
         && fee_counterparty_loss != 0
         && insurance_gain != 0
         && extracted_tokens != 0;
-    let terminal_classification = public_trace
-        .classify_terminal(PublicTerminalObservation {
-            victim_loss_atoms: if candidate_violation { victim_loss } else { 0 },
-            unauthorized_gain_atoms: if candidate_violation {
-                coalition_excess
-            } else {
-                0
-            },
-            funded_value_remaining: 0,
-            unresolved_obligation: 0,
-            bounded_exit_succeeded: !candidate_violation,
-            terminal_receipt_created: false,
-            authorized_forfeit: false,
-            required_exit_routes: 0,
-            attempted_exit_routes: 0,
-            progressing_exit_routes: 0,
-        })
-        .map_err(|error| format!("bilateral terminal evidence is invalid: {error}"))?;
+    let terminal_evidence = build_terminal_cohort_payout_evidence(
+        "bilateral mark-fee world",
+        victim_destinations,
+        coalition_destinations,
+        victim_group_equity_before,
+        coalition_equity_before,
+        users_terminal,
+        classify_if_value_transfer,
+        public_trace,
+    )?;
+    let coalition_excess = terminal_evidence
+        .beneficiary_terminal_payout
+        .saturating_sub(coalition_equity_before);
+    let victim_loss =
+        victim_group_equity_before.saturating_sub(terminal_evidence.victim_terminal_payout);
     Ok(BilateralMarkFeeDiscovery {
         mode,
         route,
@@ -10495,13 +10591,7 @@ fn discover_one_bilateral_mark_fee_violation(
         fee_counterparty_loss,
         insurance_gain,
         extracted_tokens,
-        victim_terminal_payout,
-        coalition_terminal_payout,
-        users_terminal,
-        victim_destinations,
-        coalition_destinations,
-        terminal_classification,
-        public_trace,
+        terminal_evidence,
     })
 }
 
@@ -10634,8 +10724,12 @@ fn discover_one_composite_rounding_violation(
     env.trade_no_cpi(0, 1, 0, size_q, exact_mark, 0)
         .map_err(|error| format!("{scale:?} open victim exposure: {error}"))?;
     let victim_capital_before = env.primary_portfolio(0).capital.get();
+    let victim_equity_before = u128::try_from(discovery_portfolio_equity(&env, 0)?)
+        .map_err(|_| format!("{scale:?} victim began insolvent"))?;
     let oi_before = env.primary_market_state().1.assets[0].oi_eff_long_q;
     let cranker_capital_before = env.primary_portfolio(2).capital.get();
+    let cranker_equity_before = u128::try_from(discovery_portfolio_equity(&env, 2)?)
+        .map_err(|_| format!("{scale:?} cranker began insolvent"))?;
     let supply_before = env.token_supply_observed();
 
     let fresh_oracles: Vec<_> = fresh_prices
@@ -10643,6 +10737,7 @@ fn discover_one_composite_rounding_violation(
         .enumerate()
         .map(|(index, price)| env.set_pyth_price(&feeds[index], *price, -6, 0, 101))
         .collect();
+    env.begin_public_trace();
     let observations = || {
         vec![CrankObservationHint {
             asset_index: 0,
@@ -10688,9 +10783,39 @@ fn discover_one_composite_rounding_violation(
             .map_err(|error| format!("{scale:?} withdraw liquidation reward: {error}"))?;
     }
     let extracted_tokens = env.token_amount(env.actors[2].destination_token);
+    env.resolve_market()
+        .map_err(|error| format!("{scale:?} resolve composite-rounding world: {error}"))?;
+    let actors = [0usize, 1, 2, 3, 4];
+    drain_resolved_discovery_actors(&mut env, actors)?;
+    let users_terminal = actors.iter().try_fold(true, |all_terminal, actor| {
+        discovery_portfolio_is_terminal(&env.primary_portfolio(*actor))
+            .map(|terminal| all_terminal && terminal)
+    })?;
     if env.token_supply_observed() != supply_before {
         return Err("composite rounding world changed SPL supply".into());
     }
+    let public_trace = env.finish_public_trace();
+    let classify_if_value_transfer = wrapper_after.oracle_target_price_e6 != exact_mark
+        && group_after.assets[0].effective_price != exact_mark
+        && certified_liq_deficit != 0
+        && victim_capital_loss != 0
+        && oi_reduction_q != 0
+        && cranker_reward != 0
+        && cranker_reward == u128::from(extracted_tokens);
+    let terminal_evidence = build_terminal_cohort_payout_evidence(
+        &format!("{scale:?} composite-rounding world"),
+        vec![env.actors[0].destination_token],
+        vec![env.actors[2].destination_token],
+        victim_equity_before,
+        cranker_equity_before,
+        users_terminal,
+        classify_if_value_transfer,
+        public_trace,
+    )?;
+    let victim_loss = victim_equity_before.saturating_sub(terminal_evidence.victim_terminal_payout);
+    let cranker_excess = terminal_evidence
+        .beneficiary_terminal_payout
+        .saturating_sub(cranker_equity_before);
     Ok(CompositeRoundingDiscovery {
         scale,
         exact_mark,
@@ -10701,6 +10826,11 @@ fn discover_one_composite_rounding_violation(
         oi_reduction_q,
         cranker_reward,
         extracted_tokens,
+        victim_equity_before,
+        cranker_equity_before,
+        victim_loss,
+        cranker_excess,
+        terminal_evidence,
     })
 }
 

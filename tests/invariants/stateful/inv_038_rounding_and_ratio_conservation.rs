@@ -100,6 +100,10 @@ proptest! {
         }
         for discovery in discoveries {
             prop_assert!(!discovery.is_violation(), "{discovery:?}");
+            prop_assert!(
+                discovery.certifies_exact_composition_and_exit(),
+                "{discovery:?}"
+            );
             prop_assert_eq!(discovery.rounded_target, discovery.exact_mark);
             prop_assert_eq!(discovery.rounded_mark, discovery.exact_mark);
             prop_assert_eq!(discovery.certified_liq_deficit, 0);
@@ -107,6 +111,8 @@ proptest! {
             prop_assert_eq!(discovery.oi_reduction_q, 0);
             prop_assert_eq!(discovery.cranker_reward, 0);
             prop_assert_eq!(discovery.extracted_tokens, 0);
+            prop_assert_eq!(discovery.victim_loss, 0);
+            prop_assert_eq!(discovery.cranker_excess, 0);
         }
     }
 }

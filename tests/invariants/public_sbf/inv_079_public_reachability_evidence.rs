@@ -197,6 +197,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
     const FINISH: &str = concat!("finish_public_", "trace()");
     const VALIDATE: &str = concat!("validate_public_", "execution()");
     const CLASSIFY: &str = concat!("classify_", "terminal(");
+    const TERMINAL_COHORT: &str = "build_terminal_cohort_payout_evidence(";
     let mut pending = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")];
     let mut sources = Vec::new();
     while let Some(path) = pending.pop() {
@@ -228,7 +229,9 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
             let end = (line_index + 31).min(lines.len());
             let validation_window = lines[line_index + 1..end].join("\n");
             assert!(
-                validation_window.contains(VALIDATE) || validation_window.contains(CLASSIFY),
+                validation_window.contains(VALIDATE)
+                    || validation_window.contains(CLASSIFY)
+                    || validation_window.contains(TERMINAL_COHORT),
                 "{} public trace at source line {} is consumed without normalized public-reachability validation",
                 path.display(),
                 line_index + 1
@@ -236,7 +239,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 40,
+        consumers, 41,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
@@ -301,6 +304,7 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
             "AuthorityFundedHandoffDiscovery",
             "AuthorityResolveTerminalDiscovery",
             "BilateralMarkFeeDiscovery",
+            "CompositeRoundingDiscovery",
             "CrossDomainBackingDiscovery",
             "PendingZeroMoveTerminalDiscovery",
             "ProspectiveAccrualDiscovery",
@@ -345,6 +349,19 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
     assert!(shared_body.contains("public_trace"));
     assert!(shared_body.contains("certifies_exact_loss"));
     assert!(shared_body.matches("validate_public_execution()").count() >= 2);
+    let cohort_marker = "fn build_terminal_cohort_payout_evidence(";
+    let cohort_start = source
+        .find(cohort_marker)
+        .expect("shared terminal-cohort evidence builder");
+    let cohort_body = &source[cohort_start..];
+    let cohort_end = cohort_body
+        .find("\nfn build_paired_terminal_payout_evidence(")
+        .expect("terminated terminal-cohort evidence builder");
+    let cohort_body = &cohort_body[..cohort_end];
+    assert!(cohort_body.contains("token_delta_for_accounts"));
+    assert!(cohort_body.contains("classify_terminal"));
+    assert!(cohort_body.contains("certifies_exact_loss"));
+    assert!(cohort_body.contains("certifies_nonextraction"));
     assert_eq!(roster.len(), 28, "finding-blind oracle inventory changed");
 }
 
