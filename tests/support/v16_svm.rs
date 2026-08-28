@@ -2298,6 +2298,119 @@ impl V16Svm {
         )
     }
 
+    pub fn create_secondary_collateral_mint(&mut self, supply: u64) -> Pubkey {
+        let mint = Pubkey::find_program_address(
+            &[b"inv005-secondary-mint", self.market.as_ref()],
+            &self.program_id,
+        )
+        .0;
+        set_mint_account(&mut self.svm, mint, supply);
+        mint
+    }
+
+    pub fn install_secondary_collateral_mint(
+        &mut self,
+        secondary_mint: Pubkey,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateBaseUnitMints {
+                primary_mint: self.mint.to_bytes(),
+                secondary_mint: secondary_mint.to_bytes(),
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new_readonly(self.mint, false),
+                AccountMeta::new_readonly(secondary_mint, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn build_retained_base_unit_mints(&mut self, secondary_mint: Pubkey) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::UpdateBaseUnitMints {
+                primary_mint: self.mint.to_bytes(),
+                secondary_mint: secondary_mint.to_bytes(),
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new_readonly(self.mint, false),
+                AccountMeta::new_readonly(secondary_mint, false),
+            ],
+            &[authority],
+        )
+    }
+
+    fn secondary_collateral_destination(&self, secondary_mint: Pubkey) -> Pubkey {
+        Pubkey::find_program_address(
+            &[
+                b"inv005-secondary-destination",
+                self.market.as_ref(),
+                secondary_mint.as_ref(),
+            ],
+            &self.program_id,
+        )
+        .0
+    }
+
+    pub fn fund_secondary_collateral_reserve(&mut self, secondary_mint: Pubkey, amount: u64) {
+        let secondary_vault = canonical_vault_ata(self.vault_authority, secondary_mint);
+        let secondary_destination = self.secondary_collateral_destination(secondary_mint);
+        set_token_account(
+            &mut self.svm,
+            secondary_vault,
+            secondary_mint,
+            self.vault_authority,
+            amount,
+        );
+        set_token_account(
+            &mut self.svm,
+            secondary_destination,
+            secondary_mint,
+            self.admin.pubkey(),
+            0,
+        );
+        self.token_accounts
+            .extend([secondary_vault, secondary_destination]);
+        self.initial_token_supply = self
+            .initial_token_supply
+            .checked_add(u128::from(amount))
+            .expect("secondary reserve token supply");
+    }
+
+    pub fn build_retained_secondary_reserve_swap(
+        &mut self,
+        secondary_mint: Pubkey,
+        amount: u128,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        let secondary_vault = canonical_vault_ata(self.vault_authority, secondary_mint);
+        let secondary_destination = self.secondary_collateral_destination(secondary_mint);
+        self.build_program_transaction(
+            ProgInstruction::SwapSecondaryForPrimary {
+                amount,
+                authority_epoch: CURRENT_AUTHORITY_EPOCH,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new_readonly(self.market, false),
+                AccountMeta::new(self.provider_source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new(secondary_destination, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn update_trade_fee_policy(
         &mut self,
         trade_fee_base_bps: u64,
@@ -5256,6 +5369,12 @@ impl V16Svm {
                 authority_epoch, ..
             }
             | ProgInstruction::CloseSlab {
+                authority_epoch, ..
+            }
+            | ProgInstruction::UpdateBaseUnitMints {
+                authority_epoch, ..
+            }
+            | ProgInstruction::SwapSecondaryForPrimary {
                 authority_epoch, ..
             }
             | ProgInstruction::TopUpInsurance {

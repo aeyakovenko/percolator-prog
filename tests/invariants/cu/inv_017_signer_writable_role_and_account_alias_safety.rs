@@ -2060,6 +2060,7 @@ fn base_unit_mint_alias_fixture(shape: BaseUnitMintAliasShape) -> CoreAccountAli
     let instruction = ProgInstruction::UpdateBaseUnitMints {
         primary_mint: primary_mint.to_bytes(),
         secondary_mint: secondary_mint.to_bytes(),
+        authority_epoch: 0,
     };
     let mut accounts = vec![
         AccountMeta::new_readonly(authority.pubkey(), true),
@@ -2122,7 +2123,10 @@ fn swap_secondary_alias_fixture() -> CoreAccountAliasFixture {
     CoreAccountAliasFixture {
         env,
         signers: vec![authority],
-        instruction: ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        instruction: ProgInstruction::SwapSecondaryForPrimary {
+            amount: 10,
+            authority_epoch: 0,
+        },
         accounts,
         tracked_accounts,
     }
@@ -5355,7 +5359,10 @@ fn v16_attack_swap_secondary_unauthorized_and_bounded() {
             &mut env.svm,
             env.program_id,
             &env.payer,
-            ProgInstruction::SwapSecondaryForPrimary { amount },
+            ProgInstruction::SwapSecondaryForPrimary {
+                amount,
+                authority_epoch: 0,
+            },
             vec![
                 AccountMeta::new(signer.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),
@@ -5506,7 +5513,10 @@ fn v16_attack_swap_secondary_rejects_vault_source_or_dest_aliases() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 10,
+            authority_epoch: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -5549,7 +5559,10 @@ fn v16_attack_swap_secondary_rejects_vault_source_or_dest_aliases() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 10,
+            authority_epoch: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -5585,7 +5598,10 @@ fn v16_attack_swap_secondary_rejects_vault_source_or_dest_aliases() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 10,
+            authority_epoch: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),

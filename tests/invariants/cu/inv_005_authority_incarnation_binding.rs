@@ -321,13 +321,13 @@ const INV005_AUTHORITY_ROUTE_DISPOSITIONS: &[(&str, Inv005AuthorityDisposition, 
     ),
     (
         "UpdateBaseUnitMints",
-        Inv005AuthorityDisposition::OpenEpochGap,
-        "base-unit policy A-B-A replay",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "BaseUnitMints",
     ),
     (
         "SwapSecondaryForPrimary",
-        Inv005AuthorityDisposition::OpenEpochGap,
-        "secondary reserve swap A-B-A replay",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "SecondaryReserveSwap",
     ),
 ];
 
@@ -357,13 +357,9 @@ fn v16_program_configured_authority_route_dispositions_are_source_complete() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(epoch_variants, classified_epoch_variants);
 
-    let expected_open = [
-        "SwapSecondaryForPrimary",
-        "UpdateAssetLifecycle",
-        "UpdateBaseUnitMints",
-    ]
-    .into_iter()
-    .collect::<std::collections::BTreeSet<_>>();
+    let expected_open = ["UpdateAssetLifecycle"]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     let actual_open = dispositions
         .iter()
         .filter_map(|(variant, disposition)| {
@@ -4193,6 +4189,7 @@ fn v16_attack_update_authority_handoff_rekeys_secondary_swap_authority() {
     let fresh_primary_source = env.token_account_for_mint(env.mint, new_marketauth.pubkey(), 20);
     let fresh_secondary_dest =
         env.token_account_for_mint(secondary_mint, new_marketauth.pubkey(), 0);
+    let stale_authority_epoch = env.control_sequences(0).authority_epoch;
 
     env.update_asset_authority_with_cu(&new_marketauth);
     assert_eq!(
@@ -4209,7 +4206,10 @@ fn v16_attack_update_authority_handoff_rekeys_secondary_swap_authority() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SwapSecondaryForPrimary { amount: 20 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 20,
+            authority_epoch: stale_authority_epoch,
+        },
         vec![
             AccountMeta::new(old_marketauth.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -4253,11 +4253,15 @@ fn v16_attack_update_authority_handoff_rekeys_secondary_swap_authority() {
     );
 
     env.svm.expire_blockhash();
+    let fresh_authority_epoch = env.control_sequences(0).authority_epoch;
     let fresh_swap = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SwapSecondaryForPrimary { amount: 20 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 20,
+            authority_epoch: fresh_authority_epoch,
+        },
         vec![
             AccountMeta::new(new_marketauth.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),

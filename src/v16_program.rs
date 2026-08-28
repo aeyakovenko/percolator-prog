@@ -3192,9 +3192,11 @@ pub mod ix {
         UpdateBaseUnitMints {
             primary_mint: [u8; 32],
             secondary_mint: [u8; 32],
+            authority_epoch: u64,
         },
         SwapSecondaryForPrimary {
             amount: u128,
+            authority_epoch: u64,
         },
     }
 
@@ -3275,6 +3277,21 @@ pub mod ix {
             })
         }
 
+        fn decode_update_base_unit_mints_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
+            Ok(Self::UpdateBaseUnitMints {
+                primary_mint: read_bytes32(rest)?,
+                secondary_mint: read_bytes32(rest)?,
+                authority_epoch: read_u64(rest)?,
+            })
+        }
+
+        fn decode_swap_secondary_for_primary_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
+            Ok(Self::SwapSecondaryForPrimary {
+                amount: read_u128(rest)?,
+                authority_epoch: read_u64(rest)?,
+            })
+        }
+
         #[cfg(kani)]
         fn finish_proof_body(
             input: &[u8],
@@ -3310,6 +3327,22 @@ pub mod ix {
         #[cfg(kani)]
         pub fn decode_batch_trade_cpi_body_for_proof(input: &[u8]) -> Result<Self, ProgramError> {
             Self::finish_proof_body(input, Self::decode_batch_trade_cpi_body)
+        }
+
+        #[doc(hidden)]
+        #[cfg(kani)]
+        pub fn decode_update_base_unit_mints_body_for_proof(
+            input: &[u8],
+        ) -> Result<Self, ProgramError> {
+            Self::finish_proof_body(input, Self::decode_update_base_unit_mints_body)
+        }
+
+        #[doc(hidden)]
+        #[cfg(kani)]
+        pub fn decode_swap_secondary_for_primary_body_for_proof(
+            input: &[u8],
+        ) -> Result<Self, ProgramError> {
+            Self::finish_proof_body(input, Self::decode_swap_secondary_for_primary_body)
         }
 
         pub fn decode(input: &[u8]) -> Result<Self, ProgramError> {
@@ -3471,13 +3504,8 @@ pub mod ix {
                     policy_sequence: read_u64(&mut rest)?,
                     authority_epoch: read_u64(&mut rest)?,
                 },
-                60 => Self::UpdateBaseUnitMints {
-                    primary_mint: read_bytes32(&mut rest)?,
-                    secondary_mint: read_bytes32(&mut rest)?,
-                },
-                61 => Self::SwapSecondaryForPrimary {
-                    amount: read_u128(&mut rest)?,
-                },
+                60 => Self::decode_update_base_unit_mints_body(&mut rest)?,
+                61 => Self::decode_swap_secondary_for_primary_body(&mut rest)?,
                 62 => Self::ConfigureAuthMark {
                     asset_index: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
@@ -3981,14 +4009,20 @@ pub mod ix {
                 Self::UpdateBaseUnitMints {
                     primary_mint,
                     secondary_mint,
+                    authority_epoch,
                 } => {
                     out.push(60);
                     out.extend_from_slice(&primary_mint);
                     out.extend_from_slice(&secondary_mint);
+                    push_u64(&mut out, authority_epoch);
                 }
-                Self::SwapSecondaryForPrimary { amount } => {
+                Self::SwapSecondaryForPrimary {
+                    amount,
+                    authority_epoch,
+                } => {
                     out.push(61);
                     push_u128(&mut out, amount);
+                    push_u64(&mut out, authority_epoch);
                 }
                 Self::WithdrawBackingBucketEarnings {
                     domain,
@@ -7315,10 +7349,18 @@ pub mod processor {
             Instruction::UpdateBaseUnitMints {
                 primary_mint,
                 secondary_mint,
-            } => handle_update_base_unit_mints(program_id, accounts, primary_mint, secondary_mint),
-            Instruction::SwapSecondaryForPrimary { amount } => {
-                handle_swap_secondary_for_primary(program_id, accounts, amount)
-            }
+                authority_epoch,
+            } => handle_update_base_unit_mints(
+                program_id,
+                accounts,
+                primary_mint,
+                secondary_mint,
+                authority_epoch,
+            ),
+            Instruction::SwapSecondaryForPrimary {
+                amount,
+                authority_epoch,
+            } => handle_swap_secondary_for_primary(program_id, accounts, amount, authority_epoch),
         }
     }
 
@@ -11551,6 +11593,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         primary_mint: [u8; 32],
         secondary_mint: [u8; 32],
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -11579,6 +11622,7 @@ pub mod processor {
         let mut cfg = {
             let (cfg, group) = state::market_view_mut(&mut data)?;
             expect_live_authority(&cfg.marketauth, authority.key)?;
+            require_authority_epoch_view(&group, 0, expected_authority_epoch)?;
             if group.header.vault.get() != 0
                 || group.header.c_tot.get() != 0
                 || group.header.insurance.get() != 0
@@ -11624,6 +11668,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         amount: u128,
+        expected_authority_epoch: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -11645,9 +11690,17 @@ pub mod processor {
         }
         let amount_u64 = amount_to_u64(amount)?;
 
-        let (cfg, _, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.marketauth, authority.key)?;
+        let cfg = {
+            let market_data = market_ai.try_borrow_data()?;
+            let (cfg, _, _, _) = state::read_market_config_mode_and_capacity(&market_data)?;
+            expect_live_authority(&cfg.marketauth, authority.key)?;
+            let sequences = state::read_asset_control_sequences(&market_data, 0)?;
+            state::require_current_authority_epoch(
+                sequences.authority_epoch,
+                expected_authority_epoch,
+            )?;
+            cfg
+        };
         let primary_mint = primary_collateral_mint(&cfg);
         let secondary_mint = secondary_collateral_mint(&cfg)?;
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);

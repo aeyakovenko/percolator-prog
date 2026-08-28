@@ -37,6 +37,7 @@ fn v16_attack_base_unit_mints_reject_post_resolve_with_user_value() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: replacement_primary.to_bytes(),
             secondary_mint: replacement_secondary.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -2636,6 +2637,7 @@ fn v16_attack_base_unit_mints_reject_mismatched_decimals() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: env.mint.to_bytes(),
             secondary_mint: mismatched_secondary.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -2689,7 +2691,10 @@ fn v16_attack_swap_on_single_mint_market_rejects_no_secondary() {
 
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::SwapSecondaryForPrimary { amount: 100 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 100,
+            authority_epoch: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -3232,7 +3237,10 @@ fn v16_attack_swap_secondary_rejects_delegated_primary_vault() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 10,
+            authority_epoch: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -3284,7 +3292,10 @@ fn v16_attack_swap_secondary_rejects_delegated_primary_vault() {
         .unwrap();
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 10,
+            authority_epoch: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -3357,7 +3368,10 @@ fn v16_attack_swap_secondary_rejects_delegated_secondary_vault() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 10,
+            authority_epoch: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -3409,7 +3423,10 @@ fn v16_attack_swap_secondary_rejects_delegated_secondary_vault() {
         .unwrap();
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 10,
+            authority_epoch: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -3584,6 +3601,7 @@ fn v16_attack_update_base_unit_mints_guarded() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: new_primary.to_bytes(),
             secondary_mint: new_secondary.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -3609,6 +3627,7 @@ fn v16_attack_update_base_unit_mints_guarded() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: new_primary.to_bytes(),
             secondary_mint: new_secondary.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -3725,6 +3744,7 @@ fn v16_attack_base_unit_mints_changeable_only_when_empty() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: primary.to_bytes(),
             secondary_mint: new_secondary.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3754,6 +3774,7 @@ fn v16_attack_base_unit_mints_changeable_only_when_empty() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: primary.to_bytes(),
             secondary_mint: other.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3811,6 +3832,7 @@ fn v16_attack_base_unit_mint_reset_requires_old_secondary_reserve_empty() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: env.mint.to_bytes(),
             secondary_mint: replacement_secondary.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3847,6 +3869,7 @@ fn v16_attack_base_unit_mint_reset_requires_old_secondary_reserve_empty() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: env.mint.to_bytes(),
             secondary_mint: replacement_secondary.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3887,6 +3910,7 @@ fn v16_attack_base_unit_mint_reset_requires_old_secondary_reserve_empty() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: replacement_primary.to_bytes(),
             secondary_mint: replacement_secondary.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -3918,6 +3942,7 @@ fn v16_attack_base_unit_mint_reset_requires_old_secondary_reserve_empty() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: replacement_primary.to_bytes(),
             secondary_mint: replacement_secondary.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -4627,6 +4652,7 @@ fn v16_token_2022_fee_and_hook_mints_are_fail_closed_at_every_mint_admission() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: env.mint.to_bytes(),
             secondary_mint: token_2022_mint.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),

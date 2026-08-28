@@ -341,8 +341,12 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: [1u8; 32],
             secondary_mint: [2u8; 32],
+            authority_epoch: 0,
         },
-        ProgInstruction::SwapSecondaryForPrimary { amount: 1 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 1,
+            authority_epoch: 0,
+        },
     ]
 }
 

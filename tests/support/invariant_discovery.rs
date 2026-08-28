@@ -155,6 +155,8 @@ pub enum AuthorityIntentKind {
     BackingWithdrawal,
     BackingEarningsWithdrawal,
     InsuranceWithdrawal,
+    BaseUnitMints,
+    SecondaryReserveSwap,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -590,7 +592,7 @@ impl RetryIntentKind {
 }
 
 impl AuthorityIntentKind {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 29] = [
         Self::MarketAuthorityHandoff,
         Self::AssetAdminHandoff,
         Self::InsuranceAuthorityHandoff,
@@ -618,6 +620,8 @@ impl AuthorityIntentKind {
         Self::BackingWithdrawal,
         Self::BackingEarningsWithdrawal,
         Self::InsuranceWithdrawal,
+        Self::BaseUnitMints,
+        Self::SecondaryReserveSwap,
     ];
 
     fn discriminator(self) -> u8 {
@@ -649,6 +653,8 @@ impl AuthorityIntentKind {
             Self::BackingWithdrawal => 24,
             Self::BackingEarningsWithdrawal => 25,
             Self::InsuranceWithdrawal => 26,
+            Self::BaseUnitMints => 27,
+            Self::SecondaryReserveSwap => 28,
         }
     }
 
@@ -689,7 +695,9 @@ impl AuthorityIntentKind {
             | Self::ConfigureAuthMark
             | Self::PushAuthMark
             | Self::RestartAssetOracle
-            | Self::CloseSlab => None,
+            | Self::CloseSlab
+            | Self::BaseUnitMints
+            | Self::SecondaryReserveSwap => None,
         }
     }
 
@@ -733,6 +741,8 @@ impl AuthorityIntentKind {
             Self::BackingWithdrawal => "WithdrawBackingBucket",
             Self::BackingEarningsWithdrawal => "WithdrawBackingBucketEarnings",
             Self::InsuranceWithdrawal => "WithdrawInsuranceAsset",
+            Self::BaseUnitMints => "UpdateBaseUnitMints",
+            Self::SecondaryReserveSwap => "SwapSecondaryForPrimary",
         }
     }
 }
@@ -4499,6 +4509,16 @@ fn prepare_authority_incarnation_route(
                 return Err("retained backing earnings fixture produced no earnings".to_string());
             }
         }
+        AuthorityIntentKind::BaseUnitMints => {
+            return Ok(Some(env.create_secondary_collateral_mint(0)));
+        }
+        AuthorityIntentKind::SecondaryReserveSwap => {
+            let secondary_mint = env.create_secondary_collateral_mint(1_000);
+            env.install_secondary_collateral_mint(secondary_mint)
+                .map_err(|error| format!("install retained secondary reserve rail: {error}"))?;
+            env.fund_secondary_collateral_reserve(secondary_mint, 1_000);
+            return Ok(Some(secondary_mint));
+        }
         _ => {}
     }
     Ok(None)
@@ -4594,6 +4614,13 @@ fn build_authority_incarnation_intent(
         AuthorityIntentKind::InsuranceWithdrawal => {
             env.build_retained_insurance_withdrawal_for_actor(AUTHORITY_A, ASSET, 100)
         }
+        AuthorityIntentKind::BaseUnitMints => {
+            env.build_retained_base_unit_mints(oracle_account.expect("base-unit mint fixture"))
+        }
+        AuthorityIntentKind::SecondaryReserveSwap => env.build_retained_secondary_reserve_swap(
+            oracle_account.expect("secondary reserve fixture"),
+            100,
+        ),
     }
 }
 
@@ -4608,10 +4635,20 @@ fn discover_one_authority_incarnation_replay(
     seed[1] ^= kind.discriminator();
     let mut env = if kind == AuthorityIntentKind::BackingEarningsWithdrawal {
         prepare_source_backed_fee_world(seed)?
+    } else if matches!(
+        kind,
+        AuthorityIntentKind::BaseUnitMints | AuthorityIntentKind::SecondaryReserveSwap
+    ) {
+        V16Svm::new(
+            seed,
+            MarketConfig {
+                actor_deposits: [0; PRIMARY_ACTOR_COUNT],
+                ..MarketConfig::default()
+            },
+        )
     } else {
         V16Svm::new(seed, MarketConfig::default())
     };
-    let supply_before = env.token_supply_observed();
     let asset = kind.authority_asset_index();
 
     if kind != AuthorityIntentKind::BackingEarningsWithdrawal {
@@ -4621,6 +4658,7 @@ fn discover_one_authority_incarnation_replay(
         }
     }
     let oracle_account = prepare_authority_incarnation_route(&mut env, kind)?;
+    let supply_before = env.token_supply_observed();
     let retained = build_authority_incarnation_intent(&mut env, kind, oracle_account);
 
     if kind.uses_market_authority_rotation() {

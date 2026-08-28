@@ -240,6 +240,65 @@ fn kani_v16_removed_withdraw_insurance_payload_rejects() {
 }
 
 #[kani::proof]
+#[kani::unwind(33)]
+fn kani_v16_update_base_unit_mints_decode_preserves_wire_fields() {
+    let primary_mint: [u8; 32] = kani::any();
+    let secondary_mint: [u8; 32] = kani::any();
+    let authority_epoch: u64 = kani::any();
+
+    let mut data = [0u8; 72];
+    data[..32].copy_from_slice(&primary_mint);
+    data[32..64].copy_from_slice(&secondary_mint);
+    data[64..72].copy_from_slice(&authority_epoch.to_le_bytes());
+
+    match Instruction::decode_update_base_unit_mints_body_for_proof(&data).unwrap() {
+        Instruction::UpdateBaseUnitMints {
+            primary_mint: got_primary,
+            secondary_mint: got_secondary,
+            authority_epoch: got_epoch,
+        } => {
+            assert_eq!(got_primary, primary_mint);
+            assert_eq!(got_secondary, secondary_mint);
+            assert_eq!(got_epoch, authority_epoch);
+        }
+        _ => unreachable!(),
+    }
+
+    let extra: u8 = kani::any();
+    let mut trailing = [0u8; 73];
+    trailing[..72].copy_from_slice(&data);
+    trailing[72] = extra;
+    assert!(Instruction::decode_update_base_unit_mints_body_for_proof(&trailing).is_err());
+}
+
+#[kani::proof]
+fn kani_v16_swap_secondary_for_primary_decode_preserves_wire_fields() {
+    let amount: u128 = kani::any();
+    let authority_epoch: u64 = kani::any();
+
+    let mut data = [0u8; 24];
+    data[..16].copy_from_slice(&amount.to_le_bytes());
+    data[16..24].copy_from_slice(&authority_epoch.to_le_bytes());
+
+    match Instruction::decode_swap_secondary_for_primary_body_for_proof(&data).unwrap() {
+        Instruction::SwapSecondaryForPrimary {
+            amount: got_amount,
+            authority_epoch: got_epoch,
+        } => {
+            assert_eq!(got_amount, amount);
+            assert_eq!(got_epoch, authority_epoch);
+        }
+        _ => unreachable!(),
+    }
+
+    let extra: u8 = kani::any();
+    let mut trailing = [0u8; 25];
+    trailing[..24].copy_from_slice(&data);
+    trailing[24] = extra;
+    assert!(Instruction::decode_swap_secondary_for_primary_body_for_proof(&trailing).is_err());
+}
+
+#[kani::proof]
 fn kani_v16_cure_and_cancel_close_decode_preserves_wire_fields() {
     let portfolio_id: u64 = kani::any();
     let position_epoch: u64 = kani::any();
@@ -1771,7 +1830,6 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
         },
         extra,
     );
-    assert_rejects_trailing_byte(Instruction::SwapSecondaryForPrimary { amount: 1 }, extra);
 }
 
 #[kani::proof]
@@ -2186,10 +2244,10 @@ fn kani_v16_policy_permissionless_payloads_reject_one_byte_truncation() {
     let update_market_init = [59u8; 32];
     assert!(Instruction::decode(&update_market_init).is_err());
 
-    let update_base_units = [60u8; 64];
+    let update_base_units = [60u8; 72];
     assert!(Instruction::decode(&update_base_units).is_err());
 
-    let swap_base_units = [61u8; 16];
+    let swap_base_units = [61u8; 24];
     assert!(Instruction::decode(&swap_base_units).is_err());
 
     let configure_permissionless = [38u8; 40];

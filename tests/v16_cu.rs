@@ -1629,6 +1629,7 @@ impl V16CuEnv {
         primary_mint: Pubkey,
         secondary_mint: Pubkey,
     ) -> u64 {
+        let authority_epoch = self.control_sequences(0).authority_epoch;
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1636,6 +1637,7 @@ impl V16CuEnv {
             ProgInstruction::UpdateBaseUnitMints {
                 primary_mint: primary_mint.to_bytes(),
                 secondary_mint: secondary_mint.to_bytes(),
+                authority_epoch,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -1656,11 +1658,15 @@ impl V16CuEnv {
         secondary_vault: Pubkey,
         amount: u128,
     ) -> u64 {
+        let authority_epoch = self.control_sequences(0).authority_epoch;
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::SwapSecondaryForPrimary { amount },
+            ProgInstruction::SwapSecondaryForPrimary {
+                amount,
+                authority_epoch,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new_readonly(self.market, false),

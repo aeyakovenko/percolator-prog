@@ -727,7 +727,10 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
             let secondary_vault = substitute_secondary_vault(slot, secondary_vault, substitutions);
             let vault_authority =
                 substitute_vault_authority(slot, env.vault_authority, substitutions);
-            let ix = ProgInstruction::SwapSecondaryForPrimary { amount: 100 };
+            let ix = ProgInstruction::SwapSecondaryForPrimary {
+                amount: 100,
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            };
             let accounts = vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),

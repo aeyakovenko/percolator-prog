@@ -327,6 +327,7 @@ fn v16_attack_update_base_unit_mints_rejects_foreign_old_reserve() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: env.mint.to_bytes(),
             secondary_mint: old_secondary.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -358,6 +359,7 @@ fn v16_attack_update_base_unit_mints_rejects_foreign_old_reserve() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: env.mint.to_bytes(),
             secondary_mint: replacement.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -391,6 +393,7 @@ fn v16_attack_update_base_unit_mints_rejects_foreign_old_reserve() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: env.mint.to_bytes(),
             secondary_mint: replacement.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -4377,6 +4380,7 @@ fn v16_attack_swap_secondary_rejects_foreign_market_vault() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: env.mint.to_bytes(),
             secondary_mint: secondary_mint.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -4418,7 +4422,10 @@ fn v16_attack_swap_secondary_rejects_foreign_market_vault() {
             &mut env.svm,
             env.program_id,
             &env.payer,
-            ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+            ProgInstruction::SwapSecondaryForPrimary {
+                amount: 10,
+                authority_epoch: 0,
+            },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),
@@ -4513,6 +4520,7 @@ fn v16_attack_close_slab_rejects_foreign_market_vaults() {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: env.mint.to_bytes(),
             secondary_mint: secondary_mint.to_bytes(),
+            authority_epoch: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),

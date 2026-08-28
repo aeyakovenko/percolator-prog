@@ -407,8 +407,12 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         ProgInstruction::UpdateBaseUnitMints {
             primary_mint: [1u8; 32],
             secondary_mint: [2u8; 32],
+            authority_epoch: 0,
         },
-        ProgInstruction::SwapSecondaryForPrimary { amount: 1 },
+        ProgInstruction::SwapSecondaryForPrimary {
+            amount: 1,
+            authority_epoch: 0,
+        },
         ProgInstruction::ConfigureAuthMark {
             asset_index: 0,
             market_id: 1,
@@ -705,7 +709,11 @@ fn v16_program_deployed_decoder_bit_mutation_matrix_is_total_canonical_and_atomi
     let mut canonical_alternatives = 0usize;
 
     for (case, (data, source_tags)) in mutations.into_iter().enumerate() {
-        let label = format!("mutation {case} from tags {source_tags:?}");
+        let label = format!(
+            "mutation {case} from tags {source_tags:?}, tag={}, len={}, data={data:02x?}",
+            data[0],
+            data.len(),
+        );
         match ProgInstruction::decode(&data) {
             Ok(decoded) => {
                 canonical_alternatives += 1;
