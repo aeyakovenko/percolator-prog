@@ -26,4 +26,4 @@ SupersessionDiscovery	REPLAY_ONLY	stale overwrite is not itself quantified LoF o
 TerminalCommitOrderingDiscovery	TERMINAL_LOF	paired public traces terminalize both users and bind exact resolve-order payout loss/gain to the same SPL identities
 TerminalDustDiscovery	TERMINAL_LOF	public trace and exact victim loss are classifier-bound
 TerminalGenerationDiscovery	TERMINAL_LOF	public trace and exact replacement-user loss are classifier-bound
-TradeDrivenLiquidationDiscovery	LOCAL_SAFETY_ONLY	liquidation and CU checks lack normalized terminal evidence
+TradeDrivenLiquidationDiscovery	TERMINAL_LOF	all five portfolios resolve through public payout rails; exact destination-token traces bind any trade-driven victim loss and coalition gain to the terminal classifier while the fixed penalty remains nonextractive

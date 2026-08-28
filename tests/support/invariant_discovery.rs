@@ -1341,7 +1341,7 @@ pub struct MarkMovementReserveDiscovery {
     pub committed_mark: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TradeDrivenLiquidationDiscovery {
     pub mode: TradeDrivenMarkMode,
     pub route: ProspectiveAccrualRoute,
@@ -1355,6 +1355,10 @@ pub struct TradeDrivenLiquidationDiscovery {
     pub coalition_loss: u128,
     pub extracted_tokens: u128,
     pub max_crank_cu: u64,
+    pub victim_equity_before: u128,
+    pub coalition_equity_before: u128,
+    pub victim_loss: u128,
+    pub terminal_evidence: TerminalCohortPayoutEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2361,19 +2365,29 @@ impl BilateralMarkFeeDiscovery {
 
 impl TradeDrivenLiquidationDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.movement_fee == 0
-            || self.liquidation_reward != 0
-            || self.retained_penalty == 0
-            || self.budgeted_penalty != 0
-            || self.victim_capital_loss == 0
-            || self.oi_reduction_q == 0
-            || self.coalition_gain != 0
-            || self.coalition_loss == 0
-            || self.max_crank_cu >= crate::support::v16_svm::TX_CU_LIMIT
+        self.movement_fee != 0
+            && self.liquidation_reward != 0
+            && self.victim_capital_loss != 0
+            && self.oi_reduction_q != 0
+            && self.coalition_gain != 0
+            && self.max_crank_cu < crate::support::v16_svm::TX_CU_LIMIT
+            && self
+                .terminal_evidence
+                .certifies_exact_loss(self.victim_loss, self.coalition_gain)
     }
 
     pub fn certifies_nonreclaimable_liquidation_penalty(&self) -> bool {
         !self.is_violation()
+            && self.movement_fee != 0
+            && self.liquidation_reward == 0
+            && self.retained_penalty != 0
+            && self.budgeted_penalty == 0
+            && self.victim_capital_loss != 0
+            && self.oi_reduction_q != 0
+            && self.coalition_gain == 0
+            && self.coalition_loss != 0
+            && self.max_crank_cu < crate::support::v16_svm::TX_CU_LIMIT
+            && self.terminal_evidence.certifies_nonextraction()
     }
 }
 
@@ -10145,6 +10159,18 @@ fn discover_one_trade_driven_liquidation(
     env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK, 0)
         .map_err(|error| format!("{mode:?} open independent victim: {error}"))?;
     let supply_before = env.token_supply_observed();
+    let victim_equity_before = u128::try_from(discovery_portfolio_equity(&env, 0)?)
+        .map_err(|_| format!("{mode:?} victim began insolvent"))?;
+    let coalition_equity_before =
+        [2usize, 3, 4]
+            .into_iter()
+            .try_fold(0u128, |total, actor| -> Result<u128, String> {
+                let equity = u128::try_from(discovery_portfolio_equity(&env, actor)?)
+                    .map_err(|_| format!("{mode:?} coalition actor {actor} began insolvent"))?;
+                total
+                    .checked_add(equity)
+                    .ok_or_else(|| "trade-driven coalition equity overflow".to_string())
+            })?;
     let victim_capital_before = env.primary_portfolio(0).capital.get();
     let victim_oi_before = env.primary_market_state().1.assets[0].oi_eff_long_q;
     let insurance_before = env.primary_market_state().1.insurance;
@@ -10158,6 +10184,7 @@ fn discover_one_trade_driven_liquidation(
     } else {
         TINY_Q
     };
+    env.begin_public_trace();
     execute_reported_price_route(&mut env, route, 2, 3, move_size_q, reported_price)
         .map_err(|error| format!("{mode:?} {route:?} move mark: {error}"))?;
     let (profile_after_move, group_after_move) = env.primary_market_state();
@@ -10259,21 +10286,40 @@ fn discover_one_trade_driven_liquidation(
                 .map_err(|error| format!("{mode:?} withdraw coalition actor {actor}: {error}"))?;
         }
     }
-    let extracted_tokens = [2usize, 3, 4].into_iter().try_fold(0u128, |sum, actor| {
-        sum.checked_add(u128::from(
-            env.token_amount(env.actors[actor].destination_token),
-        ))
-        .ok_or_else(|| "trade-driven coalition payout overflow".to_string())
+    env.resolve_market()
+        .map_err(|error| format!("{mode:?} {route:?} resolve liquidation world: {error}"))?;
+    let actors = [0usize, 1, 2, 3, 4];
+    drain_resolved_discovery_actors(&mut env, actors)?;
+    let users_terminal = actors.iter().try_fold(true, |all_terminal, actor| {
+        discovery_portfolio_is_terminal(&env.primary_portfolio(*actor))
+            .map(|terminal| all_terminal && terminal)
     })?;
-    let coalition_committed = ATTACK_DEPOSIT
-        .checked_mul(2)
-        .and_then(|value| value.checked_add(CRANKER_DEPOSIT))
-        .ok_or_else(|| "trade-driven coalition commitment overflow".to_string())?;
-    let coalition_gain = extracted_tokens.saturating_sub(coalition_committed);
-    let coalition_loss = coalition_committed.saturating_sub(extracted_tokens);
     if env.token_supply_observed() != supply_before {
         return Err("trade-driven liquidation changed SPL supply".into());
     }
+    let public_trace = env.finish_public_trace();
+    let classify_if_value_transfer = movement_fee != 0
+        && liquidation_reward != 0
+        && victim_capital_loss != 0
+        && oi_reduction_q != 0
+        && max_crank_cu < crate::support::v16_svm::TX_CU_LIMIT;
+    let terminal_evidence = build_terminal_cohort_payout_evidence(
+        &format!("{mode:?} {route:?} trade-driven liquidation world"),
+        vec![env.actors[0].destination_token],
+        [2usize, 3, 4]
+            .into_iter()
+            .map(|actor| env.actors[actor].destination_token)
+            .collect(),
+        victim_equity_before,
+        coalition_equity_before,
+        users_terminal,
+        classify_if_value_transfer,
+        public_trace,
+    )?;
+    let extracted_tokens = terminal_evidence.beneficiary_terminal_payout;
+    let coalition_gain = extracted_tokens.saturating_sub(coalition_equity_before);
+    let coalition_loss = coalition_equity_before.saturating_sub(extracted_tokens);
+    let victim_loss = victim_equity_before.saturating_sub(terminal_evidence.victim_terminal_payout);
     Ok(TradeDrivenLiquidationDiscovery {
         mode,
         route,
@@ -10287,6 +10333,10 @@ fn discover_one_trade_driven_liquidation(
         coalition_loss,
         extracted_tokens,
         max_crank_cu,
+        victim_equity_before,
+        coalition_equity_before,
+        victim_loss,
+        terminal_evidence,
     })
 }
 

@@ -2204,6 +2204,23 @@ proptest! {
             prop_assert!(discovery.oi_reduction_q > 0);
             prop_assert_eq!(discovery.coalition_gain, 0);
             prop_assert!(discovery.coalition_loss > 0);
+            prop_assert!(discovery.victim_loss > 0);
+            prop_assert!(discovery.terminal_evidence.users_terminal);
+            prop_assert!(matches!(
+                discovery.terminal_evidence.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            ));
+            prop_assert_eq!(
+                discovery
+                    .terminal_evidence
+                    .public_trace
+                    .token_delta_for_accounts(
+                        &discovery.terminal_evidence.beneficiary_destinations
+                    )
+                    .map_err(TestCaseError::fail)?,
+                i128::try_from(discovery.extracted_tokens)
+                    .map_err(|_| TestCaseError::fail("coalition payout exceeds i128"))?
+            );
         }
     }
 }
