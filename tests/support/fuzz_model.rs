@@ -25725,177 +25725,299 @@ pub fn verify_counterparty_encumbrance_route_matrix(mut seed: [u8; 32]) -> Resul
     const WINNER_DEPOSIT: u128 = 313;
     const BACKING_ATOMS: u128 = 150;
 
-    for route in [
-        TradeRoute::NoCpi,
-        TradeRoute::Cpi,
-        TradeRoute::BatchNoCpi,
-        TradeRoute::BatchCpi,
-    ] {
-        for winner_long in [false, true] {
-            seed[0] ^= (route.index() as u8) << 3;
-            seed[1] ^= u8::from(winner_long);
-            let direction = if winner_long { 1i128 } else { -1i128 };
-            let winning_mark = if winner_long { 105 } else { 95 };
-            let adverse_mark = if winner_long { 95 } else { 105 };
-            let source_domain = if winner_long { 1usize } else { 0usize };
-            let label = format!("INV-026 {route:?} winner_long={winner_long}");
-            let mut env = V16Svm::new(
-                seed,
-                MarketConfig {
-                    initial_price: START_PRICE,
-                    h_max: 4,
-                    maintenance_margin_bps: 1_000,
-                    initial_margin_bps: 1_000,
-                    max_price_move_bps_per_slot: 500,
-                    max_accrual_dt_slots: 1,
-                    max_abs_funding_e9_per_slot: 0,
-                    min_funding_lifetime_slots: 1,
-                    maintenance_fee_per_slot: 0,
-                    actor_deposits: [WINNER_DEPOSIT, 1_000, 1, 1, 1],
-                    actor_token_balances: [WINNER_DEPOSIT as u64, 1_000, 1, 1, 1],
-                    ..MarketConfig::default()
-                },
-            );
-            let supply_before = env.token_supply_observed();
-            env.top_up_backing_bucket(source_domain as u16, BACKING_ATOMS, 100)
-                .map_err(|error| format!("{label} backing top-up: {error}"))?;
-            assert_public_encumbrance_census(&format!("{label} after backing top-up"), &env)?;
+    for recovery_exit in [false, true] {
+        for route in [
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ] {
+            for winner_long in [false, true] {
+                seed[0] ^= (route.index() as u8) << 3;
+                seed[1] ^= u8::from(winner_long);
+                seed[2] ^= u8::from(recovery_exit) << 7;
+                let direction = if winner_long { 1i128 } else { -1i128 };
+                let winning_mark = if winner_long { 105 } else { 95 };
+                let adverse_mark = if winner_long { 95 } else { 105 };
+                let source_domain = if winner_long { 1usize } else { 0usize };
+                let terminal = if recovery_exit {
+                    "Recovery"
+                } else {
+                    "Resolved"
+                };
+                let label =
+                    format!("INV-026 {route:?} winner_long={winner_long} terminal={terminal}");
+                let mut env = V16Svm::new(
+                    seed,
+                    MarketConfig {
+                        initial_price: START_PRICE,
+                        h_max: 4,
+                        maintenance_margin_bps: 1_000,
+                        initial_margin_bps: 1_000,
+                        max_price_move_bps_per_slot: 500,
+                        max_accrual_dt_slots: 1,
+                        max_abs_funding_e9_per_slot: 0,
+                        min_funding_lifetime_slots: 1,
+                        maintenance_fee_per_slot: 0,
+                        actor_deposits: [WINNER_DEPOSIT, 1_000, 1, 1, 1],
+                        actor_token_balances: [WINNER_DEPOSIT as u64, 1_000, 1, 1, 1],
+                        ..MarketConfig::default()
+                    },
+                );
+                let supply_before = env.token_supply_observed();
+                env.top_up_backing_bucket(source_domain as u16, BACKING_ATOMS, 100)
+                    .map_err(|error| format!("{label} backing top-up: {error}"))?;
+                assert_public_encumbrance_census(&format!("{label} after backing top-up"), &env)?;
 
-            execute_trade_route(
-                &mut env,
-                route,
-                WINNER,
-                COUNTERPARTY,
-                WINNING_ASSET,
-                direction * WINNING_SIZE_Q,
-                START_PRICE,
-                0,
-            )
-            .map_err(|error| format!("{label} winning-leg open: {error}"))?;
-            execute_trade_route(
-                &mut env,
-                route,
-                WINNER,
-                COUNTERPARTY,
-                ADVERSE_ASSET,
-                direction * ADVERSE_SIZE_Q,
-                START_PRICE,
-                0,
-            )
-            .map_err(|error| format!("{label} adverse-leg open: {error}"))?;
-            assert_public_encumbrance_census(&format!("{label} after opens"), &env)?;
+                execute_trade_route(
+                    &mut env,
+                    route,
+                    WINNER,
+                    COUNTERPARTY,
+                    WINNING_ASSET,
+                    direction * WINNING_SIZE_Q,
+                    START_PRICE,
+                    0,
+                )
+                .map_err(|error| format!("{label} winning-leg open: {error}"))?;
+                execute_trade_route(
+                    &mut env,
+                    route,
+                    WINNER,
+                    COUNTERPARTY,
+                    ADVERSE_ASSET,
+                    direction * ADVERSE_SIZE_Q,
+                    START_PRICE,
+                    0,
+                )
+                .map_err(|error| format!("{label} adverse-leg open: {error}"))?;
+                assert_public_encumbrance_census(&format!("{label} after opens"), &env)?;
 
-            env.warp_to_slot(2);
-            env.push_auth_mark(WINNING_ASSET, 2, winning_mark)
-                .map_err(|error| format!("{label} winning mark: {error}"))?;
-            env.push_auth_mark(ADVERSE_ASSET, 2, adverse_mark)
-                .map_err(|error| format!("{label} adverse mark: {error}"))?;
-            let observations = [WINNING_ASSET, ADVERSE_ASSET]
-                .into_iter()
-                .map(|asset_index| CrankObservationHint {
-                    asset_index,
-                    oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
-                })
-                .collect::<Vec<_>>();
-            for actor in [MARKET_CRANKER, COUNTERPARTY, WINNER] {
-                crank_adapter_steps_with_observations(&mut env, actor, 2, observations.clone(), 16)
+                env.warp_to_slot(2);
+                env.push_auth_mark(WINNING_ASSET, 2, winning_mark)
+                    .map_err(|error| format!("{label} winning mark: {error}"))?;
+                env.push_auth_mark(ADVERSE_ASSET, 2, adverse_mark)
+                    .map_err(|error| format!("{label} adverse mark: {error}"))?;
+                let observations = [WINNING_ASSET, ADVERSE_ASSET]
+                    .into_iter()
+                    .map(|asset_index| CrankObservationHint {
+                        asset_index,
+                        oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
+                    })
+                    .collect::<Vec<_>>();
+                for actor in [MARKET_CRANKER, COUNTERPARTY, WINNER] {
+                    crank_adapter_steps_with_observations(
+                        &mut env,
+                        actor,
+                        2,
+                        observations.clone(),
+                        16,
+                    )
                     .map_err(|error| format!("{label} settle actor {actor}: {error}"))?;
-            }
-            if env.primary_portfolio(WINNER).pnl.get() != 50 {
-                return Err(format!(
-                    "{label}: paired marks produced PnL {}, expected 50",
-                    env.primary_portfolio(WINNER).pnl.get(),
-                ));
-            }
-            assert_public_encumbrance_census(&format!("{label} after settlement"), &env)?;
+                }
+                if env.primary_portfolio(WINNER).pnl.get() != 50 {
+                    return Err(format!(
+                        "{label}: paired marks produced PnL {}, expected 50",
+                        env.primary_portfolio(WINNER).pnl.get(),
+                    ));
+                }
+                assert_public_encumbrance_census(&format!("{label} after settlement"), &env)?;
 
-            execute_trade_route(
-                &mut env,
-                route,
-                WINNER,
-                COUNTERPARTY,
-                ADVERSE_ASSET,
-                direction * SAFE_INCREASE_Q,
-                adverse_mark,
-                0,
-            )
-            .map_err(|error| format!("{label} source-backed risk increase: {error}"))?;
-            let account_lien =
-                account_counterparty_lien_for_domain(&env.primary_portfolio(WINNER), source_domain);
-            let (_, liened_group) = env.primary_market_state();
-            if account_lien == 0
-                || account_lien
-                    != liened_group.source_credit[source_domain].valid_liened_backing_num
-            {
-                return Err(format!(
+                execute_trade_route(
+                    &mut env,
+                    route,
+                    WINNER,
+                    COUNTERPARTY,
+                    ADVERSE_ASSET,
+                    direction * SAFE_INCREASE_Q,
+                    adverse_mark,
+                    0,
+                )
+                .map_err(|error| format!("{label} source-backed risk increase: {error}"))?;
+                let account_lien = account_counterparty_lien_for_domain(
+                    &env.primary_portfolio(WINNER),
+                    source_domain,
+                );
+                let (_, liened_group) = env.primary_market_state();
+                if account_lien == 0
+                    || account_lien
+                        != liened_group.source_credit[source_domain].valid_liened_backing_num
+                {
+                    return Err(format!(
                     "{label}: route did not create a real singly-attributed counterparty lien: account={account_lien}, market={}",
                     liened_group.source_credit[source_domain].valid_liened_backing_num,
                 ));
-            }
-            assert_public_encumbrance_census(&format!("{label} after lien creation"), &env)?;
-
-            env.resolve_market()
-                .map_err(|error| format!("{label} resolve: {error}"))?;
-            assert_public_encumbrance_census(&format!("{label} after resolve"), &env)?;
-            let mut winner_calls = 0u16;
-            let mut counterparty_calls = 0u16;
-            let mut globally_fixed = false;
-            for _ in 0..64 {
-                let market_before = env.market_data(false);
-                let winner_before = env.primary_portfolio_data(WINNER);
-                let counterparty_before = env.primary_portfolio_data(COUNTERPARTY);
-                let winner_destination_before =
-                    env.token_amount(env.actors[WINNER].destination_token);
-                let counterparty_destination_before =
-                    env.token_amount(env.actors[COUNTERPARTY].destination_token);
-                winner_calls = winner_calls
-                    .checked_add(drain_resolved_actor_with_encumbrance_census(
-                        &mut env, WINNER, &label,
-                    )?)
-                    .ok_or_else(|| format!("{label}: winner close count overflow"))?;
-                counterparty_calls = counterparty_calls
-                    .checked_add(drain_resolved_actor_with_encumbrance_census(
-                        &mut env,
-                        COUNTERPARTY,
-                        &label,
-                    )?)
-                    .ok_or_else(|| format!("{label}: counterparty close count overflow"))?;
-                if env.market_data(false) == market_before
-                    && env.primary_portfolio_data(WINNER) == winner_before
-                    && env.primary_portfolio_data(COUNTERPARTY) == counterparty_before
-                    && env.token_amount(env.actors[WINNER].destination_token)
-                        == winner_destination_before
-                    && env.token_amount(env.actors[COUNTERPARTY].destination_token)
-                        == counterparty_destination_before
-                {
-                    globally_fixed = true;
-                    break;
                 }
-            }
-            let (_, terminal) = env.primary_market_state();
-            let terminal_source = terminal.source_credit[source_domain];
-            let terminal_bucket = terminal.source_backing_buckets[source_domain];
-            if !globally_fixed
-                || winner_calls == 0
-                || counterparty_calls == 0
-                || account_counterparty_lien_for_domain(
-                    &env.primary_portfolio(WINNER),
-                    source_domain,
-                ) != 0
-                || terminal_source.valid_liened_backing_num != 0
-                || terminal_source.impaired_liened_backing_num != 0
-                || terminal_bucket.valid_liened_backing_num != 0
-                || terminal_bucket.consumed_liened_backing_num == 0
-                || terminal_source.provider_receivable_num
-                    != terminal_bucket.consumed_liened_backing_num
-                || env.token_supply_observed() != supply_before
-            {
-                return Err(format!(
+                assert_public_encumbrance_census(&format!("{label} after lien creation"), &env)?;
+
+                if recovery_exit {
+                    env.configure_permissionless_resolve(1_000, 1)
+                        .map_err(|error| format!("{label} configure Recovery policy: {error}"))?;
+                    env.warp_to_slot(3);
+                    env.shutdown_asset(ADVERSE_ASSET, 3)
+                        .map_err(|error| format!("{label} shutdown adverse asset: {error}"))?;
+                    assert_public_encumbrance_census(&format!("{label} after shutdown"), &env)?;
+                    for actor in [WINNER, COUNTERPARTY] {
+                        env.forfeit_recovery_leg(actor, ADVERSE_ASSET, u128::MAX)
+                            .map_err(|error| {
+                                format!("{label} actor {actor} Recovery forfeit: {error}")
+                            })?;
+                        assert_public_encumbrance_census(
+                            &format!("{label} after actor {actor} Recovery forfeit"),
+                            &env,
+                        )?;
+                    }
+                    for actor in [WINNER, COUNTERPARTY] {
+                        match env.crank(actor, 3, Vec::new()) {
+                            Ok(_) => assert_public_encumbrance_census(
+                                &format!("{label} pre-close refresh actor {actor}"),
+                                &env,
+                            )?,
+                            Err(error) if error.contains("Custom(22)") => {}
+                            Err(error) => {
+                                return Err(format!(
+                                    "{label}: pre-close refresh actor {actor}: {error}"
+                                ))
+                            }
+                        }
+                    }
+                    execute_trade_route(
+                        &mut env,
+                        route,
+                        WINNER,
+                        COUNTERPARTY,
+                        WINNING_ASSET,
+                        -direction * WINNING_SIZE_Q,
+                        winning_mark,
+                        0,
+                    )
+                    .map_err(|error| format!("{label} close surviving winning leg: {error}"))?;
+                    assert_public_encumbrance_census(
+                        &format!("{label} after surviving-leg close"),
+                        &env,
+                    )?;
+
+                    let mut fixed = false;
+                    for step in 0..16 {
+                        for actor in [WINNER, COUNTERPARTY] {
+                            match env.crank(actor, 3, Vec::new()) {
+                                Ok(_) => assert_public_encumbrance_census(
+                                    &format!("{label} cleanup actor {actor} step {step}"),
+                                    &env,
+                                )?,
+                                Err(error) if error.contains("Custom(22)") => {}
+                                Err(error) => {
+                                    return Err(format!(
+                                        "{label}: cleanup actor {actor} step {step}: {error}"
+                                    ))
+                                }
+                            }
+                        }
+                        let (_, current) = env.primary_market_state();
+                        let source = current.source_credit[source_domain];
+                        if account_counterparty_lien_for_domain(
+                            &env.primary_portfolio(WINNER),
+                            source_domain,
+                        ) == 0
+                            && source.valid_liened_backing_num == 0
+                            && source.impaired_liened_backing_num == 0
+                        {
+                            fixed = true;
+                            break;
+                        }
+                    }
+                    let (_, recovered) = env.primary_market_state();
+                    let recovered_source = recovered.source_credit[source_domain];
+                    let recovered_bucket = recovered.source_backing_buckets[source_domain];
+                    if !fixed
+                        || account_counterparty_lien_for_domain(
+                            &env.primary_portfolio(WINNER),
+                            source_domain,
+                        ) != 0
+                        || recovered_source.valid_liened_backing_num != 0
+                        || recovered_source.impaired_liened_backing_num != 0
+                        || recovered_bucket.valid_liened_backing_num != 0
+                        || recovered_bucket.impaired_liened_backing_num != 0
+                        || recovered_bucket.consumed_liened_backing_num != 50 * BOUND_SCALE
+                        || recovered_source.provider_receivable_num
+                            != recovered_bucket.consumed_liened_backing_num
+                        || env.token_supply_observed() != supply_before
+                    {
+                        return Err(format!(
+                        "{label}: Recovery did not release the source lien exactly: source={recovered_source:?}, bucket={recovered_bucket:?}, supply={}/{}",
+                        env.token_supply_observed(), supply_before,
+                    ));
+                    }
+                    assert_public_encumbrance_census(
+                        &format!("{label} Recovery fixed point"),
+                        &env,
+                    )?;
+                    continue;
+                }
+
+                env.resolve_market()
+                    .map_err(|error| format!("{label} resolve: {error}"))?;
+                assert_public_encumbrance_census(&format!("{label} after resolve"), &env)?;
+                let mut winner_calls = 0u16;
+                let mut counterparty_calls = 0u16;
+                let mut globally_fixed = false;
+                for _ in 0..64 {
+                    let market_before = env.market_data(false);
+                    let winner_before = env.primary_portfolio_data(WINNER);
+                    let counterparty_before = env.primary_portfolio_data(COUNTERPARTY);
+                    let winner_destination_before =
+                        env.token_amount(env.actors[WINNER].destination_token);
+                    let counterparty_destination_before =
+                        env.token_amount(env.actors[COUNTERPARTY].destination_token);
+                    winner_calls = winner_calls
+                        .checked_add(drain_resolved_actor_with_encumbrance_census(
+                            &mut env, WINNER, &label,
+                        )?)
+                        .ok_or_else(|| format!("{label}: winner close count overflow"))?;
+                    counterparty_calls = counterparty_calls
+                        .checked_add(drain_resolved_actor_with_encumbrance_census(
+                            &mut env,
+                            COUNTERPARTY,
+                            &label,
+                        )?)
+                        .ok_or_else(|| format!("{label}: counterparty close count overflow"))?;
+                    if env.market_data(false) == market_before
+                        && env.primary_portfolio_data(WINNER) == winner_before
+                        && env.primary_portfolio_data(COUNTERPARTY) == counterparty_before
+                        && env.token_amount(env.actors[WINNER].destination_token)
+                            == winner_destination_before
+                        && env.token_amount(env.actors[COUNTERPARTY].destination_token)
+                            == counterparty_destination_before
+                    {
+                        globally_fixed = true;
+                        break;
+                    }
+                }
+                let (_, terminal) = env.primary_market_state();
+                let terminal_source = terminal.source_credit[source_domain];
+                let terminal_bucket = terminal.source_backing_buckets[source_domain];
+                if !globally_fixed
+                    || winner_calls == 0
+                    || counterparty_calls == 0
+                    || account_counterparty_lien_for_domain(
+                        &env.primary_portfolio(WINNER),
+                        source_domain,
+                    ) != 0
+                    || terminal_source.valid_liened_backing_num != 0
+                    || terminal_source.impaired_liened_backing_num != 0
+                    || terminal_bucket.valid_liened_backing_num != 0
+                    || terminal_bucket.consumed_liened_backing_num == 0
+                    || terminal_source.provider_receivable_num
+                        != terminal_bucket.consumed_liened_backing_num
+                    || env.token_supply_observed() != supply_before
+                {
+                    return Err(format!(
                     "{label}: terminal lien lifecycle incomplete: calls={winner_calls}/{counterparty_calls}, source={terminal_source:?}, bucket={terminal_bucket:?}, supply={}/{}",
                     env.token_supply_observed(), supply_before,
                 ));
+                }
+                assert_public_encumbrance_census(&format!("{label} terminal"), &env)?;
             }
-            assert_public_encumbrance_census(&format!("{label} terminal"), &env)?;
         }
     }
     Ok(())
