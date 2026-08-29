@@ -1857,6 +1857,9 @@ fn assert_source_claim_bound_attribution(
 
     let mut attributed = vec![0u128; group.source_credit.len()];
     for (portfolio_index, portfolio) in portfolios.iter().enumerate() {
+        let mut account_claim_num = 0u128;
+        let mut account_live_lien_num = 0u128;
+        let mut account_impaired_claim_num = 0u128;
         for (slot, source) in portfolio.source_domains.iter().copied().enumerate() {
             if !source.is_occupied() {
                 continue;
@@ -1873,6 +1876,57 @@ fn assert_source_claim_bound_attribution(
                 .ok_or_else(|| {
                     format!("{label} source domain {domain} portfolio attribution overflow")
                 })?;
+            account_claim_num = account_claim_num
+                .checked_add(source.source_claim_bound_num.get())
+                .ok_or_else(|| {
+                    format!("{label} portfolio {portfolio_index} source-claim sum overflow")
+                })?;
+            account_live_lien_num = account_live_lien_num
+                .checked_add(source.source_claim_liened_num.get())
+                .ok_or_else(|| {
+                    format!("{label} portfolio {portfolio_index} live-lien sum overflow")
+                })?;
+            account_impaired_claim_num = account_impaired_claim_num
+                .checked_add(source.source_claim_impaired_num.get())
+                .ok_or_else(|| {
+                    format!("{label} portfolio {portfolio_index} impaired-claim sum overflow")
+                })?;
+        }
+
+        if group.mode == MarketModeV16::Live {
+            let expected_claim_num = (portfolio.pnl.get().max(0) as u128)
+                .checked_mul(BOUND_SCALE)
+                .ok_or_else(|| {
+                    format!("{label} portfolio {portfolio_index} positive-PnL bound overflow")
+                })?;
+            if account_claim_num != expected_claim_num {
+                return Err(format!(
+                    "{label} live portfolio {portfolio_index} source-claim face {account_claim_num} \
+                     != exact positive-PnL face {expected_claim_num} for pnl {}",
+                    portfolio.pnl.get()
+                ));
+            }
+
+            let close = portfolio.close_progress.try_to_runtime().map_err(|error| {
+                format!(
+                    "{label} portfolio {portfolio_index} close-progress decode failed: {error:?}"
+                )
+            })?;
+            if close.active
+                && !close.finalized
+                && !close.canceled
+                && close.residual_remaining != 0
+                && (account_claim_num != 0
+                    || account_live_lien_num != 0
+                    || account_impaired_claim_num != 0)
+            {
+                return Err(format!(
+                    "{label} live portfolio {portfolio_index} pending close residual {} retains \
+                     source claim {account_claim_num}, live lien {account_live_lien_num}, or \
+                     impaired claim {account_impaired_claim_num}",
+                    close.residual_remaining
+                ));
+            }
         }
     }
 
