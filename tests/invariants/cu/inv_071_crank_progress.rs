@@ -655,12 +655,88 @@ fn v16_program_public_pending_close_preempts_b_stale_then_exposes_b_progress() {
         )
         .expect("deferred B settlement must become the next public continuation");
     assert_cu_within("public deferred B settlement", settle_cu, CRANK_CU_LIMIT);
-    let b_after = active_leg_for_asset(&env.portfolio_state(target), 1);
+    let state_after_b = env.portfolio_state(target);
+    let b_after = active_leg_for_asset(&state_after_b, 1);
     assert!(b_after.b_snap > b_before.b_snap);
-    assert!(b_after.b_snap <= target_b);
+    assert_eq!(
+        b_after.b_snap, target_b,
+        "the B prerequisite must be exhausted before probing the third class"
+    );
+    assert!(
+        !inv071_close_pending(close_progress(&state_after_b)),
+        "close work must remain exhausted before probing the third class"
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery,
+        "the deferred third class must be a real Recovery-lifecycle leg"
+    );
     assert_eq!(
         env.market_state().1.vault as u64,
         env.token_amount(env.vault)
+    );
+
+    // The same public prefix also leaves the asset-1 Recovery leg needing
+    // committed-state account refresh after its close and B prerequisites are
+    // gone. This third class must become dispatchable without an oracle hint;
+    // otherwise the pairwise priority witnesses would miss a real fixed point.
+    let account_before_refresh = env.svm.get_account(&target).unwrap();
+    let market_before_refresh = env.svm.get_account(&env.market).unwrap();
+    let vault_before_refresh = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: shutdown_slot,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+            ],
+            &[],
+        )
+        .expect("deferred Recovery-leg refresh must follow close and B progress");
+    assert_cu_within(
+        "public deferred Recovery-leg refresh",
+        refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert!(
+        env.svm.get_account(&target).unwrap() != account_before_refresh
+            || env.svm.get_account(&env.market).unwrap() != market_before_refresh,
+        "the accepted third-class continuation must mutate liveness state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_refresh,
+        "committed-state Recovery-leg refresh must not move SPL custody"
+    );
+    let group_after_refresh = env.market_state().1;
+    let state_after_refresh = env.portfolio_state(target);
+    let cert_after_refresh = health_cert(&state_after_refresh);
+    assert!(cert_after_refresh.valid);
+    assert_eq!(
+        cert_after_refresh.cert_oracle_epoch,
+        group_after_refresh.oracle_epoch
+    );
+    assert_eq!(
+        cert_after_refresh.cert_funding_epoch,
+        group_after_refresh.funding_epoch
+    );
+    assert_eq!(
+        cert_after_refresh.cert_risk_epoch,
+        group_after_refresh.risk_epoch
+    );
+    assert_eq!(
+        cert_after_refresh.cert_asset_set_epoch,
+        group_after_refresh.asset_set_epoch
+    );
+    assert_eq!(
+        cert_after_refresh.active_bitmap_at_cert,
+        active_bitmap(&state_after_refresh),
+        "the third-class step must discharge the deferred certificate rank"
     );
 }
 

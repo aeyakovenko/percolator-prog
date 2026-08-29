@@ -86,7 +86,12 @@ bounded calls. A second branch uses bounded public accrual, authority-signed shu
 forfeit to create a simultaneous nonzero close ledger without touching program bytes out of band.
 `PermissionlessCrank` selects the higher-priority close, strictly decreases its residual on every
 accepted call, frames the independent B leg and SPL custody, terminates within the explicit bound,
-and then exposes a successful B-settlement continuation. The same public state is also advanced past
+then exposes B settlement to the exact market target, and finally dispatches a hint-free
+committed-state refresh for the retained Recovery leg. The third step mutates liveness state without
+moving SPL custody and makes the health certificate current across the oracle, funding, risk, and
+asset-set epochs plus the active bitmap. This is a concrete three-class
+`AdvanceClose -> SettleBChunk -> RefreshAccount` composition rather than pairwise selector evidence.
+The same public state is also advanced past
 the close deadline: authenticated `Clock` expiry outranks the B obligation, declares Recovery
 without touching the portfolio or custody, finalizes Recovery permissionlessly, and then disposes
 the deferred B leg through bounded Resolved continuations. These are net-new concrete
@@ -2210,7 +2215,7 @@ Verification at this checkpoint:
 | Focused INV-052 four-way source-lien partition | 16/16 newly added public worlds within the 56-world matrix | four target portfolios plus one shared counterparty exhaust the fixture's public actors; every route and expiry landing executes both target exit orders with exact attribution, custody, liveness, and N-1 rounding-bound oracles |
 | Focused INV-052 two-domain source-lien partition | 48/48 public worlds | aggregate, domain-isolated, and four-account worlds cross both assets/source domains, all four trade routes, exact/late expiry, and both source/exit orders with exact total reservation, provenance, bounded rounding, terminal value/OI/custody, public exit, and CU oracles |
 | Focused INV-052/063/071 mixed-expiry source-lien progress | 48/48 public worlds | both mixed Fresh/Impaired orientations cross all four trade routes, aggregate/domain-isolated/four-account layouts, and both source/exit orders. Parent engine `c0dec8ce` reaches a public `EngineNonProgress` fixed point with 5,246,000,000,000,000 live lien units; engine `6c8d94bc` normalizes one exact domain per bounded crank, preserves the impaired claim, converts the fresh sibling claim, and terminates with exact value/OI/custody/stock and sub-ceiling CU. |
-| Focused INV-071/072/078/082 concrete B selector composition | 3/3 public two-asset worlds plus 17/17 focused INV-071, 31/31 focused INV-073, 7/7 focused INV-078, and 6/6 focused INV-056 CU tests | one portfolio carries a real B-stale leg plus either a separately adverse live leg or a real active-close residual, all created exclusively by public trades, marks, cranks, shutdown, and owner forfeit. In the live world, B settlement byte-frames the adverse leg and SPL custody before bounded recertification and liquidation reduce it. Before close expiry, every close call strictly decreases the higher-priority residual while framing B and custody, then deferred B settlement succeeds. After expiry, authenticated Clock selects Recovery despite a stale caller slot, reaches Resolved permissionlessly, and bounded resolved progress disposes the deferred B leg. A public attempt to compose close with an already retained source lien instead showed that close creation consumes that lien through canonical loss attribution; no injected overlap test was retained. |
+| Focused INV-071/072/078/082 concrete B selector composition | 3/3 public two-asset worlds plus 17/17 focused INV-071, 31/31 focused INV-073, 7/7 focused INV-078, and 6/6 focused INV-056 CU tests | one portfolio carries a real B-stale leg plus either a separately adverse live leg or a real active-close residual, all created exclusively by public trades, marks, cranks, shutdown, and owner forfeit. In the live world, B settlement byte-frames the adverse leg and SPL custody before bounded recertification and liquidation reduce it. Before close expiry, every close call strictly decreases the higher-priority residual, deferred B settlement reaches the exact market target, and a third hint-free call refreshes the retained Recovery leg to a certificate current across all four epochs and its active bitmap. This proves concrete `AdvanceClose -> SettleBChunk -> RefreshAccount` composition. After expiry, authenticated Clock selects Recovery despite a stale caller slot, reaches Resolved permissionlessly, and bounded resolved progress disposes the deferred B leg. A public attempt to compose close with an already retained source lien instead showed that close creation consumes that lien through canonical loss attribution; no injected overlap test was retained. |
 | Focused INV-028/071/073 retained-source/adverse-leg composition | 1/1 public two-asset world | public fills create a real source lien, flatten its original episodes, then reopen a separately adverse short under authenticated marks. The stale refresh frames quantity; the 365,924-CU liquidation strictly reduces risk and normalizes the source label; owner reduction and remaining-capital withdrawal stay live with exact engine/SPL custody. No production violation was found. |
 | Focused INV-028/029/071 source-lien/close exclusion | 211/211 public stateful traces, one public close builder, 2/2 engine closure Kani, and one 4,000-case arithmetic differential | the shared oracle rejects any Live portfolio whose aggregate source-claim face differs from exact positive PnL, and rejects a nonfinal nonzero close residual coexisting with any source claim/live lien/impaired claim. Public close construction consumes the retained lien. Under the named source-credit arithmetic axiom, exact engine `d604ca0` proves a complete lien-bearing prestate is valid (0/5,590 failed, 173 unreachable, cover) and production `set_account_pnl` clears account/source/bucket attribution across symbolic positive-to-negative crossings (0/6,340 failed, 181 unreachable, cover); the deployed rate formula separately matches its independent reference over 4,000 generated cases. |
 | Focused INV-041 canonical source-domain allocation | 4/4 public worlds, 1/1 engine runtime, 1/1 engine Kani | reversing the same asymmetric-fee signed history is economically exact through direct and matcher-CPI routes; the engine proof preserves field association while sorting occupied domains and completes with 0/3,045 failed checks plus its constructive cover |
@@ -2269,8 +2274,9 @@ and formal-composition gaps.
    Pure `ActionableSummaryV16` totality is supporting evidence, not closure, until each summary bit
    is related to concrete account/market/bucket/close state by this public-route oracle or a
    whole-builder proof. Standalone public witnesses exist for every production plan, and the first
-   same-account composition now proves `AdvanceClose > SettleBChunk` through complete close
-   termination and deferred-B progress. A second composition proves
+   same-account composition now proves `AdvanceClose > SettleBChunk > RefreshAccount` through
+   complete close termination, exact B exhaustion, and certificate-current Recovery-leg refresh. A
+   second composition proves
    `DeclareRecovery > SettleBChunk`, `FinalizeRecovery`, and eventual Resolved disposal from the
    same expired public state. A third composition proves `SettleBChunk` preserves and eventually
    exposes a separately adverse live leg through recertification and liquidation. The attempted
@@ -2279,9 +2285,9 @@ and formal-composition gaps.
    oracle plus valid-prestate and whole-`set_account_pnl` engine composition proofs under the named
    source-credit arithmetic axiom; no injected state is retained. A fourth public composition proves
    stale refresh and liquidation cannot hide a retained source label and preserve the owner's
-   remaining-capital exit. Continue with reachable three-class and lifecycle/lower-priority
-   overlaps, and require every proposed combination either to produce a public trace or a checked
-   production-transition exclusion like this one.
+   remaining-capital exit. The first reachable three-class cell is therefore closed; continue with
+   other lifecycle/lower-priority overlaps, and require every proposed combination either to produce
+   a public trace or a checked production-transition exclusion like this one.
 2. Convert the 8 `Quarantined` adapters to `Certified` only after the current pin satisfies their
    positive economic and liveness postconditions. The other 91 entries already have explicit
    executable disposition: 83 fixed-pin certifications and 8 public nonqualifying proofs. Do not
