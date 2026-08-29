@@ -114,6 +114,7 @@ fn v16_program_all_retained_portfolio_intents_reject_after_same_pubkey_recreate(
             ],
         ),
         (278, &[PortfolioIntentKind::ForfeitRecoveryLeg]),
+        (285, &PortfolioIntentKind::ALL),
         (299, &[PortfolioIntentKind::Withdraw]),
         (301, &[PortfolioIntentKind::ConvertReleasedPnl]),
         (

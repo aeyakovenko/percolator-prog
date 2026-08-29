@@ -308,7 +308,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         BlockerAdapter::Pr231AssetGenerationTradeReplay,
     ),
     OpenLof::nonqualifying(237, Privileged, PrivilegedLifecycle),
-    OpenLof::quarantined(
+    OpenLof::certified(
         251,
         Blocker,
         ReplayIncarnation,
@@ -443,7 +443,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         DomainValue,
         BlockerAdapter::Pr284SignedDirectionSideAttribution,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         285,
         Hardening,
         ReplayIncarnation,
@@ -693,13 +693,13 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr344InsuranceTopUpRetryReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         345,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::AuthorityHandoffAbaReplayFamily,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         346,
         Blocker,
         ReplayIncarnation,
@@ -729,7 +729,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr351BackingTopUpRetryReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         353,
         Blocker,
         ReplayIncarnation,

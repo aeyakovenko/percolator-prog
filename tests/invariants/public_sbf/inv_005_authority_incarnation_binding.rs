@@ -5,6 +5,8 @@
 //! authority and incumbent-owner exits remain available. The stateful INV-005 suite runs the same
 //! finding-blind oracles over generated seeds; Kani exhausts the scalar epoch predicates.
 
+use crate::support::invariant_discovery::AuthorityIntentKind;
+
 #[test]
 fn v16_program_authority_incarnation_matrix_rejects_stale_consent() {
     let discoveries =
@@ -14,11 +16,39 @@ fn v16_program_authority_incarnation_matrix_rejects_stale_consent() {
         discoveries.len(),
         crate::support::invariant_discovery::AuthorityIntentKind::ALL.len()
     );
-    for discovery in discoveries {
+    for discovery in &discoveries {
         assert!(
             discovery.certifies_epoch_rejection(),
             "stale authority consent did not reject exactly: {discovery:?}"
         );
+    }
+
+    // Fixed-pin holdout certification remains separate from the finding-blind generator. Asset
+    // authority rows require every configured asset role rather than one representative handoff.
+    let asset_handoffs = [
+        AuthorityIntentKind::AssetAdminHandoff,
+        AuthorityIntentKind::InsuranceAuthorityHandoff,
+        AuthorityIntentKind::InsuranceOperatorHandoff,
+        AuthorityIntentKind::BackingAuthorityHandoff,
+        AuthorityIntentKind::OracleAuthorityHandoff,
+    ];
+    let certifications: &[(u16, &[AuthorityIntentKind])] = &[
+        (251, &asset_handoffs),
+        (345, &[AuthorityIntentKind::MarketAuthorityHandoff]),
+        (346, &asset_handoffs),
+        (353, &[AuthorityIntentKind::ResolveMarket]),
+    ];
+    for (pr, kinds) in certifications {
+        for kind in *kinds {
+            let evidence = discoveries
+                .iter()
+                .find(|discovery| discovery.kind == *kind)
+                .unwrap_or_else(|| panic!("PR {pr}: missing {kind:?} authority evidence"));
+            assert!(
+                evidence.certifies_epoch_rejection(),
+                "PR {pr}: {kind:?} lacks stale rollback or fresh liveness",
+            );
+        }
     }
 }
 
