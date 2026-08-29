@@ -73,8 +73,9 @@
 //! maintenance floor is explicitly bounded from the configured health slope.
 //! `v16_program_public_source_lien_expiry_is_split_merge_invariant` constructs the same
 //! source-backed risk increase as one portfolio, two equal portfolios with distinct counterparties,
-//! or three asymmetric portfolios sharing one counterparty through all four public trade routes.
-//! The three-way shape splits exposure 333/333/334 and the lien-creating increase 16/17/17. The
+//! three or four asymmetric portfolios sharing one counterparty through all four public trade
+//! routes. The three-way shape splits exposure 333/333/334 and the lien-creating increase
+//! 16/17/17; the four-way shape uses 250/250/250/250 and 12/12/13/13. The
 //! test normalizes the live lien at exact and late authenticated expiry and exits every owner in
 //! both orders. Account, source, and bucket ledgers must attribute the same backing; an N-way split
 //! may add at most N-1 conservative rounding atoms but may never reserve less. User payout, OI,
@@ -298,6 +299,7 @@ enum SourceLienPartition {
     Aggregate,
     EqualTwo,
     AsymmetricThree,
+    AsymmetricFour,
 }
 
 impl SourceLienPartition {
@@ -306,6 +308,7 @@ impl SourceLienPartition {
             Self::Aggregate => 1,
             Self::EqualTwo => 2,
             Self::AsymmetricThree => 3,
+            Self::AsymmetricFour => 4,
         }
     }
 
@@ -314,6 +317,7 @@ impl SourceLienPartition {
             Self::Aggregate => 0,
             Self::EqualTwo => 1,
             Self::AsymmetricThree => 2,
+            Self::AsymmetricFour => 3,
         }
     }
 }
@@ -2336,9 +2340,11 @@ fn run_source_lien_partition(
     const AGGREGATE_TARGETS: [usize; 1] = [0];
     const EQUAL_TWO_TARGETS: [usize; 2] = [0, 2];
     const ASYMMETRIC_THREE_TARGETS: [usize; 3] = [0, 2, 3];
+    const ASYMMETRIC_FOUR_TARGETS: [usize; 4] = [0, 2, 3, 4];
     const AGGREGATE_COUNTERPARTIES: [usize; 1] = [1];
     const EQUAL_TWO_COUNTERPARTIES: [usize; 2] = [1, 3];
     const ASYMMETRIC_THREE_COUNTERPARTIES: [usize; 1] = [1];
+    const ASYMMETRIC_FOUR_COUNTERPARTIES: [usize; 1] = [1];
     const AGGREGATE_PAIRS: [(usize, usize, i128, i128); 1] =
         [(0, 1, TOTAL_OPEN_Q, TOTAL_INCREASE_Q)];
     const EQUAL_TWO_PAIRS: [(usize, usize, i128, i128); 2] = [
@@ -2350,7 +2356,13 @@ fn run_source_lien_partition(
         (2, 1, 333 * POS_SCALE as i128, 17 * POS_SCALE as i128),
         (3, 1, 334 * POS_SCALE as i128, 17 * POS_SCALE as i128),
     ];
-    const KEEPER: usize = 4;
+    const ASYMMETRIC_FOUR_PAIRS: [(usize, usize, i128, i128); 4] = [
+        (0, 1, 250 * POS_SCALE as i128, 12 * POS_SCALE as i128),
+        (2, 1, 250 * POS_SCALE as i128, 12 * POS_SCALE as i128),
+        (3, 1, 250 * POS_SCALE as i128, 13 * POS_SCALE as i128),
+        (4, 1, 250 * POS_SCALE as i128, 13 * POS_SCALE as i128),
+    ];
+    const KEEPER: usize = 1;
 
     if landing_slot < EXPIRY_SLOT {
         return Err(format!(
@@ -2372,6 +2384,7 @@ fn run_source_lien_partition(
         SourceLienPartition::Aggregate => [52_502, 1_000_000, 0, 0, 0],
         SourceLienPartition::EqualTwo => [26_251, 500_000, 26_251, 500_000, 0],
         SourceLienPartition::AsymmetricThree => [17_501, 1_000_000, 17_501, 17_500, 0],
+        SourceLienPartition::AsymmetricFour => [13_126, 1_000_000, 13_126, 13_125, 13_125],
     };
     let mut env = V16Svm::new(
         seed,
@@ -2394,16 +2407,19 @@ fn run_source_lien_partition(
         SourceLienPartition::Aggregate => &AGGREGATE_TARGETS,
         SourceLienPartition::EqualTwo => &EQUAL_TWO_TARGETS,
         SourceLienPartition::AsymmetricThree => &ASYMMETRIC_THREE_TARGETS,
+        SourceLienPartition::AsymmetricFour => &ASYMMETRIC_FOUR_TARGETS,
     };
     let active_counterparties: &[usize] = match partition {
         SourceLienPartition::Aggregate => &AGGREGATE_COUNTERPARTIES,
         SourceLienPartition::EqualTwo => &EQUAL_TWO_COUNTERPARTIES,
         SourceLienPartition::AsymmetricThree => &ASYMMETRIC_THREE_COUNTERPARTIES,
+        SourceLienPartition::AsymmetricFour => &ASYMMETRIC_FOUR_COUNTERPARTIES,
     };
     let pairs: &[(usize, usize, i128, i128)] = match partition {
         SourceLienPartition::Aggregate => &AGGREGATE_PAIRS,
         SourceLienPartition::EqualTwo => &EQUAL_TWO_PAIRS,
         SourceLienPartition::AsymmetricThree => &ASYMMETRIC_THREE_PAIRS,
+        SourceLienPartition::AsymmetricFour => &ASYMMETRIC_FOUR_PAIRS,
     };
     let observations = vec![CrankObservationHint {
         asset_index: 0,
@@ -3265,6 +3281,7 @@ fn v16_program_public_source_lien_expiry_is_split_merge_invariant() {
     let mut canonical_aggregate = None;
     let mut canonical_equal_two = None;
     let mut canonical_asymmetric_three = None;
+    let mut canonical_asymmetric_four = None;
 
     for landing_slot in [3u64, 4] {
         for route in ROUTES {
@@ -3313,6 +3330,26 @@ fn v16_program_public_source_lien_expiry_is_split_merge_invariant() {
             .unwrap_or_else(|error| {
                 panic!("reversed asymmetric-three source lien via {route:?} at {landing_slot}: {error}")
             });
+            let asymmetric_four = run_source_lien_partition(
+                SourceLienPartition::AsymmetricFour,
+                false,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!("asymmetric-four source lien via {route:?} at {landing_slot}: {error}")
+            });
+            let asymmetric_four_reversed = run_source_lien_partition(
+                SourceLienPartition::AsymmetricFour,
+                true,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "reversed asymmetric-four source lien via {route:?} at {landing_slot}: {error}"
+                )
+            });
 
             assert_source_lien_partition_equivalent(
                 SourceLienPartition::EqualTwo,
@@ -3327,6 +3364,14 @@ fn v16_program_public_source_lien_expiry_is_split_merge_invariant() {
                 &aggregate,
                 &asymmetric_three,
                 &asymmetric_three_reversed,
+                route,
+                landing_slot,
+            );
+            assert_source_lien_partition_equivalent(
+                SourceLienPartition::AsymmetricFour,
+                &aggregate,
+                &asymmetric_four,
+                &asymmetric_four_reversed,
                 route,
                 landing_slot,
             );
@@ -3368,6 +3413,14 @@ fn v16_program_public_source_lien_expiry_is_split_merge_invariant() {
                 );
             } else {
                 canonical_asymmetric_three = Some(asymmetric_three.economics);
+            }
+            if let Some(canonical) = canonical_asymmetric_four.as_ref() {
+                assert_eq!(
+                    &asymmetric_four.economics, canonical,
+                    "asymmetric-four source-lien economics changed by route/expiry landing {route:?}/{landing_slot}"
+                );
+            } else {
+                canonical_asymmetric_four = Some(asymmetric_four.economics);
             }
         }
     }
