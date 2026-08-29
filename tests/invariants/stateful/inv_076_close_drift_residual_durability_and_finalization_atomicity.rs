@@ -35,6 +35,8 @@ fn v16_program_same_asset_price_and_funding_drift_preserves_close_and_owner_exit
     assert_eq!(evidence.funding_index_move_worlds, 2, "{evidence:?}");
     assert_eq!(evidence.rejected_close_hint_words, 16, "{evidence:?}");
     assert_eq!(evidence.oi_basis_frame_worlds, 4, "{evidence:?}");
+    assert_eq!(evidence.exact_partition_pre_worlds, 4, "{evidence:?}");
+    assert_eq!(evidence.exact_partition_post_worlds, 4, "{evidence:?}");
     assert_eq!(evidence.live_close_progresses, 4, "{evidence:?}");
     assert_eq!(evidence.owner_exit_worlds, 4, "{evidence:?}");
     assert_ne!(evidence.minimum_initial_residual, 0, "{evidence:?}");

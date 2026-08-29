@@ -7067,6 +7067,8 @@ pub struct SameAssetCloseDriftProgressEvidence {
     pub funding_index_move_worlds: u64,
     pub rejected_close_hint_words: u64,
     pub oi_basis_frame_worlds: u64,
+    pub exact_partition_pre_worlds: u64,
+    pub exact_partition_post_worlds: u64,
     pub live_close_progresses: u64,
     pub owner_exit_worlds: u64,
     pub minimum_initial_residual: u128,
@@ -7605,18 +7607,22 @@ pub fn run_same_asset_close_locality_probe() -> Result<SameAssetCloseLocalityEvi
     aggregate.ok_or_else(|| "INV-074 locality matrix produced no worlds".into())
 }
 
-fn assert_close_residual_partition(
+pub(crate) fn verify_close_residual_partition(
     label: &str,
     close: &CloseProgressLedgerV16,
 ) -> Result<(), String> {
+    if close.support_consumed > close.junior_face_burned {
+        return Err(format!(
+            "{label}: realized support exceeds retired junior face: ledger={close:?}"
+        ));
+    }
     let expected = close
         .gross_loss_at_close_start
         .checked_add(close.drift_consumed)
         .ok_or_else(|| format!("{label}: close gross-loss partition overflow"))?;
     let accounted = close
         .support_consumed
-        .checked_add(close.junior_face_burned)
-        .and_then(|value| value.checked_add(close.insurance_spent))
+        .checked_add(close.insurance_spent)
         .and_then(|value| value.checked_add(close.b_loss_booked))
         .and_then(|value| value.checked_add(close.explicit_loss_assigned))
         .and_then(|value| value.checked_add(close.residual_remaining))
@@ -7627,6 +7633,215 @@ fn assert_close_residual_partition(
         ));
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoverySupportPartitionEvidence {
+    pub route_worlds: u64,
+    pub exact_partition_worlds: u64,
+    pub nonzero_support_worlds: u64,
+    pub face_exceeds_support_worlds: u64,
+    pub minimum_retired_face: u128,
+    pub maximum_support_consumed: u128,
+}
+
+fn run_recovery_support_partition_world(
+    seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<CloseProgressLedgerV16, String> {
+    const CLAIMANT: usize = 0;
+    const CLAIM_SOURCE: usize = 1;
+    const CLAIM_SOURCE_PRINCIPAL: u128 = 250;
+    const CLAIM_SOURCE_DOMAIN: u16 = 1;
+    const ADVERSE_ASSET: usize = 2;
+    const INITIAL_PRICE: u64 = 100;
+    const WINNING_MARK: u64 = 150;
+    const CLAIM_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const ADVERSE_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const BACKING_EXPIRY_SLOT: u64 = 100;
+
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config(
+        seed,
+        MarketConfig {
+            initial_price: INITIAL_PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                1_000,
+                CLAIM_SOURCE_PRINCIPAL,
+                1_000,
+                1_000,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    )?;
+    bounded_reference_top_up_backing(
+        &mut runner,
+        CLAIM_SOURCE_DOMAIN,
+        1,
+        BACKING_EXPIRY_SLOT,
+        true,
+    )?;
+
+    runner.execute_trade(
+        route,
+        CLAIMANT,
+        CLAIM_SOURCE,
+        vec![(0, CLAIM_SIZE_Q)],
+        0,
+        0,
+        true,
+    )?;
+    runner.execute_trade(
+        route,
+        CLAIMANT,
+        EXIT_MAKER_INDEX,
+        vec![(ADVERSE_ASSET, -ADVERSE_SIZE_Q)],
+        0,
+        0,
+        true,
+    )?;
+    for (offset, mark) in (105..=WINNING_MARK).step_by(5).enumerate() {
+        let slot = 2 + u64::try_from(offset).expect("bounded INV-037 claim-mark sequence");
+        bounded_reference_push_mark(&mut runner, 0, slot, mark)?;
+        for actor in [CLAIM_SOURCE, CLAIMANT] {
+            runner
+                .execute_crank(actor, HintMode::Complete, false)
+                .map_err(CrankFailure::into_message)?;
+            runner.assert_global_invariants()?;
+        }
+    }
+    runner.execute_trade(
+        route,
+        CLAIMANT,
+        CLAIM_SOURCE,
+        vec![(0, -CLAIM_SIZE_Q)],
+        0,
+        0,
+        true,
+    )?;
+    runner.assert_global_invariants()?;
+
+    let claimant = runner.env.primary_portfolio(CLAIMANT);
+    if claimant.pnl.get() <= 1 {
+        return Err(format!(
+            "INV-037 {route:?} claim prefix did not create nontrivial positive PnL: {}",
+            claimant.pnl.get()
+        ));
+    }
+    let (source_domain, source_claim_num) = (0..PORTFOLIO_SOURCE_DOMAIN_CAP)
+        .map(|domain| (domain, source_claim_for_domain(&claimant, domain)))
+        .find(|(_, claim)| *claim != 0)
+        .ok_or_else(|| format!("INV-037 {route:?} claim prefix had no source attribution"))?;
+    if source_domain != CLAIM_SOURCE_DOMAIN as usize {
+        return Err(format!(
+            "INV-037 {route:?} claim bound unexpected source domain {source_domain}"
+        ));
+    }
+    if source_claim_num <= BOUND_SCALE {
+        return Err(format!(
+            "INV-037 {route:?} source claim is not larger than one support atom: {source_claim_num}"
+        ));
+    }
+    for (offset, mark) in (105..=WINNING_MARK).step_by(5).enumerate() {
+        let slot = 12 + u64::try_from(offset).expect("bounded INV-037 adverse-mark sequence");
+        bounded_reference_push_mark(&mut runner, ADVERSE_ASSET as u16, slot, mark)?;
+        runner
+            .execute_crank(EXIT_MAKER_INDEX, HintMode::Complete, false)
+            .map_err(CrankFailure::into_message)?;
+        runner.assert_global_invariants()?;
+    }
+
+    let pnl_before_forfeit = runner.env.primary_portfolio(CLAIMANT).pnl.get();
+    if pnl_before_forfeit != claimant.pnl.get() {
+        return Err(format!(
+            "INV-037 {route:?} adverse leg changed claimant PnL before Recovery settlement: {} -> {pnl_before_forfeit}",
+            claimant.pnl.get()
+        ));
+    }
+    if !runner.try_rebalance_exit(EXIT_MAKER_INDEX, ADVERSE_ASSET, ADVERSE_SIZE_Q)? {
+        return Err(format!(
+            "INV-037 {route:?} public counterparty reduction did not make the stale side exitable"
+        ));
+    }
+    let (_, drain_group) = runner.env.primary_market_state();
+    if !matches!(
+        drain_group.assets[ADVERSE_ASSET].mode_short,
+        SideModeV16::DrainOnly | SideModeV16::ResetPending
+    ) {
+        return Err(format!(
+            "INV-037 {route:?} counterparty reduction left the stale short side in a non-forfeitable mode: {:?}",
+            drain_group.assets[ADVERSE_ASSET].mode_short
+        ));
+    }
+    runner.assert_global_invariants()?;
+
+    if !runner.execute_recovery_forfeit(CLAIMANT, ADVERSE_ASSET, u128::MAX)? {
+        return Err(format!(
+            "INV-037 {route:?} owner Recovery forfeit did not detach the adverse leg"
+        ));
+    }
+    runner.assert_global_invariants()?;
+    let close = runner
+        .env
+        .primary_portfolio(CLAIMANT)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-037 {route:?} close-ledger decode: {error:?}"))?;
+    verify_close_residual_partition(&format!("INV-037 {route:?} Recovery support"), &close)?;
+    let expected_support = CLAIM_SOURCE_PRINCIPAL
+        .checked_add(1)
+        .expect("bounded INV-037 support attribution");
+    if close.support_consumed != expected_support
+        || close.junior_face_burned <= close.support_consumed
+        || !close.finalized
+        || close.residual_remaining != 0
+    {
+        return Err(format!(
+            "INV-037 {route:?} did not expose exact principal-plus-backing support with larger retired face: {close:?}"
+        ));
+    }
+    Ok(close)
+}
+
+pub fn run_recovery_support_partition_probe(
+    seed: [u8; 32],
+) -> Result<RecoverySupportPartitionEvidence, String> {
+    let mut evidence = RecoverySupportPartitionEvidence {
+        route_worlds: 0,
+        exact_partition_worlds: 0,
+        nonzero_support_worlds: 0,
+        face_exceeds_support_worlds: 0,
+        minimum_retired_face: u128::MAX,
+        maximum_support_consumed: 0,
+    };
+    for (index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut route_seed = seed;
+        route_seed[0] ^= u8::try_from(index).expect("four INV-037 routes") << 4;
+        let close = run_recovery_support_partition_world(route_seed, route)?;
+        evidence.route_worlds += 1;
+        evidence.exact_partition_worlds += 1;
+        evidence.nonzero_support_worlds += u64::from(close.support_consumed != 0);
+        evidence.face_exceeds_support_worlds +=
+            u64::from(close.junior_face_burned > close.support_consumed);
+        evidence.minimum_retired_face = evidence.minimum_retired_face.min(close.junior_face_burned);
+        evidence.maximum_support_consumed = evidence
+            .maximum_support_consumed
+            .max(close.support_consumed);
+    }
+    Ok(evidence)
 }
 
 fn run_same_asset_close_drift_progress_world(
@@ -7696,7 +7911,7 @@ fn run_same_asset_close_drift_progress_world(
             runner.positions[CLOSE_WINNER][ASSET], runner.positions[CLOSE_LOSER][ASSET]
         ));
     }
-    assert_close_residual_partition("INV-076 pre-drift", &close_before)?;
+    verify_close_residual_partition("INV-076 pre-drift", &close_before)?;
     let (_, group_before) = runner.env.primary_market_state();
     let asset_before = group_before.assets[ASSET];
     let control_oi_q = POS_SCALE / 100;
@@ -7856,7 +8071,7 @@ fn run_same_asset_close_drift_progress_world(
         .close_progress
         .try_to_runtime()
         .map_err(|error| format!("INV-076 progressed close decode: {error:?}"))?;
-    assert_close_residual_partition("INV-076 post-drift progress", &close_after)?;
+    verify_close_residual_partition("INV-076 post-drift progress", &close_after)?;
     if progressed_group.mode != MarketModeV16::Live
         || close_after.residual_remaining >= close_before.residual_remaining
         || progressed_group.assets[ASSET].oi_eff_long_q != control_oi_q
@@ -7926,6 +8141,8 @@ fn run_same_asset_close_drift_progress_world(
         funding_index_move_worlds: u64::from(funding_moved),
         rejected_close_hint_words: invalid_hint_words.len() as u64,
         oi_basis_frame_worlds: 1,
+        exact_partition_pre_worlds: 1,
+        exact_partition_post_worlds: 1,
         live_close_progresses: 1,
         owner_exit_worlds: 1,
         minimum_initial_residual: close_before.residual_remaining,
@@ -7967,6 +8184,8 @@ pub fn run_same_asset_close_drift_progress_probe(
             existing.funding_index_move_worlds += evidence.funding_index_move_worlds;
             existing.rejected_close_hint_words += evidence.rejected_close_hint_words;
             existing.oi_basis_frame_worlds += evidence.oi_basis_frame_worlds;
+            existing.exact_partition_pre_worlds += evidence.exact_partition_pre_worlds;
+            existing.exact_partition_post_worlds += evidence.exact_partition_post_worlds;
             existing.live_close_progresses += evidence.live_close_progresses;
             existing.owner_exit_worlds += evidence.owner_exit_worlds;
             existing.minimum_initial_residual = existing

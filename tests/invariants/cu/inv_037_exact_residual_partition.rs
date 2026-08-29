@@ -4,10 +4,12 @@
 //! close ledger categories. This test reaches a real public liquidation path
 //! where insurance covers the bankrupt short, then checks the deployed
 //! `CloseProgressLedger` equation before allowing the emptied portfolio to
-//! close:
+//! close. The same independent oracle is mutation-tested by the stateful
+//! owner and applied before and after continuation in INV-076's four public
+//! route/drift worlds:
 //!
 //! ```text
-//! gross_loss_at_close_start =
+//! gross_loss_at_close_start + drift_consumed =
 //!   support_consumed
 //! + insurance_spent
 //! + b_loss_booked
@@ -15,10 +17,16 @@
 //! + residual_remaining
 //! ```
 //!
-//! The current ledger has no separate adverse-drift field, so this owner pins
-//! the implemented v16.8 close partition directly.
+//! `junior_face_burned` records retired claim face and is intentionally not a
+//! second payment term; only the realizable `support_consumed` atoms cover
+//! loss. The stateful INV-037 owner makes this distinction public and
+//! nonvacuous on all four trade routes: 1,000 retired face atoms coexist with
+//! exactly 251 realizable support atoms. The current ledger does not separately
+//! expose every normative INV-037 provenance category, so this owner pins the
+//! deployed equation without claiming the absent category-level decomposition.
 
 use super::*;
+use crate::support::fuzz_model::verify_close_residual_partition;
 
 #[test]
 fn v16_program_insurance_covered_liquidation_close_ledger_partitions_exactly() {
@@ -82,17 +90,8 @@ fn v16_program_insurance_covered_liquidation_close_ledger_partitions_exactly() {
         ledger.insurance_spent > 0,
         "insurance must be one non-vacuous partition component",
     );
-    let partition = ledger
-        .support_consumed
-        .checked_add(ledger.insurance_spent)
-        .and_then(|value| value.checked_add(ledger.b_loss_booked))
-        .and_then(|value| value.checked_add(ledger.explicit_loss_assigned))
-        .and_then(|value| value.checked_add(ledger.residual_remaining))
-        .expect("close partition sum");
-    assert_eq!(
-        partition, ledger.gross_loss_at_close_start,
-        "close ledger partition must account for every loss atom exactly once",
-    );
+    verify_close_residual_partition("insurance-covered liquidation", &ledger)
+        .expect("close ledger partition must account for every loss atom exactly once");
 
     let close_cu = env.close_portfolio_with_cu(&short_owner, short);
     assert_cu_within(

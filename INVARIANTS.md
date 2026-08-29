@@ -546,6 +546,12 @@ gross_loss_at_close_start
 
 No atom appears in two categories and no category is silently dropped.
 
+For the deployed v16.8 ledger, `drift_consumed` is the adverse-drift term and
+`support_consumed` is the realizable value payment. `junior_face_burned` is claim-face metadata,
+not an additional payment, and must not be added to the value partition. Any abstract category
+folded into a deployed field must have one documented, disjoint mapping; an absent category is not
+implicitly proven nonzero or independently attributable.
+
 **Required tests.** Independently recompute the equality after every continuation, preemption,
 cancel attempt, recovery, and finalization.
 **Verification:** P, F

@@ -161,6 +161,9 @@ mod inv_035_no_global_b_pool_residuals_remain_local;
 #[path = "invariants/stateful/inv_036_fee_destination_and_policy_version_integrity.rs"]
 mod inv_036_fee_destination_and_policy_version_integrity;
 
+#[path = "invariants/stateful/inv_037_exact_residual_partition.rs"]
+mod inv_037_exact_residual_partition;
+
 #[path = "invariants/stateful/inv_038_rounding_and_ratio_conservation.rs"]
 mod inv_038_rounding_and_ratio_conservation;
 
