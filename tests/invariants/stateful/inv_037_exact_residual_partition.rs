@@ -8,8 +8,10 @@
 //! face atoms while counting exactly 251 realizable support atoms once. Shared INV-076 evidence
 //! separately checks the equation before and after a real residual-decreasing continuation under
 //! price and funding drift. A third matrix crosses all four trade routes and both position
-//! orientations, checks the equation before and after owner cure/cancellation, and requires the
-//! released counterparty obligation to clear through bounded mutating cranks.
+//! orientations, rejects a zero-deposit cure only after the reversible close reaches full account
+//! refresh with complete snapshot rollback, checks the equation before and after the funded
+//! cure/cancellation, and requires the released counterparty obligation to clear through bounded
+//! mutating cranks.
 //!
 //! Guarantee boundary: the deployed ledger has `drift_consumed`, `support_consumed`, insurance,
 //! B, explicit loss, and remaining residual. It does not expose separate fields for every abstract
@@ -150,6 +152,10 @@ fn inv037_public_cure_preserves_exact_partition_across_routes_and_sides() {
     assert_eq!(
         evidence.exact_partition_after_cure_worlds, 8,
         "{evidence:?}"
+    );
+    assert_eq!(
+        evidence.underfunded_cure_rollback_worlds, 8,
+        "every reversible close must roll back a post-refresh underfunded cure"
     );
     assert_eq!(evidence.canceled_worlds, 8, "{evidence:?}");
     assert_eq!(evidence.progressing_cleanup_worlds, 8, "{evidence:?}");

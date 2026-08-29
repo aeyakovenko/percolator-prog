@@ -10,10 +10,14 @@
 //! the close asset before the close account is touched. The matrix crosses upward/downward price
 //! movement and funding enabled/disabled, requires an actual funding-index delta in enabled worlds,
 //! exact close-ledger conservation, strict value-neutral Live progress, and complete normal owner
-//! withdrawals. Four malformed hint words per world must reject with byte/token/lamport-exact
-//! rollback before the canonical retry. Effective OI is checked at close creation, after both
-//! accruals, after residual booking, and after final owner exits. No program-owned bytes are
-//! synthesized or mutated out of band.
+//! withdrawals. Before the canonical accrual, a duplicate-hint instruction performs real staged
+//! market/profile mutation on its first hint and rejects on its second; the complete
+//! market/portfolio/token/matcher/lamport snapshot must roll back in all four worlds. Four
+//! additional malformed hint words per world reject with exact rollback. Effective OI is checked
+//! at close creation, after both accruals, after residual booking, and after final owner exits. The
+//! successful continuation frames every non-target portfolio, matcher, backing ledger, SPL
+//! account, and economic lamport balance. No program-owned bytes are synthesized or mutated out of
+//! band.
 //!
 //! Guarantee boundary: this closes the publicly reachable flat-close same-asset price/funding
 //! drift cell. Uncovered loss with open risk is prevented from entering this state by the separate
@@ -33,8 +37,10 @@ fn v16_program_same_asset_price_and_funding_drift_preserves_close_and_owner_exit
     assert_eq!(evidence.funding_enabled_worlds, 2, "{evidence:?}");
     assert_eq!(evidence.same_asset_slot_advances, 4, "{evidence:?}");
     assert_eq!(evidence.funding_index_move_worlds, 2, "{evidence:?}");
+    assert_eq!(evidence.post_accrual_fault_rollbacks, 4, "{evidence:?}");
     assert_eq!(evidence.rejected_close_hint_words, 16, "{evidence:?}");
     assert_eq!(evidence.oi_basis_frame_worlds, 4, "{evidence:?}");
+    assert_eq!(evidence.complete_success_frame_worlds, 4, "{evidence:?}");
     assert_eq!(evidence.exact_partition_pre_worlds, 4, "{evidence:?}");
     assert_eq!(evidence.exact_partition_post_worlds, 4, "{evidence:?}");
     assert_eq!(evidence.live_close_progresses, 4, "{evidence:?}");

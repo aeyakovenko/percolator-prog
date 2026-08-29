@@ -7180,8 +7180,10 @@ pub struct SameAssetCloseDriftProgressEvidence {
     pub funding_enabled_worlds: u64,
     pub same_asset_slot_advances: u64,
     pub funding_index_move_worlds: u64,
+    pub post_accrual_fault_rollbacks: u64,
     pub rejected_close_hint_words: u64,
     pub oi_basis_frame_worlds: u64,
+    pub complete_success_frame_worlds: u64,
     pub exact_partition_pre_worlds: u64,
     pub exact_partition_post_worlds: u64,
     pub live_close_progresses: u64,
@@ -7266,6 +7268,7 @@ pub struct CurePendingObligationDosEvidence {
     pub cure_spl_vault_credit: u128,
     pub cure_accounted_vault_credit: u128,
     pub cure_capital_credit: u128,
+    pub underfunded_cure_rollback: bool,
     pub close_canceled: bool,
     pub intermediate_positive_pnl_total: u128,
     pub intermediate_positive_pnl_bound_num: u128,
@@ -7293,6 +7296,7 @@ pub struct CloseCancelPartitionEvidence {
     pub winner_side_worlds: [u64; 2],
     pub exact_partition_before_cure_worlds: u64,
     pub exact_partition_after_cure_worlds: u64,
+    pub underfunded_cure_rollback_worlds: u64,
     pub canceled_worlds: u64,
     pub progressing_cleanup_worlds: u64,
 }
@@ -8095,6 +8099,38 @@ fn run_same_asset_close_drift_progress_world(
         return Err("INV-076 mark push did not stage target without engine accrual".into());
     }
 
+    // The first duplicate hint is fully valid and performs real same-asset
+    // accrual in the staged invocation. The duplicate is discovered only on
+    // the second loop iteration, after market/profile bytes have been mutated.
+    // Transaction rollback must therefore restore the complete pre-accrual
+    // market, close, custody, matcher, and unrelated-account snapshot.
+    runner.env.warp_to_slot(first_drift_slot);
+    let before_post_accrual_fault = runner.snapshot();
+    let duplicate_after_accrual = vec![
+        CrankObservationHint {
+            asset_index: ASSET as u16,
+            oracle_accounts: 0,
+        },
+        CrankObservationHint {
+            asset_index: ASSET as u16,
+            oracle_accounts: 0,
+        },
+    ];
+    if runner
+        .env
+        .crank(CLOSE_LOSER, first_drift_slot, duplicate_after_accrual)
+        .is_ok()
+    {
+        return Err("INV-076 post-accrual duplicate hint unexpectedly landed".into());
+    }
+    runner.assert_snapshot_unchanged(&before_post_accrual_fault)?;
+    if runner.env.primary_market_state().1.assets[ASSET].slot_last
+        != close_before.drift_reference_slot
+        || runner.env.primary_profile(ASSET).mark_ewma_e6 != target_mark
+    {
+        return Err("INV-076 rejected post-accrual fault did not restore staged mark state".into());
+    }
+
     let close_account_before_drift = runner.env.primary_portfolio_data(CLOSE_LOSER);
     for drift_slot in [first_drift_slot, second_drift_slot] {
         runner.env.warp_to_slot(drift_slot);
@@ -8187,10 +8223,23 @@ fn run_same_asset_close_drift_progress_world(
         runner.assert_snapshot_unchanged(&before_rejection)?;
     }
 
+    let before_close_progress = runner.snapshot();
     let vault_before_progress = runner.env.token_amount(runner.env.vault);
     runner
         .execute_crank(CLOSE_LOSER, HintMode::Empty, true)
         .map_err(CrankFailure::into_message)?;
+    runner.assert_portfolio_frame(&before_close_progress, &[CLOSE_LOSER])?;
+    runner.assert_no_token_side_effects(&before_close_progress)?;
+    if before_close_progress.backing_domain_ledger != runner.env.backing_domain_ledger_data()
+        || before_close_progress.matcher_contexts != runner.env.all_matcher_context_data()
+        || before_close_progress.economic_account_lamports
+            != runner.env.all_economic_account_lamports()
+    {
+        return Err(
+            "INV-076 successful close continuation escaped its market/target-portfolio frame"
+                .into(),
+        );
+    }
     runner.assert_global_invariants()?;
     let (_, progressed_group) = runner.env.primary_market_state();
     let close_after = runner
@@ -8267,8 +8316,10 @@ fn run_same_asset_close_drift_progress_world(
         funding_enabled_worlds: u64::from(funding_enabled),
         same_asset_slot_advances: 1,
         funding_index_move_worlds: u64::from(funding_moved),
+        post_accrual_fault_rollbacks: 1,
         rejected_close_hint_words: invalid_hint_words.len() as u64,
         oi_basis_frame_worlds: 1,
+        complete_success_frame_worlds: 1,
         exact_partition_pre_worlds: 1,
         exact_partition_post_worlds: 1,
         live_close_progresses: 1,
@@ -8310,8 +8361,10 @@ pub fn run_same_asset_close_drift_progress_probe(
             existing.funding_enabled_worlds += evidence.funding_enabled_worlds;
             existing.same_asset_slot_advances += evidence.same_asset_slot_advances;
             existing.funding_index_move_worlds += evidence.funding_index_move_worlds;
+            existing.post_accrual_fault_rollbacks += evidence.post_accrual_fault_rollbacks;
             existing.rejected_close_hint_words += evidence.rejected_close_hint_words;
             existing.oi_basis_frame_worlds += evidence.oi_basis_frame_worlds;
+            existing.complete_success_frame_worlds += evidence.complete_success_frame_worlds;
             existing.exact_partition_pre_worlds += evidence.exact_partition_pre_worlds;
             existing.exact_partition_post_worlds += evidence.exact_partition_post_worlds;
             existing.live_close_progresses += evidence.live_close_progresses;
@@ -9689,6 +9742,18 @@ fn run_cure_pending_obligation_dos_world(
         .map_err(|error| format!("active close decode: {error:?}"))?;
     verify_close_residual_partition("pre-cure close", &active_close)?;
 
+    // This close has no irreversible progress, so a zero-deposit cure reaches
+    // the engine's full-account refresh and fails only when the refreshed
+    // equity cannot satisfy initial margin. That refresh is mutating in the
+    // not-atomic engine API; the public instruction error must roll the entire
+    // market/portfolio/SPL/lamport snapshot back before the funded retry.
+    let before_underfunded_cure = runner.snapshot();
+    if runner.env.cure_and_cancel_primary_close(LOSER, 0).is_ok() {
+        return Err("public zero-deposit cure unexpectedly restored solvency".into());
+    }
+    runner.assert_snapshot_unchanged(&before_underfunded_cure)?;
+    let underfunded_cure_rollback = true;
+
     let cure_source_before = runner
         .env
         .token_amount(runner.env.actors[LOSER].source_token);
@@ -9834,6 +9899,7 @@ fn run_cure_pending_obligation_dos_world(
         cure_spl_vault_credit,
         cure_accounted_vault_credit,
         cure_capital_credit,
+        underfunded_cure_rollback,
         close_canceled: canceled_close.canceled,
         intermediate_positive_pnl_total: group.pnl_pos_tot,
         intermediate_positive_pnl_bound_num: group.pnl_pos_bound_tot_num,
@@ -9866,6 +9932,7 @@ pub fn run_close_cancel_partition_probe() -> Result<CloseCancelPartitionEvidence
         winner_side_worlds: [0; 2],
         exact_partition_before_cure_worlds: 0,
         exact_partition_after_cure_worlds: 0,
+        underfunded_cure_rollback_worlds: 0,
         canceled_worlds: 0,
         progressing_cleanup_worlds: 0,
     };
@@ -9888,6 +9955,7 @@ pub fn run_close_cancel_partition_probe() -> Result<CloseCancelPartitionEvidence
                 u64::from(world.exact_partition_before_cure);
             evidence.exact_partition_after_cure_worlds +=
                 u64::from(world.exact_partition_after_cure);
+            evidence.underfunded_cure_rollback_worlds += u64::from(world.underfunded_cure_rollback);
             evidence.canceled_worlds += u64::from(world.close_canceled);
             evidence.progressing_cleanup_worlds += u64::from(
                 world.progressing_cranks != 0
