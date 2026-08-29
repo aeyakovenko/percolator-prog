@@ -1190,12 +1190,16 @@ pub struct SourceFeeConsentDiscovery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackingProviderConsentDiscovery {
     pub order: BackingProviderConsentOrder,
-    pub accepted_provider_terms: bool,
+    pub accepted_unconsented_transition: bool,
+    pub rejected_exact_rollback: bool,
+    pub authorized_control_landed: bool,
     pub lp_capital_debit: u128,
     pub provider_earnings_credit: u128,
+    pub provider_withdrawn: u64,
     pub operator_insurance_credit: u128,
     pub operator_withdrawn: u64,
     pub compute_units: Option<u64>,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3117,11 +3121,38 @@ impl AccrualOrderingDiscovery {
 
 impl BackingProviderConsentDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.accepted_provider_terms
+        self.accepted_unconsented_transition
             && self.lp_capital_debit != 0
             && self.provider_earnings_credit == 0
             && self.operator_insurance_credit == self.lp_capital_debit
             && u128::from(self.operator_withdrawn) == self.lp_capital_debit
+    }
+
+    pub fn satisfies_invariant(&self) -> bool {
+        !self.accepted_unconsented_transition
+            && self.rejected_exact_rollback
+            && self.authorized_control_landed
+            && self.lp_capital_debit != 0
+            && self
+                .provider_earnings_credit
+                .checked_add(self.operator_insurance_credit)
+                == Some(self.lp_capital_debit)
+            && self.compute_units.is_some()
+            && self.token_supply_conserved
+            && match self.order {
+                BackingProviderConsentOrder::FundThenPolicy => {
+                    self.provider_earnings_credit == self.lp_capital_debit
+                        && u128::from(self.provider_withdrawn) == self.lp_capital_debit
+                        && self.operator_insurance_credit == 0
+                        && self.operator_withdrawn == 0
+                }
+                BackingProviderConsentOrder::PolicyThenRetainedFund => {
+                    self.provider_earnings_credit == 0
+                        && self.provider_withdrawn == 0
+                        && self.operator_insurance_credit == self.lp_capital_debit
+                        && u128::from(self.operator_withdrawn) == self.lp_capital_debit
+                }
+            }
     }
 }
 
@@ -5356,8 +5387,6 @@ fn prepare_authority_incarnation_route(
             const LP: usize = 2;
             const WINNING_DOMAIN: u16 = 3;
             const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
-            env.update_backing_fee_policy_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 0)
-                .map_err(|error| format!("install retained backing earnings fee: {error}"))?;
             env.warp_to_slot(6);
             env.trade_no_cpi_with_backing_fee_cap(PROVIDER, LP, 0, -INCREASE_Q, 95, 0, 5_000)
                 .map_err(|error| format!("realize retained backing earnings: {error}"))?;
@@ -7269,6 +7298,8 @@ fn prepare_source_backed_fee_world(seed: [u8; 32]) -> Result<V16Svm, String> {
         .map_err(|error| format!("activate source-backed asset: {error}"))?;
     env.configure_auth_mark_for_actor(PROVIDER, ASSET, 3, PRICE)
         .map_err(|error| format!("configure source-backed mark: {error}"))?;
+    env.update_backing_fee_policy_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 0)
+        .map_err(|error| format!("install provider-visible source-backing fee: {error}"))?;
     env.top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 100)
         .map_err(|error| format!("fund source-backing bucket: {error}"))?;
     env.trade_no_cpi_with_backing_fee_cap(
@@ -7355,8 +7386,6 @@ fn discover_one_source_fee_consent_violation(
             env.build_retained_batch_cpi_trade(account_a, account_b, 0, size_q, 0)
         }
     };
-    env.update_backing_fee_policy_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 0)
-        .map_err(|error| format!("install post-consent source-backing fee: {error}"))?;
     env.warp_to_slot(6);
     let lp_before = env.primary_portfolio(LP).capital.get();
     let provider_before = env.primary_market_state().1.source_backing_buckets
@@ -7582,12 +7611,12 @@ pub fn discover_source_fee_consent_violations(
         .collect()
 }
 
-fn rejected_backing_provider_consent(
+fn require_rejected_backing_provider_consent(
     env: &V16Svm,
     order: BackingProviderConsentOrder,
     before: EconomicFingerprint,
     supply_before: u128,
-) -> Result<BackingProviderConsentDiscovery, String> {
+) -> Result<(), String> {
     if before != fingerprint(env) {
         return Err(format!(
             "{order:?} rejected provider-policy transition did not roll back exactly"
@@ -7598,15 +7627,7 @@ fn rejected_backing_provider_consent(
             "{order:?} rejected provider-policy transition changed SPL supply"
         ));
     }
-    Ok(BackingProviderConsentDiscovery {
-        order,
-        accepted_provider_terms: false,
-        lp_capital_debit: 0,
-        provider_earnings_credit: 0,
-        operator_insurance_credit: 0,
-        operator_withdrawn: 0,
-        compute_units: None,
-    })
+    Ok(())
 }
 
 fn discover_one_backing_provider_consent_violation(
@@ -7677,54 +7698,79 @@ fn discover_one_backing_provider_consent_violation(
     );
 
     let mut max_cu = 0;
-    match order {
-        BackingProviderConsentOrder::FundThenPolicy => {
-            let top_up = env
-                .top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, BACKING_PRINCIPAL, 100)
-                .map_err(|error| format!("fund provider-approved bucket: {error}"))?;
-            max_cu = max_cu.max(top_up.compute_units);
-            let before_policy = fingerprint(&env);
-            match env.update_backing_fee_policy_for_actor(
-                POLICY_AUTHORITY,
-                WINNING_DOMAIN,
-                BACKING_FEE_BPS,
-                10_000,
-            ) {
-                Ok(policy) => max_cu = max_cu.max(policy.compute_units),
-                Err(_) => {
-                    return rejected_backing_provider_consent(
-                        &env,
-                        order,
-                        before_policy,
-                        supply_before,
-                    );
-                }
-            }
-        }
-        BackingProviderConsentOrder::PolicyThenRetainedFund => {
-            let policy = env
-                .update_backing_fee_policy_for_actor(
+    let (accepted_unconsented_transition, rejected_exact_rollback, authorized_control_landed) =
+        match order {
+            BackingProviderConsentOrder::FundThenPolicy => {
+                let top_up = env
+                    .top_up_backing_bucket_for_actor(
+                        PROVIDER,
+                        WINNING_DOMAIN,
+                        BACKING_PRINCIPAL,
+                        100,
+                    )
+                    .map_err(|error| format!("fund provider-approved bucket: {error}"))?;
+                max_cu = max_cu.max(top_up.compute_units);
+                let before_policy = fingerprint(&env);
+                match env.update_backing_fee_policy_for_actor(
                     POLICY_AUTHORITY,
                     WINNING_DOMAIN,
                     BACKING_FEE_BPS,
                     10_000,
-                )
-                .map_err(|error| format!("replace provider-visible fee split: {error}"))?;
-            max_cu = max_cu.max(policy.compute_units);
-            let before_top_up = fingerprint(&env);
-            match env.land_retained(retained_top_up) {
-                Ok(top_up) => max_cu = max_cu.max(top_up.compute_units),
-                Err(_) => {
-                    return rejected_backing_provider_consent(
-                        &env,
-                        order,
-                        before_top_up,
-                        supply_before,
-                    );
+                ) {
+                    Ok(policy) => {
+                        max_cu = max_cu.max(policy.compute_units);
+                        (true, false, false)
+                    }
+                    Err(_) => {
+                        require_rejected_backing_provider_consent(
+                            &env,
+                            order,
+                            before_policy,
+                            supply_before,
+                        )?;
+                        (false, true, true)
+                    }
                 }
             }
-        }
-    }
+            BackingProviderConsentOrder::PolicyThenRetainedFund => {
+                let policy = env
+                    .update_backing_fee_policy_for_actor(
+                        POLICY_AUTHORITY,
+                        WINNING_DOMAIN,
+                        BACKING_FEE_BPS,
+                        10_000,
+                    )
+                    .map_err(|error| format!("replace provider-visible fee split: {error}"))?;
+                max_cu = max_cu.max(policy.compute_units);
+                let before_top_up = fingerprint(&env);
+                match env.land_retained(retained_top_up) {
+                    Ok(top_up) => {
+                        max_cu = max_cu.max(top_up.compute_units);
+                        (true, false, false)
+                    }
+                    Err(_) => {
+                        require_rejected_backing_provider_consent(
+                            &env,
+                            order,
+                            before_top_up,
+                            supply_before,
+                        )?;
+                        let top_up = env
+                            .top_up_backing_bucket_for_actor(
+                                PROVIDER,
+                                WINNING_DOMAIN,
+                                BACKING_PRINCIPAL,
+                                100,
+                            )
+                            .map_err(|error| {
+                                format!("fund bucket under current provider-visible split: {error}")
+                            })?;
+                        max_cu = max_cu.max(top_up.compute_units);
+                        (false, true, true)
+                    }
+                }
+            }
+        };
 
     env.trade_no_cpi_with_backing_fee_cap(
         MARKET_TRADER,
@@ -7804,6 +7850,23 @@ fn discover_one_backing_provider_consent_violation(
         ));
     }
 
+    let provider_destination = env.actors[PROVIDER].destination_token;
+    let provider_destination_before = env.token_amount(provider_destination);
+    if provider_earnings_credit != 0 {
+        let withdrawal = env
+            .withdraw_backing_bucket_earnings_for_actor(
+                PROVIDER,
+                WINNING_DOMAIN,
+                provider_earnings_credit,
+            )
+            .map_err(|error| format!("withdraw provider-approved backing fee: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+    }
+    let provider_withdrawn = env
+        .token_amount(provider_destination)
+        .checked_sub(provider_destination_before)
+        .ok_or_else(|| "provider destination decreased".to_string())?;
+
     let operator_destination = env.actors[OPERATOR].destination_token;
     let operator_destination_before = env.token_amount(operator_destination);
     if operator_insurance_credit != 0 {
@@ -7816,7 +7879,8 @@ fn discover_one_backing_provider_consent_violation(
         .token_amount(operator_destination)
         .checked_sub(operator_destination_before)
         .ok_or_else(|| "operator destination decreased".to_string())?;
-    if env.token_supply_observed() != supply_before {
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    if !token_supply_conserved {
         return Err(format!(
             "{order:?} provider-consent probe changed SPL supply: {supply_before} -> {}",
             env.token_supply_observed()
@@ -7824,12 +7888,16 @@ fn discover_one_backing_provider_consent_violation(
     }
     Ok(BackingProviderConsentDiscovery {
         order,
-        accepted_provider_terms: true,
+        accepted_unconsented_transition,
+        rejected_exact_rollback,
+        authorized_control_landed,
         lp_capital_debit,
         provider_earnings_credit,
+        provider_withdrawn,
         operator_insurance_credit,
         operator_withdrawn,
         compute_units: Some(max_cu),
+        token_supply_conserved,
     })
 }
 

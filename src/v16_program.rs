@@ -2997,6 +2997,8 @@ pub mod ix {
             market_id: u64,
             intent_id: u64,
             authority_epoch: u64,
+            backing_fee_bps: u16,
+            insurance_share_bps: u16,
             amount: u128,
             expiry_slot: u64,
         },
@@ -3473,6 +3475,8 @@ pub mod ix {
                     market_id: read_u64(&mut rest)?,
                     intent_id: read_u64(&mut rest)?,
                     authority_epoch: read_u64(&mut rest)?,
+                    backing_fee_bps: read_u16(&mut rest)?,
+                    insurance_share_bps: read_u16(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                     expiry_slot: read_u64(&mut rest)?,
                 },
@@ -3883,6 +3887,8 @@ pub mod ix {
                     market_id,
                     intent_id,
                     authority_epoch,
+                    backing_fee_bps,
+                    insurance_share_bps,
                     amount,
                     expiry_slot,
                 } => {
@@ -3891,6 +3897,8 @@ pub mod ix {
                     push_u64(&mut out, market_id);
                     push_u64(&mut out, intent_id);
                     push_u64(&mut out, authority_epoch);
+                    push_u16(&mut out, backing_fee_bps);
+                    push_u16(&mut out, insurance_share_bps);
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
                 }
@@ -5297,6 +5305,22 @@ pub mod policy_v16 {
         authenticated_slot: u64,
     ) -> bool {
         authenticated_slot < expiry_slot
+    }
+
+    pub fn backing_fee_policy_change_allowed(
+        current_fee_bps: u16,
+        current_insurance_share_bps: u16,
+        proposed_fee_bps: u16,
+        proposed_insurance_share_bps: u16,
+        bucket: &percolator::BackingBucketV16,
+    ) -> bool {
+        (current_fee_bps, current_insurance_share_bps)
+            == (proposed_fee_bps, proposed_insurance_share_bps)
+            || (bucket.fresh_unliened_backing_num == 0
+                && bucket.valid_liened_backing_num == 0
+                && bucket.consumed_liened_backing_num == 0
+                && bucket.impaired_liened_backing_num == 0
+                && bucket.utilization_fee_earnings == 0)
     }
 
     /// Historical bankruptcy is audit state. Domain withdrawal is blocked by live global or
@@ -6962,6 +6986,8 @@ pub mod processor {
                 market_id,
                 intent_id,
                 authority_epoch,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             } => handle_top_up_backing_bucket(
@@ -6971,6 +6997,8 @@ pub mod processor {
                 market_id,
                 intent_id,
                 authority_epoch,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             ),
@@ -10111,6 +10139,8 @@ pub mod processor {
         expected_market_id: u64,
         intent_id: u64,
         expected_authority_epoch: u64,
+        expected_backing_fee_bps: u16,
+        expected_insurance_share_bps: u16,
         amount: u128,
         expiry_slot: u64,
     ) -> ProgramResult {
@@ -10151,6 +10181,20 @@ pub mod processor {
             }
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+            let current_policy = if domain_usize % 2 == 0 {
+                (
+                    profile.backing_trade_fee_bps_long,
+                    profile.backing_trade_fee_insurance_share_bps_long,
+                )
+            } else {
+                (
+                    profile.backing_trade_fee_bps_short,
+                    profile.backing_trade_fee_insurance_share_bps_short,
+                )
+            };
+            if current_policy != (expected_backing_fee_bps, expected_insurance_share_bps) {
+                return Err(PercolatorError::Unauthorized.into());
+            }
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             (cfg, authorities)
         };
@@ -10174,6 +10218,11 @@ pub mod processor {
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
+            if backing_fee_policy_for_domain_view(&group, &cfg, domain_usize)?
+                != (expected_backing_fee_bps, expected_insurance_share_bps)
+            {
+                return Err(PercolatorError::Unauthorized.into());
+            }
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             expect_live_authority(&authorities.backing_bucket_authority, signer.key)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
@@ -12534,12 +12583,23 @@ pub mod processor {
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        {
+        let current_policy = {
             let market_data = market_ai.try_borrow_data()?;
             let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             expect_live_authority(&authorities.insurance_authority, authority.key)?;
-        }
+            if domain % 2 == 0 {
+                (
+                    profile.backing_trade_fee_bps_long,
+                    profile.backing_trade_fee_insurance_share_bps_long,
+                )
+            } else {
+                (
+                    profile.backing_trade_fee_bps_short,
+                    profile.backing_trade_fee_insurance_share_bps_short,
+                )
+            }
+        };
         if fee_bps > 10_000
             || insurance_share_bps > 10_000
             || (fee_bps == 0 && insurance_share_bps != 0)
@@ -12578,15 +12638,21 @@ pub mod processor {
             {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            let (_, bucket) = backing_domain_parts_view(&group, domain)?;
+            if !policy_v16::backing_fee_policy_change_allowed(
+                current_policy.0,
+                current_policy.1,
+                fee_bps,
+                insurance_share_bps,
+                &bucket,
+            ) {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
             advance_backing_fee_sequence_view(&mut group, asset_index, policy_sequence)?;
         }
         if asset_index == 0 {
             let mut profile = state::read_asset_oracle_profile(&market_data, asset_index)?;
-            let old_fee = if long_side {
-                cfg.backing_trade_fee_bps_long
-            } else {
-                cfg.backing_trade_fee_bps_short
-            };
+            let old_fee = current_policy.0;
             adjust_policy_count(&mut cfg, old_fee, fee_bps)?;
             if long_side {
                 cfg.backing_trade_fee_bps_long = fee_bps;
@@ -12603,11 +12669,7 @@ pub mod processor {
             state::write_asset_oracle_profile(&mut market_data, asset_index, &profile)
         } else {
             let mut profile = state::read_asset_oracle_profile(&market_data, asset_index)?;
-            let old_fee = if long_side {
-                profile.backing_trade_fee_bps_long
-            } else {
-                profile.backing_trade_fee_bps_short
-            };
+            let old_fee = current_policy.0;
             adjust_policy_count(&mut cfg, old_fee, fee_bps)?;
             if long_side {
                 profile.backing_trade_fee_bps_long = fee_bps;

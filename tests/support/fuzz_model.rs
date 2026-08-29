@@ -11349,6 +11349,27 @@ impl UnderfundedPolicyKind {
         }
     }
 
+    fn backing_fee_request(
+        self,
+        env: &V16Svm,
+        boundary: UnderfundedPolicyBoundary,
+        fresh: bool,
+    ) -> (u16, u16) {
+        let domain = u16::from(self == Self::BackingFeeShort);
+        let bucket = &env.primary_market_state().1.source_backing_buckets[domain as usize];
+        let provider_value_live = bucket.fresh_unliened_backing_num != 0
+            || bucket.valid_liened_backing_num != 0
+            || bucket.consumed_liened_backing_num != 0
+            || bucket.impaired_liened_backing_num != 0
+            || bucket.utilization_fee_earnings != 0;
+        if provider_value_live {
+            env.backing_fee_policy(domain)
+        } else {
+            let bps = boundary.bps(fresh);
+            (bps, bps)
+        }
+    }
+
     fn instruction(
         self,
         env: &V16Svm,
@@ -11395,11 +11416,13 @@ impl UnderfundedPolicyKind {
                 }
             }
             Self::BackingFeeLong | Self::BackingFeeShort => {
+                let domain = u16::from(self == Self::BackingFeeShort);
+                let (fee_bps, insurance_share_bps) = self.backing_fee_request(env, boundary, fresh);
                 ProgInstruction::UpdateBackingFeePolicy {
-                    domain: u16::from(self == Self::BackingFeeShort),
+                    domain,
                     market_id: env.primary_market_state().1.assets[0].market_id,
-                    fee_bps: bps,
-                    insurance_share_bps: bps,
+                    fee_bps,
+                    insurance_share_bps,
                     policy_sequence,
                     authority_epoch,
                 }
@@ -11430,7 +11453,12 @@ impl UnderfundedPolicyKind {
         }
     }
 
-    fn requested_value(self, boundary: UnderfundedPolicyBoundary, fresh: bool) -> [u128; 2] {
+    fn requested_value(
+        self,
+        env: &V16Svm,
+        boundary: UnderfundedPolicyBoundary,
+        fresh: bool,
+    ) -> [u128; 2] {
         let bps = u128::from(boundary.bps(fresh));
         match self {
             Self::TradeFee | Self::FeeRedirect | Self::LiquidationFee | Self::MaintenanceFee => {
@@ -11441,7 +11469,10 @@ impl UnderfundedPolicyKind {
                 let (stale_slots, force_close_delay_slots) = boundary.resolve_slots(fresh);
                 [u128::from(stale_slots), u128::from(force_close_delay_slots)]
             }
-            Self::BackingFeeLong | Self::BackingFeeShort => [bps, bps],
+            Self::BackingFeeLong | Self::BackingFeeShort => {
+                let (fee_bps, insurance_share_bps) = self.backing_fee_request(env, boundary, fresh);
+                [u128::from(fee_bps), u128::from(insurance_share_bps)]
+            }
         }
     }
 
@@ -12029,9 +12060,9 @@ fn execute_authority_policy_ordered_resolve(
     let (cfg, group) = runner.env.primary_market_state();
     let expected_policy_sequence = policy_sequence_before_fresh + u64::from(fresh_policy_landed);
     let expected_policy_value = if fresh_policy_landed {
-        policy_kind.requested_value(boundary, true)
+        policy_kind.requested_value(&runner.env, boundary, true)
     } else if policy_landed {
-        policy_kind.requested_value(boundary, false)
+        policy_kind.requested_value(&runner.env, boundary, false)
     } else {
         initial_policy_value
     };
@@ -15667,6 +15698,8 @@ pub fn verify_cpi_backing_fee_consent(
         .map_err(|error| format!("activate attacker asset: {error}"))?;
     env.configure_auth_mark_for_actor(0, 1, 3, PRICE)
         .map_err(|error| format!("configure attacker AuthMark: {error}"))?;
+    env.update_backing_fee_policy_for_actor(0, WINNING_DOMAIN, 5_000, 0)
+        .map_err(|error| format!("install provider-visible backing fee: {error}"))?;
     env.top_up_backing_bucket_for_actor(0, WINNING_DOMAIN, 5_000, 100)
         .map_err(|error| format!("fund attacker backing domain: {error}"))?;
     assert_public_stock_census("INV-088 after backing-provider funding", &env)?;
@@ -15739,8 +15772,6 @@ pub fn verify_cpi_backing_fee_consent(
         ));
     }
 
-    env.update_backing_fee_policy_for_actor(0, WINNING_DOMAIN, 5_000, 0)
-        .map_err(|error| format!("install post-consent backing fee: {error}"))?;
     let lp_before = env.primary_portfolio(2).capital.get();
     let attacker_before = env.primary_portfolio(0).capital.get();
     let provider_before = env.primary_market_state().1.source_backing_buckets

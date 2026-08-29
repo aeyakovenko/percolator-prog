@@ -252,6 +252,8 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             intent_id: 4,
             domain: 0,
             market_id: 1,
+            backing_fee_bps: 0,
+            insurance_share_bps: 0,
             amount: 1,
             expiry_slot: 10,
         },

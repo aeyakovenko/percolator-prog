@@ -1835,6 +1835,23 @@ impl V16CuEnv {
         state::read_asset_control_sequences(&account.data, asset_index).unwrap()
     }
 
+    fn backing_fee_policy(&self, domain: u16) -> (u16, u16) {
+        let account = self.svm.get_account(&self.market).expect("market account");
+        let profile = state::read_asset_oracle_profile(&account.data, domain as usize / 2)
+            .expect("decode backing fee profile");
+        if domain % 2 == 0 {
+            (
+                profile.backing_trade_fee_bps_long,
+                profile.backing_trade_fee_insurance_share_bps_long,
+            )
+        } else {
+            (
+                profile.backing_trade_fee_bps_short,
+                profile.backing_trade_fee_insurance_share_bps_short,
+            )
+        }
+    }
+
     fn withdrawal_authority_epoch(
         &self,
         authority: Pubkey,
@@ -3745,6 +3762,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> u64 {
+        let (backing_fee_bps, insurance_share_bps) = self.backing_fee_policy(domain);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -3754,6 +3772,8 @@ impl V16CuEnv {
                 intent_id: 0,
                 market_id: 0,
                 domain,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             },
@@ -3957,6 +3977,7 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let (backing_fee_bps, insurance_share_bps) = self.backing_fee_policy(domain);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
@@ -3966,6 +3987,8 @@ impl V16CuEnv {
                 intent_id: 0,
                 market_id: 0,
                 domain,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             },
@@ -4002,6 +4025,7 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let (backing_fee_bps, insurance_share_bps) = self.backing_fee_policy(domain);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
@@ -4011,6 +4035,8 @@ impl V16CuEnv {
                 intent_id: 0,
                 market_id: 0,
                 domain,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             },
@@ -4037,6 +4063,7 @@ impl V16CuEnv {
     ) -> Pubkey {
         self.ensure_signer_account(authority.pubkey());
         let source = self.token_account(authority.pubkey(), amount as u64);
+        let (backing_fee_bps, insurance_share_bps) = self.backing_fee_policy(domain);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -4046,6 +4073,8 @@ impl V16CuEnv {
                 intent_id: 0,
                 market_id: 0,
                 domain,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             },
@@ -5436,6 +5465,20 @@ fn top_up_backing_bucket_to_market(
     expiry_slot: u64,
 ) -> Pubkey {
     let source = env.token_account(env.admin.pubkey(), amount as u64);
+    let market_account = env.svm.get_account(&market).expect("market account");
+    let profile = state::read_asset_oracle_profile(&market_account.data, domain as usize / 2)
+        .expect("decode explicit-market backing fee profile");
+    let (backing_fee_bps, insurance_share_bps) = if domain % 2 == 0 {
+        (
+            profile.backing_trade_fee_bps_long,
+            profile.backing_trade_fee_insurance_share_bps_long,
+        )
+    } else {
+        (
+            profile.backing_trade_fee_bps_short,
+            profile.backing_trade_fee_insurance_share_bps_short,
+        )
+    };
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
@@ -5446,6 +5489,8 @@ fn top_up_backing_bucket_to_market(
             intent_id: 0,
             market_id: 0,
             domain,
+            backing_fee_bps,
+            insurance_share_bps,
             amount,
             expiry_slot,
         },

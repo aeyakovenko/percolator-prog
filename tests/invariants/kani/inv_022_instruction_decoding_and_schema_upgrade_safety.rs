@@ -648,17 +648,21 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
     let market_id: u64 = kani::any();
     let intent_id: u64 = kani::any();
     let authority_epoch: u64 = kani::any();
+    let backing_fee_bps: u16 = kani::any();
+    let insurance_share_bps: u16 = kani::any();
     let amount: u128 = kani::any();
     let expiry_slot: u64 = kani::any();
 
-    let mut data = [0u8; 51];
+    let mut data = [0u8; 55];
     data[0] = 24;
     data[1..3].copy_from_slice(&domain.to_le_bytes());
     data[3..11].copy_from_slice(&market_id.to_le_bytes());
     data[11..19].copy_from_slice(&intent_id.to_le_bytes());
     data[19..27].copy_from_slice(&authority_epoch.to_le_bytes());
-    data[27..43].copy_from_slice(&amount.to_le_bytes());
-    data[43..51].copy_from_slice(&expiry_slot.to_le_bytes());
+    data[27..29].copy_from_slice(&backing_fee_bps.to_le_bytes());
+    data[29..31].copy_from_slice(&insurance_share_bps.to_le_bytes());
+    data[31..47].copy_from_slice(&amount.to_le_bytes());
+    data[47..55].copy_from_slice(&expiry_slot.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TopUpBackingBucket {
@@ -666,6 +670,8 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
             market_id: got_market_id,
             intent_id: got_intent_id,
             authority_epoch: got_authority_epoch,
+            backing_fee_bps: got_backing_fee_bps,
+            insurance_share_bps: got_insurance_share_bps,
             amount: got_amount,
             expiry_slot: got_expiry,
         } => {
@@ -673,6 +679,8 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
             assert_eq!(got_market_id, market_id);
             assert_eq!(got_intent_id, intent_id);
             assert_eq!(got_authority_epoch, authority_epoch);
+            assert_eq!(got_backing_fee_bps, backing_fee_bps);
+            assert_eq!(got_insurance_share_bps, insurance_share_bps);
             assert_eq!(got_amount, amount);
             assert_eq!(got_expiry, expiry_slot);
         }
@@ -685,10 +693,12 @@ fn kani_v16_topups_reject_intentless_legacy_payloads() {
     let insurance = [9u8; 25];
     let domain_insurance = [56u8; 27];
     let backing = [24u8; 35];
+    let backing_without_fee_consent = [24u8; 51];
 
     assert!(Instruction::decode(&insurance).is_err());
     assert!(Instruction::decode(&domain_insurance).is_err());
     assert!(Instruction::decode(&backing).is_err());
+    assert!(Instruction::decode(&backing_without_fee_consent).is_err());
 }
 
 #[kani::proof]
@@ -1892,6 +1902,8 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
             authority_epoch: 0,
             amount: 1,
             expiry_slot: 10,
+            backing_fee_bps: 0,
+            insurance_share_bps: 0,
         },
         extra,
     );

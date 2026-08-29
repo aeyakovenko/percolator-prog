@@ -14,9 +14,10 @@
 //! is not mislabeled when both traders sign the updated fee and the exact debit stays in bounds.
 //! Secondary coverage: INV-036 where those debits become an unauthorized fee destination or
 //! redirect value away from the signer-approved policy.
-//! `v16_program_backing_provider_consent_order_matrix_discovers_fee_redirection` varies fee-policy
-//! changes before and after a retained backing top-up, then traces the generated LP fee through
-//! provider/insurance ledgers and an operator SPL withdrawal.
+//! `v16_program_backing_provider_consent_order_matrix_preserves_provider_terms` varies fee-policy
+//! changes before and after a retained backing top-up. Each stale transition rejects with exact
+//! rollback, then a current provider-authorized control generates a nonzero LP fee and traces it
+//! through the selected provider/insurance ledger to an exact SPL withdrawal.
 //! Direct impact regressions remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -78,7 +79,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_backing_provider_consent_order_matrix_discovers_fee_redirection(
+    fn v16_program_backing_provider_consent_order_matrix_preserves_provider_terms(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_backing_provider_consent_violations(seed)
@@ -87,17 +88,10 @@ proptest! {
         for (expected, discovery) in BackingProviderConsentOrder::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.order, expected);
         }
-        let violations: Vec<_> = discoveries
-            .iter()
-            .filter(|discovery| discovery.is_violation())
-            .map(|discovery| discovery.order)
-            .collect();
-        eprintln!("independent backing-provider consent discoveries: {violations:?}");
-        prop_assert_eq!(
-            violations,
-            BackingProviderConsentOrder::ALL.to_vec(),
-            "vulnerable-pin backing-provider consent corpus changed"
-        );
+        for discovery in &discoveries {
+            prop_assert!(!discovery.is_violation(), "{:?} violated INV-014", discovery.order);
+            prop_assert!(discovery.satisfies_invariant(), "{:?} was vacuous: {discovery:?}", discovery.order);
+        }
     }
 }
 

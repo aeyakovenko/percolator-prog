@@ -556,6 +556,8 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
                 market_id: 0,
                 intent_id: 0,
                 domain: 0,
+                backing_fee_bps: 0,
+                insurance_share_bps: 0,
                 amount: 100,
                 expiry_slot: 10,
             };

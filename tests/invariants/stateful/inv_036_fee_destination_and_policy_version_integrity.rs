@@ -16,7 +16,7 @@
 //!
 //! Guarantee boundary: PRs 223, 224, 259, 310, 313, and 314 are fixed-pin certifications here.
 //! The source-fee matrix is the independent holdout oracle for delayed trader-fee consent, while
-//! INV-014 retains PR339's backing-provider consent counterexample.
+//! INV-014 certifies PR339's distinct backing-provider consent and policy-order matrix.
 
 use super::*;
 

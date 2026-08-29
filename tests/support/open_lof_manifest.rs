@@ -669,7 +669,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr338DelayedTradeFeePolicyReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         339,
         Blocker,
         FeeConsent,

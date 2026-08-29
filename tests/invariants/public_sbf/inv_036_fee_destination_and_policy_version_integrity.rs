@@ -7,8 +7,8 @@
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: PRs 223, 224, 259, 310, 313, and 314 are fixed-pin certifications here.
-//! INV-014 retains PR339's backing-provider consent counterexample; that provider-policy scope is
-//! not covered by the trader-consent certification.
+//! INV-014 separately certifies PR339's backing-provider policy scope; it is intentionally not
+//! conflated with this trader-consent certification.
 
 use super::*;
 use crate::support::invariant_discovery::{

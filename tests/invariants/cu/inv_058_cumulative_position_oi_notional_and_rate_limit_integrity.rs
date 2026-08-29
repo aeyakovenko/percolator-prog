@@ -307,6 +307,8 @@ fn v16_program_topups_cannot_bypass_cumulative_tvl_cap() {
                 intent_id: 0,
                 market_id: 0,
                 domain: 1,
+                backing_fee_bps: 0,
+                insurance_share_bps: 0,
                 amount: 2,
                 expiry_slot: 10_000,
             },

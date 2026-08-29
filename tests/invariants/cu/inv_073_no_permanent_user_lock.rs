@@ -2956,6 +2956,8 @@ fn v16_program_live_value_paths_reject_when_resolve_matured() {
             intent_id: 0,
             market_id: 0,
             domain: 1,
+            backing_fee_bps: 0,
+            insurance_share_bps: 0,
             amount: 30,
             expiry_slot: 100,
         },

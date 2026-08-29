@@ -3255,12 +3255,15 @@ impl V16Svm {
         let market_id = self.primary_market_state().1.assets[asset_index].market_id;
         let intent_id =
             next_control_sequence(self.primary_control_sequences(asset_index).backing_top_up);
+        let (backing_fee_bps, insurance_share_bps) = self.backing_fee_policy(domain);
         self.send_program(
             ProgInstruction::TopUpBackingBucket {
                 intent_id,
                 domain,
                 market_id,
                 authority_epoch: CURRENT_AUTHORITY_EPOCH,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             },
@@ -3287,12 +3290,15 @@ impl V16Svm {
         let market_id = self.primary_market_state().1.assets[asset_index].market_id;
         let intent_id =
             next_control_sequence(self.primary_control_sequences(asset_index).backing_top_up);
+        let (backing_fee_bps, insurance_share_bps) = self.backing_fee_policy(domain);
         self.build_program_transaction(
             ProgInstruction::TopUpBackingBucket {
                 intent_id,
                 domain,
                 market_id,
                 authority_epoch: CURRENT_AUTHORITY_EPOCH,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             },
@@ -3319,12 +3325,15 @@ impl V16Svm {
         let market_id = self.primary_market_state().1.assets[asset_index].market_id;
         let intent_id =
             next_control_sequence(self.primary_control_sequences(asset_index).backing_top_up);
+        let (backing_fee_bps, insurance_share_bps) = self.backing_fee_policy(domain);
         self.send_program(
             ProgInstruction::TopUpBackingBucket {
                 intent_id,
                 domain,
                 market_id,
                 authority_epoch: CURRENT_AUTHORITY_EPOCH,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             },
@@ -3432,12 +3441,15 @@ impl V16Svm {
         let market_id = self.primary_market_state().1.assets[asset_index].market_id;
         let intent_id =
             next_control_sequence(self.primary_control_sequences(asset_index).backing_top_up);
+        let (backing_fee_bps, insurance_share_bps) = self.backing_fee_policy(domain);
         self.send_program(
             ProgInstruction::TopUpBackingBucket {
                 intent_id,
                 domain,
                 market_id,
                 authority_epoch: CURRENT_AUTHORITY_EPOCH,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             },
@@ -4681,12 +4693,15 @@ impl V16Svm {
         let market_id = self.primary_market_state().1.assets[asset_index].market_id;
         let intent_id =
             next_control_sequence(self.primary_control_sequences(asset_index).backing_top_up);
+        let (backing_fee_bps, insurance_share_bps) = self.backing_fee_policy(domain);
         self.build_program_transaction(
             ProgInstruction::TopUpBackingBucket {
                 intent_id,
                 domain,
                 market_id,
                 authority_epoch: CURRENT_AUTHORITY_EPOCH,
+                backing_fee_bps,
+                insurance_share_bps,
                 amount,
                 expiry_slot,
             },
@@ -5364,6 +5379,21 @@ impl V16Svm {
         let account = self.svm.get_account(&self.market).expect("primary market");
         state::read_asset_oracle_profile(&account.data, asset_index)
             .expect("decode primary oracle profile")
+    }
+
+    pub fn backing_fee_policy(&self, domain: u16) -> (u16, u16) {
+        let profile = self.primary_profile(domain as usize / 2);
+        if domain % 2 == 0 {
+            (
+                profile.backing_trade_fee_bps_long,
+                profile.backing_trade_fee_insurance_share_bps_long,
+            )
+        } else {
+            (
+                profile.backing_trade_fee_bps_short,
+                profile.backing_trade_fee_insurance_share_bps_short,
+            )
+        }
     }
 
     pub fn primary_control_sequences(&self, asset_index: usize) -> state::AssetControlSequencesV16 {

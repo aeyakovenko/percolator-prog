@@ -9,14 +9,85 @@
 //!
 //! PRs 335/336/337/338/340/347/349 supplied the original public economic counterexamples.
 //! This fixed-pin matrix fails on those vulnerable handlers before their stale overwrite can reach
-//! the downstream fee, liquidation, backing, oracle, or resolution effect. PR339 is a distinct
-//! backing-provider consent problem and remains covered as a counterexample by the stateful suite.
+//! the downstream fee, liquidation, backing, oracle, or resolution effect. The independent PR339
+//! matrix additionally crosses both backing-policy/top-up landing orders, requires exact stale
+//! rejection, and traces a nonzero authorized fee to the provider-selected SPL destination.
 //!
 //! The final two tests deliberately remain public counterexamples for the separate market-account
 //! reincarnation gap: recreating the market account resets account-local ordering state. They are
 //! INV-001/INV-005 work and must not be misreported as closed by same-incarnation sequencing.
 
 use super::*;
+use crate::support::invariant_discovery::{
+    discover_backing_provider_consent_violations, BackingProviderConsentOrder,
+};
+use crate::support::v16_svm::{MarketConfig, V16Svm};
+use percolator::BOUND_SCALE;
+
+#[test]
+fn v16_program_backing_provider_fee_terms_survive_both_landing_orders() {
+    let discoveries = discover_backing_provider_consent_violations([0x39; 32])
+        .unwrap_or_else(|error| panic!("INV-014 backing-provider matrix failed: {error}"));
+    assert_eq!(discoveries.len(), BackingProviderConsentOrder::ALL.len());
+    for (expected, discovery) in BackingProviderConsentOrder::ALL
+        .into_iter()
+        .zip(&discoveries)
+    {
+        assert_eq!(discovery.order, expected);
+        assert!(!discovery.is_violation(), "{expected:?} violated INV-014");
+        assert!(
+            discovery.satisfies_invariant(),
+            "{expected:?} fixed-pin control was vacuous: {discovery:?}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_backing_provider_exit_unfreezes_policy_change() {
+    const DOMAIN: u16 = 1;
+    const PRINCIPAL: u128 = 500;
+    let mut env = V16Svm::new([0x3a; 32], MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+
+    env.update_backing_fee_policy(DOMAIN, 5_000, 0)
+        .expect("install provider-approved fee terms");
+    env.top_up_backing_bucket(DOMAIN, PRINCIPAL, 100)
+        .expect("fund under provider-approved terms");
+
+    let market_before = env.market_data(false);
+    let vault_before = env.token_amount(env.vault);
+    let source_before = env.token_amount(env.provider_source_token);
+    let rejected = env.update_backing_fee_policy(DOMAIN, 5_000, 10_000);
+    assert!(
+        rejected.is_err(),
+        "live provider principal must freeze economic fee-term changes"
+    );
+    assert_eq!(env.market_data(false), market_before);
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(env.token_amount(env.provider_source_token), source_before);
+
+    env.update_backing_fee_policy(DOMAIN, 5_000, 0)
+        .expect("funded provider domain permits a sequence-only policy refresh");
+    assert_eq!(
+        env.backing_fee_policy(DOMAIN),
+        (5_000, 0),
+        "consent guard must not freeze an economically unchanged policy"
+    );
+
+    env.withdraw_backing_bucket(DOMAIN, PRINCIPAL)
+        .expect("provider exits its unencumbered principal");
+    env.update_backing_fee_policy(DOMAIN, 5_000, 10_000)
+        .expect("empty provider domain permits a new fee policy");
+    assert_eq!(env.backing_fee_policy(DOMAIN), (5_000, 10_000));
+    env.top_up_backing_bucket(DOMAIN, PRINCIPAL, 100)
+        .expect("provider can fund under the newly visible terms");
+    assert_eq!(
+        env.primary_market_state().1.source_backing_buckets[DOMAIN as usize]
+            .fresh_unliened_backing_num,
+        PRINCIPAL * BOUND_SCALE
+    );
+    assert_eq!(env.token_supply_observed(), supply_before);
+}
 
 #[test]
 fn v16_program_same_market_delayed_controls_reject_atomically() {

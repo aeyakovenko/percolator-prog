@@ -417,13 +417,13 @@ fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes() {
     }
     assert_eq!(role_variants, production_variants);
 
-    // INV-083 owns the 232 field-or-no-data boundary matrix. Source-lock the composition edge so
+    // INV-083 owns the 234 field-or-no-data boundary matrix. Source-lock the composition edge so
     // its closure cannot silently disappear while INV-023 continues to claim it.
     assert!(inv023_source_contains_test(
         BOUNDARY_TESTS,
         "v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness",
     ));
-    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 232;"));
+    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 234;"));
     assert!(BOUNDARY_TESTS.contains("const EXPECTED_TYPE_COUNT: usize = 52;"));
 
     let dispatcher = inv023_dispatcher_source(PRODUCTION);
