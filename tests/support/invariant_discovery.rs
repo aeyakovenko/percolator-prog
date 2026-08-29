@@ -1568,8 +1568,12 @@ impl std::fmt::Debug for CrossDomainInsuranceDiscovery {
 pub struct CrossDomainBackingDiscovery {
     pub unfunded_claim_before_num: u128,
     pub funded_claim_before_num: u128,
+    pub unfunded_claim_after_first_num: u128,
+    pub funded_claim_after_first_num: u128,
     pub funded_backing_consumed_num: u128,
     pub winner_capital_gain: u128,
+    pub second_conversion_rejected: bool,
+    pub second_conversion_exact_rollback: bool,
     pub extracted_tokens: u64,
     pub victim_loss_atoms: u128,
     pub unauthorized_gain_atoms: u128,
@@ -2166,25 +2170,26 @@ impl CrossDomainBDiscovery {
 }
 
 impl CrossDomainBackingDiscovery {
-    pub fn is_violation(&self) -> bool {
+    pub fn preserves_single_use(&self) -> bool {
         self.unfunded_claim_before_num != 0
             && self.funded_claim_before_num == self.unfunded_claim_before_num
-            && self.funded_backing_consumed_num == self.funded_claim_before_num.saturating_mul(2)
+            && self.unfunded_claim_after_first_num == self.unfunded_claim_before_num
+            && self.funded_claim_after_first_num == 0
+            && self.funded_backing_consumed_num == self.funded_claim_before_num
             && self.winner_capital_gain
                 == self
-                    .funded_backing_consumed_num
+                    .funded_claim_before_num
                     .checked_div(percolator::BOUND_SCALE)
                     .unwrap_or(0)
+            && self.second_conversion_rejected
+            && self.second_conversion_exact_rollback
             && u128::from(self.extracted_tokens) > self.winner_capital_gain
-            && self.victim_loss_atoms != 0
-            && self.victim_loss_atoms == self.unauthorized_gain_atoms
+            && self.victim_loss_atoms == 0
+            && self.unauthorized_gain_atoms == 0
             && matches!(
                 self.terminal_classification,
-                PublicTerminalClassification::LossOfFunds {
-                    victim_loss_atoms,
-                    unauthorized_gain_atoms,
-                } if victim_loss_atoms == self.victim_loss_atoms
-                    && unauthorized_gain_atoms == self.unauthorized_gain_atoms
+                PublicTerminalClassification::Progressing
+                    | PublicTerminalClassification::BoundedExit
             )
             && self.public_trace.validate_public_execution().is_ok()
     }
@@ -12612,7 +12617,7 @@ pub fn discover_cross_domain_insurance_violation(
     })
 }
 
-pub fn discover_cross_domain_backing_violation(
+pub fn discover_cross_domain_backing_single_use(
     mut seed: [u8; 32],
 ) -> Result<CrossDomainBackingDiscovery, String> {
     const INITIAL_PRICE: u64 = 100;
@@ -12693,14 +12698,17 @@ pub fn discover_cross_domain_backing_violation(
     env.convert_released_pnl(0, CLAIM_PER_ASSET)
         .map_err(|error| format!("first aggregate conversion: {error}"))?;
     let after_first = env.primary_market_state().1;
-    if after_first.source_credit[UNFUNDED_SOURCE_DOMAIN].positive_claim_bound_num != 0
-        || after_first.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num
-            != CLAIM_PER_ASSET * percolator::BOUND_SCALE
+    let unfunded_claim_after_first_num =
+        after_first.source_credit[UNFUNDED_SOURCE_DOMAIN].positive_claim_bound_num;
+    let funded_claim_after_first_num =
+        after_first.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num;
+    if unfunded_claim_after_first_num != unfunded_claim_before_num
+        || funded_claim_after_first_num != 0
         || after_first.source_backing_buckets[FUNDED_SOURCE_DOMAIN].consumed_liened_backing_num
             != CLAIM_PER_ASSET * percolator::BOUND_SCALE
     {
         return Err(
-            "first conversion did not expose source claim/backing desynchronization".into(),
+            "first conversion did not consume the funded source claim in exact lockstep".into(),
         );
     }
 
@@ -12713,8 +12721,14 @@ pub fn discover_cross_domain_backing_violation(
         }],
     )
     .map_err(|error| format!("refresh flat winner certificate: {error}"))?;
-    env.convert_released_pnl(0, CLAIM_PER_ASSET)
-        .map_err(|error| format!("second aggregate conversion: {error}"))?;
+    let before_second = fingerprint(&env);
+    let second_conversion_rejected = env.convert_released_pnl(0, CLAIM_PER_ASSET).is_err();
+    let second_conversion_exact_rollback = fingerprint(&env) == before_second;
+    if !second_conversion_rejected || !second_conversion_exact_rollback {
+        return Err(format!(
+            "second aggregate conversion was not rejected atomically: rejected={second_conversion_rejected}, rollback={second_conversion_exact_rollback}"
+        ));
+    }
     let after_second = env.primary_market_state().1;
     let funded_backing_consumed_num =
         after_second.source_backing_buckets[FUNDED_SOURCE_DOMAIN].consumed_liened_backing_num;
@@ -12724,15 +12738,17 @@ pub fn discover_cross_domain_backing_violation(
         .get()
         .checked_sub(DEPOSIT)
         .ok_or_else(|| "winner did not gain capital".to_string())?;
-    if env.primary_portfolio(0).pnl.get() != 0 {
-        return Err("winner retained PnL after second conversion".into());
+    if env.primary_portfolio(0).pnl.get() != CLAIM_PER_ASSET as i128 {
+        return Err("rejected conversion changed the unfunded source claim".into());
     }
     let winner_capital = env.primary_portfolio(0).capital.get();
     env.withdraw_primary(0, winner_capital)
         .map_err(|error| format!("withdraw cross-domain winner: {error}"))?;
     let extracted_tokens = env.token_amount(env.actors[0].destination_token);
-    if env.token_supply_observed() != supply_before {
-        return Err("cross-domain backing world changed SPL supply".into());
+    if u128::from(extracted_tokens) != DEPOSIT + winner_capital_gain
+        || env.token_supply_observed() != supply_before
+    {
+        return Err("cross-domain backing world changed exact SPL custody".into());
     }
     let victim_loss_atoms = funded_backing_consumed_num
         .checked_sub(funded_claim_before_num)
@@ -12753,8 +12769,12 @@ pub fn discover_cross_domain_backing_violation(
     Ok(CrossDomainBackingDiscovery {
         unfunded_claim_before_num,
         funded_claim_before_num,
+        unfunded_claim_after_first_num,
+        funded_claim_after_first_num,
         funded_backing_consumed_num,
         winner_capital_gain,
+        second_conversion_rejected,
+        second_conversion_exact_rollback,
         extracted_tokens,
         victim_loss_atoms,
         unauthorized_gain_atoms,

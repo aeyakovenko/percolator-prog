@@ -38,6 +38,16 @@ const TRADE_CU_LIMIT: u64 = 345_000;
 const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 const MAX_10M_MARKET_SLOTS: usize = 5_782;
+const CERTIFIED_ENGINE_GIT_SOURCE: &str =
+    "git+https://github.com/aeyakovenko/percolator?rev=422893fa#\
+     422893fa0a43a2d07697e88dd2009dcef8dce1d5";
+
+fn assert_certified_engine_pin(context: &str) {
+    assert!(
+        include_str!("../Cargo.lock").contains(CERTIFIED_ENGINE_GIT_SOURCE),
+        "{context} is bound to the exact certified engine pin",
+    );
+}
 
 fn next_control_sequence(current: u64) -> u64 {
     current.checked_add(1).expect("control sequence exhausted")

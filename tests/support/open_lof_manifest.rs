@@ -353,7 +353,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
     ),
     OpenLof::certified(264, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
     OpenLof::certified(265, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
-    OpenLof::quarantined(
+    OpenLof::certified(
         267,
         Blocker,
         DomainValue,

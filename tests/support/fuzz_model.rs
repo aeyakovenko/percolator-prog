@@ -494,16 +494,6 @@ pub struct TradeDrivenLiquidationRewardReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CrossDomainBackingDoubleSpendReproduction {
-    pub blocker: KnownBlocker,
-    pub unfunded_claim_before_num: u128,
-    pub funded_claim_before_num: u128,
-    pub funded_backing_consumed_num: u128,
-    pub winner_capital_gain: u128,
-    pub extracted_tokens: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssetGenerationMarkReplayReproduction {
     pub blocker: KnownBlocker,
     pub path: AssetGenerationMarkPath,
@@ -24892,159 +24882,6 @@ pub fn reproduce_trade_driven_liquidation_reward(
     })
 }
 
-pub fn reproduce_cross_domain_backing_double_spend(
-    mut seed: [u8; 32],
-) -> Result<CrossDomainBackingDoubleSpendReproduction, String> {
-    seed[0] ^= 0x67;
-    const INITIAL_PRICE: u64 = 100;
-    const MOVED_PRICE: u64 = 105;
-    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
-    const CLAIM_PER_ASSET: u128 = 100;
-    const LOWER_SOURCE_DOMAIN: usize = 1;
-    const FUNDED_SOURCE_DOMAIN: usize = 3;
-    const DEPOSIT: u128 = 1_000;
-
-    let mut env = V16Svm::new(
-        seed,
-        MarketConfig {
-            initial_price: INITIAL_PRICE,
-            maintenance_margin_bps: 1_000,
-            initial_margin_bps: 1_000,
-            max_price_move_bps_per_slot: 500,
-            max_accrual_dt_slots: 1,
-            min_funding_lifetime_slots: 1,
-            actor_deposits: [DEPOSIT; PRIMARY_ACTOR_COUNT],
-            ..MarketConfig::default()
-        },
-    );
-    let supply_before = env.token_supply_observed();
-    let provider_source_before = env.token_amount(env.provider_source_token);
-    env.top_up_backing_bucket(FUNDED_SOURCE_DOMAIN as u16, 2 * CLAIM_PER_ASSET, 10)
-        .map_err(|error| format!("PR 267 fund higher source domain: {error}"))?;
-    if provider_source_before.checked_sub(env.token_amount(env.provider_source_token))
-        != Some((2 * CLAIM_PER_ASSET) as u64)
-    {
-        return Err("PR 267 provider top-up did not debit exact SPL principal".into());
-    }
-
-    for asset in [0u16, 1u16] {
-        env.trade_no_cpi(0, 1, asset, SIZE_Q, INITIAL_PRICE, 0)
-            .map_err(|error| format!("PR 267 open winner asset {asset}: {error}"))?;
-    }
-    env.warp_to_slot(2);
-    for asset in [0u16, 1u16] {
-        env.push_auth_mark(asset, 2, MOVED_PRICE)
-            .map_err(|error| format!("PR 267 move asset {asset}: {error}"))?;
-        env.crank(
-            0,
-            2,
-            vec![CrankObservationHint {
-                asset_index: asset,
-                oracle_accounts: env.primary_profile(asset as usize).oracle_leg_count,
-            }],
-        )
-        .map_err(|error| format!("PR 267 refresh winner asset {asset}: {error}"))?;
-    }
-    let before = env.primary_market_state().1;
-    let unfunded_claim_before_num =
-        before.source_credit[LOWER_SOURCE_DOMAIN].positive_claim_bound_num;
-    let funded_claim_before_num =
-        before.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num;
-    if env.primary_portfolio(0).pnl.get() != (2 * CLAIM_PER_ASSET) as i128
-        || unfunded_claim_before_num != CLAIM_PER_ASSET * percolator::BOUND_SCALE
-        || funded_claim_before_num != CLAIM_PER_ASSET * percolator::BOUND_SCALE
-        || before.source_credit[LOWER_SOURCE_DOMAIN].fresh_reserved_backing_num != 0
-        || before.source_credit[FUNDED_SOURCE_DOMAIN].fresh_reserved_backing_num
-            != 2 * CLAIM_PER_ASSET * percolator::BOUND_SCALE
-    {
-        return Err(format!(
-            "PR 267 setup did not create one unfunded and one overfunded claim: pnl {}, lower {:?}, funded {:?}",
-            env.primary_portfolio(0).pnl.get(),
-            before.source_credit[LOWER_SOURCE_DOMAIN],
-            before.source_credit[FUNDED_SOURCE_DOMAIN]
-        ));
-    }
-
-    for asset in [0u16, 1u16] {
-        env.rebalance_reduce(0, asset, SIZE_Q.unsigned_abs())
-            .map_err(|error| format!("PR 267 reduce winner asset {asset}: {error}"))?;
-    }
-    if decoded_legs(&env.primary_portfolio(0))
-        .into_iter()
-        .any(|leg| leg.active)
-    {
-        return Err("PR 267 winner remained positioned before conversion".into());
-    }
-
-    env.convert_released_pnl(0, CLAIM_PER_ASSET)
-        .map_err(|error| format!("PR 267 first aggregate conversion: {error}"))?;
-    let after_first = env.primary_market_state().1;
-    if after_first.source_credit[LOWER_SOURCE_DOMAIN].positive_claim_bound_num != 0
-        || after_first.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num
-            != CLAIM_PER_ASSET * percolator::BOUND_SCALE
-        || after_first.source_backing_buckets[FUNDED_SOURCE_DOMAIN].consumed_liened_backing_num
-            != CLAIM_PER_ASSET * percolator::BOUND_SCALE
-    {
-        return Err(format!(
-            "PR 267 vulnerable first conversion no longer desynchronizes claim face/backing: lower {:?}, funded {:?}, bucket {:?}",
-            after_first.source_credit[LOWER_SOURCE_DOMAIN],
-            after_first.source_credit[FUNDED_SOURCE_DOMAIN],
-            after_first.source_backing_buckets[FUNDED_SOURCE_DOMAIN]
-        ));
-    }
-
-    env.crank(
-        0,
-        2,
-        vec![CrankObservationHint {
-            asset_index: 0,
-            oracle_accounts: env.primary_profile(0).oracle_leg_count,
-        }],
-    )
-    .map_err(|error| format!("PR 267 refresh flat winner certificate: {error}"))?;
-    env.convert_released_pnl(0, CLAIM_PER_ASSET)
-        .map_err(|error| format!("PR 267 second cross-domain conversion: {error}"))?;
-    let after_second = env.primary_market_state().1;
-    let funded_backing_consumed_num =
-        after_second.source_backing_buckets[FUNDED_SOURCE_DOMAIN].consumed_liened_backing_num;
-    let winner_capital_gain = env
-        .primary_portfolio(0)
-        .capital
-        .get()
-        .checked_sub(DEPOSIT)
-        .ok_or("PR 267 winner did not gain capital")?;
-    if funded_backing_consumed_num != 2 * CLAIM_PER_ASSET * percolator::BOUND_SCALE
-        || winner_capital_gain != 2 * CLAIM_PER_ASSET
-        || env.primary_portfolio(0).pnl.get() != 0
-    {
-        return Err(format!(
-            "PR 267 did not charge one provider twice: consumed {funded_backing_consumed_num}, winner gain {winner_capital_gain}, pnl {}",
-            env.primary_portfolio(0).pnl.get()
-        ));
-    }
-    let winner_capital = env.primary_portfolio(0).capital.get();
-    env.withdraw_primary(0, winner_capital)
-        .map_err(|error| format!("PR 267 withdraw double-funded winner: {error}"))?;
-    let extracted_tokens = env.token_amount(env.actors[0].destination_token);
-    if u128::from(extracted_tokens) != DEPOSIT + 2 * CLAIM_PER_ASSET
-        || env.token_supply_observed() != supply_before
-    {
-        return Err(format!(
-            "PR 267 terminal SPL extraction mismatch: tokens {extracted_tokens}, supply {}/{}",
-            env.token_supply_observed(),
-            supply_before
-        ));
-    }
-    Ok(CrossDomainBackingDoubleSpendReproduction {
-        blocker: KnownBlocker::CrossDomainBackingDoubleSpend,
-        unfunded_claim_before_num,
-        funded_claim_before_num,
-        funded_backing_consumed_num,
-        winner_capital_gain,
-        extracted_tokens,
-    })
-}
-
 pub fn reproduce_cross_domain_b_settlement(
     mut seed: [u8; 32],
 ) -> Result<CrossDomainBSettlementReproduction, String> {
@@ -28410,11 +28247,6 @@ pub fn trade_driven_liquidation_reward_strategy(
         ]),
         prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),
     )
-}
-
-#[allow(dead_code)]
-pub fn cross_domain_backing_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
-    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

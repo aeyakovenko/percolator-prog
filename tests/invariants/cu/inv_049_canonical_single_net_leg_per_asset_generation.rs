@@ -393,12 +393,5 @@ fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
         );
     }
 
-    let lock = include_str!("../../../Cargo.lock");
-    assert!(
-        lock.contains(
-            "git+https://github.com/aeyakovenko/percolator?rev=9b737fd#\
-             9b737fdcec16f3709c0651f4ecc7488b4917f2d8"
-        ),
-        "INV-049 engine validator and leg-kernel contracts are bound to the exact certified pin"
-    );
+    crate::assert_certified_engine_pin("INV-049 engine validator and leg-kernel contracts");
 }

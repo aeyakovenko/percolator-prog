@@ -417,7 +417,6 @@ fn v16_program_new_liquidation_fee_episode_requires_new_authenticated_deficit() 
 fn v16_program_liquidation_fee_surface_is_single_route_and_engine_selected() {
     const PRODUCTION_SOURCE: &str = include_str!("../../../src/v16_program.rs");
     const CALLER_INPUT_ROSTER: &str = include_str!("../inv_023_caller_input_roster.tsv");
-    const ENGINE_LOCK: &str = include_str!("../../../Cargo.lock");
 
     let production = PRODUCTION_SOURCE
         .split("    #[cfg(test)]\n    mod tests")
@@ -446,10 +445,7 @@ fn v16_program_liquidation_fee_surface_is_single_route_and_engine_selected() {
         !CALLER_INPUT_ROSTER.contains("PermissionlessCrank.close"),
         "caller-selected close quantity would make liquidation partitioning public"
     );
-    assert!(ENGINE_LOCK.contains(
-        "git+https://github.com/aeyakovenko/percolator?rev=9b737fd#\
-         9b737fdcec16f3709c0651f4ecc7488b4917f2d8"
-    ));
+    crate::assert_certified_engine_pin("INV-059 engine-selected liquidation evidence");
 }
 
 #[test]

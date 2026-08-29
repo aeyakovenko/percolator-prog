@@ -50,9 +50,5 @@ fn v16_program_non_exact_claim_bound_routes_remain_absent_from_deployed_profile(
         );
     }
 
-    let lock = include_str!("../../../Cargo.lock");
-    assert!(lock.contains(
-        "git+https://github.com/aeyakovenko/percolator?rev=9b737fd#\
-         9b737fdcec16f3709c0651f4ecc7488b4917f2d8"
-    ));
+    crate::assert_certified_engine_pin("INV-029 exact-claim profile evidence");
 }

@@ -3,10 +3,10 @@
 //! Normative obligation: A backing or claim atom cannot support two economic obligations.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_two_source_claims_discover_backing_double_consume` creates equal positive claims
+//! `v16_program_two_source_claims_preserve_source_backing_single_use` creates equal positive claims
 //! in an unfunded and an overfunded source domain, then partitions aggregate conversion. The
 //! independent ledger oracle requires each claim to consume only its own source backing and checks
-//! the final SPL extraction. Direct impact tests remain below. These tests exercise the deployed public
+//! that a retry cannot consume the funded atoms again. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //! `v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing` closes the retained
@@ -29,9 +29,9 @@
 //! The same trace is reused by INV-027: the externally withdrawn tranche must equal the original
 //! loser's principal debit while a separately funded portfolio remains byte- and SPL-exact.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: this certifies the generated two-domain conversion family on the fixed
+//! engine pin. Other backing and insurance lifecycle compositions remain covered by the route
+//! matrices below.
 
 use super::*;
 use crate::support::{
@@ -1046,52 +1046,23 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_two_source_claims_discover_backing_double_consume(
+    fn v16_program_two_source_claims_preserve_source_backing_single_use(
         seed in any::<[u8; 32]>()
     ) {
-        let discovery = discover_cross_domain_backing_violation(seed)
+        let discovery = discover_cross_domain_backing_single_use(seed)
             .map_err(TestCaseError::fail)?;
-        eprintln!("independent cross-domain backing discovery: {discovery:?}");
         prop_assert!(
-            discovery.is_violation(),
-            "vulnerable-pin source backing attribution changed: {:?}",
+            discovery.preserves_single_use(),
+            "source backing attribution or retry safety failed: {:?}",
             discovery
         );
-        prop_assert_eq!(discovery.victim_loss_atoms, 100);
-        prop_assert_eq!(discovery.unauthorized_gain_atoms, 100);
-        let exact_terminal_loss = matches!(
+        prop_assert_eq!(discovery.victim_loss_atoms, 0);
+        prop_assert_eq!(discovery.unauthorized_gain_atoms, 0);
+        let progressing_or_bounded = matches!(
             discovery.terminal_classification,
-            crate::support::v16_svm::PublicTerminalClassification::LossOfFunds {
-                victim_loss_atoms: 100,
-                unauthorized_gain_atoms: 100,
-            }
+            crate::support::v16_svm::PublicTerminalClassification::Progressing
+                | crate::support::v16_svm::PublicTerminalClassification::BoundedExit
         );
-        prop_assert!(exact_terminal_loss);
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
-        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
-        failure_persistence: Some(Box::new(
-            proptest::test_runner::FileFailurePersistence::Direct(
-                "proptest-regressions/v16_program_stateful_fuzz.txt",
-            ),
-        )),
-        ..ProptestConfig::default()
-    })]
-
-    #[test]
-    fn v16_program_pr267_cross_domain_backing_double_spend_fuzz(
-        seed in cross_domain_backing_seed_strategy()
-    ) {
-        let result = reproduce_cross_domain_backing_double_spend(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 267 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        prop_assert!(progressing_or_bounded);
     }
 }
