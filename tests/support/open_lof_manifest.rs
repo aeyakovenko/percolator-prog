@@ -314,7 +314,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr251DelayedAssetAuthorityRevival,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         253,
         Blocker,
         OracleAccrual,
@@ -619,7 +619,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr328InsuranceWithdrawalGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         329,
         Blocker,
         OracleAccrual,
@@ -765,7 +765,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         DomainValue,
         BlockerAdapter::Pr363ExpiredBackingConversion,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         365,
         Blocker,
         OracleAccrual,
@@ -805,7 +805,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr380ProspectiveFundingRewrite,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         381,
         Blocker,
         OracleAccrual,
