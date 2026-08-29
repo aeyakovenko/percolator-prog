@@ -4,7 +4,9 @@
 //! same-pubkey recreation. The fuzzer generates retained requests for the full
 //! portfolio-intent registry, performs a public A -> B -> A owner cycle at the
 //! same pubkey, and then replays A's original request after A owns the account
-//! again. Every route must reject before mutation and preserve exact rollback.
+//! again. Every stale route must reject before mutation and preserve exact
+//! rollback; the same operation rebuilt against the current incarnation must
+//! then land and mutate economic state.
 
 use super::*;
 
@@ -93,6 +95,33 @@ proptest! {
                 "{:?}: stale replay must move no SPL value",
                 expected,
             );
+            prop_assert!(
+                discovery.fresh_intent_landed,
+                "{:?}: current-incarnation control must remain executable: {:?}",
+                expected,
+                discovery.fresh_error,
+            );
+            prop_assert!(
+                discovery.fresh_mutated_economic_state,
+                "{:?}: current-incarnation control must produce a nonvacuous economic delta",
+                expected,
+            );
+            prop_assert!(
+                discovery.fresh_compute_units.is_some(),
+                "{:?}: current-incarnation control needs a successful CU result",
+                expected,
+            );
+            let fresh_trace = discovery.fresh_public_trace.as_ref()
+                .ok_or_else(|| TestCaseError::fail(format!("{expected:?}: missing fresh trace")))?;
+            prop_assert_eq!(
+                fresh_trace.out_of_band_economic_mutations,
+                0,
+                "{:?}: current control must use public transitions only",
+                expected,
+            );
+            let fresh = fresh_trace.steps.last()
+                .ok_or_else(|| TestCaseError::fail(format!("{expected:?}: empty fresh trace")))?;
+            prop_assert!(fresh.succeeded, "{:?}: current control trace", expected);
         }
     }
 }

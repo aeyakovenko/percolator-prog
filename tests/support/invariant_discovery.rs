@@ -18,6 +18,7 @@ pub enum PortfolioIntentKind {
     Deposit,
     Withdraw,
     Close,
+    MatcherEnable,
     MatcherDisable,
     TradeNoCpi,
     TradeCpi,
@@ -29,10 +30,11 @@ pub enum PortfolioIntentKind {
 }
 
 impl PortfolioIntentKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Deposit,
         Self::Withdraw,
         Self::Close,
+        Self::MatcherEnable,
         Self::MatcherDisable,
         Self::TradeNoCpi,
         Self::TradeCpi,
@@ -876,6 +878,11 @@ pub struct IncarnationDiscovery {
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
     pub public_trace: PublicTraceEvidence,
+    pub fresh_intent_landed: bool,
+    pub fresh_mutated_economic_state: bool,
+    pub fresh_compute_units: Option<u64>,
+    pub fresh_error: Option<String>,
+    pub fresh_public_trace: Option<PublicTraceEvidence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3348,6 +3355,7 @@ fn retained_portfolio_intent(env: &mut V16Svm, kind: PortfolioIntentKind) -> Tra
         PortfolioIntentKind::Deposit => env.build_retained_deposit(SUBJECT, AMOUNT),
         PortfolioIntentKind::Withdraw => env.build_retained_withdrawal(SUBJECT, AMOUNT),
         PortfolioIntentKind::Close => env.build_retained_close_primary_portfolio(SUBJECT),
+        PortfolioIntentKind::MatcherEnable => env.build_retained_matcher_config(SUBJECT, 1),
         PortfolioIntentKind::MatcherDisable => env.build_retained_matcher_config(SUBJECT, 0),
         PortfolioIntentKind::TradeNoCpi => {
             env.build_retained_no_cpi_trade(SUBJECT, COUNTERPARTY, 0, size_q, INITIAL_PRICE)
@@ -3366,6 +3374,28 @@ fn retained_portfolio_intent(env: &mut V16Svm, kind: PortfolioIntentKind) -> Tra
         | PortfolioIntentKind::ForfeitRecoveryLeg => {
             unreachable!("lifecycle-bearing portfolio intents use dedicated setup")
         }
+    }
+}
+
+fn current_portfolio_intent(env: &mut V16Svm, kind: PortfolioIntentKind) -> Transaction {
+    const DEFAULT_SUBJECT: usize = 0;
+    match kind {
+        PortfolioIntentKind::ConvertReleasedPnl => {
+            const CONVERSION_SUBJECT: usize = 1;
+            let released = env.primary_portfolio(CONVERSION_SUBJECT).pnl.get();
+            let amount = u128::try_from(released)
+                .expect("current conversion control must hold positive released PnL");
+            env.build_retained_convert_released_pnl(CONVERSION_SUBJECT, amount)
+        }
+        PortfolioIntentKind::RebalanceReduce => env.build_retained_rebalance_reduce(
+            DEFAULT_SUBJECT,
+            0,
+            1_000u128 * u128::from(POS_SCALE),
+        ),
+        PortfolioIntentKind::ForfeitRecoveryLeg => {
+            env.build_retained_forfeit_recovery_leg(DEFAULT_SUBJECT, 0, 1)
+        }
+        _ => retained_portfolio_intent(env, kind),
     }
 }
 
@@ -3423,6 +3453,11 @@ fn finish_portfolio_incarnation_discovery(
                 mutated_economic_state,
                 compute_units: Some(success.compute_units),
                 public_trace,
+                fresh_intent_landed: false,
+                fresh_mutated_economic_state: false,
+                fresh_compute_units: None,
+                fresh_error: None,
+                fresh_public_trace: None,
             })
         }
         Err(_) => {
@@ -3431,6 +3466,27 @@ fn finish_portfolio_incarnation_discovery(
                     "{kind:?} rejected stale transaction did not roll back exactly"
                 ));
             }
+            env.begin_public_trace();
+            let fresh = current_portfolio_intent(env, kind);
+            let fresh_before = fingerprint(env);
+            let fresh_result = env.land_retained(fresh);
+            let fresh_after = fingerprint(env);
+            if env.token_supply_observed() != supply_before {
+                return Err(format!(
+                    "{kind:?} current-incarnation control changed SPL supply: {supply_before} -> {}",
+                    env.token_supply_observed()
+                ));
+            }
+            let fresh_public_trace = env.finish_public_trace();
+            fresh_public_trace
+                .validate_public_execution()
+                .map_err(|error| {
+                    format!("{kind:?} current-incarnation trace is invalid: {error}")
+                })?;
+            let (fresh_intent_landed, fresh_compute_units, fresh_error) = match fresh_result {
+                Ok(success) => (true, Some(success.compute_units), None),
+                Err(error) => (false, None, Some(error)),
+            };
             Ok(IncarnationDiscovery {
                 kind,
                 old_portfolio_id,
@@ -3440,6 +3496,11 @@ fn finish_portfolio_incarnation_discovery(
                 mutated_economic_state: false,
                 compute_units: None,
                 public_trace,
+                fresh_intent_landed,
+                fresh_mutated_economic_state: fresh_before != fresh_after,
+                fresh_compute_units,
+                fresh_error,
+                fresh_public_trace: Some(fresh_public_trace),
             })
         }
     }
@@ -3752,9 +3813,13 @@ fn discover_one_portfolio_incarnation_replay(
         env.deposit_primary(SUBJECT, replacement_capital)
             .map_err(|error| format!("fund replacement portfolio: {error}"))?;
     }
-    if kind == PortfolioIntentKind::MatcherDisable {
-        env.set_matcher_config(SUBJECT, 1)
-            .map_err(|error| format!("establish replacement matcher policy: {error}"))?;
+    match kind {
+        PortfolioIntentKind::MatcherEnable => {}
+        PortfolioIntentKind::MatcherDisable => {
+            env.set_matcher_config(SUBJECT, 1)
+                .map_err(|error| format!("establish replacement matcher policy: {error}"))?;
+        }
+        _ => {}
     }
 
     finish_portfolio_incarnation_discovery(
