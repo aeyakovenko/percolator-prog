@@ -451,8 +451,15 @@ impairment, cross-asset use, and cyclic A-backs-B-backs-A plans must never excee
 unresolved, and recovery positive claims owed by D. Replacing a bound with an exact receipt is
 permitted only with a proof that the exact claim does not exceed the prior contribution.
 
-**Required tests.** Exhaustively test bucket range edges, favorable price/funding bounds,
-rebucketing, stale uncertainty, and receipt replacement.
+The deployed v16 profile currently has no approximate claim-bound bucket or rebucketing route:
+every production source claim is exact and atom-scaled. For that profile, public-transition tests
+must require `exact_positive_claim_num[D] == positive_claim_bound_num[D]`, and a source-complete
+absence guard must reject any non-exact bound ingress. Adding an approximate bucket reopens this
+invariant and requires the bucket-specific evidence below before deployment.
+
+**Required tests.** Exhaustively test favorable price/funding bounds, stale uncertainty, and receipt
+replacement. When approximate buckets are enabled, also exhaust bucket range edges and prove
+out-of-range inputs fail closed or rebucket without understatement.
 **Verification:** P, F, R
 
 ### INV-030 - Credit-rate determinism and fail-closed behavior

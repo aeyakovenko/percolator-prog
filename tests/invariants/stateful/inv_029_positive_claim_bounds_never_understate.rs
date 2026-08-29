@@ -39,6 +39,10 @@
 //! claim and the payout snapshot capture the exact remaining junior face. This proves the deployed
 //! protocol's stale-uncertainty envelope is a fail-closed barrier, not an understated denominator
 //! that can become withdrawable.
+//! The pinned production profile has no approximate claim-bound buckets or rebucketing route.
+//! Every complete-account census also requires each domain's exact claim tracker to equal its
+//! positive bound, so any future non-exact production term fails this suite until range and
+//! rebucketing coverage is supplied.
 //! `v16_program_partial_receipt_exactly_replaces_its_prior_claim_bound` reuses the independent
 //! underfunded terminal lifecycle. Its shared transition oracle observes a genuine partial receipt
 //! and proves the terminal ledger adds exactly `terminal_positive_claim_face * BOUND_SCALE`,
@@ -49,7 +53,8 @@
 //!
 //! Guarantee boundary: this is a complete census only for the bounded test world, whose portfolio
 //! count is checked against the market's materialized-portfolio counter. It does not replace a
-//! production whole-state enumeration proof or rebucketing coverage.
+//! production whole-state enumeration proof. Approximate-bucket range/rebucketing coverage is
+//! inapplicable while the executable source lock keeps that optional mechanism out of production.
 
 use super::*;
 use crate::support::fuzz_model::{

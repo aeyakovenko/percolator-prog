@@ -1791,6 +1791,13 @@ fn assert_source_claim_bound_attribution(
 
     let mut domain_total = 0u128;
     for (domain, source) in group.source_credit.iter().copied().enumerate() {
+        if source.exact_positive_claim_num != source.positive_claim_bound_num {
+            return Err(format!(
+                "{label} source domain {domain} deployed exact-only profile has claim bound {} \
+                 but exact claim {}",
+                source.positive_claim_bound_num, source.exact_positive_claim_num
+            ));
+        }
         if attributed[domain] != source.positive_claim_bound_num {
             return Err(format!(
                 "{label} source domain {domain} market claim bound {} != independent portfolio \

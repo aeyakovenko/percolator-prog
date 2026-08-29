@@ -11,6 +11,12 @@
 //! partially burn those claims, the positions close, backing is added, and both
 //! conversion orders are checked against an independent portfolio census after
 //! every public transition.
+//! The deployed profile has no approximate claim-bound buckets: every production source claim is
+//! exact and atom-scaled. The source lock below keeps non-exact bound injection and rebucketing out
+//! of the wrapper API, while the stateful complete-account census requires the persisted exact and
+//! bound totals to remain equal after every generated public transition. Introducing an
+//! approximate bucket is therefore a deliberate profile change that must replace this absence
+//! proof with the charter's range-edge and rebucketing proofs.
 //!
 //! Guarantee boundary: this is one non-random whole-route witness for the same
 //! invariant enforced by the stateful generator. It does not replace exhaustive
@@ -22,4 +28,31 @@ fn v16_program_positive_claim_bounds_match_public_lifecycle_census() {
         [0x29; 32], 3, 13, true,
     )
     .expect("positive-claim bound public lifecycle census");
+}
+
+#[test]
+fn v16_program_non_exact_claim_bound_routes_remain_absent_from_deployed_profile() {
+    let source = include_str!("../../../src/v16_program.rs");
+    let production = source
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production source prefix");
+
+    for forbidden in [
+        "add_source_positive_claim_bound_not_atomic",
+        "claim_bound_bucket",
+        "rebucket_claim",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "non-exact claim-bound mechanism {forbidden} entered the public wrapper; INV-029 \
+             requires range and rebucketing coverage before deployment",
+        );
+    }
+
+    let lock = include_str!("../../../Cargo.lock");
+    assert!(lock.contains(
+        "git+https://github.com/aeyakovenko/percolator?rev=9b737fd#\
+         9b737fdcec16f3709c0651f4ecc7488b4917f2d8"
+    ));
 }
