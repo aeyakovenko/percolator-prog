@@ -23,7 +23,7 @@ fn v16_program_same_market_delayed_controls_reject_atomically() {
     let discoveries = discover_superseded_intents([0x14; 32])
         .unwrap_or_else(|error| panic!("INV-014 supersession matrix failed: {error}"));
     assert_eq!(discoveries.len(), SupersededIntentKind::ALL.len());
-    for (expected, discovery) in SupersededIntentKind::ALL.into_iter().zip(discoveries) {
+    for (expected, discovery) in SupersededIntentKind::ALL.into_iter().zip(&discoveries) {
         assert_eq!(discovery.kind, expected);
         assert!(
             !discovery.accepted_stale_intent,
@@ -37,7 +37,63 @@ fn v16_program_same_market_delayed_controls_reject_atomically() {
             discovery.compute_units, None,
             "{expected:?} unexpectedly committed"
         );
+        assert!(
+            discovery.fresh_intent_landed,
+            "{expected:?} current-sequence control did not land"
+        );
+        assert!(
+            discovery.fresh_mutated_economic_state,
+            "{expected:?} current-sequence control was vacuous"
+        );
+        assert!(
+            discovery.fresh_compute_units.is_some(),
+            "{expected:?} current-sequence control needs a successful CU result"
+        );
         assert!(!discovery.is_violation(), "{expected:?} violated INV-014");
+    }
+
+    // Fixed-pin certification maps the finding-agnostic controls to the dated holdout roster.
+    // Oracle and backing rows require every semantic lane owned by the same sequence domain.
+    let certifications: &[(u16, &[SupersededIntentKind])] = &[
+        (334, &[SupersededIntentKind::MatcherConfig]),
+        (
+            335,
+            &[
+                SupersededIntentKind::PushAuthMark,
+                SupersededIntentKind::ConfigureAuthMark,
+                SupersededIntentKind::PushEwmaMark,
+                SupersededIntentKind::ConfigureEwmaMark,
+                SupersededIntentKind::ConfigureHybridOracle,
+            ],
+        ),
+        (336, &[SupersededIntentKind::LiquidationFeePolicy]),
+        (337, &[SupersededIntentKind::MaintenanceFeePolicy]),
+        (338, &[SupersededIntentKind::TradeFeePolicy]),
+        (340, &[SupersededIntentKind::FeeRedirectPolicy]),
+        (347, &[SupersededIntentKind::ResolvePolicy]),
+        (
+            349,
+            &[
+                SupersededIntentKind::BackingFeePolicy,
+                SupersededIntentKind::BackingFeePolicyShort,
+            ],
+        ),
+    ];
+    for (pr, kinds) in certifications {
+        for kind in *kinds {
+            let evidence = discoveries
+                .iter()
+                .find(|discovery| discovery.kind == *kind)
+                .unwrap_or_else(|| panic!("PR {pr}: missing {kind:?} sequence evidence"));
+            assert!(
+                !evidence.accepted_stale_intent && !evidence.overwrote_newer_state,
+                "PR {pr}: {kind:?} stale control must reject atomically",
+            );
+            assert!(
+                evidence.fresh_intent_landed && evidence.fresh_mutated_economic_state,
+                "PR {pr}: {kind:?} current-sequence control must remain live",
+            );
+        }
     }
 }
 

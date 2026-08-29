@@ -57,6 +57,9 @@ proptest! {
             prop_assert!(!discovery.accepted_stale_intent, "{:?}/{:?} accepted stale signed bytes", discovery.kind, discovery.payload_order);
             prop_assert!(!discovery.overwrote_newer_state, "{:?}/{:?} overwrote the newer state", discovery.kind, discovery.payload_order);
             prop_assert_eq!(discovery.compute_units, None, "{:?}/{:?} unexpectedly committed", discovery.kind, discovery.payload_order);
+            prop_assert!(discovery.fresh_intent_landed, "{:?}/{:?} current-sequence control did not land", discovery.kind, discovery.payload_order);
+            prop_assert!(discovery.fresh_mutated_economic_state, "{:?}/{:?} current-sequence control was vacuous", discovery.kind, discovery.payload_order);
+            prop_assert!(discovery.fresh_compute_units.is_some(), "{:?}/{:?} current-sequence control needs a successful CU result", discovery.kind, discovery.payload_order);
             prop_assert!(!discovery.is_violation(), "{:?}/{:?} violated INV-014", discovery.kind, discovery.payload_order);
         }
     }

@@ -639,31 +639,31 @@ pub const OPEN_LOFS: &[OpenLof] = &[
     ),
     OpenLof::certified(332, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
     OpenLof::certified(333, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
-    OpenLof::quarantined(
+    OpenLof::certified(
         334,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr334DelayedMatcherEnableReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         335,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr335DelayedOracleIntentReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         336,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr336DelayedLiquidationPolicyReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         337,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr337DelayedMaintenancePolicyReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         338,
         Blocker,
         ReplayIncarnation,
@@ -675,7 +675,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         FeeConsent,
         BlockerAdapter::Pr339BackingFeeConsentReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         340,
         Blocker,
         ReplayIncarnation,
@@ -705,13 +705,13 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::AuthorityHandoffAbaReplayFamily,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         347,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr347DelayedResolvePolicyReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         349,
         Blocker,
         ReplayIncarnation,

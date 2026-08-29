@@ -3124,6 +3124,9 @@ pub struct SupersessionDiscovery {
     pub accepted_stale_intent: bool,
     pub overwrote_newer_state: bool,
     pub compute_units: Option<u64>,
+    pub fresh_intent_landed: bool,
+    pub fresh_mutated_economic_state: bool,
+    pub fresh_compute_units: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6437,7 +6440,7 @@ fn prepare_superseded_intent(
     env: &mut V16Svm,
     kind: SupersededIntentKind,
     payload_order: SupersessionPayloadOrder,
-) -> Result<Transaction, String> {
+) -> Result<(Transaction, Transaction), String> {
     const AUTHORITY: usize = 2;
     match kind {
         SupersededIntentKind::MatcherConfig => {
@@ -6445,7 +6448,8 @@ fn prepare_superseded_intent(
             let retained = env.build_retained_matcher_config(0, retained_enabled);
             env.set_matcher_config(0, committed_enabled)
                 .map_err(|error| format!("install newer matcher policy: {error}"))?;
-            Ok(retained)
+            let fresh = env.build_retained_matcher_config(0, retained_enabled);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::PushAuthMark => {
             let (retained_mark, committed_mark) =
@@ -6456,7 +6460,8 @@ fn prepare_superseded_intent(
             env.warp_to_slot(1);
             env.push_auth_mark(0, 1, committed_mark)
                 .map_err(|error| format!("install newer authenticated mark: {error}"))?;
-            Ok(retained)
+            let fresh = env.build_retained_auth_mark(0, retained_mark);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::ConfigureAuthMark => {
             let (retained_mark, committed_mark) =
@@ -6465,7 +6470,8 @@ fn prepare_superseded_intent(
             env.warp_to_slot(1);
             env.configure_auth_mark(false, 0, 1, committed_mark)
                 .map_err(|error| format!("install newer AuthMark configuration: {error}"))?;
-            Ok(retained)
+            let fresh = env.build_retained_auth_config(0, retained_mark);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::PushEwmaMark => {
             let (retained_mark, committed_mark) =
@@ -6476,7 +6482,8 @@ fn prepare_superseded_intent(
             env.warp_to_slot(1);
             env.push_ewma_mark(0, 1, committed_mark)
                 .map_err(|error| format!("install newer EWMA observation: {error}"))?;
-            Ok(retained)
+            let fresh = env.build_retained_ewma_mark(0, retained_mark);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::ConfigureEwmaMark => {
             let (retained_mark, committed_mark) =
@@ -6485,10 +6492,12 @@ fn prepare_superseded_intent(
             env.warp_to_slot(1);
             env.configure_ewma_mark(0, 1, committed_mark, 1, 0)
                 .map_err(|error| format!("install newer EWMA configuration: {error}"))?;
-            Ok(retained)
+            let fresh = env.build_retained_ewma_config(0, retained_mark, 1, 0);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::ConfigureHybridOracle => {
             const FEED_ID: [u8; 32] = [0x41; 32];
+            const FRESH_FEED_ID: [u8; 32] = [0x42; 32];
             let (retained_mark, committed_mark) =
                 payload_order.ordered(INITIAL_PRICE * 9 / 10, INITIAL_PRICE * 11 / 10);
             env.set_clock(1, 100);
@@ -6505,42 +6514,58 @@ fn prepare_superseded_intent(
             );
             env.configure_auth_mark(false, 0, 1, committed_mark)
                 .map_err(|error| format!("install newer cross-mode configuration: {error}"))?;
-            Ok(retained)
+            let fresh_feed = env.set_pyth_price(&FRESH_FEED_ID, INITIAL_PRICE as i64, 0, 1, 100);
+            let fresh = env.build_retained_hybrid_oracle_config(
+                0,
+                1,
+                100,
+                0,
+                [FRESH_FEED_ID, [0; 32], [0; 32]],
+                &[fresh_feed],
+                3,
+                500,
+            );
+            Ok((retained, fresh))
         }
         SupersededIntentKind::TradeFeePolicy => {
             let (retained_value, committed_value) = payload_order.ordered(1_000, 9_000);
             let retained = env.build_retained_trade_fee_policy(retained_value);
             env.update_trade_fee_policy(committed_value)
                 .map_err(|error| format!("install newer trade-fee policy: {error}"))?;
-            Ok(retained)
+            let fresh = env.build_retained_trade_fee_policy(retained_value);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::FeeRedirectPolicy => {
             let (retained_value, committed_value) = payload_order.ordered(1_000, 9_000);
             let retained = env.build_retained_fee_redirect_policy(retained_value);
             env.update_fee_redirect_policy(committed_value)
                 .map_err(|error| format!("install newer fee-redirect policy: {error}"))?;
-            Ok(retained)
+            let fresh = env.build_retained_fee_redirect_policy(retained_value);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::LiquidationFeePolicy => {
             let (retained_value, committed_value) = payload_order.ordered(1_000, 9_000);
             let retained = env.build_retained_liquidation_fee_policy(retained_value);
             env.update_liquidation_fee_policy(committed_value)
                 .map_err(|error| format!("install newer liquidation-fee policy: {error}"))?;
-            Ok(retained)
+            let fresh = env.build_retained_liquidation_fee_policy(retained_value);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::MaintenanceFeePolicy => {
             let (retained_value, committed_value) = payload_order.ordered(1_000, 9_000);
             let retained = env.build_retained_maintenance_fee_policy(retained_value);
             env.update_maintenance_fee_policy(committed_value)
                 .map_err(|error| format!("install newer maintenance-fee policy: {error}"))?;
-            Ok(retained)
+            let fresh = env.build_retained_maintenance_fee_policy(retained_value);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::MarketInitFeePolicy => {
             let (retained_value, committed_value) = payload_order.ordered(1_000, 9_000);
             let retained = env.build_retained_market_init_fee_policy(retained_value);
             env.update_market_init_fee_policy(committed_value)
                 .map_err(|error| format!("install newer market-init-fee policy: {error}"))?;
-            Ok(retained)
+            let fresh = env.build_retained_market_init_fee_policy(retained_value);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::ResolvePolicy => {
             let ((retained_stale, retained_delay), (committed_stale, committed_delay)) =
@@ -6549,7 +6574,9 @@ fn prepare_superseded_intent(
                 env.build_retained_permissionless_resolve_policy(retained_stale, retained_delay);
             env.configure_permissionless_resolve(committed_stale, committed_delay)
                 .map_err(|error| format!("install newer resolve policy: {error}"))?;
-            Ok(retained)
+            let fresh =
+                env.build_retained_permissionless_resolve_policy(retained_stale, retained_delay);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::BackingFeePolicy => {
             env.update_asset_authority_from_admin(
@@ -6563,7 +6590,9 @@ fn prepare_superseded_intent(
                 env.build_retained_backing_fee_policy_for_actor(AUTHORITY, 0, retained_value, 0);
             env.update_backing_fee_policy_for_actor(AUTHORITY, 0, committed_value, 0)
                 .map_err(|error| format!("install newer backing-fee policy: {error}"))?;
-            Ok(retained)
+            let fresh =
+                env.build_retained_backing_fee_policy_for_actor(AUTHORITY, 0, retained_value, 0);
+            Ok((retained, fresh))
         }
         SupersededIntentKind::BackingFeePolicyShort => {
             env.update_asset_authority_from_admin(
@@ -6577,7 +6606,9 @@ fn prepare_superseded_intent(
                 env.build_retained_backing_fee_policy_for_actor(AUTHORITY, 1, retained_value, 0);
             env.update_backing_fee_policy_for_actor(AUTHORITY, 1, committed_value, 0)
                 .map_err(|error| format!("install newer short backing-fee policy: {error}"))?;
-            Ok(retained)
+            let fresh =
+                env.build_retained_backing_fee_policy_for_actor(AUTHORITY, 1, retained_value, 0);
+            Ok((retained, fresh))
         }
     }
 }
@@ -6592,7 +6623,7 @@ fn discover_one_superseded_intent(
     seed[2] ^= payload_order.discriminator();
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
-    let retained = prepare_superseded_intent(&mut env, kind, payload_order)?;
+    let (retained, fresh) = prepare_superseded_intent(&mut env, kind, payload_order)?;
     let newer_state = fingerprint(&env);
     let result = env.land_retained(retained);
     let after = fingerprint(&env);
@@ -6617,6 +6648,9 @@ fn discover_one_superseded_intent(
                 accepted_stale_intent: true,
                 overwrote_newer_state,
                 compute_units: Some(success.compute_units),
+                fresh_intent_landed: false,
+                fresh_mutated_economic_state: false,
+                fresh_compute_units: None,
             })
         }
         Err(_) => {
@@ -6625,12 +6659,35 @@ fn discover_one_superseded_intent(
                     "{kind:?} rejected stale control did not roll back exactly"
                 ));
             }
+            let before_fresh = fingerprint(&env);
+            let fresh_result = env.land_retained(fresh);
+            let after_fresh = fingerprint(&env);
+            let fresh_success = fresh_result.map_err(|error| {
+                format!(
+                    "{kind:?}/{payload_order:?} current-sequence control rejected after stale rollback: {error}"
+                )
+            })?;
+            let fresh_mutated_economic_state = before_fresh != after_fresh;
+            if !fresh_mutated_economic_state {
+                return Err(format!(
+                    "{kind:?}/{payload_order:?} current-sequence control produced no state delta"
+                ));
+            }
+            if env.token_supply_observed() != supply_before {
+                return Err(format!(
+                    "{kind:?}/{payload_order:?} current-sequence control changed SPL supply: {supply_before} -> {}",
+                    env.token_supply_observed()
+                ));
+            }
             Ok(SupersessionDiscovery {
                 kind,
                 payload_order,
                 accepted_stale_intent: false,
                 overwrote_newer_state: false,
                 compute_units: None,
+                fresh_intent_landed: true,
+                fresh_mutated_economic_state,
+                fresh_compute_units: Some(fresh_success.compute_units),
             })
         }
     }
