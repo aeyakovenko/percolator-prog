@@ -339,7 +339,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         BlockerAdapter::Pr256LiveFeeConsent,
     ),
     OpenLof::nonqualifying(258, Privileged, PrivilegedLifecycle),
-    OpenLof::quarantined(
+    OpenLof::certified(
         259,
         Privileged,
         FeeConsent,

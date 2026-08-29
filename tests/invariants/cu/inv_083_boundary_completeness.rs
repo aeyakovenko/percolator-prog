@@ -176,7 +176,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
     use std::collections::{BTreeMap, BTreeSet};
 
     const HEADER: &str = "type\tfields\tclassification\tevidence";
-    const EXPECTED_FIELD_COUNT: usize = 230;
+    const EXPECTED_FIELD_COUNT: usize = 232;
     const EXPECTED_TYPE_COUNT: usize = 52;
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -256,7 +256,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
     let expected_profile_counts = BTreeMap::from([
         ("amount", 23),
         ("authenticated-time", 12),
-        ("basis-points", 17),
+        ("basis-points", 19),
         ("bitmask", 1),
         ("count", 5),
         ("duration", 9),

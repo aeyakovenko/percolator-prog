@@ -4,19 +4,19 @@
 //!
 //! Evidence in this file (F over public I routes):
 //! `v16_program_source_fee_consent_route_matrix_discovers_unsigned_debits` constructs positive
-//! source-backed PnL and varies the consuming trade across CPI/no-CPI and single/batch routes. Its
-//! common oracle requires the LP debit to stay within prior consent and traces any debit through
-//! the backing provider's earnings into an exact public SPL withdrawal. Finding-specific impact
+//! source-backed PnL and varies the consuming trade across CPI/no-CPI, single/batch, and both
+//! participant roles. Every request is retained before the backing-fee policy change. Its common
+//! oracle requires the LP debit to stay within prior consent and traces any debit through the
+//! backing provider's earnings into an exact public SPL withdrawal. Finding-specific impact
 //! regressions remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //! Secondary coverage: INV-014 because the same route matrix varies the policy state retained by
 //! the signer and rejects economic terms introduced after consent.
 //!
-//! Guarantee boundary: PRs 223, 224, 310, 313, and 314 are fixed-pin certifications here. The
-//! independent source-fee matrix still reproduces PR259 on no-CPI, while INV-014 retains PR339's
-//! backing-provider consent counterexample; those unresolved fee scopes are not covered by these
-//! certifications.
+//! Guarantee boundary: PRs 223, 224, 259, 310, 313, and 314 are fixed-pin certifications here.
+//! The source-fee matrix is the independent holdout oracle for delayed trader-fee consent, while
+//! INV-014 retains PR339's backing-provider consent counterexample.
 
 use super::*;
 
@@ -38,35 +38,68 @@ proptest! {
     ) {
         let discoveries = discover_source_fee_consent_violations(seed)
             .map_err(TestCaseError::fail)?;
-        prop_assert_eq!(discoveries.len(), SourceFeeConsentKind::ALL.len());
-        for (expected, discovery) in SourceFeeConsentKind::ALL.into_iter().zip(&discoveries) {
-            prop_assert_eq!(discovery.kind, expected);
+        prop_assert_eq!(
+            discoveries.len(),
+            SourceFeeConsentKind::ALL.len() * SourceFeeConsentRole::ALL.len()
+        );
+        for ((expected_kind, expected_role), discovery) in SourceFeeConsentKind::ALL
+            .into_iter()
+            .flat_map(|kind| SourceFeeConsentRole::ALL.into_iter().map(move |role| (kind, role)))
+            .zip(&discoveries)
+        {
+            prop_assert_eq!(discovery.kind, expected_kind);
+            prop_assert_eq!(discovery.victim_role, expected_role);
         }
         let violations: Vec<_> = discoveries
             .iter()
             .filter(|discovery| discovery.is_violation())
-            .map(|discovery| discovery.kind)
+            .map(|discovery| (discovery.kind, discovery.victim_role))
             .collect();
         eprintln!("independent source-fee consent discoveries: {violations:?}");
-        let no_cpi = &discoveries[0];
-        prop_assert_eq!(no_cpi.lp_capital_debit, no_cpi.provider_earnings_credit);
-        prop_assert_eq!(
-            no_cpi.provider_earnings_credit,
-            no_cpi.extracted_provider_tokens
-        );
-        let exact_terminal_loss = matches!(
-            no_cpi.terminal_classification,
-            crate::support::v16_svm::PublicTerminalClassification::LossOfFunds {
-                victim_loss_atoms,
-                unauthorized_gain_atoms,
-            } if victim_loss_atoms == no_cpi.lp_capital_debit
-                && unauthorized_gain_atoms == no_cpi.extracted_provider_tokens
-        );
-        prop_assert!(exact_terminal_loss);
-        prop_assert_eq!(
-            violations,
-            vec![SourceFeeConsentKind::NoCpi],
-            "source-fee route differential changed; CPI must require matcher consent"
+        for discovery in discoveries.iter().filter(|discovery| discovery.is_violation()) {
+            prop_assert_eq!(discovery.lp_capital_debit, discovery.provider_earnings_credit);
+            prop_assert_eq!(
+                discovery.provider_earnings_credit,
+                discovery.extracted_provider_tokens
+            );
+            let exact_terminal_loss = matches!(
+                discovery.terminal_classification,
+                crate::support::v16_svm::PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == discovery.lp_capital_debit
+                    && unauthorized_gain_atoms == discovery.extracted_provider_tokens
+            );
+            prop_assert!(exact_terminal_loss);
+        }
+        for discovery in &discoveries {
+            let single_route = matches!(
+                discovery.kind,
+                SourceFeeConsentKind::NoCpi | SourceFeeConsentKind::Cpi
+            );
+            prop_assert_eq!(discovery.authorized_retry_landed, single_route);
+            prop_assert_eq!(discovery.over_cap_rejected_exact_rollback, single_route);
+            if single_route {
+                prop_assert!(discovery.authorized_retry_lp_capital_debit > 0);
+                prop_assert_eq!(
+                    discovery.authorized_retry_lp_capital_debit,
+                    discovery.authorized_retry_provider_earnings_credit
+                );
+                prop_assert_eq!(
+                    discovery.authorized_retry_provider_earnings_credit,
+                    discovery.authorized_retry_extracted_provider_tokens
+                );
+                prop_assert!(discovery.authorized_retry_compute_units.is_some());
+            } else {
+                prop_assert_eq!(discovery.authorized_retry_lp_capital_debit, 0);
+                prop_assert_eq!(discovery.authorized_retry_provider_earnings_credit, 0);
+                prop_assert_eq!(discovery.authorized_retry_extracted_provider_tokens, 0);
+                prop_assert!(discovery.authorized_retry_compute_units.is_none());
+            }
+        }
+        prop_assert!(
+            violations.is_empty(),
+            "retained trade accepted a backing fee that the debited trader never authorized: {violations:?}"
         );
     }
 }

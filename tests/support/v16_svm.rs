@@ -1789,6 +1789,28 @@ impl V16Svm {
         exec_price: u64,
         fee_bps: u64,
     ) -> Result<TxSuccess, String> {
+        self.trade_no_cpi_with_backing_fee_cap(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            exec_price,
+            fee_bps,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn trade_no_cpi_with_backing_fee_cap(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        exec_price: u64,
+        fee_bps: u64,
+        backing_fee_cap_bps: u16,
+    ) -> Result<TxSuccess, String> {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let account_a_portfolio_id = self.primary_portfolio_id(taker);
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
@@ -1807,6 +1829,7 @@ impl V16Svm {
                 size_q,
                 exec_price,
                 fee_bps,
+                backing_fee_cap_bps,
             },
             vec![
                 AccountMeta::new(taker_owner.pubkey(), true),
@@ -1877,6 +1900,7 @@ impl V16Svm {
                 size_q,
                 fee_bps,
                 limit_price,
+                backing_fee_cap_bps: 0,
             },
             vec![
                 AccountMeta::new(taker_owner.pubkey(), true),
@@ -3795,6 +3819,7 @@ impl V16Svm {
                 size_q,
                 exec_price: INITIAL_PRICE,
                 fee_bps: 0,
+                backing_fee_cap_bps: 0,
             },
             vec![
                 AccountMeta::new(primary_owner.pubkey(), true),
@@ -3905,6 +3930,7 @@ impl V16Svm {
                 size_q: POS_SCALE as i128 / 4,
                 fee_bps: 0,
                 limit_price: 0,
+                backing_fee_cap_bps: 0,
             },
             vec![
                 AccountMeta::new(taker_owner.pubkey(), true),
@@ -4015,6 +4041,28 @@ impl V16Svm {
         exec_price: u64,
         fee_bps: u64,
     ) -> Transaction {
+        self.build_retained_no_cpi_trade_with_fee_and_backing_cap(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            exec_price,
+            fee_bps,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_retained_no_cpi_trade_with_fee_and_backing_cap(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        exec_price: u64,
+        fee_bps: u64,
+        backing_fee_cap_bps: u16,
+    ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let account_a_portfolio_id = self.primary_portfolio_id(taker);
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
@@ -4033,6 +4081,7 @@ impl V16Svm {
                 size_q,
                 exec_price,
                 fee_bps,
+                backing_fee_cap_bps,
             },
             vec![
                 AccountMeta::new(taker_owner.pubkey(), true),
@@ -4242,6 +4291,25 @@ impl V16Svm {
         size_q: i128,
         limit_price: u64,
     ) -> Transaction {
+        self.build_retained_cpi_trade_with_backing_fee_cap(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            limit_price,
+            0,
+        )
+    }
+
+    pub fn build_retained_cpi_trade_with_backing_fee_cap(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        limit_price: u64,
+        backing_fee_cap_bps: u16,
+    ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let account_a_portfolio_id = self.primary_portfolio_id(taker);
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
@@ -4260,6 +4328,7 @@ impl V16Svm {
                 size_q,
                 fee_bps: 0,
                 limit_price,
+                backing_fee_cap_bps,
             },
             vec![
                 AccountMeta::new(taker_owner.pubkey(), true),

@@ -4520,6 +4520,7 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            backing_fee_cap_bps: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),

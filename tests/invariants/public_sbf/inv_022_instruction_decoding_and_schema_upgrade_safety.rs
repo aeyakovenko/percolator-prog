@@ -95,6 +95,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             size_q: 1,
             exec_price: 100,
             fee_bps: 0,
+            backing_fee_cap_bps: 0,
         },
         ProgInstruction::TradeCpi {
             account_a_portfolio_id: 1,
@@ -106,6 +107,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             size_q: 1,
             fee_bps: 0,
             limit_price: 100,
+            backing_fee_cap_bps: 0,
         },
         ProgInstruction::BatchTradeNoCpi {
             account_a_portfolio_id: 1,

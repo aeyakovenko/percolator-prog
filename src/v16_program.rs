@@ -2929,6 +2929,7 @@ pub mod ix {
             size_q: i128,
             exec_price: u64,
             fee_bps: u64,
+            backing_fee_cap_bps: u16,
         },
         TradeCpi {
             account_a_portfolio_id: u64,
@@ -2940,6 +2941,7 @@ pub mod ix {
             size_q: i128,
             fee_bps: u64,
             limit_price: u64,
+            backing_fee_cap_bps: u16,
         },
         /// Atomic multi-leg batch: apply every leg against one taker/LP pair with a single
         /// end-state initial-margin check (interim legs need not be individually margin-feasible).
@@ -3213,6 +3215,7 @@ pub mod ix {
                 size_q: read_i128(rest)?,
                 exec_price: read_u64(rest)?,
                 fee_bps: read_u64(rest)?,
+                backing_fee_cap_bps: read_u16(rest)?,
             })
         }
 
@@ -3227,6 +3230,7 @@ pub mod ix {
                 size_q: read_i128(rest)?,
                 fee_bps: read_u64(rest)?,
                 limit_price: read_u64(rest)?,
+                backing_fee_cap_bps: read_u16(rest)?,
             })
         }
 
@@ -3734,6 +3738,7 @@ pub mod ix {
                     size_q,
                     exec_price,
                     fee_bps,
+                    backing_fee_cap_bps,
                 } => {
                     out.push(6);
                     push_u64(&mut out, account_a_portfolio_id);
@@ -3745,6 +3750,7 @@ pub mod ix {
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, exec_price);
                     push_u64(&mut out, fee_bps);
+                    push_u16(&mut out, backing_fee_cap_bps);
                 }
                 Self::TradeCpi {
                     account_a_portfolio_id,
@@ -3756,6 +3762,7 @@ pub mod ix {
                     size_q,
                     fee_bps,
                     limit_price,
+                    backing_fee_cap_bps,
                 } => {
                     out.push(10);
                     push_u64(&mut out, account_a_portfolio_id);
@@ -3767,6 +3774,7 @@ pub mod ix {
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, fee_bps);
                     push_u64(&mut out, limit_price);
+                    push_u16(&mut out, backing_fee_cap_bps);
                 }
                 Self::BatchTradeNoCpi {
                     account_a_portfolio_id,
@@ -6814,6 +6822,7 @@ pub mod processor {
                 size_q,
                 exec_price,
                 fee_bps,
+                backing_fee_cap_bps,
             } => handle_trade_nocpi(
                 program_id,
                 accounts,
@@ -6826,6 +6835,7 @@ pub mod processor {
                 size_q,
                 exec_price,
                 fee_bps,
+                backing_fee_cap_bps,
             ),
             Instruction::TradeCpi {
                 account_a_portfolio_id,
@@ -6837,6 +6847,7 @@ pub mod processor {
                 size_q,
                 fee_bps,
                 limit_price,
+                backing_fee_cap_bps,
             } => handle_trade_cpi(
                 program_id,
                 accounts,
@@ -6849,6 +6860,7 @@ pub mod processor {
                 size_q,
                 fee_bps,
                 limit_price,
+                backing_fee_cap_bps,
             ),
             Instruction::BatchTradeNoCpi {
                 account_a_portfolio_id,
@@ -7733,6 +7745,7 @@ pub mod processor {
         size_q: i128,
         exec_price: u64,
         fee_bps: u64,
+        account_a_backing_fee_cap_bps: Option<u16>,
         account_b_backing_fee_cap_bps: Option<u16>,
         account_b_matcher_synchronized: bool,
         max_market_slots: usize,
@@ -7900,6 +7913,7 @@ pub mod processor {
                     backing_before_a.as_ref(),
                     &mut account_b,
                     backing_before_b.as_ref(),
+                    account_a_backing_fee_cap_bps,
                     account_b_backing_fee_cap_bps,
                 )?;
             }
@@ -8406,6 +8420,7 @@ pub mod processor {
         size_q: i128,
         exec_price: u64,
         fee_bps: u64,
+        backing_fee_cap_bps: u16,
     ) -> ProgramResult {
         let signer_a = account(accounts, 0)?;
         let signer_b = account(accounts, 1)?;
@@ -8444,6 +8459,9 @@ pub mod processor {
         if cfg_pre.trade_fee_base_bps > fee_bps {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        if backing_fee_cap_bps > 10_000 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         handle_trade_nocpi_zero_copy(
             program_id,
             signer_a.key,
@@ -8460,7 +8478,8 @@ pub mod processor {
             size_q,
             exec_price,
             fee_bps,
-            None,
+            Some(backing_fee_cap_bps),
+            Some(backing_fee_cap_bps),
             false,
             max_market_slots,
         )
@@ -8958,6 +8977,7 @@ pub mod processor {
         size_q: i128,
         fee_bps: u64,
         limit_price: u64,
+        backing_fee_cap_bps: u16,
     ) -> ProgramResult {
         let signer_a = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -9031,6 +9051,9 @@ pub mod processor {
         }
         let fee_floor_pre = core::cmp::max(fee_bps, cfg_pre.trade_fee_base_bps);
         if fee_floor_pre > max_trading_fee_bps {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if backing_fee_cap_bps > 10_000 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         if account_a_header.portfolio_account_id != account_a_ai.key.to_bytes()
@@ -9170,6 +9193,7 @@ pub mod processor {
             // approval. Caller input is bounded above, but only the market base fee may debit the
             // unsigned LP; mark-movement fees are still derived inside the shared trade path.
             cfg_pre.trade_fee_base_bps,
+            Some(backing_fee_cap_bps),
             Some(ret.backing_fee_cap_bps()),
             true,
             max_market_slots,
@@ -14407,8 +14431,10 @@ pub mod processor {
                 )
                 .map_err(map_v16_error)?;
                 if split.total_fee != 0 {
-                    // CPI supplies the unsigned LP's matcher-selected cap. Check only an actual
-                    // debit so fee-free and risk-reducing fills remain executable at cap zero.
+                    // Single-trade routes supply each debited account's signed or matcher-selected
+                    // cap. Check only an actual debit so fee-free and risk-reducing fills remain
+                    // executable at cap zero; batch routes currently pass no cap and reject active
+                    // backing-fee policy before this collector.
                     if backing_fee_cap_bps.is_some_and(|cap| bps > cap) {
                         return Err(PercolatorError::Unauthorized.into());
                     }
@@ -14454,6 +14480,7 @@ pub mod processor {
         before_a: &[(u32, u128)],
         account_b: &mut percolator::PortfolioV16ViewMut<'_>,
         before_b: &[(u32, u128)],
+        account_a_backing_fee_cap_bps: Option<u16>,
         account_b_backing_fee_cap_bps: Option<u16>,
     ) -> Result<u128, ProgramError> {
         let mut fees_a_by_domain: DomainFeeTotals = Vec::new();
@@ -14462,7 +14489,7 @@ pub mod processor {
             cfg,
             account_a,
             before_a,
-            None,
+            account_a_backing_fee_cap_bps,
             &mut fees_a_by_domain,
         )?;
         let mut fees_b_by_domain: DomainFeeTotals = Vec::new();
@@ -16112,6 +16139,7 @@ pub mod processor {
                     before_a,
                     &mut account_b,
                     before_b,
+                    None,
                     None,
                 )
                 .unwrap();

@@ -438,6 +438,7 @@ fn v16_program_account_type_confusion_rejected() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            backing_fee_cap_bps: 0,
         },
         vec![
             AccountMeta::new(la.pubkey(), true),

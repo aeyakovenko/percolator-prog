@@ -1932,6 +1932,7 @@ impl V16CuEnv {
             size_q,
             exec_price,
             fee_bps,
+            backing_fee_cap_bps: 0,
         }
     }
 
@@ -1954,6 +1955,7 @@ impl V16CuEnv {
             size_q,
             fee_bps,
             limit_price,
+            backing_fee_cap_bps: 0,
         }
     }
 
@@ -2216,6 +2218,32 @@ impl V16CuEnv {
         exec_price: u64,
         fee_bps: u64,
     ) -> Result<u64, String> {
+        self.try_trade_asset_with_backing_fee_cap_with_cu(
+            asset_index,
+            owner_a,
+            account_a,
+            owner_b,
+            account_b,
+            size_q,
+            exec_price,
+            fee_bps,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_trade_asset_with_backing_fee_cap_with_cu(
+        &mut self,
+        asset_index: u16,
+        owner_a: &Keypair,
+        account_a: Pubkey,
+        owner_b: &Keypair,
+        account_b: Pubkey,
+        size_q: i128,
+        exec_price: u64,
+        fee_bps: u64,
+        backing_fee_cap_bps: u16,
+    ) -> Result<u64, String> {
         let market_id = self
             .market_state()
             .1
@@ -2234,6 +2262,7 @@ impl V16CuEnv {
                 size_q,
                 exec_price,
                 fee_bps,
+                backing_fee_cap_bps,
             },
             vec![
                 AccountMeta::new(owner_a.pubkey(), true),
@@ -2944,6 +2973,7 @@ impl V16CuEnv {
                 size_q,
                 fee_bps,
                 limit_price: 0,
+                backing_fee_cap_bps: 0,
             },
             metas,
             &[owner_a],
@@ -4862,7 +4892,7 @@ fn public_backing_earnings_fixture() -> PublicBackingEarningsFixture {
     env.deposit(&counterparty_owner, counterparty_portfolio, 500);
     let earnings_before =
         env.market_state().1.source_backing_buckets[DOMAIN as usize].utilization_fee_earnings;
-    env.trade_asset_with_cu(
+    env.try_trade_asset_with_backing_fee_cap_with_cu(
         1,
         &cross_owner,
         cross_portfolio,
@@ -4871,7 +4901,9 @@ fn public_backing_earnings_fixture() -> PublicBackingEarningsFixture {
         LIEN_GROWTH_Q,
         95,
         0,
-    );
+        5_000,
+    )
+    .expect("public risk increase with signed backing-fee cap");
     let earnings = env.market_state().1.source_backing_buckets[DOMAIN as usize]
         .utilization_fee_earnings
         .checked_sub(earnings_before)
@@ -5526,6 +5558,7 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
                 size_q: POS_SCALE as i128,
                 exec_price: OLD_PRICE,
                 fee_bps: 0,
+                backing_fee_cap_bps: 0,
             },
             AssetGenerationTradePath::BatchTradeNoCpi => ProgInstruction::BatchTradeNoCpi {
                 account_a_portfolio_id,
@@ -5550,6 +5583,7 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
                 size_q: POS_SCALE as i128,
                 fee_bps: 0,
                 limit_price: 0,
+                backing_fee_cap_bps: 0,
             },
             AssetGenerationTradePath::BatchTradeCpi => ProgInstruction::BatchTradeCpi {
                 account_a_portfolio_id,
@@ -5668,6 +5702,7 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
                 size_q: POS_SCALE as i128,
                 exec_price: NEW_PRICE,
                 fee_bps: 0,
+                backing_fee_cap_bps: 0,
             },
             AssetGenerationTradePath::BatchTradeNoCpi => ProgInstruction::BatchTradeNoCpi {
                 account_a_portfolio_id,
@@ -5692,6 +5727,7 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
                 size_q: POS_SCALE as i128,
                 fee_bps: 0,
                 limit_price: 0,
+                backing_fee_cap_bps: 0,
             },
             AssetGenerationTradePath::BatchTradeCpi => ProgInstruction::BatchTradeCpi {
                 account_a_portfolio_id,

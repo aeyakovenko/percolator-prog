@@ -473,7 +473,7 @@ fn v16_attack_backing_fee_split_conserves() {
         .sum();
 
     // Risk-increasing trade: grows the IM source-credit lien -> draws fresh backing -> charges the fee.
-    let r = env.try_trade_asset_with_cu(
+    let r = env.try_trade_asset_with_backing_fee_cap_with_cu(
         1,
         &cross_owner,
         cross_account,
@@ -482,6 +482,7 @@ fn v16_attack_backing_fee_split_conserves() {
         SAFE_INCREASE_Q,
         95,
         0,
+        FEE_BPS,
     );
     assert!(r.is_ok(), "backed risk increase must succeed: {r:?}");
 

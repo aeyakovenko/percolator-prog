@@ -1164,6 +1164,7 @@ fn v16_program_hostile_matcher_no_write_cannot_replay_stale_single_context() {
             size_q,
             fee_bps: 100,
             limit_price: 0,
+            backing_fee_cap_bps: 0,
         }
         .encode(),
     };
@@ -1686,6 +1687,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
         size_q,
         fee_bps: 100,
         limit_price: 0,
+        backing_fee_cap_bps: 0,
     };
 
     // ATTACK 1: forward the MARKET account into the matcher tail -> reject.

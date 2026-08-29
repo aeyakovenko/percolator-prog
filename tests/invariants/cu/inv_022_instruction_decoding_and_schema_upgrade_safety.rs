@@ -217,6 +217,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             size_q: 1,
             exec_price: 100,
             fee_bps: 0,
+            backing_fee_cap_bps: 0,
         },
         ProgInstruction::ClosePortfolio {
             portfolio_id: 1,
@@ -239,6 +240,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             size_q: 1,
             fee_bps: 0,
             limit_price: 100,
+            backing_fee_cap_bps: 0,
         },
         ProgInstruction::CloseSlab { authority_epoch: 1 },
         ProgInstruction::ResolveMarket {

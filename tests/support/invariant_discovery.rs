@@ -257,6 +257,12 @@ pub enum SourceFeeConsentKind {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SourceFeeConsentRole {
+    AccountA,
+    AccountB,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BackingProviderConsentOrder {
     FundThenPolicy,
     PolicyThenRetainedFund,
@@ -488,6 +494,17 @@ impl SourceFeeConsentKind {
             Self::BatchNoCpi => 1,
             Self::Cpi => 2,
             Self::BatchCpi => 3,
+        }
+    }
+}
+
+impl SourceFeeConsentRole {
+    pub const ALL: [Self; 2] = [Self::AccountA, Self::AccountB];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::AccountA => 0,
+            Self::AccountB => 1,
         }
     }
 }
@@ -1154,11 +1171,18 @@ pub struct FeeConsentDiscovery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceFeeConsentDiscovery {
     pub kind: SourceFeeConsentKind,
+    pub victim_role: SourceFeeConsentRole,
     pub accepted_unconsented_fee: bool,
     pub lp_capital_debit: u128,
     pub provider_earnings_credit: u128,
     pub extracted_provider_tokens: u128,
     pub compute_units: Option<u64>,
+    pub over_cap_rejected_exact_rollback: bool,
+    pub authorized_retry_landed: bool,
+    pub authorized_retry_lp_capital_debit: u128,
+    pub authorized_retry_provider_earnings_credit: u128,
+    pub authorized_retry_extracted_provider_tokens: u128,
+    pub authorized_retry_compute_units: Option<u64>,
     pub terminal_classification: PublicTerminalClassification,
     pub public_trace: PublicTraceEvidence,
 }
@@ -5335,7 +5359,7 @@ fn prepare_authority_incarnation_route(
             env.update_backing_fee_policy_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 0)
                 .map_err(|error| format!("install retained backing earnings fee: {error}"))?;
             env.warp_to_slot(6);
-            env.trade_no_cpi(PROVIDER, LP, 0, -INCREASE_Q, 95, 0)
+            env.trade_no_cpi_with_backing_fee_cap(PROVIDER, LP, 0, -INCREASE_Q, 95, 0, 5_000)
                 .map_err(|error| format!("realize retained backing earnings: {error}"))?;
             let earnings = env.primary_market_state().1.source_backing_buckets
                 [WINNING_DOMAIN as usize]
@@ -7247,8 +7271,16 @@ fn prepare_source_backed_fee_world(seed: [u8; 32]) -> Result<V16Svm, String> {
         .map_err(|error| format!("configure source-backed mark: {error}"))?;
     env.top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 100)
         .map_err(|error| format!("fund source-backing bucket: {error}"))?;
-    env.trade_no_cpi(MARKET_TRADER, LP, ASSET, -WINNING_SIZE_Q, PRICE, 0)
-        .map_err(|error| format!("open source-backed winning leg: {error}"))?;
+    env.trade_no_cpi_with_backing_fee_cap(
+        MARKET_TRADER,
+        LP,
+        ASSET,
+        -WINNING_SIZE_Q,
+        PRICE,
+        0,
+        10_000,
+    )
+    .map_err(|error| format!("open source-backed winning leg: {error}"))?;
     env.trade_no_cpi(MARKET_TRADER, LP, 0, -LOSING_SIZE_Q, PRICE, 0)
         .map_err(|error| format!("open source-backed losing leg: {error}"))?;
 
@@ -7283,6 +7315,7 @@ fn prepare_source_backed_fee_world(seed: [u8; 32]) -> Result<V16Svm, String> {
 fn discover_one_source_fee_consent_violation(
     mut seed: [u8; 32],
     kind: SourceFeeConsentKind,
+    victim_role: SourceFeeConsentRole,
 ) -> Result<SourceFeeConsentDiscovery, String> {
     const PROVIDER: usize = 0;
     const LP: usize = 2;
@@ -7291,50 +7324,48 @@ fn discover_one_source_fee_consent_violation(
     const EXEC_PRICE: u64 = 95;
     seed[0] ^= 0x7b;
     seed[1] ^= kind.discriminator();
+    seed[2] ^= victim_role.discriminator();
     let mut env = prepare_source_backed_fee_world(seed)?;
     env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     let provider_destination = env.actors[PROVIDER].destination_token;
     let provider_tokens_before = env.token_amount(provider_destination);
+    let (account_a, account_b, size_q) = match victim_role {
+        SourceFeeConsentRole::AccountA => (LP, PROVIDER, INCREASE_Q),
+        SourceFeeConsentRole::AccountB => (PROVIDER, LP, -INCREASE_Q),
+    };
+    if matches!(
+        kind,
+        SourceFeeConsentKind::Cpi | SourceFeeConsentKind::BatchCpi
+    ) {
+        env.set_matcher_config_with_trade_fee_cap(account_b, 1, 10_000)
+            .map_err(|error| format!("refresh source-fee matcher capability: {error}"))?;
+    }
     let retained = match kind {
         SourceFeeConsentKind::NoCpi => {
-            Some(env.build_retained_no_cpi_trade(PROVIDER, LP, 0, -INCREASE_Q, EXEC_PRICE))
+            env.build_retained_no_cpi_trade(account_a, account_b, 0, size_q, EXEC_PRICE)
         }
         SourceFeeConsentKind::BatchNoCpi => {
-            Some(env.build_retained_batch_no_cpi_trade(PROVIDER, LP, 0, -INCREASE_Q, EXEC_PRICE))
+            env.build_retained_batch_no_cpi_trade(account_a, account_b, 0, size_q, EXEC_PRICE)
         }
-        SourceFeeConsentKind::Cpi | SourceFeeConsentKind::BatchCpi => None,
+        SourceFeeConsentKind::Cpi => {
+            env.build_retained_cpi_trade(account_a, account_b, 0, size_q, 0)
+        }
+        SourceFeeConsentKind::BatchCpi => {
+            env.build_retained_batch_cpi_trade(account_a, account_b, 0, size_q, 0)
+        }
     };
     env.update_backing_fee_policy_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 0)
         .map_err(|error| format!("install post-consent source-backing fee: {error}"))?;
     env.warp_to_slot(6);
     let lp_before = env.primary_portfolio(LP).capital.get();
-    let trade_market_id = env.primary_market_state().1.assets[0].market_id;
     let provider_before = env.primary_market_state().1.source_backing_buckets
         [WINNING_DOMAIN as usize]
         .utilization_fee_earnings;
     let before = fingerprint(&env);
-    let execution = match kind {
-        SourceFeeConsentKind::NoCpi | SourceFeeConsentKind::BatchNoCpi => env
-            .land_retained(retained.expect("retained source-fee trade"))
-            .map(|success| success.compute_units),
-        SourceFeeConsentKind::Cpi => env
-            .trade_cpi(PROVIDER, LP, 0, -INCREASE_Q, 0, 0)
-            .map(|success| success.compute_units),
-        SourceFeeConsentKind::BatchCpi => env
-            .batch_trade_cpi(
-                PROVIDER,
-                LP,
-                vec![BatchTradeCpiLeg {
-                    asset_index: 0,
-                    market_id: trade_market_id,
-                    size_q: -INCREASE_Q,
-                    fee_bps: 0,
-                    limit_price: 0,
-                }],
-            )
-            .map(|success| success.compute_units),
-    };
+    let execution = env
+        .land_retained(retained)
+        .map(|success| success.compute_units);
     let after = fingerprint(&env);
     let lp_capital_debit = debit_between(
         lp_before,
@@ -7401,13 +7432,138 @@ fn discover_one_source_fee_consent_violation(
         extracted_provider_tokens,
         "source fee",
     )?;
+    let (
+        over_cap_rejected_exact_rollback,
+        authorized_retry_landed,
+        authorized_retry_lp_capital_debit,
+        authorized_retry_provider_earnings_credit,
+        authorized_retry_extracted_provider_tokens,
+        authorized_retry_compute_units,
+    ) = if !accepted_unconsented_fee
+        && matches!(
+            kind,
+            SourceFeeConsentKind::NoCpi | SourceFeeConsentKind::Cpi
+        ) {
+        const AUTHORIZED_CAP_BPS: u16 = 5_000;
+        const INVALID_CAP_BPS: u16 = 10_001;
+        let invalid_retained = match kind {
+            SourceFeeConsentKind::NoCpi => env
+                .build_retained_no_cpi_trade_with_fee_and_backing_cap(
+                    account_a,
+                    account_b,
+                    0,
+                    size_q,
+                    EXEC_PRICE,
+                    0,
+                    INVALID_CAP_BPS,
+                ),
+            SourceFeeConsentKind::Cpi => env.build_retained_cpi_trade_with_backing_fee_cap(
+                account_a,
+                account_b,
+                0,
+                size_q,
+                0,
+                INVALID_CAP_BPS,
+            ),
+            SourceFeeConsentKind::BatchNoCpi | SourceFeeConsentKind::BatchCpi => unreachable!(),
+        };
+        let before_invalid = fingerprint(&env);
+        let invalid_rejected = env.land_retained(invalid_retained).is_err();
+        let invalid_rolled_back = fingerprint(&env) == before_invalid;
+        if !invalid_rejected || !invalid_rolled_back {
+            return Err(format!(
+                "{kind:?} {victim_role:?} accepted or committed an out-of-domain backing-fee cap"
+            ));
+        }
+        if kind == SourceFeeConsentKind::Cpi && victim_role == SourceFeeConsentRole::AccountB {
+            env.set_matcher_backing_fee_cap(account_b, AUTHORIZED_CAP_BPS)
+                .map_err(|error| format!("authorize CPI account-B source fee: {error}"))?;
+        }
+        let retained = match kind {
+            SourceFeeConsentKind::NoCpi => env
+                .build_retained_no_cpi_trade_with_fee_and_backing_cap(
+                    account_a,
+                    account_b,
+                    0,
+                    size_q,
+                    EXEC_PRICE,
+                    0,
+                    AUTHORIZED_CAP_BPS,
+                ),
+            SourceFeeConsentKind::Cpi => env.build_retained_cpi_trade_with_backing_fee_cap(
+                account_a,
+                account_b,
+                0,
+                size_q,
+                0,
+                AUTHORIZED_CAP_BPS,
+            ),
+            SourceFeeConsentKind::BatchNoCpi | SourceFeeConsentKind::BatchCpi => unreachable!(),
+        };
+        let lp_before = env.primary_portfolio(LP).capital.get();
+        let provider_before = env.primary_market_state().1.source_backing_buckets
+            [WINNING_DOMAIN as usize]
+            .utilization_fee_earnings;
+        let provider_tokens_before = env.token_amount(provider_destination);
+        let success = env
+            .land_retained(retained)
+            .map_err(|error| format!("{kind:?} {victim_role:?} authorized retry: {error}"))?;
+        let lp_debit = debit_between(
+            lp_before,
+            env.primary_portfolio(LP).capital.get(),
+            "authorized source-backed LP fee",
+        )?;
+        let provider_credit = env.primary_market_state().1.source_backing_buckets
+            [WINNING_DOMAIN as usize]
+            .utilization_fee_earnings
+            .checked_sub(provider_before)
+            .ok_or_else(|| "authorized source-backing provider earnings decreased".to_string())?;
+        if lp_debit == 0 || lp_debit != provider_credit {
+            return Err(format!(
+                "{kind:?} {victim_role:?} authorized retry fee mismatch: \
+                 debit={lp_debit}, provider={provider_credit}"
+            ));
+        }
+        env.withdraw_backing_bucket_earnings_for_actor(PROVIDER, WINNING_DOMAIN, provider_credit)
+            .map_err(|error| format!("withdraw authorized source-fee earnings: {error}"))?;
+        let extracted = u128::from(
+            env.token_amount(provider_destination)
+                .checked_sub(provider_tokens_before)
+                .ok_or_else(|| {
+                    "authorized source-fee provider destination decreased".to_string()
+                })?,
+        );
+        if extracted != provider_credit || env.token_supply_observed() != supply_before {
+            return Err(format!(
+                "{kind:?} {victim_role:?} authorized source-fee reconciliation failed: \
+                 provider={provider_credit}, extracted={extracted}"
+            ));
+        }
+        (
+            true,
+            true,
+            lp_debit,
+            provider_credit,
+            extracted,
+            Some(success.compute_units),
+        )
+    } else {
+        (false, false, 0, 0, 0, None)
+    };
     Ok(SourceFeeConsentDiscovery {
         kind,
+        victim_role,
         accepted_unconsented_fee,
         lp_capital_debit,
         provider_earnings_credit,
         extracted_provider_tokens,
         compute_units,
+        over_cap_rejected_exact_rollback,
+        authorized_retry_landed,
+        authorized_retry_lp_capital_debit,
+        authorized_retry_provider_earnings_credit,
+        authorized_retry_extracted_provider_tokens,
+        authorized_retry_compute_units,
         terminal_classification,
         public_trace,
     })
@@ -7418,7 +7574,11 @@ pub fn discover_source_fee_consent_violations(
 ) -> Result<Vec<SourceFeeConsentDiscovery>, String> {
     SourceFeeConsentKind::ALL
         .into_iter()
-        .map(|kind| discover_one_source_fee_consent_violation(seed, kind))
+        .flat_map(|kind| {
+            SourceFeeConsentRole::ALL
+                .into_iter()
+                .map(move |role| discover_one_source_fee_consent_violation(seed, kind, role))
+        })
         .collect()
 }
 
@@ -7566,8 +7726,16 @@ fn discover_one_backing_provider_consent_violation(
         }
     }
 
-    env.trade_no_cpi(MARKET_TRADER, LP, ASSET, -WINNING_SIZE_Q, PRICE, 0)
-        .map_err(|error| format!("open provider-backed winning leg: {error}"))?;
+    env.trade_no_cpi_with_backing_fee_cap(
+        MARKET_TRADER,
+        LP,
+        ASSET,
+        -WINNING_SIZE_Q,
+        PRICE,
+        0,
+        BACKING_FEE_BPS,
+    )
+    .map_err(|error| format!("open provider-backed winning leg: {error}"))?;
     env.trade_no_cpi(MARKET_TRADER, LP, 0, -LOSING_SIZE_Q, PRICE, 0)
         .map_err(|error| format!("open provider-backed losing leg: {error}"))?;
     env.warp_to_slot(2);
@@ -7595,7 +7763,15 @@ fn discover_one_backing_provider_consent_violation(
         ));
     }
 
-    let retained_trade = env.build_retained_no_cpi_trade(OPERATOR, LP, 0, -INCREASE_Q, PRICE - 5);
+    let retained_trade = env.build_retained_no_cpi_trade_with_fee_and_backing_cap(
+        OPERATOR,
+        LP,
+        0,
+        -INCREASE_Q,
+        PRICE - 5,
+        0,
+        BACKING_FEE_BPS,
+    );
     let before = env.primary_market_state().1;
     let provider_before =
         before.source_backing_buckets[WINNING_DOMAIN as usize].utilization_fee_earnings;
@@ -9168,6 +9344,7 @@ fn build_retained_discovery_trade(
     asset_index: u16,
     size_q: i128,
     price: u64,
+    backing_fee_cap_bps: u16,
 ) -> Result<Transaction, String> {
     if matches!(
         route,
@@ -9177,15 +9354,26 @@ fn build_retained_discovery_trade(
             .map_err(|error| format!("refresh retained CPI matcher authorization: {error}"))?;
     }
     match route {
-        DiscoveryTradeRoute::NoCpi => {
-            Ok(env.build_retained_no_cpi_trade(taker, maker, asset_index, size_q, price))
-        }
+        DiscoveryTradeRoute::NoCpi => Ok(env.build_retained_no_cpi_trade_with_fee_and_backing_cap(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            price,
+            0,
+            backing_fee_cap_bps,
+        )),
         DiscoveryTradeRoute::BatchNoCpi => {
             Ok(env.build_retained_batch_no_cpi_trade(taker, maker, asset_index, size_q, price))
         }
-        DiscoveryTradeRoute::Cpi => {
-            Ok(env.build_retained_cpi_trade(taker, maker, asset_index, size_q, 0))
-        }
+        DiscoveryTradeRoute::Cpi => Ok(env.build_retained_cpi_trade_with_backing_fee_cap(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            0,
+            backing_fee_cap_bps,
+        )),
         DiscoveryTradeRoute::BatchCpi => {
             Ok(env.build_retained_batch_cpi_trade(taker, maker, asset_index, size_q, 0))
         }
@@ -9799,7 +9987,7 @@ fn run_pending_mark_inheritance_world(
     env.top_up_backing_bucket(1, 10_000_000, 100)
         .map_err(|error| format!("{route:?} fund source backing: {error}"))?;
     env.warp_to_slot(2);
-    let retained = build_retained_discovery_trade(&mut env, route, 2, 3, 0, LARGE_Q, MARK)?;
+    let retained = build_retained_discovery_trade(&mut env, route, 2, 3, 0, LARGE_Q, MARK, 0)?;
 
     let seed_capital_before = env
         .primary_portfolio(0)
@@ -13673,7 +13861,15 @@ pub fn discover_backing_expiry_violation(
     let capital_before = env.primary_portfolio(0).capital.get();
     let provider_before = env.token_amount(env.provider_destination_token);
     let supply_before = env.token_supply_observed();
-    let retained = env.build_retained_no_cpi_trade(0, 1, 0, increase_q, winning_mark);
+    let retained = env.build_retained_no_cpi_trade_with_fee_and_backing_cap(
+        0,
+        1,
+        0,
+        increase_q,
+        winning_mark,
+        0,
+        fee_bps,
+    );
 
     let authenticated_slot = expiry_slot
         .checked_add(1)
@@ -13829,6 +14025,7 @@ pub fn discover_backing_expiry_trade_route_boundary(
         ASSET,
         INCREASE_Q,
         WINNING_MARK,
+        5_000,
     )?;
     let before_retained = fingerprint(&env);
 

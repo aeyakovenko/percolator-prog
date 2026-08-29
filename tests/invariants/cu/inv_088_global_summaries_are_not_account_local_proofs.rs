@@ -726,7 +726,7 @@ fn inv_088_realize_backing_earnings(env: &mut V16CuEnv, cohort: &Inv088EarningsC
     );
     let before = env.market_state().1.source_backing_buckets[cohort.domain as usize]
         .utilization_fee_earnings;
-    env.trade_asset_with_cu(
+    env.try_trade_asset_with_backing_fee_cap_with_cu(
         cohort.hedge_asset,
         &cohort.cross_owner,
         cohort.cross_portfolio,
@@ -735,7 +735,9 @@ fn inv_088_realize_backing_earnings(env: &mut V16CuEnv, cohort: &Inv088EarningsC
         LIEN_GROWTH_Q,
         95,
         0,
-    );
+        5_000,
+    )
+    .expect("risk increase with signed backing-fee cap");
     let after = env.market_state().1.source_backing_buckets[cohort.domain as usize]
         .utilization_fee_earnings;
     let earned = after

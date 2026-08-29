@@ -2839,6 +2839,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            backing_fee_cap_bps: 0,
         },
         vec![
             AccountMeta::new(local_owner.pubkey(), true),
@@ -3011,6 +3012,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            backing_fee_cap_bps: 0,
         },
         vec![
             AccountMeta::new(local_owner.pubkey(), true),
@@ -3474,6 +3476,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 size_q: POS_SCALE as i128,
                 exec_price: 100,
                 fee_bps: 100,
+                backing_fee_cap_bps: 0,
             },
             vec![
                 AccountMeta::new(attacker.pubkey(), true),
@@ -3520,6 +3523,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
+                backing_fee_cap_bps: 0,
             },
             vec![
                 AccountMeta::new(attacker.pubkey(), true),
@@ -3593,6 +3597,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 100,
+            backing_fee_cap_bps: 0,
         },
         vec![
             AccountMeta::new(good_a.pubkey(), true),
@@ -3699,6 +3704,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             size_q: POS_SCALE as i128,
             fee_bps: 100,
             limit_price: 0,
+            backing_fee_cap_bps: 0,
         },
     );
     reject_foreign_matcher_tuple(
@@ -3733,6 +3739,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             size_q: POS_SCALE as i128,
             fee_bps: 100,
             limit_price: 0,
+            backing_fee_cap_bps: 0,
         },
         vec![
             AccountMeta::new(cpi_taker.pubkey(), true),
@@ -4255,6 +4262,7 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            backing_fee_cap_bps: 0,
         },
         vec![
             AccountMeta::new(long_owner.pubkey(), true),
@@ -4764,6 +4772,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            backing_fee_cap_bps: 0,
         },
         vec![
             AccountMeta::new(b_long_owner.pubkey(), true),

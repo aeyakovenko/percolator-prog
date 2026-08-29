@@ -721,6 +721,7 @@ struct NoCpiTradeWireFields {
     size_q: i128,
     exec_price: u64,
     fee_bps: u64,
+    backing_fee_cap_bps: u16,
 }
 
 fn canonical_nocpi_trade_fields() -> NoCpiTradeWireFields {
@@ -734,11 +735,12 @@ fn canonical_nocpi_trade_fields() -> NoCpiTradeWireFields {
         size_q: -0x7777_7777_7777_7777_7777_7777_7777_7777i128,
         exec_price: 0x8888_8888_8888_8888,
         fee_bps: 0x9999_9999_9999_9999,
+        backing_fee_cap_bps: 0xaaaa,
     }
 }
 
 fn assert_single_nocpi_trade_decoder_preserves(fields: NoCpiTradeWireFields) {
-    let mut single = [0u8; 75];
+    let mut single = [0u8; 77];
     single[0] = 6;
     single[1..9].copy_from_slice(&fields.account_a_portfolio_id.to_le_bytes());
     single[9..17].copy_from_slice(&fields.account_a_position_epoch.to_le_bytes());
@@ -749,6 +751,7 @@ fn assert_single_nocpi_trade_decoder_preserves(fields: NoCpiTradeWireFields) {
     single[43..59].copy_from_slice(&fields.size_q.to_le_bytes());
     single[59..67].copy_from_slice(&fields.exec_price.to_le_bytes());
     single[67..75].copy_from_slice(&fields.fee_bps.to_le_bytes());
+    single[75..77].copy_from_slice(&fields.backing_fee_cap_bps.to_le_bytes());
     match Instruction::decode_body_for_proof(6, &single[1..]).unwrap() {
         Instruction::TradeNoCpi {
             account_a_portfolio_id,
@@ -760,6 +763,7 @@ fn assert_single_nocpi_trade_decoder_preserves(fields: NoCpiTradeWireFields) {
             size_q,
             exec_price,
             fee_bps,
+            backing_fee_cap_bps,
         } => {
             assert_eq!(account_a_portfolio_id, fields.account_a_portfolio_id);
             assert_eq!(account_a_position_epoch, fields.account_a_position_epoch);
@@ -770,6 +774,7 @@ fn assert_single_nocpi_trade_decoder_preserves(fields: NoCpiTradeWireFields) {
             assert_eq!(size_q, fields.size_q);
             assert_eq!(exec_price, fields.exec_price);
             assert_eq!(fee_bps, fields.fee_bps);
+            assert_eq!(backing_fee_cap_bps, fields.backing_fee_cap_bps);
         }
         _ => unreachable!(),
     }
@@ -822,6 +827,7 @@ struct CpiTradeWireFields {
     size_q: i128,
     fee_bps: u64,
     limit_price: u64,
+    backing_fee_cap_bps: u16,
 }
 
 fn canonical_cpi_trade_fields() -> CpiTradeWireFields {
@@ -835,11 +841,12 @@ fn canonical_cpi_trade_fields() -> CpiTradeWireFields {
         size_q: -0x7777_7777_7777_7777_7777_7777_7777_7777i128,
         fee_bps: 0x8888_8888_8888_8888,
         limit_price: 0x9999_9999_9999_9999,
+        backing_fee_cap_bps: 0xaaaa,
     }
 }
 
 fn assert_single_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
-    let mut single = [0u8; 75];
+    let mut single = [0u8; 77];
     single[0] = 10;
     single[1..9].copy_from_slice(&fields.account_a_portfolio_id.to_le_bytes());
     single[9..17].copy_from_slice(&fields.account_a_position_epoch.to_le_bytes());
@@ -850,6 +857,7 @@ fn assert_single_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
     single[43..59].copy_from_slice(&fields.size_q.to_le_bytes());
     single[59..67].copy_from_slice(&fields.fee_bps.to_le_bytes());
     single[67..75].copy_from_slice(&fields.limit_price.to_le_bytes());
+    single[75..77].copy_from_slice(&fields.backing_fee_cap_bps.to_le_bytes());
     match Instruction::decode_body_for_proof(10, &single[1..]).unwrap() {
         Instruction::TradeCpi {
             account_a_portfolio_id,
@@ -861,6 +869,7 @@ fn assert_single_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
             size_q,
             fee_bps,
             limit_price,
+            backing_fee_cap_bps,
         } => {
             assert_eq!(account_a_portfolio_id, fields.account_a_portfolio_id);
             assert_eq!(account_a_position_epoch, fields.account_a_position_epoch);
@@ -871,6 +880,7 @@ fn assert_single_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
             assert_eq!(size_q, fields.size_q);
             assert_eq!(fee_bps, fields.fee_bps);
             assert_eq!(limit_price, fields.limit_price);
+            assert_eq!(backing_fee_cap_bps, fields.backing_fee_cap_bps);
         }
         _ => unreachable!(),
     }
@@ -1003,6 +1013,13 @@ prove_nocpi_trade_field!(
     u64
 );
 
+#[kani::proof]
+fn kani_v16_single_nocpi_trade_decoder_preserves_backing_fee_cap_bps() {
+    let mut fields = canonical_nocpi_trade_fields();
+    fields.backing_fee_cap_bps = kani::any();
+    assert_single_nocpi_trade_decoder_preserves(fields);
+}
+
 prove_cpi_trade_field!(
     kani_v16_single_cpi_trade_decoder_preserves_account_a_portfolio_id,
     kani_v16_batch_cpi_trade_decoder_preserves_account_a_portfolio_id,
@@ -1057,6 +1074,44 @@ prove_cpi_trade_field!(
     limit_price,
     u64
 );
+
+#[kani::proof]
+fn kani_v16_single_cpi_trade_decoder_preserves_backing_fee_cap_bps() {
+    let mut fields = canonical_cpi_trade_fields();
+    fields.backing_fee_cap_bps = kani::any();
+    assert_single_cpi_trade_decoder_preserves(fields);
+}
+
+#[kani::proof]
+fn kani_v16_single_trade_decoders_reject_backing_cap_less_schema() {
+    let nocpi = canonical_nocpi_trade_fields();
+    let mut single_nocpi = [0u8; 75];
+    single_nocpi[0] = 6;
+    single_nocpi[1..9].copy_from_slice(&nocpi.account_a_portfolio_id.to_le_bytes());
+    single_nocpi[9..17].copy_from_slice(&nocpi.account_a_position_epoch.to_le_bytes());
+    single_nocpi[17..25].copy_from_slice(&nocpi.account_b_portfolio_id.to_le_bytes());
+    single_nocpi[25..33].copy_from_slice(&nocpi.account_b_position_epoch.to_le_bytes());
+    single_nocpi[33..35].copy_from_slice(&nocpi.asset_index.to_le_bytes());
+    single_nocpi[35..43].copy_from_slice(&nocpi.market_id.to_le_bytes());
+    single_nocpi[43..59].copy_from_slice(&nocpi.size_q.to_le_bytes());
+    single_nocpi[59..67].copy_from_slice(&nocpi.exec_price.to_le_bytes());
+    single_nocpi[67..75].copy_from_slice(&nocpi.fee_bps.to_le_bytes());
+    assert!(Instruction::decode_body_for_proof(6, &single_nocpi[1..]).is_err());
+
+    let cpi = canonical_cpi_trade_fields();
+    let mut single_cpi = [0u8; 75];
+    single_cpi[0] = 10;
+    single_cpi[1..9].copy_from_slice(&cpi.account_a_portfolio_id.to_le_bytes());
+    single_cpi[9..17].copy_from_slice(&cpi.account_a_position_epoch.to_le_bytes());
+    single_cpi[17..25].copy_from_slice(&cpi.account_b_portfolio_id.to_le_bytes());
+    single_cpi[25..33].copy_from_slice(&cpi.account_b_position_epoch.to_le_bytes());
+    single_cpi[33..35].copy_from_slice(&cpi.asset_index.to_le_bytes());
+    single_cpi[35..43].copy_from_slice(&cpi.market_id.to_le_bytes());
+    single_cpi[43..59].copy_from_slice(&cpi.size_q.to_le_bytes());
+    single_cpi[59..67].copy_from_slice(&cpi.fee_bps.to_le_bytes());
+    single_cpi[67..75].copy_from_slice(&cpi.limit_price.to_le_bytes());
+    assert!(Instruction::decode_body_for_proof(10, &single_cpi[1..]).is_err());
+}
 
 #[kani::proof]
 fn kani_v16_trade_decoders_reject_position_epoch_less_legacy_schemas() {
@@ -1905,6 +1960,7 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
             size_q: 1,
             exec_price: 100,
             fee_bps: 0,
+            backing_fee_cap_bps: 0,
         },
         extra,
     );
@@ -1919,6 +1975,7 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
             size_q: 1,
             fee_bps: 0,
             limit_price: 0,
+            backing_fee_cap_bps: 0,
         },
         extra,
     );
