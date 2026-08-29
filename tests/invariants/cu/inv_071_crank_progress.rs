@@ -28,7 +28,17 @@ struct Inv071PublicCloseBOverlap {
     shutdown_slot: u64,
 }
 
-fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
+struct Inv071PublicBAdverseOverlap {
+    env: V16CuEnv,
+    target_owner: Keypair,
+    target: Pubkey,
+    target_b: u128,
+    b_before: percolator::PortfolioLegV16,
+    adverse_before: percolator::PortfolioLegV16,
+    now_slot: u64,
+}
+
+fn inv071_public_b_adverse_overlap() -> Inv071PublicBAdverseOverlap {
     let PublicActiveCloseFixture {
         mut env,
         loss,
@@ -65,8 +75,9 @@ fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
     let b_stale = active_leg_for_asset(&env.portfolio_state(target), 1);
     assert!(b_stale.b_stale && b_stale.b_snap < target_b);
 
-    // Make the already-open asset-0 short bankrupt using only authenticated mark
-    // updates, then enter its close episode through the owner forfeit route.
+    // Make the already-open asset-0 short adverse using only authenticated mark
+    // updates while leaving its account uncranked. This creates a real public
+    // B prerequisite in front of the separately actionable live-risk leg.
     for (slot, mark) in [(5u64, 200u64), (6, 400)] {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_as_admin(0, slot, mark);
@@ -109,6 +120,37 @@ fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
             || caught_up_profile.funding_mark_pending_slot <= caught_up_group.assets[0].slot_last,
         "bounded public accrual must make the authenticated checkpoint replayable"
     );
+
+    let overlap = env.portfolio_state(target);
+    let b_before = active_leg_for_asset(&overlap, 1);
+    let adverse_before = active_leg_for_asset(&overlap, 0);
+    assert!(b_before.b_stale && b_before.b_snap < target_b);
+    assert_eq!(adverse_before.side, SideV16::Short);
+
+    Inv071PublicBAdverseOverlap {
+        env,
+        target_owner,
+        target,
+        target_b,
+        b_before,
+        adverse_before,
+        now_slot: shutdown_slot,
+    }
+}
+
+fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
+    let Inv071PublicBAdverseOverlap {
+        mut env,
+        target_owner,
+        target,
+        target_b,
+        b_before,
+        now_slot: shutdown_slot,
+        ..
+    } = inv071_public_b_adverse_overlap();
+
+    // Freeze and forfeit the adverse leg to turn the lower-priority live-risk
+    // work into a durable close ledger without touching the independent B leg.
     let admin = Keypair::from_bytes(&env.admin.to_bytes()).expect("copy market authority");
     env.try_shutdown_asset_with_authority(&admin, 0, shutdown_slot)
         .expect("market authority shuts down asset 0");
@@ -116,9 +158,8 @@ fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
 
     let overlap = env.portfolio_state(target);
     let close_before = close_progress(&overlap);
-    let b_before = active_leg_for_asset(&overlap, 1);
     assert!(inv071_close_pending(close_before));
-    assert!(b_before.b_stale && b_before.b_snap < target_b);
+    assert_eq!(active_leg_for_asset(&overlap, 1), b_before);
 
     Inv071PublicCloseBOverlap {
         env,
@@ -129,6 +170,119 @@ fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
         close_before,
         shutdown_slot,
     }
+}
+
+#[test]
+fn v16_program_public_b_prerequisite_preserves_later_liquidation_progress() {
+    let Inv071PublicBAdverseOverlap {
+        mut env,
+        target,
+        target_b,
+        b_before,
+        adverse_before,
+        now_slot,
+        ..
+    } = inv071_public_b_adverse_overlap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let group_before = env.market_state().1;
+    let cert_before = health_cert(&env.portfolio_state(target));
+    assert!(
+        !cert_before.valid
+            || cert_before.cert_oracle_epoch != group_before.oracle_epoch
+            || cert_before.cert_funding_epoch != group_before.funding_epoch
+            || cert_before.cert_risk_epoch != group_before.risk_epoch
+            || cert_before.cert_asset_set_epoch != group_before.asset_set_epoch
+            || cert_before.active_bitmap_at_cert != active_bitmap(&env.portfolio_state(target)),
+        "the public B/adverse prefix must expose the certificate prerequisite"
+    );
+
+    // The adverse leg cannot make B settlement disappear or redirect it. Even
+    // with the asset-0 observation present, the first public call must consume
+    // the account-local B prerequisite and frame the separate live-risk leg.
+    env.svm.expire_blockhash();
+    let settle_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+            ],
+            &[],
+        )
+        .expect("B prerequisite must be publicly dispatchable before adverse-risk work");
+    assert_cu_within(
+        "public B prerequisite before liquidation",
+        settle_cu,
+        CRANK_CU_LIMIT,
+    );
+    let after_b = env.portfolio_state(target);
+    let b_after = active_leg_for_asset(&after_b, 1);
+    assert!(b_after.b_snap > b_before.b_snap);
+    assert!(b_after.b_snap <= target_b);
+    assert_eq!(
+        active_leg_for_asset(&after_b, 0),
+        adverse_before,
+        "B settlement must frame the independent adverse leg"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "B settlement must move no SPL custody"
+    );
+
+    // Once B reaches its target, the same observation-bearing public route must
+    // recertify and reduce the adverse leg in finitely many bounded calls. This
+    // proves the real sequential composition even though this public prefix's B
+    // work precedes the health-certificate state needed for liquidation.
+    let adverse_abs_before = adverse_before.basis_pos_q.unsigned_abs();
+    let mut reduced = false;
+    for _ in 0..8 {
+        let account_before = env.svm.get_account(&target).unwrap();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        let step_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new_readonly(env.payer.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(target, false),
+                ],
+                &[],
+            )
+            .expect("post-B adverse account must retain a public progress step");
+        assert_cu_within(
+            "public post-B liquidation continuation",
+            step_cu,
+            CRANK_CU_LIMIT,
+        );
+        assert!(
+            env.svm.get_account(&target).unwrap() != account_before
+                || env.svm.get_account(&env.market).unwrap() != market_before,
+            "every accepted post-B crank must mutate the account or market"
+        );
+        let after = env.portfolio_state(target);
+        reduced = !has_active_leg_for_asset(&after, 0)
+            || active_leg_for_asset(&after, 0).basis_pos_q.unsigned_abs() < adverse_abs_before;
+        if reduced {
+            break;
+        }
+    }
+    assert!(
+        reduced,
+        "the publicly adverse leg must become liquidatable after its B prerequisite clears"
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
 }
 
 #[test]
