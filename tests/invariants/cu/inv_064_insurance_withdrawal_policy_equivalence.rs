@@ -2,6 +2,10 @@
 //!
 //! The wrapper exposes one asset-scoped insurance withdrawal route in both live and resolved
 //! modes. The same authority, budget, custody, and rollback rules must apply in either mode.
+//! `v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_close` additionally
+//! owns INV-027's insurance-withdrawal seniority row: loss-stale live withdrawal preserves market,
+//! vault, and both funded portfolios byte-for-byte; both users then recover exact principal before
+//! the authority receives only the exact residual insurance in terminal mode.
 
 use super::*;
 
@@ -707,6 +711,9 @@ fn v16_attack_unexposed_target_move_cannot_grief_live_insurance_withdrawals() {
 
 #[test]
 fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_close() {
+    const USER_PRINCIPAL: u128 = 1_000;
+    const INSURANCE_ATOMS: u128 = 100;
+
     let mut env = V16CuEnv::new();
     let insurance_authority = Keypair::new();
     let insurance_operator = Keypair::new();
@@ -723,16 +730,17 @@ fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_clo
         env.admin.pubkey(),
     );
 
-    let insurance_source = env.top_up_insurance_domain_with_authority(&insurance_authority, 2, 100);
+    let insurance_source =
+        env.top_up_insurance_domain_with_authority(&insurance_authority, 2, INSURANCE_ATOMS);
     assert_eq!(env.token_amount(insurance_source), 0);
-    assert_eq!(env.token_amount(env.vault), 100);
+    assert_eq!(u128::from(env.token_amount(env.vault)), INSURANCE_ATOMS);
 
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
     let long_account = env.create_portfolio(&long_owner);
     let short_account = env.create_portfolio(&short_owner);
-    env.deposit(&long_owner, long_account, 1_000);
-    env.deposit(&short_owner, short_account, 1_000);
+    env.deposit(&long_owner, long_account, USER_PRINCIPAL);
+    env.deposit(&short_owner, short_account, USER_PRINCIPAL);
     env.trade_asset_with_cu(
         1,
         &long_owner,
@@ -758,14 +766,37 @@ fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_clo
         group.loss_stale_active,
         "advancing SVM Clock must reproduce the live stale-loss gate"
     );
-    assert_eq!(group.insurance_domain_budget[2], 100);
+    assert_eq!(group.insurance_domain_budget[2], INSURANCE_ATOMS);
 
+    let market_before_reject = env.svm.get_account(&env.market).unwrap();
+    let vault_before_reject = env.svm.get_account(&env.vault).unwrap();
+    let long_before_reject = env.svm.get_account(&long_account).unwrap();
+    let short_before_reject = env.svm.get_account(&short_account).unwrap();
     assert!(
-        env.try_withdraw_insurance_domain_with_authority(&insurance_operator, 2, 100)
+        env.try_withdraw_insurance_domain_with_authority(&insurance_operator, 2, INSURANCE_ATOMS,)
             .is_err(),
         "live domain withdrawal remains blocked while loss-stale"
     );
-    assert_eq!(env.token_amount(env.vault), 2_100);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_reject
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_reject
+    );
+    assert_eq!(
+        env.svm.get_account(&long_account).unwrap(),
+        long_before_reject
+    );
+    assert_eq!(
+        env.svm.get_account(&short_account).unwrap(),
+        short_before_reject
+    );
+    assert_eq!(
+        u128::from(env.token_amount(env.vault)),
+        2 * USER_PRINCIPAL + INSURANCE_ATOMS
+    );
 
     env.trade_asset_with_cu(
         1,
@@ -782,23 +813,42 @@ fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_clo
     assert_eq!(group.assets[1].oi_eff_long_q, 0);
     assert_eq!(group.assets[1].oi_eff_short_q, 0);
 
-    let long_dest = env.withdraw(&long_owner, long_account, 1_000);
-    let short_dest = env.withdraw(&short_owner, short_account, 1_000);
-    assert_eq!(env.token_amount(long_dest), 1_000);
-    assert_eq!(env.token_amount(short_dest), 1_000);
+    let long_dest = env.withdraw(&long_owner, long_account, USER_PRINCIPAL);
+    let short_dest = env.withdraw(&short_owner, short_account, USER_PRINCIPAL);
+    assert_eq!(u128::from(env.token_amount(long_dest)), USER_PRINCIPAL);
+    assert_eq!(u128::from(env.token_amount(short_dest)), USER_PRINCIPAL);
+    let after_user_withdrawals = env.market_state().1;
+    assert_eq!(after_user_withdrawals.c_tot, 0);
+    assert_eq!(after_user_withdrawals.insurance, INSURANCE_ATOMS);
+    assert_eq!(after_user_withdrawals.vault, INSURANCE_ATOMS);
+    assert_eq!(
+        u128::from(env.token_amount(env.vault)),
+        INSURANCE_ATOMS,
+        "both users recover exact principal before insurance authority value can leave"
+    );
     env.close_portfolio_with_cu(&long_owner, long_account);
     env.close_portfolio_with_cu(&short_owner, short_account);
 
     env.resolve();
     let (insurance_dest, _) =
-        env.withdraw_terminal_insurance_with_authority(&insurance_authority, 1, 100);
-    assert_eq!(env.token_amount(insurance_dest), 100);
+        env.withdraw_terminal_insurance_with_authority(&insurance_authority, 1, INSURANCE_ATOMS);
+    assert_eq!(
+        u128::from(env.token_amount(insurance_dest)),
+        INSURANCE_ATOMS
+    );
     assert_eq!(env.token_amount(env.vault), 0);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (_, group) = state::read_market(&market_data).unwrap();
     assert_eq!(group.vault, 0);
     assert_eq!(group.insurance, 0);
     assert_eq!(group.insurance_domain_budget[2], 0);
+    assert_eq!(
+        u128::from(env.token_amount(long_dest))
+            + u128::from(env.token_amount(short_dest))
+            + u128::from(env.token_amount(insurance_dest)),
+        2 * USER_PRINCIPAL + INSURANCE_ATOMS,
+        "terminal value partition returns user principal before exact residual insurance"
+    );
 
     env.close_slab_with_cu();
     let market_data = env.svm.get_account(&env.market).unwrap().data;

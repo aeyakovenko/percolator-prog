@@ -38,10 +38,16 @@
 //! invalidations. Each refreshed conversion consumes only its exact source-backing lien and frames
 //! the original counterparty and SPL custody.
 //!
+//! `v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_close` in the
+//! INV-064-owned file closes the insurance-withdrawal row. A publicly funded live position blocks
+//! withdrawal under stale loss state with exact account rollback; both users recover exact
+//! principal before only residual insurance can leave terminal custody. INV-066 independently
+//! requires every one of five user claims to settle before prior insurance is withdrawn.
+//!
 //! Guarantee boundary: this certifies the stale K/F cohort, half-backed, pending-close,
-//! resolved-payout, and certificate-stale rows on the fixed engine pin. Insurance-withdrawal and
-//! other loss-stale rows still need one normalized public route-by-state matrix before INV-027 can
-//! be promoted beyond partial coverage.
+//! resolved-payout, certificate-stale, and insurance-withdrawal rows on the fixed engine pin. Other
+//! loss-stale rows still need one normalized public route-by-state matrix before INV-027 can be
+//! promoted beyond partial coverage.
 //! `v16_program_fully_backed_pnl_route_matrix_preserves_unrelated_principal` closes the Current
 //! fully funded control row. It realizes the same directional profit through every trade family,
 //! independently derives realizable support from the claim and backing stocks, and proves the
