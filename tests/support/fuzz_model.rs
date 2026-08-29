@@ -13692,6 +13692,256 @@ pub fn verify_positive_claim_bound_attribution_lifecycle(
 }
 
 #[allow(dead_code)]
+pub fn verify_favorable_funding_claim_bound_route_matrix(seed: [u8; 32]) -> Result<u64, String> {
+    const ACTOR_A: usize = 0;
+    const ACTOR_B: usize = 1;
+    const ASSET: u16 = 0;
+    const PRICE: u64 = 2;
+    const TARGET: u64 = 1;
+    const Q: i128 = 100 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut world_count = 0u64;
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        for actor_a_long in [false, true] {
+            let mut world_seed = seed;
+            world_seed[0] ^= route.index() as u8;
+            world_seed[1] ^= u8::from(actor_a_long) << 7;
+            let direction = if actor_a_long { 1i128 } else { -1i128 };
+            let label = format!("INV-029 funding {route:?} actor_a_long={actor_a_long}");
+            let mut env = V16Svm::new(
+                world_seed,
+                MarketConfig {
+                    initial_price: PRICE,
+                    max_price_move_bps_per_slot: 24,
+                    max_accrual_dt_slots: 1,
+                    max_abs_funding_e9_per_slot: 1_000,
+                    min_funding_lifetime_slots: 1,
+                    actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+                    actor_token_balances: [DEPOSIT as u64, DEPOSIT as u64, 1, 1, 1],
+                    ..MarketConfig::default()
+                },
+            );
+            let supply_before = env.token_supply_observed();
+            let unrelated_before = [env.primary_portfolio_data(2), env.primary_portfolio_data(3)];
+            let unrelated_tokens_before = [
+                (
+                    env.token_amount(env.actors[2].source_token),
+                    env.token_amount(env.actors[2].destination_token),
+                ),
+                (
+                    env.token_amount(env.actors[3].source_token),
+                    env.token_amount(env.actors[3].destination_token),
+                ),
+            ];
+            let destination_before = [
+                env.token_amount(env.actors[ACTOR_A].destination_token),
+                env.token_amount(env.actors[ACTOR_B].destination_token),
+            ];
+            assert_primary_source_claim_bound_attribution(&format!("{label} initialized"), &env)?;
+
+            execute_trade_route(
+                &mut env,
+                route,
+                ACTOR_A,
+                ACTOR_B,
+                ASSET,
+                direction * Q,
+                PRICE,
+                0,
+            )
+            .map_err(|error| format!("{label} open: {error}"))?;
+            assert_primary_source_claim_bound_attribution(&format!("{label} after open"), &env)?;
+
+            env.warp_to_slot(2);
+            env.push_auth_mark(ASSET, 2, TARGET)
+                .map_err(|error| format!("{label} stage funding target: {error}"))?;
+            assert_primary_source_claim_bound_attribution(&format!("{label} after target"), &env)?;
+            for actor in [ACTOR_A, ACTOR_B] {
+                env.crank(actor, 2, zero_move_observation(&env))
+                    .map_err(|error| format!("{label} slot-2 crank actor {actor}: {error}"))?;
+                assert_primary_source_claim_bound_attribution(
+                    &format!("{label} after slot-2 actor {actor}"),
+                    &env,
+                )?;
+            }
+            let (_, primed) = env.primary_market_state();
+            if primed.assets[ASSET as usize].effective_price != PRICE
+                || primed.assets[ASSET as usize].f_long_num != 0
+                || primed.assets[ASSET as usize].f_short_num != 0
+            {
+                return Err(format!(
+                    "{label}: target staging moved value before the funding interval: asset={:?}",
+                    primed.assets[ASSET as usize]
+                ));
+            }
+
+            env.warp_to_slot(3);
+            for actor in [ACTOR_A, ACTOR_B] {
+                env.crank_if_actionable(actor, 3, zero_move_observation(&env))
+                    .map_err(|error| format!("{label} funding crank actor {actor}: {error}"))?;
+                assert_primary_source_claim_bound_attribution(
+                    &format!("{label} after funding actor {actor}"),
+                    &env,
+                )?;
+            }
+            let (_, funded_group) = env.primary_market_state();
+            let funded_asset = funded_group.assets[ASSET as usize];
+            if funded_asset.effective_price != PRICE
+                || funded_asset.f_long_num == 0
+                || funded_asset.f_short_num != -funded_asset.f_long_num
+            {
+                return Err(format!(
+                    "{label}: fixture did not isolate a zero-mark-move funding transfer: asset={funded_asset:?}"
+                ));
+            }
+            let funded_accounts = [
+                env.primary_portfolio(ACTOR_A),
+                env.primary_portfolio(ACTOR_B),
+            ];
+            let winners = [ACTOR_A, ACTOR_B]
+                .into_iter()
+                .filter(|actor| env.primary_portfolio(*actor).pnl.get() > 0)
+                .collect::<Vec<_>>();
+            if winners.len() != 1 {
+                return Err(format!(
+                    "{label}: funding must produce exactly one positive claimant: pnl={:?}",
+                    funded_accounts.map(|account| account.pnl.get())
+                ));
+            }
+            let winner = winners[0];
+            let payer = if winner == ACTOR_A { ACTOR_B } else { ACTOR_A };
+            let winner_pnl = u128::try_from(env.primary_portfolio(winner).pnl.get())
+                .map_err(|_| format!("{label}: positive funding PnL does not fit u128"))?;
+            let expected_claim_num = winner_pnl
+                .checked_mul(BOUND_SCALE)
+                .ok_or_else(|| format!("{label}: funding claim scale overflow"))?;
+            let claim_domains = funded_group
+                .source_credit
+                .iter()
+                .enumerate()
+                .filter_map(|(domain, _)| {
+                    let claim = source_claim_for_domain(&env.primary_portfolio(winner), domain);
+                    (claim != 0).then_some((domain, claim))
+                })
+                .collect::<Vec<_>>();
+            if claim_domains.len() != 1
+                || claim_domains[0].1 != expected_claim_num
+                || funded_group.source_credit[claim_domains[0].0].positive_claim_bound_num
+                    != expected_claim_num
+                || funded_group.source_claim_bound_total_num != expected_claim_num
+                || env.primary_portfolio(payer).pnl.get() != 0
+                || env
+                    .primary_portfolio(payer)
+                    .capital
+                    .get()
+                    .checked_add(winner_pnl)
+                    != Some(DEPOSIT)
+            {
+                return Err(format!(
+                    "{label}: favorable funding was not exactly source-attributed: winner={winner}, payer={payer}, pnl={winner_pnl}, claims={claim_domains:?}, total={}, payer_capital={}",
+                    funded_group.source_claim_bound_total_num,
+                    env.primary_portfolio(payer).capital.get(),
+                ));
+            }
+
+            execute_trade_route(
+                &mut env,
+                route,
+                ACTOR_A,
+                ACTOR_B,
+                ASSET,
+                -direction * Q,
+                PRICE,
+                0,
+            )
+            .map_err(|error| format!("{label} close: {error}"))?;
+            assert_primary_source_claim_bound_attribution(&format!("{label} after close"), &env)?;
+            let (_, before_conversion_group) = env.primary_market_state();
+            let before_conversion = env.primary_portfolio(winner);
+            let domain = claim_domains[0].0;
+            let claim_before = source_claim_for_domain(&before_conversion, domain);
+            let capital_before = before_conversion.capital.get();
+            let spl_vault_before = env.token_amount(env.vault);
+            env.convert_released_pnl(winner, winner_pnl)
+                .map_err(|error| format!("{label} convert funding claim: {error}"))?;
+            assert_primary_source_claim_bound_attribution(
+                &format!("{label} after conversion"),
+                &env,
+            )?;
+            let (_, after_conversion_group) = env.primary_market_state();
+            let after_conversion = env.primary_portfolio(winner);
+            if after_conversion.pnl.get() != 0
+                || after_conversion.capital.get().checked_sub(capital_before) != Some(winner_pnl)
+                || source_claim_for_domain(&after_conversion, domain)
+                    .checked_add(expected_claim_num)
+                    != Some(claim_before)
+                || after_conversion_group.source_credit[domain]
+                    .positive_claim_bound_num
+                    .checked_add(expected_claim_num)
+                    != Some(before_conversion_group.source_credit[domain].positive_claim_bound_num)
+                || after_conversion_group
+                    .source_claim_bound_total_num
+                    .checked_add(expected_claim_num)
+                    != Some(before_conversion_group.source_claim_bound_total_num)
+                || after_conversion_group.vault != before_conversion_group.vault
+                || env.token_amount(env.vault) != spl_vault_before
+            {
+                return Err(format!(
+                    "{label}: funding conversion did not burn and reclassify the exact claim"
+                ));
+            }
+
+            for actor in [ACTOR_A, ACTOR_B] {
+                let capital = env.primary_portfolio(actor).capital.get();
+                env.withdraw_primary(actor, capital)
+                    .map_err(|error| format!("{label} withdraw actor {actor}: {error}"))?;
+                assert_primary_source_claim_bound_attribution(
+                    &format!("{label} after withdraw actor {actor}"),
+                    &env,
+                )?;
+            }
+            let payout = [ACTOR_A, ACTOR_B]
+                .into_iter()
+                .enumerate()
+                .map(|(index, actor)| {
+                    env.token_amount(env.actors[actor].destination_token)
+                        .checked_sub(destination_before[index])
+                        .map(u128::from)
+                        .ok_or_else(|| format!("{label}: destination balance regressed"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if payout.iter().sum::<u128>() != 2 * DEPOSIT
+                || env.primary_portfolio_data(2) != unrelated_before[0]
+                || env.primary_portfolio_data(3) != unrelated_before[1]
+                || (
+                    env.token_amount(env.actors[2].source_token),
+                    env.token_amount(env.actors[2].destination_token),
+                ) != unrelated_tokens_before[0]
+                || (
+                    env.token_amount(env.actors[3].source_token),
+                    env.token_amount(env.actors[3].destination_token),
+                ) != unrelated_tokens_before[1]
+                || env.token_supply_observed() != supply_before
+            {
+                return Err(format!(
+                    "{label}: funding claim did not remain a zero-sum attributed user transfer: payout={payout:?}"
+                ));
+            }
+            world_count = world_count
+                .checked_add(1)
+                .ok_or_else(|| format!("{label}: world count overflow"))?;
+        }
+    }
+    Ok(world_count)
+}
+
+#[allow(dead_code)]
 pub fn verify_source_credit_rate_lifecycle(
     mut seed: [u8; 32],
     initial_backing: u16,

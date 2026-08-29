@@ -23,6 +23,13 @@
 //! Each conversion additionally proves exact account, domain, and aggregate bound deltas while SPL
 //! custody remains unchanged. The shared stateful runner applies the same census after every
 //! successful generated public action across single/batch and CPI/no-CPI routes.
+//! `v16_program_favorable_funding_claim_bounds_are_exact_across_routes_and_sides` adds eight
+//! zero-mark-move worlds across those four routes and both position orientations. Authenticated
+//! target lag creates nonzero funding while effective price remains fixed, so the positive claim
+//! can only come from funding. The independent census runs after every public transition; the
+//! winner's sole source-domain bound must equal its exact positive funding PnL, conversion burns
+//! that bound exactly without moving custody, both users recover the original aggregate principal,
+//! and unrelated portfolios remain byte- and token-identical.
 //! `v16_program_partial_receipt_exactly_replaces_its_prior_claim_bound` reuses the independent
 //! underfunded terminal lifecycle. Its shared transition oracle observes a genuine partial receipt
 //! and proves the terminal ledger adds exactly `terminal_positive_claim_face * BOUND_SCALE`,
@@ -36,6 +43,14 @@
 //! production whole-state enumeration proof or the charter's resolved/recovery claim model.
 
 use super::*;
+use crate::support::fuzz_model::verify_favorable_funding_claim_bound_route_matrix;
+
+#[test]
+fn v16_program_favorable_funding_claim_bounds_are_exact_across_routes_and_sides() {
+    let worlds = verify_favorable_funding_claim_bound_route_matrix([0xf2; 32])
+        .unwrap_or_else(|error| panic!("INV-029 favorable-funding matrix: {error}"));
+    assert_eq!(worlds, 8);
+}
 
 #[test]
 fn v16_program_partial_receipt_exactly_replaces_its_prior_claim_bound() {
