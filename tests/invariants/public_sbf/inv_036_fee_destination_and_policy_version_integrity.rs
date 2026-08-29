@@ -6,10 +6,10 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
-//! PRs 223, 224, 310, 313, and 314 are fixed-pin assertions here.
+//! Guarantee boundary: PRs 223, 224, 310, 313, and 314 are fixed-pin certifications here. The
+//! independent source-fee matrix still reproduces PR259 on no-CPI, while INV-014 retains PR339's
+//! backing-provider consent counterexample; those unresolved fee scopes are not covered by these
+//! certifications.
 
 use super::*;
 

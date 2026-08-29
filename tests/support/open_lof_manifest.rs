@@ -283,13 +283,13 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr220OmittedRescue,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         223,
         Privileged,
         FeeConsent,
         BlockerAdapter::Pr223CpiBackingFeeSiphon,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         224,
         Blocker,
         FeeConsent,
@@ -529,7 +529,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr309PortfolioCloseIncarnationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         310,
         Privileged,
         FeeConsent,
@@ -553,7 +553,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         FeeConsent,
         BlockerAdapter::Pr313CpiBaseFeeConsent,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         314,
         Blocker,
         FeeConsent,
