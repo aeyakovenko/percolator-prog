@@ -15,10 +15,10 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter. Non-trade cross-entrypoint
-//! bundles, successful partial-fill partitions, expiry, and aggregate signed budgets remain open.
+//! Guarantee boundary: PRs 343/344/350/351/355/362 are fixed-pin certifications of the currently
+//! deployed retained families, not a claim that absent message fields exist. Successful partial
+//! fills have their own INV-009 matrix; retained expiry and aggregate signed budgets remain open
+//! schema requirements.
 
 use super::*;
 use crate::support::v16_svm::{MarketConfig, V16Svm};

@@ -681,13 +681,13 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr340DelayedFeeRedirectPolicyReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         343,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr343TradeRetryReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         344,
         Blocker,
         ReplayIncarnation,
@@ -717,13 +717,13 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr349DelayedBackingFeePolicyReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         350,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr350DepositRetryReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         351,
         Blocker,
         ReplayIncarnation,
@@ -735,7 +735,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr353ResolveAuthorityIncarnationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         355,
         Blocker,
         ReplayIncarnation,
@@ -753,7 +753,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         DomainValue,
         BlockerAdapter::Pr360StaleCohortNovation,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         362,
         Blocker,
         ReplayIncarnation,
