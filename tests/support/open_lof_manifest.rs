@@ -277,7 +277,7 @@ use LofSeverity::{Blocker, Hardening, Privileged};
 // use Quarantined. Certified means the same public adapter now asserts the fixed-pin safety
 // postcondition; it does not imply exhaustive proof outside that adapter's stated boundary.
 pub const OPEN_LOFS: &[OpenLof] = &[
-    OpenLof::quarantined(
+    OpenLof::certified(
         220,
         Blocker,
         OracleAccrual,
@@ -419,7 +419,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr280TradeDrivenLiquidationReward,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         281,
         Blocker,
         DomainValue,
@@ -431,13 +431,13 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr282PendingEwmaTargetOverride,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         283,
         Blocker,
         RecoveryTerminal,
         BlockerAdapter::Pr283TerminalDustPayoutErasure,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         284,
         Blocker,
         DomainValue,
@@ -631,7 +631,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         RecoveryTerminal,
         BlockerAdapter::Pr330TerminalBankruptcyResidual,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         331,
         Blocker,
         OracleAccrual,
@@ -771,13 +771,13 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr365FractionalCapSettlement,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         366,
         Blocker,
         OracleAccrual,
         BlockerAdapter::Pr220OmittedRescue,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         367,
         Blocker,
         DomainValue,
