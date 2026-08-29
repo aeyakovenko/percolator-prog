@@ -524,8 +524,20 @@ fn verify_flat_negative_final_leg_progress(
         .iter()
         .try_fold(0u128, |sum, payout| sum.checked_add(*payout))
         .ok_or_else(|| format!("{route:?}: destination payout total overflow"))?;
+    let winner_profit = destination_payouts[WINNER]
+        .checked_sub(actor_deposits[WINNER])
+        .ok_or_else(|| format!("{route:?}: winner lost principal"))?;
+    let loser_principal_debit = actor_deposits[LOSER]
+        .checked_sub(destination_payouts[LOSER])
+        .ok_or_else(|| format!("{route:?}: loser terminal payout exceeded its principal"))?;
+    let unrelated_principal_preserved = [2usize, 3, 4]
+        .into_iter()
+        .all(|actor| destination_payouts[actor] == actor_deposits[actor]);
     let final_vault = u128::from(env.token_amount(env.vault));
     if destination_payouts != expected_destination_payouts
+        || winner_profit != loser_principal_debit
+        || winner_profit != LOSER_PRINCIPAL
+        || !unrelated_principal_preserved
         || total_destination_payouts != expected_payouts
         || total_destination_payouts != vault_at_resolution
         || terminal_claim_payouts > total_destination_payouts
@@ -535,6 +547,7 @@ fn verify_flat_negative_final_leg_progress(
         return Err(format!(
             "{route:?}: terminal value mismatch: payouts={destination_payouts:?}, \
              expected_by_owner={expected_destination_payouts:?}, total={total_destination_payouts}, expected={expected_payouts}, \
+             winner_profit={winner_profit}, loser_debit={loser_principal_debit}, unrelated_preserved={unrelated_principal_preserved}, \
              resolution_vault={vault_at_resolution}, final_vault={final_vault}, \
              claim_payouts={terminal_claim_payouts}, supply_before={token_supply_before}, supply_after={}",
             env.token_supply_observed()

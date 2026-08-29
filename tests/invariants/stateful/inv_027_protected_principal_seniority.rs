@@ -23,8 +23,18 @@
 //! withdrawable tranche equals the original loser's principal debit, and frames an unrelated
 //! funded portfolio byte-for-byte before any replacement backing is added.
 //!
-//! Guarantee boundary: this certifies the stale K/F cohort and half-backed rows on the fixed
-//! engine pin. Certificate-stale, pending-close, resolved-payout, insurance-withdrawal, and other
+//! `v16_program_flat_negative_final_leg_route_matrix_reaches_terminal_payout` in the INV-071-owned
+//! file closes the pending-close row across every trade route and multiple claimant orders. Its
+//! public active-close residual reaches terminal payout, the winner's excess equals exactly the
+//! bankrupt loser's principal debit, and every unrelated funded actor receives its own principal.
+//!
+//! `v16_program_public_resolved_claim_split_is_conservatively_rounded` in the INV-052-owned file
+//! closes the resolved-payout row. Its underbacked junior cohort settles beside an independently
+//! backed domain through all 16 open/close route pairs; the independent winner receives exact
+//! principal plus exact claim face while its bankrupt counterparty receives zero.
+//!
+//! Guarantee boundary: this certifies the stale K/F cohort, half-backed, pending-close, and
+//! resolved-payout rows on the fixed engine pin. Certificate-stale, insurance-withdrawal, and other
 //! loss-stale rows still need one normalized public route-by-state matrix before INV-027 can be
 //! promoted beyond partial coverage.
 //! `v16_program_fully_backed_pnl_route_matrix_preserves_unrelated_principal` closes the Current

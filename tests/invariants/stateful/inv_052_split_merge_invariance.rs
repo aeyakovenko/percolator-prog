@@ -57,8 +57,12 @@
 //! supplies the same terminal residual. All 16 open/close route pairs must produce the same claim
 //! face and route-independent economics. Both schedules materialize a genuine partial receipt and
 //! move nonzero value after receipt creation; splitting cannot increase payout, and its only
-//! permitted difference is one conservative floor atom. Every claim is retired, engine/SPL vaults
-//! remain exact, and every instruction stays below the transaction CU ceiling.
+//! permitted difference is one conservative floor atom. An independent entitlement oracle also
+//! requires the separately backed winner to receive its exact principal plus exact claim face and
+//! its bankrupt counterparty to receive zero; the underbacked junior cohort therefore cannot
+//! consume that domain's protected value even if every compared schedule shared the same defect.
+//! Every claim is retired, engine/SPL vaults remain exact, and every instruction stays below the
+//! transaction CU ceiling.
 //! `v16_program_public_liquidation_split_and_order_are_conservative` holds aggregate collateral,
 //! exposure, authenticated mark history, and liquidation policy fixed while representing the
 //! losing side as either one portfolio or two proportional portfolios. It crosses all four public
@@ -194,6 +198,8 @@ struct BackingConversionPartitionOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ResolvedClaimPartitionOutcome {
     winner_claim_face: u128,
+    backed_claim_face: u128,
+    backed_winner_principal: u128,
     winner_receipt_face: u128,
     winner_seeded_paid_effective: u128,
     winner_resolved_payout: u128,
@@ -1597,18 +1603,23 @@ pub(super) fn run_resolved_claim_partition(
     let Some(winner_claim_face) = winner_claim_face else {
         return Err("resolved-claim winner face overflow".into());
     };
+    let backed_claim_face = env.primary_portfolio(BACKED_WINNER).pnl.get().max(0) as u128;
     let source_face_num =
         resolved_claim_partition_source_face(&env, &WINNERS, u32::from(SOURCE_DOMAIN));
     let backed_face_num =
         resolved_claim_partition_source_face(&env, &[BACKED_WINNER], u32::from(BACKED_DOMAIN));
+    let expected_backed_face_num = backed_claim_face
+        .checked_mul(BOUND_SCALE)
+        .ok_or_else(|| "resolved-claim backed face overflow".to_string())?;
     if winner_claim_face == 0
         || source_face_num != winner_claim_face * BOUND_SCALE
-        || backed_face_num == 0
+        || backed_claim_face == 0
+        || backed_face_num != expected_backed_face_num
         || env.primary_market_state().1.source_claim_bound_total_num
             != source_face_num + backed_face_num
     {
         return Err(format!(
-            "resolved-claim partition did not create exact public junior/backed claims: face={winner_claim_face}, junior={source_face_num}, backed={backed_face_num}, market={}",
+            "resolved-claim partition did not create exact public junior/backed claims: face={winner_claim_face}, junior={source_face_num}, backed_face={backed_claim_face}, backed_num={backed_face_num}, market={}",
             env.primary_market_state().1.source_claim_bound_total_num
         ));
     }
@@ -1789,7 +1800,18 @@ pub(super) fn run_resolved_claim_partition(
         .checked_sub(winner_payout_before_topup)
         .ok_or_else(|| "resolved-claim post-receipt payout underflow".to_string())?;
     let loser_payout = payouts[2] + payouts[3];
-    let unrelated_payout = payouts[BACKED_WINNER] + payouts[backed_loser];
+    let backed_winner_payout = payouts[BACKED_WINNER];
+    let backed_loser_payout = payouts[backed_loser];
+    let unrelated_payout = backed_winner_payout + backed_loser_payout;
+    let backed_winner_principal = u128::from(actor_deposits[BACKED_WINNER]);
+    let expected_backed_winner_payout = backed_winner_principal
+        .checked_add(backed_claim_face)
+        .ok_or_else(|| "resolved-claim backed payout overflow".to_string())?;
+    if backed_winner_payout != expected_backed_winner_payout || backed_loser_payout != 0 {
+        return Err(format!(
+            "underbacked junior settlement violated independent backed-domain seniority: winner_payout={backed_winner_payout}, expected={expected_backed_winner_payout}, principal={backed_winner_principal}, claim={backed_claim_face}, loser_payout={backed_loser_payout}"
+        ));
+    }
     let total_payout = payouts
         .into_iter()
         .try_fold(0u128, |sum, payout| sum.checked_add(payout))
@@ -1816,6 +1838,8 @@ pub(super) fn run_resolved_claim_partition(
 
     Ok(ResolvedClaimPartitionOutcome {
         winner_claim_face,
+        backed_claim_face,
+        backed_winner_principal,
         winner_receipt_face,
         winner_seeded_paid_effective,
         winner_resolved_payout,
@@ -2919,6 +2943,17 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
                 .unwrap_or_else(|error| panic!("split {open_route:?}/{close_route:?}: {error}"));
 
             assert_eq!(split.winner_claim_face, aggregate.winner_claim_face);
+            assert_eq!(split.backed_claim_face, aggregate.backed_claim_face);
+            assert_eq!(
+                aggregate.unrelated_payout,
+                aggregate.backed_winner_principal + aggregate.backed_claim_face,
+                "the underbacked junior claim cannot consume independent backed principal or claim value for {open_route:?}/{close_route:?}"
+            );
+            assert_eq!(
+                split.unrelated_payout,
+                split.backed_winner_principal + split.backed_claim_face,
+                "splitting the underbacked junior claim cannot consume independent backed principal or claim value for {open_route:?}/{close_route:?}"
+            );
             assert_eq!(split.winner_receipt_face, aggregate.winner_receipt_face);
             assert_eq!(split.loser_payout, aggregate.loser_payout);
             assert_eq!(split.unrelated_payout, aggregate.unrelated_payout);
