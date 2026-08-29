@@ -472,7 +472,8 @@ recovery.
 **Required tests.** Independently recompute every rate and compare. Across every public transition,
 unchanged formula inputs preserve the rate, any formula-input mutation advances the source-credit
 epoch, and a live claim's rate can increase only when independently available backing increases or
-its valid claim bound decreases. Pure expiry or impairment cannot improve either quantity.
+its valid claim bound decreases. Pure expiry or impairment cannot improve either quantity. Omitted
+embedded state and every invalid persisted formula/ledger relation reject before mutation.
 **Verification:** P, F
 
 ### INV-031 - No double use of claim, backing, or insurance atoms
