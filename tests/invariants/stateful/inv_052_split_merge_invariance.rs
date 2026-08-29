@@ -90,8 +90,16 @@
 //! the one-extra-account rounding envelope enforced independently for each domain. Cross-margin
 //! may choose a different domain-local reservation for the aggregate account, so the aggregate
 //! oracle requires exact total reservation and terminal value rather than false per-domain
-//! equality. The same public world builder is reused by INV-041's asymmetric-fee insertion-order
-//! regression; INV-041 owns that test and no route is executed twice merely for file organization.
+//! equality. A second matrix gives the two domains different authenticated deadlines, lands while
+//! exactly one is expired, and swaps which domain remains fresh. This requires source-order and
+//! account-partition permutations to preserve the exact fresh/impaired attribution and terminal
+//! economics instead of accidentally treating the first persisted source as global state. After
+//! every target exits, bounded public auto-cranks must eliminate every live lien: expired backing
+//! is retained only as an explicit impaired account claim, while the independent fresh claim must
+//! convert through the public API. Reaching EngineNonProgress with a live lien is a liveness
+//! failure, even when principal withdrawal still succeeds. The
+//! same public world builder is reused by INV-041's asymmetric-fee insertion-order regression;
+//! INV-041 owns that test and no route is executed twice merely for file organization.
 //!
 //! Guarantee boundary: target publication order and target lifetime are identical across the
 //! compared executions. Reordering authenticated observations is a different economic history,
@@ -311,6 +319,7 @@ struct MultiDomainSourceLienEconomics {
     final_local: [[u128; 11]; 2],
     final_source: [[u128; 11]; 2],
     final_bucket: [percolator::BackingBucketV16; 2],
+    fresh_claim_converted: u128,
     target_payout: u128,
     target_value_before_withdrawal: i128,
     oi_q: [[u128; 2]; 2],
@@ -2722,21 +2731,6 @@ fn execute_trade_route_with_backing_fee_cap(
     }
 }
 
-fn run_multi_domain_source_lien_partition(
-    partition: MultiDomainSourceLienPartition,
-    reverse_domain_order: bool,
-    route: TradeRoute,
-    landing_slot: u64,
-) -> Result<MultiDomainSourceLienOutcome, String> {
-    run_multi_domain_source_lien_partition_with_fees(
-        partition,
-        reverse_domain_order,
-        route,
-        landing_slot,
-        [0, 0],
-    )
-}
-
 fn run_multi_domain_source_lien_partition_with_fees(
     partition: MultiDomainSourceLienPartition,
     reverse_domain_order: bool,
@@ -2744,9 +2738,43 @@ fn run_multi_domain_source_lien_partition_with_fees(
     landing_slot: u64,
     backing_fee_bps: [u16; 2],
 ) -> Result<MultiDomainSourceLienOutcome, String> {
+    run_multi_domain_source_lien_partition_with_fees_and_expiries(
+        partition,
+        reverse_domain_order,
+        route,
+        landing_slot,
+        backing_fee_bps,
+        [3, 3],
+    )
+}
+
+fn run_multi_domain_source_lien_partition_with_expiries(
+    partition: MultiDomainSourceLienPartition,
+    reverse_domain_order: bool,
+    route: TradeRoute,
+    landing_slot: u64,
+    expiry_slots: [u64; 2],
+) -> Result<MultiDomainSourceLienOutcome, String> {
+    run_multi_domain_source_lien_partition_with_fees_and_expiries(
+        partition,
+        reverse_domain_order,
+        route,
+        landing_slot,
+        [0, 0],
+        expiry_slots,
+    )
+}
+
+fn run_multi_domain_source_lien_partition_with_fees_and_expiries(
+    partition: MultiDomainSourceLienPartition,
+    reverse_domain_order: bool,
+    route: TradeRoute,
+    landing_slot: u64,
+    backing_fee_bps: [u16; 2],
+    expiry_slots: [u64; 2],
+) -> Result<MultiDomainSourceLienOutcome, String> {
     const PRICE: u64 = 100;
     const WINNING_MARK: u64 = 105;
-    const EXPIRY_SLOT: u64 = 3;
     const DOMAINS: [usize; 2] = [1, 3];
     const ASSETS: [u16; 2] = [0, 1];
     const AGGREGATE_TARGETS: [usize; 1] = [0];
@@ -2768,9 +2796,9 @@ fn run_multi_domain_source_lien_partition_with_fees(
         (4, 1, 1, 500 * POS_SCALE as i128, 25 * POS_SCALE as i128),
     ];
 
-    if landing_slot < EXPIRY_SLOT {
+    if expiry_slots.iter().all(|expiry| landing_slot < *expiry) {
         return Err(format!(
-            "multi-domain source-lien landing {landing_slot} precedes expiry {EXPIRY_SLOT}"
+            "multi-domain source-lien landing {landing_slot} precedes both expiries {expiry_slots:?}"
         ));
     }
     let route_discriminator = match route {
@@ -2852,7 +2880,7 @@ fn run_multi_domain_source_lien_partition_with_fees(
             max_compute_units = max_compute_units.max(policy.compute_units);
         }
         let backing = env
-            .top_up_backing_bucket_without_ledger(domain as u16, 100_000, EXPIRY_SLOT)
+            .top_up_backing_bucket_without_ledger(domain as u16, 100_000, expiry_slots[domain_slot])
             .map_err(|error| format!("fund multi-domain source {domain}: {error}"))?;
         max_compute_units = max_compute_units.max(backing.compute_units);
     }
@@ -2974,12 +3002,16 @@ fn run_multi_domain_source_lien_partition_with_fees(
         )?;
     }
     let expired_group = env.primary_market_state().1;
-    for domain in DOMAINS {
-        if expired_group.source_backing_buckets[domain].status
-            != percolator::BackingBucketStatusV16::Impaired
-        {
+    for (domain_slot, domain) in DOMAINS.into_iter().enumerate() {
+        let expected_status = if expiry_slots[domain_slot] <= landing_slot {
+            percolator::BackingBucketStatusV16::Impaired
+        } else {
+            percolator::BackingBucketStatusV16::Fresh
+        };
+        if expired_group.source_backing_buckets[domain].status != expected_status {
             return Err(format!(
-                "multi-domain source {domain} did not normalize at slot {landing_slot}: {:?}",
+                "multi-domain source {domain} did not normalize to {expected_status:?} at slot {landing_slot} with expiry {}: {:?}",
+                expiry_slots[domain_slot],
                 expired_group.source_backing_buckets[domain]
             ));
         }
@@ -3010,6 +3042,103 @@ fn run_multi_domain_source_lien_partition_with_fees(
             observations.clone(),
             &mut max_compute_units,
         )?;
+    }
+    for actor in active_targets.iter().copied() {
+        let retained_live_lien_num = env
+            .primary_portfolio(actor)
+            .source_domains
+            .iter()
+            .map(|source| source.source_claim_liened_num.get())
+            .try_fold(0u128, |sum, lien| sum.checked_add(lien))
+            .ok_or_else(|| "multi-domain live source-lien sum overflow".to_string())?;
+        if retained_live_lien_num != 0 {
+            return Err(format!(
+                "multi-domain target {actor} reached EngineNonProgress with {retained_live_lien_num} live source-claim lien units"
+            ));
+        }
+    }
+    let mut fresh_claim_converted = 0u128;
+    for actor in active_targets.iter().copied() {
+        crank_source_lien_partition_to_fixed_point(
+            &mut env,
+            actor,
+            landing_slot,
+            observations.clone(),
+            &mut max_compute_units,
+        )?;
+        let account = env.primary_portfolio(actor);
+        let fresh_claim_num = account
+            .source_domains
+            .iter()
+            .filter(|source| {
+                if !source.is_occupied() {
+                    return false;
+                }
+                DOMAINS
+                    .iter()
+                    .position(|domain| *domain == source.domain.get() as usize)
+                    .is_some_and(|domain_slot| expiry_slots[domain_slot] > landing_slot)
+            })
+            .try_fold(0u128, |sum, source| {
+                let unavailable = source
+                    .source_claim_liened_num
+                    .get()
+                    .checked_add(source.source_claim_impaired_num.get())
+                    .ok_or_else(|| "multi-domain unavailable source claim overflow".to_string())?;
+                let available = source
+                    .source_claim_bound_num
+                    .get()
+                    .checked_sub(unavailable)
+                    .ok_or_else(|| {
+                        "multi-domain unavailable source claim exceeded face".to_string()
+                    })?;
+                sum.checked_add(available)
+                    .ok_or_else(|| "multi-domain fresh source claim overflow".to_string())
+            })?;
+        let pnl_before = account.pnl.get();
+        let capital_before = account.capital.get();
+        let positive_pnl = u128::try_from(pnl_before.max(0)).unwrap_or(0);
+        let convertible = (fresh_claim_num / BOUND_SCALE).min(positive_pnl);
+        if convertible == 0 {
+            continue;
+        }
+        for (domain_slot, domain) in DOMAINS.into_iter().enumerate() {
+            if expiry_slots[domain_slot] > landing_slot
+                && env.primary_market_state().1.source_credit[domain].credit_rate_num
+                    != CREDIT_RATE_SCALE
+            {
+                return Err(format!(
+                    "fresh source domain {domain} did not retain full conversion credit"
+                ));
+            }
+        }
+        let conversion = env
+            .convert_released_pnl(actor, convertible)
+            .map_err(|error| {
+                format!(
+                    "convert independently fresh multi-domain claim for target {actor}: {error}"
+                )
+            })?;
+        max_compute_units = max_compute_units.max(conversion.compute_units);
+        let expected_capital = capital_before
+            .checked_add(convertible)
+            .ok_or_else(|| "multi-domain converted capital overflow".to_string())?;
+        let converted_i128 = i128::try_from(convertible)
+            .map_err(|_| "multi-domain converted claim exceeds i128".to_string())?;
+        let expected_pnl = pnl_before
+            .checked_sub(converted_i128)
+            .ok_or_else(|| "multi-domain converted PnL underflow".to_string())?;
+        let converted = env.primary_portfolio(actor);
+        if converted.capital.get() != expected_capital || converted.pnl.get() != expected_pnl {
+            return Err(format!(
+                "fresh source conversion was not exact for target {actor}: before capital/pnl={capital_before}/{pnl_before}, after={}/{}, amount={convertible}",
+                converted.capital.get(),
+                converted.pnl.get(),
+            ));
+        }
+        fresh_claim_converted = fresh_claim_converted
+            .checked_add(convertible)
+            .ok_or_else(|| "multi-domain converted claim sum overflow".to_string())?;
     }
     let target_value_before_withdrawal =
         liquidation_partition_portfolio_value(&env, active_targets)?;
@@ -3095,6 +3224,7 @@ fn run_multi_domain_source_lien_partition_with_fees(
             final_local,
             final_source,
             final_bucket,
+            fresh_claim_converted,
             target_payout,
             target_value_before_withdrawal,
             oi_q,
@@ -3902,6 +4032,7 @@ fn assert_multi_domain_source_lien_partition_equivalent(
     split_reversed: &MultiDomainSourceLienOutcome,
     route: TradeRoute,
     landing_slot: u64,
+    expiry_slots: [u64; 2],
 ) {
     assert_eq!(
         aggregate.economics, aggregate_reversed.economics,
@@ -3949,28 +4080,78 @@ fn assert_multi_domain_source_lien_partition_equivalent(
             split.economics.peak_bucket[domain_slot].valid_liened_backing_num,
             "split account/bucket attribution diverged for domain {domain_slot} via {route:?} at {landing_slot}"
         );
-        assert_eq!(split.economics.final_local[domain_slot][8], 0);
-        assert_eq!(
-            split.economics.final_local[domain_slot][5],
-            split.economics.final_source[domain_slot][6],
-            "split impaired account/source attribution diverged for domain {domain_slot} via {route:?} at {landing_slot}"
-        );
-        assert_eq!(
-            split.economics.final_local[domain_slot][5],
-            split.economics.final_bucket[domain_slot].impaired_liened_backing_num,
-            "split impaired account/bucket attribution diverged for domain {domain_slot} via {route:?} at {landing_slot}"
-        );
-        assert!(
-            split.economics.final_source[domain_slot][6]
-                >= isolated.economics.final_source[domain_slot][6],
-            "splitting domain {domain_slot} lowered impaired backing via {route:?} at {landing_slot}"
-        );
-        assert!(
-            split.economics.final_source[domain_slot][6]
-                - isolated.economics.final_source[domain_slot][6]
-                <= BOUND_SCALE,
-            "splitting domain {domain_slot} exceeded its impaired rounding budget via {route:?} at {landing_slot}"
-        );
+        let expired = expiry_slots[domain_slot] <= landing_slot;
+        for (label, outcome) in [
+            ("aggregate", aggregate),
+            ("aggregate-reversed", aggregate_reversed),
+            ("isolated", isolated),
+            ("isolated-reversed", isolated_reversed),
+            ("split", split),
+            ("split-reversed", split_reversed),
+        ] {
+            let local = outcome.economics.final_local[domain_slot];
+            let source = outcome.economics.final_source[domain_slot];
+            let bucket = outcome.economics.final_bucket[domain_slot];
+            assert!(
+                local[1..=6].iter().all(|value| *value == 0),
+                "{label} retained a live account lien for domain {domain_slot} via {route:?} at {landing_slot}: {local:?}"
+            );
+            assert_eq!(
+                local[8], 0,
+                "{label} retained unsupported impaired-effective credit for domain {domain_slot} via {route:?} at {landing_slot}"
+            );
+            assert_eq!(
+                (source[5], source[6]),
+                (0, 0),
+                "{label} retained market source encumbrance for domain {domain_slot} via {route:?} at {landing_slot}"
+            );
+            assert_eq!(
+                (
+                    bucket.valid_liened_backing_num,
+                    bucket.impaired_liened_backing_num,
+                ),
+                (0, 0),
+                "{label} retained bucket encumbrance for domain {domain_slot} via {route:?} at {landing_slot}"
+            );
+            assert_eq!(
+                local[0], source[0],
+                "{label} account/source claim attribution diverged for domain {domain_slot} via {route:?} at {landing_slot}"
+            );
+            if expired {
+                assert_eq!(bucket.status, percolator::BackingBucketStatusV16::Expired);
+                assert!(
+                    local[7] > 0,
+                    "{label} dropped the impaired account claim for domain {domain_slot} via {route:?} at {landing_slot}"
+                );
+                assert!(
+                    local[7] <= local[0],
+                    "{label} impaired more claim than the account owns for domain {domain_slot} via {route:?} at {landing_slot}"
+                );
+                assert_eq!(
+                    source[10], 0,
+                    "{label} retained positive credit for expired domain {domain_slot} via {route:?} at {landing_slot}"
+                );
+            } else {
+                assert_eq!(bucket.status, percolator::BackingBucketStatusV16::Fresh);
+                assert_eq!(
+                    (local[0], local[7]),
+                    (0, 0),
+                    "{label} did not consume the independently fresh claim for domain {domain_slot} via {route:?} at {landing_slot}"
+                );
+            }
+        }
+        if expired {
+            let split_impaired = split.economics.final_local[domain_slot][7];
+            let isolated_impaired = isolated.economics.final_local[domain_slot][7];
+            assert!(
+                split_impaired >= isolated_impaired,
+                "splitting domain {domain_slot} lowered impaired claim attribution via {route:?} at {landing_slot}"
+            );
+            assert!(
+                split_impaired - isolated_impaired <= BOUND_SCALE,
+                "splitting domain {domain_slot} exceeded its impaired-claim rounding budget via {route:?} at {landing_slot}"
+            );
+        }
     }
     let peak_reservation = |outcome: &MultiDomainSourceLienOutcome| {
         outcome
@@ -3980,12 +4161,12 @@ fn assert_multi_domain_source_lien_partition_equivalent(
             .map(|domain| domain[5])
             .sum::<u128>()
     };
-    let final_impaired = |outcome: &MultiDomainSourceLienOutcome| {
+    let final_encumbered = |outcome: &MultiDomainSourceLienOutcome| {
         outcome
             .economics
             .final_source
             .iter()
-            .map(|domain| domain[6])
+            .map(|domain| domain[5] + domain[6])
             .sum::<u128>()
     };
     assert_eq!(
@@ -3993,15 +4174,40 @@ fn assert_multi_domain_source_lien_partition_equivalent(
         peak_reservation(isolated),
         "cross-domain aggregation changed the exact total margin reservation via {route:?} at {landing_slot}"
     );
-    assert_eq!(
-        final_impaired(aggregate),
-        final_impaired(isolated),
-        "cross-domain aggregation changed the exact total impaired backing via {route:?} at {landing_slot}"
-    );
+    for (label, outcome) in [
+        ("aggregate", aggregate),
+        ("aggregate-reversed", aggregate_reversed),
+        ("isolated", isolated),
+        ("isolated-reversed", isolated_reversed),
+        ("split", split),
+        ("split-reversed", split_reversed),
+    ] {
+        assert_eq!(
+            final_encumbered(outcome),
+            0,
+            "{label} retained source backing encumbrance via {route:?} at {landing_slot}"
+        );
+    }
+    let has_fresh_source = expiry_slots.iter().any(|expiry| *expiry > landing_slot);
+    for outcome in [
+        aggregate,
+        aggregate_reversed,
+        isolated,
+        isolated_reversed,
+        split,
+        split_reversed,
+    ] {
+        assert_eq!(
+            outcome.economics.fresh_claim_converted > 0,
+            has_fresh_source,
+            "fresh-claim conversion availability diverged via {route:?} at {landing_slot}"
+        );
+    }
     let terminal_frame = |outcome: &MultiDomainSourceLienOutcome| {
         (
             outcome.economics.target_payout,
             outcome.economics.target_value_before_withdrawal,
+            outcome.economics.fresh_claim_converted,
             outcome.economics.oi_q,
             outcome.economics.c_tot_plus_insurance,
             outcome.economics.vault,
@@ -4028,6 +4234,53 @@ fn assert_multi_domain_source_lien_partition_equivalent(
     assert!(split.public_steps > isolated.public_steps);
 }
 
+fn run_multi_domain_source_lien_matrix(
+    route: TradeRoute,
+    landing_slot: u64,
+    expiry_slots: [u64; 2],
+) -> Result<[MultiDomainSourceLienOutcome; 6], String> {
+    let run = |partition, reverse_domain_order| {
+        run_multi_domain_source_lien_partition_with_expiries(
+            partition,
+            reverse_domain_order,
+            route,
+            landing_slot,
+            expiry_slots,
+        )
+        .map_err(|error| {
+            format!(
+                "{partition:?} reverse={reverse_domain_order} via {route:?} at {landing_slot} with expiries {expiry_slots:?}: {error}"
+            )
+        })
+    };
+    Ok([
+        run(MultiDomainSourceLienPartition::CrossDomainAggregate, false)?,
+        run(MultiDomainSourceLienPartition::CrossDomainAggregate, true)?,
+        run(MultiDomainSourceLienPartition::DomainIsolated, false)?,
+        run(MultiDomainSourceLienPartition::DomainIsolated, true)?,
+        run(MultiDomainSourceLienPartition::SplitFour, false)?,
+        run(MultiDomainSourceLienPartition::SplitFour, true)?,
+    ])
+}
+
+fn assert_multi_domain_source_lien_route_stability(
+    canonical: &mut Option<MultiDomainSourceLienEconomics>,
+    outcome: &MultiDomainSourceLienOutcome,
+    partition: MultiDomainSourceLienPartition,
+    route: TradeRoute,
+    landing_slot: u64,
+    expiry_slots: [u64; 2],
+) {
+    if let Some(canonical) = canonical.as_ref() {
+        assert_eq!(
+            &outcome.economics, canonical,
+            "{partition:?} economics changed by route {route:?} at {landing_slot} with expiries {expiry_slots:?}"
+        );
+    } else {
+        *canonical = Some(outcome.economics.clone());
+    }
+}
+
 #[test]
 fn v16_program_public_two_domain_source_liens_are_split_merge_invariant() {
     const ROUTES: [TradeRoute; 4] = [
@@ -4042,66 +4295,9 @@ fn v16_program_public_two_domain_source_liens_are_split_merge_invariant() {
 
     for landing_slot in [3u64, 4] {
         for route in ROUTES {
-            let aggregate = run_multi_domain_source_lien_partition(
-                MultiDomainSourceLienPartition::CrossDomainAggregate,
-                false,
-                route,
-                landing_slot,
-            )
-            .unwrap_or_else(|error| {
-                panic!("aggregate two-domain source lien via {route:?} at {landing_slot}: {error}")
-            });
-            let aggregate_reversed = run_multi_domain_source_lien_partition(
-                MultiDomainSourceLienPartition::CrossDomainAggregate,
-                true,
-                route,
-                landing_slot,
-            )
-            .unwrap_or_else(|error| {
-                panic!(
-                    "reversed aggregate two-domain source lien via {route:?} at {landing_slot}: {error}"
-                )
-            });
-            let isolated = run_multi_domain_source_lien_partition(
-                MultiDomainSourceLienPartition::DomainIsolated,
-                false,
-                route,
-                landing_slot,
-            )
-            .unwrap_or_else(|error| {
-                panic!("isolated two-domain source lien via {route:?} at {landing_slot}: {error}")
-            });
-            let isolated_reversed = run_multi_domain_source_lien_partition(
-                MultiDomainSourceLienPartition::DomainIsolated,
-                true,
-                route,
-                landing_slot,
-            )
-            .unwrap_or_else(|error| {
-                panic!(
-                    "reversed isolated two-domain source lien via {route:?} at {landing_slot}: {error}"
-                )
-            });
-            let split = run_multi_domain_source_lien_partition(
-                MultiDomainSourceLienPartition::SplitFour,
-                false,
-                route,
-                landing_slot,
-            )
-            .unwrap_or_else(|error| {
-                panic!("split two-domain source lien via {route:?} at {landing_slot}: {error}")
-            });
-            let split_reversed = run_multi_domain_source_lien_partition(
-                MultiDomainSourceLienPartition::SplitFour,
-                true,
-                route,
-                landing_slot,
-            )
-            .unwrap_or_else(|error| {
-                panic!(
-                    "reversed split two-domain source lien via {route:?} at {landing_slot}: {error}"
-                )
-            });
+            let [aggregate, aggregate_reversed, isolated, isolated_reversed, split, split_reversed] =
+                run_multi_domain_source_lien_matrix(route, landing_slot, [3, 3])
+                    .unwrap_or_else(|error| panic!("two-domain source-lien matrix: {error}"));
 
             assert_multi_domain_source_lien_partition_equivalent(
                 &aggregate,
@@ -4112,31 +4308,90 @@ fn v16_program_public_two_domain_source_liens_are_split_merge_invariant() {
                 &split_reversed,
                 route,
                 landing_slot,
+                [3, 3],
             );
-            if let Some(canonical) = canonical_aggregate.as_ref() {
-                assert_eq!(
-                    &aggregate.economics, canonical,
-                    "aggregate two-domain economics changed by route/expiry {route:?}/{landing_slot}"
-                );
-            } else {
-                canonical_aggregate = Some(aggregate.economics);
-            }
-            if let Some(canonical) = canonical_isolated.as_ref() {
-                assert_eq!(
-                    &isolated.economics, canonical,
-                    "isolated two-domain economics changed by route/expiry {route:?}/{landing_slot}"
-                );
-            } else {
-                canonical_isolated = Some(isolated.economics);
-            }
-            if let Some(canonical) = canonical_split.as_ref() {
-                assert_eq!(
-                    &split.economics, canonical,
-                    "split two-domain economics changed by route/expiry {route:?}/{landing_slot}"
-                );
-            } else {
-                canonical_split = Some(split.economics);
-            }
+            assert_multi_domain_source_lien_route_stability(
+                &mut canonical_aggregate,
+                &aggregate,
+                MultiDomainSourceLienPartition::CrossDomainAggregate,
+                route,
+                landing_slot,
+                [3, 3],
+            );
+            assert_multi_domain_source_lien_route_stability(
+                &mut canonical_isolated,
+                &isolated,
+                MultiDomainSourceLienPartition::DomainIsolated,
+                route,
+                landing_slot,
+                [3, 3],
+            );
+            assert_multi_domain_source_lien_route_stability(
+                &mut canonical_split,
+                &split,
+                MultiDomainSourceLienPartition::SplitFour,
+                route,
+                landing_slot,
+                [3, 3],
+            );
+        }
+    }
+}
+
+#[test]
+fn v16_program_public_mixed_fresh_expired_source_liens_are_split_merge_invariant() {
+    const ROUTES: [TradeRoute; 4] = [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ];
+    const LANDING_SLOT: u64 = 3;
+
+    for expiry_slots in [[3, 4], [4, 3]] {
+        let mut canonical_aggregate = None;
+        let mut canonical_isolated = None;
+        let mut canonical_split = None;
+        for route in ROUTES {
+            let [aggregate, aggregate_reversed, isolated, isolated_reversed, split, split_reversed] =
+                run_multi_domain_source_lien_matrix(route, LANDING_SLOT, expiry_slots)
+                    .unwrap_or_else(|error| panic!("mixed-freshness source-lien matrix: {error}"));
+
+            assert_multi_domain_source_lien_partition_equivalent(
+                &aggregate,
+                &aggregate_reversed,
+                &isolated,
+                &isolated_reversed,
+                &split,
+                &split_reversed,
+                route,
+                LANDING_SLOT,
+                expiry_slots,
+            );
+            assert_multi_domain_source_lien_route_stability(
+                &mut canonical_aggregate,
+                &aggregate,
+                MultiDomainSourceLienPartition::CrossDomainAggregate,
+                route,
+                LANDING_SLOT,
+                expiry_slots,
+            );
+            assert_multi_domain_source_lien_route_stability(
+                &mut canonical_isolated,
+                &isolated,
+                MultiDomainSourceLienPartition::DomainIsolated,
+                route,
+                LANDING_SLOT,
+                expiry_slots,
+            );
+            assert_multi_domain_source_lien_route_stability(
+                &mut canonical_split,
+                &split,
+                MultiDomainSourceLienPartition::SplitFour,
+                route,
+                LANDING_SLOT,
+                expiry_slots,
+            );
         }
     }
 }
