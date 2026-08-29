@@ -239,7 +239,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 42,
+        consumers, 43,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }

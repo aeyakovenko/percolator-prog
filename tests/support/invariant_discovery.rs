@@ -1326,7 +1326,7 @@ pub struct PendingMarkFeeOrderingDiscovery {
     pub extracted_reward: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkMovementReserveDiscovery {
     pub route: DiscoveryTradeRoute,
     pub movement_fee: u128,
@@ -1339,6 +1339,9 @@ pub struct MarkMovementReserveDiscovery {
     pub coalition_gain: u128,
     pub coalition_loss: u128,
     pub committed_mark: u64,
+    pub victim_equity_before: u128,
+    pub coalition_equity_before: u128,
+    pub terminal_evidence: TerminalCohortPayoutEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2393,12 +2396,17 @@ impl TradeDrivenLiquidationDiscovery {
 
 impl MarkMovementReserveDiscovery {
     pub fn is_violation(&self) -> bool {
+        let terminal_extraction = self.coalition_gain != 0
+            && self.victim_loss != 0
+            && self
+                .terminal_evidence
+                .certifies_exact_loss(self.victim_loss, self.coalition_gain);
         !self.pending_withdraw_rejected
             || !self.pending_exact_rollback
             || !self.committed_withdraw_rejected
             || !self.committed_exact_rollback
             || self.withdrawn_reserve != 0
-            || self.coalition_gain != 0
+            || terminal_extraction
             || self.victim_loss > self.movement_fee
     }
 
@@ -2407,6 +2415,15 @@ impl MarkMovementReserveDiscovery {
             && self.movement_fee != 0
             && self.victim_loss != 0
             && self.coalition_loss != 0
+            && self
+                .victim_equity_before
+                .checked_sub(self.terminal_evidence.victim_terminal_payout)
+                == Some(self.victim_loss)
+            && self
+                .coalition_equity_before
+                .checked_sub(self.terminal_evidence.beneficiary_terminal_payout)
+                == Some(self.coalition_loss)
+            && self.terminal_evidence.certifies_nonextraction()
     }
 }
 
@@ -9941,6 +9958,21 @@ fn discover_one_mark_movement_reserve_violation(
     execute_discovery_trade_route(&mut env, route, 0, 3, ASSET, -POSITION_Q, MARK)
         .map_err(|error| format!("{route:?} open independent exposure: {error}"))?;
     env.warp_to_slot(4);
+    let victim_equity_before = u128::try_from(discovery_portfolio_equity(&env, 3)?)
+        .map_err(|_| format!("{route:?} reserve victim began insolvent"))?;
+    let coalition_equity_before =
+        [0usize, 1, 2]
+            .into_iter()
+            .try_fold(0u128, |total, actor| -> Result<u128, String> {
+                let equity =
+                    u128::try_from(discovery_portfolio_equity(&env, actor)?).map_err(|_| {
+                        format!("{route:?} reserve coalition actor {actor} began insolvent")
+                    })?;
+                total
+                    .checked_add(equity)
+                    .ok_or_else(|| "movement-reserve coalition equity overflow".to_string())
+            })?;
+    env.begin_public_trace();
     let insurance_before = env.primary_market_state().1.insurance;
     env.trade_no_cpi(1, 2, ASSET, POSITION_Q, LOW_PRINT, 0)
         .map_err(|error| format!("{route:?} pay downward mark movement: {error}"))?;
@@ -10037,25 +10069,37 @@ fn discover_one_mark_movement_reserve_violation(
                 .map_err(|error| format!("{route:?} withdraw actor {actor}: {error}"))?;
         }
     }
-    let coalition_payout = [0usize, 1, 2].into_iter().try_fold(0u128, |sum, actor| {
-        sum.checked_add(u128::from(
-            env.token_amount(env.actors[actor].destination_token),
-        ))
-        .ok_or_else(|| "movement-reserve coalition payout overflow".to_string())
+    env.resolve_market()
+        .map_err(|error| format!("{route:?} resolve movement-reserve world: {error}"))?;
+    let actors = [0usize, 1, 2, 3, 4];
+    drain_resolved_discovery_actors(&mut env, actors)?;
+    let users_terminal = actors.iter().try_fold(true, |all_terminal, actor| {
+        discovery_portfolio_is_terminal(&env.primary_portfolio(*actor))
+            .map(|terminal| all_terminal && terminal)
     })?;
-    let victim_payout = u128::from(env.token_amount(env.actors[3].destination_token));
-    let coalition_committed = DEPOSIT
-        .checked_mul(3)
-        .and_then(|value| value.checked_add(INIT_FEE))
-        .ok_or_else(|| "movement-reserve coalition commitment overflow".to_string())?;
-    let victim_loss = DEPOSIT
-        .checked_sub(victim_payout)
-        .ok_or_else(|| "movement-reserve victim payout exceeded deposit".to_string())?;
-    let coalition_gain = coalition_payout.saturating_sub(coalition_committed);
-    let coalition_loss = coalition_committed.saturating_sub(coalition_payout);
     if env.token_supply_observed() != supply_before {
         return Err("movement-reserve world changed SPL supply".into());
     }
+    let public_trace = env.finish_public_trace();
+    let terminal_evidence = build_terminal_cohort_payout_evidence(
+        &format!("{route:?} movement-reserve world"),
+        vec![env.actors[3].destination_token],
+        [0usize, 1, 2]
+            .into_iter()
+            .map(|actor| env.actors[actor].destination_token)
+            .collect(),
+        victim_equity_before,
+        coalition_equity_before,
+        users_terminal,
+        true,
+        public_trace,
+    )?;
+    let victim_loss = victim_equity_before.saturating_sub(terminal_evidence.victim_terminal_payout);
+    let coalition_gain = terminal_evidence
+        .beneficiary_terminal_payout
+        .saturating_sub(coalition_equity_before);
+    let coalition_loss =
+        coalition_equity_before.saturating_sub(terminal_evidence.beneficiary_terminal_payout);
     Ok(MarkMovementReserveDiscovery {
         route,
         movement_fee,
@@ -10068,6 +10112,9 @@ fn discover_one_mark_movement_reserve_violation(
         coalition_gain,
         coalition_loss,
         committed_mark,
+        victim_equity_before,
+        coalition_equity_before,
+        terminal_evidence,
     })
 }
 

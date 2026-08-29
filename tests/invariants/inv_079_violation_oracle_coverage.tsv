@@ -14,7 +14,7 @@ FundedRoleDiscovery	PRIVILEGED_TRANSFER	exact principal transfer requires the cu
 IncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
 IntentReplayDiscovery	REPLAY_ONLY	duplicate economic mutation is not itself quantified LoF or persistent DoS
 MarketIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
-MarkMovementReserveDiscovery	LOCAL_SAFETY_ONLY	reserve and withdrawal checks lack normalized terminal evidence
+MarkMovementReserveDiscovery	LOCAL_SAFETY_ONLY	public terminal evidence proves nonextraction, but rollback and reserve-admission failures are not themselves terminal LoF
 PendingMarkAdmissionDiscovery	LOCAL_SAFETY_ONLY	guard and round-trip checks lack normalized terminal evidence
 PendingMarkInheritanceDiscovery	LOCAL_SAFETY_ONLY	guard and round-trip checks lack normalized terminal evidence
 PendingTargetOverrideDiscovery	LOCAL_SAFETY_ONLY	target and payout checks lack normalized terminal evidence

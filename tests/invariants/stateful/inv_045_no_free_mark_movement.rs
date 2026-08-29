@@ -16,7 +16,9 @@
 //! exact rollback, then verifies the post-commit retry and terminal payouts equal the canonical
 //! ordering. `v16_program_trade_route_matrix_keeps_mark_reserve_nonwithdrawable` creates a paid mark
 //! move and proves withdrawal rejects with exact rollback both before and after commitment, while
-//! the fee keeps the controlling coalition economically non-positive across all trade routes.
+//! the fee keeps the controlling coalition economically non-positive across all trade routes. It
+//! then resolves the market and binds exact terminal victim and coalition payouts to the shared
+//! public-trace classifier, proving the reserve cannot be reclaimed through a later payout rail.
 //! `v16_program_mark_mode_route_matrix_keeps_liquidation_penalties_nonreclaimable` crosses EWMA and
 //! hybrid-after-hours modes with all single/batch CPI/no-CPI routes. It requires liquidation to
 //! remain live while the resulting penalty stays out of cranker rewards and withdrawable domain
