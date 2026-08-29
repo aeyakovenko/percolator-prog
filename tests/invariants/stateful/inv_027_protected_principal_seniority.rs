@@ -17,10 +17,16 @@
 //! arithmetic value before the loser refreshes. The old leg still owns a generation membership,
 //! unsafe novation rejects atomically, and the loser advances its epoch exactly once with zero PnL.
 //!
-//! Guarantee boundary: this certifies the stale K/F cohort row on the fixed engine pin. Current,
-//! half-backed, stale-certificate, pending-close, resolved-payout, and insurance-withdrawal rows
-//! still need one normalized public route-by-state matrix before INV-027 can be promoted beyond
-//! partial coverage.
+//! `v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing` in the INV-031-owned
+//! file closes the half-backed row without duplicating its expensive setup. Across every trade
+//! route it creates a 2,000-atom claim backed by only 1,000 atoms, proves the exact terminally
+//! withdrawable tranche equals the original loser's principal debit, and frames an unrelated
+//! funded portfolio byte-for-byte before any replacement backing is added.
+//!
+//! Guarantee boundary: this certifies the stale K/F cohort and half-backed rows on the fixed
+//! engine pin. Certificate-stale, pending-close, resolved-payout, insurance-withdrawal, and other
+//! loss-stale rows still need one normalized public route-by-state matrix before INV-027 can be
+//! promoted beyond partial coverage.
 //! `v16_program_fully_backed_pnl_route_matrix_preserves_unrelated_principal` closes the Current
 //! fully funded control row. It realizes the same directional profit through every trade family,
 //! independently derives realizable support from the claim and backing stocks, and proves the

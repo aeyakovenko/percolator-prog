@@ -26,6 +26,8 @@
 //! conversion amount. The deployed handler reaches its post-conversion cap rejection, and SVM
 //! rollback must restore the claim, backing bucket, portfolio, custody, and every auxiliary
 //! account before the identical full-cap request consumes the tranche exactly once.
+//! The same trace is reused by INV-027: the externally withdrawn tranche must equal the original
+//! loser's principal debit while a separately funded portfolio remains byte- and SPL-exact.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -771,6 +773,12 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
         },
     );
     let label = format!("INV-031 {route:?}");
+    let supply_before = env.token_supply_observed();
+    let loser_capital_before = env.primary_portfolio(OPEN_COUNTERPARTY).capital.get();
+    let unrelated_account_before = env.primary_portfolio_data(3);
+    let unrelated_source_before = env.token_amount(env.actors[3].source_token);
+    let unrelated_destination_before = env.token_amount(env.actors[3].destination_token);
+    let winner_destination_before = env.token_amount(env.actors[WINNER].destination_token);
     env.begin_public_trace();
 
     execute_trade_route(
@@ -890,6 +898,28 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
         ));
     }
 
+    let loser_capital_after = env.primary_portfolio(OPEN_COUNTERPARTY).capital.get();
+    let losing_episode_debit = loser_capital_before
+        .checked_sub(loser_capital_after)
+        .ok_or_else(|| format!("{label} losing episode increased loser capital"))?;
+    env.withdraw_primary(WINNER, BACKING_TRANCHE_ATOMS)
+        .map_err(|error| format!("{label} withdraw converted backing: {error}"))?;
+    let winner_payout = env
+        .token_amount(env.actors[WINNER].destination_token)
+        .checked_sub(winner_destination_before)
+        .ok_or_else(|| format!("{label} winner destination decreased"))?;
+    if u128::from(winner_payout) != BACKING_TRANCHE_ATOMS
+        || u128::from(winner_payout) != losing_episode_debit
+        || env.primary_portfolio_data(3) != unrelated_account_before
+        || env.token_amount(env.actors[3].source_token) != unrelated_source_before
+        || env.token_amount(env.actors[3].destination_token) != unrelated_destination_before
+    {
+        return Err(format!(
+            "{label} half-backed payout violated principal seniority: payout={winner_payout}, losing_debit={losing_episode_debit}, unrelated_capital={}",
+            env.primary_portfolio(3).capital.get()
+        ));
+    }
+
     let before_retry = economic_snapshot(&env);
     let retry = env.land_retained(retained_retry);
     let retry_error = match retry {
@@ -933,7 +963,7 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
         ));
     }
     let terminal = env.primary_market_state().1;
-    if env.primary_portfolio(WINNER).capital.get() != DEPOSIT + BACKING_TRANCHE_ATOMS
+    if env.primary_portfolio(WINNER).capital.get() != DEPOSIT
         || env.primary_portfolio(WINNER).pnl.get() != 0
         || terminal.source_credit[SOURCE_DOMAIN].spent_backing_num
             != BACKING_TRANCHE_ATOMS * percolator::BOUND_SCALE
@@ -950,6 +980,15 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
             terminal.source_credit[SOURCE_DOMAIN].fresh_reserved_backing_num,
             terminal.source_credit[SOURCE_DOMAIN].spent_backing_num,
             terminal.source_backing_buckets[SOURCE_DOMAIN].consumed_liened_backing_num,
+        ));
+    }
+    if env.primary_portfolio_data(3) != unrelated_account_before
+        || env.token_amount(env.actors[3].source_token) != unrelated_source_before
+        || env.token_amount(env.actors[3].destination_token) != unrelated_destination_before
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "{label} replacement backing or retries changed unrelated principal or token supply"
         ));
     }
 
