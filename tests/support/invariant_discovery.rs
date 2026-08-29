@@ -20,26 +20,34 @@ pub enum PortfolioIntentKind {
     Close,
     MatcherEnable,
     MatcherDisable,
-    TradeNoCpi,
-    TradeCpi,
-    BatchTradeNoCpi,
-    BatchTradeCpi,
+    TradeNoCpiAccountA,
+    TradeNoCpiAccountB,
+    TradeCpiAccountA,
+    TradeCpiAccountB,
+    BatchTradeNoCpiAccountA,
+    BatchTradeNoCpiAccountB,
+    BatchTradeCpiAccountA,
+    BatchTradeCpiAccountB,
     ConvertReleasedPnl,
     RebalanceReduce,
     ForfeitRecoveryLeg,
 }
 
 impl PortfolioIntentKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 16] = [
         Self::Deposit,
         Self::Withdraw,
         Self::Close,
         Self::MatcherEnable,
         Self::MatcherDisable,
-        Self::TradeNoCpi,
-        Self::TradeCpi,
-        Self::BatchTradeNoCpi,
-        Self::BatchTradeCpi,
+        Self::TradeNoCpiAccountA,
+        Self::TradeNoCpiAccountB,
+        Self::TradeCpiAccountA,
+        Self::TradeCpiAccountB,
+        Self::BatchTradeNoCpiAccountA,
+        Self::BatchTradeNoCpiAccountB,
+        Self::BatchTradeCpiAccountA,
+        Self::BatchTradeCpiAccountB,
         Self::ConvertReleasedPnl,
         Self::RebalanceReduce,
         Self::ForfeitRecoveryLeg,
@@ -3357,16 +3365,17 @@ fn retained_portfolio_intent(env: &mut V16Svm, kind: PortfolioIntentKind) -> Tra
         PortfolioIntentKind::Close => env.build_retained_close_primary_portfolio(SUBJECT),
         PortfolioIntentKind::MatcherEnable => env.build_retained_matcher_config(SUBJECT, 1),
         PortfolioIntentKind::MatcherDisable => env.build_retained_matcher_config(SUBJECT, 0),
-        PortfolioIntentKind::TradeNoCpi => {
+        PortfolioIntentKind::TradeNoCpiAccountA | PortfolioIntentKind::TradeNoCpiAccountB => {
             env.build_retained_no_cpi_trade(SUBJECT, COUNTERPARTY, 0, size_q, INITIAL_PRICE)
         }
-        PortfolioIntentKind::TradeCpi => {
+        PortfolioIntentKind::TradeCpiAccountA | PortfolioIntentKind::TradeCpiAccountB => {
             env.build_retained_cpi_trade(SUBJECT, COUNTERPARTY, 0, size_q, 0)
         }
-        PortfolioIntentKind::BatchTradeNoCpi => {
+        PortfolioIntentKind::BatchTradeNoCpiAccountA
+        | PortfolioIntentKind::BatchTradeNoCpiAccountB => {
             env.build_retained_batch_no_cpi_trade(SUBJECT, COUNTERPARTY, 0, size_q, INITIAL_PRICE)
         }
-        PortfolioIntentKind::BatchTradeCpi => {
+        PortfolioIntentKind::BatchTradeCpiAccountA | PortfolioIntentKind::BatchTradeCpiAccountB => {
             env.build_retained_batch_cpi_trade(SUBJECT, COUNTERPARTY, 0, size_q, 0)
         }
         PortfolioIntentKind::ConvertReleasedPnl
@@ -3374,6 +3383,17 @@ fn retained_portfolio_intent(env: &mut V16Svm, kind: PortfolioIntentKind) -> Tra
         | PortfolioIntentKind::ForfeitRecoveryLeg => {
             unreachable!("lifecycle-bearing portfolio intents use dedicated setup")
         }
+    }
+}
+
+fn portfolio_intent_subject(kind: PortfolioIntentKind) -> usize {
+    match kind {
+        PortfolioIntentKind::TradeNoCpiAccountB
+        | PortfolioIntentKind::TradeCpiAccountB
+        | PortfolioIntentKind::BatchTradeNoCpiAccountB
+        | PortfolioIntentKind::BatchTradeCpiAccountB
+        | PortfolioIntentKind::ConvertReleasedPnl => 1,
+        _ => 0,
     }
 }
 
@@ -3779,7 +3799,6 @@ fn discover_one_portfolio_incarnation_replay(
     mut seed: [u8; 32],
     kind: PortfolioIntentKind,
 ) -> Result<IncarnationDiscovery, String> {
-    const SUBJECT: usize = 0;
     seed[0] ^= 0xa3;
     seed[1] ^= kind as u8;
     match kind {
@@ -3794,29 +3813,37 @@ fn discover_one_portfolio_incarnation_replay(
         }
         _ => {}
     }
+    let subject = portfolio_intent_subject(kind);
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
     env.begin_public_trace();
-    let old_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let old_portfolio_id = env.primary_portfolio_id(subject);
     let retained = retained_portfolio_intent(&mut env, kind);
 
-    let old_capital = env.primary_portfolio(SUBJECT).capital.get();
-    env.withdraw_primary(SUBJECT, old_capital)
+    let old_capital = env.primary_portfolio(subject).capital.get();
+    env.withdraw_primary(subject, old_capital)
         .map_err(|error| format!("empty old portfolio: {error}"))?;
-    env.close_primary_portfolio(SUBJECT)
+    env.close_primary_portfolio(subject)
         .map_err(|error| format!("close old portfolio: {error}"))?;
     let (intermediate_portfolio_id, new_portfolio_id) = env
-        .cycle_closed_primary_portfolio_through_owner(SUBJECT, 2)
+        .cycle_closed_primary_portfolio_through_owner(subject, 2)
         .map_err(|error| format!("cycle replacement portfolio owner A-B-A: {error}"))?;
     let replacement_capital = replacement_capital(kind);
     if replacement_capital != 0 {
-        env.deposit_primary(SUBJECT, replacement_capital)
+        env.deposit_primary(subject, replacement_capital)
             .map_err(|error| format!("fund replacement portfolio: {error}"))?;
+    }
+    if matches!(
+        kind,
+        PortfolioIntentKind::TradeCpiAccountB | PortfolioIntentKind::BatchTradeCpiAccountB
+    ) {
+        env.set_matcher_config(subject, 1)
+            .map_err(|error| format!("authorize replacement CPI maker: {error}"))?;
     }
     match kind {
         PortfolioIntentKind::MatcherEnable => {}
         PortfolioIntentKind::MatcherDisable => {
-            env.set_matcher_config(SUBJECT, 1)
+            env.set_matcher_config(subject, 1)
                 .map_err(|error| format!("establish replacement matcher policy: {error}"))?;
         }
         _ => {}

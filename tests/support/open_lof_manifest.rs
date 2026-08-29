@@ -377,7 +377,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         RecoveryTerminal,
         BlockerAdapter::Pr273ForfeitFundingErasure,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         274,
         Hardening,
         ReplayIncarnation,
@@ -389,7 +389,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::OracleGenerationReplayFamily,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         276,
         Hardening,
         ReplayIncarnation,
@@ -401,7 +401,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::OracleGenerationReplayFamily,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         278,
         Hardening,
         ReplayIncarnation,
@@ -487,31 +487,31 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr296TradeFeeMarketGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         299,
         Hardening,
         ReplayIncarnation,
         BlockerAdapter::Pr299PortfolioIncarnationWithdrawal,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         301,
         Hardening,
         ReplayIncarnation,
         BlockerAdapter::Pr301ConvertPortfolioIncarnationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         303,
         Hardening,
         ReplayIncarnation,
         BlockerAdapter::Pr303TradePortfolioIncarnationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         304,
         Hardening,
         ReplayIncarnation,
         BlockerAdapter::Pr304MatcherGrantPortfolioIncarnationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         305,
         Hardening,
         ReplayIncarnation,
@@ -523,7 +523,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr307MarketIncarnationDeposit,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         309,
         Hardening,
         ReplayIncarnation,

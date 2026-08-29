@@ -94,4 +94,59 @@ fn v16_program_all_retained_portfolio_intents_reject_after_same_pubkey_recreate(
             .unwrap_or_else(|| panic!("{expected:?}: empty fresh trace"));
         assert!(fresh.succeeded, "{expected:?}: current control trace");
     }
+
+    // This fixed-pin mapping is direct certification evidence, not independent discovery.
+    // Each finding remains backed by the operation-generic matrix above; trade findings require
+    // every route family in both account roles rather than one representative transaction.
+    let certifications: &[(u16, &[PortfolioIntentKind])] = &[
+        (274, &[PortfolioIntentKind::MatcherEnable]),
+        (
+            276,
+            &[
+                PortfolioIntentKind::TradeNoCpiAccountA,
+                PortfolioIntentKind::TradeNoCpiAccountB,
+                PortfolioIntentKind::TradeCpiAccountA,
+                PortfolioIntentKind::TradeCpiAccountB,
+                PortfolioIntentKind::BatchTradeNoCpiAccountA,
+                PortfolioIntentKind::BatchTradeNoCpiAccountB,
+                PortfolioIntentKind::BatchTradeCpiAccountA,
+                PortfolioIntentKind::BatchTradeCpiAccountB,
+            ],
+        ),
+        (278, &[PortfolioIntentKind::ForfeitRecoveryLeg]),
+        (299, &[PortfolioIntentKind::Withdraw]),
+        (301, &[PortfolioIntentKind::ConvertReleasedPnl]),
+        (
+            303,
+            &[
+                PortfolioIntentKind::TradeNoCpiAccountA,
+                PortfolioIntentKind::TradeNoCpiAccountB,
+                PortfolioIntentKind::TradeCpiAccountA,
+                PortfolioIntentKind::TradeCpiAccountB,
+                PortfolioIntentKind::BatchTradeNoCpiAccountA,
+                PortfolioIntentKind::BatchTradeNoCpiAccountB,
+                PortfolioIntentKind::BatchTradeCpiAccountA,
+                PortfolioIntentKind::BatchTradeCpiAccountB,
+            ],
+        ),
+        (304, &[PortfolioIntentKind::MatcherEnable]),
+        (305, &[PortfolioIntentKind::Deposit]),
+        (309, &[PortfolioIntentKind::Close]),
+    ];
+    for (pr, kinds) in certifications {
+        for kind in *kinds {
+            let evidence = discoveries
+                .iter()
+                .find(|discovery| discovery.kind == *kind)
+                .unwrap_or_else(|| panic!("PR {pr}: missing {kind:?} certification evidence"));
+            assert!(
+                !evidence.accepted_stale_intent && !evidence.mutated_economic_state,
+                "PR {pr}: {kind:?} stale request must reject atomically",
+            );
+            assert!(
+                evidence.fresh_intent_landed && evidence.fresh_mutated_economic_state,
+                "PR {pr}: {kind:?} current request must remain live",
+            );
+        }
+    }
 }
