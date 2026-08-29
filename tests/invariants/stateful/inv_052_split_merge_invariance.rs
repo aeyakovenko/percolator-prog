@@ -83,6 +83,15 @@
 //! failed on engine `3b76b794`: the aggregate route reserved 2,623 effective quote atoms, while the
 //! two-way route reserved 2,622. Engine `ba7a84b7` ceils the canonical margin requirement and routes
 //! liquidation planning through that same helper.
+//! `v16_program_public_two_domain_source_liens_are_split_merge_invariant` composes the same oracle
+//! across assets 0 and 1 simultaneously. One aggregate portfolio carries both source domains; the
+//! comparison splits each domain across two portfolios while retaining one shared counterparty.
+//! Both cross-domain exit/hint orders, exact/late expiry, and every trade route must converge, with
+//! the one-extra-account rounding envelope enforced independently for each domain. Cross-margin
+//! may choose a different domain-local reservation for the aggregate account, so the aggregate
+//! oracle requires exact total reservation and terminal value rather than false per-domain
+//! equality. The same public world builder is reused by INV-041's asymmetric-fee insertion-order
+//! regression; INV-041 owns that test and no route is executed twice merely for file organization.
 //!
 //! Guarantee boundary: target publication order and target lifetime are identical across the
 //! compared executions. Reordering authenticated observations is a different economic history,
@@ -95,7 +104,7 @@
 use super::*;
 use crate::support::{
     fuzz_model::{assert_public_encumbrance_census, execute_trade_route, TradeRoute},
-    v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
+    v16_svm::{MarketConfig, TxSuccess, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
@@ -292,6 +301,37 @@ struct SourceLienPartitionOutcome {
     economics: SourceLienPartitionEconomics,
     max_compute_units: u64,
     public_steps: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MultiDomainSourceLienEconomics {
+    peak_local: [[u128; 11]; 2],
+    peak_source: [[u128; 11]; 2],
+    peak_bucket: [percolator::BackingBucketV16; 2],
+    final_local: [[u128; 11]; 2],
+    final_source: [[u128; 11]; 2],
+    final_bucket: [percolator::BackingBucketV16; 2],
+    target_payout: u128,
+    target_value_before_withdrawal: i128,
+    oi_q: [[u128; 2]; 2],
+    c_tot_plus_insurance: u128,
+    vault: u128,
+    spl_vault: u128,
+    token_supply: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MultiDomainSourceLienOutcome {
+    economics: MultiDomainSourceLienEconomics,
+    max_compute_units: u64,
+    public_steps: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MultiDomainSourceLienPartition {
+    CrossDomainAggregate,
+    DomainIsolated,
+    SplitFour,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2641,6 +2681,433 @@ fn run_source_lien_partition(
     })
 }
 
+fn execute_trade_route_with_backing_fee_cap(
+    env: &mut V16Svm,
+    route: TradeRoute,
+    taker: usize,
+    maker: usize,
+    asset_index: u16,
+    size_q: i128,
+    price: u64,
+    backing_fee_cap_bps: u16,
+) -> Result<TxSuccess, String> {
+    match route {
+        TradeRoute::NoCpi => env.trade_no_cpi_with_backing_fee_cap(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            price,
+            0,
+            backing_fee_cap_bps,
+        ),
+        TradeRoute::Cpi => {
+            env.ensure_primary_matcher_enabled(maker)?;
+            let tx = env.build_retained_cpi_trade_with_backing_fee_cap(
+                taker,
+                maker,
+                asset_index,
+                size_q,
+                0,
+                backing_fee_cap_bps,
+            );
+            env.land_retained(tx)
+        }
+        TradeRoute::BatchNoCpi | TradeRoute::BatchCpi if backing_fee_cap_bps != 0 => {
+            Err("batch routes do not carry backing-fee consent".to_string())
+        }
+        TradeRoute::BatchNoCpi | TradeRoute::BatchCpi => {
+            execute_trade_route(env, route, taker, maker, asset_index, size_q, price, 0)
+        }
+    }
+}
+
+fn run_multi_domain_source_lien_partition(
+    partition: MultiDomainSourceLienPartition,
+    reverse_domain_order: bool,
+    route: TradeRoute,
+    landing_slot: u64,
+) -> Result<MultiDomainSourceLienOutcome, String> {
+    run_multi_domain_source_lien_partition_with_fees(
+        partition,
+        reverse_domain_order,
+        route,
+        landing_slot,
+        [0, 0],
+    )
+}
+
+fn run_multi_domain_source_lien_partition_with_fees(
+    partition: MultiDomainSourceLienPartition,
+    reverse_domain_order: bool,
+    route: TradeRoute,
+    landing_slot: u64,
+    backing_fee_bps: [u16; 2],
+) -> Result<MultiDomainSourceLienOutcome, String> {
+    const PRICE: u64 = 100;
+    const WINNING_MARK: u64 = 105;
+    const EXPIRY_SLOT: u64 = 3;
+    const DOMAINS: [usize; 2] = [1, 3];
+    const ASSETS: [u16; 2] = [0, 1];
+    const AGGREGATE_TARGETS: [usize; 1] = [0];
+    const ISOLATED_TARGETS: [usize; 2] = [0, 3];
+    const SPLIT_TARGETS: [usize; 4] = [0, 2, 3, 4];
+    const COUNTERPARTIES: [usize; 1] = [1];
+    const AGGREGATE_PAIRS: [(usize, usize, u16, i128, i128); 2] = [
+        (0, 1, 0, 1_000 * POS_SCALE as i128, 50 * POS_SCALE as i128),
+        (0, 1, 1, 1_000 * POS_SCALE as i128, 50 * POS_SCALE as i128),
+    ];
+    const ISOLATED_PAIRS: [(usize, usize, u16, i128, i128); 2] = [
+        (0, 1, 0, 1_000 * POS_SCALE as i128, 50 * POS_SCALE as i128),
+        (3, 1, 1, 1_000 * POS_SCALE as i128, 50 * POS_SCALE as i128),
+    ];
+    const SPLIT_PAIRS: [(usize, usize, u16, i128, i128); 4] = [
+        (0, 1, 0, 500 * POS_SCALE as i128, 25 * POS_SCALE as i128),
+        (2, 1, 0, 500 * POS_SCALE as i128, 25 * POS_SCALE as i128),
+        (3, 1, 1, 500 * POS_SCALE as i128, 25 * POS_SCALE as i128),
+        (4, 1, 1, 500 * POS_SCALE as i128, 25 * POS_SCALE as i128),
+    ];
+
+    if landing_slot < EXPIRY_SLOT {
+        return Err(format!(
+            "multi-domain source-lien landing {landing_slot} precedes expiry {EXPIRY_SLOT}"
+        ));
+    }
+    let route_discriminator = match route {
+        TradeRoute::NoCpi => 0,
+        TradeRoute::Cpi => 1,
+        TradeRoute::BatchNoCpi => 2,
+        TradeRoute::BatchCpi => 3,
+    };
+    let mut seed = [0x5d; 32];
+    seed[0] ^= match partition {
+        MultiDomainSourceLienPartition::CrossDomainAggregate => 0,
+        MultiDomainSourceLienPartition::DomainIsolated => 1,
+        MultiDomainSourceLienPartition::SplitFour => 2,
+    };
+    seed[1] ^= u8::from(reverse_domain_order) << 1;
+    seed[2] ^= route_discriminator;
+    seed[3] ^= landing_slot as u8;
+    let actor_deposits = match partition {
+        MultiDomainSourceLienPartition::CrossDomainAggregate => [105_004, 2_000_000, 0, 0, 0],
+        MultiDomainSourceLienPartition::DomainIsolated => [52_502, 2_000_000, 0, 52_502, 0],
+        MultiDomainSourceLienPartition::SplitFour => [26_251, 2_000_000, 26_251, 26_251, 26_251],
+    };
+    let active_targets: &[usize] = match partition {
+        MultiDomainSourceLienPartition::CrossDomainAggregate => &AGGREGATE_TARGETS,
+        MultiDomainSourceLienPartition::DomainIsolated => &ISOLATED_TARGETS,
+        MultiDomainSourceLienPartition::SplitFour => &SPLIT_TARGETS,
+    };
+    let pairs: &[(usize, usize, u16, i128, i128)] = match partition {
+        MultiDomainSourceLienPartition::CrossDomainAggregate => &AGGREGATE_PAIRS,
+        MultiDomainSourceLienPartition::DomainIsolated => &ISOLATED_PAIRS,
+        MultiDomainSourceLienPartition::SplitFour => &SPLIT_PAIRS,
+    };
+    let mut pair_order = pairs.to_vec();
+    if reverse_domain_order {
+        pair_order.reverse();
+    }
+    let exit_plan: Vec<(usize, u16)> = pair_order
+        .iter()
+        .map(|(target, _, asset_index, _, _)| (*target, *asset_index))
+        .collect();
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 10,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 5_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 0,
+            actor_deposits,
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let mut observations: Vec<CrankObservationHint> = ASSETS
+        .iter()
+        .map(|asset_index| CrankObservationHint {
+            asset_index: *asset_index,
+            oracle_accounts: env
+                .primary_profile(usize::from(*asset_index))
+                .oracle_leg_count,
+        })
+        .collect();
+    if reverse_domain_order {
+        observations.reverse();
+    }
+    let mut max_compute_units = 0u64;
+    env.begin_public_trace();
+
+    for (domain_slot, domain) in DOMAINS.into_iter().enumerate() {
+        if backing_fee_bps[domain_slot] != 0 {
+            let policy = env
+                .update_backing_fee_policy(domain as u16, backing_fee_bps[domain_slot], 0)
+                .map_err(|error| format!("configure multi-domain source {domain}: {error}"))?;
+            max_compute_units = max_compute_units.max(policy.compute_units);
+        }
+        let backing = env
+            .top_up_backing_bucket_without_ledger(domain as u16, 100_000, EXPIRY_SLOT)
+            .map_err(|error| format!("fund multi-domain source {domain}: {error}"))?;
+        max_compute_units = max_compute_units.max(backing.compute_units);
+    }
+    for &(target, counterparty, asset_index, open_q, _) in &pair_order {
+        let open = execute_trade_route_with_backing_fee_cap(
+            &mut env,
+            route,
+            target,
+            counterparty,
+            asset_index,
+            open_q,
+            PRICE,
+            backing_fee_bps.into_iter().max().unwrap_or(0),
+        )
+        .map_err(|error| {
+            format!("open multi-domain source-lien asset {asset_index} via {route:?}: {error}")
+        })?;
+        max_compute_units = max_compute_units.max(open.compute_units);
+    }
+
+    env.warp_to_slot(2);
+    let mut asset_order = ASSETS;
+    if reverse_domain_order {
+        asset_order.reverse();
+    }
+    for asset_index in asset_order {
+        let mark = env
+            .push_auth_mark(asset_index, 2, WINNING_MARK)
+            .map_err(|error| {
+                format!("publish multi-domain winning mark for asset {asset_index}: {error}")
+            })?;
+        max_compute_units = max_compute_units.max(mark.compute_units);
+    }
+    for actor in COUNTERPARTIES.iter().chain(active_targets.iter()).copied() {
+        crank_source_lien_partition_to_fixed_point(
+            &mut env,
+            actor,
+            2,
+            observations.clone(),
+            &mut max_compute_units,
+        )?;
+    }
+    let mut expected_pnl = [0i128; PRIMARY_ACTOR_COUNT];
+    for &(target, _, _, open_q, _) in &pair_order {
+        expected_pnl[target] = expected_pnl[target]
+            .checked_add(open_q / POS_SCALE as i128 * i128::from(WINNING_MARK - PRICE))
+            .ok_or_else(|| "multi-domain expected PnL overflow".to_string())?;
+    }
+    for actor in active_targets {
+        if env.primary_portfolio(*actor).pnl.get() != expected_pnl[*actor] {
+            return Err(format!(
+                "multi-domain target {actor} earned {}, expected {}",
+                env.primary_portfolio(*actor).pnl.get(),
+                expected_pnl[*actor]
+            ));
+        }
+    }
+    for &(target, counterparty, asset_index, _, increase_q) in &pair_order {
+        let increase = execute_trade_route_with_backing_fee_cap(
+            &mut env,
+            route,
+            target,
+            counterparty,
+            asset_index,
+            increase_q,
+            WINNING_MARK,
+            backing_fee_bps.into_iter().max().unwrap_or(0),
+        )
+        .map_err(|error| {
+            format!(
+                "create multi-domain source lien for asset {asset_index} via {route:?}: {error}"
+            )
+        })?;
+        max_compute_units = max_compute_units.max(increase.compute_units);
+    }
+    assert_public_encumbrance_census("INV-052 multi-domain source liens at peak", &env)?;
+    let peak_group = env.primary_market_state().1;
+    let peak_local = [
+        source_lien_partition_local_totals(&env, active_targets, DOMAINS[0])?,
+        source_lien_partition_local_totals(&env, active_targets, DOMAINS[1])?,
+    ];
+    let peak_source = [
+        source_credit_amounts(peak_group.source_credit[DOMAINS[0]]),
+        source_credit_amounts(peak_group.source_credit[DOMAINS[1]]),
+    ];
+    let peak_bucket = [
+        peak_group.source_backing_buckets[DOMAINS[0]],
+        peak_group.source_backing_buckets[DOMAINS[1]],
+    ];
+    for domain_slot in 0..DOMAINS.len() {
+        if peak_local[domain_slot][2] == 0
+            || peak_local[domain_slot][5] == 0
+            || peak_local[domain_slot][5] != peak_source[domain_slot][5]
+            || peak_local[domain_slot][5] != peak_bucket[domain_slot].valid_liened_backing_num
+        {
+            return Err(format!(
+                "multi-domain source {} lacked exact live-lien attribution: local={:?}, source={:?}, bucket={:?}",
+                DOMAINS[domain_slot], peak_local[domain_slot], peak_source[domain_slot], peak_bucket[domain_slot]
+            ));
+        }
+    }
+
+    env.warp_to_slot(landing_slot);
+    for asset_index in asset_order {
+        let mark = env
+            .push_auth_mark(asset_index, landing_slot, WINNING_MARK)
+            .map_err(|error| {
+                format!("authenticate multi-domain expiry for asset {asset_index}: {error}")
+            })?;
+        max_compute_units = max_compute_units.max(mark.compute_units);
+    }
+    for actor in active_targets.iter().copied() {
+        crank_source_lien_partition_to_fixed_point(
+            &mut env,
+            actor,
+            landing_slot,
+            observations.clone(),
+            &mut max_compute_units,
+        )?;
+    }
+    let expired_group = env.primary_market_state().1;
+    for domain in DOMAINS {
+        if expired_group.source_backing_buckets[domain].status
+            != percolator::BackingBucketStatusV16::Impaired
+        {
+            return Err(format!(
+                "multi-domain source {domain} did not normalize at slot {landing_slot}: {:?}",
+                expired_group.source_backing_buckets[domain]
+            ));
+        }
+    }
+
+    for &(actor, asset_index) in &exit_plan {
+        let exposure_q = liquidation_partition_basis_q(&env, actor, u32::from(asset_index))?;
+        if exposure_q == 0 {
+            return Err(format!(
+                "multi-domain target {actor} had no asset-{asset_index} exposure at expiry"
+            ));
+        }
+        let reduce = env
+            .rebalance_reduce(actor, asset_index, exposure_q)
+            .map_err(|error| {
+                format!("reduce multi-domain target {actor} asset {asset_index}: {error}")
+            })?;
+        max_compute_units = max_compute_units.max(reduce.compute_units);
+        if liquidation_partition_basis_q(&env, actor, u32::from(asset_index))? != 0 {
+            return Err(format!(
+                "multi-domain target {actor} retained asset-{asset_index} exposure"
+            ));
+        }
+        crank_source_lien_partition_to_fixed_point(
+            &mut env,
+            actor,
+            landing_slot,
+            observations.clone(),
+            &mut max_compute_units,
+        )?;
+    }
+    let target_value_before_withdrawal =
+        liquidation_partition_portfolio_value(&env, active_targets)?;
+    for actor in active_targets.iter().copied() {
+        let capital = env.primary_portfolio(actor).capital.get();
+        if capital == 0 {
+            return Err(format!(
+                "multi-domain source-lien target {actor} retained no funded exit"
+            ));
+        }
+        let withdrawal = env
+            .withdraw_primary(actor, capital)
+            .map_err(|error| format!("withdraw multi-domain target {actor}: {error}"))?;
+        max_compute_units = max_compute_units.max(withdrawal.compute_units);
+    }
+    assert_public_encumbrance_census("INV-052 multi-domain source liens after exits", &env)?;
+
+    let final_group = env.primary_market_state().1;
+    let final_local = [
+        source_lien_partition_local_totals(&env, active_targets, DOMAINS[0])?,
+        source_lien_partition_local_totals(&env, active_targets, DOMAINS[1])?,
+    ];
+    let final_source = [
+        source_credit_amounts(final_group.source_credit[DOMAINS[0]]),
+        source_credit_amounts(final_group.source_credit[DOMAINS[1]]),
+    ];
+    let final_bucket = [
+        final_group.source_backing_buckets[DOMAINS[0]],
+        final_group.source_backing_buckets[DOMAINS[1]],
+    ];
+    let target_payout = active_targets.iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(u128::from(
+            env.token_amount(env.actors[*actor].destination_token),
+        ))
+        .ok_or_else(|| "multi-domain target payout overflow".to_string())
+    })?;
+    let c_tot_plus_insurance = final_group
+        .c_tot
+        .checked_add(final_group.insurance)
+        .ok_or_else(|| "multi-domain stock overflow".to_string())?;
+    let oi_q = [
+        [
+            final_group.assets[usize::from(ASSETS[0])].oi_eff_long_q,
+            final_group.assets[usize::from(ASSETS[0])].oi_eff_short_q,
+        ],
+        [
+            final_group.assets[usize::from(ASSETS[1])].oi_eff_long_q,
+            final_group.assets[usize::from(ASSETS[1])].oi_eff_short_q,
+        ],
+    ];
+    if oi_q != [[0, 0], [0, 0]]
+        || target_payout == 0
+        || final_group.vault != u128::from(env.token_amount(env.vault))
+        || env.token_supply_observed() != supply_before
+        || max_compute_units >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "multi-domain partition escaped exit/OI/custody/CU frame: group={final_group:?}, payout={target_payout}, CU={max_compute_units}"
+        ));
+    }
+    let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("multi-domain source-lien trace must be public and rollback-exact");
+    if trace.out_of_band_economic_mutations != 0
+        || trace.steps.iter().any(|step| {
+            !step.succeeded
+                && (step.rejected_exact_writable_rollback != Some(true)
+                    || step.rejected_no_program_lamport_delta != Some(true)
+                    || step.token_deltas.iter().any(|(_, delta)| *delta != 0))
+        })
+    {
+        return Err(format!(
+            "multi-domain source-lien trace escaped public exact-rollback semantics: {trace:?}"
+        ));
+    }
+
+    Ok(MultiDomainSourceLienOutcome {
+        economics: MultiDomainSourceLienEconomics {
+            peak_local,
+            peak_source,
+            peak_bucket,
+            final_local,
+            final_source,
+            final_bucket,
+            target_payout,
+            target_value_before_withdrawal,
+            oi_q,
+            c_tot_plus_insurance,
+            vault: final_group.vault,
+            spl_vault: u128::from(env.token_amount(env.vault)),
+            token_supply: env.token_supply_observed(),
+        },
+        max_compute_units,
+        public_steps: trace.steps.len(),
+    })
+}
+
 fn run_target_history(
     seed: [u8; 32],
     episodes: &[TargetEpisode],
@@ -3423,6 +3890,282 @@ fn v16_program_public_source_lien_expiry_is_split_merge_invariant() {
                 canonical_asymmetric_four = Some(asymmetric_four.economics);
             }
         }
+    }
+}
+
+fn assert_multi_domain_source_lien_partition_equivalent(
+    aggregate: &MultiDomainSourceLienOutcome,
+    aggregate_reversed: &MultiDomainSourceLienOutcome,
+    isolated: &MultiDomainSourceLienOutcome,
+    isolated_reversed: &MultiDomainSourceLienOutcome,
+    split: &MultiDomainSourceLienOutcome,
+    split_reversed: &MultiDomainSourceLienOutcome,
+    route: TradeRoute,
+    landing_slot: u64,
+) {
+    assert_eq!(
+        aggregate.economics, aggregate_reversed.economics,
+        "reversing aggregate domain order changed economics via {route:?} at {landing_slot}"
+    );
+    assert_eq!(
+        isolated.economics, isolated_reversed.economics,
+        "reversing isolated domain order changed economics via {route:?} at {landing_slot}"
+    );
+    assert_eq!(
+        split.economics, split_reversed.economics,
+        "reversing split domain/owner order changed economics via {route:?} at {landing_slot}"
+    );
+    for domain_slot in 0..2 {
+        assert!(
+            aggregate.economics.peak_local[domain_slot][2] > 0
+                && aggregate.economics.peak_local[domain_slot][5] > 0,
+            "aggregate domain {domain_slot} did not create a live source lien via {route:?} at {landing_slot}"
+        );
+        assert!(
+            aggregate.economics.peak_local[domain_slot][5]
+                <= aggregate.economics.peak_local[domain_slot][0],
+            "cross-domain aggregation reserved beyond the claim bound for domain {domain_slot} via {route:?} at {landing_slot}"
+        );
+        assert!(
+            split.economics.peak_local[domain_slot][5]
+                >= isolated.economics.peak_local[domain_slot][5],
+            "splitting domain {domain_slot} lowered the isolated reservation via {route:?} at {landing_slot}: isolated={}, split={} ",
+            isolated.economics.peak_local[domain_slot][5],
+            split.economics.peak_local[domain_slot][5]
+        );
+        assert!(
+            split.economics.peak_local[domain_slot][5]
+                - isolated.economics.peak_local[domain_slot][5]
+                <= BOUND_SCALE,
+            "splitting domain {domain_slot} exceeded its one-extra-account rounding budget via {route:?} at {landing_slot}"
+        );
+        assert_eq!(
+            split.economics.peak_local[domain_slot][5],
+            split.economics.peak_source[domain_slot][5],
+            "split account/source attribution diverged for domain {domain_slot} via {route:?} at {landing_slot}"
+        );
+        assert_eq!(
+            split.economics.peak_local[domain_slot][5],
+            split.economics.peak_bucket[domain_slot].valid_liened_backing_num,
+            "split account/bucket attribution diverged for domain {domain_slot} via {route:?} at {landing_slot}"
+        );
+        assert_eq!(split.economics.final_local[domain_slot][8], 0);
+        assert_eq!(
+            split.economics.final_local[domain_slot][5],
+            split.economics.final_source[domain_slot][6],
+            "split impaired account/source attribution diverged for domain {domain_slot} via {route:?} at {landing_slot}"
+        );
+        assert_eq!(
+            split.economics.final_local[domain_slot][5],
+            split.economics.final_bucket[domain_slot].impaired_liened_backing_num,
+            "split impaired account/bucket attribution diverged for domain {domain_slot} via {route:?} at {landing_slot}"
+        );
+        assert!(
+            split.economics.final_source[domain_slot][6]
+                >= isolated.economics.final_source[domain_slot][6],
+            "splitting domain {domain_slot} lowered impaired backing via {route:?} at {landing_slot}"
+        );
+        assert!(
+            split.economics.final_source[domain_slot][6]
+                - isolated.economics.final_source[domain_slot][6]
+                <= BOUND_SCALE,
+            "splitting domain {domain_slot} exceeded its impaired rounding budget via {route:?} at {landing_slot}"
+        );
+    }
+    let peak_reservation = |outcome: &MultiDomainSourceLienOutcome| {
+        outcome
+            .economics
+            .peak_local
+            .iter()
+            .map(|domain| domain[5])
+            .sum::<u128>()
+    };
+    let final_impaired = |outcome: &MultiDomainSourceLienOutcome| {
+        outcome
+            .economics
+            .final_source
+            .iter()
+            .map(|domain| domain[6])
+            .sum::<u128>()
+    };
+    assert_eq!(
+        peak_reservation(aggregate),
+        peak_reservation(isolated),
+        "cross-domain aggregation changed the exact total margin reservation via {route:?} at {landing_slot}"
+    );
+    assert_eq!(
+        final_impaired(aggregate),
+        final_impaired(isolated),
+        "cross-domain aggregation changed the exact total impaired backing via {route:?} at {landing_slot}"
+    );
+    let terminal_frame = |outcome: &MultiDomainSourceLienOutcome| {
+        (
+            outcome.economics.target_payout,
+            outcome.economics.target_value_before_withdrawal,
+            outcome.economics.oi_q,
+            outcome.economics.c_tot_plus_insurance,
+            outcome.economics.vault,
+            outcome.economics.spl_vault,
+            outcome.economics.token_supply,
+        )
+    };
+    assert_eq!(
+        terminal_frame(aggregate),
+        terminal_frame(isolated),
+        "cross-domain aggregation changed user value, OI, stock, or custody via {route:?} at {landing_slot}"
+    );
+    assert_eq!(
+        terminal_frame(isolated),
+        terminal_frame(split),
+        "two-domain split changed user value, OI, stock, or custody via {route:?} at {landing_slot}"
+    );
+    assert!(aggregate.max_compute_units < TX_CU_LIMIT);
+    assert!(aggregate_reversed.max_compute_units < TX_CU_LIMIT);
+    assert!(isolated.max_compute_units < TX_CU_LIMIT);
+    assert!(isolated_reversed.max_compute_units < TX_CU_LIMIT);
+    assert!(split.max_compute_units < TX_CU_LIMIT);
+    assert!(split_reversed.max_compute_units < TX_CU_LIMIT);
+    assert!(split.public_steps > isolated.public_steps);
+}
+
+#[test]
+fn v16_program_public_two_domain_source_liens_are_split_merge_invariant() {
+    const ROUTES: [TradeRoute; 4] = [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ];
+    let mut canonical_aggregate = None;
+    let mut canonical_isolated = None;
+    let mut canonical_split = None;
+
+    for landing_slot in [3u64, 4] {
+        for route in ROUTES {
+            let aggregate = run_multi_domain_source_lien_partition(
+                MultiDomainSourceLienPartition::CrossDomainAggregate,
+                false,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!("aggregate two-domain source lien via {route:?} at {landing_slot}: {error}")
+            });
+            let aggregate_reversed = run_multi_domain_source_lien_partition(
+                MultiDomainSourceLienPartition::CrossDomainAggregate,
+                true,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "reversed aggregate two-domain source lien via {route:?} at {landing_slot}: {error}"
+                )
+            });
+            let isolated = run_multi_domain_source_lien_partition(
+                MultiDomainSourceLienPartition::DomainIsolated,
+                false,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!("isolated two-domain source lien via {route:?} at {landing_slot}: {error}")
+            });
+            let isolated_reversed = run_multi_domain_source_lien_partition(
+                MultiDomainSourceLienPartition::DomainIsolated,
+                true,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "reversed isolated two-domain source lien via {route:?} at {landing_slot}: {error}"
+                )
+            });
+            let split = run_multi_domain_source_lien_partition(
+                MultiDomainSourceLienPartition::SplitFour,
+                false,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!("split two-domain source lien via {route:?} at {landing_slot}: {error}")
+            });
+            let split_reversed = run_multi_domain_source_lien_partition(
+                MultiDomainSourceLienPartition::SplitFour,
+                true,
+                route,
+                landing_slot,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "reversed split two-domain source lien via {route:?} at {landing_slot}: {error}"
+                )
+            });
+
+            assert_multi_domain_source_lien_partition_equivalent(
+                &aggregate,
+                &aggregate_reversed,
+                &isolated,
+                &isolated_reversed,
+                &split,
+                &split_reversed,
+                route,
+                landing_slot,
+            );
+            if let Some(canonical) = canonical_aggregate.as_ref() {
+                assert_eq!(
+                    &aggregate.economics, canonical,
+                    "aggregate two-domain economics changed by route/expiry {route:?}/{landing_slot}"
+                );
+            } else {
+                canonical_aggregate = Some(aggregate.economics);
+            }
+            if let Some(canonical) = canonical_isolated.as_ref() {
+                assert_eq!(
+                    &isolated.economics, canonical,
+                    "isolated two-domain economics changed by route/expiry {route:?}/{landing_slot}"
+                );
+            } else {
+                canonical_isolated = Some(isolated.economics);
+            }
+            if let Some(canonical) = canonical_split.as_ref() {
+                assert_eq!(
+                    &split.economics, canonical,
+                    "split two-domain economics changed by route/expiry {route:?}/{landing_slot}"
+                );
+            } else {
+                canonical_split = Some(split.economics);
+            }
+        }
+    }
+}
+
+pub(super) fn verify_public_source_lien_allocation_is_domain_order_canonical() {
+    for route in [TradeRoute::NoCpi, TradeRoute::Cpi] {
+        let first_high = run_multi_domain_source_lien_partition_with_fees(
+            MultiDomainSourceLienPartition::CrossDomainAggregate,
+            false,
+            route,
+            3,
+            [5_000, 0],
+        )
+        .unwrap_or_else(|error| panic!("first-high asymmetric fee via {route:?}: {error}"));
+        let first_free = run_multi_domain_source_lien_partition_with_fees(
+            MultiDomainSourceLienPartition::CrossDomainAggregate,
+            true,
+            route,
+            3,
+            [5_000, 0],
+        )
+        .unwrap_or_else(|error| panic!("first-free asymmetric fee via {route:?}: {error}"));
+        assert_eq!(
+            first_high.economics, first_free.economics,
+            "source-domain insertion order changed allocation or terminal economics via {route:?}"
+        );
+        assert!(first_high.economics.peak_bucket[0].utilization_fee_earnings > 0);
+        assert!(first_high.max_compute_units < TX_CU_LIMIT);
+        assert!(first_free.max_compute_units < TX_CU_LIMIT);
     }
 }
 

@@ -9,8 +9,17 @@
 //! authenticated mark move and public shutdown, the model exhausts both pair
 //! orders crossed with one-shot and dust-chunked force-close schedules. It
 //! compares account-local claims and domain-level accounting, not merely total
-//! vault value. Other liquidation, insurance, lien, and close-preemption order
-//! spaces remain outside this bounded topology.
+//! vault value. A second public LiteSVM regression reuses INV-052's two-asset
+//! source-lien world and assigns a 50% utilization fee to one source domain and
+//! zero to the other. Reversing otherwise identical signed trade history must
+//! preserve the complete allocation and terminal economics through direct and
+//! matcher-CPI routes. On engine `422893fa`, insertion order moved 2,378 quote
+//! atoms between target payout and provider earnings; engine `c0dec8ce`
+//! canonicalizes the bounded persisted source-domain set, with native and Kani
+//! field-preservation coverage. Both pre-fix outcomes remained inside signed fee
+//! bounds, so this is deterministic-allocation correctness rather than a public
+//! LoF or persistent DoS finding. Other liquidation, insurance, lien, and
+//! close-preemption order spaces remain outside this bounded topology.
 
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{BOUND_SCALE, POS_SCALE};
@@ -21,6 +30,12 @@ const SOURCE_DOMAIN: usize = 1;
 const OPEN_PRICE: u64 = 101;
 const CLOSE_PRICE: u64 = 137;
 const SIZE_Q: u128 = POS_SCALE + 17;
+
+#[test]
+fn v16_program_public_source_lien_allocation_is_domain_order_canonical() {
+    super::inv_052_split_merge_invariance::
+        verify_public_source_lien_allocation_is_domain_order_canonical();
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AccountOutcome {
