@@ -10,6 +10,10 @@
 //! discounted positive claim, adds fresh backing, crosses the exact expiry slot,
 //! checks a public owner risk-reduction path with zero credit, and refills the
 //! bucket. After each route, an independent u128 oracle recomputes the rate.
+//! The generated stateful runner also applies a transition-cause oracle to every public action and
+//! successful crank: formula-input changes advance the source epoch, unchanged inputs preserve the
+//! rate, and a live claim's rate cannot rise without more independently available backing or a
+//! smaller claim bound.
 //!
 //! Guarantee boundary: this is one non-random whole-route witness for the same
 //! invariant enforced by the stateful generator. Full-width arithmetic remains

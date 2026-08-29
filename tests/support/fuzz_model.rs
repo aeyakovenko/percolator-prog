@@ -1720,16 +1720,7 @@ pub(crate) fn assert_source_credit_rates(
                 "{label} source domain {domain} liens more insurance than reserved"
             ));
         }
-        let available = source
-            .fresh_reserved_backing_num
-            .checked_sub(source.valid_liened_backing_num)
-            .and_then(|counterparty| {
-                source
-                    .insurance_credit_reserved_num
-                    .checked_sub(insurance_encumbered)
-                    .and_then(|insurance| counterparty.checked_add(insurance))
-            })
-            .ok_or_else(|| format!("{label} source domain {domain} available backing invalid"))?;
+        let available = source_available_backing_num(label, domain, source)?;
         let expected = if source.positive_claim_bound_num == 0
             || available >= source.positive_claim_bound_num
         {
@@ -1748,6 +1739,112 @@ pub(crate) fn assert_source_credit_rates(
                  {expected} (available={available}, claim_bound={})",
                 source.credit_rate_num, source.positive_claim_bound_num
             ));
+        }
+    }
+    Ok(())
+}
+
+fn source_available_backing_num(
+    label: &str,
+    domain: usize,
+    source: percolator::SourceCreditStateV16,
+) -> Result<u128, String> {
+    let insurance_encumbered = source
+        .valid_liened_insurance_num
+        .checked_add(source.impaired_liened_insurance_num)
+        .ok_or_else(|| format!("{label} source domain {domain} insurance lien overflow"))?;
+    source
+        .fresh_reserved_backing_num
+        .checked_sub(source.valid_liened_backing_num)
+        .and_then(|counterparty| {
+            source
+                .insurance_credit_reserved_num
+                .checked_sub(insurance_encumbered)
+                .and_then(|insurance| counterparty.checked_add(insurance))
+        })
+        .ok_or_else(|| format!("{label} source domain {domain} available backing invalid"))
+}
+
+pub(crate) fn assert_source_credit_rate_transition(
+    label: &str,
+    before: &MarketGroupV16,
+    after: &MarketGroupV16,
+) -> Result<(), String> {
+    if before.source_credit.len() != after.source_credit.len() {
+        return Err(format!(
+            "{label} source-credit domain count changed {} -> {}",
+            before.source_credit.len(),
+            after.source_credit.len()
+        ));
+    }
+
+    for domain in 0..before.source_credit.len() {
+        let asset_index = domain / 2;
+        let before_asset = before
+            .assets
+            .get(asset_index)
+            .ok_or_else(|| format!("{label} before-state missing source asset {asset_index}"))?;
+        let after_asset = after
+            .assets
+            .get(asset_index)
+            .ok_or_else(|| format!("{label} after-state missing source asset {asset_index}"))?;
+        if before_asset.market_id != after_asset.market_id {
+            continue;
+        }
+
+        let old = before.source_credit[domain];
+        let new = after.source_credit[domain];
+        let old_inputs = (
+            old.positive_claim_bound_num,
+            old.fresh_reserved_backing_num,
+            old.valid_liened_backing_num,
+            old.insurance_credit_reserved_num,
+            old.valid_liened_insurance_num,
+            old.impaired_liened_insurance_num,
+        );
+        let new_inputs = (
+            new.positive_claim_bound_num,
+            new.fresh_reserved_backing_num,
+            new.valid_liened_backing_num,
+            new.insurance_credit_reserved_num,
+            new.valid_liened_insurance_num,
+            new.impaired_liened_insurance_num,
+        );
+
+        if old_inputs == new_inputs {
+            if old.credit_rate_num != new.credit_rate_num {
+                return Err(format!(
+                    "{label} source domain {domain} changed rate {} -> {} without changing a \
+                     formula input",
+                    old.credit_rate_num, new.credit_rate_num
+                ));
+            }
+            continue;
+        }
+        if new.credit_epoch <= old.credit_epoch {
+            return Err(format!(
+                "{label} source domain {domain} changed a rate input without advancing its epoch: \
+                 {} -> {}",
+                old.credit_epoch, new.credit_epoch
+            ));
+        }
+
+        if new.credit_rate_num > old.credit_rate_num && new.positive_claim_bound_num != 0 {
+            let old_available = source_available_backing_num(label, domain, old)?;
+            let new_available = source_available_backing_num(label, domain, new)?;
+            if new_available <= old_available
+                && new.positive_claim_bound_num >= old.positive_claim_bound_num
+            {
+                return Err(format!(
+                    "{label} source domain {domain} improved rate {} -> {} without more available \
+                     backing or a smaller claim: available {old_available}->{new_available}, \
+                     claim {}->{}",
+                    old.credit_rate_num,
+                    new.credit_rate_num,
+                    old.positive_claim_bound_num,
+                    new.positive_claim_bound_num
+                ));
+            }
         }
     }
     Ok(())
@@ -2442,8 +2539,22 @@ impl ScenarioRunner {
 
     pub fn run_safety_prefix(&mut self, actions: &[Action]) -> Result<(), String> {
         for (index, action) in actions.iter().enumerate() {
+            let (_, before_primary) = self.env.primary_market_state();
+            let (_, before_foreign) = self.env.foreign_market_state();
             self.apply_action(action)
                 .map_err(|error| format!("action {index} {action:?}: {error}"))?;
+            let (_, after_primary) = self.env.primary_market_state();
+            let (_, after_foreign) = self.env.foreign_market_state();
+            assert_source_credit_rate_transition(
+                &format!("action {index} {action:?} primary"),
+                &before_primary,
+                &after_primary,
+            )?;
+            assert_source_credit_rate_transition(
+                &format!("action {index} {action:?} foreign"),
+                &before_foreign,
+                &after_foreign,
+            )?;
             self.assert_global_invariants()
                 .map_err(|error| format!("after action {index} {action:?}: {error}"))?;
         }
@@ -5013,6 +5124,13 @@ impl ScenarioRunner {
                     [0; ASSET_COUNT],
                     liquidation_authorized,
                     "permissionless crank",
+                )
+                .map_err(CrankFailure::Invariant)?;
+                let (_, group_after) = self.env.primary_market_state();
+                assert_source_credit_rate_transition(
+                    "permissionless crank",
+                    &group_before,
+                    &group_after,
                 )
                 .map_err(CrankFailure::Invariant)?;
                 let rank_after = self.progress_rank(actor).map_err(CrankFailure::Invariant)?;
@@ -14345,6 +14463,11 @@ pub fn verify_source_credit_rate_lifecycle(
         .map_err(|error| format!("INV-030 incremental backing top-up: {error}"))?;
     let (_, after_add) = env.primary_market_state();
     assert_source_credit_rates("INV-030 after backing add", &after_add)?;
+    assert_source_credit_rate_transition(
+        "INV-030 fresh backing transition",
+        &after_claim,
+        &after_add,
+    )?;
     let raised_rate = after_add.source_credit[SOURCE_DOMAIN].credit_rate_num;
     if raised_rate <= baseline_rate || raised_rate >= CREDIT_RATE_SCALE {
         return Err(format!(
@@ -14361,6 +14484,11 @@ pub fn verify_source_credit_rate_lifecycle(
     crank_adapter_steps(&mut env, WINNERS[0], EXPIRY_SLOT, ASSET, 24)?;
     let (_, after_expiry) = env.primary_market_state();
     assert_source_credit_rates("INV-030 after expiry", &after_expiry)?;
+    assert_source_credit_rate_transition(
+        "INV-030 exact-expiry transition",
+        &after_add,
+        &after_expiry,
+    )?;
     let expired_bucket = after_expiry.source_backing_buckets[SOURCE_DOMAIN];
     let expired_source = after_expiry.source_credit[SOURCE_DOMAIN];
     if expired_bucket.status == BackingBucketStatusV16::Fresh
@@ -14392,6 +14520,13 @@ pub fn verify_source_credit_rate_lifecycle(
              {position_before_exit}->{position_after_exit}"
         ));
     }
+    let (_, after_reduction) = env.primary_market_state();
+    assert_source_credit_rates("INV-030 after owner reduction", &after_reduction)?;
+    assert_source_credit_rate_transition(
+        "INV-030 owner-reduction transition",
+        &after_expiry,
+        &after_reduction,
+    )?;
 
     let refill = initial_backing
         .checked_add(added_backing)
@@ -14406,6 +14541,11 @@ pub fn verify_source_credit_rate_lifecycle(
     .map_err(|error| format!("INV-030 refill expired source: {error}"))?;
     let (_, after_refill) = env.primary_market_state();
     assert_source_credit_rates("INV-030 after refill", &after_refill)?;
+    assert_source_credit_rate_transition(
+        "INV-030 fresh-refill transition",
+        &after_reduction,
+        &after_refill,
+    )?;
     let refilled_source = after_refill.source_credit[SOURCE_DOMAIN];
     if after_refill.source_backing_buckets[SOURCE_DOMAIN].status != BackingBucketStatusV16::Fresh
         || refilled_source.credit_rate_num == 0

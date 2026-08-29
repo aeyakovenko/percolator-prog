@@ -21,6 +21,10 @@
 //! requested exposure within one bounded transaction. This distinguishes a temporarily unavailable
 //! matched route from a persistent funded lock; PR214's larger terminal counterexample remains owned
 //! by INV-028.
+//! The shared stateful runner additionally compares every domain before and after every generated
+//! public action and successful permissionless crank. Any formula-input mutation must advance the
+//! domain credit epoch; unchanged inputs cannot change the rate; and a nonzero-claim rate can rise
+//! only when independently available backing rises or the claim bound falls.
 //!
 //! Guarantee boundary: this covers deployed serialization and the generated lifecycle. The engine
 //! owns the full-width pure arithmetic proof; broader reachability still requires the charter's
@@ -29,8 +33,8 @@
 use super::*;
 use crate::support::{
     fuzz_model::{
-        assert_public_encumbrance_census, assert_public_stock_census, assert_source_credit_rates,
-        execute_trade_route,
+        assert_public_encumbrance_census, assert_public_stock_census,
+        assert_source_credit_rate_transition, assert_source_credit_rates, execute_trade_route,
     },
     v16_svm::{MarketConfig, V16Svm},
 };
@@ -241,6 +245,12 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
     }
 
     let (_, impaired_group) = env.primary_market_state();
+    assert_source_credit_rate_transition(
+        &format!("{label} impairment transition"),
+        &liened_group,
+        &impaired_group,
+    )
+    .expect("impairment cannot improve source-credit rate");
     assert_source_credit_rates(&format!("{label} after impairment"), &impaired_group)
         .expect("independent post-impairment rate oracle");
     let impaired_source = impaired_group.source_credit[source_domain];

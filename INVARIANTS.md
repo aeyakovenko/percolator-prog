@@ -469,8 +469,10 @@ available backing, lies in `[0, CREDIT_RATE_SCALE]`, and cannot become more favo
 expired, impaired, or omitted state. Any unrepresentable or unverifiable input yields zero credit or
 recovery.
 
-**Required tests.** Independently recompute every rate and compare. Pure expiry or impairment cannot
-increase rate unless an independently valid claim-bound decrease occurs in the same transition.
+**Required tests.** Independently recompute every rate and compare. Across every public transition,
+unchanged formula inputs preserve the rate, any formula-input mutation advances the source-credit
+epoch, and a live claim's rate can increase only when independently available backing increases or
+its valid claim bound decreases. Pure expiry or impairment cannot improve either quantity.
 **Verification:** P, F
 
 ### INV-031 - No double use of claim, backing, or insurance atoms
