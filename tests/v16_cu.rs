@@ -180,22 +180,33 @@ fn public_released_pnl_fixture() -> PublicReleasedPnlFixture {
 }
 
 fn public_asset1_bankrupt_close_fixture() -> PublicActiveCloseFixture {
-    public_asset1_bankrupt_close_fixture_impl(None).0
+    public_asset1_bankrupt_close_fixture_impl(None, None).0
 }
 
 fn public_asset1_bankrupt_close_fixture_with_asset0_external_oracle(
 ) -> (PublicActiveCloseFixture, Pubkey) {
-    let (fixture, oracle) = public_asset1_bankrupt_close_fixture_impl(Some([0x58; 32]));
+    let (fixture, oracle) = public_asset1_bankrupt_close_fixture_impl(Some([0x58; 32]), None);
     (
         fixture,
         oracle.expect("external-oracle fixture must return its feed account"),
     )
 }
 
+fn public_asset1_bankrupt_close_fixture_with_counterparty_asset0_short() -> PublicActiveCloseFixture
+{
+    public_asset1_bankrupt_close_fixture_impl(None, Some(POS_SCALE / 20)).0
+}
+
 fn public_asset1_bankrupt_close_fixture_impl(
     asset0_external_feed: Option<[u8; 32]>,
+    counterparty_asset0_short_q: Option<u128>,
 ) -> (PublicActiveCloseFixture, Option<Pubkey>) {
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: if counterparty_asset0_short_q.is_some() {
+            2
+        } else {
+            1
+        },
         max_bankrupt_close_lifetime_slots: 2,
         public_b_chunk_atoms: 1,
         ..V16CuMarketParams::default()
@@ -242,19 +253,25 @@ fn public_asset1_bankrupt_close_fixture_impl(
         0,
     );
 
-    let creator = Keypair::new();
+    let creator = if counterparty_asset0_short_q.is_some() {
+        Keypair::from_bytes(&env.admin.to_bytes()).expect("copy fixture market authority")
+    } else {
+        Keypair::new()
+    };
     let creator_key = creator.pubkey();
-    env.activate_permissionless_asset_with_fee(
-        &creator,
-        1,
-        1,
-        100,
-        creator_key,
-        creator_key,
-        creator_key,
-        creator_key,
-        1,
-    );
+    if counterparty_asset0_short_q.is_none() {
+        env.activate_permissionless_asset_with_fee(
+            &creator,
+            1,
+            1,
+            100,
+            creator_key,
+            creator_key,
+            creator_key,
+            creator_key,
+            1,
+        );
+    }
     env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
 
     let loss_owner = Keypair::new();
@@ -273,6 +290,18 @@ fn public_asset1_bankrupt_close_fixture_impl(
         100,
         0,
     );
+    if let Some(size_q) = counterparty_asset0_short_q {
+        env.trade_asset_with_cu(
+            0,
+            &base_long_owner,
+            base_long,
+            &counterparty_owner,
+            counterparty,
+            size_q as i128,
+            100,
+            0,
+        );
+    }
 
     for (slot, mark) in [(2u64, 200u64), (3, 300)] {
         env.svm.warp_to_slot(slot);

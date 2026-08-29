@@ -3,8 +3,8 @@
 //! Normative obligation: Every successful crank strictly decreases a finite liveness rank or enters a lower terminal mode.
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): expiry matrices, bankruptcy
-//! escalation, no-op crank detection, resolved cranks, stale liquidation-budget progress, priority
-//! selection, and current solvent partial-liquidation progress. These tests exercise the deployed public
+//! escalation, no-op crank detection, resolved cranks, stale liquidation-budget progress, public
+//! same-account close/B priority composition, and current solvent partial-liquidation progress. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -13,6 +13,205 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+fn inv071_close_pending(ledger: CloseProgressLedgerV16) -> bool {
+    ledger.active && !ledger.finalized && !ledger.canceled && ledger.residual_remaining != 0
+}
+
+#[test]
+fn v16_program_public_pending_close_preempts_b_stale_then_exposes_b_progress() {
+    let PublicActiveCloseFixture {
+        mut env,
+        loss,
+        asset1_counterparty_owner: target_owner,
+        asset1_counterparty: target,
+        live_counterparty,
+        ..
+    } = public_asset1_bankrupt_close_fixture_with_counterparty_asset0_short();
+
+    let target_asset0_before = active_leg_for_asset(&env.portfolio_state(target), 0);
+    assert_eq!(target_asset0_before.side, SideV16::Short);
+
+    // Complete the first public close far enough to put two loss atoms into the
+    // asset-1 B index. The target's owner then discovers and settles one atom,
+    // leaving a publicly reachable B-stale obligation on its asset-1 leg.
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new_readonly(env.payer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(loss, false),
+        ],
+        &[],
+    )
+    .expect("public close continuation must grow the asset-1 B index");
+    let target_b = env.market_state().1.assets[1].b_long_num;
+    let target_asset1_before = active_leg_for_asset(&env.portfolio_state(target), 1);
+    assert!(target_b > target_asset1_before.b_snap);
+    env.forfeit_recovery_leg_with_cu(&target_owner, target, 1, 1);
+    let b_stale = active_leg_for_asset(&env.portfolio_state(target), 1);
+    assert!(b_stale.b_stale && b_stale.b_snap < target_b);
+
+    // Make the already-open asset-0 short bankrupt using only authenticated mark
+    // updates, then enter its close episode through the owner forfeit route.
+    for (slot, mark) in [(5u64, 200u64), (6, 400)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(0, slot, mark);
+        env.crank(
+            live_counterparty,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let shutdown_slot = env
+        .svm
+        .get_sysvar::<Clock>()
+        .slot
+        .max(env.market_state().1.current_slot);
+    env.svm.warp_to_slot(shutdown_slot);
+    for _ in 0..8 {
+        let market_data = env.svm.get_account(&env.market).unwrap().data;
+        let (_, group) = state::read_market(&market_data).unwrap();
+        let profile = state::read_asset_oracle_profile(&market_data, 0).unwrap();
+        if profile.funding_mark_pending_e6 == 0
+            || profile.funding_mark_pending_slot <= group.assets[0].slot_last
+        {
+            break;
+        }
+        env.crank(
+            live_counterparty,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: shutdown_slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let caught_up_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, caught_up_group) = state::read_market(&caught_up_data).unwrap();
+    let caught_up_profile = state::read_asset_oracle_profile(&caught_up_data, 0).unwrap();
+    assert!(
+        caught_up_profile.funding_mark_pending_e6 == 0
+            || caught_up_profile.funding_mark_pending_slot <= caught_up_group.assets[0].slot_last,
+        "bounded public accrual must make the authenticated checkpoint replayable"
+    );
+    let admin = Keypair::from_bytes(&env.admin.to_bytes()).expect("copy market authority");
+    env.try_shutdown_asset_with_authority(&admin, 0, shutdown_slot)
+        .expect("market authority shuts down asset 0");
+    env.forfeit_recovery_leg_with_cu(&target_owner, target, 0, 1);
+
+    let overlap = env.portfolio_state(target);
+    let close_before = close_progress(&overlap);
+    let b_before = active_leg_for_asset(&overlap, 1);
+    assert!(inv071_close_pending(close_before));
+    assert!(b_before.b_stale && b_before.b_snap < target_b);
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    // The selector's concrete priority is pending close before B settlement. The
+    // selected step must reduce the durable close rank without consuming or
+    // rewriting the independent B obligation.
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: shutdown_slot,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+            ],
+            &[],
+        )
+        .expect("pending-close/B-stale overlap must advance the close first");
+    assert_cu_within("public pending-close/B-stale overlap", cu, CRANK_CU_LIMIT);
+    let after_close_step = env.portfolio_state(target);
+    let close_after = close_progress(&after_close_step);
+    let b_after_close = active_leg_for_asset(&after_close_step, 1);
+    assert!(
+        close_after.residual_remaining < close_before.residual_remaining,
+        "the higher-priority close rank must strictly decrease"
+    );
+    assert_eq!(
+        b_after_close, b_before,
+        "close progress must frame the B leg"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "close bookkeeping must not move SPL custody"
+    );
+
+    // Finish the bounded close, then prove the previously deferred B step is
+    // still discoverable. This is the composition property absent from the
+    // standalone per-class witnesses.
+    let mut previous = close_after.residual_remaining;
+    for _ in 0..32 {
+        if !inv071_close_pending(close_progress(&env.portfolio_state(target))) {
+            break;
+        }
+        env.svm.expire_blockhash();
+        let step_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: shutdown_slot,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new_readonly(env.payer.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(target, false),
+                ],
+                &[],
+            )
+            .expect("each pending-close continuation must remain live");
+        assert_cu_within("public pending-close continuation", step_cu, CRANK_CU_LIMIT);
+        let remaining = close_progress(&env.portfolio_state(target)).residual_remaining;
+        assert!(
+            remaining < previous,
+            "every close continuation must decrease rank"
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(target), 1),
+            b_before
+        );
+        previous = remaining;
+    }
+    assert!(
+        !inv071_close_pending(close_progress(&env.portfolio_state(target))),
+        "the public close rank must terminate within its explicit bound"
+    );
+
+    env.svm.expire_blockhash();
+    let settle_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: shutdown_slot,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+            ],
+            &[],
+        )
+        .expect("deferred B settlement must become the next public continuation");
+    assert_cu_within("public deferred B settlement", settle_cu, CRANK_CU_LIMIT);
+    let b_after = active_leg_for_asset(&env.portfolio_state(target), 1);
+    assert!(b_after.b_snap > b_before.b_snap);
+    assert!(b_after.b_snap <= target_b);
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
+}
 
 #[test]
 fn v16_program_permissionless_crank_closes_capital_only_resolved_account() {
