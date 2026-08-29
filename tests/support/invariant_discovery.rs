@@ -1020,7 +1020,12 @@ pub struct FundedRoleDiscovery {
     pub kind: FundedRoleKind,
     pub provider_source_debit: u128,
     pub takeover_landed: bool,
+    pub takeover_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub replacement_withdraw_rejected: bool,
+    pub replacement_rejection_exact_rollback: bool,
     pub replacement_gain: u128,
+    pub provider_exit_gain: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3257,6 +3262,17 @@ impl FundedRoleDiscovery {
         self.takeover_landed
             && self.provider_source_debit != 0
             && self.replacement_gain == self.provider_source_debit
+    }
+
+    pub fn certifies_funded_role_protection(&self) -> bool {
+        !self.takeover_landed
+            && self.takeover_rejected
+            && self.rejected_exact_rollback
+            && self.replacement_withdraw_rejected
+            && self.replacement_rejection_exact_rollback
+            && self.replacement_gain == 0
+            && self.provider_source_debit != 0
+            && self.provider_exit_gain == self.provider_source_debit
     }
 }
 
@@ -5934,7 +5950,6 @@ fn discover_one_funded_role_seizure(
             percolator_prog::processor::ASSET_AUTH_INSURANCE
         }
     };
-
     let provider_source = env.actors[PROVIDER].source_token;
     let provider_source_before = u128::from(env.token_amount(provider_source));
     match kind {
@@ -5959,7 +5974,9 @@ fn discover_one_funded_role_seizure(
     let takeover =
         env.update_asset_authority_between_actors(ASSET, seized_role, ASSET_ADMIN, REPLACEMENT);
     let takeover_landed = takeover.is_ok();
-    if !takeover_landed && fingerprint(&env) != before_takeover {
+    let takeover_rejected = takeover.is_err();
+    let rejected_exact_rollback = !takeover_landed && fingerprint(&env) == before_takeover;
+    if takeover_rejected && !rejected_exact_rollback {
         return Err(format!(
             "{kind:?} rejected takeover did not roll back exactly"
         ));
@@ -5978,22 +5995,43 @@ fn discover_one_funded_role_seizure(
 
     let replacement_destination = env.actors[REPLACEMENT].destination_token;
     let replacement_before = u128::from(env.token_amount(replacement_destination));
-    if takeover_landed {
-        match kind {
-            FundedRoleKind::BackingProvider => env
-                .withdraw_backing_bucket_for_actor(REPLACEMENT, DOMAIN, PRINCIPAL)
-                .map_err(|error| format!("replacement withdraw backing principal: {error}"))?,
-            FundedRoleKind::InsuranceOperator => env
-                .withdraw_insurance_asset(REPLACEMENT, ASSET, PRINCIPAL)
-                .map_err(|error| format!("replacement withdraw live insurance: {error}"))?,
-            FundedRoleKind::TerminalInsuranceAuthority => env
-                .withdraw_terminal_insurance_for_actor(REPLACEMENT, PRINCIPAL)
-                .map_err(|error| format!("replacement withdraw terminal insurance: {error}"))?,
-        };
-    }
+    let before_replacement_withdraw = fingerprint(&env);
+    let replacement_withdraw = match kind {
+        FundedRoleKind::BackingProvider => {
+            env.withdraw_backing_bucket_for_actor(REPLACEMENT, DOMAIN, PRINCIPAL)
+        }
+        FundedRoleKind::InsuranceOperator => {
+            env.withdraw_insurance_asset(REPLACEMENT, ASSET, PRINCIPAL)
+        }
+        FundedRoleKind::TerminalInsuranceAuthority => {
+            env.withdraw_terminal_insurance_for_actor(REPLACEMENT, PRINCIPAL)
+        }
+    };
+    let replacement_withdraw_rejected = replacement_withdraw.is_err();
+    let replacement_rejection_exact_rollback =
+        replacement_withdraw_rejected && fingerprint(&env) == before_replacement_withdraw;
     let replacement_gain = u128::from(env.token_amount(replacement_destination))
         .checked_sub(replacement_before)
         .ok_or_else(|| "funded-role replacement destination decreased".to_string())?;
+
+    let provider_destination = env.actors[PROVIDER].destination_token;
+    let provider_before = u128::from(env.token_amount(provider_destination));
+    if takeover_rejected {
+        match kind {
+            FundedRoleKind::BackingProvider => env
+                .withdraw_backing_bucket_for_actor(PROVIDER, DOMAIN, PRINCIPAL)
+                .map_err(|error| format!("provider withdraw backing principal: {error}"))?,
+            FundedRoleKind::InsuranceOperator => env
+                .withdraw_insurance_asset(PROVIDER, ASSET, PRINCIPAL)
+                .map_err(|error| format!("provider withdraw live insurance: {error}"))?,
+            FundedRoleKind::TerminalInsuranceAuthority => env
+                .withdraw_terminal_insurance_for_actor(PROVIDER, PRINCIPAL)
+                .map_err(|error| format!("provider withdraw terminal insurance: {error}"))?,
+        };
+    }
+    let provider_exit_gain = u128::from(env.token_amount(provider_destination))
+        .checked_sub(provider_before)
+        .ok_or_else(|| "funded-role provider destination decreased".to_string())?;
     if env.token_supply_observed() != supply_before {
         return Err(format!(
             "{kind:?} funded-role probe changed SPL supply: {supply_before} -> {}",
@@ -6004,7 +6042,12 @@ fn discover_one_funded_role_seizure(
         kind,
         provider_source_debit,
         takeover_landed,
+        takeover_rejected,
+        rejected_exact_rollback,
+        replacement_withdraw_rejected,
+        replacement_rejection_exact_rollback,
         replacement_gain,
+        provider_exit_gain,
     })
 }
 

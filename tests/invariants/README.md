@@ -161,10 +161,20 @@ asset-specific operation kinds across public retirement/reactivation, require ev
 reject with exact rollback, and require the corresponding current-generation control to remain live.
 Fifteen focused public-SBF regressions independently exercise the matching fixed-pin adapters. PRs
 231, 275, 277, 279, 311, 315, 318, 320, 321, 322, and 328 therefore move from `Quarantined` to
-`Certified`; the executable manifest now contains 79 certified, 12 quarantined, 8 nonqualifying,
-and no missing rows. This is an evidence-classification change only: no production source, state,
-or SBF byte changed. Whole-market and portfolio-incarnation rows remain quarantined because their
-distinct INV-001 and INV-003 requirements are not discharged by asset-generation coverage.
+`Certified`; that evidence-only tranche brought the executable manifest to 79 certified, 12
+quarantined, 8 nonqualifying, and no missing rows. Whole-market and portfolio-incarnation rows
+remain quarantined because their distinct INV-001 and INV-003 requirements are not discharged by
+asset-generation coverage.
+
+INV-005 now independently closes PR375 on the deployed public route. Before the fix, the generated
+matrix funded each backing/insurance role with 500 atoms, let the distinct cold asset admin replace
+the incumbent, and measured the same 500 atoms arriving at the replacement. The wrapper now derives
+funded-role ownership from the existing zero-copy backing buckets and insurance-domain budgets:
+empty-role admin configuration remains live, but only the incumbent may transfer a role while it
+controls attributed value. Rejected takeovers and replacement withdrawals roll back exactly, then
+the incumbent withdraws all 500 atoms through the normal public exit. No persisted field, mirror,
+layout change, or engine fork was added. The current manifest is 80 certified, 11 quarantined, 8
+nonqualifying, and 0 missing.
 
 INV-003's finding-blind same-pubkey recreation matrix is now nonvacuous for every retained
 portfolio operation it enumerates. Sixteen semantic kinds cover deposit, withdrawal, close, both
@@ -283,15 +293,18 @@ may gain and each claimant may lose at most one floor atom. Reducing that derive
 certification fail, and the residue cannot classify as LoF. This strengthens detection without
 changing production.
 
-The exact rebuilt SBF is 1,231,832 bytes with SHA-256
+At that checkpoint, the exact rebuilt SBF was 1,231,832 bytes with SHA-256
 `8ac842fe2ea584b99d3977a71045e9705d8c6d640e409f2f85f5889a73d57695`. Across the combined
 route removal, epoch-binding, decoder, and token-boundary simplification work, production remains
 229 source lines
 and 14,464 SBF bytes
 smaller than the preceding checkpoint. The
 complete exact-artifact gates cover 892 LiteSVM/CU tests, 102 public fuzz regressions, and 207
-stateful/model tests. The mounted wrapper proof census is 183 harnesses; exact final rerun results
-are recorded in the verification table below.
+stateful/model tests. The subsequent funded-role fix produces a 1,232,704-byte SBF with SHA-256
+`f376aaf2c9caf29a57c087350291566e953253fddfdc5b7666afd892f1ea9b9f`. Its complete runtime
+gate is 7/7 library tests, 103/103 public regressions, 209/209 stateful/model tests, and 895/895 CU
+tests. The mounted wrapper proof census is 183 harnesses; exact final rerun results are recorded in
+the verification table below.
 
 This closes the tractable same-market configured-authority surface, but not full
 INV-001/INV-005 closure. A source-derived call-graph census classifies all 29 public routes that
@@ -1434,12 +1447,11 @@ retain funded value plus an independently reconstructed unresolved obligation be
 persistent lock. Loss observations must come from independent SPL, lamport, stock, and attribution
 deltas. The sealed holdout remains unopened while this generic evidence path is extended.
 
-Two currently firing nonterminal oracles are deliberately excluded from permissionless user LoF.
-The funded-role matrix proves an exact principal transfer, but only after the currently authorized
-asset admin rotates the funded role to a replacement key. The backing-provider policy matrix proves
-an operator SPL withdrawal, but the LP signed the charged trade and the provider's harm is
-counterfactual fee revenue after a privileged split change. Both remain useful authority/policy
-regressions without being promoted to public-adversary loss claims.
+One currently firing nonterminal oracle is deliberately excluded from permissionless user LoF. The
+backing-provider policy matrix proves an operator SPL withdrawal, but the LP signed the charged
+trade and the provider's harm is counterfactual fee revenue after a privileged split change. The
+funded-role matrix no longer fires: its previously measured cold-admin transfer of incumbent
+principal is rejected exactly, while the incumbent's bounded exit remains live.
 
 In parallel, widen INV-086's unilateral-close composition across owner rebalance, liquidation,
 Recovery forfeit, and force-close routes at every ADL rounding boundary. The independent model must
@@ -2037,10 +2049,10 @@ Verification at this checkpoint:
 | Focused INV-002 generation replay, frontier, roster, and contracts | 20-family generated stateful replay matrix plus the independently roster-discovered backing-earnings route, authority/lifecycle controls, activation-frontier control, and focused host/Kani checks | exact engine-`b10b3454`/SBF-`fb16e50e` rerun on 2026-08-26; the complete 101-test public gate and 886-test CU gate pass |
 | `cargo check --tests` | pass | exact engine-`9b737fd` build completed on the 2026-08-28 PR135 test head |
 | `cargo test --lib` | 7/7 | exact engine-`9b737fd` rerun on the 2026-08-28 PR135 production head |
-| `cargo test --test v16_program_stateful_fuzz` | 209/209 | full exact engine-`9b737fd`/SBF-`8ac842fe` rerun completed in 257.86 seconds; every generated public action and successful crank now composes the INV-030 rate-input/epoch/improvement-cause oracle for both markets with the exact-only source-claim attribution census. The suite includes the eight-world favorable-funding and stale-claim snapshot-barrier matrices, 16-world two-account shared-source reservation composition, 16-world Resolved/Recovery encumbrance lifecycle, four-route late conversion rollback, half-backed, pending-close, eight-world pending-domain principal attribution, independent resolved-payout seniority, and all three INV-037 partition owners. Every public-trace token-moving step composes checked quote conservation with owner/vault attribution, and all authority, policy, lifecycle, liveness, and model campaigns pass. |
+| `cargo test --test v16_program_stateful_fuzz` | 209/209 | full exact engine-`9b737fd`/SBF-`f376aaf2` rerun completed in 220.91 seconds; every generated public action and successful crank composes the shared invariant oracles for both markets. The suite includes the funded-role matrix across backing, live-insurance-operator, and terminal-insurance-authority scopes: empty-role handoff remains live, funded takeover and replacement withdrawal reject exactly, and the incumbent recovers exact principal. All authority, policy, lifecycle, liveness, accounting, and model campaigns pass. |
 | Registry/manifest checks in the INV-079 module | 12/12 | includes the source-complete 28-oracle evidence roster, fourteen exact terminal-LoF dispositions, complete-route terminal classification, and the recursive 42-consumer source guard |
-| `cargo test --test v16_program_fuzz_regressions` | 102/102 | full exact engine-`9b737fd`/SBF-`8ac842fe` rerun completed in 27.46 seconds; includes all public regressions, 49 trace consumers, executable registries, and the source-complete INV-079 evidence roster |
-| `cargo test --test v16_cu` | 895/895 | full exact engine-`9b737fd`/SBF-`8ac842fe` rerun completed in 203.89 seconds; zero behavioral failures, including the 22-case malformed/omitted source-credit matrix and wrapper mutation source lock, exact-only claim-bound profile source lock, seven-case certificate-stale own-lien oracle, exact user-before-insurance terminal partition, shared INV-037 close-partition oracle, single SPL-account parser gateway, source-complete authority-epoch route/decoder matrices, canonical permissionless lifecycle epoch, proof/deployed-dispatch source lock, and all prior reserve, oracle, Recovery, terminal, lifecycle, and maximum-shape routes |
+| `cargo test --test v16_program_fuzz_regressions` | 103/103 | full exact engine-`9b737fd`/SBF-`f376aaf2` rerun completed in 27.35 seconds; includes the deterministic funded-role incumbent-principal regression, all other public regressions, trace consumers, executable registries, and the source-complete INV-079 evidence roster |
+| `cargo test --test v16_cu` | 895/895 | full exact engine-`9b737fd`/SBF-`f376aaf2` rerun completed in 201.68 seconds; zero behavioral failures, including all 41 INV-005 authority routes and all prior reserve, oracle, Recovery, terminal, lifecycle, and maximum-shape routes. The observed required exits remain below the 1.4M CU ceiling. |
 | `cargo kani --bin v16-kani --features kani --default-unwind 18 --output-format terse -j 2` | 183/183 | full wrapper-only exact-source rerun with engine `9b737fd`; zero failures after all decoder, identity-binding, assumption-nonvacuity, provider-parser, and deployed-arithmetic harnesses, with required constructive covers satisfied. Nine solver-hostile decoder relations share one tag-directed adapter over exact production bodies: InitMarket, hybrid oracle, four trade, two base-unit, and lifecycle. |
 | Engine runtime/property suites | 129/129 with `--features fuzz` | exact rerun on engine `9b737fd`. All unit, reference-model, arithmetic-discharge, source-credit, insolvency, and v16 specification tests pass, including unattributed-loss lock creation, risk-only liquidation, terminal lock clearing, strict source-lien release, and all prior engine regressions |
 | Focused engine source-lien selector proofs and contracts | 2/2 Kani and 3/3 function contracts | exact engine-`b10b3454` rerun: the unique-observation plan and source-lien totality/priority proofs pass; `select_progress_witness`, `actionable_summary_from_signals`, and `select_auto_crank_plan` contracts pass with respectively 0/382, 0/217, and 0/521 failed checks. Together with the strict engine transition test and public LiteSVM rank, these establish selection and finite one-domain dispatch without assuming the wrapper result. |
@@ -2195,10 +2207,10 @@ full-health recertification before liquidation, PR367 normalizes expired backing
 owner reduction, PR281 books B loss only to its exact domain, PR283 attributes the sole dust atom
 to the coalition that created it while preserving victim payout, PR284 maps signed account fees to
 the same economic sides across single/batch and CPI/no-CPI routes, and PR331 rejects all three
-cross-epoch composite words before a coherent update and complete exit. The twelve remaining
+cross-epoch composite words before a coherent update and complete exit. PR375 now rejects all three
+funded-role takeover variants before the incumbent exits with exact principal. The eleven remaining
 quarantines are intentionally still red: PR259 and PR339 fee/provider consent; PR267 cross-domain
-backing double use; PR293/294/295/296/307/317/325/326 whole-market incarnation replay; and PR375
-asset-admin seizure of funded roles.
+backing double use; and PR293/294/295/296/307/317/325/326 whole-market incarnation replay.
 
 The wrapper-supported sparse source-domain liveness shape is `2 * WRAPPER_MAX_PORTFOLIO_ASSETS`
 (28 domains). Public historical episodes can fill that shape; already-reserved domains and

@@ -11525,6 +11525,37 @@ pub mod processor {
     }
 
     #[inline(never)]
+    fn asset_authority_role_has_funded_value_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        kind: u8,
+    ) -> Result<bool, ProgramError> {
+        let slot = group
+            .markets
+            .get(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        let backing_has_value = |bucket: &percolator::BackingBucketV16Account| {
+            bucket.fresh_unliened_backing_num.get() != 0
+                || bucket.valid_liened_backing_num.get() != 0
+                || bucket.consumed_liened_backing_num.get() != 0
+                || bucket.impaired_liened_backing_num.get() != 0
+                || bucket.utilization_fee_earnings.get() != 0
+        };
+        Ok(match kind {
+            ASSET_AUTH_INSURANCE | ASSET_AUTH_INSURANCE_OPERATOR => {
+                slot.engine.insurance_domain_budget_long.get() != 0
+                    || slot.engine.insurance_domain_budget_short.get() != 0
+            }
+            ASSET_AUTH_BACKING_BUCKET => {
+                backing_has_value(&slot.engine.backing_long)
+                    || backing_has_value(&slot.engine.backing_short)
+            }
+            ASSET_AUTH_ADMIN | ASSET_AUTH_ORACLE => false,
+            _ => return Err(PercolatorError::InvalidInstruction.into()),
+        })
+    }
+
+    #[inline(never)]
     fn handle_update_asset_authority<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
@@ -11555,9 +11586,8 @@ pub mod processor {
         require_asset_generation_view(&group, asset_index, expected_market_id)?;
         let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
 
-        // The asset's own cold-storage admin may rotate ANY of its authorities, and only the admin
-        // authority itself may be burned to 0; otherwise the current holder of THIS authority
-        // self-rotates. Scoped to this asset's profile only — it can never act on another asset.
+        // The asset's cold-storage admin may configure empty roles. Once a role controls attributed
+        // backing or insurance value, only that role's incumbent can transfer it to a new key.
         let admin_signed =
             profile.asset_admin != [0u8; 32] && profile.asset_admin == current.key.to_bytes();
         let current_value = match kind {
@@ -11574,8 +11604,15 @@ pub mod processor {
         if new_pubkey == [0u8; 32] && kind != ASSET_AUTH_ADMIN {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        if !admin_signed {
-            expect_live_authority(&current_value, current.key)?;
+        let current_signed = live_authority_matches(&current_value, current.key);
+        if !admin_signed && !current_signed {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        if admin_signed
+            && !current_signed
+            && asset_authority_role_has_funded_value_view(&group, asset_index, kind)?
+        {
+            return Err(PercolatorError::EngineLockActive.into());
         }
         advance_authority_epoch_view(&mut group, asset_index, expected_authority_epoch)?;
         match kind {

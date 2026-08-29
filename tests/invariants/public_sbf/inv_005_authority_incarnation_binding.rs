@@ -78,3 +78,20 @@ fn v16_program_stale_backing_handoff_rejects_before_incumbent_exit() {
     assert_eq!(discovery.replacement_gain, 0);
     assert_eq!(discovery.provider_exit_gain, 500);
 }
+
+#[test]
+fn v16_program_funded_role_matrix_preserves_incumbent_principal() {
+    let discoveries =
+        crate::support::invariant_discovery::discover_funded_role_seizures([0x75; 32])
+            .unwrap_or_else(|error| panic!("funded-role matrix failed: {error}"));
+    assert_eq!(
+        discoveries.len(),
+        crate::support::invariant_discovery::FundedRoleKind::ALL.len()
+    );
+    for discovery in discoveries {
+        assert!(
+            discovery.certifies_funded_role_protection(),
+            "funded role did not preserve incumbent principal: {discovery:?}"
+        );
+    }
+}

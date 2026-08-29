@@ -9,10 +9,10 @@
 //! The same generated seed drives funded terminal-resolve and backing-handoff traces. Both retain
 //! old consent across A-to-B-to-A, prove rejection and rollback, and then execute the current
 //! authority or incumbent owner's bounded public exit.
-//! `v16_program_funded_role_matrix_discovers_admin_seizure` independently funds each value-bearing
-//! asset role, delegates a distinct cold asset admin, and measures whether that admin can redirect
-//! the incumbent's principal to a replacement key. The economic oracle requires an exact provider
-//! source debit and equal replacement SPL-token credit; a configuration-only handoff is not enough.
+//! `v16_program_funded_role_matrix_preserves_incumbent_principal` independently funds each
+//! value-bearing asset role after proving an empty-role cold-admin handoff remains available. It
+//! then requires a funded takeover to reject with exact rollback, rejects the replacement's
+//! withdrawal, and proves the incumbent can withdraw the exact principal.
 //! Direct impact regressions remain below.
 //! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
@@ -77,7 +77,7 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_funded_role_matrix_discovers_admin_seizure(
+    fn v16_program_funded_role_matrix_preserves_incumbent_principal(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_funded_role_seizures(seed)
@@ -86,8 +86,8 @@ proptest! {
         for (expected, discovery) in FundedRoleKind::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.kind, expected);
             prop_assert!(
-                discovery.is_violation(),
-                "vulnerable-pin funded-role discovery changed: {discovery:?}"
+                discovery.certifies_funded_role_protection(),
+                "funded role did not preserve incumbent principal: {discovery:?}"
             );
         }
     }

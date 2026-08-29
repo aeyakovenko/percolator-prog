@@ -396,7 +396,7 @@ fn v16_program_open_lof_manifest_snapshot_is_structurally_honest() {
     validate_manifest().expect("open LoF manifest structure");
     assert_eq!(
         quarantined_prs(),
-        [259, 267, 293, 294, 295, 296, 307, 317, 325, 326, 339, 375]
+        [259, 267, 293, 294, 295, 296, 307, 317, 325, 326, 339]
     );
     assert_eq!(
         certified_prs(),
@@ -405,7 +405,7 @@ fn v16_program_open_lof_manifest_snapshot_is_structurally_honest() {
             275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 290, 292, 299, 301, 303, 304,
             305, 309, 310, 311, 312, 313, 314, 315, 316, 318, 320, 321, 322, 328, 329, 330, 331,
             332, 333, 334, 335, 336, 337, 338, 340, 343, 344, 345, 346, 347, 349, 350, 351, 353,
-            355, 356, 360, 362, 363, 365, 366, 367, 369, 380, 381
+            355, 356, 360, 362, 363, 365, 366, 367, 369, 375, 380, 381
         ],
         "fixed-pin adapters must not remain classified as vulnerable quarantines"
     );
