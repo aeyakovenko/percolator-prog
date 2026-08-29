@@ -6,10 +6,14 @@
 //! sequences create a real source-backed released-PnL claim. Public oracle, source-credit,
 //! source-lien, lifecycle, reset, and asset-set mutations then make its certificate stale.
 //! Favorable conversion must reject with exact rollback until a permissionless public crank
-//! refreshes every certificate key. A public bankruptcy-close case separately proves that the
-//! touched pending-obligation account is atomically recertified with its exact deficit, unrelated
-//! certificates are staled by the composed source-risk writes, risk-bearing reuse rejects, and a
-//! flat unrelated owner retains its state-independent principal exit.
+//! refreshes every certificate key. Every refreshed control then consumes exactly the public
+//! claim's own source-backing lien, reclassifies exactly that face into capital, leaves the losing
+//! counterparty byte-identical, and moves no SPL custody. This supplies INV-027's independent
+//! certificate-stale seniority oracle rather than merely comparing two equally wrong schedules. A
+//! public bankruptcy-close case separately proves that the touched pending-obligation account is
+//! atomically recertified with its exact deficit, unrelated certificates are staled by the composed
+//! source-risk writes, risk-bearing reuse rejects, and a flat unrelated owner retains its
+//! state-independent principal exit.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -18,6 +22,7 @@
 use super::*;
 
 const PUBLIC_RELEASED_PNL: u128 = PUBLIC_RELEASED_PNL_FIXTURE_AMOUNT;
+const PUBLIC_RELEASED_PNL_SOURCE_DOMAIN: usize = 1;
 
 fn cert_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
     let group = env.market_state().1;
@@ -31,18 +36,18 @@ fn cert_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
         && cert.active_bitmap_at_cert == active_bitmap(&account)
 }
 
-fn setup_public_released_pnl_certificate() -> (V16CuEnv, Keypair, Pubkey) {
+fn setup_public_released_pnl_certificate() -> (V16CuEnv, Keypair, Pubkey, Pubkey) {
     let PublicReleasedPnlFixture {
         env,
         winner_owner,
         winner,
-        ..
+        loser,
     } = public_released_pnl_fixture();
     assert!(
         cert_is_current(&env, winner),
         "the public close must issue a fully current certificate"
     );
-    (env, winner_owner, winner)
+    (env, winner_owner, winner, loser)
 }
 
 fn assert_stale_conversion_rolls_back(env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey) {
@@ -86,22 +91,69 @@ fn refresh_public_claim_certificate(env: &mut V16CuEnv, portfolio: Pubkey) {
     );
 }
 
-fn refresh_and_convert_public_claim(env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey) {
+fn refresh_and_convert_public_claim(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    protected_counterparty: Pubkey,
+) {
     refresh_public_claim_certificate(env, portfolio);
     let capital_before = env.portfolio_state(portfolio).capital.get();
+    let protected_counterparty_before = env.svm.get_account(&protected_counterparty).unwrap();
+    let group_before = env.market_state().1;
+    let spl_vault_before = env.token_amount(env.vault);
     let convert_cu = env.convert_released_pnl_with_cu(owner, portfolio, PUBLIC_RELEASED_PNL);
     assert_cu_within(
         "public released-PnL conversion after certificate refresh",
         convert_cu,
         CUSTODY_CU_LIMIT,
     );
+    let converted = env.portfolio_state(portfolio);
+    let group_after = env.market_state().1;
+    let claim_num = PUBLIC_RELEASED_PNL * BOUND_SCALE;
     assert_eq!(
-        env.portfolio_state(portfolio).capital.get(),
+        converted.capital.get(),
         capital_before + PUBLIC_RELEASED_PNL,
         "refresh admits exactly the publicly realized claim"
     );
+    assert_eq!(converted.pnl.get(), 0, "the exact claim is consumed once");
     assert_eq!(
-        env.market_state().1.vault as u64,
+        group_after.c_tot.checked_sub(group_before.c_tot),
+        Some(PUBLIC_RELEASED_PNL),
+        "conversion reclassifies exactly the claim face into senior capital"
+    );
+    assert_eq!(
+        group_after.source_backing_buckets[PUBLIC_RELEASED_PNL_SOURCE_DOMAIN]
+            .consumed_liened_backing_num
+            .checked_sub(
+                group_before.source_backing_buckets[PUBLIC_RELEASED_PNL_SOURCE_DOMAIN]
+                    .consumed_liened_backing_num
+            ),
+        Some(claim_num),
+        "conversion consumes exactly its own source-backing lien"
+    );
+    assert_eq!(
+        group_before.source_credit[PUBLIC_RELEASED_PNL_SOURCE_DOMAIN]
+            .positive_claim_bound_num
+            .checked_sub(
+                group_after.source_credit[PUBLIC_RELEASED_PNL_SOURCE_DOMAIN]
+                    .positive_claim_bound_num
+            ),
+        Some(claim_num),
+        "conversion removes exactly its own source claim bound"
+    );
+    assert_eq!(
+        env.svm.get_account(&protected_counterparty).unwrap(),
+        protected_counterparty_before,
+        "conversion cannot debit the losing counterparty a second time"
+    );
+    assert_eq!(
+        group_after.vault, group_before.vault,
+        "internal claim conversion cannot move quote custody"
+    );
+    assert_eq!(env.token_amount(env.vault), spl_vault_before);
+    assert_eq!(
+        group_after.vault as u64,
         env.token_amount(env.vault),
         "certificate refresh and conversion preserve SPL custody parity"
     );
@@ -109,7 +161,8 @@ fn refresh_and_convert_public_claim(env: &mut V16CuEnv, owner: &Keypair, portfol
 
 #[test]
 fn v16_attack_source_credit_risk_epoch_invalidates_public_released_pnl_cert() {
-    let (mut env, owner, portfolio) = setup_public_released_pnl_certificate();
+    let (mut env, owner, portfolio, protected_counterparty) =
+        setup_public_released_pnl_certificate();
     let before = env.market_state().1;
     let cert_before = health_cert(&env.portfolio_state(portfolio));
 
@@ -131,7 +184,7 @@ fn v16_attack_source_credit_risk_epoch_invalidates_public_released_pnl_cert() {
     );
 
     assert_stale_conversion_rolls_back(&mut env, &owner, portfolio);
-    refresh_and_convert_public_claim(&mut env, &owner, portfolio);
+    refresh_and_convert_public_claim(&mut env, &owner, portfolio, protected_counterparty);
 }
 
 #[test]
@@ -271,12 +324,13 @@ fn v16_attack_source_lien_risk_epoch_invalidates_unrelated_released_pnl_cert() {
     assert!(stale.cert_risk_epoch < after.risk_epoch);
 
     assert_stale_conversion_rolls_back(&mut env, &claim_owner, claimant);
-    refresh_and_convert_public_claim(&mut env, &claim_owner, claimant);
+    refresh_and_convert_public_claim(&mut env, &claim_owner, claimant, claim_loser);
 }
 
 #[test]
 fn v16_attack_lifecycle_risk_epoch_invalidates_public_released_pnl_cert() {
-    let (mut env, owner, portfolio) = setup_public_released_pnl_certificate();
+    let (mut env, owner, portfolio, protected_counterparty) =
+        setup_public_released_pnl_certificate();
     let before = env.market_state().1;
     let cert_before = health_cert(&env.portfolio_state(portfolio));
     let lifecycle_cu =
@@ -308,14 +362,15 @@ fn v16_attack_lifecycle_risk_epoch_invalidates_public_released_pnl_cert() {
     );
 
     assert_stale_conversion_rolls_back(&mut env, &owner, portfolio);
-    refresh_and_convert_public_claim(&mut env, &owner, portfolio);
+    refresh_and_convert_public_claim(&mut env, &owner, portfolio, protected_counterparty);
 }
 
 #[test]
 fn v16_attack_reset_pending_risk_epoch_invalidates_public_released_pnl_cert() {
     const OPEN_Q: u128 = 10 * POS_SCALE;
 
-    let (mut env, claim_owner, claimant) = setup_public_released_pnl_certificate();
+    let (mut env, claim_owner, claimant, protected_counterparty) =
+        setup_public_released_pnl_certificate();
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
     let long = env.create_portfolio(&long_owner);
@@ -393,7 +448,7 @@ fn v16_attack_reset_pending_risk_epoch_invalidates_public_released_pnl_cert() {
     assert!(finalize_stale.cert_risk_epoch < finalized.risk_epoch);
 
     assert_stale_conversion_rolls_back(&mut env, &claim_owner, claimant);
-    refresh_and_convert_public_claim(&mut env, &claim_owner, claimant);
+    refresh_and_convert_public_claim(&mut env, &claim_owner, claimant, protected_counterparty);
 }
 
 #[test]
@@ -581,7 +636,8 @@ fn v16_attack_pending_obligation_recertifies_affected_and_stales_unrelated_cert(
 #[test]
 fn v16_attack_asset_append_invalidates_public_released_pnl_cert() {
     const INIT_FEE: u128 = 1;
-    let (mut env, owner, portfolio) = setup_public_released_pnl_certificate();
+    let (mut env, owner, portfolio, protected_counterparty) =
+        setup_public_released_pnl_certificate();
     env.update_market_init_fee_policy_with_cu(INIT_FEE);
     let before = env.market_state().1;
     let cert_before = health_cert(&env.portfolio_state(portfolio));
@@ -623,14 +679,15 @@ fn v16_attack_asset_append_invalidates_public_released_pnl_cert() {
     );
 
     assert_stale_conversion_rolls_back(&mut env, &owner, portfolio);
-    refresh_and_convert_public_claim(&mut env, &owner, portfolio);
+    refresh_and_convert_public_claim(&mut env, &owner, portfolio, protected_counterparty);
 }
 
 #[test]
 fn v16_attack_target_and_funding_epochs_invalidate_public_released_pnl_cert() {
     const PREMIUM_MARK: u64 = 2_000_000;
     const FUNDING_SIZE_Q: i128 = 10 * POS_SCALE as i128;
-    let (mut env, claim_owner, claimant) = setup_public_released_pnl_certificate();
+    let (mut env, claim_owner, claimant, protected_counterparty) =
+        setup_public_released_pnl_certificate();
 
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
@@ -726,12 +783,13 @@ fn v16_attack_target_and_funding_epochs_invalidate_public_released_pnl_cert() {
     );
 
     assert_stale_conversion_rolls_back(&mut env, &claim_owner, claimant);
-    refresh_and_convert_public_claim(&mut env, &claim_owner, claimant);
+    refresh_and_convert_public_claim(&mut env, &claim_owner, claimant, protected_counterparty);
 }
 
 #[test]
 fn v16_attack_convert_released_pnl_requires_current_cert_and_public_refresh() {
-    let (mut env, owner, portfolio) = setup_public_released_pnl_certificate();
+    let (mut env, owner, portfolio, protected_counterparty) =
+        setup_public_released_pnl_certificate();
 
     let crank_long_owner = Keypair::new();
     let crank_short_owner = Keypair::new();
@@ -772,7 +830,7 @@ fn v16_attack_convert_released_pnl_requires_current_cert_and_public_refresh() {
     );
 
     assert_stale_conversion_rolls_back(&mut env, &owner, portfolio);
-    refresh_and_convert_public_claim(&mut env, &owner, portfolio);
+    refresh_and_convert_public_claim(&mut env, &owner, portfolio, protected_counterparty);
 }
 
 #[test]
