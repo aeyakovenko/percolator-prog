@@ -7,7 +7,9 @@
 //! then lands a larger stale loss through `ForfeitRecoveryLeg`. Every route must retire all 1,000
 //! face atoms while counting exactly 251 realizable support atoms once. Shared INV-076 evidence
 //! separately checks the equation before and after a real residual-decreasing continuation under
-//! price and funding drift.
+//! price and funding drift. A third matrix crosses all four trade routes and both position
+//! orientations, checks the equation before and after owner cure/cancellation, and requires the
+//! released counterparty obligation to clear through bounded mutating cranks.
 //!
 //! Guarantee boundary: the deployed ledger has `drift_consumed`, `support_consumed`, insurance,
 //! B, explicit loss, and remaining residual. It does not expose separate fields for every abstract
@@ -16,7 +18,8 @@
 //! provenance fields.
 
 use crate::support::fuzz_model::{
-    run_recovery_support_partition_probe, verify_close_residual_partition,
+    run_close_cancel_partition_probe, run_recovery_support_partition_probe,
+    verify_close_residual_partition,
 };
 use percolator::{CloseProgressLedgerV16, SideV16};
 
@@ -131,4 +134,23 @@ fn inv037_public_recovery_counts_support_once_and_excludes_larger_retired_face()
     assert_eq!(evidence.face_exceeds_support_worlds, 4, "{evidence:?}");
     assert_eq!(evidence.minimum_retired_face, 1_000, "{evidence:?}");
     assert_eq!(evidence.maximum_support_consumed, 251, "{evidence:?}");
+}
+
+#[test]
+fn inv037_public_cure_preserves_exact_partition_across_routes_and_sides() {
+    let evidence = run_close_cancel_partition_probe()
+        .expect("public cure/cancel must preserve the exact close partition");
+    assert_eq!(evidence.world_count, 8, "{evidence:?}");
+    assert_eq!(evidence.route_worlds, [2; 4], "{evidence:?}");
+    assert_eq!(evidence.winner_side_worlds, [4; 2], "{evidence:?}");
+    assert_eq!(
+        evidence.exact_partition_before_cure_worlds, 8,
+        "{evidence:?}"
+    );
+    assert_eq!(
+        evidence.exact_partition_after_cure_worlds, 8,
+        "{evidence:?}"
+    );
+    assert_eq!(evidence.canceled_worlds, 8, "{evidence:?}");
+    assert_eq!(evidence.progressing_cleanup_worlds, 8, "{evidence:?}");
 }

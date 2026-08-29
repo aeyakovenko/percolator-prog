@@ -7167,6 +7167,19 @@ pub struct CurePendingObligationDosEvidence {
     pub successful_noop_cranks: usize,
     pub unrelated_trade_rejected: bool,
     pub owner_withdraw_rejected: bool,
+    pub exact_partition_before_cure: bool,
+    pub exact_partition_after_cure: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloseCancelPartitionEvidence {
+    pub world_count: u64,
+    pub route_worlds: [u64; 4],
+    pub winner_side_worlds: [u64; 2],
+    pub exact_partition_before_cure_worlds: u64,
+    pub exact_partition_after_cure_worlds: u64,
+    pub canceled_worlds: u64,
+    pub progressing_cleanup_worlds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -9520,7 +9533,11 @@ fn cure_primary_close_with_bounded_deposit(
     }
 }
 
-pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDosEvidence, String> {
+fn run_cure_pending_obligation_dos_world(
+    route: TradeRoute,
+    winner_side: SideV16,
+    seed_byte: u8,
+) -> Result<CurePendingObligationDosEvidence, String> {
     const FIRST_WINNER: usize = 0;
     const LOSER: usize = 1;
     const UNRELATED_TAKER: usize = 2;
@@ -9539,14 +9556,23 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
         actor_token_balances: [1_000_000, 1_000_000_000_000, 1_000_000, 1_000_000, 1],
         ..MarketConfig::default()
     };
-    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([0xc3; 32], config)?;
-    create_public_cancellable_close(
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
+    create_public_cancellable_close_via_route_and_side(
         &mut runner,
         FIRST_WINNER as u8,
         LOSER as u8,
         0,
         EXIT_MAKER_INDEX as u8,
+        route,
+        winner_side,
     )?;
+    let active_close = runner
+        .env
+        .primary_portfolio(LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("active close decode: {error:?}"))?;
+    verify_close_residual_partition("pre-cure close", &active_close)?;
 
     let cure_source_before = runner
         .env
@@ -9594,6 +9620,7 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
         .close_progress
         .try_to_runtime()
         .map_err(|error| format!("canceled close decode: {error:?}"))?;
+    verify_close_residual_partition("post-cure canceled close", &canceled_close)?;
     let (_, group) = runner.env.primary_market_state();
     let asset = group.assets[0];
     let pending_obligation_count = asset
@@ -9708,7 +9735,53 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
         successful_noop_cranks,
         unrelated_trade_rejected,
         owner_withdraw_rejected,
+        exact_partition_before_cure: true,
+        exact_partition_after_cure: true,
     })
+}
+
+pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDosEvidence, String> {
+    run_cure_pending_obligation_dos_world(TradeRoute::NoCpi, SideV16::Long, 0xc3)
+}
+
+pub fn run_close_cancel_partition_probe() -> Result<CloseCancelPartitionEvidence, String> {
+    let mut evidence = CloseCancelPartitionEvidence {
+        world_count: 0,
+        route_worlds: [0; 4],
+        winner_side_worlds: [0; 2],
+        exact_partition_before_cure_worlds: 0,
+        exact_partition_after_cure_worlds: 0,
+        canceled_worlds: 0,
+        progressing_cleanup_worlds: 0,
+    };
+    for (route_index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (side_index, winner_side) in [SideV16::Long, SideV16::Short].into_iter().enumerate() {
+            let seed_byte = 0x37 ^ (route_index as u8) ^ ((side_index as u8) << 4);
+            let world = run_cure_pending_obligation_dos_world(route, winner_side, seed_byte)?;
+            evidence.world_count += 1;
+            evidence.route_worlds[route_index] += 1;
+            evidence.winner_side_worlds[side_index] += 1;
+            evidence.exact_partition_before_cure_worlds +=
+                u64::from(world.exact_partition_before_cure);
+            evidence.exact_partition_after_cure_worlds +=
+                u64::from(world.exact_partition_after_cure);
+            evidence.canceled_worlds += u64::from(world.close_canceled);
+            evidence.progressing_cleanup_worlds += u64::from(
+                world.progressing_cranks != 0
+                    && world.successful_noop_cranks == 0
+                    && world.pending_obligation_count == 0,
+            );
+        }
+    }
+    Ok(evidence)
 }
 
 fn run_pending_barrier_cross_zero_world(
