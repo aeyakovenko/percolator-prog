@@ -13942,6 +13942,332 @@ pub fn verify_favorable_funding_claim_bound_route_matrix(seed: [u8; 32]) -> Resu
 }
 
 #[allow(dead_code)]
+pub fn verify_stale_claim_snapshot_barrier_route_matrix(seed: [u8; 32]) -> Result<u64, String> {
+    const ACTOR_A: usize = 0;
+    const ACTOR_B: usize = 1;
+    const MARKET_CRANKER: usize = 4;
+    const ASSET: u16 = 0;
+    const START_PRICE: u64 = 100;
+    const SETTLED_PRICE: u64 = 300;
+    const Q: i128 = POS_SCALE as i128;
+    const WINNER_DEPOSIT: u128 = 1_000;
+    const LOSER_DEPOSIT: u128 = 100;
+    const EXPECTED_CLAIM: u128 = 200;
+    const EXPECTED_JUNIOR_CLAIM: u128 = EXPECTED_CLAIM - LOSER_DEPOSIT;
+
+    fn independent_resolved_blockers(group: &MarketGroupV16) -> Result<u64, String> {
+        let asset = group
+            .assets
+            .get(ASSET as usize)
+            .ok_or("INV-029 stale snapshot world has no configured asset")?;
+        let (long_domain, short_domain) = v16_domain_pair_for_asset_index(ASSET as usize)
+            .map_err(|error| format!("INV-029 stale snapshot domain map: {error:?}"))?;
+        [
+            asset.stored_pos_count_long,
+            asset.stored_pos_count_short,
+            asset.stale_account_count_long,
+            asset.stale_account_count_short,
+            *group
+                .pending_domain_loss_barriers
+                .get(long_domain)
+                .ok_or("INV-029 stale snapshot missing long barrier")?,
+            *group
+                .pending_domain_loss_barriers
+                .get(short_domain)
+                .ok_or("INV-029 stale snapshot missing short barrier")?,
+        ]
+        .into_iter()
+        .try_fold(0u64, |total, value| {
+            total
+                .checked_add(value)
+                .ok_or_else(|| "INV-029 stale snapshot blocker sum overflow".to_string())
+        })
+    }
+
+    let mut world_count = 0u64;
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        for actor_a_wins in [false, true] {
+            let mut world_seed = seed;
+            world_seed[0] ^= route.index() as u8;
+            world_seed[1] ^= u8::from(actor_a_wins) << 6;
+            let direction = if actor_a_wins { Q } else { -Q };
+            let winner = if actor_a_wins { ACTOR_A } else { ACTOR_B };
+            let loser = if actor_a_wins { ACTOR_B } else { ACTOR_A };
+            let actor_a_deposit = if actor_a_wins {
+                WINNER_DEPOSIT
+            } else {
+                LOSER_DEPOSIT
+            };
+            let actor_b_deposit = if actor_a_wins {
+                LOSER_DEPOSIT
+            } else {
+                WINNER_DEPOSIT
+            };
+            let label = format!("INV-029 stale snapshot {route:?} actor_a_wins={actor_a_wins}");
+            let mut env = V16Svm::new(
+                world_seed,
+                MarketConfig {
+                    initial_price: START_PRICE,
+                    max_price_move_bps_per_slot: 10_000,
+                    max_accrual_dt_slots: 1,
+                    min_funding_lifetime_slots: 1,
+                    actor_deposits: [actor_a_deposit, actor_b_deposit, 1, 1, 1],
+                    actor_token_balances: [actor_a_deposit as u64, actor_b_deposit as u64, 1, 1, 1],
+                    ..MarketConfig::default()
+                },
+            );
+            let supply_before = env.token_supply_observed();
+            let destination_before = [
+                env.token_amount(env.actors[ACTOR_A].destination_token),
+                env.token_amount(env.actors[ACTOR_B].destination_token),
+            ];
+            env.configure_auth_mark(false, ASSET, 1, START_PRICE)
+                .map_err(|error| format!("{label} configure AuthMark: {error}"))?;
+            execute_trade_route(
+                &mut env,
+                route,
+                ACTOR_A,
+                ACTOR_B,
+                ASSET,
+                direction,
+                START_PRICE,
+                0,
+            )
+            .map_err(|error| format!("{label} open: {error}"))?;
+            assert_primary_source_claim_bound_attribution(&format!("{label} after open"), &env)?;
+
+            for slot in 2..=3 {
+                env.warp_to_slot(slot);
+                env.push_auth_mark(ASSET, slot, SETTLED_PRICE)
+                    .map_err(|error| {
+                        format!("{label} publish favorable mark at {slot}: {error}")
+                    })?;
+                crank_adapter_steps(&mut env, MARKET_CRANKER, slot, ASSET, 8)
+                    .map_err(|error| format!("{label} commit favorable mark at {slot}: {error}"))?;
+            }
+            assert_primary_source_claim_bound_attribution(
+                &format!("{label} after market accrual"),
+                &env,
+            )?;
+
+            let (_, stale_group) = env.primary_market_state();
+            let stale_asset = stale_group.assets[ASSET as usize];
+            let stale_blockers = independent_resolved_blockers(&stale_group)?;
+            if stale_asset.effective_price != SETTLED_PRICE
+                || stale_asset.stale_account_count_long != 1
+                || stale_asset.stale_account_count_short != 1
+                || stale_asset.stored_pos_count_long != 1
+                || stale_asset.stored_pos_count_short != 1
+                || stale_blockers != stale_group.resolved_payout_blocker_count
+                || stale_group.source_claim_bound_total_num != 0
+                || stale_group.pnl_pos_bound_tot_num != 0
+                || env.primary_portfolio(ACTOR_A).pnl.get() != 0
+                || env.primary_portfolio(ACTOR_B).pnl.get() != 0
+            {
+                return Err(format!(
+                    "{label}: fixture did not isolate an unmaterialized favorable claim: \
+                     asset={stale_asset:?}, blockers={stale_blockers}/{}, source_bound={}, \
+                     pnl_bound={}, pnl={:?}",
+                    stale_group.resolved_payout_blocker_count,
+                    stale_group.source_claim_bound_total_num,
+                    stale_group.pnl_pos_bound_tot_num,
+                    [
+                        env.primary_portfolio(ACTOR_A).pnl.get(),
+                        env.primary_portfolio(ACTOR_B).pnl.get(),
+                    ]
+                ));
+            }
+
+            env.resolve_market()
+                .map_err(|error| format!("{label} resolve stale market: {error}"))?;
+            let (_, resolved_stale) = env.primary_market_state();
+            if resolved_stale.payout_snapshot_captured
+                || independent_resolved_blockers(&resolved_stale)? != stale_blockers
+                || resolved_stale.resolved_payout_blocker_count != stale_blockers
+            {
+                return Err(format!(
+                    "{label}: resolution captured or lost the stale-claim barrier: snapshot={}, \
+                     blockers={}/{}",
+                    resolved_stale.payout_snapshot_captured,
+                    independent_resolved_blockers(&resolved_stale)?,
+                    resolved_stale.resolved_payout_blocker_count,
+                ));
+            }
+
+            let winner_destination_before = env.token_amount(env.actors[winner].destination_token);
+            env.close_resolved_primary(winner)
+                .map_err(|error| format!("{label} settle stale winner: {error}"))?;
+            assert_primary_source_claim_bound_attribution(
+                &format!("{label} after winner settlement"),
+                &env,
+            )?;
+            let (_, winner_settled_group) = env.primary_market_state();
+            let winner_account = env.primary_portfolio(winner);
+            let winner_claims = winner_settled_group
+                .source_credit
+                .iter()
+                .enumerate()
+                .filter_map(|(domain, _)| {
+                    let claim = source_claim_for_domain(&winner_account, domain);
+                    (claim != 0).then_some((domain, claim))
+                })
+                .collect::<Vec<_>>();
+            let expected_claim_num = EXPECTED_CLAIM
+                .checked_mul(BOUND_SCALE)
+                .ok_or_else(|| format!("{label}: expected claim scale overflow"))?;
+            let winner_blockers = independent_resolved_blockers(&winner_settled_group)?;
+            if winner_account.pnl.get() != EXPECTED_CLAIM as i128
+                || winner_claims.len() != 1
+                || winner_claims[0].1 != expected_claim_num
+                || winner_settled_group.source_credit[winner_claims[0].0].positive_claim_bound_num
+                    != expected_claim_num
+                || winner_settled_group.source_claim_bound_total_num != expected_claim_num
+                || winner_settled_group.pnl_pos_bound_tot_num != expected_claim_num
+                || winner_settled_group.payout_snapshot_captured
+                || winner_blockers == 0
+                || winner_blockers != winner_settled_group.resolved_payout_blocker_count
+                || env.token_amount(env.actors[winner].destination_token)
+                    != winner_destination_before
+            {
+                return Err(format!(
+                    "{label}: winner settlement did not materialize and barrier the exact claim: \
+                     pnl={}, claims={winner_claims:?}, total={}/{}, snapshot={}, blockers={}/{}",
+                    winner_account.pnl.get(),
+                    winner_settled_group.source_claim_bound_total_num,
+                    winner_settled_group.pnl_pos_bound_tot_num,
+                    winner_settled_group.payout_snapshot_captured,
+                    winner_blockers,
+                    winner_settled_group.resolved_payout_blocker_count,
+                ));
+            }
+
+            env.close_resolved_primary(loser)
+                .map_err(|error| format!("{label} settle stale loser: {error}"))?;
+            assert_primary_source_claim_bound_attribution(
+                &format!("{label} after loser settlement"),
+                &env,
+            )?;
+            let (_, all_settled_group) = env.primary_market_state();
+            if independent_resolved_blockers(&all_settled_group)? != 0
+                || all_settled_group.resolved_payout_blocker_count != 0
+                || all_settled_group.stale_certificate_count != 0
+                || all_settled_group.b_stale_account_count != 0
+                || all_settled_group.negative_pnl_account_count != 0
+                || all_settled_group.payout_snapshot_captured
+                || all_settled_group.pnl_pos_bound_tot_num != expected_claim_num
+                || all_settled_group.source_claim_bound_total_num != expected_claim_num
+            {
+                return Err(format!(
+                    "{label}: all-cohort settlement did not preserve the exact unsnapshotted claim: \
+                     blockers={}/{}, stale/b/negative={}/{}/{}, snapshot={}, bound={}/{}",
+                    independent_resolved_blockers(&all_settled_group)?,
+                    all_settled_group.resolved_payout_blocker_count,
+                    all_settled_group.stale_certificate_count,
+                    all_settled_group.b_stale_account_count,
+                    all_settled_group.negative_pnl_account_count,
+                    all_settled_group.payout_snapshot_captured,
+                    all_settled_group.pnl_pos_bound_tot_num,
+                    all_settled_group.source_claim_bound_total_num,
+                ));
+            }
+
+            let mut snapshot_steps = 0u8;
+            for step in 0..8 {
+                if env.primary_market_state().1.payout_snapshot_captured {
+                    break;
+                }
+                let market_before = env.market_data(false);
+                let portfolio_before = env.primary_portfolio_data(winner);
+                let destination_before = env.token_amount(env.actors[winner].destination_token);
+                match env.close_resolved_primary(winner) {
+                    Ok(_) => {}
+                    Err(error)
+                        if error.contains("Custom(22)")
+                            || error.contains("custom program error: 0x16") =>
+                    {
+                        break;
+                    }
+                    Err(error) => return Err(format!("{label} snapshot step {step}: {error}")),
+                }
+                if env.market_data(false) == market_before
+                    && env.primary_portfolio_data(winner) == portfolio_before
+                    && env.token_amount(env.actors[winner].destination_token) == destination_before
+                {
+                    return Err(format!(
+                        "{label}: successful snapshot step {step} made no progress"
+                    ));
+                }
+                snapshot_steps = snapshot_steps
+                    .checked_add(1)
+                    .ok_or_else(|| format!("{label}: snapshot step count overflow"))?;
+            }
+            let (_, snapshotted_group) = env.primary_market_state();
+            let terminal_winner = env.primary_portfolio(winner);
+            if !snapshotted_group.payout_snapshot_captured
+                || snapshot_steps == 0
+                || snapshotted_group.payout_snapshot_pnl_pos_tot != EXPECTED_JUNIOR_CLAIM
+                || snapshotted_group
+                    .resolved_payout_ledger
+                    .terminal_claim_exact_receipts_num
+                    != EXPECTED_JUNIOR_CLAIM * BOUND_SCALE
+                || snapshotted_group
+                    .resolved_payout_ledger
+                    .terminal_claim_bound_unreceipted_num
+                    != 0
+            {
+                return Err(format!(
+                    "{label}: terminal snapshot omitted the settled claim after {snapshot_steps} \
+                     steps: snapshot={}, face={}, ledger={:?}, blockers={}, stale/b/negative={}/{}/{}, \
+                     source_total={}, pnl_bound={}, winner capital/pnl/reserved={}/{}/{}",
+                    snapshotted_group.payout_snapshot_captured,
+                    snapshotted_group.payout_snapshot_pnl_pos_tot,
+                    snapshotted_group.resolved_payout_ledger,
+                    snapshotted_group.resolved_payout_blocker_count,
+                    snapshotted_group.stale_certificate_count,
+                    snapshotted_group.b_stale_account_count,
+                    snapshotted_group.negative_pnl_account_count,
+                    snapshotted_group.source_claim_bound_total_num,
+                    snapshotted_group.pnl_pos_bound_tot_num,
+                    terminal_winner.capital.get(),
+                    terminal_winner.pnl.get(),
+                    terminal_winner.reserved_pnl.get(),
+                ));
+            }
+
+            let payout = [ACTOR_A, ACTOR_B]
+                .into_iter()
+                .enumerate()
+                .map(|(index, actor)| {
+                    env.token_amount(env.actors[actor].destination_token)
+                        .checked_sub(destination_before[index])
+                        .map(u128::from)
+                        .ok_or_else(|| format!("{label}: destination balance regressed"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if payout.iter().sum::<u128>() != WINNER_DEPOSIT + LOSER_DEPOSIT
+                || env.token_supply_observed() != supply_before
+            {
+                return Err(format!(
+                    "{label}: stale claim terminal settlement did not conserve user value: \
+                     payout={payout:?}, supply={}/{}",
+                    env.token_supply_observed(),
+                    supply_before,
+                ));
+            }
+            world_count = world_count
+                .checked_add(1)
+                .ok_or_else(|| format!("{label}: world count overflow"))?;
+        }
+    }
+    Ok(world_count)
+}
+
+#[allow(dead_code)]
 pub fn verify_source_credit_rate_lifecycle(
     mut seed: [u8; 32],
     initial_backing: u16,

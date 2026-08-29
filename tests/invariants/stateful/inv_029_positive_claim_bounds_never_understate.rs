@@ -30,6 +30,15 @@
 //! winner's sole source-domain bound must equal its exact positive funding PnL, conversion burns
 //! that bound exactly without moving custody, both users recover the original aggregate principal,
 //! and unrelated portfolios remain byte- and token-identical.
+//! `v16_program_stale_positive_claim_blocks_snapshot_until_exactly_materialized` covers the
+//! prospective-claim boundary with eight more public worlds. An authenticated favorable mark is
+//! committed while both account K/F snapshots remain stale and no positive claim has yet been
+//! booked. Resolution must preserve the independently reconstructed stale/stored-position blocker;
+//! settling only the winner must materialize its exact source claim but still cannot snapshot or
+//! pay it. Only after the losing cohort is also settled may its principal realize part of the
+//! claim and the payout snapshot capture the exact remaining junior face. This proves the deployed
+//! protocol's stale-uncertainty envelope is a fail-closed barrier, not an understated denominator
+//! that can become withdrawable.
 //! `v16_program_partial_receipt_exactly_replaces_its_prior_claim_bound` reuses the independent
 //! underfunded terminal lifecycle. Its shared transition oracle observes a genuine partial receipt
 //! and proves the terminal ledger adds exactly `terminal_positive_claim_face * BOUND_SCALE`,
@@ -40,10 +49,20 @@
 //!
 //! Guarantee boundary: this is a complete census only for the bounded test world, whose portfolio
 //! count is checked against the market's materialized-portfolio counter. It does not replace a
-//! production whole-state enumeration proof or the charter's resolved/recovery claim model.
+//! production whole-state enumeration proof or rebucketing coverage.
 
 use super::*;
-use crate::support::fuzz_model::verify_favorable_funding_claim_bound_route_matrix;
+use crate::support::fuzz_model::{
+    verify_favorable_funding_claim_bound_route_matrix,
+    verify_stale_claim_snapshot_barrier_route_matrix,
+};
+
+#[test]
+fn v16_program_stale_positive_claim_blocks_snapshot_until_exactly_materialized() {
+    let worlds = verify_stale_claim_snapshot_barrier_route_matrix([0xf3; 32])
+        .unwrap_or_else(|error| panic!("INV-029 stale-claim snapshot matrix: {error}"));
+    assert_eq!(worlds, 8);
+}
 
 #[test]
 fn v16_program_favorable_funding_claim_bounds_are_exact_across_routes_and_sides() {
