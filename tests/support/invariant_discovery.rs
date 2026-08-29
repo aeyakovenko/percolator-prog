@@ -83,6 +83,7 @@ pub enum AssetIntentKind {
     InsuranceTopUp,
     BackingTopUp,
     BackingWithdrawal,
+    BackingEarningsWithdrawal,
     InsuranceWithdrawal,
     BackingFeePolicy,
     ResolveMarket,
@@ -800,7 +801,7 @@ impl AuthorityIntentKind {
 }
 
 impl AssetIntentKind {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::TradeNoCpi,
         Self::TradeCpi,
         Self::BatchTradeNoCpi,
@@ -813,6 +814,7 @@ impl AssetIntentKind {
         Self::InsuranceTopUp,
         Self::BackingTopUp,
         Self::BackingWithdrawal,
+        Self::BackingEarningsWithdrawal,
         Self::InsuranceWithdrawal,
         Self::BackingFeePolicy,
         Self::ResolveMarket,
@@ -837,14 +839,15 @@ impl AssetIntentKind {
             Self::InsuranceTopUp => 9,
             Self::BackingTopUp => 10,
             Self::BackingWithdrawal => 11,
-            Self::InsuranceWithdrawal => 12,
-            Self::BackingFeePolicy => 13,
-            Self::ResolveMarket => 14,
-            Self::ResolvePolicy => 15,
-            Self::AssetAuthority => 16,
-            Self::LifecycleShutdown => 17,
-            Self::LifecycleDrainOnly => 18,
-            Self::LifecycleRetire => 19,
+            Self::BackingEarningsWithdrawal => 12,
+            Self::InsuranceWithdrawal => 13,
+            Self::BackingFeePolicy => 14,
+            Self::ResolveMarket => 15,
+            Self::ResolvePolicy => 16,
+            Self::AssetAuthority => 17,
+            Self::LifecycleShutdown => 18,
+            Self::LifecycleDrainOnly => 19,
+            Self::LifecycleRetire => 20,
         }
     }
 
@@ -854,6 +857,7 @@ impl AssetIntentKind {
             Self::InsuranceTopUp
                 | Self::BackingTopUp
                 | Self::BackingWithdrawal
+                | Self::BackingEarningsWithdrawal
                 | Self::InsuranceWithdrawal
                 | Self::BackingFeePolicy
                 | Self::AssetAuthority
@@ -4952,6 +4956,7 @@ fn configure_old_asset_intent(
         }
         AssetIntentKind::BackingTopUp
         | AssetIntentKind::BackingWithdrawal
+        | AssetIntentKind::BackingEarningsWithdrawal
         | AssetIntentKind::BackingFeePolicy => env
             .update_asset_authority_from_admin(
                 asset_index,
@@ -5052,6 +5057,12 @@ fn retained_asset_intent(
         AssetIntentKind::BackingWithdrawal => {
             env.build_retained_backing_bucket_withdrawal_for_actor(authority_actor, domain, AMOUNT)
         }
+        AssetIntentKind::BackingEarningsWithdrawal => env
+            .build_retained_backing_bucket_earnings_withdrawal_for_actor(
+                authority_actor,
+                domain,
+                AMOUNT,
+            ),
         AssetIntentKind::InsuranceWithdrawal => {
             env.build_retained_insurance_withdrawal_for_actor(authority_actor, asset_index, AMOUNT)
         }
@@ -5112,6 +5123,7 @@ fn configure_replacement_asset(
             .top_up_backing_bucket_for_actor(authority_actor, asset_index * 2, 1_000, 100)
             .map(|_| ())
             .map_err(|error| format!("fund replacement backing bucket: {error}")),
+        AssetIntentKind::BackingEarningsWithdrawal => Ok(()),
         AssetIntentKind::AssetAuthority
         | AssetIntentKind::LifecycleShutdown
         | AssetIntentKind::LifecycleDrainOnly
@@ -5120,10 +5132,475 @@ fn configure_replacement_asset(
     }
 }
 
+fn accrue_backing_earnings_for_generation(env: &mut V16Svm) -> Result<u128, String> {
+    const PROVIDER: usize = 0;
+    const LP: usize = 2;
+    const WINNING_DOMAIN: u16 = 3;
+    const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const EXEC_PRICE: u64 = 95;
+
+    env.update_backing_fee_policy_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 0)
+        .map_err(|error| format!("install generation-scoped backing fee: {error}"))?;
+    env.warp_to_slot(6);
+    let before = env.primary_market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    env.trade_no_cpi_with_backing_fee_cap(PROVIDER, LP, 0, -INCREASE_Q, EXEC_PRICE, 0, 5_000)
+        .map_err(|error| format!("accrue generation-scoped backing earnings: {error}"))?;
+    let after = env.primary_market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let earnings = after
+        .checked_sub(before)
+        .ok_or_else(|| "generation-scoped backing earnings decreased".to_string())?;
+    if earnings == 0 {
+        return Err("public trade produced no generation-scoped backing earnings".into());
+    }
+    Ok(earnings)
+}
+
+fn clear_source_backing_generation(
+    env: &mut V16Svm,
+    earnings: u128,
+    live_control_amount: u128,
+) -> Result<(), String> {
+    const PROVIDER: usize = 0;
+    const MARKET_TRADER: usize = 1;
+    const LP: usize = 2;
+    const ASSET: u16 = 1;
+    const WINNING_DOMAIN: u16 = 3;
+    const WINNING_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+
+    let provider_destination = env.actors[PROVIDER].destination_token;
+    let destination_before = env.token_amount(provider_destination);
+    if live_control_amount == 0 || live_control_amount > earnings {
+        return Err(format!(
+            "invalid old-generation earnings control amount {live_control_amount}/{earnings}"
+        ));
+    }
+    env.withdraw_backing_bucket_earnings_for_actor(PROVIDER, WINNING_DOMAIN, live_control_amount)
+        .map_err(|error| format!("withdraw live old-generation backing earnings: {error}"))?;
+    if earnings > live_control_amount {
+        env.withdraw_backing_bucket_earnings_for_actor(
+            PROVIDER,
+            WINNING_DOMAIN,
+            earnings - live_control_amount,
+        )
+        .map_err(|error| format!("clear remaining old-generation backing earnings: {error}"))?;
+    }
+    let withdrawn = env
+        .token_amount(provider_destination)
+        .checked_sub(destination_before)
+        .ok_or_else(|| "provider destination decreased".to_string())?;
+    if u128::from(withdrawn) != earnings {
+        return Err(format!(
+            "old-generation earnings control moved {withdrawn}, expected {earnings}"
+        ));
+    }
+
+    env.trade_no_cpi(PROVIDER, LP, 0, INCREASE_Q, 95, 0)
+        .map_err(|error| format!("reverse fee-generating position: {error}"))?;
+    env.trade_no_cpi(MARKET_TRADER, LP, ASSET, WINNING_SIZE_Q, 105, 0)
+        .map_err(|error| format!("close source-backed winning position: {error}"))?;
+    env.trade_no_cpi(MARKET_TRADER, LP, 0, LOSING_SIZE_Q, 95, 0)
+        .map_err(|error| format!("close source-backed losing position: {error}"))?;
+
+    for actor in [PROVIDER, MARKET_TRADER, LP] {
+        for asset_index in [0u16, ASSET] {
+            if discovery_position(&env.primary_portfolio(actor), asset_index)? != 0 {
+                return Err(format!(
+                    "actor {actor} retained asset {asset_index} exposure after public close"
+                ));
+            }
+        }
+    }
+
+    let observations = [0u16, ASSET]
+        .into_iter()
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
+        })
+        .collect::<Vec<_>>();
+    for actor in [PROVIDER, MARKET_TRADER, LP] {
+        for _ in 0..8 {
+            if env
+                .crank_if_actionable(actor, 6, observations.clone())
+                .map_err(|error| format!("release actor {actor} source attribution: {error}"))?
+                .is_none()
+            {
+                break;
+            }
+        }
+        let account = env.primary_portfolio(actor);
+        let source_claim_num = account
+            .source_domains
+            .iter()
+            .filter(|source| source.domain.get() == u32::from(WINNING_DOMAIN))
+            .map(|source| source.source_claim_bound_num.get())
+            .try_fold(0u128, |sum, value| {
+                sum.checked_add(value)
+                    .ok_or_else(|| "account source claim overflow".to_string())
+            })?;
+        if source_claim_num != 0 {
+            let claim_atoms = source_claim_num
+                .checked_div(BOUND_SCALE)
+                .ok_or_else(|| "source claim scale is zero".to_string())?;
+            let claim_atoms_i128 = i128::try_from(claim_atoms)
+                .map_err(|_| "source claim does not fit signed PnL".to_string())?;
+            if claim_atoms == 0 || account.pnl.get() < claim_atoms_i128 {
+                return Err(format!(
+                    "actor {actor} source claim is not convertible: claim={source_claim_num}, pnl={}",
+                    account.pnl.get()
+                ));
+            }
+            if let Err(error) = env.convert_released_pnl(actor, claim_atoms) {
+                return Err(format!(
+                    "convert actor {actor} domain {WINNING_DOMAIN} source claim: {error}"
+                ));
+            }
+        }
+    }
+
+    // The offsetting base leg leaves MARKET_TRADER with a disjoint base-domain claim. Fund and
+    // settle it through the public source-credit route so the replacement generation starts from
+    // a genuinely oracle-reconfigurable live market, not an injected state.
+    let base_claim_num = env
+        .primary_portfolio(MARKET_TRADER)
+        .source_domains
+        .iter()
+        .filter(|source| source.domain.get() == 0)
+        .map(|source| source.source_claim_bound_num.get())
+        .try_fold(0u128, |sum, value| {
+            sum.checked_add(value)
+                .ok_or_else(|| "base source claim overflow".to_string())
+        })?;
+    if base_claim_num != 0 {
+        let base_claim_atoms = base_claim_num
+            .checked_div(BOUND_SCALE)
+            .ok_or_else(|| "base source claim scale is zero".to_string())?;
+        if base_claim_atoms == 0
+            || base_claim_atoms
+                .checked_mul(BOUND_SCALE)
+                .ok_or_else(|| "base source claim rescale overflow".to_string())?
+                != base_claim_num
+        {
+            return Err(format!(
+                "base source claim is not atom-exact: {base_claim_num}"
+            ));
+        }
+        env.top_up_backing_bucket_without_ledger(0, base_claim_atoms, 100)
+            .map_err(|error| format!("fund unrelated base source claim: {error}"))?;
+        crank_discovery_steps_for_assets(env, MARKET_TRADER, 6, &[0])?;
+        env.convert_released_pnl(MARKET_TRADER, base_claim_atoms)
+            .map_err(|error| format!("convert unrelated base source claim: {error}"))?;
+
+        let source = env.primary_market_state().1.source_credit[0];
+        if source.positive_claim_bound_num != 0
+            || source.exact_positive_claim_num != 0
+            || source.valid_liened_backing_num != 0
+        {
+            return Err(format!(
+                "base source attribution remained after conversion: {source:?}"
+            ));
+        }
+        let refill_atoms = source
+            .provider_receivable_num
+            .checked_div(BOUND_SCALE)
+            .ok_or_else(|| "base provider receivable scale is zero".to_string())?;
+        if refill_atoms != 0 {
+            env.top_up_backing_bucket_without_ledger(0, refill_atoms, 100)
+                .map_err(|error| format!("refill consumed base backing: {error}"))?;
+        }
+        let bucket = env.primary_market_state().1.source_backing_buckets[0];
+        let principal_atoms = bucket
+            .fresh_unliened_backing_num
+            .checked_div(BOUND_SCALE)
+            .ok_or_else(|| "base backing principal scale is zero".to_string())?;
+        let principal_num = principal_atoms
+            .checked_mul(BOUND_SCALE)
+            .ok_or_else(|| "base backing principal rescale overflow".to_string())?;
+        if principal_atoms == 0
+            || principal_num != bucket.fresh_unliened_backing_num
+            || bucket.valid_liened_backing_num != 0
+            || bucket.consumed_liened_backing_num != 0
+        {
+            return Err(format!(
+                "base backing is not publicly withdrawable after refill: {bucket:?}"
+            ));
+        }
+        env.withdraw_backing_bucket(0, principal_atoms)
+            .map_err(|error| format!("withdraw settled base backing: {error}"))?;
+    }
+
+    let before_refill = env.primary_market_state().1;
+    let source = before_refill.source_credit[WINNING_DOMAIN as usize];
+    if source.positive_claim_bound_num != 0
+        || source.exact_positive_claim_num != 0
+        || source.valid_liened_backing_num != 0
+    {
+        return Err(format!(
+            "source attribution remained after public release/convert: {source:?}"
+        ));
+    }
+    let refill_atoms = source
+        .provider_receivable_num
+        .checked_div(BOUND_SCALE)
+        .ok_or_else(|| "provider receivable scale is zero".to_string())?;
+    if refill_atoms != 0 {
+        env.top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, refill_atoms, 100)
+            .map_err(|error| format!("refill consumed provider backing: {error}"))?;
+    }
+    let bucket = env.primary_market_state().1.source_backing_buckets[WINNING_DOMAIN as usize];
+    let principal_atoms = bucket
+        .fresh_unliened_backing_num
+        .checked_div(BOUND_SCALE)
+        .ok_or_else(|| "backing principal scale is zero".to_string())?;
+    let principal_num = principal_atoms
+        .checked_mul(BOUND_SCALE)
+        .ok_or_else(|| "backing principal rescale overflow".to_string())?;
+    if principal_atoms == 0
+        || bucket.fresh_unliened_backing_num != principal_num
+        || bucket.valid_liened_backing_num != 0
+        || bucket.consumed_liened_backing_num != 0
+    {
+        return Err(format!(
+            "old-generation backing is not publicly withdrawable: {bucket:?}"
+        ));
+    }
+    if let Err(error) =
+        env.withdraw_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, principal_atoms)
+    {
+        let group = env.primary_market_state().1;
+        return Err(format!(
+            "withdraw old-generation backing principal: {error}; pnls={:?}; bucket={:?}; source={:?}",
+            [
+                env.primary_portfolio(PROVIDER).pnl.get(),
+                env.primary_portfolio(MARKET_TRADER).pnl.get(),
+                env.primary_portfolio(LP).pnl.get(),
+            ],
+            group.source_backing_buckets[WINNING_DOMAIN as usize],
+            group.source_credit[WINNING_DOMAIN as usize],
+        ));
+    }
+    Ok(())
+}
+
+fn accrue_replacement_backing_earnings(env: &mut V16Svm) -> Result<u128, String> {
+    const PROVIDER: usize = 0;
+    const MARKET_TRADER: usize = 1;
+    const LP: usize = 2;
+    const FEE_TRADER: usize = 0;
+    const ASSET: u16 = 1;
+    const WINNING_DOMAIN: u16 = 3;
+    const PRICE: u64 = 100;
+    const WINNING_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+
+    let replacement_group = env.primary_market_state().1;
+    if replacement_group.mode != percolator::MarketModeV16::Live
+        || replacement_group.pnl_pos_tot != 0
+        || replacement_group.stale_certificate_count != 0
+        || replacement_group.b_stale_account_count != 0
+        || replacement_group.negative_pnl_account_count != 0
+    {
+        return Err(format!(
+            "replacement oracle reconfiguration blockers: mode={:?}, pnl_pos_tot={}, stale={}, b_stale={}, negative={}",
+            replacement_group.mode,
+            replacement_group.pnl_pos_tot,
+            replacement_group.stale_certificate_count,
+            replacement_group.b_stale_account_count,
+            replacement_group.negative_pnl_account_count,
+        ));
+    }
+    env.configure_auth_mark_for_actor(PROVIDER, ASSET, 8, PRICE)
+        .map_err(|error| format!("configure replacement source mark: {error}"))?;
+    env.configure_auth_mark(false, 0, 8, PRICE)
+        .map_err(|error| format!("reset replacement base mark: {error}"))?;
+    env.update_backing_fee_policy_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 0)
+        .map_err(|error| format!("install replacement backing fee: {error}"))?;
+    env.top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 100)
+        .map_err(|error| format!("fund replacement source backing: {error}"))?;
+    let base_price = env.primary_market_state().1.assets[0].effective_price;
+    env.trade_no_cpi(MARKET_TRADER, LP, ASSET, -WINNING_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open replacement source-winning leg: {error}"))?;
+    env.trade_no_cpi(MARKET_TRADER, LP, 0, -LOSING_SIZE_Q, base_price, 0)
+        .map_err(|error| format!("open replacement offsetting leg: {error}"))?;
+
+    env.warp_to_slot(9);
+    env.push_auth_mark_for_actor(PROVIDER, ASSET, 9, PRICE)
+        .map_err(|error| format!("prime replacement source mark: {error}"))?;
+    env.push_auth_mark(0, 9, base_price)
+        .map_err(|error| format!("prime replacement base mark: {error}"))?;
+    for actor in [MARKET_TRADER, LP] {
+        crank_discovery_steps_for_assets(env, actor, 9, &[ASSET, 0])?;
+    }
+    env.sync_maintenance_fee(LP, 9)
+        .map_err(|error| format!("sync replacement source maintenance: {error}"))?;
+
+    env.warp_to_slot(10);
+    env.push_auth_mark_for_actor(PROVIDER, ASSET, 10, PRICE + 5)
+        .map_err(|error| format!("publish replacement winning mark: {error}"))?;
+    env.push_auth_mark(0, 10, base_price.saturating_sub(5).max(1))
+        .map_err(|error| format!("publish replacement losing mark: {error}"))?;
+    for actor in [MARKET_TRADER, LP] {
+        crank_discovery_steps_for_assets(env, actor, 10, &[ASSET, 0])?;
+    }
+    if env.primary_portfolio(LP).pnl.get() <= 0 {
+        return Err(format!(
+            "replacement source fixture produced no positive LP claim: {}",
+            env.primary_portfolio(LP).pnl.get()
+        ));
+    }
+    env.warp_to_slot(11);
+    let before = env.primary_market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let exec_price = env.primary_market_state().1.assets[0].effective_price;
+    env.trade_no_cpi_with_backing_fee_cap(FEE_TRADER, LP, 0, -INCREASE_Q, exec_price, 0, 5_000)
+        .map_err(|error| format!("accrue replacement backing earnings: {error}"))?;
+    let after = env.primary_market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let earnings = after
+        .checked_sub(before)
+        .ok_or_else(|| "replacement backing earnings decreased".to_string())?;
+    if earnings == 0 {
+        return Err("replacement public trade produced no backing earnings".into());
+    }
+    Ok(earnings)
+}
+
+fn discover_backing_earnings_generation_replay(
+    mut seed: [u8; 32],
+) -> Result<AssetGenerationDiscovery, String> {
+    const PROVIDER: usize = 0;
+    const LP: usize = 2;
+    const ASSET: u16 = 1;
+    const WINNING_DOMAIN: u16 = 3;
+    const PRICE: u64 = 100;
+    const REPLAY_AMOUNT: u128 = 1;
+    seed[0] ^= 0x52;
+
+    let mut env = prepare_source_backed_fee_world(seed)?;
+    let supply_before = env.token_supply_observed();
+    let old_asset_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let earnings = accrue_backing_earnings_for_generation(&mut env)?;
+    let retained = env.build_retained_backing_bucket_earnings_withdrawal_for_actor(
+        PROVIDER,
+        WINNING_DOMAIN,
+        REPLAY_AMOUNT,
+    );
+    clear_source_backing_generation(&mut env, earnings, REPLAY_AMOUNT)?;
+    let lp_capital = env.primary_portfolio(LP).capital.get();
+    let replacement_starting_capital = 3_190u128;
+    if lp_capital > replacement_starting_capital {
+        env.withdraw_primary(LP, lp_capital - replacement_starting_capital)
+            .map_err(|error| format!("withdraw flat old-generation LP surplus: {error}"))?;
+    }
+
+    env.warp_to_slot(7);
+    env.retire_asset(ASSET, 7)
+        .map_err(|error| format!("retire earnings-bearing old asset: {error}"))?;
+    env.warp_to_slot(8);
+    env.activate_permissionless_asset_for_actor(PROVIDER, ASSET, 8, PRICE, PROVIDER, 1)
+        .map_err(|error| format!("reactivate earnings asset slot: {error}"))?;
+    let new_asset_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if new_asset_id <= old_asset_id {
+        return Err(format!(
+            "backing-earnings asset generation did not advance: {old_asset_id} -> {new_asset_id}"
+        ));
+    }
+
+    let replacement_earnings = accrue_replacement_backing_earnings(&mut env)?;
+    if replacement_earnings < REPLAY_AMOUNT {
+        return Err(format!(
+            "replacement earnings {replacement_earnings} cannot fund retained amount {REPLAY_AMOUNT}"
+        ));
+    }
+
+    let before = fingerprint(&env);
+    let error = env
+        .land_retained(retained)
+        .expect_err("old-generation backing earnings withdrawal must reject after slot reuse");
+    let after = fingerprint(&env);
+    if before != after {
+        return Err("rejected backing-earnings replay did not roll back exactly".into());
+    }
+    let expected = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    if !error.contains(&expected) {
+        return Err(format!(
+            "backing-earnings replay rejected for the wrong reason: expected {expected}, got {error}"
+        ));
+    }
+    if env.token_supply_observed() != supply_before {
+        return Err("backing-earnings generation lifecycle changed SPL supply".into());
+    }
+
+    let fresh = env.build_retained_backing_bucket_earnings_withdrawal_for_actor(
+        PROVIDER,
+        WINNING_DOMAIN,
+        REPLAY_AMOUNT,
+    );
+    let fresh_destination = env.actors[PROVIDER].destination_token;
+    let fresh_destination_before = env.token_amount(fresh_destination);
+    let fresh_vault_before = env.token_amount(env.vault);
+    let fresh_earnings_before = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let before_fresh = fingerprint(&env);
+    let fresh_result = env.land_retained(fresh);
+    let after_fresh = fingerprint(&env);
+    let fresh_intent_landed = fresh_result.is_ok();
+    let fresh_intent_mutated_economic_state = before_fresh != after_fresh;
+    let fresh_withdrawn = env
+        .token_amount(fresh_destination)
+        .checked_sub(fresh_destination_before)
+        .ok_or_else(|| "fresh provider destination decreased".to_string())?;
+    let fresh_vault_after = env.token_amount(env.vault);
+    let fresh_vault_debit = fresh_vault_before
+        .checked_sub(fresh_vault_after)
+        .ok_or_else(|| "fresh vault balance increased".to_string())?;
+    let fresh_earnings_after = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let expected_earnings_after = fresh_earnings_before
+        .checked_sub(REPLAY_AMOUNT)
+        .ok_or_else(|| "fresh earnings withdrawal exceeded the replacement bucket".to_string())?;
+    if !fresh_intent_landed
+        || !fresh_intent_mutated_economic_state
+        || u128::from(fresh_withdrawn) != REPLAY_AMOUNT
+        || u128::from(fresh_vault_debit) != REPLAY_AMOUNT
+        || fresh_earnings_after != expected_earnings_after
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "current-generation backing earnings control was not exact: result={fresh_result:?}, mutated={fresh_intent_mutated_economic_state}, destination_credit={fresh_withdrawn}, vault_debit={fresh_vault_debit}, earnings={fresh_earnings_before}->{fresh_earnings_after}, expected={REPLAY_AMOUNT}"
+        ));
+    }
+
+    Ok(AssetGenerationDiscovery {
+        kind: AssetIntentKind::BackingEarningsWithdrawal,
+        old_asset_id,
+        new_asset_id,
+        accepted_stale_intent: false,
+        mutated_economic_state: false,
+        compute_units: None,
+        rejection_was_generation_mismatch: true,
+        fresh_intent_landed,
+        fresh_intent_mutated_economic_state,
+    })
+}
+
 fn discover_one_asset_generation_replay(
     mut seed: [u8; 32],
     kind: AssetIntentKind,
 ) -> Result<AssetGenerationDiscovery, String> {
+    if kind == AssetIntentKind::BackingEarningsWithdrawal {
+        return discover_backing_earnings_generation_replay(seed);
+    }
     const ASSET: u16 = 1;
     const AUTHORITY_ACTOR: usize = 2;
     const ACTIVATION_PAYER: usize = 3;

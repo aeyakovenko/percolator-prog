@@ -7,7 +7,10 @@
 //! rollback, liveness, or compute outcomes appropriate to the invariant. Oracle controls are
 //! retained with `u64::MAX` sequences so sequence reset or forward-gap ordering cannot make the
 //! result pass; the restart route deliberately reuses the same authorized asset admin in both
-//! generations and proves a fresh generation-B restart remains live.
+//! generations and proves a fresh generation-B restart remains live. Backing-earnings withdrawal
+//! is nonvacuous in both generations: public trades earn the fees, the old request is live before
+//! retirement, stale replay frames every economic account, and the fresh request transfers the
+//! exact current-generation amount from bucket and vault to the authorized destination.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -185,6 +188,23 @@ fn v16_program_stale_backing_withdrawal_rejects_across_asset_generation() {
 }
 
 #[test]
+fn v16_program_stale_backing_earnings_withdrawal_rejects_across_asset_generation() {
+    let protection =
+        discover_asset_generation_replay([0x52; 32], AssetIntentKind::BackingEarningsWithdrawal)
+            .unwrap_or_else(|error| {
+                panic!("backing earnings withdrawal protection failed: {error}")
+            });
+    assert_eq!(protection.kind, AssetIntentKind::BackingEarningsWithdrawal);
+    assert!(protection.new_asset_id > protection.old_asset_id);
+    assert!(!protection.accepted_stale_intent);
+    assert!(!protection.mutated_economic_state);
+    assert_eq!(protection.compute_units, None);
+    assert!(protection.rejection_was_generation_mismatch);
+    assert!(protection.fresh_intent_landed);
+    assert!(protection.fresh_intent_mutated_economic_state);
+}
+
+#[test]
 fn v16_program_pr279_asset_zero_top_up_rejects_after_restart() {
     const ASSET: u16 = 0;
     const REUSED_INSURANCE_AUTHORITY: usize = 2;
@@ -276,81 +296,6 @@ fn v16_program_pr318_stale_backing_fee_policy_rejects_across_asset_generation() 
     assert!(protection.rejection_was_generation_mismatch);
     assert!(protection.fresh_intent_landed);
     assert!(protection.fresh_intent_mutated_economic_state);
-}
-
-#[test]
-fn v16_program_stale_backing_earnings_withdrawal_rejects_across_asset_generation() {
-    const ASSET: u16 = 1;
-    const DOMAIN: u16 = ASSET * 2;
-    const AUTHORITY: usize = 2;
-    const ACTIVATOR: usize = 3;
-
-    let mut env = V16Svm::new([0xe2; 32], MarketConfig::default());
-    env.update_asset_authority_from_admin(
-        ASSET,
-        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
-        AUTHORITY,
-    )
-    .expect("install generation-A backing authority");
-    let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
-    let retained =
-        env.build_retained_backing_bucket_earnings_withdrawal_for_actor(AUTHORITY, DOMAIN, 1);
-
-    env.update_market_init_fee_policy(1)
-        .expect("enable permissionless replacement activation");
-    env.warp_to_slot(3);
-    env.retire_asset(ASSET, 3)
-        .expect("retire empty generation A");
-    env.warp_to_slot(4);
-    env.activate_permissionless_asset_with_actor_authorities(
-        ACTIVATOR, ASSET, 4, 100, AUTHORITY, AUTHORITY, AUTHORITY, AUTHORITY, 1,
-    )
-    .expect("activate generation B with the same visible backing authority");
-    let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
-    assert!(new_market_id > old_market_id);
-
-    let market_before = env.market_data(false);
-    let ledger_before = env.svm.get_account(&env.backing_domain_ledger);
-    let tokens_before = env.all_token_account_data();
-    let supply_before = env.token_supply_observed();
-    let error = env
-        .land_retained(retained)
-        .expect_err("generation-A earnings consent cannot reach generation B");
-    let expected = format!(
-        "Custom({})",
-        PercolatorError::AssetGenerationMismatch as u32
-    );
-    assert!(
-        error.contains(&expected),
-        "stale earnings withdrawal must return {expected}, got {error}"
-    );
-    assert_eq!(env.market_data(false), market_before);
-    assert_eq!(
-        env.svm.get_account(&env.backing_domain_ledger),
-        ledger_before
-    );
-    assert_eq!(env.all_token_account_data(), tokens_before);
-    assert_eq!(env.token_supply_observed(), supply_before);
-
-    // A current-generation request reaches the economic amount gate rather than
-    // failing generation validation. The value-moving positive route is shared
-    // with INV-025/028 and source-bound by the INV-002 roster.
-    let fresh =
-        env.build_retained_backing_bucket_earnings_withdrawal_for_actor(AUTHORITY, DOMAIN, 1);
-    let fresh_error = env
-        .land_retained(fresh)
-        .expect_err("an empty replacement bucket has no earnings to withdraw");
-    assert!(
-        !fresh_error.contains(&expected),
-        "current generation must pass the generation gate: {fresh_error}"
-    );
-    assert_eq!(env.market_data(false), market_before);
-    assert_eq!(
-        env.svm.get_account(&env.backing_domain_ledger),
-        ledger_before
-    );
-    assert_eq!(env.all_token_account_data(), tokens_before);
-    assert_eq!(env.token_supply_observed(), supply_before);
 }
 
 #[test]
