@@ -155,6 +155,17 @@ wrapper rate/epoch writers; INV-088's complete wrapper-to-engine callsite roster
 engine contracts own the internal mutations without duplicating them here. Universal public-state
 reachability remains open.
 
+The finding-blind INV-002 operation matrix now supports fixed-pin certification of eleven additional
+asset-generation holdout adapters. Its nine focused stateful tests enumerate all 20 retained
+asset-specific operation kinds across public retirement/reactivation, require every stale request to
+reject with exact rollback, and require the corresponding current-generation control to remain live.
+Fifteen focused public-SBF regressions independently exercise the matching fixed-pin adapters. PRs
+231, 275, 277, 279, 311, 315, 318, 320, 321, 322, and 328 therefore move from `Quarantined` to
+`Certified`; the executable manifest now contains 30 certified, 61 quarantined, 8 nonqualifying,
+and no missing rows. This is an evidence-classification change only: no production source, state,
+or SBF byte changed. Whole-market and portfolio-incarnation rows remain quarantined because their
+distinct INV-001 and INV-003 requirements are not discharged by asset-generation coverage.
+
 The current INV-005 tranche extends the canonical per-asset authority epoch to backing-principal,
 backing-earnings, asset-scoped insurance withdrawals, base-unit mint replacement, and the
 secondary-to-primary reserve swap. Combined with terminal slab close, the three value-bearing
@@ -2020,9 +2031,9 @@ and formal-composition gaps.
 
 ### Immediate next work
 
-1. Convert the 73 `Quarantined` adapters to `Certified` only after the current pin satisfies their
-   positive economic and liveness postconditions. The other 26 entries already have explicit
-   executable disposition: 18 fixed-pin certifications and 8 public nonqualifying proofs. Do not
+1. Convert the 61 `Quarantined` adapters to `Certified` only after the current pin satisfies their
+   positive economic and liveness postconditions. The other 38 entries already have explicit
+   executable disposition: 30 fixed-pin certifications and 8 public nonqualifying proofs. Do not
    promote a vulnerable counterexample merely because its broader invariant has other green tests.
 2. Treat INV-020 as an arithmetic frontier, not a request for more finite matrix duplication. Its
    byte parser, typed validator, all-index timestamp selection, provider/transform ingestion, and
@@ -2083,11 +2094,11 @@ state-preserving because the wrapper returns the error and SVM rollback applies.
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 102 | Deterministic public SBF/LiteSVM regressions, decoder corpora, manifests, and public-trace checks. The retained-intent inventory covers every family, same-transaction duplicates, both insurance entrypoints, and all 16 ordered single/batch CPI/no-CPI trade pairs with exact rollback and economic-state oracles. INV-015 additionally owns the complete persisted byte-domain and alignment boundary. |
-| `stateful/` | 205 | Generated public routes with exact rollback on rejection and shared state, custody, OI, source-credit, and liveness oracles on success. Coverage includes randomized retained retries and trade-route switching, exact normalized nonzero-fee equivalence across all four trade route classes, lifecycle and terminal compositions, all 2,380 public action words through depth three, underfunded terminal authority/resolve and retained-policy/boundary/order products, the 27-case authority-incarnation matrix, one public two-stage exact receipt-top-up lifecycle, all 5! basic claimant orders, and the mutation-killed, four-route Recovery, and eight-world cancellation INV-037 residual-partition oracles. Per-invariant rows below are the source of truth for uncovered dimensions. |
-| `cu/` | 892 | Public-route, metamorphic, rollback, liveness, arithmetic-differential, and maximum-shape LiteSVM coverage. It includes source-complete ownership and exhaustive account-role matrices for all 49 instructions, a source-locked single SPL-account parser gateway, real SPL/CPI boundaries, retained-intent failures and retries, the complete authority-epoch source matrix, 60 partial-fill route/ratio/maximum-domain worlds, lifecycle and terminal exits, hostile hint/oracle/matcher inputs, full supported shapes, and exact custody/accounting checks. |
+| `stateful/` | 209 | Generated public routes with exact rollback on rejection and shared state, custody, OI, source-credit, and liveness oracles on success. Coverage includes randomized retained retries and trade-route switching, exact normalized nonzero-fee equivalence across all four trade route classes, lifecycle and terminal compositions, all 2,380 public action words through depth three, underfunded terminal authority/resolve and retained-policy/boundary/order products, the 27-case authority-incarnation matrix, one public two-stage exact receipt-top-up lifecycle, all 5! basic claimant orders, and the mutation-killed, four-route Recovery, and eight-world cancellation INV-037 residual-partition oracles. Per-invariant rows below are the source of truth for uncovered dimensions. |
+| `cu/` | 895 | Public-route, metamorphic, rollback, liveness, arithmetic-differential, and maximum-shape LiteSVM coverage. It includes source-complete ownership and exhaustive account-role matrices for all 49 instructions, a source-locked single SPL-account parser gateway, real SPL/CPI boundaries, retained-intent failures and retries, the complete authority-epoch source matrix, 60 partial-fill route/ratio/maximum-domain worlds, lifecycle and terminal exits, hostile hint/oracle/matcher inputs, full supported shapes, and exact custody/accounting checks. |
 | `kani/` | 183 | Symbolic wrapper arithmetic, exact account-header acceptance and short-length rejection, exact portfolio/position tuple acceptance and episode invalidation, full-key matcher-capability equality, retained-close and owner-value sequence binding, all four trade tuple bindings, atomic batch matcher-return quantity acceptance, strict full-width top-up watermark ordering, matcher binding and synchronization policy, ordering, strict-decoder, proof-assumption nonvacuity, exact full-width composite-oracle epoch coherence, and oracle confidence-totality/freshness/dispatch/identity/short-data contracts. Twelve INV-085 harnesses compare deployed price movement, dt clamping, premium funding, EWMA, fee-supported movement, fee shares, activation-fee tiers, risk notional, ceil division, two-sided fees, fee-rate search, and batch-leg fees with independent widened or exhaustive formulas; all branch-bearing domains have constructive covers and no new assumption. Sixteen provider-parser decomposition harnesses additionally compose canonical Pyth and Chainlink byte fields, independently bind the first/last Switchboard wire offsets, prove the complete Switchboard selected-timestamp table and typed validation, and cover confidence routing, invalid sign/exponent/decimal partitions, and concrete scale boundaries through production code without new assumptions. The roster includes rejection of legacy deposit/withdraw/trade/top-up/hybrid schemas; all full-width fields in the exact shipping InitMarket, hybrid-oracle, four trade, two base-unit, and lifecycle decoder bodies through one tag-directed proof adapter; exact current-versus-frontier asset-generation selection; authority-wire and exact epoch-field binding, including terminal close, all reserve top-ups, the three reserve-withdrawal routes, base-unit mint replacement, secondary-reserve swap, and all lifecycle actions; exact deployed portfolio-ID allocator monotonicity/non-reuse; exhaustive acceptance/rejection of the persisted oracle carry and reserved-byte domains; full-width strict pre-expiry admission for provider-principal withdrawal; and a source-complete exact-owner inventory plus two-sided witnesses for all 13 explicit assumptions in all 21 mounted modules. Duplicate backing-withdrawal wire assertions were removed from INV-022 because INV-002 owns them, and the remaining insurance decoder proofs are exact per-route queries. The required command is `cargo kani --bin v16-kani --features kani --default-unwind 18 --output-format terse -j 2`. |
 
-The executable 99-finding manifest currently contains 18 `Certified`, 73 `Quarantined`, 8
+The executable 99-finding manifest currently contains 30 `Certified`, 61 `Quarantined`, 8
 `Nonqualifying`, and 0 `Missing` entries. Certified adapters assert positive safety/liveness
 outcomes on this fixed pin; quarantined adapters still reproduce vulnerable behavior; and every
 nonqualifying row is tied to a public proof that the alleged route is privileged-only, transient,
@@ -2431,7 +2442,7 @@ public-route LoF or DoS class. It maps every row to a primary invariant. PR135 c
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
 `tests/support/open_lof_manifest.rs` retains the executable adapter mapping for its 99-LoF snapshot:
-18 are `Certified`, 73 remain `Quarantined`, 8 are `Nonqualifying`, and none are `Missing`. Its
+30 are `Certified`, 61 remain `Quarantined`, 8 are `Nonqualifying`, and none are `Missing`. Its
 `Quarantined` entries mean **Direct regression**, not **Independent discovery**. The unified TSV's
 classification criterion is met for its dated snapshot, but executable fixed-pin certification is
 not complete while any quarantine remains.

@@ -301,7 +301,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr225ReclaimableEwmaFee,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         231,
         Blocker,
         ReplayIncarnation,
@@ -383,7 +383,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr304MatcherGrantPortfolioIncarnationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         275,
         Blocker,
         ReplayIncarnation,
@@ -395,7 +395,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr303TradePortfolioIncarnationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         277,
         Blocker,
         ReplayIncarnation,
@@ -407,7 +407,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr278ForfeitPortfolioIncarnationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         279,
         Blocker,
         ReplayIncarnation,
@@ -535,7 +535,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         FeeConsent,
         BlockerAdapter::Pr310BilateralBaseFeeConsent,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         311,
         Blocker,
         ReplayIncarnation,
@@ -559,7 +559,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         FeeConsent,
         BlockerAdapter::Pr314ActivationFeeConsent,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         315,
         Blocker,
         ReplayIncarnation,
@@ -577,25 +577,25 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr317FeeRedirectGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         318,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr318BackingFeeGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         320,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr279CollateralTopUpGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         321,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr321BackingTopUpGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         322,
         Blocker,
         ReplayIncarnation,
@@ -613,7 +613,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr326LiquidationPolicyGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         328,
         Blocker,
         ReplayIncarnation,
