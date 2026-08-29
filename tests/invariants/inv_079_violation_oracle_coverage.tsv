@@ -9,7 +9,7 @@ BilateralMarkFeeDiscovery	TERMINAL_LOF	all six portfolios resolve through public
 CompositeRoundingDiscovery	TERMINAL_LOF	all five portfolios resolve through public payout rails; exact destination-token traces bind any rounded-composite liquidation loss and cranker gain to the terminal classifier
 CrossDomainBackingDiscovery	TERMINAL_LOF	public trace binds excess domain backing consumption to winner excess gain
 FeeConsentDiscovery	ECONOMIC_DELTA_ONLY	unauthorized debit lacks normalized public terminal evidence
-FractionalMovementDiscovery	LOCAL_SAFETY_ONLY	stall and settlement mismatch lack a complete terminal route mask
+FractionalMovementDiscovery	TERMINAL_LOF	public trace binds a stalled target's exact short underpayment to long overpayment while stale resolution proves it is not persistent DoS
 FundedRoleDiscovery	PRIVILEGED_TRANSFER	exact principal transfer requires the currently authorized asset admin to rotate the funded role
 IncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
 IntentReplayDiscovery	REPLAY_ONLY	duplicate economic mutation is not itself quantified LoF or persistent DoS
@@ -17,7 +17,7 @@ MarketIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified
 MarkMovementReserveDiscovery	LOCAL_SAFETY_ONLY	public terminal evidence proves nonextraction, but rollback and reserve-admission failures are not themselves terminal LoF
 PendingMarkAdmissionDiscovery	LOCAL_SAFETY_ONLY	guard and round-trip checks lack normalized terminal evidence
 PendingMarkInheritanceDiscovery	LOCAL_SAFETY_ONLY	guard and round-trip checks lack normalized terminal evidence
-PendingTargetOverrideDiscovery	LOCAL_SAFETY_ONLY	target and payout checks lack normalized terminal evidence
+PendingTargetOverrideDiscovery	LOCAL_SAFETY_ONLY	paired public terminal evidence binds any payout extraction, while target and rollback failures remain local safety claims
 PendingZeroMoveTerminalDiscovery	TERMINAL_LOF	paired public traces terminalize both users and bind exact zero-move ordering payout loss/gain to the same SPL identities
 ProspectiveAccrualDiscovery	TERMINAL_LOF	all four public trade routes resolve every actor and bind exact control-relative SPL payout loss/gain to the terminal classifier
 ShutdownCommitOrderingDiscovery	TERMINAL_LOF	paired public traces terminalize both users and bind exact shutdown-order payout loss/gain to the same SPL identities

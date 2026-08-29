@@ -1299,7 +1299,7 @@ pub struct PendingMarkInheritanceDiscovery {
     pub extracted_profit: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingTargetOverrideDiscovery {
     pub route: DiscoveryTradeRoute,
     pub control_target: u64,
@@ -1311,6 +1311,9 @@ pub struct PendingTargetOverrideDiscovery {
     pub coalition_profit: u128,
     pub control_supply: u128,
     pub reordered_supply: u128,
+    pub control_total_payout: u128,
+    pub reordered_total_payout: u128,
+    pub terminal_evidence: PairedTerminalPayoutEvidence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1412,7 +1415,7 @@ pub struct ObservationOmissionDiscovery {
     pub counterparty_payout_gain: u128,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FractionalMovementDiscovery {
     pub target_price: u64,
     pub settlement_price: u64,
@@ -1422,6 +1425,19 @@ pub struct FractionalMovementDiscovery {
     pub nonmoving_stalls: u8,
     pub long_overpayment: u128,
     pub short_underpayment: u128,
+    pub long_destination: Pubkey,
+    pub short_destination: Pubkey,
+    pub long_payout: u128,
+    pub short_payout: u128,
+    pub target_long_payout: u128,
+    pub target_short_payout: u128,
+    pub stale_resolution_landed: bool,
+    pub users_terminal: bool,
+    pub required_exit_routes: u64,
+    pub attempted_exit_routes: u64,
+    pub progressing_exit_routes: u64,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2219,13 +2235,49 @@ impl HybridTerminalCoherenceEvidence {
 }
 
 impl FractionalMovementDiscovery {
+    fn certifies_traced_payouts(&self) -> bool {
+        let Ok(traced_long) = self
+            .public_trace
+            .token_delta_for_accounts(std::slice::from_ref(&self.long_destination))
+            .and_then(|delta| {
+                u128::try_from(delta).map_err(|_| "negative long payout delta".to_string())
+            })
+        else {
+            return false;
+        };
+        let Ok(traced_short) = self
+            .public_trace
+            .token_delta_for_accounts(std::slice::from_ref(&self.short_destination))
+            .and_then(|delta| {
+                u128::try_from(delta).map_err(|_| "negative short payout delta".to_string())
+            })
+        else {
+            return false;
+        };
+        traced_long == self.long_payout
+            && traced_short == self.short_payout
+            && self.long_payout.checked_sub(self.target_long_payout) == Some(self.long_overpayment)
+            && self.target_short_payout.checked_sub(self.short_payout)
+                == Some(self.short_underpayment)
+    }
+
     pub fn is_violation(&self) -> bool {
-        self.successful_cranks != 0
-            && !self.reached_target
+        !self.reached_target
             && self.settlement_price > self.target_price
             && (self.rejected_stalls >= 3 || self.nonmoving_stalls >= 3)
             && self.long_overpayment != 0
             && self.long_overpayment == self.short_underpayment
+            && self.certifies_traced_payouts()
+            && self.users_terminal
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == self.short_underpayment
+                    && unauthorized_gain_atoms == self.long_overpayment
+            )
+            && self.public_trace.validate_public_execution().is_ok()
     }
 
     pub fn preserves_fractional_settlement(&self) -> bool {
@@ -2234,6 +2286,18 @@ impl FractionalMovementDiscovery {
             && self.settlement_price == self.target_price
             && self.long_overpayment == 0
             && self.short_underpayment == 0
+            && self.certifies_traced_payouts()
+            && self.stale_resolution_landed
+            && self.users_terminal
+            && self.required_exit_routes != 0
+            && self.attempted_exit_routes & self.required_exit_routes == self.required_exit_routes
+            && self.progressing_exit_routes != 0
+            && self.progressing_exit_routes & !self.attempted_exit_routes == 0
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && self.public_trace.validate_public_execution().is_ok()
     }
 }
 
@@ -2440,16 +2504,29 @@ impl PendingMarkFeeOrderingDiscovery {
 
 impl PendingTargetOverrideDiscovery {
     pub fn is_violation(&self) -> bool {
+        let terminal_extraction = self.victim_payout_loss != 0
+            && self.coalition_profit != 0
+            && self.terminal_evidence.certifies_exact_loss(
+                self.victim_payout_loss,
+                self.coalition_profit,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            );
         !self.override_rejected_lock
             || !self.rejected_exact_rollback
             || self.reordered_target != self.control_target
-            || self.victim_payout_loss != 0
-            || self.coalition_profit != 0
+            || terminal_extraction
             || self.control_supply != self.reordered_supply
     }
 
     pub fn certifies_guard_and_terminal_value(&self) -> bool {
-        !self.is_violation() && self.movement_fee == 0
+        !self.is_violation()
+            && self.movement_fee == 0
+            && self.terminal_evidence.certifies_bounded_exit(
+                self.victim_payout_loss,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            )
     }
 }
 
@@ -9489,7 +9566,7 @@ pub fn discover_pending_mark_inheritance_violations(
         .collect()
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PendingTargetWorld {
     target: u64,
     override_rejected_lock: bool,
@@ -9497,7 +9574,12 @@ struct PendingTargetWorld {
     movement_fee: u128,
     victim_payout: u128,
     coalition_payout: u128,
+    total_payout: u128,
     supply: u128,
+    users_terminal: bool,
+    victim_destination: Pubkey,
+    coalition_destinations: Vec<Pubkey>,
+    public_trace: PublicTraceEvidence,
 }
 
 fn run_pending_target_world(
@@ -9585,6 +9667,7 @@ fn run_pending_target_world(
         return Err(format!("{route:?} honest rebound did not remain pending"));
     }
 
+    env.begin_public_trace();
     env.warp_to_slot(7);
     let insurance_before = env.primary_market_state().1.insurance;
     let mut override_rejected_lock = false;
@@ -9644,20 +9727,31 @@ fn run_pending_target_world(
         .map_err(|error| format!("{route:?} close directional OI: {error}"))?;
     env.resolve_market()
         .map_err(|error| format!("{route:?} resolve target world: {error}"))?;
-    for actor in 0..4 {
-        env.close_resolved_primary(actor)
-            .map_err(|error| format!("{route:?} close resolved actor {actor}: {error}"))?;
-    }
-    for actor in 0..4 {
-        let _ = env.claim_resolved_payout_topup_primary(actor);
-    }
-    let victim_payout = u128::from(env.token_amount(env.actors[0].destination_token));
-    let coalition_payout = [1usize, 2, 3].into_iter().try_fold(0u128, |sum, actor| {
-        sum.checked_add(u128::from(
-            env.token_amount(env.actors[actor].destination_token),
-        ))
-        .ok_or_else(|| "pending-target coalition payout overflow".to_string())
+    let actors = [0usize, 1, 2, 3, 4];
+    drain_resolved_discovery_actors(&mut env, actors)?;
+    let users_terminal = actors.iter().try_fold(true, |all_terminal, actor| {
+        discovery_portfolio_is_terminal(&env.primary_portfolio(*actor))
+            .map(|terminal| all_terminal && terminal)
     })?;
+    let victim_destination = env.actors[0].destination_token;
+    let coalition_destinations = [1usize, 2, 3]
+        .into_iter()
+        .map(|actor| env.actors[actor].destination_token)
+        .collect::<Vec<_>>();
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("{route:?} target-world trace invalid: {error}"))?;
+    let victim_payout = u128::try_from(
+        public_trace.token_delta_for_accounts(std::slice::from_ref(&victim_destination))?,
+    )
+    .map_err(|_| "pending-target victim payout delta was negative".to_string())?;
+    let coalition_payout =
+        u128::try_from(public_trace.token_delta_for_accounts(&coalition_destinations)?)
+            .map_err(|_| "pending-target coalition payout delta was negative".to_string())?;
+    let total_payout = victim_payout
+        .checked_add(coalition_payout)
+        .ok_or_else(|| "pending-target total payout overflow".to_string())?;
     Ok(PendingTargetWorld {
         target,
         override_rejected_lock,
@@ -9665,7 +9759,12 @@ fn run_pending_target_world(
         movement_fee,
         victim_payout,
         coalition_payout,
+        total_payout,
         supply: env.token_supply_observed(),
+        users_terminal,
+        victim_destination,
+        coalition_destinations,
+        public_trace,
     })
 }
 
@@ -9673,7 +9772,6 @@ fn discover_one_pending_target_override(
     mut seed: [u8; 32],
     route: DiscoveryTradeRoute,
 ) -> Result<PendingTargetOverrideDiscovery, String> {
-    const COALITION_DEPOSITS: u128 = 24_000_000_000;
     seed[0] ^= 0xe9;
     seed[1] ^= route.discriminator();
     let control = run_pending_target_world(seed, route, false)?;
@@ -9682,10 +9780,28 @@ fn discover_one_pending_target_override(
         .victim_payout
         .checked_sub(reordered.victim_payout)
         .ok_or_else(|| "target mutation increased victim payout".to_string())?;
+    if control.victim_destination != reordered.victim_destination
+        || control.coalition_destinations != reordered.coalition_destinations
+    {
+        return Err("pending-target paired worlds used different payout accounts".into());
+    }
     let coalition_profit = reordered
         .coalition_payout
-        .checked_sub(COALITION_DEPOSITS)
-        .ok_or_else(|| "target mutation coalition did not recover deposits".to_string())?;
+        .checked_sub(control.coalition_payout)
+        .ok_or_else(|| "target mutation decreased coalition payout".to_string())?;
+    let terminal_evidence = build_paired_terminal_payout_evidence(
+        &format!("{route:?} pending-target override"),
+        vec![reordered.victim_destination],
+        reordered.coalition_destinations.clone(),
+        0,
+        control.users_terminal && reordered.users_terminal,
+        victim_payout_loss,
+        coalition_profit,
+        control.total_payout,
+        reordered.total_payout,
+        control.public_trace,
+        reordered.public_trace,
+    )?;
     Ok(PendingTargetOverrideDiscovery {
         route,
         control_target: control.target,
@@ -9697,6 +9813,9 @@ fn discover_one_pending_target_override(
         coalition_profit,
         control_supply: control.supply,
         reordered_supply: reordered.supply,
+        control_total_payout: control.total_payout,
+        reordered_total_payout: reordered.total_payout,
+        terminal_evidence,
     })
 }
 
@@ -11127,6 +11246,7 @@ pub fn verify_fractional_movement_convergence(
         .map_err(|error| format!("configure fractional authenticated mark: {error}"))?;
     env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, OPEN_PRICE, 0)
         .map_err(|error| format!("open fractional-movement pair: {error}"))?;
+    env.begin_public_trace();
     env.warp_to_slot(2);
     env.push_auth_mark(0, 2, TARGET_PRICE)
         .map_err(|error| format!("publish fractional target: {error}"))?;
@@ -11186,8 +11306,7 @@ pub fn verify_fractional_movement_convergence(
     }
     let settlement_price = env.primary_market_state().1.assets[0].effective_price;
     let reached_target = settlement_price == TARGET_PRICE;
-    if successful_cranks == 0
-        || (!reached_target && nonmoving_stalls < 3 && rejected_stalls < 3)
+    if (!reached_target && nonmoving_stalls < 3 && rejected_stalls < 3)
         || settlement_price < TARGET_PRICE
     {
         return Err(format!(
@@ -11200,18 +11319,27 @@ pub fn verify_fractional_movement_convergence(
         .ok_or_else(|| "fractional resolve slot overflow".to_string())?;
     env.resolve_stale_permissionless(resolve_slot)
         .map_err(|error| format!("resolve fractional-stall market: {error}"))?;
+    let stale_resolution_landed = true;
     env.warp_to_slot(
         resolve_slot
             .checked_add(1)
             .ok_or_else(|| "fractional close slot overflow".to_string())?,
     );
-    let [long_payout, short_payout] = drain_resolved_discovery_actors(&mut env, [0, 1])?;
+    let payouts = drain_resolved_discovery_actors(&mut env, [0usize, 1, 2, 3, 4])?;
+    let long_payout = payouts[0];
+    let short_payout = payouts[1];
+    let users_terminal = (0..5).try_fold(true, |all_terminal, actor| {
+        discovery_portfolio_is_terminal(&env.primary_portfolio(actor))
+            .map(|terminal| all_terminal && terminal)
+    })?;
     let target_long_payout = DEPOSIT
         .checked_sub(u128::from(OPEN_PRICE - TARGET_PRICE))
         .ok_or_else(|| "target long payout underflow".to_string())?;
     let target_short_payout = DEPOSIT
         .checked_add(u128::from(OPEN_PRICE - TARGET_PRICE))
         .ok_or_else(|| "target short payout overflow".to_string())?;
+    let long_destination = env.actors[0].destination_token;
+    let short_destination = env.actors[1].destination_token;
     let long_overpayment = long_payout
         .checked_sub(target_long_payout)
         .ok_or_else(|| "fractional settlement underpaid long".to_string())?;
@@ -11231,6 +11359,37 @@ pub fn verify_fractional_movement_convergence(
             "fractional settlement did not preserve target attribution and SPL supply".into(),
         );
     }
+    const CRANK_EXIT_ROUTE: u64 = 1 << 0;
+    const STALE_RESOLVE_EXIT_ROUTE: u64 = 1 << 1;
+    let required_exit_routes = CRANK_EXIT_ROUTE | STALE_RESOLVE_EXIT_ROUTE;
+    let attempted_exit_routes = required_exit_routes;
+    let progressing_exit_routes = u64::from(successful_cranks != 0) * CRANK_EXIT_ROUTE
+        | u64::from(stale_resolution_landed) * STALE_RESOLVE_EXIT_ROUTE;
+    let public_trace = env.finish_public_trace();
+    let exact_terminal_loss =
+        !reached_target && long_overpayment != 0 && long_overpayment == short_underpayment;
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: if exact_terminal_loss {
+                short_underpayment
+            } else {
+                0
+            },
+            unauthorized_gain_atoms: if exact_terminal_loss {
+                long_overpayment
+            } else {
+                0
+            },
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: !exact_terminal_loss,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes,
+            attempted_exit_routes,
+            progressing_exit_routes,
+        })
+        .map_err(|error| format!("fractional terminal evidence invalid: {error}"))?;
     Ok(FractionalMovementDiscovery {
         target_price: TARGET_PRICE,
         settlement_price,
@@ -11240,6 +11399,19 @@ pub fn verify_fractional_movement_convergence(
         nonmoving_stalls,
         long_overpayment,
         short_underpayment,
+        long_destination,
+        short_destination,
+        long_payout,
+        short_payout,
+        target_long_payout,
+        target_short_payout,
+        stale_resolution_landed,
+        users_terminal,
+        required_exit_routes,
+        attempted_exit_routes,
+        progressing_exit_routes,
+        terminal_classification,
+        public_trace,
     })
 }
 

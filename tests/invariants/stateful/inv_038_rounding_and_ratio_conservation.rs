@@ -13,7 +13,9 @@
 //! funding indexes and terminal payouts exactly.
 //! `v16_program_fractional_max_dt_cranks_reach_target_and_preserve_terminal_value` repeatedly executes the
 //! bounded public crank at maximum elapsed time and requires fractional cap residue to accumulate
-//! until the target is reached; it also reconciles any stalled price against terminal payouts.
+//! until the target is reached. Its public trace attempts both crank and stale-resolution routes,
+//! terminalizes every actor, and binds any stalled-price short underpayment to the long's exact
+//! terminal overpayment.
 //! Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -40,7 +42,14 @@ proptest! {
     ) {
         let discovery = verify_fractional_movement_convergence(seed)
             .map_err(TestCaseError::fail)?;
-        eprintln!("independent fractional-movement discovery: {discovery:?}");
+        eprintln!(
+            "independent fractional movement: target={}, settled={}, cranks={}, stalls={}/{}",
+            discovery.target_price,
+            discovery.settlement_price,
+            discovery.successful_cranks,
+            discovery.rejected_stalls,
+            discovery.nonmoving_stalls,
+        );
         prop_assert!(
             discovery.preserves_fractional_settlement(),
             "fractional movement failed to converge and conserve value: {:?}",

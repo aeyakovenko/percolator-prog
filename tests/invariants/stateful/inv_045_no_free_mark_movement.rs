@@ -10,7 +10,8 @@
 //! signs exposure before a paid mark move and requires the retained request to reject on every
 //! route, then proves the same intent shape can trade and exit after catch-up. The pending-target
 //! override matrix independently requires a cheap round trip to reject without changing the
-//! eventual target or terminal payouts.
+//! eventual target or terminal payouts. Its two landing orders now share one public-trace payout
+//! comparison, so any victim-to-coalition difference must classify as exact terminal loss.
 //! `v16_program_pending_mark_fee_ordering_rejects_and_preserves_terminal_value` permutes fee
 //! synchronization against mark commitment. It requires the pending-order attempt to reject with
 //! exact rollback, then verifies the post-commit retry and terminal payouts equal the canonical
