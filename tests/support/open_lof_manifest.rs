@@ -326,7 +326,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         PrivilegedLifecycle,
         BlockerAdapter::Pr254ShutdownCommittedFunding,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         255,
         Blocker,
         RecoveryTerminal,
@@ -359,19 +359,19 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         DomainValue,
         BlockerAdapter::Pr267CrossDomainBackingDoubleSpend,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         271,
         Blocker,
         OracleAccrual,
         BlockerAdapter::Pr271TradeFundingErasure,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         272,
         Blocker,
         OracleAccrual,
         BlockerAdapter::Pr272RebalanceFundingErasure,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         273,
         Blocker,
         RecoveryTerminal,
@@ -747,7 +747,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr356PendingMarkFeeReward,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         360,
         Blocker,
         DomainValue,
@@ -799,7 +799,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         PrivilegedLifecycle,
         BlockerAdapter::Pr375FundedRoleAdminSeizure,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         380,
         Blocker,
         OracleAccrual,
