@@ -44,10 +44,17 @@
 //! principal before only residual insurance can leave terminal custody. INV-066 independently
 //! requires every one of five user claims to settle before prior insurance is withdrawn.
 //!
+//! `v16_program_pending_loss_barrier_rejects_flips_but_preserves_all_route_exits` in the INV-050-
+//! owned file closes the pending-domain-barrier row. Eight public worlds cross all trade routes and
+//! both barrier sides, release the barrier through its real owner, independently derive the exact
+//! floor/ceil PnL partition and settlement residue, preserve the junior claim, and withdraw every
+//! remaining senior-capital atom from both flat auxiliary portfolios.
+//!
 //! Guarantee boundary: this certifies the stale K/F cohort, half-backed, pending-close,
-//! resolved-payout, certificate-stale, and insurance-withdrawal rows on the fixed engine pin. Other
-//! loss-stale rows still need one normalized public route-by-state matrix before INV-027 can be
-//! promoted beyond partial coverage.
+//! pending-domain-barrier, resolved-payout, certificate-stale, and insurance-withdrawal rows on the
+//! fixed engine pin. Other loss-stale rows still need one normalized public route-by-state matrix
+//! before INV-027 can be promoted beyond partial coverage.
+//!
 //! `v16_program_fully_backed_pnl_route_matrix_preserves_unrelated_principal` closes the Current
 //! fully funded control row. It realizes the same directional profit through every trade family,
 //! independently derives realizable support from the claim and backing stocks, and proves the

@@ -1,6 +1,6 @@
 use super::v16_svm::{
-    MarketConfig, TxSuccess, V16Svm, ASSET_COUNT, EXIT_MAKER_INDEX, PRIMARY_ACTOR_COUNT,
-    TX_CU_LIMIT, USER_COUNT,
+    MarketConfig, TxSuccess, V16Svm, ASSET_COUNT, EXIT_MAKER_INDEX, INITIAL_PRICE,
+    PRIMARY_ACTOR_COUNT, TX_CU_LIMIT, USER_COUNT,
 };
 use percolator::{
     active_bitmap_is_empty, v16_domain_pair_for_asset_index, AssetLifecycleV16, AssetStateV16,
@@ -7176,6 +7176,7 @@ pub struct PendingBarrierCrossZeroEvidence {
     pub rejected_cross_zero_worlds: u64,
     pub exact_exit_worlds: u64,
     pub released_barrier_worlds: u64,
+    pub senior_capital_exit_worlds: u64,
     pub coverage: Coverage,
 }
 
@@ -9503,6 +9504,7 @@ fn run_pending_barrier_cross_zero_world(
     const KEEPER: usize = EXIT_MAKER_INDEX;
     const ASSET: usize = 0;
     const AUXILIARY_Q: i128 = POS_SCALE as i128 / 4;
+    const AUXILIARY_PRINCIPAL: u128 = 1_000_000;
     const RELEASE_BOUND: usize = 8;
 
     let config = MarketConfig {
@@ -9513,7 +9515,13 @@ fn run_pending_barrier_cross_zero_world(
         maintenance_fee_per_slot: 0,
         maintenance_margin_bps: 1_000,
         initial_margin_bps: 1_000,
-        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_deposits: [
+            1_000_000,
+            161_600,
+            AUXILIARY_PRINCIPAL,
+            AUXILIARY_PRINCIPAL,
+            1,
+        ],
         actor_token_balances: [1_000_000, 1_000_000_000_000, 1_000_000, 1_000_000, 1],
         ..MarketConfig::default()
     };
@@ -9702,6 +9710,104 @@ fn run_pending_barrier_cross_zero_world(
         ));
     }
 
+    let long_before = runner.env.primary_portfolio(AUXILIARY_LONG);
+    let short_before = runner.env.primary_portfolio(AUXILIARY_SHORT);
+    let long_capital = long_before.capital.get();
+    let short_capital = short_before.capital.get();
+    let long_positive_pnl = u128::try_from(long_before.pnl.get()).map_err(|_| {
+        format!(
+            "INV-050 {route:?} flat long retained negative PnL after exact exit: {long_before:?}"
+        )
+    })?;
+    let short_positive_pnl = u128::try_from(short_before.pnl.get()).map_err(|_| {
+        format!(
+            "INV-050 {route:?} flat short retained negative PnL after exact exit: {short_before:?}"
+        )
+    })?;
+    let auxiliary_value = long_capital
+        .checked_add(short_capital)
+        .and_then(|value| value.checked_add(long_positive_pnl))
+        .and_then(|value| value.checked_add(short_positive_pnl))
+        .ok_or("INV-050 auxiliary value overflow")?;
+    let original_principal = AUXILIARY_PRINCIPAL
+        .checked_mul(2)
+        .ok_or("INV-050 original principal overflow")?;
+    let price_delta = u128::from(released_asset.effective_price.abs_diff(INITIAL_PRICE));
+    let pnl_numerator = price_delta
+        .checked_mul(AUXILIARY_Q as u128)
+        .ok_or("INV-050 exact PnL numerator overflow")?;
+    let position_scale = POS_SCALE as u128;
+    let expected_gain = pnl_numerator / position_scale;
+    let expected_loss = pnl_numerator
+        .checked_add(position_scale - 1)
+        .ok_or("INV-050 exact PnL ceil overflow")?
+        / position_scale;
+    let expected_rounding_residue = expected_loss
+        .checked_sub(expected_gain)
+        .ok_or("INV-050 negative settlement rounding residue")?;
+    let expected_capital_total = original_principal
+        .checked_sub(expected_loss)
+        .ok_or("INV-050 price loss exceeded auxiliary principal")?;
+    if auxiliary_value
+        .checked_add(expected_rounding_residue)
+        .ok_or("INV-050 attributed value overflow")?
+        != original_principal
+        || long_capital
+            .checked_add(short_capital)
+            .ok_or("INV-050 capital total overflow")?
+            != expected_capital_total
+        || long_positive_pnl
+            .checked_add(short_positive_pnl)
+            .ok_or("INV-050 positive PnL overflow")?
+            != expected_gain
+        || long_capital == 0
+        || short_capital == 0
+        || expected_gain == 0
+    {
+        return Err(format!(
+            "INV-050 {route:?} barrier lifecycle misattributed the auxiliary pair: original={original_principal}, capital=({long_capital},{short_capital}) expected_total={expected_capital_total}, positive_pnl=({long_positive_pnl},{short_positive_pnl}) expected_gain={expected_gain}, rounding_residue={expected_rounding_residue}"
+        ));
+    }
+
+    let long_destination_before = runner
+        .env
+        .token_amount(runner.env.actors[AUXILIARY_LONG].destination_token);
+    let short_destination_before = runner
+        .env
+        .token_amount(runner.env.actors[AUXILIARY_SHORT].destination_token);
+    runner
+        .env
+        .withdraw_primary(AUXILIARY_LONG, long_capital)
+        .map_err(|error| format!("INV-050 {route:?} long principal exit failed: {error}"))?;
+    runner
+        .env
+        .withdraw_primary(AUXILIARY_SHORT, short_capital)
+        .map_err(|error| format!("INV-050 {route:?} short principal exit failed: {error}"))?;
+    let long_destination_delta = runner
+        .env
+        .token_amount(runner.env.actors[AUXILIARY_LONG].destination_token)
+        .checked_sub(long_destination_before)
+        .ok_or("INV-050 long destination decreased")?;
+    let short_destination_delta = runner
+        .env
+        .token_amount(runner.env.actors[AUXILIARY_SHORT].destination_token)
+        .checked_sub(short_destination_before)
+        .ok_or("INV-050 short destination decreased")?;
+    if u128::from(long_destination_delta) != long_capital
+        || u128::from(short_destination_delta) != short_capital
+        || runner.env.primary_portfolio(AUXILIARY_LONG).capital.get() != 0
+        || runner.env.primary_portfolio(AUXILIARY_SHORT).capital.get() != 0
+        || runner.env.primary_portfolio(AUXILIARY_LONG).pnl.get() != long_before.pnl.get()
+        || runner.env.primary_portfolio(AUXILIARY_SHORT).pnl.get() != short_before.pnl.get()
+    {
+        return Err(format!(
+            "INV-050 {route:?} barrier lifecycle blocked or rewrote senior-capital exit: expected=({long_capital},{short_capital}), delta=({long_destination_delta},{short_destination_delta}), long={:?}, short={:?}",
+            runner.env.primary_portfolio(AUXILIARY_LONG),
+            runner.env.primary_portfolio(AUXILIARY_SHORT),
+        ));
+    }
+    runner.assert_global_invariants()?;
+
     let mut route_worlds = [0; 4];
     route_worlds[route.index()] = 1;
     Ok(PendingBarrierCrossZeroEvidence {
@@ -9712,6 +9818,7 @@ fn run_pending_barrier_cross_zero_world(
         rejected_cross_zero_worlds: 1,
         exact_exit_worlds: 1,
         released_barrier_worlds: 1,
+        senior_capital_exit_worlds: 1,
         coverage: runner.coverage,
     })
 }
@@ -9740,6 +9847,7 @@ pub fn run_pending_barrier_cross_zero_probe() -> Result<PendingBarrierCrossZeroE
                 existing.rejected_cross_zero_worlds += evidence.rejected_cross_zero_worlds;
                 existing.exact_exit_worlds += evidence.exact_exit_worlds;
                 existing.released_barrier_worlds += evidence.released_barrier_worlds;
+                existing.senior_capital_exit_worlds += evidence.senior_capital_exit_worlds;
                 existing.coverage.merge(evidence.coverage);
             } else {
                 aggregate = Some(evidence);

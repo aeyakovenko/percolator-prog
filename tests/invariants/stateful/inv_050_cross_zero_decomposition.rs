@@ -12,6 +12,10 @@
 //!
 //! Evidence: public LiteSVM stateful composition plus route metamorphism and independent raw-leg,
 //! effective-OI, custody, encumbrance, stock, rollback, and liveness oracles after every step.
+//! After the barrier releases, the pair's remaining capital plus junior positive-PnL face must
+//! equal its original principal exactly, and both traders must withdraw all remaining senior
+//! capital. Clearing OI while dropping value or silently converting a junior claim into senior
+//! capital is therefore not accepted.
 //!
 //! Guarantee boundary: one real pending-loss episode is reached for every route/orientation cell.
 //! Multiple simultaneous barriers, cross-asset barrier ordering, and full-width cross-zero
@@ -38,6 +42,10 @@ fn v16_program_pending_loss_barrier_rejects_flips_but_preserves_all_route_exits(
     );
     assert_eq!(
         evidence.released_barrier_worlds, evidence.world_count,
+        "{evidence:?}"
+    );
+    assert_eq!(
+        evidence.senior_capital_exit_worlds, evidence.world_count,
         "{evidence:?}"
     );
 }
