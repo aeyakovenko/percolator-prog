@@ -22,6 +22,10 @@
 //! an independent sum of account-local liens must equal the one source aggregate and backing
 //! bucket after every mutation. Both accounts reach the shared admission frontier, reject with
 //! exact rollback, and release the exact original pool through bounded public cranks.
+//! The haircut-conversion matrix also submits a cap one atom below the independently known
+//! conversion amount. The deployed handler reaches its post-conversion cap rejection, and SVM
+//! rollback must restore the claim, backing bucket, portfolio, custody, and every auxiliary
+//! account before the identical full-cap request consumes the tranche exactly once.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -840,7 +844,31 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
 
     // The 50% source-credit rate pays one backing atom for every two claim atoms. A successful
     // conversion therefore consumes the only backing tranche and burns the complete claim face.
-    // The retained request must not reuse either class after it lands out of order.
+    // First force the wrapper's post-conversion cap check to fail by one atom. The engine call
+    // precedes that check, so exact transaction rollback is what prevents partial claim/backing
+    // consumption. The identical state then succeeds with the exact cap.
+    let before_undersized_cap = economic_snapshot(&env);
+    let undersized_error = env
+        .convert_released_pnl(WINNER, BACKING_TRANCHE_ATOMS - 1)
+        .expect_err("undersized conversion cap must reject after computing the full conversion");
+    if !undersized_error.contains("Custom(21)")
+        && !undersized_error.contains("custom program error: 0x15")
+    {
+        return Err(format!(
+            "{label} undersized conversion cap rejected for an unrelated reason: {undersized_error}"
+        ));
+    }
+    if economic_snapshot(&env) != before_undersized_cap {
+        return Err(format!(
+            "{label} undersized post-conversion cap committed partial claim/backing consumption"
+        ));
+    }
+    assert_inv_031_censuses(
+        &format!("{label} after undersized conversion rollback"),
+        &env,
+    )?;
+
+    // The retained request must not reuse either class after the full conversion lands.
     let retained_retry = env.build_retained_convert_released_pnl(WINNER, BACKING_TRANCHE_ATOMS);
     env.convert_released_pnl(WINNER, BACKING_TRANCHE_ATOMS)
         .map_err(|error| format!("{label} first conversion: {error}"))?;
@@ -935,7 +963,7 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
         .filter(|step| !step.succeeded)
         .collect::<Vec<_>>();
     if trace.out_of_band_economic_mutations != 0
-        || rejected.len() != 2
+        || rejected.len() != 3
         || rejected.iter().any(|step| {
             step.program_id != env.program_id
                 || step.rejected_exact_writable_rollback != Some(true)
@@ -944,7 +972,7 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
         })
     {
         return Err(format!(
-            "{label} public trace did not prove both exact rollbacks without out-of-band mutation: {trace:?}"
+            "{label} public trace did not prove all three exact rollbacks without out-of-band mutation: {trace:?}"
         ));
     }
     Ok(())
