@@ -18,8 +18,17 @@ fn inv071_close_pending(ledger: CloseProgressLedgerV16) -> bool {
     ledger.active && !ledger.finalized && !ledger.canceled && ledger.residual_remaining != 0
 }
 
-#[test]
-fn v16_program_public_pending_close_preempts_b_stale_then_exposes_b_progress() {
+struct Inv071PublicCloseBOverlap {
+    env: V16CuEnv,
+    target_owner: Keypair,
+    target: Pubkey,
+    target_b: u128,
+    b_before: percolator::PortfolioLegV16,
+    close_before: CloseProgressLedgerV16,
+    shutdown_slot: u64,
+}
+
+fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
     let PublicActiveCloseFixture {
         mut env,
         loss,
@@ -110,6 +119,29 @@ fn v16_program_public_pending_close_preempts_b_stale_then_exposes_b_progress() {
     let b_before = active_leg_for_asset(&overlap, 1);
     assert!(inv071_close_pending(close_before));
     assert!(b_before.b_stale && b_before.b_snap < target_b);
+
+    Inv071PublicCloseBOverlap {
+        env,
+        target_owner,
+        target,
+        target_b,
+        b_before,
+        close_before,
+        shutdown_slot,
+    }
+}
+
+#[test]
+fn v16_program_public_pending_close_preempts_b_stale_then_exposes_b_progress() {
+    let Inv071PublicCloseBOverlap {
+        mut env,
+        target,
+        target_b,
+        b_before,
+        close_before,
+        shutdown_slot,
+        ..
+    } = inv071_public_close_b_overlap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
 
     // The selector's concrete priority is pending close before B settlement. The
@@ -210,6 +242,171 @@ fn v16_program_public_pending_close_preempts_b_stale_then_exposes_b_progress() {
     assert_eq!(
         env.market_state().1.vault as u64,
         env.token_amount(env.vault)
+    );
+}
+
+#[test]
+fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_progress() {
+    let Inv071PublicCloseBOverlap {
+        mut env,
+        target_owner,
+        target,
+        target_b,
+        b_before,
+        close_before,
+        ..
+    } = inv071_public_close_b_overlap();
+
+    let expired_slot = close_before
+        .max_close_slot
+        .checked_add(1)
+        .expect("fixture close expiry fits u64");
+    env.svm.warp_to_slot(expired_slot);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let target_before = env.svm.get_account(&target).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let group_before = env.market_state().1;
+
+    // Expiration is a market-terminal condition and must outrank account-local
+    // B settlement. The authenticated Clock drives the decision; the caller's
+    // now_slot is deliberately stale and no discovery hint is supplied.
+    env.svm.expire_blockhash();
+    let declare_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+            ],
+            &[],
+        )
+        .expect("expired-close/B-stale overlap must declare Recovery first");
+    assert_cu_within(
+        "public expired-close/B-stale recovery declaration",
+        declare_cu,
+        CRANK_CU_LIMIT,
+    );
+    let recovered = env.market_state().1;
+    assert_eq!(recovered.mode, MarketModeV16::Recovery);
+    assert_eq!(
+        recovered.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
+    );
+    assert_ne!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&target).unwrap(), target_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(recovered.vault, group_before.vault);
+    assert_eq!(recovered.c_tot, group_before.c_tot);
+    assert_eq!(recovered.insurance, group_before.insurance);
+    assert_eq!(close_progress(&env.portfolio_state(target)), close_before);
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(target), 1),
+        b_before
+    );
+
+    // Recovery itself has a bounded public continuation and must not consume the
+    // deferred account-local obligation while changing the market mode.
+    let recovery_market = env.svm.get_account(&env.market).unwrap();
+    let recovery_target = env.svm.get_account(&target).unwrap();
+    env.svm.expire_blockhash();
+    let finalize_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+            ],
+            &[],
+        )
+        .expect("Recovery must retain a permissionless Resolved continuation");
+    assert_cu_within(
+        "public expired-close/B-stale Recovery-to-Resolved",
+        finalize_cu,
+        CRANK_CU_LIMIT,
+    );
+    let resolved = env.market_state().1;
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_ne!(env.svm.get_account(&env.market).unwrap(), recovery_market);
+    assert_eq!(env.svm.get_account(&target).unwrap(), recovery_target);
+    assert_eq!(resolved.vault as u64, env.token_amount(env.vault));
+
+    // After the owner exit window, a third party can drive the same account's
+    // resolved continuation. The deferred B leg must be processed or removed in
+    // bounded successful calls rather than becoming hidden by global Recovery.
+    let force_close_delay = env.market_state().0.force_close_delay_slots;
+    let resolved_crank_slot = resolved
+        .resolved_slot
+        .checked_add(force_close_delay)
+        .and_then(|slot| slot.checked_add(1))
+        .expect("resolved permissionless slot fits u64");
+    env.svm.warp_to_slot(resolved_crank_slot);
+    let destination = env.token_account(target_owner.pubkey(), 0);
+    let mut b_disposed = false;
+    for _ in 0..16 {
+        let before = env.portfolio_state(target);
+        if !has_active_leg_for_asset(&before, 1) {
+            b_disposed = true;
+            break;
+        }
+        let current_b = active_leg_for_asset(&before, 1);
+        if current_b.b_snap >= target_b {
+            b_disposed = true;
+            break;
+        }
+        let market_step_before = env.svm.get_account(&env.market).unwrap();
+        let target_step_before = env.svm.get_account(&target).unwrap();
+        let vault_step_before = env.svm.get_account(&env.vault).unwrap();
+        let destination_step_before = env.svm.get_account(&destination).unwrap();
+        env.svm.expire_blockhash();
+        let step_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: resolved_crank_slot,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new_readonly(target_owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(target, false),
+                    AccountMeta::new(destination, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            )
+            .expect("Resolved must keep processing the deferred B-bearing account");
+        assert_cu_within(
+            "public expired-close/B-stale resolved continuation",
+            step_cu,
+            CRANK_CU_LIMIT,
+        );
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_step_before
+                || env.svm.get_account(&target).unwrap() != target_step_before
+                || env.svm.get_account(&env.vault).unwrap() != vault_step_before
+                || env.svm.get_account(&destination).unwrap() != destination_step_before,
+            "a successful resolved continuation must mutate persistent state or custody"
+        );
+        assert_eq!(
+            env.market_state().1.vault as u64,
+            env.token_amount(env.vault)
+        );
+    }
+    let terminal_target = env.portfolio_state(target);
+    b_disposed |= !has_active_leg_for_asset(&terminal_target, 1)
+        || active_leg_for_asset(&terminal_target, 1).b_snap >= target_b;
+    assert!(
+        b_disposed,
+        "global recovery must not hide the pre-existing B obligation from bounded resolved progress"
     );
 }
 
