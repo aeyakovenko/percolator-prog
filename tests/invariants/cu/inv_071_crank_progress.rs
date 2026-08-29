@@ -286,6 +286,271 @@ fn v16_program_public_b_prerequisite_preserves_later_liquidation_progress() {
 }
 
 #[test]
+fn v16_program_public_retained_source_lien_does_not_hide_adverse_leg_progress() {
+    const PRICE: u64 = 100;
+    const WINNING_PRICE: u64 = 105;
+    const LOSING_PRICE: u64 = 95;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
+    env.top_up_backing_bucket(1, 150, 100);
+
+    let owner = Keypair::new();
+    let peer_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let peer = env.create_portfolio(&peer_owner);
+    env.deposit(&owner, portfolio, 313);
+    env.deposit(&peer_owner, peer, 5_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        portfolio,
+        &peer_owner,
+        peer,
+        20 * POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &owner,
+        portfolio,
+        &peer_owner,
+        peer,
+        10 * POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, WINNING_PRICE);
+    env.push_auth_mark_for_asset_as_admin(1, 2, LOSING_PRICE);
+    for account in [peer, portfolio] {
+        for _ in 0..4 {
+            if env
+                .crank_if_actionable(
+                    account,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 2,
+                        observations: crank_observations_for_assets(&[0, 1]),
+                    },
+                )
+                .is_none()
+            {
+                break;
+            }
+        }
+    }
+
+    // Create one real source-backed risk increase, then flatten the original
+    // episodes. The resulting label is retained in an otherwise flat account.
+    env.trade_asset_with_cu(
+        1,
+        &owner,
+        portfolio,
+        &peer_owner,
+        peer,
+        POS_SCALE as i128,
+        LOSING_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &owner,
+        portfolio,
+        &peer_owner,
+        peer,
+        -(11 * POS_SCALE as i128),
+        LOSING_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        portfolio,
+        &peer_owner,
+        peer,
+        -(20 * POS_SCALE as i128),
+        WINNING_PRICE,
+        0,
+    );
+    let source_lien_count = |env: &V16CuEnv| {
+        env.portfolio_state(portfolio)
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_liened_num.get() != 0)
+            .count()
+    };
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(portfolio)
+    )));
+    let lien_count_before = source_lien_count(&env);
+    assert!(lien_count_before > 0);
+
+    // Reopen a separate episode and move an authenticated mark against it while
+    // only the peer is cranked. The target therefore reaches a public state with
+    // a retained source label, a stale certificate, and an adverse active leg.
+    env.trade_asset_with_cu(
+        1,
+        &owner,
+        portfolio,
+        &peer_owner,
+        peer,
+        -(20 * POS_SCALE as i128),
+        LOSING_PRICE,
+        0,
+    );
+    for slot in 3u64..=5 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(1, slot, 110);
+        env.crank(
+            peer,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(1),
+            },
+        );
+    }
+    assert_eq!(source_lien_count(&env), lien_count_before);
+    let adverse_before = active_leg_for_asset(&env.portfolio_state(portfolio), 1);
+    let adverse_abs_before = adverse_before.basis_pos_q.unsigned_abs();
+
+    // A stale account is refreshed before liquidation. That first bounded call
+    // may normalize the obsolete source label, but it cannot hide, resize, or
+    // redirect the independently adverse leg.
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 5,
+                observations: crank_observations(1),
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        )
+        .expect("retained source labels must not block adverse-account refresh");
+    assert_cu_within(
+        "public source-lien/adverse refresh",
+        refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before
+            || env.svm.get_account(&portfolio).unwrap() != portfolio_before
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(portfolio), 1)
+            .basis_pos_q
+            .unsigned_abs(),
+        adverse_abs_before,
+        "refresh must frame the adverse episode's signed quantity"
+    );
+
+    let mut reduced = false;
+    for _ in 0..8 {
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 5,
+                    observations: crank_observations(1),
+                },
+                vec![
+                    AccountMeta::new_readonly(env.payer.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            )
+            .expect("refreshed adverse account must retain a bounded public continuation");
+        assert_cu_within("public source-lien/adverse liquidation", cu, 400_000);
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&portfolio).unwrap() != portfolio_before
+        );
+        let state = env.portfolio_state(portfolio);
+        reduced = !has_active_leg_for_asset(&state, 1)
+            || active_leg_for_asset(&state, 1).basis_pos_q.unsigned_abs() < adverse_abs_before;
+        if reduced {
+            break;
+        }
+    }
+    assert!(
+        reduced,
+        "the refreshed adverse leg must become liquidatable"
+    );
+
+    // Finish the owner's remaining risk through the ordinary signed reduction.
+    // Once flat, any obsolete source label must already be gone or become a
+    // bounded observation-free crank continuation.
+    let state = env.portfolio_state(portfolio);
+    if has_active_leg_for_asset(&state, 1) {
+        let remaining = active_leg_for_asset(&state, 1).basis_pos_q.unsigned_abs();
+        env.svm.expire_blockhash();
+        let reduce_cu = env
+            .send(
+                ProgInstruction::RebalanceReduce {
+                    portfolio_id: env.portfolio_id(portfolio),
+                    position_epoch: env.portfolio_position_epoch(portfolio),
+                    asset_index: 1,
+                    reduce_q: remaining,
+                },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[&owner],
+            )
+            .expect("owner must retain the canonical full reduction after liquidation");
+        assert_cu_within(
+            "post-liquidation owner reduction",
+            reduce_cu,
+            CRANK_CU_LIMIT,
+        );
+    }
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(portfolio)
+    )));
+    for _ in 0..8 {
+        if source_lien_count(&env) < lien_count_before {
+            break;
+        }
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 5,
+                observations: vec![],
+            },
+        );
+    }
+    assert!(source_lien_count(&env) < lien_count_before);
+    let remaining_capital = env.portfolio_state(portfolio).capital.get();
+    assert!(remaining_capital > 0);
+    env.withdraw_with_cu(&owner, portfolio, remaining_capital);
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
+}
+
+#[test]
 fn v16_program_public_pending_close_preempts_b_stale_then_exposes_b_progress() {
     let Inv071PublicCloseBOverlap {
         mut env,
