@@ -6,9 +6,13 @@
 //! `v16_program_mark_publication_matrix_rejects_stale_risk_and_recovers` publishes marks through
 //! authenticated, EWMA, single-trade, and batch-trade routes. It proves the engine target is staged
 //! immediately, stale risk increase rejects with exact rollback, and a post-catch-up round trip
-//! remains live without value transfer. `v16_program_trade_route_matrix_rejects_pending_mark_inheritance`
+//! remains live without value transfer. Paired no-attempt/attempt worlds then resolve every actor
+//! and bind any stale-price admission to exact attacker gain and victim terminal loss.
+//! `v16_program_trade_route_matrix_rejects_pending_mark_inheritance`
 //! signs exposure before a paid mark move and requires the retained request to reject on every
-//! route, then proves the same intent shape can trade and exit after catch-up. The pending-target
+//! route, then proves the same intent shape can trade and exit after catch-up. Paired public worlds
+//! close any accepted stale exposure and bind its exact terminal victim loss and attacker gain.
+//! The pending-target
 //! override matrix independently requires a cheap round trip to reject without changing the
 //! eventual target or terminal payouts. Its two landing orders now share one public-trace payout
 //! comparison, so any victim-to-coalition difference must classify as exact terminal loss.

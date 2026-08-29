@@ -1271,7 +1271,7 @@ pub struct ProspectiveAccrualDiscovery {
     pub terminal_evidence: PairedTerminalPayoutEvidence,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingMarkAdmissionDiscovery {
     pub source: PendingMarkSource,
     pub published_target: u64,
@@ -1283,9 +1283,12 @@ pub struct PendingMarkAdmissionDiscovery {
     pub attacker_profit: u128,
     pub victim_loss: u128,
     pub extracted_tokens: u64,
+    pub control_total_payout: u128,
+    pub reordered_total_payout: u128,
+    pub terminal_evidence: PairedTerminalPayoutEvidence,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingMarkInheritanceDiscovery {
     pub route: DiscoveryTradeRoute,
     pub movement_cost: u128,
@@ -1297,6 +1300,9 @@ pub struct PendingMarkInheritanceDiscovery {
     pub victim_loss: u128,
     pub attacker_gain: u128,
     pub extracted_profit: u64,
+    pub control_total_payout: u128,
+    pub reordered_total_payout: u128,
+    pub terminal_evidence: PairedTerminalPayoutEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2533,34 +2539,58 @@ impl PendingTargetOverrideDiscovery {
 impl PendingMarkInheritanceDiscovery {
     pub fn is_violation(&self) -> bool {
         !self.retained_rejected_lock
-            || !self.retained_exact_rollback
-            || self.attacker_gain != 0
-            || self.victim_loss != 0
-            || self.extracted_profit != 0
+            && self.attacker_gain != 0
+            && self.victim_loss != 0
+            && u128::from(self.extracted_profit) == self.attacker_gain
+            && self.terminal_evidence.certifies_exact_loss(
+                self.victim_loss,
+                self.attacker_gain,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            )
     }
 
     pub fn certifies_guard_and_liveness(&self) -> bool {
         !self.is_violation()
             && self.movement_cost != 0
             && self.pending_mark == self.committed_mark
+            && self.retained_rejected_lock
+            && self.retained_exact_rollback
             && self.post_commit_round_trip_landed
+            && self.terminal_evidence.certifies_bounded_exit(
+                self.victim_loss,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            )
     }
 }
 
 impl PendingMarkAdmissionDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.staged_engine_target != self.published_target
-            || !self.stale_risk_rejected_lock
-            || !self.rejected_exact_rollback
-            || self.attacker_profit != 0
-            || self.victim_loss != 0
-            || self.extracted_tokens != 0
+        !self.stale_risk_rejected_lock
+            && self.attacker_profit != 0
+            && self.victim_loss != 0
+            && u128::from(self.extracted_tokens) == self.attacker_profit
+            && self.terminal_evidence.certifies_exact_loss(
+                self.victim_loss,
+                self.attacker_profit,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            )
     }
 
     pub fn certifies_guard_and_liveness(&self) -> bool {
         !self.is_violation()
+            && self.staged_engine_target == self.published_target
+            && self.stale_risk_rejected_lock
+            && self.rejected_exact_rollback
             && self.committed_mark == self.published_target
             && self.post_commit_round_trip_landed
+            && self.terminal_evidence.certifies_bounded_exit(
+                self.victim_loss,
+                self.control_total_payout,
+                self.reordered_total_payout,
+            )
     }
 }
 
@@ -9226,10 +9256,28 @@ pub fn discover_prospective_accrual_violations(
         .collect()
 }
 
-fn discover_one_pending_mark_admission(
+#[derive(Clone, Debug)]
+struct PendingMarkAdmissionWorld {
+    published_target: u64,
+    staged_engine_target: u64,
+    committed_mark: u64,
+    stale_risk_rejected_lock: bool,
+    rejected_exact_rollback: bool,
+    post_commit_round_trip_landed: bool,
+    attacker_payout: u128,
+    victim_payout: u128,
+    total_payout: u128,
+    users_terminal: bool,
+    attacker_destination: Pubkey,
+    victim_destination: Pubkey,
+    public_trace: PublicTraceEvidence,
+}
+
+fn run_pending_mark_admission_world(
     mut seed: [u8; 32],
     source: PendingMarkSource,
-) -> Result<PendingMarkAdmissionDiscovery, String> {
+    attempt_stale_risk: bool,
+) -> Result<PendingMarkAdmissionWorld, String> {
     const OLD_MARK: u64 = 100;
     const AUTH_TARGET: u64 = 200;
     const EWMA_TARGET: u64 = 150;
@@ -9322,20 +9370,28 @@ fn discover_one_pending_mark_admission(
         ));
     }
 
-    let before_rejection = fingerprint(&env);
-    let stale_error = env
-        .trade_cpi(attacker, victim, 0, CONTROL_SIZE_Q, 0, 0)
-        .expect_err("pending-target risk increase must reject");
-    let stale_risk_rejected_lock =
-        stale_error.contains("Custom(21)") || stale_error.contains("custom program error: 0x15");
-    let rejected_exact_rollback = fingerprint(&env) == before_rejection;
-    if !stale_risk_rejected_lock || !rejected_exact_rollback {
-        return Err(format!(
-            "{source:?} stale risk increase was not an exact lock rollback: \
-             rejected={stale_risk_rejected_lock}, rollback={rejected_exact_rollback}, \
-             error={stale_error}"
-        ));
-    }
+    env.begin_public_trace();
+    let (stale_risk_rejected_lock, rejected_exact_rollback, stale_risk_landed) =
+        if attempt_stale_risk {
+            let before_rejection = fingerprint(&env);
+            match env.trade_cpi(attacker, victim, 0, CONTROL_SIZE_Q, 0, 0) {
+                Ok(_) => (false, false, true),
+                Err(error) => {
+                    let rejected_lock = error.contains("Custom(21)")
+                        || error.contains("custom program error: 0x15");
+                    let exact_rollback = fingerprint(&env) == before_rejection;
+                    if !rejected_lock || !exact_rollback {
+                        return Err(format!(
+                            "{source:?} stale risk increase returned an unexpected rejection: \
+                             rejected={rejected_lock}, rollback={exact_rollback}, error={error}"
+                        ));
+                    }
+                    (true, true, false)
+                }
+            }
+        } else {
+            (false, false, false)
+        };
 
     if lagging_position_q != 0 {
         env.trade_cpi(attacker, victim, 0, -lagging_position_q, 0, 0)
@@ -9365,6 +9421,11 @@ fn discover_one_pending_mark_admission(
         ));
     }
 
+    if stale_risk_landed {
+        env.trade_cpi(attacker, victim, 0, -CONTROL_SIZE_Q, 0, 0)
+            .map_err(|error| format!("{source:?} stale-risk exit rejected: {error}"))?;
+    }
+
     let attacker_capital_before = env.primary_portfolio(attacker).capital.get();
     let victim_capital_before = env.primary_portfolio(victim).capital.get();
     env.trade_cpi(attacker, victim, 0, CONTROL_SIZE_Q, 0, 0)
@@ -9373,39 +9434,116 @@ fn discover_one_pending_mark_admission(
         .map_err(|error| format!("{source:?} post-commit control exit rejected: {error}"))?;
     let attacker_after = env.primary_portfolio(attacker);
     let victim_after = env.primary_portfolio(victim);
-    let attacker_profit = attacker_after
-        .capital
-        .get()
-        .saturating_sub(attacker_capital_before);
-    let victim_loss = victim_capital_before.saturating_sub(victim_after.capital.get());
-    let extracted_tokens = env.token_amount(env.actors[attacker].destination_token);
-    if attacker_profit != 0
-        || victim_loss != 0
-        || attacker_after.pnl.get() != 0
-        || victim_after.pnl.get() != 0
-        || extracted_tokens != 0
-        || env.token_supply_observed() != supply_before
-    {
+    let post_commit_round_trip_landed = attacker_after.capital.get() == attacker_capital_before
+        && victim_after.capital.get() == victim_capital_before
+        && attacker_after.pnl.get() == 0
+        && victim_after.pnl.get() == 0;
+    if !post_commit_round_trip_landed {
         return Err(format!(
-            "{source:?} guarded round trip transferred value: attacker={attacker_profit}, \
-             victim={victim_loss}, extracted={extracted_tokens}, pnl={}/{}, supply={}/{}",
+            "{source:?} post-commit round trip transferred value: capital={}/{}, pnl={}/{}",
+            attacker_after.capital.get(),
+            victim_after.capital.get(),
             attacker_after.pnl.get(),
             victim_after.pnl.get(),
-            env.token_supply_observed(),
-            supply_before
         ));
     }
-    Ok(PendingMarkAdmissionDiscovery {
-        source,
+    env.resolve_market()
+        .map_err(|error| format!("{source:?} resolve admission world: {error}"))?;
+    let actors = [0usize, 1, 2, 3, 4];
+    drain_resolved_discovery_actors(&mut env, actors)?;
+    let users_terminal = actors.iter().try_fold(true, |all_terminal, actor| {
+        discovery_portfolio_is_terminal(&env.primary_portfolio(*actor))
+            .map(|terminal| all_terminal && terminal)
+    })?;
+    if env.token_supply_observed() != supply_before {
+        return Err(format!("{source:?} admission world changed SPL supply"));
+    }
+    let attacker_destination = env.actors[attacker].destination_token;
+    let victim_destination = env.actors[victim].destination_token;
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("{source:?} admission trace invalid: {error}"))?;
+    let attacker_payout = u128::try_from(
+        public_trace.token_delta_for_accounts(std::slice::from_ref(&attacker_destination))?,
+    )
+    .map_err(|_| format!("{source:?} attacker payout delta was negative"))?;
+    let victim_payout = u128::try_from(
+        public_trace.token_delta_for_accounts(std::slice::from_ref(&victim_destination))?,
+    )
+    .map_err(|_| format!("{source:?} victim payout delta was negative"))?;
+    let total_payout = attacker_payout
+        .checked_add(victim_payout)
+        .ok_or_else(|| format!("{source:?} admission payout overflow"))?;
+    Ok(PendingMarkAdmissionWorld {
         published_target,
         staged_engine_target,
         committed_mark,
         stale_risk_rejected_lock,
         rejected_exact_rollback,
-        post_commit_round_trip_landed: true,
+        post_commit_round_trip_landed,
+        attacker_payout,
+        victim_payout,
+        total_payout,
+        users_terminal,
+        attacker_destination,
+        victim_destination,
+        public_trace,
+    })
+}
+
+fn discover_one_pending_mark_admission(
+    seed: [u8; 32],
+    source: PendingMarkSource,
+) -> Result<PendingMarkAdmissionDiscovery, String> {
+    let control = run_pending_mark_admission_world(seed, source, false)?;
+    let reordered = run_pending_mark_admission_world(seed, source, true)?;
+    if control.attacker_destination != reordered.attacker_destination
+        || control.victim_destination != reordered.victim_destination
+        || control.published_target != reordered.published_target
+        || control.staged_engine_target != reordered.staged_engine_target
+        || control.committed_mark != reordered.committed_mark
+    {
+        return Err(format!(
+            "{source:?} admission worlds diverged before payout comparison"
+        ));
+    }
+    let victim_loss = control
+        .victim_payout
+        .saturating_sub(reordered.victim_payout);
+    let attacker_profit = reordered
+        .attacker_payout
+        .saturating_sub(control.attacker_payout);
+    let extracted_tokens = u64::try_from(attacker_profit)
+        .map_err(|_| format!("{source:?} attacker payout gain exceeds u64"))?;
+    let terminal_evidence = build_paired_terminal_payout_evidence(
+        &format!("{source:?} pending-mark admission"),
+        vec![reordered.victim_destination],
+        vec![reordered.attacker_destination],
+        0,
+        control.users_terminal && reordered.users_terminal,
+        victim_loss,
+        attacker_profit,
+        control.total_payout,
+        reordered.total_payout,
+        control.public_trace,
+        reordered.public_trace,
+    )?;
+    Ok(PendingMarkAdmissionDiscovery {
+        source,
+        published_target: reordered.published_target,
+        staged_engine_target: reordered.staged_engine_target,
+        committed_mark: reordered.committed_mark,
+        stale_risk_rejected_lock: reordered.stale_risk_rejected_lock,
+        rejected_exact_rollback: reordered.rejected_exact_rollback,
+        post_commit_round_trip_landed: control.post_commit_round_trip_landed
+            && reordered.post_commit_round_trip_landed,
         attacker_profit,
         victim_loss,
         extracted_tokens,
+        control_total_payout: control.total_payout,
+        reordered_total_payout: reordered.total_payout,
+        terminal_evidence,
     })
 }
 
@@ -9418,10 +9556,28 @@ pub fn discover_pending_mark_admission_violations(
         .collect()
 }
 
-fn discover_one_pending_mark_inheritance(
+#[derive(Clone, Debug)]
+struct PendingMarkInheritanceWorld {
+    movement_cost: u128,
+    pending_mark: u64,
+    committed_mark: u64,
+    retained_rejected_lock: bool,
+    retained_exact_rollback: bool,
+    post_commit_round_trip_landed: bool,
+    attacker_payout: u128,
+    victim_payout: u128,
+    total_payout: u128,
+    users_terminal: bool,
+    attacker_destination: Pubkey,
+    victim_destination: Pubkey,
+    public_trace: PublicTraceEvidence,
+}
+
+fn run_pending_mark_inheritance_world(
     mut seed: [u8; 32],
     route: DiscoveryTradeRoute,
-) -> Result<PendingMarkInheritanceDiscovery, String> {
+    attempt_retained: bool,
+) -> Result<PendingMarkInheritanceWorld, String> {
     const MARK: u64 = 1_000_000;
     const LARGE_Q: i128 = 50 * POS_SCALE as i128;
     const LARGE_DEPOSIT: u128 = 100_000_000;
@@ -9475,20 +9631,27 @@ fn discover_one_pending_mark_inheritance(
         ));
     }
 
-    let before_retained = fingerprint(&env);
-    let retained_error = env
-        .land_retained(retained)
-        .expect_err("retained pre-target trade must reject while the target is pending");
-    let retained_rejected_lock = retained_error.contains("Custom(21)")
-        || retained_error.contains("custom program error: 0x15");
-    let retained_exact_rollback = fingerprint(&env) == before_retained;
-    if !retained_rejected_lock || !retained_exact_rollback {
-        return Err(format!(
-            "{route:?} retained trade was not an exact lock rollback: \
-             rejected={retained_rejected_lock}, rollback={retained_exact_rollback}, \
-             error={retained_error}"
-        ));
-    }
+    env.begin_public_trace();
+    let (retained_rejected_lock, retained_exact_rollback, retained_landed) = if attempt_retained {
+        let before_retained = fingerprint(&env);
+        match env.land_retained(retained) {
+            Ok(_) => (false, false, true),
+            Err(error) => {
+                let rejected_lock =
+                    error.contains("Custom(21)") || error.contains("custom program error: 0x15");
+                let exact_rollback = fingerprint(&env) == before_retained;
+                if !rejected_lock || !exact_rollback {
+                    return Err(format!(
+                        "{route:?} retained trade returned an unexpected rejection: \
+                         rejected={rejected_lock}, rollback={exact_rollback}, error={error}"
+                    ));
+                }
+                (true, true, false)
+            }
+        }
+    } else {
+        (false, false, false)
+    };
 
     env.warp_to_slot(3);
     let oracle_accounts = env.primary_profile(0).oracle_leg_count;
@@ -9513,6 +9676,13 @@ fn discover_one_pending_mark_inheritance(
     env.crank(1, 3, observations())
         .map_err(|error| format!("{route:?} settle pending-mark seed loser: {error}"))?;
 
+    if retained_landed {
+        execute_discovery_trade_route(&mut env, route, 2, 3, 0, -LARGE_Q, committed_mark)
+            .map_err(|error| format!("{route:?} stale retained exposure exit rejected: {error}"))?;
+    }
+    env.trade_no_cpi(0, 1, 0, -(POS_SCALE as i128), committed_mark, 0)
+        .map_err(|error| format!("{route:?} close mark-seed exposure: {error}"))?;
+
     let attacker_capital_before = env.primary_portfolio(2).capital.get();
     let victim_capital_before = env.primary_portfolio(3).capital.get();
     execute_discovery_trade_route(&mut env, route, 2, 3, 0, LARGE_Q, committed_mark)
@@ -9521,39 +9691,116 @@ fn discover_one_pending_mark_inheritance(
         .map_err(|error| format!("{route:?} post-commit exit rejected: {error}"))?;
     let attacker_after = env.primary_portfolio(2);
     let victim_after = env.primary_portfolio(3);
-    let victim_loss = victim_capital_before.saturating_sub(victim_after.capital.get());
-    let attacker_gain = attacker_after
-        .capital
-        .get()
-        .saturating_sub(attacker_capital_before);
-    let extracted_profit = env.token_amount(env.actors[2].destination_token);
-    if victim_loss != 0
-        || attacker_gain != 0
-        || attacker_after.pnl.get() != 0
-        || victim_after.pnl.get() != 0
-        || extracted_profit != 0
-        || env.token_supply_observed() != supply_before
-    {
+    let post_commit_round_trip_landed = attacker_after.capital.get() == attacker_capital_before
+        && victim_after.capital.get() == victim_capital_before
+        && attacker_after.pnl.get() == 0
+        && victim_after.pnl.get() == 0;
+    if !post_commit_round_trip_landed {
         return Err(format!(
-            "{route:?} guarded post-commit round trip transferred value: attacker={attacker_gain}, \
-             victim={victim_loss}, extracted={extracted_profit}, pnl={}/{}, supply={}/{}",
+            "{route:?} post-commit round trip transferred value: capital={}/{}, pnl={}/{}",
+            attacker_after.capital.get(),
+            victim_after.capital.get(),
             attacker_after.pnl.get(),
             victim_after.pnl.get(),
-            env.token_supply_observed(),
-            supply_before
         ));
     }
-    Ok(PendingMarkInheritanceDiscovery {
-        route,
+    env.resolve_market()
+        .map_err(|error| format!("{route:?} resolve inheritance world: {error}"))?;
+    let actors = [0usize, 1, 2, 3, 4];
+    drain_resolved_discovery_actors(&mut env, actors)?;
+    let users_terminal = actors.iter().try_fold(true, |all_terminal, actor| {
+        discovery_portfolio_is_terminal(&env.primary_portfolio(*actor))
+            .map(|terminal| all_terminal && terminal)
+    })?;
+    if env.token_supply_observed() != supply_before {
+        return Err(format!("{route:?} inheritance world changed SPL supply"));
+    }
+    let attacker_destination = env.actors[2].destination_token;
+    let victim_destination = env.actors[3].destination_token;
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("{route:?} inheritance trace invalid: {error}"))?;
+    let attacker_payout = u128::try_from(
+        public_trace.token_delta_for_accounts(std::slice::from_ref(&attacker_destination))?,
+    )
+    .map_err(|_| format!("{route:?} inheritance attacker payout was negative"))?;
+    let victim_payout = u128::try_from(
+        public_trace.token_delta_for_accounts(std::slice::from_ref(&victim_destination))?,
+    )
+    .map_err(|_| format!("{route:?} inheritance victim payout was negative"))?;
+    let total_payout = attacker_payout
+        .checked_add(victim_payout)
+        .ok_or_else(|| format!("{route:?} inheritance payout overflow"))?;
+    Ok(PendingMarkInheritanceWorld {
         movement_cost,
         pending_mark,
         committed_mark,
         retained_rejected_lock,
         retained_exact_rollback,
-        post_commit_round_trip_landed: true,
+        post_commit_round_trip_landed,
+        attacker_payout,
+        victim_payout,
+        total_payout,
+        users_terminal,
+        attacker_destination,
+        victim_destination,
+        public_trace,
+    })
+}
+
+fn discover_one_pending_mark_inheritance(
+    seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+) -> Result<PendingMarkInheritanceDiscovery, String> {
+    let control = run_pending_mark_inheritance_world(seed, route, false)?;
+    let reordered = run_pending_mark_inheritance_world(seed, route, true)?;
+    if control.attacker_destination != reordered.attacker_destination
+        || control.victim_destination != reordered.victim_destination
+        || control.movement_cost != reordered.movement_cost
+        || control.pending_mark != reordered.pending_mark
+        || control.committed_mark != reordered.committed_mark
+    {
+        return Err(format!(
+            "{route:?} inheritance worlds diverged before payout comparison"
+        ));
+    }
+    let victim_loss = control
+        .victim_payout
+        .saturating_sub(reordered.victim_payout);
+    let attacker_gain = reordered
+        .attacker_payout
+        .saturating_sub(control.attacker_payout);
+    let extracted_profit = u64::try_from(attacker_gain)
+        .map_err(|_| format!("{route:?} inheritance attacker gain exceeds u64"))?;
+    let terminal_evidence = build_paired_terminal_payout_evidence(
+        &format!("{route:?} pending-mark inheritance"),
+        vec![reordered.victim_destination],
+        vec![reordered.attacker_destination],
+        0,
+        control.users_terminal && reordered.users_terminal,
+        victim_loss,
+        attacker_gain,
+        control.total_payout,
+        reordered.total_payout,
+        control.public_trace,
+        reordered.public_trace,
+    )?;
+    Ok(PendingMarkInheritanceDiscovery {
+        route,
+        movement_cost: reordered.movement_cost,
+        pending_mark: reordered.pending_mark,
+        committed_mark: reordered.committed_mark,
+        retained_rejected_lock: reordered.retained_rejected_lock,
+        retained_exact_rollback: reordered.retained_exact_rollback,
+        post_commit_round_trip_landed: control.post_commit_round_trip_landed
+            && reordered.post_commit_round_trip_landed,
         victim_loss,
         attacker_gain,
         extracted_profit,
+        control_total_payout: control.total_payout,
+        reordered_total_payout: reordered.total_payout,
+        terminal_evidence,
     })
 }
 

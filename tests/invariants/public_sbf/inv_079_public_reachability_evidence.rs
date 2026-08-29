@@ -239,7 +239,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 45,
+        consumers, 47,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
@@ -307,6 +307,8 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
             "CompositeRoundingDiscovery",
             "CrossDomainBackingDiscovery",
             "FractionalMovementDiscovery",
+            "PendingMarkAdmissionDiscovery",
+            "PendingMarkInheritanceDiscovery",
             "PendingZeroMoveTerminalDiscovery",
             "ProspectiveAccrualDiscovery",
             "ShutdownCommitOrderingDiscovery",
