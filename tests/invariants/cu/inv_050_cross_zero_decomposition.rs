@@ -20,9 +20,12 @@
 //! barriers on two assets at once, then covers both assets through every route while framing both
 //! close ledgers, retaining both account-local obligation classes, and restoring withdrawal.
 //! ResetPending stale raw legs and Retired exposure unreachability are covered on every route and
-//! both side orientations; INV-046 supplies the existing public Resolved strict/cross-zero and
-//! terminal-payout matrix. Full-width ADL arithmetic equivalence remains owned by INV-051/085;
-//! there is no remaining wrapper-specific cross-zero partition on the current public surface.
+//! both side orientations. The ResetPending matrix also reaches the otherwise distinct
+//! `stored_pos_count != 0 && effective OI == 0` loss-stale partition, clears it through the sole
+//! public continuation, and returns every actor's exact principal. INV-046 supplies the existing
+//! public Resolved strict/cross-zero and terminal-payout matrix. Full-width ADL arithmetic
+//! equivalence remains owned by INV-051/085; there is no remaining wrapper-specific cross-zero
+//! partition on the current public surface.
 
 use super::*;
 
@@ -1431,6 +1434,21 @@ fn run_reset_pending_stale_leg_world(route: AdlCrossZeroRoute, reducer_side: Sid
     assert_eq!(reset_mode, SideModeV16::ResetPending);
     assert_eq!(reset.assets[0].oi_eff_long_q, 0);
     assert_eq!(reset.assets[0].oi_eff_short_q, 0);
+    let (reset_stored_count, reset_pending_count, opposite_stored_count) = match reset_side {
+        SideV16::Long => (
+            reset.assets[0].stored_pos_count_long,
+            reset.assets[0].pending_obligation_count_long,
+            reset.assets[0].stored_pos_count_short,
+        ),
+        SideV16::Short => (
+            reset.assets[0].stored_pos_count_short,
+            reset.assets[0].pending_obligation_count_short,
+            reset.assets[0].stored_pos_count_long,
+        ),
+    };
+    assert_eq!(reset_stored_count, 1);
+    assert_eq!(reset_pending_count, 0);
+    assert_eq!(opposite_stored_count, 0);
     let cross_zero_q = if stale_leg.basis_pos_q > 0 {
         -(OPEN_Q + 1)
     } else {
@@ -1543,6 +1561,30 @@ fn run_reset_pending_stale_leg_world(route: AdlCrossZeroRoute, reducer_side: Sid
     assert!(!has_active_leg_for_asset(&env.portfolio_state(stale), 0));
     assert!(!has_active_leg_for_asset(&env.portfolio_state(fresh), 0));
     assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+    assert_eq!(terminal.assets[0].stored_pos_count_long, 0);
+    assert_eq!(terminal.assets[0].stored_pos_count_short, 0);
+
+    for (owner, portfolio) in [
+        (&reducer_owner, reducer),
+        (&stale_owner, stale),
+        (&fresh_owner, fresh),
+    ] {
+        let account = env.portfolio_state(portfolio);
+        assert_eq!(account.capital.get(), 1_000_000);
+        assert_eq!(account.pnl.get(), 0);
+        env.svm.expire_blockhash();
+        let (destination, withdraw_cu) = env.withdraw_with_cu(owner, portfolio, 1_000_000);
+        assert_cu_within(
+            "post-reset complete principal withdrawal",
+            withdraw_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(env.token_amount(destination), 1_000_000);
+    }
+    let withdrawn = env.market_state().1;
+    assert_eq!(withdrawn.c_tot, 0);
+    assert_eq!(withdrawn.vault, withdrawn.insurance);
+    assert_eq!(withdrawn.vault as u64, env.token_amount(env.vault));
 }
 
 #[test]

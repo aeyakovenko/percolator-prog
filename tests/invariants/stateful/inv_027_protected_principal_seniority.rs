@@ -50,10 +50,16 @@
 //! floor/ceil PnL partition and settlement residue, preserve the junior claim, and withdraw every
 //! remaining senior-capital atom from both flat auxiliary portfolios.
 //!
+//! `v16_program_reset_pending_stale_leg_cannot_reissue_basis_on_any_route` in the INV-050-owned
+//! CU file closes the zero-effective-OI/stored-position row. Eight public worlds reach the exact
+//! `stored_pos_count != 0 && effective OI == 0 && pending_obligation_count == 0` partition, reject
+//! stale-basis reissue with complete rollback, clear the old leg permissionlessly, finalize the
+//! side, and return all three actors' original principal after a fresh same-price retry.
+//!
 //! Guarantee boundary: this certifies the stale K/F cohort, half-backed, pending-close,
-//! pending-domain-barrier, resolved-payout, certificate-stale, and insurance-withdrawal rows on the
-//! fixed engine pin. Other loss-stale rows still need one normalized public route-by-state matrix
-//! before INV-027 can be promoted beyond partial coverage.
+//! pending-domain-barrier, zero-effective-OI/stored-position, resolved-payout, certificate-stale,
+//! and insurance-withdrawal rows on the fixed engine pin. Other loss-stale rows still need one
+//! normalized public route-by-state matrix before INV-027 can be promoted beyond partial coverage.
 //!
 //! `v16_program_fully_backed_pnl_route_matrix_preserves_unrelated_principal` closes the Current
 //! fully funded control row. It realizes the same directional profit through every trade family,
