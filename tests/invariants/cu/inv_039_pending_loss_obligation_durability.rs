@@ -10,8 +10,9 @@
 //! `proof_v16_public_finalize_side_reset_rejects_each_blocker_without_mutation` own that
 //! unreachability and exact reset-gate frame, while the wrapper exposes no direct state writer.
 //! INV-088 source-rosters every wrapper-to-engine transition, so a new removal route reopens this
-//! composition. The same run remains cross-owned evidence for INV-073 without duplicating an
-//! expensive public lifecycle.
+//! composition. Secondary coverage: INV-073. The same run proves both landing orders retain a
+//! bounded owner exit and permissionless terminal continuation while preserving exact loss
+//! attribution, without duplicating an expensive public lifecycle.
 
 #[test]
 fn v16_program_pending_obligation_blocks_close_then_releases() {

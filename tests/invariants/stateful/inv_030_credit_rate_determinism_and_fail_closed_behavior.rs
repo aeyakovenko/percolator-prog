@@ -16,11 +16,12 @@
 //! public trade families with both source sides. Every world creates a real counterparty lien,
 //! expires that live lien through the public crank, and proves the resulting impaired backing
 //! contributes zero credit. Independent stock and encumbrance censuses run after every successful
-//! transition, including each expiry-normalization step. Account refresh and a bilateral trade are
-//! stale-gated with exact rollback, but the owner-only `RebalanceReduce` route must remove the exact
-//! requested exposure within one bounded transaction. This distinguishes a temporarily unavailable
-//! matched route from a persistent funded lock; PR214's larger terminal counterexample remains owned
-//! by INV-028.
+//! transition, including each expiry-normalization step. An unrelated counterparty refresh must
+//! remain live and settle its new loss against existing positive face one-for-one without using the
+//! impaired domain or charging principal. Favorable risk increase remains stale-gated with exact
+//! rollback, while both a strict bilateral reduction and owner-only `RebalanceReduce` remove exact
+//! requested exposure within bounded transactions. This distinguishes unavailable new risk from a
+//! persistent funded lock; PR214's larger terminal counterexample remains owned by INV-028.
 //! The shared stateful runner additionally compares every domain before and after every generated
 //! public action and successful permissionless crank. Any formula-input mutation must advance the
 //! domain credit epoch; unchanged inputs cannot change the rate; and a nonzero-claim rate can rise
@@ -106,6 +107,7 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
     const RISK_INCREASE_Q: i128 = 2 * POS_SCALE as i128;
     const BACKING_ATOMS: u128 = 150;
     const EXPIRY_SLOT: u64 = 3;
+    const EXPIRY_COUNTERPARTY_LOSS: i128 = 20;
 
     let route_index = match route {
         TradeRoute::NoCpi => 0,
@@ -274,31 +276,43 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
     assert_eq!(impaired_source.credit_rate_num, 0);
     assert_eq!(env.token_amount(env.vault), custody_before_impairment);
 
-    let market_before_refresh = env.market_data(false);
-    let portfolios_before_refresh = env.all_primary_portfolio_data();
+    let counterparty_before_refresh = env.primary_portfolio(COUNTERPARTY);
     let tokens_before_refresh = env.all_token_account_data();
     env.begin_public_trace();
-    let refresh = env.crank(COUNTERPARTY, EXPIRY_SLOT, observations.clone());
-    let refresh_error = refresh.expect_err("impaired-state account refresh unexpectedly landed");
+    let refresh = env
+        .crank(COUNTERPARTY, EXPIRY_SLOT, observations.clone())
+        .unwrap_or_else(|error| panic!("{label} counterparty loss refresh: {error}"));
     assert!(
-        refresh_error.contains("Custom(21)")
-            || refresh_error.contains("custom program error: 0x15"),
-        "{label} account refresh failed for an unrelated reason: {refresh_error}"
+        refresh.compute_units < crate::support::v16_svm::TX_CU_LIMIT,
+        "{label} counterparty loss refresh exceeded the transaction limit"
     );
-    assert_eq!(env.market_data(false), market_before_refresh);
-    assert_eq!(env.all_primary_portfolio_data(), portfolios_before_refresh);
+    assert_inv_030_census(&format!("{label} counterparty loss refreshed"), &env);
+    let counterparty_after_refresh = env.primary_portfolio(COUNTERPARTY);
+    assert_eq!(
+        counterparty_after_refresh.capital.get(),
+        counterparty_before_refresh.capital.get(),
+        "{label} retained positive face must absorb the new loss before principal"
+    );
+    assert_eq!(
+        counterparty_after_refresh.pnl.get(),
+        counterparty_before_refresh.pnl.get() - EXPIRY_COUNTERPARTY_LOSS,
+        "{label} the new loss must reduce positive face exactly once"
+    );
+    let (_, after_refresh) = env.primary_market_state();
+    assert_eq!(after_refresh.source_credit[source_domain], impaired_source);
+    assert_source_credit_rates(
+        &format!("{label} after counterparty refresh"),
+        &after_refresh,
+    )
+    .expect("independent refreshed-state rate oracle");
     assert_eq!(env.all_token_account_data(), tokens_before_refresh);
     let refresh_trace = env.finish_public_trace();
     refresh_trace
         .validate_public_execution()
-        .expect("credit refresh trace must be public and rollback-exact");
+        .expect("credit refresh trace must be public and value-exact");
     assert_eq!(refresh_trace.out_of_band_economic_mutations, 0);
     assert_eq!(refresh_trace.steps.len(), 1);
-    assert!(!refresh_trace.steps[0].succeeded);
-    assert_eq!(
-        refresh_trace.steps[0].rejected_exact_writable_rollback,
-        Some(true)
-    );
+    assert!(refresh_trace.steps[0].succeeded);
 
     let market_before_rejection = env.market_data(false);
     let portfolios_before_rejection = env.all_primary_portfolio_data();
@@ -354,24 +368,12 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
         .iter()
         .all(|(_, delta)| *delta == 0));
 
-    let position_before_owner_reduction = inv_030_position_for_asset(&env, WINNER, ADVERSE_ASSET);
-    let funded_capital = env.primary_portfolio(WINNER).capital.get();
-    assert_ne!(
-        position_before_owner_reduction, 0,
-        "{label} stale-route control has no funded exposure"
-    );
-    assert!(
-        funded_capital > 0,
-        "{label} stale-route control has no funded capital"
-    );
-
-    let market_before_reduction = env.market_data(false);
-    let portfolios_before_reduction = env.all_primary_portfolio_data();
-    let ledger_before_reduction = env.backing_domain_ledger_data();
+    let winner_position_before_matched = inv_030_position_for_asset(&env, WINNER, ADVERSE_ASSET);
+    let counterparty_position_before_matched =
+        inv_030_position_for_asset(&env, COUNTERPARTY, ADVERSE_ASSET);
     let tokens_before_reduction = env.all_token_account_data();
-    let matcher_before_reduction = env.all_matcher_context_data();
     env.begin_public_trace();
-    let matched_reduction = execute_trade_route(
+    execute_trade_route(
         &mut env,
         route,
         WINNER,
@@ -380,34 +382,50 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
         -direction * RISK_INCREASE_Q,
         adverse_mark,
         0,
-    );
-    let matched_reduction_error = matched_reduction
-        .expect_err("impaired-state matched reduction unexpectedly bypassed the stale gate");
-    assert!(
-        matched_reduction_error.contains("Custom(21)")
-            || matched_reduction_error.contains("custom program error: 0x15"),
-        "{label} matched reduction failed for an unrelated reason: {matched_reduction_error}"
-    );
-    assert_eq!(env.market_data(false), market_before_reduction);
+    )
+    .unwrap_or_else(|error| panic!("{label} impaired-state matched reduction: {error}"));
     assert_eq!(
-        env.all_primary_portfolio_data(),
-        portfolios_before_reduction
+        inv_030_position_for_asset(&env, WINNER, ADVERSE_ASSET),
+        winner_position_before_matched - direction * RISK_INCREASE_Q,
+        "{label} matched route did not reduce the winner exactly"
     );
-    assert_eq!(env.backing_domain_ledger_data(), ledger_before_reduction);
+    assert_eq!(
+        inv_030_position_for_asset(&env, COUNTERPARTY, ADVERSE_ASSET),
+        counterparty_position_before_matched + direction * RISK_INCREASE_Q,
+        "{label} matched route did not reduce the counterparty exactly"
+    );
     assert_eq!(env.all_token_account_data(), tokens_before_reduction);
-    assert_eq!(env.all_matcher_context_data(), matcher_before_reduction);
+    assert_inv_030_census(&format!("{label} matched risk reduced"), &env);
+    let (_, after_matched_reduction) = env.primary_market_state();
+    assert_source_credit_rate_transition(
+        &format!("{label} matched reduction rate transition"),
+        &after_rejection,
+        &after_matched_reduction,
+    )
+    .expect("matched reduction cannot improve credit without a canonical cause");
+    assert_source_credit_rates(
+        &format!("{label} after matched reduction"),
+        &after_matched_reduction,
+    )
+    .expect("independent matched-reduction rate oracle");
     let matched_trace = env.finish_public_trace();
     matched_trace
         .validate_public_execution()
-        .expect("matched credit trace must be public and rollback-exact");
+        .expect("matched credit trace must be public and value-exact");
     assert_eq!(matched_trace.out_of_band_economic_mutations, 0);
     assert_eq!(matched_trace.steps.len(), 1);
-    assert!(!matched_trace.steps[0].succeeded);
-    assert_eq!(
-        matched_trace.steps[0].rejected_exact_writable_rollback,
-        Some(true)
-    );
+    assert!(matched_trace.steps[0].succeeded);
 
+    let position_before_owner_reduction = inv_030_position_for_asset(&env, WINNER, ADVERSE_ASSET);
+    let funded_capital = env.primary_portfolio(WINNER).capital.get();
+    assert_ne!(
+        position_before_owner_reduction, 0,
+        "{label} matched reduction left no owner-route exposure"
+    );
+    assert!(
+        funded_capital > 0,
+        "{label} owner-route control has no funded capital"
+    );
     let owner_reduction = env
         .rebalance_reduce(
             WINNER,

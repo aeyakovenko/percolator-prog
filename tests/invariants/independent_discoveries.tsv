@@ -102,7 +102,7 @@ INV-073	crossed-adl/exact-effective-trade	v16_program_crossed_adl_effective_exit
 INV-073	partial-adl/recovery-force-close	v16_program_recovery_residue_matrix_clears_abandoned_owner_residue	partial-adl-recovery-effective-close-clears-both-legs-in-one-bounded-call	203
 INV-073	social-loss/fractional-carry-exit-routes	v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit	fractional-social-loss-carry-cannot-lock-funded-owner-exit	217
 INV-073	recovery/fragmented-opposite-oi	v16_program_fragmented_recovery_pair_matrix_clears_every_fragment	fragmented-recovery-must-have-a-permissionless-pairwise-close-path	228
-INV-073	recovery/forfeit-order-loss-durability	v16_program_recovery_forfeit_orders_preserve_loss_and_terminal_exit	forfeit-order-cannot-lock-provider-backed-recovery	371
+INV-073	recovery/forfeit-order-loss-durability	v16_program_pending_obligation_blocks_close_then_releases	forfeit-order-cannot-lock-provider-backed-recovery	371
 INV-073	asset0-recovery/provider-backing	v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_progress	recovered-provider-backing-must-have-withdraw-or-restart-progress	376
 INV-073	permissionless-asset/expired-local-close	v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery	permissionless-asset-local-close-cannot-freeze-unrelated-funded-users	236
 INV-073	expired-partial-close/unrelated-funded-account	v16_program_expired_partial_close_matrix_resolves_and_preserves_idle_exit	account-local-expired-close-preserves-unrelated-resolved-exit	368

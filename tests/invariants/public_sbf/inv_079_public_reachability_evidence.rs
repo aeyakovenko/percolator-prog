@@ -239,7 +239,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 50,
+        consumers, 51,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
@@ -568,6 +568,11 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
             39,
             &[39],
             include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
+        ),
+        (
+            39,
+            &[39, 73],
+            include_str!("../cu/inv_039_pending_loss_obligation_durability.rs"),
         ),
         (
             45,
