@@ -32,6 +32,8 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 mod support;
 
+use support::v16_svm::assert_closed_market_tombstone;
+
 const CRANK_CU_LIMIT: u64 = 325_000;
 const CUSTODY_CU_LIMIT: u64 = 300_000;
 const TRADE_CU_LIMIT: u64 = 345_000;
@@ -8538,6 +8540,9 @@ mod inv_004_position_episode_binding;
 
 #[path = "invariants/cu/inv_005_authority_incarnation_binding.rs"]
 mod inv_005_authority_incarnation_binding;
+
+#[path = "invariants/cu/inv_007_no_aba_reuse.rs"]
+mod inv_007_no_aba_reuse;
 
 #[path = "invariants/cu/inv_008_intent_uniqueness_and_bounded_replay.rs"]
 mod inv_008_intent_uniqueness_and_bounded_replay;

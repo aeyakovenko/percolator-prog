@@ -24737,9 +24737,13 @@ pub fn reproduce_reclaimable_ewma_fee(
             .checked_sub(env.mint_supply())
             .ok_or("terminal mint supply increased")?,
     );
+    let mut expected_tombstone = vec![0u8; percolator_prog::constants::HEADER_LEN];
+    expected_tombstone[0..8].copy_from_slice(&percolator_prog::constants::MAGIC.to_le_bytes());
+    expected_tombstone[8..10].copy_from_slice(&percolator_prog::constants::VERSION.to_le_bytes());
+    expected_tombstone[10] = percolator_prog::constants::KIND_CLOSED_MARKET;
     if terminal_fee_burned != fee_paid
         || env.token_amount(env.market_admin_destination_token) != admin_destination_before
-        || env.market_data(false).iter().any(|byte| *byte != 0)
+        || env.market_data(false) != expected_tombstone
     {
         return Err(format!(
             "{route:?} terminal reserve was not burned exactly: burned={terminal_fee_burned}, \

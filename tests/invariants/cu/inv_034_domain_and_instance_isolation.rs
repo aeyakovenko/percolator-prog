@@ -4643,8 +4643,7 @@ fn v16_attack_close_slab_rejects_foreign_market_vaults() {
     assert_eq!(env.token_amount(secondary_dest), 50);
     assert_eq!(env.token_amount(secondary_vault_b), 70);
     let closed_market = env.svm.get_account(&env.market).unwrap();
-    assert_eq!(closed_market.lamports, 0);
-    assert!(closed_market.data.iter().all(|b| *b == 0));
+    assert_closed_market_tombstone(&closed_market);
 }
 
 // security.md sweep — ForceCloseAbandonedAsset has no portfolio-owner signatures by design after a

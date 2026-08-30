@@ -16,7 +16,9 @@
 //! custody.
 
 use crate::support::fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census};
-use crate::support::v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT};
+use crate::support::v16_svm::{
+    assert_closed_market_tombstone, MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT,
+};
 use percolator::{MarketModeV16, POS_SCALE};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,9 +150,7 @@ fn run_terminal_lifecycle(order: [usize; PRIMARY_ACTOR_COUNT]) -> Result<Termina
         .svm
         .get_account(&env.market)
         .ok_or("closed market account disappeared unexpectedly")?;
-    if closed_market.lamports != 0 || closed_market.data.iter().any(|byte| *byte != 0) {
-        return Err("CloseSlab did not reclaim and zero the market account".to_string());
-    }
+    assert_closed_market_tombstone(&closed_market);
 
     if env.market_data(true) != foreign_market_before
         || env.foreign_portfolio_data() != foreign_portfolio_before
@@ -297,8 +297,7 @@ fn v16_program_prior_insurance_drains_after_every_user_claim_before_close_slab()
         .svm
         .get_account(&env.market)
         .expect("closed market account remains observable");
-    assert_eq!(closed_market.lamports, 0);
-    assert!(closed_market.data.iter().all(|byte| *byte == 0));
+    assert_closed_market_tombstone(&closed_market);
     assert_eq!(env.market_data(true), foreign_market_before);
     assert!(max_compute_units < TX_CU_LIMIT);
 }

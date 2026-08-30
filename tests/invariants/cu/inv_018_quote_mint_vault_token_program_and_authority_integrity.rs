@@ -1683,8 +1683,7 @@ fn v16_attack_close_slab_rejects_delegated_or_closable_primary_vault() {
     );
     assert_eq!(env.token_amount(dest), 7);
     let closed_market = env.svm.get_account(&env.market).unwrap();
-    assert_eq!(closed_market.lamports, 0);
-    assert!(closed_market.data.iter().all(|b| *b == 0));
+    assert_closed_market_tombstone(&closed_market);
 }
 
 // full-interface sweep (cron31): CloseSlab must pin the primary vault to the current market's vault
@@ -1828,8 +1827,7 @@ fn v16_attack_close_slab_rejects_foreign_primary_vault() {
     assert_eq!(env.token_amount(dest), 7);
     assert_eq!(env.token_amount(vault_b), 9);
     let closed_market = env.svm.get_account(&env.market).unwrap();
-    assert_eq!(closed_market.lamports, 0);
-    assert!(closed_market.data.iter().all(|b| *b == 0));
+    assert_closed_market_tombstone(&closed_market);
 }
 
 // security.md sweep - live insurance withdrawal vault pinning (#33/#44/#48): WithdrawInsuranceAsset
@@ -3623,8 +3621,7 @@ fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
     assert_eq!(env.token_amount(primary_dest), 7);
     assert_eq!(env.token_amount(secondary_dest), 50);
     let closed_market = env.svm.get_account(&env.market).unwrap();
-    assert_eq!(closed_market.lamports, 0);
-    assert!(closed_market.data.iter().all(|b| *b == 0));
+    assert_closed_market_tombstone(&closed_market);
 }
 
 // security.md sweep — UpdateBaseUnitMints guard (#44/#48): the collateral mint can only be changed

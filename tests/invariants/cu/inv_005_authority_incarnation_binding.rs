@@ -4769,12 +4769,5 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
         "final vault dust recovered by the current market authority"
     );
     let closed_market = env.svm.get_account(&env.market).unwrap();
-    assert_eq!(
-        closed_market.lamports, 0,
-        "market lamports reclaimed after current-authority CloseSlab"
-    );
-    assert!(
-        closed_market.data.iter().all(|b| *b == 0),
-        "market data zeroed only after current-authority CloseSlab"
-    );
+    assert_closed_market_tombstone(&closed_market);
 }

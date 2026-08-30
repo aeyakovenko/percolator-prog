@@ -26,8 +26,9 @@ proof or a differential equivalence argument.
 The v16.8.0 specification does not currently define the names `market_id`, `asset_generation`,
 `portfolio_id`, `position_episode`, or `authority_epoch`. Invariants 1-5 are therefore additional
 implementation requirements for retained signed requests. If the implementation already has
-equivalent fields, the test harness must map them explicitly. If it does not, the corresponding
-tests should fail until the fields and validation are added.
+equivalent fields or makes an account address permanently nonreusable with a typed program-owned
+tombstone, the test harness must map that policy explicitly. If it does neither, the corresponding
+tests should fail until identity or strict non-reuse is enforced.
 
 ### Important correction to asset binding
 
@@ -52,7 +53,7 @@ IntentHeader {
     chain_or_genesis_domain
     program_id
     market_pubkey
-    market_id                  // persistent market generation
+    market_id                  // persistent market generation when the market pubkey is reusable
     instruction_kind
     message_version
     intent_id                  // monotonic nonce or unique replay key
@@ -85,7 +86,10 @@ AuthorityBinding {
 `market_id`, `asset_generation`, `portfolio_id`, and authority epochs must be program assigned and
 must not reset merely because an account is closed and recreated at the same pubkey. A market-level
 or factory-level monotonic registry is required wherever account-local storage would disappear on
-close.
+close. As a stricter equivalent for an account class, close may retain an immutable typed,
+rent-exempt, program-owned tombstone that makes recreation at that pubkey impossible. That policy
+must reject public reinitialization even after arbitrary lamport funding and must leave fresh
+addresses usable; it does not remove chain/program/message-type domain requirements.
 
 ### Verification tags
 
@@ -119,14 +123,17 @@ copying a PR regression into the fuzzer does not.
 
 ### INV-001 - Market incarnation binding
 
-**Statement.** Every retained signed request binds the persistent market generation. The binding
-must include the program domain, market-group pubkey, and program-assigned monotonic `market_id`;
-reinitializing the same market pubkey must never make a request from an earlier market generation
-valid.
+**Statement.** Every retained signed request binds the persistent market identity. The binding
+includes the program domain and market-group pubkey. If that pubkey is reusable, it also includes a
+program-assigned monotonic `market_id`. A stricter implementation may permanently tombstone the
+retired pubkey so no later market incarnation can exist there. Under either policy, an earlier
+market request can never become valid in a later market.
 
-**Required tests.** Sign under generation `g`, close/recreate or reinitialize the market at the same
-pubkey with generation `g+1`, and prove every old request rejects before mutation. Also test
-cross-market and cross-program replay.
+**Required tests.** For a reusable market, sign under generation `g`, close/recreate at the same
+pubkey with generation `g+1`, and prove every old request rejects before mutation. For strict
+non-reuse, close the market, publicly fund its exact tombstone, prove reinitialization and every old
+request reject before mutation, and prove a fresh pubkey still initializes. Also test cross-market
+and cross-program replay.
 **Verification:** P, F, I, M
 
 ### INV-002 - Asset generation binding
@@ -189,11 +196,14 @@ type.
 
 **Statement.** Closing and recreating any market, asset slot, portfolio, receipt, delegate,
 capability, or auxiliary account at the same pubkey never revives old consent, capability, counters,
-reservations, liens, or claims. Incarnation identity is program assigned and survives deletion of
-account-local state.
+reservations, liens, or claims. Each reusable class has program-assigned incarnation identity that
+survives deletion of account-local state, or close leaves a permanent typed program-owned tombstone
+that makes same-pubkey recreation impossible.
 
-**Required tests.** For each account class, create A, authorize an action, close A, recreate A with
-identical visible keys, and replay. No old state or authority may reappear.
+**Required tests.** For each reusable account class, create A, authorize an action, close A,
+recreate A with identical visible keys, and replay. For each strict non-reuse class, publicly fund
+the tombstone and attempt recreation. No old state or authority may reappear, and fresh addresses
+must remain usable.
 **Verification:** P, F, I, R
 
 ### INV-008 - Intent uniqueness and bounded replay
@@ -339,8 +349,10 @@ slots, and test expiry-1, expiry, and expiry+1.
 ### INV-021 - Account creation, reallocation, close, rent, and lamport safety
 
 **Statement.** Creation and reallocation preserve type, bounds, and zero-initialization rules.
-Closing an account sends lamports only to the authorized destination after all claims and
-encumbrances are cleared; close/recreate cannot recover old bytes or bypass generation checks.
+Closing an account sends refundable lamports only to the authorized destination after all claims
+and encumbrances are cleared. A strict non-reuse close may retain exactly the rent required for its
+typed tombstone; no other value may remain. Close/recreate cannot recover old bytes or bypass
+generation or tombstone checks.
 
 **Required tests.** Reallocate smaller/larger, close with residual obligations, close to a
 substituted recipient, and recreate with an identical pubkey.
@@ -971,7 +983,8 @@ unexplained_accounting = 0
 ```
 
 Any remaining vault value is exactly classified as protocol surplus or rounding residue and can be
-swept through an explicit balanced transition. After that sweep, `CloseSlab` succeeds.
+swept through an explicit balanced transition. After that sweep, `CloseSlab` succeeds and leaves
+only the exact typed market tombstone and its rent when strict address non-reuse is configured.
 
 **Required tests.** Full-market lifecycle sequences with adversarial order, rounding, recovery, and
 prior insurance consumption.

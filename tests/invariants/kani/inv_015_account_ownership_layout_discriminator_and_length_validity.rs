@@ -42,3 +42,27 @@ fn kani_v16_account_header_rejects_every_short_length() {
         len += 1;
     }
 }
+
+/// Secondary owner: INV-001/INV-007. Closing a market overwrites arbitrary prior bytes with an
+/// initialized account class that `InitMarket` cannot mistake for a fresh account.
+#[kani::proof]
+#[kani::unwind(18)]
+fn kani_v16_closed_market_tombstone_is_an_exact_initialized_header() {
+    let mut data: [u8; constants::HEADER_LEN] = kani::any();
+
+    state::write_closed_market_tombstone(&mut data).unwrap();
+
+    assert_eq!(
+        u64::from_le_bytes(data[0..8].try_into().unwrap()),
+        constants::MAGIC
+    );
+    assert_eq!(
+        u16::from_le_bytes(data[8..10].try_into().unwrap()),
+        constants::VERSION
+    );
+    assert_eq!(data[10], constants::KIND_CLOSED_MARKET);
+    assert!(data[11..].iter().all(|byte| *byte == 0));
+    assert!(state::is_initialized(&data));
+    assert!(state::kani_check_header(&data, constants::KIND_MARKET).is_err());
+    assert!(state::kani_check_header(&data, constants::KIND_CLOSED_MARKET).is_ok());
+}

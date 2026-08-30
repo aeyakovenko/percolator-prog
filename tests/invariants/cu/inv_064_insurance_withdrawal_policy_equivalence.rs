@@ -851,6 +851,6 @@ fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_clo
     );
 
     env.close_slab_with_cu();
-    let market_data = env.svm.get_account(&env.market).unwrap().data;
-    assert!(market_data.iter().all(|b| *b == 0));
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_closed_market_tombstone(&closed_market);
 }

@@ -6,7 +6,10 @@ use percolator::{
     BackingBucketStatusV16, MarketModeV16, SideModeV16, ADL_ONE, BOUND_SCALE, POS_SCALE,
 };
 use percolator_prog::{
-    constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
+    constants::{
+        HEADER_LEN, KIND_CLOSED_MARKET, MAGIC, ORACLE_LEG_FLAG_DIVIDE_LEG2,
+        ORACLE_LEG_FLAG_DIVIDE_LEG3, VERSION,
+    },
     error::PercolatorError,
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
 };
@@ -918,10 +921,11 @@ pub struct IncarnationDiscovery {
 pub struct MarketIncarnationDiscovery {
     pub kind: MarketIntentKind,
     pub old_market_id: u64,
-    pub new_market_id: u64,
-    pub accepted_stale_intent: bool,
-    pub mutated_economic_state: bool,
-    pub compute_units: Option<u64>,
+    pub tombstone_lamports: u64,
+    pub recreation_rejected: bool,
+    pub recreation_exact_rollback: bool,
+    pub retained_intent_rejected: bool,
+    pub retained_intent_exact_rollback: bool,
     pub public_trace: PublicTraceEvidence,
 }
 
@@ -3348,7 +3352,17 @@ impl AssetGenerationDiscovery {
 
 impl MarketIncarnationDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.accepted_stale_intent && self.mutated_economic_state
+        !self.certifies_no_reuse()
+    }
+
+    pub fn certifies_no_reuse(&self) -> bool {
+        self.old_market_id != 0
+            && self.tombstone_lamports != 0
+            && self.recreation_rejected
+            && self.recreation_exact_rollback
+            && self.retained_intent_rejected
+            && self.retained_intent_exact_rollback
+            && self.public_trace.validate_public_execution().is_ok()
     }
 }
 
@@ -3996,17 +4010,54 @@ fn publicly_recreate_market(
     Ok(())
 }
 
-fn finish_market_incarnation_discovery(
+fn finish_market_tombstone_discovery(
     env: &mut V16Svm,
     kind: MarketIntentKind,
     old_market_id: u64,
-    new_market_id: u64,
     retained: Transaction,
+    config: MarketConfig,
+    reinit_slot: u64,
     supply_before: u128,
 ) -> Result<MarketIncarnationDiscovery, String> {
-    let before = fingerprint(env);
-    let result = env.land_retained(retained);
-    let after = fingerprint(env);
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let capital = env.primary_portfolio(actor).capital.get();
+        env.withdraw_primary(actor, capital)
+            .map_err(|error| format!("empty old-market portfolio {actor}: {error}"))?;
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("close old-market portfolio {actor}: {error}"))?;
+    }
+    env.resolve_market()
+        .map_err(|error| format!("resolve old market: {error}"))?;
+    env.close_primary_slab()
+        .map_err(|error| format!("close old market: {error}"))?;
+    env.warp_to_slot(reinit_slot);
+    env.fund_closed_primary_market()
+        .map_err(|error| format!("fund closed market tombstone: {error}"))?;
+
+    let tombstone = env
+        .svm
+        .get_account(&env.market)
+        .ok_or("closed market address disappeared after public funding")?;
+    let mut expected_data = vec![0u8; HEADER_LEN];
+    expected_data[0..8].copy_from_slice(&MAGIC.to_le_bytes());
+    expected_data[8..10].copy_from_slice(&VERSION.to_le_bytes());
+    expected_data[10] = KIND_CLOSED_MARKET;
+    let tombstone_lamports = if tombstone.owner == percolator_prog::id()
+        && tombstone.data == expected_data
+        && tombstone.lamports != 0
+    {
+        tombstone.lamports
+    } else {
+        0
+    };
+
+    let before_recreation = fingerprint(env);
+    let recreation_rejected = env.reinitialize_primary_market(config).is_err();
+    let recreation_exact_rollback = fingerprint(env) == before_recreation;
+
+    let before_replay = fingerprint(env);
+    let retained_intent_rejected = env.land_retained(retained).is_err();
+    let retained_intent_exact_rollback = fingerprint(env) == before_replay;
     if env.token_supply_observed() != supply_before {
         return Err(format!(
             "{kind:?} market-incarnation probe changed SPL supply: {supply_before} -> {}",
@@ -4018,41 +4069,16 @@ fn finish_market_incarnation_discovery(
         .validate_public_execution()
         .map_err(|error| format!("{kind:?} market-incarnation trace is invalid: {error}"))?;
 
-    match result {
-        Ok(success) => {
-            let mutated_economic_state = before != after;
-            if !mutated_economic_state {
-                return Err(format!(
-                    "{kind:?} stale market transaction succeeded without an observable state delta"
-                ));
-            }
-            Ok(MarketIncarnationDiscovery {
-                kind,
-                old_market_id,
-                new_market_id,
-                accepted_stale_intent: true,
-                mutated_economic_state,
-                compute_units: Some(success.compute_units),
-                public_trace,
-            })
-        }
-        Err(_) => {
-            if before != after {
-                return Err(format!(
-                    "{kind:?} rejected stale market transaction did not roll back exactly"
-                ));
-            }
-            Ok(MarketIncarnationDiscovery {
-                kind,
-                old_market_id,
-                new_market_id,
-                accepted_stale_intent: false,
-                mutated_economic_state: false,
-                compute_units: None,
-                public_trace,
-            })
-        }
-    }
+    Ok(MarketIncarnationDiscovery {
+        kind,
+        old_market_id,
+        tombstone_lamports,
+        recreation_rejected,
+        recreation_exact_rollback,
+        retained_intent_rejected,
+        retained_intent_exact_rollback,
+        public_trace,
+    })
 }
 
 fn initialize_replacement_traders(
@@ -4097,19 +4123,13 @@ fn discover_rebalance_market_incarnation_replay(
     let retained = env.build_retained_rebalance_reduce(SUBJECT, 0, NEW_SIZE_Q.unsigned_abs());
     env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, -OLD_SIZE_Q, PRICE, 0)
         .map_err(|error| format!("close old-market rebalance position: {error}"))?;
-    publicly_recreate_market(&mut env, config, REINIT_SLOT)?;
-    env.configure_auth_mark(false, 0, REINIT_SLOT, PRICE)
-        .map_err(|error| format!("configure replacement-market mark: {error}"))?;
-    let new_market_id = env.primary_market_state().1.assets[0].market_id;
-    initialize_replacement_traders(&mut env, &[SUBJECT, COUNTERPARTY], DEPOSIT)?;
-    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, NEW_SIZE_Q, PRICE, 0)
-        .map_err(|error| format!("open replacement-market rebalance position: {error}"))?;
-    finish_market_incarnation_discovery(
+    finish_market_tombstone_discovery(
         &mut env,
         kind,
         old_market_id,
-        new_market_id,
         retained,
+        config,
+        REINIT_SLOT,
         supply_before,
     )
 }
@@ -4148,29 +4168,18 @@ fn discover_forfeit_market_incarnation_replay(
         .map_err(|error| format!("shutdown old market asset: {error}"))?;
     let retained = env.build_retained_forfeit_recovery_leg(SUBJECT, 0, 1);
     settle_recovery_pair_for_recreation(&mut env, SUBJECT, COUNTERPARTY, 0, 2)?;
-    publicly_recreate_market(&mut env, config, REINIT_SLOT)?;
-    env.configure_permissionless_resolve(100, 1)
-        .map_err(|error| format!("configure replacement recovery lifecycle: {error}"))?;
-    env.configure_auth_mark(false, 0, REINIT_SLOT, PRICE)
-        .map_err(|error| format!("configure replacement recovery mark: {error}"))?;
-    let new_market_id = env.primary_market_state().1.assets[0].market_id;
-    initialize_replacement_traders(&mut env, &[SUBJECT, COUNTERPARTY], DEPOSIT)?;
-    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, SIZE_Q, PRICE, 0)
-        .map_err(|error| format!("open replacement-market recovery leg: {error}"))?;
-    env.warp_to_slot(REINIT_SLOT + 1);
-    env.shutdown_asset(0, REINIT_SLOT + 1)
-        .map_err(|error| format!("shutdown replacement market asset: {error}"))?;
-    finish_market_incarnation_discovery(
+    finish_market_tombstone_discovery(
         &mut env,
         kind,
         old_market_id,
-        new_market_id,
         retained,
+        config,
+        REINIT_SLOT,
         supply_before,
     )
 }
 
-fn discover_one_market_incarnation_replay(
+pub fn discover_market_incarnation_replay(
     mut seed: [u8; 32],
     kind: MarketIntentKind,
 ) -> Result<MarketIncarnationDiscovery, String> {
@@ -4216,46 +4225,14 @@ fn discover_one_market_incarnation_replay(
         .then(|| env.primary_portfolio_matcher_sequence(SUBJECT));
     let retained = retained_market_intent(&mut env, kind);
 
-    publicly_recreate_market(&mut env, config, REINIT_SLOT)?;
-    let new_market_id = env.primary_market_state().1.assets[0].market_id;
-    if matches!(
-        kind,
-        MarketIntentKind::Deposit | MarketIntentKind::MatcherEnable
-    ) {
-        env.fund_closed_primary_portfolio(SUBJECT, 1_000_000_000)
-            .map_err(|error| format!("fund replacement portfolio: {error}"))?;
-        env.reinitialize_primary_portfolio(SUBJECT)
-            .map_err(|error| format!("initialize replacement portfolio: {error}"))?;
-    }
-    if kind == MarketIntentKind::MatcherEnable {
-        // Market recreation resets both portfolio IDs and retained-action sequences. Advance
-        // the replacement through legitimate owner mutations until the old generation's
-        // expected sequence collides again; sequence binding alone is not market-incarnation
-        // binding. The dynamic target keeps this probe valid as more owner operations consume
-        // the shared sequence.
-        let target = old_matcher_sequence.expect("matcher target captured above");
-        while env.primary_portfolio_matcher_sequence(SUBJECT) < target {
-            env.set_matcher_config(SUBJECT, 0)
-                .map_err(|error| format!("align replacement matcher sequence: {error}"))?;
-        }
-        if env.primary_portfolio_matcher_sequence(SUBJECT) != target {
-            return Err(format!(
-                "replacement matcher sequence overshot retained target {target}"
-            ));
-        }
-    }
-    if kind == MarketIntentKind::ShutdownAsset {
-        env.configure_permissionless_resolve(1_000_000, 1)
-            .map_err(|error| format!("configure replacement shutdown policy: {error}"))?;
-        env.warp_to_slot(12);
-    }
-
-    finish_market_incarnation_discovery(
+    let _ = old_matcher_sequence;
+    finish_market_tombstone_discovery(
         &mut env,
         kind,
         old_market_id,
-        new_market_id,
         retained,
+        config,
+        REINIT_SLOT,
         supply_before,
     )
 }
@@ -4265,7 +4242,7 @@ pub fn discover_market_incarnation_replays(
 ) -> Result<Vec<MarketIncarnationDiscovery>, String> {
     MarketIntentKind::ALL
         .into_iter()
-        .map(|kind| discover_one_market_incarnation_replay(seed, kind))
+        .map(|kind| discover_market_incarnation_replay(seed, kind))
         .collect()
 }
 

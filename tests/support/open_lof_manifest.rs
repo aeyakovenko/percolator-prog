@@ -463,25 +463,25 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr292RebalancePortfolioIncarnation,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         293,
         Hardening,
         ReplayIncarnation,
         BlockerAdapter::Pr293RebalanceMarketIncarnation,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         294,
         Hardening,
         ReplayIncarnation,
         BlockerAdapter::Pr294MatcherGrantMarketGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         295,
         Hardening,
         ReplayIncarnation,
         BlockerAdapter::Pr295ForfeitMarketGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         296,
         Blocker,
         ReplayIncarnation,
@@ -517,7 +517,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr305PortfolioIncarnationDeposit,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         307,
         Hardening,
         ReplayIncarnation,
@@ -571,7 +571,7 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr316RebalancePositionEpisode,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         317,
         Blocker,
         ReplayIncarnation,
@@ -601,13 +601,13 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::OracleGenerationReplayFamily,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         325,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::Pr325MaintenancePolicyGenerationReplay,
     ),
-    OpenLof::quarantined(
+    OpenLof::certified(
         326,
         Blocker,
         ReplayIncarnation,

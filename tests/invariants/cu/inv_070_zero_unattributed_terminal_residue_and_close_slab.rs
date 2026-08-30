@@ -104,11 +104,7 @@ fn v16_program_close_slab_rejects_until_market_has_zero_terminal_residue() {
         "fully drained market can be reclaimed by CloseSlab",
     );
     let closed_market = env.svm.get_account(&market).unwrap();
-    assert_eq!(closed_market.lamports, 0);
-    assert!(
-        closed_market.data.iter().all(|byte| *byte == 0),
-        "market account is zeroed only after a valid terminal close",
-    );
+    assert_closed_market_tombstone(&closed_market);
 }
 
 #[test]
@@ -188,14 +184,7 @@ fn v16_program_close_slab_final_dust_destination_validation_is_atomic() {
         "primary vault dust is recovered to current market authority",
     );
     let closed_market = env.svm.get_account(&env.market).unwrap();
-    assert_eq!(
-        closed_market.lamports, 0,
-        "market lamports reclaimed after valid close",
-    );
-    assert!(
-        closed_market.data.iter().all(|byte| *byte == 0),
-        "market data zeroed only after a valid close",
-    );
+    assert_closed_market_tombstone(&closed_market);
 }
 
 // security.md sweep — CloseSlab with secondary collateral (#44/#48): if a secondary collateral mint is
@@ -343,15 +332,8 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
         50,
         "secondary reserve recovered to admin"
     );
-    assert!(
-        env.svm
-            .get_account(&env.market)
-            .unwrap()
-            .data
-            .iter()
-            .all(|b| *b == 0),
-        "market reclaimed only after both vaults close"
-    );
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_closed_market_tombstone(&closed_market);
 }
 
 // SOL-010 / account-kind confusion: InitPortfolio is permissionless and targets a program-owned

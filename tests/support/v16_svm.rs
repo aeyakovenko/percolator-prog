@@ -1,6 +1,7 @@
 use litesvm::LiteSVM;
 use percolator::POS_SCALE;
 use percolator_prog::{
+    constants::{HEADER_LEN, KIND_CLOSED_MARKET, MAGIC, VERSION},
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     state,
     state::{AssetOracleProfileV16, MarketGroupV16, PortfolioAccountV16},
@@ -14,6 +15,7 @@ use solana_sdk::{
     program_option::COption,
     program_pack::Pack,
     pubkey::Pubkey,
+    rent::Rent,
     signature::{keypair_from_seed, Keypair, Signer},
     system_instruction,
     transaction::Transaction,
@@ -37,6 +39,23 @@ pub const EXIT_MAKER_TOKEN_BALANCE: u64 = 2_500_000_000;
 const FOREIGN_TOKEN_BALANCE: u64 = 200_000_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 const CURRENT_AUTHORITY_EPOCH: u64 = u64::MAX;
+
+pub fn closed_market_tombstone_data() -> [u8; HEADER_LEN] {
+    let mut data = [0u8; HEADER_LEN];
+    data[0..8].copy_from_slice(&MAGIC.to_le_bytes());
+    data[8..10].copy_from_slice(&VERSION.to_le_bytes());
+    data[10] = KIND_CLOSED_MARKET;
+    data
+}
+
+pub fn assert_closed_market_tombstone(account: &Account) {
+    assert_eq!(account.owner, percolator_prog::id());
+    assert_eq!(account.data, closed_market_tombstone_data());
+    assert_eq!(
+        account.lamports,
+        Rent::default().minimum_balance(HEADER_LEN)
+    );
+}
 
 fn next_control_sequence(current: u64) -> u64 {
     current.checked_add(1).expect("control sequence exhausted")

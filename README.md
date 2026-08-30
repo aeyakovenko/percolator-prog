@@ -182,12 +182,13 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   authority self-rotates even after the asset admin is burned; required domain authorities cannot be
   burned). All verified by
   `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable`.
-- **Market admin can run a scheduled market close** — fully shut the market down and **reclaim the
-  account id** — with **safe delays that cannot steal user funds** but **eventually drain an
+- **Market admin can run a scheduled market close** — fully shut the market down and **refund its
+  reusable storage lamports while permanently tombstoning the market address** — with **safe delays that cannot steal user funds** but **eventually drain an
   abandoned market to zero**. **✅** `v16_attack_scheduled_close_cannot_strand_funds_then_reclaims`
   asserts `CloseSlab` **rejects** on a live market and on a resolved market that still custodies user
-  value, and only **succeeds + zeroes (reclaims) the account** once users are made whole and the slab
-  is fully drained; the abandoned-market path is the permissionless-resolve fallback
+  value, and only **succeeds + writes the typed 16-byte tombstone** once users are made whole and
+  the slab is fully drained; all lamports except exact tombstone rent are refunded, and the
+  abandoned-market path is the permissionless-resolve fallback
   (`v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free`, bounded + oracle-free).
 - **The `marketauth` key can force-shutdown assets 0..N without rugging traders** — `ASSET_ACTION_SHUTDOWN`
   accepts either `marketauth` (global liveness) or that asset's `asset_admin` (local shutdown); any
@@ -873,7 +874,8 @@ These are governance powers, not bugs:
    - choose who can call bounded live insurance withdrawal.
    - impact: bounded live insurance extraction capability is delegated.
 8. `CloseSlab` (when market is fully empty)
-    - decommission market account and recover slab lamports.
+    - decommission the market, recover refundable slab lamports, and retain only the typed
+      rent-exempt tombstone.
     - impact: market is permanently closed.
 
 > **Authority model (items 3, 5, 7).** Asset-0's insurance/operator/oracle(mark)/backing authorities now

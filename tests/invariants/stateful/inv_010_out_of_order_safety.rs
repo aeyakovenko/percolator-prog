@@ -51,7 +51,9 @@
 
 use super::*;
 use crate::support::fuzz_model::verify_underfunded_authority_policy_resolve_claim_orders;
-use crate::support::v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
+use crate::support::v16_svm::{
+    assert_closed_market_tombstone, MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
+};
 use percolator::{HealthCertV16Account, MarketModeV16, PortfolioAccountV16Account, POS_SCALE};
 use percolator_prog::ix::Instruction as ProgInstruction;
 use solana_sdk::{pubkey::Pubkey, signature::Signer, transaction::Transaction};
@@ -897,8 +899,7 @@ fn run_authority_resolve_order(seed: [u8; 32], handoff_first: bool) {
     env.close_primary_slab_for_actor(INCOMING_AUTHORITY)
         .expect("a fully paid authority/resolve world must close the slab");
     let closed_market = env.svm.get_account(&env.market).unwrap();
-    assert_eq!(closed_market.lamports, 0);
-    assert!(closed_market.data.iter().all(|byte| *byte == 0));
+    assert_closed_market_tombstone(&closed_market);
 }
 
 #[test]

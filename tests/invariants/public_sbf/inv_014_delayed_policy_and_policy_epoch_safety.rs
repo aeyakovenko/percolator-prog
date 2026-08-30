@@ -13,9 +13,8 @@
 //! matrix additionally crosses both backing-policy/top-up landing orders, requires exact stale
 //! rejection, and traces a nonzero authorized fee to the provider-selected SPL destination.
 //!
-//! The final two tests deliberately remain public counterexamples for the separate market-account
-//! reincarnation gap: recreating the market account resets account-local ordering state. They are
-//! INV-001/INV-005 work and must not be misreported as closed by same-incarnation sequencing.
+//! Whole-market reuse is separately prohibited by INV-001/INV-007's persistent tombstone; this
+//! file therefore owns only same-incarnation ordering and policy-epoch behavior.
 
 use super::*;
 use crate::support::invariant_discovery::{
@@ -173,43 +172,4 @@ fn v16_program_pr334_delayed_matcher_enable_rejects_after_revoke() {
     let protection = verify_matcher_mutation_order_safety([0x34; 32])
         .unwrap_or_else(|error| panic!("PR 334 fixed route failed: {error}"));
     assert!(protection.satisfies_invariant(), "{protection:?}");
-}
-
-#[test]
-fn v16_program_pr325_stale_maintenance_policy_extracts_after_market_recreate() {
-    let reproduction = reproduce_maintenance_policy_generation_replay([0x25; 32])
-        .unwrap_or_else(|error| panic!("PR 325 no longer reproduces: {error}"));
-    assert_eq!(
-        reproduction.blocker,
-        KnownBlocker::MaintenancePolicyGenerationReplay
-    );
-    assert_eq!(
-        reproduction.new_asset_market_id, reproduction.old_asset_market_id,
-        "same-pubkey market recreation resets account-local engine generation state"
-    );
-    assert!(reproduction.live_oi_q > 0);
-    assert_eq!(reproduction.victim_loss, 580);
-    assert_eq!(reproduction.attacker_extraction, 580);
-    assert!(reproduction.replay_cu < 1_400_000);
-    assert!(reproduction.sync_cu < 1_400_000);
-}
-
-#[test]
-fn v16_program_pr326_stale_liquidation_policy_extracts_after_market_recreate() {
-    let reproduction = reproduce_liquidation_policy_generation_replay([0x26; 32])
-        .unwrap_or_else(|error| panic!("PR 326 no longer reproduces: {error}"));
-    assert_eq!(
-        reproduction.blocker,
-        KnownBlocker::LiquidationPolicyGenerationReplay
-    );
-    assert_eq!(
-        reproduction.new_asset_market_id, reproduction.old_asset_market_id,
-        "same-pubkey market recreation resets account-local engine generation state"
-    );
-    assert!(reproduction.live_oi_q > 0);
-    assert_eq!(reproduction.victim_capital_loss, 455);
-    assert_eq!(reproduction.attacker_extraction, 455);
-    assert_eq!(reproduction.insurance_delta, 0);
-    assert!(reproduction.replay_cu < 1_400_000);
-    assert!(reproduction.liquidation_cu < 1_400_000);
 }

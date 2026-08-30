@@ -46,6 +46,7 @@ pub mod constants {
     pub const KIND_PORTFOLIO: u8 = 2;
     pub const KIND_BACKING_DOMAIN_LEDGER: u8 = 3;
     pub const KIND_INSURANCE_LEDGER: u8 = 4;
+    pub const KIND_CLOSED_MARKET: u8 = 5;
 
     pub const HEADER_LEN: usize = 16;
     pub const WRAPPER_CONFIG_LEN: usize = 448;
@@ -173,7 +174,7 @@ pub mod state {
     use crate::{
         constants::{
             ASSET_CONTROL_SEQUENCES_LEN, ASSET_CONTROL_SEQUENCES_OFF, ASSET_ORACLE_PROFILE_LEN,
-            ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN, KIND_BACKING_DOMAIN_LEDGER,
+            ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN, KIND_BACKING_DOMAIN_LEDGER, KIND_CLOSED_MARKET,
             KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC, MARKET_GROUP_LEN,
             MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK,
             ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK, ORACLE_MODE_HYBRID_AFTER_HOURS,
@@ -867,6 +868,14 @@ pub mod state {
     #[inline]
     pub fn is_initialized(data: &[u8]) -> bool {
         data.len() >= HEADER_LEN && read_u64(data, 0).ok() == Some(MAGIC)
+    }
+
+    pub fn write_closed_market_tombstone(data: &mut [u8]) -> Result<(), ProgramError> {
+        if data.len() != HEADER_LEN {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        data.fill(0);
+        write_header(data, KIND_CLOSED_MARKET)
     }
 
     pub const fn backing_domain_ledger_account_len() -> usize {
@@ -2498,11 +2507,11 @@ pub mod state {
         initial_price: u64,
         init_slot: u64,
     ) -> Result<(), ProgramError> {
-        if data.len() < MIN_MARKET_ACCOUNT_LEN {
-            return Err(PercolatorError::InvalidAccountLen.into());
-        }
         if is_initialized(data) {
             return Err(PercolatorError::AlreadyInitialized.into());
+        }
+        if data.len() < MIN_MARKET_ACCOUNT_LEN {
+            return Err(PercolatorError::InvalidAccountLen.into());
         }
         for b in data.iter_mut() {
             *b = 0;
@@ -10934,14 +10943,17 @@ pub mod processor {
             )?;
         }
 
-        for b in market_ai.try_borrow_mut_data()?.iter_mut() {
-            *b = 0;
-        }
+        market_ai.realloc(constants::HEADER_LEN, false)?;
+        state::write_closed_market_tombstone(&mut market_ai.try_borrow_mut_data()?)?;
+        let retained_lamports = Rent::get()?.minimum_balance(constants::HEADER_LEN);
         let market_lamports = market_ai.lamports();
-        **market_ai.lamports.borrow_mut() = 0;
+        let refunded_lamports = market_lamports
+            .checked_sub(retained_lamports)
+            .ok_or(PercolatorError::RentExemptRequired)?;
+        **market_ai.lamports.borrow_mut() = retained_lamports;
         **admin_dest.lamports.borrow_mut() = admin_dest
             .lamports()
-            .checked_add(market_lamports)
+            .checked_add(refunded_lamports)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         Ok(())
     }
