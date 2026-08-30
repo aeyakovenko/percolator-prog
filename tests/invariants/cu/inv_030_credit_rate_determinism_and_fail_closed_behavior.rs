@@ -13,7 +13,9 @@
 //! The generated stateful runner also applies a transition-cause oracle to every public action and
 //! successful crank: formula-input changes advance the source epoch, unchanged inputs preserve the
 //! rate, and a live claim's rate cannot rise without more independently available backing or a
-//! smaller claim bound.
+//! smaller claim bound. The source-complete composition gate binds that oracle to every generated
+//! action, every bounded live/terminal edge, both rate directions, post-claim backing recovery,
+//! claim-reduction recovery, the public route matrices, and INV-088's transition roster.
 //! A separate malformed-state matrix retains an otherwise-valid backing mutation, corrupts each
 //! persisted source-credit relation on both source sides, and requires an instruction error with
 //! exact market, backing-ledger, token, and lamport rollback. This deliberately malformed fixture
@@ -23,9 +25,9 @@
 //! exclusively inside the pinned engine; INV-088 separately inventories every wrapper-to-engine
 //! transition callsite, so this wrapper suite does not duplicate the engine's arithmetic proof.
 //!
-//! Guarantee boundary: this is one non-random whole-route witness for the same
-//! invariant enforced by the stateful generator. Full-width arithmetic remains
-//! covered by engine/Kani and INV-085 arithmetic-differential tests.
+//! Guarantee boundary: full-width arithmetic remains covered by engine/Kani and INV-085
+//! arithmetic-differential tests. Unbounded whole-production-state induction is not claimed by the
+//! finite deployed graph.
 
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{SourceCreditStateV16, BOUND_SCALE, CREDIT_RATE_SCALE};
@@ -193,6 +195,59 @@ fn v16_wrapper_has_no_independent_source_credit_rate_mutation_path() {
     }
 
     crate::assert_certified_engine_pin("INV-030 engine-owned source-credit mutation evidence");
+}
+
+#[test]
+fn v16_program_credit_rate_transition_composition_is_source_complete() {
+    crate::assert_certified_engine_pin("INV-030 credit-rate transition composition");
+
+    let model = include_str!("../../support/fuzz_model.rs");
+    for required in [
+        "fn assert_source_credit_rate_transition(",
+        "assert_source_credit_rate_transition(\n                &format!(\"action {index} {action:?} primary\")",
+        "assert_source_credit_rate_transition(\n                &format!(\"action {index} {action:?} foreign\")",
+        "fn bounded_source_credit_transition_evidence(",
+        "backing_rate_recovery_world_count: 1",
+        "source_credit_backing_supported_increase_count",
+        "source_credit_claim_reduction_increase_count",
+    ] {
+        assert!(
+            model.contains(required),
+            "shared public-transition model lost INV-030 relation {required}",
+        );
+    }
+
+    let bounded =
+        include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs");
+    for required in [
+        "evidence.source_credit_formula_input_change_count != 0",
+        "evidence.source_credit_rate_increase_count != 0",
+        "evidence.source_credit_rate_decrease_count != 0",
+        "evidence.source_credit_backing_supported_increase_count != 0",
+        "evidence.source_credit_claim_reduction_increase_count != 0",
+    ] {
+        assert!(
+            bounded.contains(required),
+            "bounded deployed graph lost INV-030 witness {required}",
+        );
+    }
+
+    let stateful =
+        include_str!("../stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs");
+    for required in [
+        "fn v16_program_liened_backing_expiry_route_matrix_preserves_owner_reduction",
+        "fn v16_program_source_credit_rate_lifecycle_matches_independent_oracle",
+    ] {
+        assert!(
+            stateful.contains(required),
+            "INV-030 public route matrix lost witness {required}",
+        );
+    }
+
+    let transitions = include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transitions.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
 }
 
 #[test]

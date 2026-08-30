@@ -11036,6 +11036,34 @@ struct BoundedSourceCreditNode {
     credit_epoch: u64,
 }
 
+impl BoundedSourceCreditNode {
+    fn formula_inputs(&self) -> [u128; 6] {
+        [
+            self.amounts[0],
+            self.amounts[2],
+            self.amounts[5],
+            self.amounts[7],
+            self.amounts[8],
+            self.amounts[9],
+        ]
+    }
+
+    fn available_backing_num(&self, label: &str, domain: usize) -> Result<u128, String> {
+        let counterparty = self.amounts[2]
+            .checked_sub(self.amounts[5])
+            .ok_or_else(|| {
+                format!("{label} source domain {domain} has excess counterparty liens")
+            })?;
+        let insurance = self.amounts[7]
+            .checked_sub(self.amounts[8])
+            .and_then(|remaining| remaining.checked_sub(self.amounts[9]))
+            .ok_or_else(|| format!("{label} source domain {domain} has excess insurance liens"))?;
+        counterparty
+            .checked_add(insurance)
+            .ok_or_else(|| format!("{label} source domain {domain} backing overflow"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedBackingBucketNode {
     market_id: u64,
@@ -11105,6 +11133,113 @@ fn bounded_claim_state_changed(
         || before.payout_receipts != after.payout_receipts
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BoundedSourceCreditTransitionEvidence {
+    formula_input_change_count: usize,
+    rate_change_count: usize,
+    rate_increase_count: usize,
+    rate_decrease_count: usize,
+    backing_supported_increase_count: usize,
+    claim_reduction_increase_count: usize,
+}
+
+impl BoundedSourceCreditTransitionEvidence {
+    fn merge(&mut self, other: Self) -> Result<(), String> {
+        self.formula_input_change_count = self
+            .formula_input_change_count
+            .checked_add(other.formula_input_change_count)
+            .ok_or("INV-030 formula-input transition count overflow")?;
+        self.rate_change_count = self
+            .rate_change_count
+            .checked_add(other.rate_change_count)
+            .ok_or("INV-030 rate transition count overflow")?;
+        self.rate_increase_count = self
+            .rate_increase_count
+            .checked_add(other.rate_increase_count)
+            .ok_or("INV-030 rate-increase count overflow")?;
+        self.rate_decrease_count = self
+            .rate_decrease_count
+            .checked_add(other.rate_decrease_count)
+            .ok_or("INV-030 rate-decrease count overflow")?;
+        self.backing_supported_increase_count = self
+            .backing_supported_increase_count
+            .checked_add(other.backing_supported_increase_count)
+            .ok_or("INV-030 backing-supported rate-increase count overflow")?;
+        self.claim_reduction_increase_count = self
+            .claim_reduction_increase_count
+            .checked_add(other.claim_reduction_increase_count)
+            .ok_or("INV-030 claim-reduction rate-increase count overflow")?;
+        Ok(())
+    }
+}
+
+fn bounded_source_credit_transition_evidence(
+    label: &str,
+    before: &BoundedReferenceNode,
+    after: &BoundedReferenceNode,
+) -> Result<BoundedSourceCreditTransitionEvidence, String> {
+    if before.source_credit.len() != after.source_credit.len()
+        || before.source_backing_buckets.len() != after.source_backing_buckets.len()
+        || before.source_credit.len() != before.source_backing_buckets.len()
+    {
+        return Err(format!("{label} source-domain cardinality changed"));
+    }
+
+    let mut evidence = BoundedSourceCreditTransitionEvidence::default();
+    for domain in 0..before.source_credit.len() {
+        if before.source_backing_buckets[domain].market_id
+            != after.source_backing_buckets[domain].market_id
+        {
+            continue;
+        }
+        let old = &before.source_credit[domain];
+        let new = &after.source_credit[domain];
+        let inputs_changed = old.formula_inputs() != new.formula_inputs();
+        let rate_changed = old.amounts[10] != new.amounts[10];
+        if !inputs_changed {
+            if rate_changed {
+                return Err(format!(
+                    "{label} source domain {domain} changed rate {} -> {} without a formula-input change",
+                    old.amounts[10], new.amounts[10]
+                ));
+            }
+            continue;
+        }
+
+        evidence.formula_input_change_count += 1;
+        if new.credit_epoch <= old.credit_epoch {
+            return Err(format!(
+                "{label} source domain {domain} changed formula inputs without advancing epoch {} -> {}",
+                old.credit_epoch, new.credit_epoch
+            ));
+        }
+        if !rate_changed {
+            continue;
+        }
+
+        evidence.rate_change_count += 1;
+        if new.amounts[10] < old.amounts[10] {
+            evidence.rate_decrease_count += 1;
+            continue;
+        }
+
+        evidence.rate_increase_count += 1;
+        let old_available = old.available_backing_num(label, domain)?;
+        let new_available = new.available_backing_num(label, domain)?;
+        let backing_increased = new_available > old_available;
+        let claim_reduced = new.amounts[0] < old.amounts[0];
+        if !backing_increased && !claim_reduced && new.amounts[0] != 0 {
+            return Err(format!(
+                "{label} source domain {domain} improved rate {} -> {} without more backing or a smaller claim",
+                old.amounts[10], new.amounts[10]
+            ));
+        }
+        evidence.backing_supported_increase_count += usize::from(backing_increased);
+        evidence.claim_reduction_increase_count += usize::from(claim_reduced);
+    }
+    Ok(evidence)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundedReferenceGraphEvidence {
     pub word_count: usize,
@@ -11120,11 +11255,18 @@ pub struct BoundedReferenceGraphEvidence {
     pub underfunded_terminal_transition_count: usize,
     pub underfunded_terminal_unique_node_count: usize,
     pub underfunded_terminal_unique_edge_count: usize,
+    pub backing_rate_recovery_world_count: usize,
     pub partial_receipt_seed_count: usize,
     pub value_moving_claim_world_count: usize,
     pub expiry_normalization_world_count: usize,
     pub claim_changing_edge_count: usize,
     pub receipt_replacement_count: u64,
+    pub source_credit_formula_input_change_count: usize,
+    pub source_credit_rate_change_count: usize,
+    pub source_credit_rate_increase_count: usize,
+    pub source_credit_rate_decrease_count: usize,
+    pub source_credit_backing_supported_increase_count: usize,
+    pub source_credit_claim_reduction_increase_count: usize,
     pub coverage: Coverage,
 }
 
@@ -11816,10 +11958,12 @@ struct UnderfundedTerminalGraphEvidence {
     transition_count: usize,
     unique_node_count: usize,
     unique_edge_count: usize,
+    backing_rate_recovery_world_count: usize,
     partial_receipt_seed_count: usize,
     value_moving_claim_world_count: usize,
     expiry_normalization_world_count: usize,
     claim_changing_edge_count: usize,
+    source_credit_transitions: BoundedSourceCreditTransitionEvidence,
     coverage: Coverage,
 }
 
@@ -13542,11 +13686,57 @@ fn run_underfunded_terminal_reference_subgraph() -> Result<UnderfundedTerminalGr
         ));
     }
 
+    const RECOVERY_DOMAIN: usize = 1;
+    const RECOVERY_EXPIRY_SLOT: u64 = 12;
+    let mut recovery_runner = build_underfunded_live_reference_prefix(
+        [0x30; 32],
+        false,
+        DEFAULT_UNDERFUNDED_BACKING_PLAN,
+    )?;
+    let recovery_before = recovery_runner.bounded_reference_node()?;
+    let claim_before = recovery_before.source_credit[RECOVERY_DOMAIN].amounts[0];
+    let rate_before = recovery_before.source_credit[RECOVERY_DOMAIN].amounts[10];
+    if claim_before == 0 || rate_before == 0 || rate_before >= CREDIT_RATE_SCALE {
+        return Err(format!(
+            "INV-030 recovery seed is not a live discounted claim: claim={claim_before}, rate={rate_before}"
+        ));
+    }
+    bounded_reference_top_up_backing(
+        &mut recovery_runner,
+        RECOVERY_DOMAIN as u16,
+        99,
+        RECOVERY_EXPIRY_SLOT,
+        true,
+    )?;
+    let recovery_after = recovery_runner.bounded_reference_node()?;
+    let claim_after = recovery_after.source_credit[RECOVERY_DOMAIN].amounts[0];
+    let rate_after = recovery_after.source_credit[RECOVERY_DOMAIN].amounts[10];
+    if claim_after != claim_before || rate_after <= rate_before {
+        return Err(format!(
+            "INV-030 fresh backing did not improve the unchanged discounted claim: claim {claim_before}->{claim_after}, rate {rate_before}->{rate_after}"
+        ));
+    }
+    nodes.insert(recovery_before.clone());
+    nodes.insert(recovery_after.clone());
+    edges.insert((recovery_before, u8::MAX, recovery_after));
+    transition_count += 1;
+    coverage.merge(recovery_runner.coverage);
+
+    let mut source_credit_transitions = BoundedSourceCreditTransitionEvidence::default();
+    for (before, action, after) in &edges {
+        source_credit_transitions.merge(bounded_source_credit_transition_evidence(
+            &format!("INV-030 underfunded terminal edge {action}"),
+            before,
+            after,
+        )?)?;
+    }
+
     Ok(UnderfundedTerminalGraphEvidence {
         world_count,
         transition_count,
         unique_node_count: nodes.len(),
         unique_edge_count: edges.len(),
+        backing_rate_recovery_world_count: 1,
         partial_receipt_seed_count,
         value_moving_claim_world_count,
         expiry_normalization_world_count,
@@ -13554,6 +13744,7 @@ fn run_underfunded_terminal_reference_subgraph() -> Result<UnderfundedTerminalGr
             .iter()
             .filter(|(before, _, after)| bounded_claim_state_changed(before, after))
             .count(),
+        source_credit_transitions,
         coverage,
     })
 }
@@ -13714,6 +13905,14 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
         .ok_or("INV-029 claim-changing edge count overflow")?;
     graph.coverage.merge(underfunded.coverage);
     let receipt_replacement_count = graph.coverage.resolved_receipt_replacements;
+    let mut source_credit_transitions = underfunded.source_credit_transitions;
+    for (before, action, after) in &graph.edges {
+        source_credit_transitions.merge(bounded_source_credit_transition_evidence(
+            &format!("INV-030 bounded public edge {action}"),
+            before,
+            after,
+        )?)?;
+    }
 
     Ok(BoundedReferenceGraphEvidence {
         word_count,
@@ -13729,11 +13928,21 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
         underfunded_terminal_transition_count: underfunded.transition_count,
         underfunded_terminal_unique_node_count: underfunded.unique_node_count,
         underfunded_terminal_unique_edge_count: underfunded.unique_edge_count,
+        backing_rate_recovery_world_count: underfunded.backing_rate_recovery_world_count,
         partial_receipt_seed_count: underfunded.partial_receipt_seed_count,
         value_moving_claim_world_count: underfunded.value_moving_claim_world_count,
         expiry_normalization_world_count: underfunded.expiry_normalization_world_count,
         claim_changing_edge_count,
         receipt_replacement_count,
+        source_credit_formula_input_change_count: source_credit_transitions
+            .formula_input_change_count,
+        source_credit_rate_change_count: source_credit_transitions.rate_change_count,
+        source_credit_rate_increase_count: source_credit_transitions.rate_increase_count,
+        source_credit_rate_decrease_count: source_credit_transitions.rate_decrease_count,
+        source_credit_backing_supported_increase_count: source_credit_transitions
+            .backing_supported_increase_count,
+        source_credit_claim_reduction_increase_count: source_credit_transitions
+            .claim_reduction_increase_count,
         coverage: graph.coverage,
     })
 }

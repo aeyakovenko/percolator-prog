@@ -26,9 +26,10 @@
 //! domain credit epoch; unchanged inputs cannot change the rate; and a nonzero-claim rate can rise
 //! only when independently available backing rises or the claim bound falls.
 //!
-//! Guarantee boundary: this covers deployed serialization and the generated lifecycle. The engine
-//! owns the full-width pure arithmetic proof; broader reachability still requires the charter's
-//! exhaustive model and all public source-credit mutation routes.
+//! The shared bounded deployed-state graph additionally checks this transition relation on every
+//! live and terminal edge, requires both rate directions, and includes separate public witnesses
+//! for recovery through new backing and claim reduction. The engine owns the full-width pure
+//! arithmetic proof. Unbounded whole-production-state induction remains outside this finite graph.
 
 use super::*;
 use crate::support::{

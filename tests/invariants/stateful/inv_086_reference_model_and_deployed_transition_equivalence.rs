@@ -138,6 +138,10 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
         evidence.expiry_normalization_world_count, 8,
         "exact- and post-expiry worlds must normalize backing on a public edge"
     );
+    assert_eq!(
+        evidence.backing_rate_recovery_world_count, 1,
+        "bounded graph must include a post-claim backing recovery edge"
+    );
     assert!(
         evidence.claim_changing_edge_count != 0,
         "bounded public words and terminal schedules must traverse real exact-claim changes: {evidence:?}"
@@ -145,6 +149,21 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
     assert!(
         evidence.receipt_replacement_count >= evidence.partial_receipt_seed_count as u64,
         "every partial-receipt seed must replace an unreceipted claim bound exactly: {evidence:?}"
+    );
+    assert!(
+        evidence.source_credit_formula_input_change_count != 0,
+        "bounded public edges must exercise source-credit formula-input changes: {evidence:?}"
+    );
+    assert!(
+        evidence.source_credit_rate_change_count != 0
+            && evidence.source_credit_rate_increase_count != 0
+            && evidence.source_credit_rate_decrease_count != 0,
+        "bounded public edges must exercise both improving and degrading credit rates: {evidence:?}"
+    );
+    assert!(
+        evidence.source_credit_backing_supported_increase_count != 0
+            && evidence.source_credit_claim_reduction_increase_count != 0,
+        "bounded rate improvements must cover both backing additions and claim reductions: {evidence:?}"
     );
     assert_ne!(
         evidence.coverage.loaded_program_hash, [0; 32],
