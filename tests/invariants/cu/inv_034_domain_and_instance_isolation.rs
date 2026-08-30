@@ -7,9 +7,13 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: the source-locked role roster covers all 49 current public variants. Its 20
+//! single-instance-anchor rows have no type-correct foreign role, while all 29 mixed-role rows bind
+//! every current instance-owned account to a mutating same-instance control and exact-rollback
+//! foreign-instance rejection. The public multi-asset loss campaign and pinned engine contracts
+//! own value/liability domain isolation beyond account substitution. A new public variant,
+//! instance-bound role, cross-domain value transition, or engine pin reopens this closure; this is
+//! not an exhaustive theorem over arbitrary unbounded instruction sequences.
 
 use super::*;
 
