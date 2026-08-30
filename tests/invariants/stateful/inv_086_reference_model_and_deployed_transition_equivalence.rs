@@ -39,6 +39,12 @@
 //! `close_id`, and only then may the claimant receive a genuinely partial payout receipt. The
 //! same public state must then produce a value-moving top-up and converge every portfolio to its
 //! economic terminal predicate.
+//! The ADL reduction-clamp matrix creates a scaled live leg through every trade transport, submits
+//! owner reductions at `effective - 1`, `effective`, `effective + 1`, and retained raw basis, and
+//! derives the permitted reduction from authenticated pre-state. Both side OI counters and the
+//! leg's independently recomputed post-reduction effective quantity must match that clamp before
+//! both terminal claimant orders return exactly the funded value. This covers accepted overshoot
+//! as a liveness requirement: a stale or raw-basis work request is safely clamped, not rejected.
 //! This is finite reachability evidence, not equivalence over unbounded sequences.
 
 use super::*;
@@ -206,6 +212,41 @@ fn v16_program_rebalance_then_terminal_exit_preserves_position_attribution() {
         coverage.user_positions_closed, 0,
         "the resulting asymmetric position set must still reach public terminal exits"
     );
+}
+
+#[test]
+fn v16_program_adl_reduction_clamp_matrix_matches_public_terminal_routes() {
+    let discoveries =
+        verify_adl_reduction_clamp_matrix([0x86; 32]).expect("INV-086 ADL reduction clamp matrix");
+    assert_eq!(
+        discoveries.len(),
+        DiscoveryTradeRoute::ALL.len()
+            * AdlReductionBoundary::ALL.len()
+            * ResolvedAdlCloseOrder::ALL.len(),
+        "must cross every trade route, reduction boundary, and terminal claimant order"
+    );
+    for discovery in discoveries {
+        assert!(
+            discovery.satisfies_invariant(),
+            "ADL reduction clamp composition failed: {discovery:?}"
+        );
+        assert_eq!(
+            discovery.request_overshot_effective,
+            matches!(
+                discovery.boundary,
+                AdlReductionBoundary::AboveEffective | AdlReductionBoundary::RawBasis
+            ),
+            "only the two overshoot rows may exceed authenticated effective exposure: {discovery:?}"
+        );
+        assert_eq!(
+            discovery.expected_effective_after_q,
+            u128::from(matches!(
+                discovery.boundary,
+                AdlReductionBoundary::BelowEffective
+            )),
+            "only effective-minus-one must retain one live quantity atom: {discovery:?}"
+        );
+    }
 }
 
 proptest! {

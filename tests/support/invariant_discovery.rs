@@ -315,6 +315,14 @@ pub enum ResolvedAdlCloseOrder {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AdlReductionBoundary {
+    BelowEffective,
+    ExactEffective,
+    AboveEffective,
+    RawBasis,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StaleCohortRoute {
     NoCpi,
     BatchNoCpi,
@@ -342,6 +350,24 @@ impl ResolvedAdlCloseOrder {
         match self {
             Self::WinnerThenLoser => 0,
             Self::LoserThenWinner => 1,
+        }
+    }
+}
+
+impl AdlReductionBoundary {
+    pub const ALL: [Self; 4] = [
+        Self::BelowEffective,
+        Self::ExactEffective,
+        Self::AboveEffective,
+        Self::RawBasis,
+    ];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::BelowEffective => 0,
+            Self::ExactEffective => 1,
+            Self::AboveEffective => 2,
+            Self::RawBasis => 3,
         }
     }
 }
@@ -1088,6 +1114,31 @@ pub struct ResolvedAdlCloseDiscovery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdlReductionClampDiscovery {
+    pub route: DiscoveryTradeRoute,
+    pub boundary: AdlReductionBoundary,
+    pub close_order: ResolvedAdlCloseOrder,
+    pub raw_basis_before_q: u128,
+    pub effective_before_q: u128,
+    pub requested_reduce_q: u128,
+    pub expected_reduce_q: u128,
+    pub observed_long_reduce_q: u128,
+    pub observed_short_reduce_q: u128,
+    pub expected_effective_after_q: u128,
+    pub observed_effective_after_q: u128,
+    pub request_overshot_effective: bool,
+    pub first_reduction_moved_no_tokens: bool,
+    pub users_terminal: bool,
+    pub portfolios_closed: bool,
+    pub winner_external_payout: u64,
+    pub loser_external_payout: u64,
+    pub winner_funded_value: u128,
+    pub loser_funded_value: u128,
+    pub canonical_vault_after: u128,
+    pub token_supply_conserved: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StaleCohortNovationCertification {
     pub route: StaleCohortRoute,
     pub pre_stale_long_count: u64,
@@ -1135,6 +1186,23 @@ impl ResolvedAdlCloseDiscovery {
             && self.close_steps <= 16
             && self.every_close_step_mutated
             && self.exact_rejection_rollback
+            && self.users_terminal
+            && self.portfolios_closed
+            && u128::from(self.winner_external_payout) == self.winner_funded_value
+            && u128::from(self.loser_external_payout) == self.loser_funded_value
+            && self.canonical_vault_after == 0
+            && self.token_supply_conserved
+    }
+}
+
+impl AdlReductionClampDiscovery {
+    pub fn satisfies_invariant(&self) -> bool {
+        self.raw_basis_before_q > self.effective_before_q
+            && self.expected_reduce_q != 0
+            && self.observed_long_reduce_q == self.expected_reduce_q
+            && self.observed_short_reduce_q == self.expected_reduce_q
+            && self.observed_effective_after_q == self.expected_effective_after_q
+            && self.first_reduction_moved_no_tokens
             && self.users_terminal
             && self.portfolios_closed
             && u128::from(self.winner_external_payout) == self.winner_funded_value
@@ -16346,6 +16414,206 @@ pub fn verify_resolved_adl_close_orders(
         .into_iter()
         .map(|order| verify_one_resolved_adl_close_order(seed, order))
         .collect()
+}
+
+fn verify_one_adl_reduction_clamp(
+    mut seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+    boundary: AdlReductionBoundary,
+    close_order: ResolvedAdlCloseOrder,
+) -> Result<AdlReductionClampDiscovery, String> {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const OPEN_MARK: u64 = 100;
+    const BANKRUPTCY_MARK: u64 = 500;
+    const WINNER_DEPOSIT: u128 = 1_000;
+    const LOSER_DEPOSIT: u128 = 900;
+    const TRADE_SIZE_Q: i128 = (2 * POS_SCALE) as i128;
+
+    seed[0] ^= 0x86;
+    seed[1] ^= route.discriminator();
+    seed[2] ^= boundary.discriminator();
+    seed[3] ^= close_order.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_MARK,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [WINNER_DEPOSIT, LOSER_DEPOSIT, 0, 0, 0],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    execute_discovery_trade_route(&mut env, route, WINNER, LOSER, 0, TRADE_SIZE_Q, OPEN_MARK)
+        .map_err(|error| format!("open ADL clamp pair through {route:?}: {error}"))?;
+    env.warp_to_slot(6);
+    env.push_auth_mark(0, 6, BANKRUPTCY_MARK)
+        .map_err(|error| format!("publish ADL clamp bankruptcy mark: {error}"))?;
+    crank_asset_progress(&mut env, LOSER, 6, 0, 16)
+        .map_err(|error| format!("ADL clamp loser progress: {error}"))?;
+    crank_asset_progress(&mut env, WINNER, 6, 0, 16)
+        .map_err(|error| format!("ADL clamp winner progress: {error}"))?;
+
+    let (_, before_group) = env.primary_market_state();
+    let winner_before = env.primary_portfolio(WINNER);
+    let winner_leg_before = winner_before
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .ok_or_else(|| "ADL clamp winner has no active leg".to_string())?;
+    let raw_basis_before_q = winner_leg_before.basis_pos_q.unsigned_abs();
+    let effective_before_q = super::reference_math::mul_div_ceil(
+        raw_basis_before_q,
+        before_group.assets[0].a_long,
+        winner_leg_before.a_basis,
+    )?;
+    if before_group.assets[0].a_long >= ADL_ONE
+        || raw_basis_before_q <= effective_before_q
+        || effective_before_q <= 1
+        || before_group.assets[0].oi_eff_long_q != effective_before_q
+        || before_group.assets[0].oi_eff_short_q != effective_before_q
+    {
+        return Err(format!(
+            "ADL clamp setup did not create one balanced scaled winner: a={}, basis={raw_basis_before_q}, effective={effective_before_q}, long_oi={}, short_oi={}",
+            before_group.assets[0].a_long,
+            before_group.assets[0].oi_eff_long_q,
+            before_group.assets[0].oi_eff_short_q,
+        ));
+    }
+    let requested_reduce_q = match boundary {
+        AdlReductionBoundary::BelowEffective => effective_before_q - 1,
+        AdlReductionBoundary::ExactEffective => effective_before_q,
+        AdlReductionBoundary::AboveEffective => effective_before_q
+            .checked_add(1)
+            .ok_or_else(|| "ADL clamp above-effective request overflow".to_string())?,
+        AdlReductionBoundary::RawBasis => raw_basis_before_q,
+    };
+    let expected_reduce_q = requested_reduce_q
+        .min(effective_before_q)
+        .min(before_group.assets[0].oi_eff_long_q)
+        .min(before_group.assets[0].oi_eff_short_q);
+    let expected_effective_after_q = effective_before_q
+        .checked_sub(expected_reduce_q)
+        .ok_or_else(|| "ADL clamp expected reduction underflow".to_string())?;
+    let tokens_before_reduction = env.all_token_account_data();
+    env.rebalance_reduce(WINNER, 0, requested_reduce_q)
+        .map_err(|error| format!("ADL clamp owner reduction {boundary:?}: {error}"))?;
+    let first_reduction_moved_no_tokens = env.all_token_account_data() == tokens_before_reduction;
+    let (_, after_group) = env.primary_market_state();
+    let observed_long_reduce_q = before_group.assets[0]
+        .oi_eff_long_q
+        .checked_sub(after_group.assets[0].oi_eff_long_q)
+        .ok_or_else(|| "ADL clamp increased long OI".to_string())?;
+    let observed_short_reduce_q = before_group.assets[0]
+        .oi_eff_short_q
+        .checked_sub(after_group.assets[0].oi_eff_short_q)
+        .ok_or_else(|| "ADL clamp increased short OI".to_string())?;
+    let observed_effective_after_q = env
+        .primary_portfolio(WINNER)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .map(|leg| {
+            super::reference_math::mul_div_ceil(
+                leg.basis_pos_q.unsigned_abs(),
+                after_group.assets[0].a_long,
+                leg.a_basis,
+            )
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if observed_long_reduce_q != expected_reduce_q
+        || observed_short_reduce_q != expected_reduce_q
+        || observed_effective_after_q != expected_effective_after_q
+    {
+        return Err(format!(
+            "ADL clamp diverged for {route:?}/{boundary:?}: requested={requested_reduce_q}, expected_reduce={expected_reduce_q}, observed=({observed_long_reduce_q},{observed_short_reduce_q}), effective_after={observed_effective_after_q}/{expected_effective_after_q}"
+        ));
+    }
+
+    if observed_effective_after_q != 0 {
+        env.rebalance_reduce(WINNER, 0, u128::MAX)
+            .map_err(|error| format!("clear ADL clamp remainder: {error}"))?;
+    }
+    env.resolve_market()
+        .map_err(|error| format!("resolve ADL clamp market: {error}"))?;
+    let winner_at_resolve = env.primary_portfolio(WINNER);
+    let loser_at_resolve = env.primary_portfolio(LOSER);
+    let winner_funded_value = winner_at_resolve
+        .capital
+        .get()
+        .checked_add(winner_at_resolve.pnl.get().max(0) as u128)
+        .ok_or_else(|| "ADL clamp winner funded-value overflow".to_string())?;
+    let loser_funded_value = loser_at_resolve
+        .capital
+        .get()
+        .checked_add(loser_at_resolve.pnl.get().max(0) as u128)
+        .ok_or_else(|| "ADL clamp loser funded-value overflow".to_string())?;
+    let payout_order = match close_order {
+        ResolvedAdlCloseOrder::WinnerThenLoser => [WINNER, LOSER],
+        ResolvedAdlCloseOrder::LoserThenWinner => [LOSER, WINNER],
+    };
+    let ordered_payouts = drain_resolved_discovery_actors(&mut env, payout_order)?;
+    let (winner_external_payout, loser_external_payout) = match close_order {
+        ResolvedAdlCloseOrder::WinnerThenLoser => (ordered_payouts[0], ordered_payouts[1]),
+        ResolvedAdlCloseOrder::LoserThenWinner => (ordered_payouts[1], ordered_payouts[0]),
+    };
+    let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(WINNER))?
+        && discovery_portfolio_is_terminal(&env.primary_portfolio(LOSER))?;
+    let portfolios_closed =
+        env.close_primary_portfolio(WINNER).is_ok() && env.close_primary_portfolio(LOSER).is_ok();
+    let canonical_vault_after = u128::from(env.token_amount(env.vault));
+
+    Ok(AdlReductionClampDiscovery {
+        route,
+        boundary,
+        close_order,
+        raw_basis_before_q,
+        effective_before_q,
+        requested_reduce_q,
+        expected_reduce_q,
+        observed_long_reduce_q,
+        observed_short_reduce_q,
+        expected_effective_after_q,
+        observed_effective_after_q,
+        request_overshot_effective: requested_reduce_q > effective_before_q,
+        first_reduction_moved_no_tokens,
+        users_terminal,
+        portfolios_closed,
+        winner_external_payout: u64::try_from(winner_external_payout)
+            .map_err(|_| "ADL clamp winner payout exceeds SPL width")?,
+        loser_external_payout: u64::try_from(loser_external_payout)
+            .map_err(|_| "ADL clamp loser payout exceeds SPL width")?,
+        winner_funded_value,
+        loser_funded_value,
+        canonical_vault_after,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+    })
+}
+
+pub fn verify_adl_reduction_clamp_matrix(
+    seed: [u8; 32],
+) -> Result<Vec<AdlReductionClampDiscovery>, String> {
+    let mut discoveries = Vec::new();
+    for route in DiscoveryTradeRoute::ALL {
+        for boundary in AdlReductionBoundary::ALL {
+            for close_order in ResolvedAdlCloseOrder::ALL {
+                discoveries.push(verify_one_adl_reduction_clamp(
+                    seed,
+                    route,
+                    boundary,
+                    close_order,
+                )?);
+            }
+        }
+    }
+    Ok(discoveries)
 }
 
 const STALE_COHORT_WINNER: usize = 0;
