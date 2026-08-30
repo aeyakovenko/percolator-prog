@@ -6,9 +6,13 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: reachable successful create/grow/impair/consume/release
+//! classes are independently censused after public transitions across all trade
+//! routes, source sides, Resolved, Recovery, expiry, and conversion retry. Every
+//! engine error propagates into SVM rollback under INV-080. The insurance-backed
+//! lifecycle is not exposed by this wrapper and is pin-bound to INV-033's engine
+//! contracts. A new transition, public insurance reservation, engine pin, or
+//! missing lifecycle witness reopens this current-surface closure.
 
 use super::*;
 
@@ -163,4 +167,43 @@ fn v16_attack_force_close_source_backed_accounts_does_not_grow_source_liens() {
         &after_group,
         "source-backed force-close no fee bypass",
     );
+}
+
+#[test]
+fn v16_program_counterparty_lien_lifecycle_composition_is_source_complete() {
+    crate::assert_certified_engine_pin("INV-032 lien-lifecycle composition");
+
+    let lifecycle_source =
+        include_str!("../stateful/inv_026_reservation_and_encumbrance_conservation.rs");
+    assert!(lifecycle_source.contains(
+        "fn v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes"
+    ));
+    let impairment_source =
+        include_str!("../stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs");
+    assert!(impairment_source
+        .contains("fn v16_program_liened_backing_expiry_route_matrix_preserves_owner_reduction"));
+    let expiry_source = include_str!("inv_028_source_domain_realizability_cap.rs");
+    assert!(expiry_source
+        .contains("fn v16_program_expired_source_lien_route_matrix_preserves_bounded_owner_exit"));
+    assert!(expiry_source
+        .contains("fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress"));
+    let retry_source =
+        include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
+    assert!(retry_source
+        .contains("fn v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing"));
+
+    let insurance_source = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
+    assert!(insurance_source.contains(
+        "fn v16_program_public_source_lien_classification_never_double_counts_insurance"
+    ));
+    let rollback_source = include_str!("inv_080_error_propagation_and_exact_rollback.rs");
+    assert!(rollback_source
+        .contains("fn v16_program_explicit_engine_error_dispositions_are_source_complete"));
+    assert!(rollback_source
+        .contains("fn v16_program_dispatch_and_entrypoints_preserve_every_handler_error"));
+    let transition_source =
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transition_source.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
 }

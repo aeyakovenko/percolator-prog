@@ -5,6 +5,13 @@
 //! time. These public-route LiteSVM regressions exercise source backing,
 //! insurance, dual-mint rail, and PnL conversion paths to prove retrying or
 //! reclassifying the same atom cannot create a second spend.
+//!
+//! The composition census at the end closes the current wrapper surface without
+//! duplicating engine internals. INV-026/031 own every reachable successful
+//! counterparty-lien class, INV-024/025 own value and stock, INV-080 owns complete
+//! error propagation into SVM rollback, INV-033 owns public unreachability plus
+//! pinned engine proofs for insurance-backed liens, and INV-088 reopens on any
+//! new wrapper-to-engine transition.
 
 use super::*;
 
@@ -409,4 +416,58 @@ fn v16_program_dual_mint_terminal_insurance_no_double_withdraw() {
         secondary_dest_before,
         "rejected terminal double-withdraw pays no additional secondary tokens"
     );
+}
+
+#[test]
+fn v16_program_single_use_lifecycle_composition_is_source_complete() {
+    crate::assert_certified_engine_pin("INV-031 single-use composition");
+
+    let public_source =
+        include_str!("../public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
+    assert!(public_source.contains("fn v16_program_cross_domain_backing_is_consumed_once"));
+
+    let stateful_source =
+        include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
+    for witness in [
+        "v16_program_live_source_lien_route_pairs_preserve_single_backing_ownership",
+        "v16_program_two_accounts_cannot_reserve_the_same_source_backing_atoms",
+        "v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing",
+    ] {
+        assert!(
+            stateful_source.contains(&format!("fn {witness}")),
+            "missing INV-031 public ownership witness {witness}",
+        );
+    }
+
+    let lifecycle_source =
+        include_str!("../stateful/inv_026_reservation_and_encumbrance_conservation.rs");
+    assert!(lifecycle_source.contains(
+        "fn v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes"
+    ));
+    let insurance_source = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
+    assert!(insurance_source.contains(
+        "fn v16_program_public_source_lien_classification_never_double_counts_insurance"
+    ));
+    let rollback_source = include_str!("inv_080_error_propagation_and_exact_rollback.rs");
+    assert!(rollback_source
+        .contains("fn v16_program_explicit_engine_error_dispositions_are_source_complete"));
+    assert!(rollback_source
+        .contains("fn v16_program_dispatch_and_entrypoints_preserve_every_handler_error"));
+    let transition_source =
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transition_source.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
+
+    let value_proof = include_str!("../kani/inv_024_attributed_quote_value_conservation.rs");
+    assert!(
+        value_proof.contains("fn kani_inv024_engine_flow_validator_equals_wrapper_value_equation")
+    );
+    let stock_proof = include_str!("../kani/inv_025_exact_stock_reconciliation.rs");
+    assert!(
+        stock_proof.contains("fn kani_inv025_engine_partition_composes_with_wrapper_spl_custody")
+    );
+    let residual_source = include_str!("../stateful/inv_037_exact_residual_partition.rs");
+    assert!(residual_source
+        .contains("fn inv037_public_cure_preserves_exact_partition_across_routes_and_sides"));
 }
