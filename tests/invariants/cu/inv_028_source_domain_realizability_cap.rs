@@ -30,9 +30,12 @@
 //! provider label to retire without consuming a sibling label or an insurance-backed reserve; and
 //! INV-073 requires every funded portfolio in the public lifecycle to reach terminal disposition.
 //!
-//! Guarantee boundary: the wrapper-supported sparse source-domain shape is 2 *
-//! WRAPPER_MAX_PORTFOLIO_ASSETS. Risk-reducing exits remain available at that shape; additional
-//! risk on an unreserved asset is not an advertised public liveness shape.
+//! Guarantee boundary: the shared public-state oracle independently computes usable positive
+//! credit and available backing for every domain after every generated transition. A composition
+//! gate binds that oracle to the maximum 28-domain conversion, exact counterparty-lien lifecycle,
+//! the wrapper's complete engine-transition roster, and the source-locked absence of an
+//! insurance-reservation route. A new transition, source-credit field, insurance-reservation
+//! route, maximum shape, or engine pin reopens this current-surface closure.
 
 use super::*;
 
@@ -1487,4 +1490,44 @@ fn v16_bpf_trade_paths_respect_source_credit_watermark_permutations() {
             run_source_credit_watermark_trade_case(path, direction);
         }
     }
+}
+
+#[test]
+fn v16_program_source_realizability_cap_composition_is_source_complete() {
+    crate::assert_certified_engine_pin("INV-028 realizability-cap composition");
+
+    let model = include_str!("../../support/fuzz_model.rs");
+    for required in [
+        "let usable_positive_credit_num = super::reference_math::mul_div_floor(",
+        "if usable_positive_credit_num > available",
+        "assert_source_credit_rates(\"primary\", &primary)?",
+        "assert_source_credit_rates(\"foreign\", &foreign)?",
+        "assert_public_encumbrance_census(\"stateful post-transition\", &self.env)?",
+    ] {
+        assert!(
+            model.contains(required),
+            "shared public-transition oracle lost INV-028 relation {required}",
+        );
+    }
+
+    let max_shape = include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs");
+    assert!(max_shape.contains("fn v16_program_max_source_conversion_and_owner_exit_are_bounded"));
+    assert!(
+        max_shape.contains("fn v16_program_sequential_all_source_lien_mutation_shape_is_bounded")
+    );
+
+    let lifecycle = include_str!("inv_032_exact_counterparty_lien_lifecycle.rs");
+    assert!(lifecycle
+        .contains("fn v16_program_counterparty_lien_lifecycle_composition_is_source_complete"));
+    let insurance = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
+    assert!(insurance.contains(
+        "fn v16_program_public_source_lien_classification_never_double_counts_insurance"
+    ));
+
+    let transitions = include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transitions.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
+    let cycles = include_str!("../stateful/inv_028_source_domain_realizability_cap.rs");
+    assert!(cycles.contains("fn v16_program_reciprocal_cross_asset_cycle_cannot_mint_credit"));
 }

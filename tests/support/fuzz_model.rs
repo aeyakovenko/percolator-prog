@@ -1730,6 +1730,17 @@ pub(crate) fn assert_source_credit_rates(
                 source.credit_rate_num, source.positive_claim_bound_num
             ));
         }
+        let usable_positive_credit_num = super::reference_math::mul_div_floor(
+            source.positive_claim_bound_num,
+            source.credit_rate_num,
+            CREDIT_RATE_SCALE,
+        )?;
+        if usable_positive_credit_num > available {
+            return Err(format!(
+                "{label} source domain {domain} exposes usable positive credit \
+                 {usable_positive_credit_num} above independently available backing {available}"
+            ));
+        }
     }
     Ok(())
 }

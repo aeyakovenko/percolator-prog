@@ -663,7 +663,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         assert!(
             include_str!("../README.md").lines().any(|line| {
                 line.starts_with(&format!("| INV-{invariant:03} |"))
-                    && line.contains("| Independent")
+                    && line
+                        .split('|')
+                        .nth(2)
+                        .is_some_and(|methods| methods.contains("Independent"))
             }),
             "INV-{invariant:03} has discovery metadata but its coverage row is not Independent"
         );
