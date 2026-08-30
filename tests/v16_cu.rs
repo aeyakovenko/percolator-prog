@@ -8645,6 +8645,9 @@ mod inv_037_exact_residual_partition;
 #[path = "invariants/cu/inv_038_rounding_and_ratio_conservation.rs"]
 mod inv_038_rounding_and_ratio_conservation;
 
+#[path = "invariants/cu/inv_039_pending_loss_obligation_durability.rs"]
+mod inv_039_pending_loss_obligation_durability;
+
 #[path = "invariants/cu/inv_040_no_fee_seniority.rs"]
 mod inv_040_no_fee_seniority;
 

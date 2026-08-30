@@ -4,7 +4,6 @@
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): recovery and terminal-exit
 //! matrices (`v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_progress`,
-//! `v16_program_recovery_forfeit_orders_preserve_loss_and_terminal_exit`,
 //! `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`,
 //! `v16_program_fragmented_recovery_pair_matrix_clears_every_fragment`,
 //! `v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit`,
@@ -17,12 +16,13 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! The Recovery-order matrix reaches the same shutdown state entirely through public instructions,
-//! executes both winner-first and loser-first forfeiture schedules, and proves that zero-basis loss
-//! weight remains durable until its counterparty settles. Both orders must produce the same 8,424
-//! atom social loss, payouts, provider loss partition, bounded continuation, and terminal exits.
-//! This is shared whole-route evidence for INV-039 (pending-loss durability), INV-041
-//! (caller-order independence), and INV-073 (no permanent user lock).
+//! INV-039 owns `v16_program_pending_obligation_blocks_close_then_releases`, which invokes the
+//! shared Recovery-order verifier below. It reaches the same shutdown state entirely through
+//! public instructions, executes both winner-first and loser-first forfeiture schedules, and proves
+//! that zero-basis loss weight remains durable until its counterparty settles. Both orders produce
+//! the same 8,424-atom social loss, payouts, provider loss partition, bounded continuation, and
+//! terminal exits. This remains cross-invariant evidence for INV-041 and INV-073 without running a
+//! duplicate expensive lifecycle.
 //!
 //! The fractional-carry matrix forks from the same publicly reached state and proves both the
 //! owner-signed reduction and bilateral trade routes clear the leg, normalize the carry, remain
@@ -432,6 +432,34 @@ fn drain_recovery_pending_obligation(
     panic!("{label}: retained obligation did not clear in bounded public cranks");
 }
 
+fn assert_pending_obligation_blocks_close(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    label: &str,
+) {
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let close = env.send(
+        env.close_portfolio_ix(portfolio),
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[owner],
+    );
+    assert!(
+        close.is_err(),
+        "{label}: a retained obligation must block close"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+}
+
 fn run_recovery_forfeit_order(winner_first: bool) -> RecoveryForfeitOrderOutcome {
     const PRICE: u64 = 1_000_000;
     const ASSET: u16 = 1;
@@ -557,6 +585,7 @@ fn run_recovery_forfeit_order(winner_first: bool) -> RecoveryForfeitOrderOutcome
             );
         }
     }
+    assert_pending_obligation_blocks_close(&mut env, first_owner, first, label);
 
     drive_recovery_owner_to_pending_or_detached(&mut env, second_owner, second, ASSET, label);
     assert!(
@@ -679,8 +708,7 @@ fn run_recovery_forfeit_order(winner_first: bool) -> RecoveryForfeitOrderOutcome
     }
 }
 
-#[test]
-fn v16_program_recovery_forfeit_orders_preserve_loss_and_terminal_exit() {
+pub(super) fn verify_recovery_forfeit_orders_preserve_loss_and_terminal_exit() {
     let winner_first = run_recovery_forfeit_order(true);
     let loser_first = run_recovery_forfeit_order(false);
 

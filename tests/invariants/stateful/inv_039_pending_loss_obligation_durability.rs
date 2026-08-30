@@ -20,6 +20,12 @@
 //! `v16_program_shutdown_commit_ordering_preserves_committed_funding` applies the same ordering
 //! oracle to asset shutdown while constraining the effective price to remain unchanged. Any payout
 //! difference is therefore a committed funding transfer erased by the lifecycle transition.
+//! `v16_program_partial_liquidation_cannot_erase_pending_funding` starts a short exactly at its
+//! maintenance boundary, creates a zero-price-move nonzero funding checkpoint, and compares
+//! settle-then-liquidate with direct automatic-crank dispatch. Both schedules must perform a
+//! strict partial liquidation from byte-identical fixtures, book the same payer/receiver transfer,
+//! terminate every funded user, and produce identical destination-token payouts under the public
+//! trace oracle.
 //! INV-027 owns the stale-cohort novation guard because its economic obligation is protection of
 //! a fresh entrant's principal. This file retains the independent pending-obligation and
 //! accrual-ordering matrices that lead to that broader seniority property.
@@ -29,10 +35,16 @@
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: the prospective-accrual, exposure-removal, asset-shutdown, and
-//! terminal-resolve matrices are fixed-pin certification. INV-027 now certifies stale-cohort
-//! rejection, exact rollback, finite settlement, and owner-reduction liveness on the fixed pin.
+//! terminal-resolve matrices are fixed-pin certification. INV-027 certifies stale-cohort rejection,
+//! exact rollback, finite settlement, and owner-reduction liveness. INV-039 composes these public
+//! traces with the pinned engine's retain/release/clear contracts, reset blocker proof, and INV-088's
+//! source-complete wrapper transition roster. A new position-removal route, obligation field writer,
+//! reset gate, layout, or engine pin reopens certification.
 
 use super::*;
+use crate::support::{
+    invariant_discovery::discover_partial_liquidation_accrual_ordering, v16_svm::TX_CU_LIMIT,
+};
 
 #[test]
 fn v16_host_market_roundtrip_preserves_funding_mark_checkpoint() {
@@ -61,6 +73,45 @@ fn v16_host_market_roundtrip_preserves_funding_mark_checkpoint() {
         after.funding_mark_pending_slot,
         profile.funding_mark_pending_slot
     );
+}
+
+#[test]
+fn v16_program_partial_liquidation_cannot_erase_pending_funding() {
+    let discovery = discover_partial_liquidation_accrual_ordering([0x39; 32])
+        .unwrap_or_else(|error| panic!("partial-liquidation accrual ordering failed: {error}"));
+    assert_eq!(discovery.control_paid, 200, "{discovery:?}");
+    assert_eq!(discovery.control_paid, discovery.control_received);
+    assert_eq!(discovery.reordered_paid, discovery.control_paid);
+    assert_eq!(discovery.reordered_received, discovery.control_received);
+    assert!(
+        discovery.control_effective_oi_q < discovery.initial_effective_oi_q,
+        "{discovery:?}"
+    );
+    assert!(
+        discovery.reordered_effective_oi_q < discovery.initial_effective_oi_q,
+        "{discovery:?}"
+    );
+    assert_ne!(discovery.control_effective_oi_q, 0, "{discovery:?}");
+    assert_ne!(discovery.reordered_effective_oi_q, 0, "{discovery:?}");
+    assert_eq!(
+        discovery.reordered_effective_oi_q,
+        discovery.control_effective_oi_q
+    );
+    assert_eq!(
+        discovery
+            .initial_effective_oi_q
+            .checked_sub(discovery.control_effective_oi_q),
+        Some(200_000),
+        "{discovery:?}"
+    );
+    assert_eq!(discovery.reordered_payouts, discovery.control_payouts);
+    assert_eq!(
+        discovery.control_payouts,
+        [99_800, 1_000_200, 1_000_000, 1_000_000, 1_000_000]
+    );
+    assert!(discovery.control_terminal && discovery.reordered_terminal);
+    assert!(discovery.control_max_crank_cu < TX_CU_LIMIT);
+    assert!(discovery.reordered_max_crank_cu < TX_CU_LIMIT);
 }
 
 proptest! {

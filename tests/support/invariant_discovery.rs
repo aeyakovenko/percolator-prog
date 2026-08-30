@@ -1231,6 +1231,23 @@ pub struct AccrualOrderingDiscovery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartialLiquidationAccrualDiscovery {
+    pub initial_effective_oi_q: u128,
+    pub control_effective_oi_q: u128,
+    pub reordered_effective_oi_q: u128,
+    pub control_paid: u128,
+    pub control_received: u128,
+    pub reordered_paid: u128,
+    pub reordered_received: u128,
+    pub control_payouts: [u128; PRIMARY_ACTOR_COUNT],
+    pub reordered_payouts: [u128; PRIMARY_ACTOR_COUNT],
+    pub control_max_crank_cu: u64,
+    pub reordered_max_crank_cu: u64,
+    pub control_terminal: bool,
+    pub reordered_terminal: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalCommitOrderingDiscovery {
     pub committed_mark: u64,
     pub reordered_mark: u64,
@@ -8920,6 +8937,157 @@ pub fn discover_accrual_ordering_violations(
         .into_iter()
         .map(|kind| discover_one_accrual_ordering_violation(seed, kind, 3, false))
         .collect()
+}
+
+fn run_partial_liquidation_accrual_world(
+    mut seed: [u8; 32],
+    settle_before_liquidation: bool,
+) -> Result<(AccrualOrderingWorld, u128, u128, u64), String> {
+    const PRICE: u64 = 1_000;
+    const TARGET: u64 = 900;
+    const Q: i128 = 100 * POS_SCALE as i128;
+    const VICTIM_CAPITAL: u128 = 100_000;
+    const SETTLEMENT_SLOT: u64 = 4;
+
+    seed[0] ^= 0x39;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            min_nonzero_mm_req: 1,
+            min_nonzero_im_req: 2,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [VICTIM_CAPITAL, 1_000_000, 1_000_000, 1_000_000, 1_000_000],
+            ..MarketConfig::default()
+        },
+    );
+    env.begin_public_trace();
+    let supply_before = env.token_supply_observed();
+    env.trade_no_cpi(0, 1, 0, -Q, PRICE, 0)
+        .map_err(|error| format!("open pending-liquidation pair: {error}"))?;
+    let initial_effective_oi_q = env.primary_market_state().1.assets[0].oi_eff_short_q;
+    if initial_effective_oi_q != Q.unsigned_abs() {
+        return Err(format!(
+            "pending-liquidation setup has unexpected short OI: {initial_effective_oi_q}"
+        ));
+    }
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, TARGET)
+        .map_err(|error| format!("stage partial-liquidation funding target: {error}"))?;
+    for actor in [0, 1] {
+        env.crank(actor, 2, zero_move_observation_discovery(&env))
+            .map_err(|error| format!("prime partial-liquidation actor {actor}: {error}"))?;
+    }
+    let (_, primed_group) = env.primary_market_state();
+    if primed_group.assets[0].effective_price != PRICE
+        || primed_group.assets[0].f_long_num != 0
+        || primed_group.assets[0].f_short_num != 0
+    {
+        return Err(format!(
+            "partial-liquidation prime unexpectedly changed price/funding: price={}, F=({}, {})",
+            primed_group.assets[0].effective_price,
+            primed_group.assets[0].f_long_num,
+            primed_group.assets[0].f_short_num
+        ));
+    }
+    env.warp_to_slot(SETTLEMENT_SLOT);
+    if settle_before_liquidation {
+        settle_zero_move_actors(&mut env, SETTLEMENT_SLOT, &[0, 1])?;
+    }
+
+    let mut max_crank_cu = 0u64;
+    let mut effective_oi_q = initial_effective_oi_q;
+    for attempt in 0..8 {
+        let needs_market_progress =
+            env.primary_market_state().1.assets[0].slot_last < SETTLEMENT_SLOT;
+        let observations = if !settle_before_liquidation && needs_market_progress {
+            zero_move_observation_discovery(&env)
+        } else {
+            Vec::new()
+        };
+        if let Some(success) = env
+            .crank_if_actionable(0, SETTLEMENT_SLOT, observations)
+            .map_err(|error| format!("pending-liquidation crank {attempt}: {error}"))?
+        {
+            max_crank_cu = max_crank_cu.max(success.compute_units);
+        }
+        effective_oi_q = env.primary_market_state().1.assets[0].oi_eff_short_q;
+        if effective_oi_q < initial_effective_oi_q {
+            break;
+        }
+    }
+    if effective_oi_q == 0 || effective_oi_q >= initial_effective_oi_q {
+        let (paid, received) = funding_totals(&env, 0, 1);
+        let victim = env.primary_portfolio(0);
+        let (_, group) = env.primary_market_state();
+        let asset = group.assets[0];
+        return Err(format!(
+            "pending funding did not produce a strict partial liquidation: before={initial_effective_oi_q}, after={effective_oi_q}, paid={paid}, received={received}, capital={}, pnl={}, price={}, raw={}, F=({}, {}), slot_last={}",
+            victim.capital.get(),
+            victim.pnl.get(),
+            asset.effective_price,
+            asset.raw_oracle_target_price,
+            asset.f_long_num,
+            asset.f_short_num,
+            asset.slot_last,
+        ));
+    }
+    settle_zero_move_actors(&mut env, SETTLEMENT_SLOT, &[0, 1])?;
+    let (paid, received) = funding_totals(&env, 0, 1);
+    let terminal = finish_accrual_ordering_world(
+        &mut env,
+        if settle_before_liquidation {
+            "settle-first partial-liquidation world"
+        } else {
+            "liquidation-first partial-liquidation world"
+        },
+        1,
+        SETTLEMENT_SLOT,
+        supply_before,
+        paid,
+        received,
+        false,
+        false,
+        true,
+    )?;
+    Ok((
+        terminal,
+        initial_effective_oi_q,
+        effective_oi_q,
+        max_crank_cu,
+    ))
+}
+
+pub fn discover_partial_liquidation_accrual_ordering(
+    seed: [u8; 32],
+) -> Result<PartialLiquidationAccrualDiscovery, String> {
+    let (control, initial_effective_oi_q, control_effective_oi_q, control_max_crank_cu) =
+        run_partial_liquidation_accrual_world(seed, true)?;
+    let (reordered, reordered_initial_q, reordered_effective_oi_q, reordered_max_crank_cu) =
+        run_partial_liquidation_accrual_world(seed, false)?;
+    if reordered_initial_q != initial_effective_oi_q {
+        return Err("paired pending-liquidation worlds began with different OI".into());
+    }
+    Ok(PartialLiquidationAccrualDiscovery {
+        initial_effective_oi_q,
+        control_effective_oi_q,
+        reordered_effective_oi_q,
+        control_paid: control.paid,
+        control_received: control.received,
+        reordered_paid: reordered.paid,
+        reordered_received: reordered.received,
+        control_payouts: control.payouts,
+        reordered_payouts: reordered.payouts,
+        control_max_crank_cu,
+        reordered_max_crank_cu,
+        control_terminal: control.users_terminal,
+        reordered_terminal: reordered.users_terminal,
+    })
 }
 
 pub fn discover_multi_segment_accrual_ordering_violations(
