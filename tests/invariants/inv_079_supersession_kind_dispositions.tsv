@@ -1,0 +1,15 @@
+# superseded_kind	disposition	terminal_oracle	rationale
+MatcherConfig	TERMINAL_LOF	MatcherRevocationTerminalDiscovery	stale re-enablement can authorize an unsigned matcher CPI fill; the paired public world binds exact LP terminal loss and attacker gain
+PushAuthMark	TERMINAL_VALUE_CANDIDATE	-	a stale authenticated mark can change settlement value; exact paired terminal evidence for this sequence family remains to be added
+ConfigureAuthMark	TERMINAL_VALUE_CANDIDATE	-	a stale AuthMark configuration can replace both mode and price state; exact paired terminal evidence remains to be added
+PushEwmaMark	TERMINAL_VALUE_CANDIDATE	-	a stale EWMA observation can change settlement value; exact paired terminal evidence remains to be added
+ConfigureEwmaMark	TERMINAL_VALUE_CANDIDATE	-	a stale EWMA configuration can replace price and movement policy; exact paired terminal evidence remains to be added
+ConfigureHybridOracle	TERMINAL_VALUE_CANDIDATE	-	a stale Hybrid configuration can replace feed identity and fallback policy; exact paired terminal evidence remains to be added
+TradeFeePolicy	SIGNED_ECONOMIC_BOUND	-	every charged trade fee remains bounded by the affected signers' retained fee consent; sequence rejection is still required for policy integrity
+FeeRedirectPolicy	ATTRIBUTION_CANDIDATE	-	the policy redistributes already charged fees between insurance domains; downstream domain-loss impact is not yet terminally quantified
+LiquidationFeePolicy	TERMINAL_VALUE_CANDIDATE	-	a stale liquidation-fee share can change a liquidated user's terminal value; exact paired terminal evidence remains to be added
+MaintenanceFeePolicy	TERMINAL_VALUE_CANDIDATE	-	a stale maintenance-fee share can change a funded user's terminal value; exact paired terminal evidence remains to be added
+MarketInitFeePolicy	SIGNED_ECONOMIC_BOUND	-	permissionless activation binds the creator's exact accepted fee, so stale policy acceptance alone is not terminal loss
+ResolvePolicy	LIVENESS_CANDIDATE	-	stale timing policy can alter when permissionless resolution is available; a complete funded-route liveness observation remains to be added
+BackingFeePolicy	PROVIDER_CONSENT_BOUND	-	live provider principal freezes changed fee terms and each trade binds the charged source fee; stale overwrite remains a policy-integrity failure
+BackingFeePolicyShort	PROVIDER_CONSENT_BOUND	-	the short source domain has the same provider-principal freeze and signed source-fee bound as the long domain

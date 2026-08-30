@@ -23,7 +23,7 @@ use support::{
         discover_asset_generation_replay, discover_cross_domain_backing_single_use,
         discover_cross_route_insurance_top_up_retry, discover_cross_route_trade_intent_retries,
         discover_debited_intent_retries, discover_expired_backing_consumers,
-        discover_intent_retries, discover_intent_retry,
+        discover_intent_retries, discover_intent_retry, discover_matcher_revocation_terminal_loss,
         discover_multi_segment_accrual_ordering_violations,
         discover_pending_zero_move_terminal_ordering, discover_retained_maturity_terminal_locks,
         discover_same_transaction_intent_retries, discover_shutdown_catchup_liveness,

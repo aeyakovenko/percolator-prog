@@ -3294,6 +3294,25 @@ pub struct MatcherMutationOrderDiscovery {
     pub token_supply_conserved: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatcherRevocationTerminalDiscovery {
+    pub stale_enable_landed: bool,
+    pub stale_enable_rejected_exact_rollback: bool,
+    pub unauthorized_trade_landed: bool,
+    pub unauthorized_trade_rejected_exact_rollback: bool,
+    pub control_lp_payout: u128,
+    pub replay_lp_payout: u128,
+    pub lp_loss: u128,
+    pub attacker_gain: u128,
+    pub control_total_payout: u128,
+    pub replay_total_payout: u128,
+    pub terminal_evidence: PairedTerminalPayoutEvidence,
+    pub mutation_witness_lp_loss: u128,
+    pub mutation_witness_attacker_gain: u128,
+    pub mutation_witness_total_payout: u128,
+    pub mutation_witness_evidence: PairedTerminalPayoutEvidence,
+}
+
 impl MatcherMutationOrderDiscovery {
     pub fn satisfies_invariant(&self) -> bool {
         self.revoked_trade_rejected
@@ -3307,6 +3326,45 @@ impl MatcherMutationOrderDiscovery {
             && self.sequence_after_fresh == self.sequence_after_revoke + 1
             && self.total_payout == 2_000_000
             && self.token_supply_conserved
+    }
+}
+
+impl MatcherRevocationTerminalDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.stale_enable_landed
+            && self.unauthorized_trade_landed
+            && self.lp_loss != 0
+            && self.attacker_gain != 0
+            && self.terminal_evidence.certifies_exact_loss(
+                self.lp_loss,
+                self.attacker_gain,
+                self.control_total_payout,
+                self.replay_total_payout,
+            )
+    }
+
+    pub fn certifies_revocation_and_bounded_exit(&self) -> bool {
+        !self.is_violation()
+            && !self.stale_enable_landed
+            && self.stale_enable_rejected_exact_rollback
+            && !self.unauthorized_trade_landed
+            && self.unauthorized_trade_rejected_exact_rollback
+            && self.control_lp_payout == self.replay_lp_payout
+            && self.lp_loss == 0
+            && self.attacker_gain == 0
+            && self.terminal_evidence.certifies_bounded_exit(
+                self.lp_loss,
+                self.control_total_payout,
+                self.replay_total_payout,
+            )
+            && self.mutation_witness_lp_loss != 0
+            && self.mutation_witness_attacker_gain != 0
+            && self.mutation_witness_evidence.certifies_exact_loss(
+                self.mutation_witness_lp_loss,
+                self.mutation_witness_attacker_gain,
+                self.control_total_payout,
+                self.mutation_witness_total_payout,
+            )
     }
 }
 
@@ -7845,6 +7903,195 @@ pub fn verify_matcher_mutation_order_safety(
         sequence_after_fresh,
         total_payout,
         token_supply_conserved,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct MatcherRevocationTerminalWorld {
+    grant_landed: bool,
+    grant_rejected_exact_rollback: bool,
+    unauthorized_trade_landed: bool,
+    unauthorized_trade_rejected_exact_rollback: bool,
+    payouts: [u128; 2],
+    lp_destination: Pubkey,
+    attacker_destination: Pubkey,
+    public_trace: PublicTraceEvidence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatcherGrantAttempt {
+    None,
+    RetainedStale,
+    FreshEquivalent,
+}
+
+fn run_matcher_revocation_terminal_world(
+    mut seed: [u8; 32],
+    grant_attempt: MatcherGrantAttempt,
+) -> Result<MatcherRevocationTerminalWorld, String> {
+    const PRICE: u64 = INITIAL_PRICE;
+    const ADVERSE_MARK: u64 = INITIAL_PRICE * 2;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = POS_SCALE as i128 / 4;
+    const LP: usize = 0;
+    const ATTACKER: usize = 1;
+    const MARK_SLOT: u64 = 2;
+
+    seed[0] ^= 0x94;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 0, 0, 0],
+            actor_token_balances: [2_000_000, 2_000_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_auth_mark(false, 0, 1, PRICE)
+        .map_err(|error| format!("configure matcher-revocation mark: {error}"))?;
+    let retained_enable = env.build_retained_matcher_config(LP, 1);
+
+    env.begin_public_trace();
+    env.set_matcher_config(LP, 0)
+        .map_err(|error| format!("revoke LP matcher: {error}"))?;
+    let (grant_landed, grant_rejected_exact_rollback) = match grant_attempt {
+        MatcherGrantAttempt::None => (false, true),
+        MatcherGrantAttempt::RetainedStale => {
+            let before = fingerprint(&env);
+            match env.land_retained(retained_enable) {
+                Ok(_) => (true, false),
+                Err(_) => (false, fingerprint(&env) == before),
+            }
+        }
+        MatcherGrantAttempt::FreshEquivalent => {
+            env.set_matcher_config(LP, 1)
+                .map_err(|error| format!("fresh equivalent matcher grant rejected: {error}"))?;
+            (true, false)
+        }
+    };
+
+    let before_trade = fingerprint(&env);
+    let trade_result = env.trade_cpi(ATTACKER, LP, 0, SIZE_Q, 0, 0);
+    let after_trade = fingerprint(&env);
+    let unauthorized_trade_landed = trade_result.is_ok() && after_trade != before_trade;
+    if trade_result.is_ok() && !unauthorized_trade_landed {
+        return Err("accepted post-revocation matcher trade made no economic mutation".into());
+    }
+    let unauthorized_trade_rejected_exact_rollback =
+        trade_result.is_err() && after_trade == before_trade;
+
+    env.warp_to_slot(MARK_SLOT);
+    env.push_auth_mark(0, MARK_SLOT, ADVERSE_MARK)
+        .map_err(|error| format!("publish matcher-revocation terminal mark: {error}"))?;
+    let observations = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    env.crank_if_actionable(ATTACKER, MARK_SLOT, observations.clone())
+        .map_err(|error| format!("refresh matcher-revocation attacker: {error}"))?;
+    env.crank_if_actionable(LP, MARK_SLOT, observations)
+        .map_err(|error| format!("refresh matcher-revocation LP: {error}"))?;
+    env.resolve_market()
+        .map_err(|error| format!("resolve matcher-revocation world: {error}"))?;
+    let lp_destination = env.actors[LP].destination_token;
+    let attacker_destination = env.actors[ATTACKER].destination_token;
+    let payouts = drain_resolved_discovery_actors(&mut env, [LP, ATTACKER])
+        .map_err(|error| format!("drain matcher-revocation actors: {error}"))?;
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "matcher-revocation world changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("matcher-revocation trace is invalid: {error}"))?;
+    Ok(MatcherRevocationTerminalWorld {
+        grant_landed,
+        grant_rejected_exact_rollback,
+        unauthorized_trade_landed,
+        unauthorized_trade_rejected_exact_rollback,
+        payouts,
+        lp_destination,
+        attacker_destination,
+        public_trace,
+    })
+}
+
+pub fn discover_matcher_revocation_terminal_loss(
+    seed: [u8; 32],
+) -> Result<MatcherRevocationTerminalDiscovery, String> {
+    let control = run_matcher_revocation_terminal_world(seed, MatcherGrantAttempt::None)?;
+    let replay = run_matcher_revocation_terminal_world(seed, MatcherGrantAttempt::RetainedStale)?;
+    let mutation =
+        run_matcher_revocation_terminal_world(seed, MatcherGrantAttempt::FreshEquivalent)?;
+    if control.lp_destination != replay.lp_destination
+        || control.attacker_destination != replay.attacker_destination
+        || control.lp_destination != mutation.lp_destination
+        || control.attacker_destination != mutation.attacker_destination
+    {
+        return Err("matcher-revocation paired worlds used different payout accounts".into());
+    }
+    let lp_loss = control.payouts[0].saturating_sub(replay.payouts[0]);
+    let attacker_gain = replay.payouts[1].saturating_sub(control.payouts[1]);
+    let control_total_payout = control.payouts[0]
+        .checked_add(control.payouts[1])
+        .ok_or_else(|| "matcher-revocation control payout overflow".to_string())?;
+    let replay_total_payout = replay.payouts[0]
+        .checked_add(replay.payouts[1])
+        .ok_or_else(|| "matcher-revocation replay payout overflow".to_string())?;
+    let mutation_witness_lp_loss = control.payouts[0].saturating_sub(mutation.payouts[0]);
+    let mutation_witness_attacker_gain = mutation.payouts[1].saturating_sub(control.payouts[1]);
+    let mutation_witness_total_payout = mutation.payouts[0]
+        .checked_add(mutation.payouts[1])
+        .ok_or_else(|| "matcher-revocation mutation payout overflow".to_string())?;
+    let mutation_witness_evidence = build_paired_terminal_payout_evidence(
+        "fresh equivalent matcher grant mutation witness",
+        vec![control.lp_destination],
+        vec![control.attacker_destination],
+        0,
+        true,
+        mutation_witness_lp_loss,
+        mutation_witness_attacker_gain,
+        control_total_payout,
+        mutation_witness_total_payout,
+        control.public_trace.clone(),
+        mutation.public_trace,
+    )?;
+    let terminal_evidence = build_paired_terminal_payout_evidence(
+        "retained matcher re-enable after revocation",
+        vec![control.lp_destination],
+        vec![control.attacker_destination],
+        0,
+        true,
+        lp_loss,
+        attacker_gain,
+        control_total_payout,
+        replay_total_payout,
+        control.public_trace,
+        replay.public_trace,
+    )?;
+    Ok(MatcherRevocationTerminalDiscovery {
+        stale_enable_landed: replay.grant_landed,
+        stale_enable_rejected_exact_rollback: replay.grant_rejected_exact_rollback,
+        unauthorized_trade_landed: replay.unauthorized_trade_landed,
+        unauthorized_trade_rejected_exact_rollback: replay
+            .unauthorized_trade_rejected_exact_rollback,
+        control_lp_payout: control.payouts[0],
+        replay_lp_payout: replay.payouts[0],
+        lp_loss,
+        attacker_gain,
+        control_total_payout,
+        replay_total_payout,
+        terminal_evidence,
+        mutation_witness_lp_loss,
+        mutation_witness_attacker_gain,
+        mutation_witness_total_payout,
+        mutation_witness_evidence,
     })
 }
 

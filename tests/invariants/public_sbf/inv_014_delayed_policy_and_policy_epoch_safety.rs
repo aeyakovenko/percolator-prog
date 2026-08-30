@@ -173,3 +173,13 @@ fn v16_program_pr334_delayed_matcher_enable_rejects_after_revoke() {
         .unwrap_or_else(|error| panic!("PR 334 fixed route failed: {error}"));
     assert!(protection.satisfies_invariant(), "{protection:?}");
 }
+
+#[test]
+fn v16_program_revoked_matcher_cannot_recover_terminal_value_with_stale_consent() {
+    let discovery = discover_matcher_revocation_terminal_loss([0x35; 32])
+        .unwrap_or_else(|error| panic!("matcher-revocation terminal world failed: {error}"));
+    assert!(
+        discovery.certifies_revocation_and_bounded_exit(),
+        "stale matcher consent changed LP terminal value: {discovery:?}"
+    );
+}

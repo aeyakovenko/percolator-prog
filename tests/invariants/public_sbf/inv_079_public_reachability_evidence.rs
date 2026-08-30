@@ -239,7 +239,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 53,
+        consumers, 54,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
@@ -308,6 +308,7 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
             "DebitedIntentReplayDiscovery",
             "FeeConsentDiscovery",
             "FractionalMovementDiscovery",
+            "MatcherRevocationTerminalDiscovery",
             "PendingMarkAdmissionDiscovery",
             "PendingMarkInheritanceDiscovery",
             "PendingZeroMoveTerminalDiscovery",
@@ -368,7 +369,7 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
     assert!(cohort_body.contains("classify_terminal"));
     assert!(cohort_body.contains("certifies_exact_loss"));
     assert!(cohort_body.contains("certifies_nonextraction"));
-    assert_eq!(roster.len(), 29, "finding-blind oracle inventory changed");
+    assert_eq!(roster.len(), 30, "finding-blind oracle inventory changed");
 }
 
 #[test]
@@ -489,6 +490,91 @@ fn v16_program_open_lof_manifest_snapshot_is_structurally_honest() {
     assert!(
         missing.is_empty(),
         "every finding in the dated manifest must have an executable disposition: {missing:?}"
+    );
+}
+
+#[test]
+fn v16_superseded_control_terminal_dispositions_are_source_complete() {
+    let terminal_oracles = include_str!("../inv_079_violation_oracle_coverage.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| line.split('\t').next().expect("oracle name"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut dispositions = std::collections::BTreeMap::new();
+    for line in include_str!("../inv_079_supersession_kind_dispositions.tsv").lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 4, "malformed supersession row: {line}");
+        assert!(
+            matches!(
+                fields[1],
+                "TERMINAL_LOF"
+                    | "TERMINAL_VALUE_CANDIDATE"
+                    | "SIGNED_ECONOMIC_BOUND"
+                    | "ATTRIBUTION_CANDIDATE"
+                    | "LIVENESS_CANDIDATE"
+                    | "PROVIDER_CONSENT_BOUND"
+            ),
+            "unknown supersession disposition: {line}"
+        );
+        assert!(
+            !fields[3].is_empty(),
+            "supersession row needs rationale: {line}"
+        );
+        if fields[1] == "TERMINAL_LOF" {
+            assert!(
+                terminal_oracles.contains(fields[2]),
+                "supersession row names an unregistered terminal oracle: {line}"
+            );
+        } else {
+            assert_eq!(
+                fields[2], "-",
+                "unproven supersession row names an oracle: {line}"
+            );
+        }
+        assert!(
+            dispositions.insert(fields[0], fields[1]).is_none(),
+            "duplicate supersession row: {}",
+            fields[0]
+        );
+    }
+    let expected = SupersededIntentKind::ALL
+        .into_iter()
+        .map(|kind| format!("{kind:?}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        dispositions
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected.iter().map(String::as_str).collect(),
+        "every superseded control kind needs an explicit terminal disposition"
+    );
+    assert_eq!(
+        dispositions
+            .iter()
+            .filter_map(|(kind, disposition)| (*disposition == "TERMINAL_LOF").then_some(*kind))
+            .collect::<Vec<_>>(),
+        ["MatcherConfig"]
+    );
+    assert_eq!(
+        dispositions
+            .iter()
+            .filter_map(|(kind, disposition)| {
+                (*disposition == "TERMINAL_VALUE_CANDIDATE").then_some(*kind)
+            })
+            .collect::<Vec<_>>(),
+        [
+            "ConfigureAuthMark",
+            "ConfigureEwmaMark",
+            "ConfigureHybridOracle",
+            "LiquidationFeePolicy",
+            "MaintenanceFeePolicy",
+            "PushAuthMark",
+            "PushEwmaMark",
+        ]
     );
 }
 
