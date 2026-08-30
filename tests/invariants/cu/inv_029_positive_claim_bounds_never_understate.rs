@@ -52,3 +52,57 @@ fn v16_program_non_exact_claim_bound_routes_remain_absent_from_deployed_profile(
 
     crate::assert_certified_engine_pin("INV-029 exact-claim profile evidence");
 }
+
+#[test]
+fn v16_program_exact_claim_bound_composition_is_source_complete() {
+    crate::assert_certified_engine_pin("INV-029 exact-claim composition");
+
+    let model = include_str!("../../support/fuzz_model.rs");
+    for required in [
+        "fn assert_source_claim_bound_attribution(",
+        "source.exact_positive_claim_num != source.positive_claim_bound_num",
+        "attributed[domain] != source.positive_claim_bound_num",
+        "domain_total != group.source_claim_bound_total_num",
+        "assert_source_claim_bound_attribution(\"primary\"",
+        "assert_source_claim_bound_attribution(\"foreign\"",
+        "fn bounded_claim_state_changed(",
+        "claim_changing_edge_count",
+        "receipt_replacement_count",
+    ] {
+        assert!(
+            model.contains(required),
+            "shared public-transition model lost INV-029 relation {required}",
+        );
+    }
+
+    let bounded =
+        include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs");
+    for required in [
+        "fn v16_program_bounded_reference_graph_exhausts_public_action_words",
+        "evidence.claim_changing_edge_count != 0",
+        "evidence.receipt_replacement_count >= evidence.partial_receipt_seed_count as u64",
+    ] {
+        assert!(
+            bounded.contains(required),
+            "bounded deployed graph lost INV-029 witness {required}",
+        );
+    }
+
+    let stateful = include_str!("../stateful/inv_029_positive_claim_bounds_never_understate.rs");
+    for required in [
+        "fn v16_program_claim_bound_boundary_partition_exhausts_public_lifecycle_grid",
+        "fn v16_program_favorable_funding_claim_bounds_are_exact_across_routes_and_sides",
+        "fn v16_program_stale_positive_claim_blocks_snapshot_until_exactly_materialized",
+        "fn v16_program_partial_receipt_exactly_replaces_its_prior_claim_bound",
+    ] {
+        assert!(
+            stateful.contains(required),
+            "INV-029 public route matrix lost witness {required}",
+        );
+    }
+
+    let transitions = include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transitions.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
+}

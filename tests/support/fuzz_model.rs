@@ -11091,6 +11091,20 @@ struct BoundedReferenceNode {
     epochs: [u64; 4],
 }
 
+fn bounded_claim_state_changed(
+    before: &BoundedReferenceNode,
+    after: &BoundedReferenceNode,
+) -> bool {
+    before.source_claim_bound_total_num != after.source_claim_bound_total_num
+        || before
+            .source_credit
+            .iter()
+            .zip(&after.source_credit)
+            .any(|(before, after)| before.amounts[..2] != after.amounts[..2])
+        || before.payout_ledger.amounts[1..3] != after.payout_ledger.amounts[1..3]
+        || before.payout_receipts != after.payout_receipts
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundedReferenceGraphEvidence {
     pub word_count: usize,
@@ -11109,6 +11123,8 @@ pub struct BoundedReferenceGraphEvidence {
     pub partial_receipt_seed_count: usize,
     pub value_moving_claim_world_count: usize,
     pub expiry_normalization_world_count: usize,
+    pub claim_changing_edge_count: usize,
+    pub receipt_replacement_count: u64,
     pub coverage: Coverage,
 }
 
@@ -11803,6 +11819,7 @@ struct UnderfundedTerminalGraphEvidence {
     partial_receipt_seed_count: usize,
     value_moving_claim_world_count: usize,
     expiry_normalization_world_count: usize,
+    claim_changing_edge_count: usize,
     coverage: Coverage,
 }
 
@@ -13533,6 +13550,10 @@ fn run_underfunded_terminal_reference_subgraph() -> Result<UnderfundedTerminalGr
         partial_receipt_seed_count,
         value_moving_claim_world_count,
         expiry_normalization_world_count,
+        claim_changing_edge_count: edges
+            .iter()
+            .filter(|(before, _, after)| bounded_claim_state_changed(before, after))
+            .count(),
         coverage,
     })
 }
@@ -13684,7 +13705,15 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
         + depth_three_words.iter().map(Vec::len).sum::<usize>();
 
     let underfunded = run_underfunded_terminal_reference_subgraph()?;
+    let claim_changing_edge_count = graph
+        .edges
+        .iter()
+        .filter(|(before, _, after)| bounded_claim_state_changed(before, after))
+        .count()
+        .checked_add(underfunded.claim_changing_edge_count)
+        .ok_or("INV-029 claim-changing edge count overflow")?;
     graph.coverage.merge(underfunded.coverage);
+    let receipt_replacement_count = graph.coverage.resolved_receipt_replacements;
 
     Ok(BoundedReferenceGraphEvidence {
         word_count,
@@ -13703,6 +13732,8 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
         partial_receipt_seed_count: underfunded.partial_receipt_seed_count,
         value_moving_claim_world_count: underfunded.value_moving_claim_world_count,
         expiry_normalization_world_count: underfunded.expiry_normalization_world_count,
+        claim_changing_edge_count,
+        receipt_replacement_count,
         coverage: graph.coverage,
     })
 }

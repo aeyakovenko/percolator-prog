@@ -138,6 +138,14 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
         evidence.expiry_normalization_world_count, 8,
         "exact- and post-expiry worlds must normalize backing on a public edge"
     );
+    assert!(
+        evidence.claim_changing_edge_count != 0,
+        "bounded public words and terminal schedules must traverse real exact-claim changes: {evidence:?}"
+    );
+    assert!(
+        evidence.receipt_replacement_count >= evidence.partial_receipt_seed_count as u64,
+        "every partial-receipt seed must replace an unreceipted claim bound exactly: {evidence:?}"
+    );
     assert_ne!(
         evidence.coverage.loaded_program_hash, [0; 32],
         "bounded evidence must bind the production SBF artifact"
