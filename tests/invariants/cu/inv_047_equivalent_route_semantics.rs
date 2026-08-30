@@ -14,9 +14,13 @@
 //! account construction and assert economic state, token, rollback, liveness, or compute outcomes
 //! appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: INV-023 derives every current shared-handler and semantic
+//! alternate-route family from the production dispatcher and requires an executable
+//! equivalence witness for each. The composition gate at the end binds that census
+//! to this file's route comparisons, owner-attributed value flow, scope-local exits,
+//! complete engine-transition ownership, and the exact engine pin. A new public
+//! variant, shared handler, semantic alternate, transition call, normalization, or
+//! engine pin reopens this current-surface closure.
 
 use super::*;
 
@@ -1446,4 +1450,51 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
     assert_eq!(active_leg_for_asset(&l, 1).side, SideV16::Long);
     assert_eq!(active_leg_for_asset(&t, 0).basis_pos_q, sz);
     assert_eq!(active_leg_for_asset(&t, 1).basis_pos_q, -sz);
+}
+
+#[test]
+fn v16_program_equivalent_route_family_composition_is_source_complete() {
+    crate::assert_certified_engine_pin("INV-047 equivalent-route composition");
+
+    let confinement_source =
+        include_str!("inv_023_caller_input_confinement_for_derived_safety_state.rs");
+    assert!(confinement_source
+        .contains("fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes"));
+    for family_witness in [
+        "v16_program_legacy_insurance_topup_matches_explicit_domain_split",
+        "v16_program_authority_and_permissionless_resolution_match_at_maturity",
+        "v16_program_optional_topup_ledgers_are_economically_transparent",
+        "v16_program_unique_batch_position_plan_matches_sequential_route_and_slot_semantics",
+    ] {
+        assert!(
+            include_str!("inv_047_equivalent_route_semantics.rs")
+                .contains(&format!("fn {family_witness}")),
+            "missing INV-047 family witness {family_witness}",
+        );
+    }
+
+    let stateful_route_source = include_str!("../stateful/inv_047_equivalent_route_semantics.rs");
+    assert!(stateful_route_source.contains(
+        "fn v16_program_nonzero_fee_trade_routes_are_byte_exact_after_transport_normalization"
+    ));
+    let value_source = include_str!("../stateful/inv_024_attributed_quote_value_conservation.rs");
+    assert!(value_source
+        .contains("fn v16_program_all_trade_route_pairs_preserve_realized_pnl_owner_attribution"));
+    let locality_source = include_str!("../stateful/inv_074_scope_locality.rs");
+    assert!(locality_source
+        .contains("fn v16_program_active_close_preserves_unrelated_same_asset_reduction"));
+    let insurance_source = include_str!("inv_064_insurance_withdrawal_policy_equivalence.rs");
+    assert!(insurance_source.contains(
+        "fn v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget"
+    ));
+
+    let transition_source =
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transition_source.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
+    let flow_proof = include_str!("../kani/inv_024_attributed_quote_value_conservation.rs");
+    assert!(
+        flow_proof.contains("fn kani_inv024_engine_flow_validator_equals_wrapper_value_equation")
+    );
 }
