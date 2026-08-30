@@ -5,11 +5,18 @@
 //! from another protected pool, minted into insurance, or allowed to block a
 //! risk-reducing exit.
 //!
-//! This test uses public no-CPI trade routes to put one side at an adverse
-//! maintenance boundary, then executes a full exit whose quoted fee exceeds
-//! that side's remaining capital. The invariant checks the successful exit,
-//! the actual insurance delta, exact aggregate-capital conservation, and zero
-//! token-vault movement.
+//! The public route tests in this file put one side at an adverse maintenance
+//! boundary, then execute a full exit whose quoted fee exceeds that side's
+//! remaining capital. They check the successful exit, the actual insurance
+//! delta, exact aggregate-capital conservation, and zero token-vault movement.
+//! The source-complete census at the end composes those tests with the public
+//! base-fee, backing-fee, maintenance, liquidation, resolved-close, Recovery,
+//! and activation-fee evidence owned by adjacent invariants. It proves that the
+//! wrapper has no independent protected-pool writer and delegates every
+//! internal fee debit to the exact pinned engine. The engine pin owns the fee
+//! cap, loss-before-fee ordering, and senior-stock function contracts; this
+//! wrapper invariant owns admission, returned-amount attribution, custody, and
+//! public route composition without duplicating those engine proofs.
 
 use super::*;
 
@@ -375,4 +382,201 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
         env.portfolio_state(p).capital.get() < cap1,
         "advancing real time accrues additional fee"
     );
+}
+
+#[derive(Clone, Copy)]
+struct Inv040FeeIngress {
+    owner: &'static str,
+    method: &'static str,
+    count: usize,
+    fee_class: &'static str,
+    witness: &'static str,
+}
+
+#[test]
+fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
+    const ENGINE_PIN: &str = "d604ca09b7e584d3875ce4516bab1186346bf4a6";
+    const ROWS: &[Inv040FeeIngress] = &[
+        Inv040FeeIngress {
+            owner: "collect_maintenance_fee_to_slot_before_value_debit_view",
+            method: "sync_account_fee_to_slot_not_atomic",
+            count: 1,
+            fee_class: "maintenance-before-value-debit",
+            witness: "v16_program_issue408_unsigned_matcher_cannot_spend_aged_maintenance_collateral",
+        },
+        Inv040FeeIngress {
+            owner: "handle_trade_nocpi_zero_copy",
+            method: "execute_trade_with_fee_loss_stale_scoped_not_atomic",
+            count: 2,
+            fee_class: "single-cpi-and-no-cpi-trade",
+            witness: "v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value",
+        },
+        Inv040FeeIngress {
+            owner: "handle_batch_execute_zero_copy",
+            method: "execute_batch_with_fee_loss_stale_scoped_not_atomic",
+            count: 1,
+            fee_class: "batch-cpi-and-no-cpi-trade",
+            witness: "v16_program_mixed_direction_fee_allocation_matches_independent_side_ledger",
+        },
+        Inv040FeeIngress {
+            owner: "handle_force_close_abandoned_asset",
+            method: "execute_trade_with_fee_loss_stale_scoped_not_atomic",
+            count: 2,
+            fee_class: "fee-free-recovery-reduction",
+            witness: "v16_attack_locally_stale_permissionless_asset_can_shutdown_and_force_close",
+        },
+        Inv040FeeIngress {
+            owner: "handle_sync_maintenance_fee",
+            method: "sync_account_fee_to_slot_not_atomic",
+            count: 3,
+            fee_class: "explicit-maintenance-and-reward",
+            witness: "v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded",
+        },
+        Inv040FeeIngress {
+            owner: "handle_close_resolved",
+            method: "permissionless_auto_crank_not_atomic",
+            count: 1,
+            fee_class: "resolved-maintenance",
+            witness: "v16_audit_resolved_maintenance_fee_insurance_stays_recoverable",
+        },
+        Inv040FeeIngress {
+            owner: "handle_permissionless_crank_zero_copy",
+            method: "permissionless_auto_crank_not_atomic",
+            count: 2,
+            fee_class: "liquidation-and-maintenance",
+            witness: "v16_program_issue408_liquidation_reward_cannot_preempt_aged_maintenance_collateral",
+        },
+        Inv040FeeIngress {
+            owner: "charge_account_backing_domain_fees_view",
+            method: "charge_account_backing_fee_not_atomic",
+            count: 1,
+            fee_class: "source-backing-provider-and-insurance",
+            witness: "v16_program_pr223_cpi_backing_fee_consent_fuzz",
+        },
+    ];
+    const FEE_METHODS: &[&str] = &[
+        "sync_account_fee_to_slot_not_atomic",
+        "execute_trade_with_fee_loss_stale_scoped_not_atomic",
+        "execute_batch_with_fee_loss_stale_scoped_not_atomic",
+        "permissionless_auto_crank_not_atomic",
+        "charge_account_backing_fee_not_atomic",
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-040 engine proof composition must be re-audited on every engine pin change",
+    );
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    let processor = production
+        .split_once("pub mod processor {")
+        .map(|(_, processor)| processor)
+        .expect("deployed processor module exists");
+
+    for forbidden_write in [
+        "header.capital =",
+        "header.c_tot =",
+        "header.insurance =",
+        ".utilization_fee_earnings =",
+    ] {
+        assert!(
+            !processor.contains(forbidden_write),
+            "wrapper introduced an independent protected-pool writer: {forbidden_write}",
+        );
+    }
+    for disabled_policy in [
+        "backing_fee_base_rate_e9_per_slot",
+        "backing_fee_slope_at_kink_e9_per_slot",
+        "backing_fee_slope_above_kink_e9_per_slot",
+    ] {
+        assert!(
+            !processor.contains(disabled_policy),
+            "wrapper exposed an unrostered recurring backing-utilization fee policy: {disabled_policy}",
+        );
+    }
+
+    let mut current_function = "<module>";
+    let mut actual = std::collections::BTreeMap::<(String, String), usize>::new();
+    for line in processor.lines() {
+        let trimmed = line.trim_start();
+        if let Some(fn_offset) = trimmed.find("fn ") {
+            let prefix = &trimmed[..fn_offset];
+            if prefix.is_empty() || prefix.starts_with("pub") {
+                let rest = &trimmed[fn_offset + 3..];
+                let end = rest
+                    .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .unwrap_or(rest.len());
+                current_function = &rest[..end];
+            }
+        }
+        for method in FEE_METHODS {
+            let needle = format!(".{method}(");
+            let count = line.matches(&needle).count();
+            if count != 0 {
+                *actual
+                    .entry((current_function.to_string(), (*method).to_string()))
+                    .or_default() += count;
+            }
+        }
+    }
+
+    let witness_sources = [
+        include_str!("inv_027_protected_principal_seniority.rs"),
+        include_str!("inv_036_fee_destination_and_policy_version_integrity.rs"),
+        include_str!("inv_040_no_fee_seniority.rs"),
+        include_str!("inv_061_deterministic_bounded_liquidation.rs"),
+        include_str!("inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"),
+        include_str!("inv_071_crank_progress.rs"),
+        include_str!("inv_073_no_permanent_user_lock.rs"),
+        include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
+        include_str!("inv_078_permissionless_recovery_coverage.rs"),
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs"),
+        include_str!("inv_089_activation_reactivation_and_initialization_equivalence.rs"),
+        include_str!("../public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs"),
+        include_str!("../stateful/inv_036_fee_destination_and_policy_version_integrity.rs"),
+    ];
+    let mut expected = std::collections::BTreeMap::new();
+    for row in ROWS {
+        assert!(!row.fee_class.is_empty());
+        assert!(
+            witness_sources
+                .iter()
+                .any(|source| source.contains(&format!("fn {}", row.witness))),
+            "{}.{} lacks executable public witness {}",
+            row.owner,
+            row.method,
+            row.witness,
+        );
+        assert!(
+            expected
+                .insert((row.owner.to_string(), row.method.to_string()), row.count)
+                .is_none(),
+            "duplicate fee-ingress classification for {}.{}",
+            row.owner,
+            row.method,
+        );
+    }
+    assert_eq!(
+        actual, expected,
+        "every wrapper ingress to an engine fee-bearing transition needs an INV-040 class and public witness",
+    );
+
+    let activation_evidence =
+        include_str!("../public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs");
+    assert!(activation_evidence
+        .contains("fn v16_program_pr314_permissionless_activation_fee_requires_creator_consent"));
+    assert!(processor.contains("permissionless_market_init_fee_for_asset("));
+    assert!(processor.contains("fee > max_init_fee"));
+
+    let transition_census =
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transition_census.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
 }
