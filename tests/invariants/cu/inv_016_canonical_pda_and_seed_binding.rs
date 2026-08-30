@@ -9,9 +9,23 @@
 //! keys on these routes, not seed vectors or bump bytes, so reordered or omitted seed components have
 //! no independent instruction encoding. At the byte/API boundary those attempts are executable only
 //! as substituted account keys, which the matrix below exercises without mutating program-owned
-//! account bytes.
+//! account bytes. Market-address tombstones and portfolio incarnation/episode checks compose with
+//! these stateless addresses: a same-pubkey portfolio recreation derives the same matcher delegate,
+//! but its capability bytes are zero and cannot authorize CPI until the new owner state explicitly
+//! grants it again.
 
 use super::*;
+
+fn inv016_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start = source
+        .find(start)
+        .unwrap_or_else(|| panic!("missing production source boundary {start}"));
+    let tail = &source[start..];
+    let end = tail
+        .find(end)
+        .unwrap_or_else(|| panic!("missing production source successor {end}"));
+    &tail[..end]
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CustodySnapshot {
@@ -941,6 +955,143 @@ fn v16_bpf_auth_matcher_init_binds_every_delegate_seed_and_canonical_bump() {
 }
 
 #[test]
+fn v16_program_reused_matcher_delegate_cannot_revive_closed_portfolio_capability() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    let old_portfolio_id = env.portfolio_id(lp);
+    let (context, old_delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    assert_eq!(env.portfolio_matcher_config(lp).enabled(), 1);
+
+    // The portfolio is economically empty, so close and publicly recreate its exact address under
+    // the same owner. Every matcher-delegate seed is therefore identical across incarnations.
+    env.close_portfolio_with_cu(&lp_owner, lp);
+    env.svm.expire_blockhash();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &lp, 1_000_000_000),
+        &[],
+    )
+    .expect("System Program re-funds the closed LP address");
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(lp, false),
+        ],
+        &[&lp_owner],
+    )
+    .expect("wrapper recreates the LP at the same pubkey");
+
+    let new_portfolio_id = env.portfolio_id(lp);
+    assert_ne!(new_portfolio_id, old_portfolio_id);
+    let reused_delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &matcher_program,
+        &context,
+    );
+    assert_eq!(
+        reused_delegate, old_delegate,
+        "a stateless PDA intentionally repeats when every seed repeats"
+    );
+    assert_eq!(
+        env.portfolio_matcher_config(lp),
+        state::PortfolioMatcherConfigV16::default(),
+        "the replacement portfolio must not inherit the prior capability"
+    );
+
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let lp_before = env.svm.get_account(&lp).unwrap();
+    let context_before = env.svm.get_account(&context).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let stale_capability = env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        context,
+        reused_delegate,
+        0,
+        POS_SCALE as i128,
+        100,
+    );
+    assert!(
+        stale_capability.is_err(),
+        "reused PDA alone must not revive the closed portfolio's matcher authority"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&context).unwrap(), context_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.set_matcher_config(matcher_program, &lp_owner, lp, context, reused_delegate, 1);
+    let open_cu = env
+        .try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            context,
+            reused_delegate,
+            0,
+            POS_SCALE as i128,
+            100,
+        )
+        .expect("fresh replacement-portfolio authorization restores CPI liveness");
+    assert_cu_within(
+        "fresh capability after delegate reuse",
+        open_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    let close_cu = env
+        .try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            context,
+            reused_delegate,
+            0,
+            -(POS_SCALE as i128),
+            100,
+        )
+        .expect("fresh capability retains the ordinary inverse exit");
+    assert_cu_within(
+        "fresh capability inverse exit after delegate reuse",
+        close_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(taker), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(lp), 0));
+    assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 0);
+    assert_eq!(env.market_state().1.assets[0].oi_eff_short_q, 0);
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
+}
+
+#[test]
 fn v16_program_pda_and_token_move_callsite_roster_is_source_complete() {
     let source = include_str!("../../../src/v16_program.rs");
     assert_eq!(
@@ -1048,4 +1199,86 @@ fn v16_program_pda_and_token_move_callsite_roster_is_source_complete() {
         matcher_derivation_handlers, expected_matcher_derivations,
         "matcher-derivation callsite roster changed without INV-016 review"
     );
+}
+
+#[test]
+fn v16_program_stateless_pda_incarnation_composition_is_source_complete() {
+    let source = include_str!("../../../src/v16_program.rs");
+    assert_eq!(
+        source.matches("Pubkey::find_program_address(").count(),
+        3,
+        "a new PDA class needs explicit seed, incarnation, and close/recreate coverage"
+    );
+
+    let vault = inv016_source_between(
+        source,
+        "fn derive_vault_authority(",
+        "/// The SPL Associated Token Account program",
+    );
+    assert!(vault.contains("&[b\"vault\", market_key.as_ref()]"));
+    assert!(vault.contains("program_id"));
+    let vault_ata = inv016_source_between(source, "fn canonical_vault_address(", "fn expect_key(");
+    for seed in [
+        "vault_authority.as_ref()",
+        "spl_token::ID.as_ref()",
+        "mint.as_ref()",
+        "&ASSOCIATED_TOKEN_PROGRAM_ID",
+    ] {
+        assert!(
+            vault_ata.contains(seed),
+            "canonical vault ATA lost seed {seed}"
+        );
+    }
+
+    let market_init = inv016_source_between(
+        source,
+        "pub fn init_market_account_zero_copy(",
+        "pub fn read_market(data:",
+    );
+    let initialized_guard = market_init
+        .find("if is_initialized(data)")
+        .expect("market initialization rejects every initialized account kind");
+    let length_guard = market_init
+        .find("if data.len() < MIN_MARKET_ACCOUNT_LEN")
+        .expect("fresh market length guard remains present");
+    assert!(
+        initialized_guard < length_guard,
+        "typed market tombstones must reject before fresh-market length admission"
+    );
+    assert!(source.contains("market_ai.realloc(constants::HEADER_LEN, false)?"));
+    assert!(source
+        .contains("state::write_closed_market_tombstone(&mut market_ai.try_borrow_mut_data()?)?"));
+
+    let portfolio_init = inv016_source_between(
+        source,
+        "pub fn init_portfolio_account_zero_copy(",
+        "pub fn read_portfolio(data:",
+    );
+    let zero = portfolio_init
+        .find("for b in data.iter_mut()")
+        .expect("replacement portfolio storage is zeroed");
+    let write_id = portfolio_init
+        .find("write_portfolio_id(data, portfolio_id)")
+        .expect("replacement portfolio receives a fresh program-assigned id");
+    assert!(zero < write_id);
+
+    let binding = inv016_source_between(
+        source,
+        "fn expect_portfolio_position_binding(",
+        "fn reject_missing_pending_liquidation_observations_view(",
+    );
+    assert!(binding.contains("expect_portfolio_id(data, expected_portfolio_id)?"));
+    assert!(binding.contains("state::read_portfolio_position_epoch(data)?"));
+
+    let market_aba = include_str!("../public_sbf/inv_007_no_aba_reuse.rs");
+    assert!(market_aba
+        .contains("v16_program_whole_market_recreate_aba_matrix_is_public_and_nonvacuous"));
+    let portfolio_aba = include_str!("../public_sbf/inv_003_portfolio_incarnation_binding.rs");
+    assert!(portfolio_aba
+        .contains("v16_program_all_retained_portfolio_intents_reject_after_same_pubkey_recreate"));
+    let matcher_transport = include_str!("inv_019_cpi_invocation_and_return_data_binding.rs");
+    assert!(matcher_transport
+        .contains("v16_program_matcher_cpi_identity_incarnation_census_is_source_complete"));
+    assert!(matcher_transport
+        .contains("v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi"));
 }
