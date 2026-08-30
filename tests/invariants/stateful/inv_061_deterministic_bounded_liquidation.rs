@@ -21,10 +21,15 @@
 //! remaining effective or reset-obligation legs, withdraw the exact non-fee value, and close while
 //! the market remains Live.
 //!
-//! Guarantee boundary: these matrices cover two-user terminal landing orders for a single ADL
-//! asset and equal-risk first-step selection plus live owner exit for a two-asset/three-user ADL
-//! topology. Three-plus assets, unequal cross-domain losses, and partial-receipt close composition
-//! remain in the audit ledger.
+//! The shared INV-035 matrix extends selection to three unequal-loss assets and all six persisted
+//! leg orders. The shared INV-086 bridge then takes a public 70,000,000-quantity liquidation across
+//! all four trade transports through its exact 2,723-atom close, resolution, a genuine underfunded
+//! receipt, a value-moving top-up, and terminal custody.
+//!
+//! Guarantee boundary: these finite matrices cover two-user terminal landing orders, three-asset
+//! unequal-loss selection, and liquidation-to-partial-receipt composition. Arbitrary close
+//! splitting, transfer, retirement, and remaining maximum-shape cross-products remain in the audit
+//! ledger.
 
 use super::*;
 

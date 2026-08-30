@@ -39,6 +39,12 @@
 //! `close_id`, and only then may the claimant receive a genuinely partial payout receipt. The
 //! same public state must then produce a value-moving top-up and converge every portfolio to its
 //! economic terminal predicate.
+//! `permissionless_liquidation_composes_into_partial_receipt_across_all_trade_routes` strengthens
+//! that bridge by leaving the deeply adverse position open: only the public automatic crank may
+//! remove its matched OI and create the value-bearing close. Resolution must frame and finish that
+//! same close before the underfunded winner receives a genuine partial receipt, a later
+//! value-moving top-up, and a terminal exit. This composes liquidation quantity/OI accounting with
+//! close and receipt identity rather than testing those transitions in separate worlds.
 //! The ADL reduction-clamp matrix creates a scaled live leg through every trade transport, submits
 //! owner reductions at `effective - 1`, `effective`, `effective + 1`, and retained raw basis, and
 //! derives the permitted reduction from authenticated pre-state. Both side OI counters and the
@@ -70,6 +76,7 @@
 use super::*;
 use crate::support::fuzz_model::{
     run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
+    verify_liquidation_to_partial_receipt_compositions,
 };
 
 #[test]
@@ -95,6 +102,77 @@ fn active_close_composes_through_resolution_into_partial_receipt() {
     assert!(
         evidence.post_receipt_payout != 0 && evidence.terminal_actor_count == 5,
         "the same bridge must pay and terminate every funded portfolio: {evidence:?}"
+    );
+}
+
+#[test]
+fn permissionless_liquidation_composes_into_partial_receipt_across_all_trade_routes() {
+    let discoveries = verify_liquidation_to_partial_receipt_compositions()
+        .expect("INV-086 liquidation-to-partial-receipt composition");
+    assert_eq!(discoveries.len(), 4, "every public trade route must run");
+    assert_eq!(
+        discoveries
+            .iter()
+            .map(|evidence| evidence.route)
+            .collect::<Vec<_>>(),
+        vec![
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ],
+        "the route matrix must not duplicate a transport"
+    );
+
+    let mut liquidation_compute = Vec::new();
+    for evidence in discoveries {
+        assert_eq!(
+            evidence.selected_route_trade_count, 5,
+            "every configured public trade in the prefix must use the selected route: {evidence:?}"
+        );
+        assert_eq!(
+            (
+                evidence.pre_liquidation_effective_oi,
+                evidence.post_liquidation_effective_oi,
+                evidence.liquidation_steps,
+                evidence.liquidated_abs_q,
+            ),
+            (70_000_000, 0, 1, 70_000_000),
+            "the crank must remove the complete independently configured matched exposure: {evidence:?}"
+        );
+        assert!(
+            evidence.liquidation_created_close && evidence.terminal.close_gross_loss == 2_723,
+            "the public crank must perform real liquidation and create the close: {evidence:?}"
+        );
+        assert!(
+            evidence.liquidation_compute_units != 0
+                && evidence.liquidation_compute_units <= 320_000,
+            "the liquidation call must retain bounded CU headroom: {evidence:?}"
+        );
+        liquidation_compute.push(evidence.liquidation_compute_units);
+        assert!(
+            evidence.terminal.resolve_framed_close
+                && evidence.terminal.resolved_close_finalized
+                && evidence.terminal.source_claim_domain_count == 3
+                && evidence.terminal.partial_receipt_face == 1_000
+                && evidence.terminal.partial_receipt_paid == 125
+                && evidence.terminal.post_receipt_payout == 126
+                && !evidence.terminal.terminal_receipt_present
+                && evidence.terminal.terminal_receipt_paid == 0
+                && !evidence.terminal.terminal_receipt_finalized
+                && evidence.terminal.final_engine_vault == 750
+                && evidence.terminal.final_spl_vault == 750
+                && evidence.terminal.max_compute_units != 0
+                && evidence.terminal.max_compute_units < 1_400_000
+                && evidence.terminal.terminal_actor_count == 5,
+            "liquidation must compose through a genuine partial receipt and terminal exit: {evidence:?}"
+        );
+    }
+    assert!(
+        liquidation_compute
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]),
+        "opening transport changed liquidation CU: {liquidation_compute:?}"
     );
 }
 

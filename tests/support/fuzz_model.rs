@@ -2631,6 +2631,7 @@ pub struct ScenarioRunner {
     liveness_limit: usize,
     retained: VecDeque<RetainedTrade>,
     last_trade_rejection: Option<String>,
+    last_crank_compute_units: Option<u64>,
     pub coverage: Coverage,
 }
 
@@ -2676,6 +2677,7 @@ impl ScenarioRunner {
             liveness_limit,
             retained: VecDeque::new(),
             last_trade_rejection: None,
+            last_crank_compute_units: None,
             coverage: Coverage {
                 loaded_program_hash,
                 ..Coverage::default()
@@ -5235,6 +5237,7 @@ impl ScenarioRunner {
         hints: HintMode,
         require_progress: bool,
     ) -> Result<(), CrankFailure> {
+        self.last_crank_compute_units = None;
         let account_before = self.env.primary_portfolio(actor);
         let (_, group_before) = self.env.primary_market_state();
         let before = self.snapshot();
@@ -5267,6 +5270,7 @@ impl ScenarioRunner {
             .crank(actor, self.env.current_slot(), observations.clone())
         {
             Ok(success) => {
+                self.last_crank_compute_units = Some(success.compute_units);
                 self.coverage.observe_success(None, &success);
                 self.assert_portfolio_frame(&before, &[actor])
                     .map_err(CrankFailure::Invariant)?;
@@ -11611,6 +11615,13 @@ struct UnderfundedBackingPlan {
     extra_backed_trade: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnderfundedBridgeDisposition {
+    None,
+    SignedClose,
+    PermissionlessLiquidation,
+}
+
 const DEFAULT_UNDERFUNDED_BACKING_PLAN: UnderfundedBackingPlan = UnderfundedBackingPlan {
     backed_atoms: 1_500,
     extra_backing: None,
@@ -11956,13 +11967,39 @@ pub struct ResolvedClaimAliasEvidence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloseToPartialReceiptEvidence {
     pub active_close_residual: u128,
+    pub close_gross_loss: u128,
     pub source_claim_domain_count: usize,
     pub resolve_framed_close: bool,
     pub resolved_close_finalized: bool,
     pub partial_receipt_face: u128,
     pub partial_receipt_paid: u128,
     pub post_receipt_payout: u128,
+    pub terminal_receipt_present: bool,
+    pub terminal_receipt_paid: u128,
+    pub terminal_receipt_finalized: bool,
+    pub final_engine_vault: u128,
+    pub final_spl_vault: u128,
+    pub max_compute_units: u64,
     pub terminal_actor_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseBridgeExpectation {
+    Pending,
+    Finalized,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiquidationToPartialReceiptEvidence {
+    pub route: TradeRoute,
+    pub selected_route_trade_count: u64,
+    pub pre_liquidation_effective_oi: u128,
+    pub post_liquidation_effective_oi: u128,
+    pub liquidation_steps: u64,
+    pub liquidated_abs_q: u128,
+    pub liquidation_created_close: bool,
+    pub liquidation_compute_units: u64,
+    pub terminal: CloseToPartialReceiptEvidence,
 }
 
 struct UnderfundedTerminalGraphEvidence {
@@ -12087,7 +12124,8 @@ fn drain_bounded_terminal_subset(
 
 fn build_underfunded_live_reference_prefix(
     seed: [u8; 32],
-    include_close_bridge: bool,
+    bridge_disposition: UnderfundedBridgeDisposition,
+    trade_route: TradeRoute,
     backing_plan: UnderfundedBackingPlan,
 ) -> Result<ScenarioRunner, String> {
     const JUNIOR_WINNER: usize = 0;
@@ -12139,7 +12177,7 @@ fn build_underfunded_live_reference_prefix(
         bounded_reference_top_up_backing(&mut runner, domain, amount, expiry_slot, false)?;
     }
     runner.execute_trade(
-        TradeRoute::NoCpi,
+        trade_route,
         JUNIOR_WINNER,
         JUNIOR_LOSER,
         vec![(0, SIZE_Q)],
@@ -12149,7 +12187,7 @@ fn build_underfunded_live_reference_prefix(
     )?;
     runner.assert_global_invariants()?;
     runner.execute_trade(
-        TradeRoute::NoCpi,
+        trade_route,
         BACKED_WINNER,
         BACKED_LOSER,
         vec![(BACKED_ASSET, SIZE_Q)],
@@ -12160,7 +12198,7 @@ fn build_underfunded_live_reference_prefix(
     runner.assert_global_invariants()?;
     if backing_plan.extra_backed_trade {
         runner.execute_trade(
-            TradeRoute::NoCpi,
+            trade_route,
             BACKED_WINNER,
             JUNIOR_LOSER,
             vec![(BRIDGE_ASSET, EXTRA_BACKED_SIZE_Q)],
@@ -12170,9 +12208,9 @@ fn build_underfunded_live_reference_prefix(
         )?;
         runner.assert_global_invariants()?;
     }
-    if include_close_bridge {
+    if bridge_disposition != UnderfundedBridgeDisposition::None {
         runner.execute_trade(
-            TradeRoute::NoCpi,
+            trade_route,
             JUNIOR_WINNER,
             PROVIDER,
             vec![(BRIDGE_ASSET, BRIDGE_SIZE_Q)],
@@ -12187,7 +12225,9 @@ fn build_underfunded_live_reference_prefix(
         let slot = 2 + u64::try_from(offset).expect("bounded INV-086 mark sequence");
         bounded_reference_push_mark(&mut runner, 0, slot, mark)?;
         bounded_reference_push_mark(&mut runner, BACKED_ASSET as u16, slot, mark)?;
-        if include_close_bridge || backing_plan.extra_backed_trade {
+        if bridge_disposition != UnderfundedBridgeDisposition::None
+            || backing_plan.extra_backed_trade
+        {
             bounded_reference_push_mark(&mut runner, BRIDGE_ASSET as u16, slot, mark)?;
         }
         for actor in [JUNIOR_LOSER, JUNIOR_WINNER, BACKED_LOSER, BACKED_WINNER] {
@@ -12199,7 +12239,7 @@ fn build_underfunded_live_reference_prefix(
     }
 
     runner.execute_trade(
-        TradeRoute::NoCpi,
+        trade_route,
         JUNIOR_WINNER,
         JUNIOR_LOSER,
         vec![(0, -SIZE_Q)],
@@ -12209,7 +12249,7 @@ fn build_underfunded_live_reference_prefix(
     )?;
     runner.assert_global_invariants()?;
     runner.execute_trade(
-        TradeRoute::NoCpi,
+        trade_route,
         BACKED_WINNER,
         BACKED_LOSER,
         vec![(BACKED_ASSET, -SIZE_Q)],
@@ -12220,7 +12260,7 @@ fn build_underfunded_live_reference_prefix(
     runner.assert_global_invariants()?;
     if backing_plan.extra_backed_trade {
         runner.execute_trade(
-            TradeRoute::NoCpi,
+            trade_route,
             BACKED_WINNER,
             JUNIOR_LOSER,
             vec![(BRIDGE_ASSET, -EXTRA_BACKED_SIZE_Q)],
@@ -12230,11 +12270,11 @@ fn build_underfunded_live_reference_prefix(
         )?;
         runner.assert_global_invariants()?;
     }
-    if include_close_bridge {
+    if bridge_disposition == UnderfundedBridgeDisposition::SignedClose {
         // Keep the bridge loser stale until this terminal reduction. The trade's own refresh then
         // observes the deficit while its pre-refresh one-leg attribution is still unambiguous.
         runner.execute_trade(
-            TradeRoute::NoCpi,
+            trade_route,
             JUNIOR_WINNER,
             PROVIDER,
             vec![(BRIDGE_ASSET, -BRIDGE_SIZE_Q)],
@@ -12511,7 +12551,12 @@ fn build_underfunded_resolved_reference_seed(
     seed[0] ^= landing.seed_tag();
     seed[1] ^= u8::from(reverse_tail);
     seed[2] ^= u8::from(claim_first);
-    let mut runner = build_underfunded_live_reference_prefix(seed, false, backing_plan)?;
+    let mut runner = build_underfunded_live_reference_prefix(
+        seed,
+        UnderfundedBridgeDisposition::None,
+        TradeRoute::NoCpi,
+        backing_plan,
+    )?;
 
     let before_resolution = runner.env.primary_market_state().1;
     if before_resolution.source_credit[JUNIOR_DOMAIN as usize].positive_claim_bound_num == 0
@@ -12618,31 +12663,35 @@ fn build_underfunded_resolved_reference_seed(
     })
 }
 
-pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialReceiptEvidence, String>
-{
+fn finish_close_to_partial_receipt_composition(
+    mut runner: ScenarioRunner,
+    expectation: CloseBridgeExpectation,
+) -> Result<CloseToPartialReceiptEvidence, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
     const BACKED_LOSER: usize = 3;
     const CLOSE_LOSER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
     const SNAPSHOT_SLOT: u64 = 12;
 
-    let mut runner = build_underfunded_live_reference_prefix(
-        [0x8b; 32],
-        true,
-        DEFAULT_UNDERFUNDED_BACKING_PLAN,
-    )?;
     let close_before = runner
         .env
         .primary_portfolio(CLOSE_LOSER)
         .close_progress
         .try_to_runtime()
         .map_err(|error| format!("INV-086 close bridge pre-resolution decode: {error:?}"))?;
+    let expected_phase = match expectation {
+        CloseBridgeExpectation::Pending => {
+            !close_before.finalized && close_before.residual_remaining != 0
+        }
+        CloseBridgeExpectation::Finalized => {
+            close_before.finalized && close_before.residual_remaining == 0
+        }
+    };
     if !close_before.active
-        || close_before.finalized
         || close_before.canceled
         || close_before.asset_index != 2
-        || close_before.residual_remaining == 0
-        || close_before.residual_remaining != close_before.gross_loss_at_close_start
+        || close_before.gross_loss_at_close_start == 0
+        || !expected_phase
         || runner.positions[CLOSE_LOSER]
             .iter()
             .any(|position| *position != 0)
@@ -12758,6 +12807,15 @@ pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialRec
     let post_receipt_payout = destination_after
         .checked_sub(destination_before)
         .ok_or("INV-086 close bridge destination balance decreased")?;
+    let final_receipt = runner
+        .env
+        .primary_portfolio(JUNIOR_WINNER)
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .map_err(|error| format!("INV-086 close bridge terminal receipt decode: {error:?}"))?;
+    let final_engine_vault = runner.env.primary_market_state().1.vault;
+    let final_spl_vault = u128::from(runner.env.token_amount(runner.env.vault));
+    let max_compute_units = runner.coverage.max_cu;
     let terminal_actor_count = (0..PRIMARY_ACTOR_COUNT)
         .map(|actor| runner.portfolio_is_economically_terminal(actor))
         .collect::<Result<Vec<_>, _>>()?
@@ -12772,14 +12830,174 @@ pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialRec
 
     Ok(CloseToPartialReceiptEvidence {
         active_close_residual: close_before.residual_remaining,
+        close_gross_loss: close_before.gross_loss_at_close_start,
         source_claim_domain_count,
         resolve_framed_close: close_after_resolve == close_before,
         resolved_close_finalized,
         partial_receipt_face: receipt.terminal_positive_claim_face,
         partial_receipt_paid: receipt.paid_effective,
         post_receipt_payout,
+        terminal_receipt_present: final_receipt.present,
+        terminal_receipt_paid: final_receipt.paid_effective,
+        terminal_receipt_finalized: final_receipt.finalized,
+        final_engine_vault,
+        final_spl_vault,
+        max_compute_units,
         terminal_actor_count,
     })
+}
+
+pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialReceiptEvidence, String>
+{
+    let runner = build_underfunded_live_reference_prefix(
+        [0x8b; 32],
+        UnderfundedBridgeDisposition::SignedClose,
+        TradeRoute::NoCpi,
+        DEFAULT_UNDERFUNDED_BACKING_PLAN,
+    )?;
+    finish_close_to_partial_receipt_composition(runner, CloseBridgeExpectation::Pending)
+}
+
+fn verify_one_liquidation_to_partial_receipt_composition(
+    route: TradeRoute,
+) -> Result<LiquidationToPartialReceiptEvidence, String> {
+    const CLOSE_LOSER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
+    const BRIDGE_ASSET: usize = 2;
+    const MAX_LIQUIDATION_STEPS: usize = 16;
+
+    let mut seed = [0x8c; 32];
+    seed[0] ^= u8::try_from(route.index()).expect("four trade routes fit u8");
+    let mut runner = build_underfunded_live_reference_prefix(
+        seed,
+        UnderfundedBridgeDisposition::PermissionlessLiquidation,
+        route,
+        DEFAULT_UNDERFUNDED_BACKING_PLAN,
+    )?;
+    let (_, group_before) = runner.env.primary_market_state();
+    let pre_liquidation_effective_oi = group_before.assets[BRIDGE_ASSET].oi_eff_long_q;
+    if pre_liquidation_effective_oi == 0
+        || pre_liquidation_effective_oi != group_before.assets[BRIDGE_ASSET].oi_eff_short_q
+        || runner.positions[CLOSE_LOSER][BRIDGE_ASSET] == 0
+    {
+        return Err(format!(
+            "INV-086 liquidation bridge did not retain matched live exposure: oi_long={}, oi_short={}, position={}",
+            pre_liquidation_effective_oi,
+            group_before.assets[BRIDGE_ASSET].oi_eff_short_q,
+            runner.positions[CLOSE_LOSER][BRIDGE_ASSET]
+        ));
+    }
+    let close_before = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-086 liquidation bridge initial close decode: {error:?}"))?;
+    if close_before.active {
+        return Err(format!(
+            "INV-086 liquidation bridge started with an existing close: {close_before:?}"
+        ));
+    }
+    let selected_route_trade_count = runner.coverage.route_success[route.index()];
+    if selected_route_trade_count != 5
+        || runner.coverage.route_success.iter().sum::<u64>() != selected_route_trade_count
+    {
+        return Err(format!(
+            "INV-086 liquidation bridge did not exclusively exercise {route:?}: {:?}",
+            runner.coverage.route_success
+        ));
+    }
+
+    let liquidation_steps_before = runner.coverage.liquidation_steps;
+    let liquidated_abs_q_before = runner.coverage.liquidated_abs_q;
+    let mut liquidation_compute_units = 0u64;
+    for step in 0..MAX_LIQUIDATION_STEPS {
+        let account = runner.env.primary_portfolio(CLOSE_LOSER);
+        let close = account.close_progress.try_to_runtime().map_err(|error| {
+            format!("INV-086 liquidation bridge close decode at step {step}: {error:?}")
+        })?;
+        if close.active
+            && runner.positions[CLOSE_LOSER]
+                .iter()
+                .all(|position| *position == 0)
+        {
+            break;
+        }
+        runner
+            .execute_crank(CLOSE_LOSER, HintMode::Complete, true)
+            .map_err(CrankFailure::into_message)?;
+        liquidation_compute_units = liquidation_compute_units.max(
+            runner
+                .last_crank_compute_units
+                .ok_or("INV-086 successful liquidation crank did not record compute")?,
+        );
+        runner.assert_global_invariants()?;
+    }
+
+    let (_, group_after) = runner.env.primary_market_state();
+    let post_liquidation_effective_oi = group_after.assets[BRIDGE_ASSET].oi_eff_long_q;
+    let close_after = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-086 liquidation bridge final close decode: {error:?}"))?;
+    let liquidation_steps = runner
+        .coverage
+        .liquidation_steps
+        .checked_sub(liquidation_steps_before)
+        .ok_or("INV-086 liquidation-step coverage decreased")?;
+    let liquidated_abs_q = runner
+        .coverage
+        .liquidated_abs_q
+        .checked_sub(liquidated_abs_q_before)
+        .ok_or("INV-086 liquidated quantity coverage decreased")?;
+    let liquidation_created_close = close_after.active
+        && close_after.finalized
+        && !close_after.canceled
+        && close_after.asset_index == BRIDGE_ASSET as u32
+        && close_after.gross_loss_at_close_start != 0
+        && close_after.residual_remaining == 0
+        && runner.positions[CLOSE_LOSER]
+            .iter()
+            .all(|position| *position == 0);
+    if liquidation_steps == 0
+        || liquidated_abs_q == 0
+        || post_liquidation_effective_oi >= pre_liquidation_effective_oi
+        || !liquidation_created_close
+        || liquidation_compute_units == 0
+    {
+        return Err(format!(
+            "INV-086 permissionless liquidation did not create the value-bearing terminal bridge: pre_oi={pre_liquidation_effective_oi}, post_oi={post_liquidation_effective_oi}, steps={liquidation_steps}, liquidated={liquidated_abs_q}, liquidation_cu={liquidation_compute_units}, close={close_after:?}, positions={:?}",
+            runner.positions[CLOSE_LOSER]
+        ));
+    }
+
+    let terminal =
+        finish_close_to_partial_receipt_composition(runner, CloseBridgeExpectation::Finalized)?;
+    Ok(LiquidationToPartialReceiptEvidence {
+        route,
+        selected_route_trade_count,
+        pre_liquidation_effective_oi,
+        post_liquidation_effective_oi,
+        liquidation_steps,
+        liquidated_abs_q,
+        liquidation_created_close,
+        liquidation_compute_units,
+        terminal,
+    })
+}
+
+pub fn verify_liquidation_to_partial_receipt_compositions(
+) -> Result<Vec<LiquidationToPartialReceiptEvidence>, String> {
+    [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .map(verify_one_liquidation_to_partial_receipt_composition)
+    .collect()
 }
 
 fn run_underfunded_terminal_world(
@@ -13750,7 +13968,8 @@ fn run_underfunded_terminal_reference_subgraph() -> Result<UnderfundedTerminalGr
     const RECOVERY_EXPIRY_SLOT: u64 = 12;
     let mut recovery_runner = build_underfunded_live_reference_prefix(
         [0x30; 32],
-        false,
+        UnderfundedBridgeDisposition::None,
+        TradeRoute::NoCpi,
         DEFAULT_UNDERFUNDED_BACKING_PLAN,
     )?;
     let recovery_before = recovery_runner.bounded_reference_node()?;
