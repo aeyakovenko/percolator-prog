@@ -182,12 +182,19 @@ fn public_released_pnl_fixture() -> PublicReleasedPnlFixture {
 }
 
 fn public_asset1_bankrupt_close_fixture() -> PublicActiveCloseFixture {
-    public_asset1_bankrupt_close_fixture_impl(None, None).0
+    public_asset1_bankrupt_close_fixture_impl(None, None, 1, true).0
+}
+
+fn public_asset1_bankrupt_close_fixture_before_close_with_b_chunk_atoms(
+    public_b_chunk_atoms: u128,
+) -> PublicActiveCloseFixture {
+    public_asset1_bankrupt_close_fixture_impl(None, None, public_b_chunk_atoms, false).0
 }
 
 fn public_asset1_bankrupt_close_fixture_with_asset0_external_oracle(
 ) -> (PublicActiveCloseFixture, Pubkey) {
-    let (fixture, oracle) = public_asset1_bankrupt_close_fixture_impl(Some([0x58; 32]), None);
+    let (fixture, oracle) =
+        public_asset1_bankrupt_close_fixture_impl(Some([0x58; 32]), None, 1, true);
     (
         fixture,
         oracle.expect("external-oracle fixture must return its feed account"),
@@ -196,12 +203,14 @@ fn public_asset1_bankrupt_close_fixture_with_asset0_external_oracle(
 
 fn public_asset1_bankrupt_close_fixture_with_counterparty_asset0_short() -> PublicActiveCloseFixture
 {
-    public_asset1_bankrupt_close_fixture_impl(None, Some(POS_SCALE / 20)).0
+    public_asset1_bankrupt_close_fixture_impl(None, Some(POS_SCALE / 20), 1, true).0
 }
 
 fn public_asset1_bankrupt_close_fixture_impl(
     asset0_external_feed: Option<[u8; 32]>,
     counterparty_asset0_short_q: Option<u128>,
+    public_b_chunk_atoms: u128,
+    start_close: bool,
 ) -> (PublicActiveCloseFixture, Option<Pubkey>) {
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         max_portfolio_assets: if counterparty_asset0_short_q.is_some() {
@@ -210,7 +219,7 @@ fn public_asset1_bankrupt_close_fixture_impl(
             1
         },
         max_bankrupt_close_lifetime_slots: 2,
-        public_b_chunk_atoms: 1,
+        public_b_chunk_atoms,
         ..V16CuMarketParams::default()
     });
     let asset0_oracle = if let Some(feed) = asset0_external_feed {
@@ -327,10 +336,12 @@ fn public_asset1_bankrupt_close_fixture_impl(
     env.svm.warp_to_slot(4);
     env.try_shutdown_asset_with_authority(&creator, 1, 4)
         .expect("permissionless creator shuts down only its own asset");
-    env.forfeit_recovery_leg_with_cu(&loss_owner, loss, 1, 1);
-    let ledger = close_progress(&env.portfolio_state(loss));
-    assert!(ledger.active && ledger.residual_remaining > 0);
-    assert_eq!(ledger.asset_index, 1);
+    if start_close {
+        env.forfeit_recovery_leg_with_cu(&loss_owner, loss, 1, 1);
+        let ledger = close_progress(&env.portfolio_state(loss));
+        assert!(ledger.active && ledger.residual_remaining > 0);
+        assert_eq!(ledger.asset_index, 1);
+    }
     assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
 
     (

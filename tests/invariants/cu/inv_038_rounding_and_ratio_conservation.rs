@@ -5,7 +5,10 @@
 //! non-user-value class. These public-route LiteSVM tests cover dust trade fees,
 //! split subatom execution, batch reconstruction, funding direction/caps, and
 //! backing-fee splits so rounding cannot mint principal, insurance, backing, or
-//! withdrawable PnL.
+//! withdrawable PnL. The social-loss matrix also compares one aggregate public
+//! booking/settlement with the same residual carried through one-atom calls;
+//! both schedules must converge to an identical user-value, asset, ledger, and
+//! SPL-custody frame.
 
 use super::*;
 
@@ -328,6 +331,349 @@ fn v16_program_social_loss_booking_and_settlement_preserve_exact_remainders() {
         env.token_amount(env.vault),
         "bookkeeping-only rounding transitions cannot change SPL custody"
     );
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SocialLossPartitionFrame {
+    asset0: percolator::AssetStateV16,
+    asset1: percolator::AssetStateV16,
+    market_mode: MarketModeV16,
+    bankruptcy_hlock_active: bool,
+    vault: u128,
+    c_tot: u128,
+    insurance: u128,
+    loss_capital: u128,
+    loss_pnl: i128,
+    loss_active_bitmap: percolator::V16ActiveBitmap,
+    loss_close: CloseProgressLedgerV16,
+    counterparty_capital: u128,
+    counterparty_pnl: i128,
+    counterparty_active_bitmap: percolator::V16ActiveBitmap,
+    counterparty_close: CloseProgressLedgerV16,
+    spl_vault: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SocialLossPartitionOutcome {
+    frame: SocialLossPartitionFrame,
+    initial_residual: u128,
+    booked_atoms: u128,
+    settled_atoms: u128,
+    booking_calls: usize,
+    settlement_calls: usize,
+    cleanup_calls: usize,
+    max_compute_units: u64,
+}
+
+fn inv038_public_crank(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    observations: Vec<CrankObservationHint>,
+    label: &str,
+) -> u64 {
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations,
+        },
+        vec![
+            AccountMeta::new_readonly(env.payer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[],
+    )
+    .unwrap_or_else(|error| panic!("{label}: {error}"))
+}
+
+fn inv038_assert_social_loss_booking_partition(
+    before_close: CloseProgressLedgerV16,
+    after_close: CloseProgressLedgerV16,
+    before_asset: percolator::AssetStateV16,
+    after_asset: percolator::AssetStateV16,
+    label: &str,
+) -> u128 {
+    let booked = after_close
+        .b_loss_booked
+        .checked_sub(before_close.b_loss_booked)
+        .expect("INV-038 booked-loss ledger must be monotonic");
+    let delta_b = after_asset
+        .b_long_num
+        .checked_sub(before_asset.b_long_num)
+        .expect("INV-038 B index must be monotonic");
+    assert!(booked > 0 && delta_b > 0, "{label}");
+    assert_eq!(
+        after_asset.loss_weight_sum_long, before_asset.loss_weight_sum_long,
+        "{label}: booking must retain one denominator"
+    );
+    assert_eq!(
+        delta_b
+            .checked_mul(before_asset.loss_weight_sum_long)
+            .and_then(|value| value.checked_add(after_asset.social_loss_remainder_long_num)),
+        booked
+            .checked_mul(percolator::SOCIAL_LOSS_DEN)
+            .and_then(|value| value.checked_add(before_asset.social_loss_remainder_long_num)),
+        "{label}: booking must preserve its exact carried remainder"
+    );
+    assert!(after_asset.social_loss_remainder_long_num < before_asset.loss_weight_sum_long);
+    booked
+}
+
+fn run_social_loss_partition_schedule(public_b_chunk_atoms: u128) -> SocialLossPartitionOutcome {
+    const ASSET: usize = 1;
+    const MAX_STEPS: usize = 16;
+
+    let PublicActiveCloseFixture {
+        mut env,
+        loss_owner,
+        loss,
+        asset1_counterparty_owner,
+        asset1_counterparty,
+        ..
+    } = public_asset1_bankrupt_close_fixture_before_close_with_b_chunk_atoms(public_b_chunk_atoms);
+
+    let before_start_close = close_progress(&env.portfolio_state(loss));
+    let before_start_asset = env.market_state().1.assets[ASSET];
+    assert!(!before_start_close.active);
+    let start_cu =
+        env.forfeit_recovery_leg_with_cu(&loss_owner, loss, ASSET as u16, public_b_chunk_atoms);
+    assert_cu_within(
+        "INV-038 partitioned close start",
+        start_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let after_start_close = close_progress(&env.portfolio_state(loss));
+    let after_start_asset = env.market_state().1.assets[ASSET];
+    assert!(after_start_close.active);
+    let first_booked = inv038_assert_social_loss_booking_partition(
+        before_start_close,
+        after_start_close,
+        before_start_asset,
+        after_start_asset,
+        "INV-038 close-start booking",
+    );
+    let initial_residual = first_booked
+        .checked_add(after_start_close.residual_remaining)
+        .expect("INV-038 initial residual overflow");
+    let mut booked_atoms = first_booked;
+    let mut booking_calls = 1usize;
+    let mut settlement_calls = 0usize;
+    let mut cleanup_calls = 0usize;
+    let mut max_compute_units = start_cu;
+
+    for step in 0..MAX_STEPS {
+        let before_close = close_progress(&env.portfolio_state(loss));
+        if before_close.residual_remaining == 0 {
+            break;
+        }
+        let before_asset = env.market_state().1.assets[ASSET];
+        let cu = inv038_public_crank(
+            &mut env,
+            loss,
+            Vec::new(),
+            &format!("INV-038 social-loss booking step {step}"),
+        );
+        assert_cu_within(
+            "INV-038 partitioned social-loss booking",
+            cu,
+            CRANK_CU_LIMIT,
+        );
+        max_compute_units = max_compute_units.max(cu);
+
+        let after_close = close_progress(&env.portfolio_state(loss));
+        let after_asset = env.market_state().1.assets[ASSET];
+        let booked = inv038_assert_social_loss_booking_partition(
+            before_close,
+            after_close,
+            before_asset,
+            after_asset,
+            &format!("INV-038 booking step {step}"),
+        );
+        assert_eq!(
+            before_close.residual_remaining - after_close.residual_remaining,
+            booked
+        );
+        booked_atoms = booked_atoms.checked_add(booked).unwrap();
+        booking_calls += 1;
+    }
+    assert_eq!(
+        close_progress(&env.portfolio_state(loss)).residual_remaining,
+        0
+    );
+    assert_eq!(booked_atoms, initial_residual);
+
+    let target_b = env.market_state().1.assets[ASSET].b_long_num;
+    let mut settled_atoms = 0u128;
+    for step in 0..MAX_STEPS {
+        let before_account = env.portfolio_state(asset1_counterparty);
+        if !has_active_leg_for_asset(&before_account, ASSET) {
+            break;
+        }
+        let before_leg = active_leg_for_asset(&before_account, ASSET);
+        if before_leg.b_snap == target_b && before_leg.basis_pos_q == 0 {
+            break;
+        }
+        let cu = env.forfeit_recovery_leg_with_cu(
+            &asset1_counterparty_owner,
+            asset1_counterparty,
+            ASSET as u16,
+            public_b_chunk_atoms,
+        );
+        assert_cu_within(
+            "INV-038 partitioned account B settlement",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+        max_compute_units = max_compute_units.max(cu);
+        settlement_calls += 1;
+
+        let after_account = env.portfolio_state(asset1_counterparty);
+        let before_value = i128::try_from(before_account.capital.get())
+            .ok()
+            .and_then(|capital| capital.checked_add(before_account.pnl.get()))
+            .expect("INV-038 before-account value overflow");
+        let after_value = i128::try_from(after_account.capital.get())
+            .ok()
+            .and_then(|capital| capital.checked_add(after_account.pnl.get()))
+            .expect("INV-038 after-account value overflow");
+        let settled = before_value
+            .checked_sub(after_value)
+            .and_then(|value| u128::try_from(value).ok())
+            .expect("INV-038 B settlement must debit a nonnegative amount");
+        let after_leg = has_active_leg_for_asset(&after_account, ASSET)
+            .then(|| active_leg_for_asset(&after_account, ASSET));
+        let after_b_snap = after_leg.map_or(target_b, |leg| leg.b_snap);
+        let delta_b = after_b_snap
+            .checked_sub(before_leg.b_snap)
+            .expect("INV-038 account B snapshot must be monotonic");
+        assert!(
+            delta_b > 0 && settled > 0,
+            "INV-038 settlement step {step} cap={public_b_chunk_atoms}: delta_b={delta_b}, settled={settled}, before={}/{}, after={}/{}, target={target_b}, before_snap={}, detached={}",
+            before_account.capital.get(),
+            before_account.pnl.get(),
+            after_account.capital.get(),
+            after_account.pnl.get(),
+            before_leg.b_snap,
+            after_leg.is_none(),
+        );
+        let numerator = before_leg
+            .loss_weight
+            .checked_mul(delta_b)
+            .and_then(|value| value.checked_add(before_leg.b_rem))
+            .expect("INV-038 settlement numerator overflow");
+        assert_eq!(settled, numerator / percolator::SOCIAL_LOSS_DEN);
+        let expected_remainder = numerator % percolator::SOCIAL_LOSS_DEN;
+        if let Some(after_leg) = after_leg {
+            assert_eq!(after_leg.loss_weight, before_leg.loss_weight);
+            assert_eq!(after_leg.b_rem, expected_remainder);
+            assert!(after_leg.b_snap <= target_b);
+        } else {
+            assert_eq!(after_b_snap, target_b);
+        }
+        settled_atoms = settled_atoms.checked_add(settled).unwrap();
+    }
+    if has_active_leg_for_asset(&env.portfolio_state(asset1_counterparty), ASSET) {
+        let settled_leg = active_leg_for_asset(&env.portfolio_state(asset1_counterparty), ASSET);
+        assert_eq!(settled_leg.b_snap, target_b);
+        assert_eq!(settled_leg.basis_pos_q, 0);
+    }
+
+    for step in 0..MAX_STEPS {
+        if close_progress(&env.portfolio_state(loss)).finalized {
+            break;
+        }
+        let cu = inv038_public_crank(
+            &mut env,
+            loss,
+            crank_observations(ASSET as u16),
+            &format!("INV-038 close cleanup step {step}"),
+        );
+        assert_cu_within("INV-038 partitioned close cleanup", cu, CRANK_CU_LIMIT);
+        max_compute_units = max_compute_units.max(cu);
+        cleanup_calls += 1;
+    }
+    assert!(close_progress(&env.portfolio_state(loss)).finalized);
+    if has_active_leg_for_asset(&env.portfolio_state(loss), ASSET) {
+        let cu =
+            env.forfeit_recovery_leg_with_cu(&loss_owner, loss, ASSET as u16, public_b_chunk_atoms);
+        assert_cu_within("INV-038 bankrupt owner cleanup", cu, CUSTODY_CU_LIMIT);
+        max_compute_units = max_compute_units.max(cu);
+        cleanup_calls += 1;
+    }
+    for (label, portfolio) in [
+        ("bankrupt obligation", loss),
+        ("counterparty obligation", asset1_counterparty),
+    ] {
+        for step in 0..MAX_STEPS {
+            if !has_active_leg_for_asset(&env.portfolio_state(portfolio), ASSET) {
+                break;
+            }
+            let cu = inv038_public_crank(
+                &mut env,
+                portfolio,
+                crank_observations(ASSET as u16),
+                &format!("INV-038 {label} cleanup step {step}"),
+            );
+            assert_cu_within("INV-038 partitioned obligation cleanup", cu, CRANK_CU_LIMIT);
+            max_compute_units = max_compute_units.max(cu);
+            cleanup_calls += 1;
+        }
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(portfolio), ASSET),
+            "INV-038 {label} must clear in bounded public work"
+        );
+    }
+
+    let group = env.market_state().1;
+    let loss_state = env.portfolio_state(loss);
+    let counterparty_state = env.portfolio_state(asset1_counterparty);
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+    SocialLossPartitionOutcome {
+        frame: SocialLossPartitionFrame {
+            asset0: group.assets[0],
+            asset1: group.assets[ASSET],
+            market_mode: group.mode,
+            bankruptcy_hlock_active: group.bankruptcy_hlock_active,
+            vault: group.vault,
+            c_tot: group.c_tot,
+            insurance: group.insurance,
+            loss_capital: loss_state.capital.get(),
+            loss_pnl: loss_state.pnl.get(),
+            loss_active_bitmap: active_bitmap(&loss_state),
+            loss_close: close_progress(&loss_state),
+            counterparty_capital: counterparty_state.capital.get(),
+            counterparty_pnl: counterparty_state.pnl.get(),
+            counterparty_active_bitmap: active_bitmap(&counterparty_state),
+            counterparty_close: close_progress(&counterparty_state),
+            spl_vault: env.token_amount(env.vault),
+        },
+        initial_residual,
+        booked_atoms,
+        settled_atoms,
+        booking_calls,
+        settlement_calls,
+        cleanup_calls,
+        max_compute_units,
+    }
+}
+
+#[test]
+fn v16_program_social_loss_aggregate_and_chunked_routes_converge_exactly() {
+    let aggregate = run_social_loss_partition_schedule(percolator::MAX_VAULT_TVL);
+    let chunked = run_social_loss_partition_schedule(1);
+
+    assert_eq!(aggregate.initial_residual, chunked.initial_residual);
+    assert_eq!(aggregate.booked_atoms, chunked.booked_atoms);
+    assert_eq!(aggregate.settled_atoms, chunked.settled_atoms);
+    assert_eq!(aggregate.frame, chunked.frame);
+    assert_eq!(aggregate.booking_calls, 1);
+    assert!(chunked.booking_calls > aggregate.booking_calls);
+    assert_eq!(aggregate.settlement_calls, 1);
+    assert!(chunked.settlement_calls > aggregate.settlement_calls);
+    assert!(aggregate.cleanup_calls > 0 && chunked.cleanup_calls > 0);
+    assert!(aggregate.max_compute_units < support::v16_svm::TX_CU_LIMIT);
+    assert!(chunked.max_compute_units < support::v16_svm::TX_CU_LIMIT);
 }
 
 #[test]
