@@ -131,3 +131,38 @@ fn unmodified_retained_transaction_still_executes() {
         "the signed control conserves external quote supply"
     );
 }
+
+#[test]
+fn deployed_wrapper_has_no_detached_signature_interpreter() {
+    let source = include_str!("../../../src/v16_program.rs");
+    for forbidden in [
+        "ed25519_program",
+        "secp256k1_program",
+        "secp256r1_program",
+        "sysvar::instructions",
+        "load_instruction_at_checked",
+        "load_instruction_at_relative",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "adding detached-signature surface {forbidden:?} requires an explicit typed domain header"
+        );
+    }
+
+    let signer_guard = source
+        .split("fn expect_signer")
+        .nth(1)
+        .and_then(|tail| tail.split("fn expect_writable").next())
+        .expect("production signer guard remains source-visible");
+    assert!(
+        signer_guard.contains("if !ai.is_signer"),
+        "wrapper authorization must continue to consume the SVM-authenticated signer bit"
+    );
+    assert_eq!(
+        source
+            .matches("Instruction::decode(instruction_data)?")
+            .count(),
+        1,
+        "all deployed instruction bytes must continue to enter one strict decoder"
+    );
+}

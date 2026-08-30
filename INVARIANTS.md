@@ -187,9 +187,20 @@ authority updates.
 pubkey, instruction kind, and message version. A signature for one program deployment, cluster,
 instruction variant, or encoding cannot be interpreted as another valid operation.
 
+For a wrapper that exposes no detached-signature interpreter, the signed Solana transaction message
+is the retained envelope: it binds the transaction-message version, deployed program ID, every
+account key, exact instruction bytes, and recent blockhash. In that architecture, cluster admission
+is delegated to validator recent-blockhash semantics and collision resistance rather than duplicated
+in each instruction schema. Adding Ed25519/secp instruction introspection, a relayer signature,
+durable detached consent, or another signature-bearing payload immediately requires the explicit
+typed application-domain header above.
+
 **Required tests.** Cross-cluster, cross-program, cross-instruction, and version-downgrade replay
 must reject. Ambiguous byte encodings and prefix-compatible messages must not verify as another
-type.
+type. A source-complete audit must prove whether any detached-signature surface exists; when none
+exists, mutate every Solana-message domain after signing, prove signature rejection and exact
+rollback, and compose with strict decoder/version-downgrade coverage. Validator blockhash admission
+is a named runtime assumption, not a property of the wrapper instruction body.
 **Verification:** P, F, I
 
 ### INV-007 - No ABA reuse
