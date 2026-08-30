@@ -2180,7 +2180,10 @@ fn v16_attack_source_backed_force_close_preserves_bounded_resolved_exits() {
         {
             break;
         }
-        assert!(progressed, "resolved wind-down reached a nonterminal fixed point");
+        assert!(
+            progressed,
+            "resolved wind-down reached a nonterminal fixed point"
+        );
     }
 
     let winner_after = env.portfolio_state(winner);

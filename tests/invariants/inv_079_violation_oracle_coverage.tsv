@@ -7,7 +7,7 @@ AuthorityResolveTerminalDiscovery	TERMINAL_LOF	public trace binds stale authorit
 BackingProviderConsentDiscovery	ECONOMIC_DELTA_ONLY	operator SPL gain is exact, but the LP authorized the fee and provider harm is counterfactual revenue under a privileged policy change
 BilateralMarkFeeDiscovery	TERMINAL_LOF	all six portfolios resolve through public payout rails; exact destination-token traces bind terminal coalition excess and noncoalition loss to the classifier while ordinary fee loss remains bounded-exit evidence
 CompositeRoundingDiscovery	TERMINAL_LOF	all five portfolios resolve through public payout rails; exact destination-token traces bind any rounded-composite liquidation loss and cranker gain to the terminal classifier
-FeeConsentDiscovery	ECONOMIC_DELTA_ONLY	unauthorized debit lacks normalized public terminal evidence
+FeeConsentDiscovery	TERMINAL_LOF	all eight signed fee families resolve every funded actor through public payout rails; exact affected-signer value loss and caller-fee beneficiary gain are bound to the terminal classifier
 FractionalMovementDiscovery	TERMINAL_LOF	public trace binds a stalled target's exact short underpayment to long overpayment while stale resolution proves it is not persistent DoS
 FundedRoleDiscovery	PRIVILEGED_TRANSFER	exact principal transfer requires the currently authorized asset admin to rotate the funded role
 IncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS

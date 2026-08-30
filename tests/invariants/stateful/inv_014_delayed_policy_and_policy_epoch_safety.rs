@@ -116,6 +116,10 @@ proptest! {
         prop_assert_eq!(discoveries.len(), FeeConsentKind::ALL.len());
         for (expected, discovery) in FeeConsentKind::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.kind, expected);
+            prop_assert!(
+                discovery.satisfies_invariant(),
+                "fee-consent terminal evidence was incomplete: {discovery:?}"
+            );
         }
         let violations: Vec<_> = discoveries
             .iter()

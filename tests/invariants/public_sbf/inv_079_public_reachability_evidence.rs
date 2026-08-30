@@ -305,6 +305,7 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
             "AuthorityResolveTerminalDiscovery",
             "BilateralMarkFeeDiscovery",
             "CompositeRoundingDiscovery",
+            "FeeConsentDiscovery",
             "FractionalMovementDiscovery",
             "PendingMarkAdmissionDiscovery",
             "PendingMarkInheritanceDiscovery",

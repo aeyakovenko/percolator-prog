@@ -1174,6 +1174,10 @@ pub struct FeeConsentDiscovery {
     pub authorized_debit: u128,
     pub observed_debit: u128,
     pub compute_units: Option<u64>,
+    pub terminal_victim_loss_atoms: u128,
+    pub terminal_unauthorized_gain_atoms: u128,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3201,9 +3205,36 @@ impl SourceFeeConsentDiscovery {
 
 impl FeeConsentDiscovery {
     pub fn is_violation(&self) -> bool {
+        let Some(unauthorized_loss_atoms) = self
+            .observed_debit
+            .checked_sub(self.authorized_debit)
+            .filter(|loss| *loss != 0)
+        else {
+            return false;
+        };
         self.accepted_unconsented_terms
             && self.mutated_economic_state
-            && self.observed_debit > self.authorized_debit
+            && self.terminal_victim_loss_atoms == self.observed_debit
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == unauthorized_loss_atoms
+                    && unauthorized_gain_atoms == self.terminal_unauthorized_gain_atoms
+            )
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+
+    pub fn satisfies_invariant(&self) -> bool {
+        self.public_trace.validate_public_execution().is_ok()
+            && self.terminal_victim_loss_atoms == self.observed_debit
+            && self.observed_debit <= self.authorized_debit
+            && self.terminal_unauthorized_gain_atoms == 0
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
     }
 }
 
@@ -7420,14 +7451,66 @@ pub fn verify_matcher_mutation_order_safety(
     })
 }
 
+fn fee_consent_victim_actors(kind: FeeConsentKind) -> &'static [usize] {
+    const BOTH_TRADERS: [usize; 2] = [0, 1];
+    const LP_ONLY: [usize; 1] = [1];
+    const CREATOR_ONLY: [usize; 1] = [0];
+    match kind {
+        FeeConsentKind::FreshSignedLiveBaseFee
+        | FeeConsentKind::RetainedNoCpiBaseFee
+        | FeeConsentKind::RetainedBatchNoCpiBaseFee => &BOTH_TRADERS,
+        FeeConsentKind::CpiBaseFee
+        | FeeConsentKind::BatchCpiBaseFee
+        | FeeConsentKind::CpiCallerFee
+        | FeeConsentKind::BatchCpiCallerFee => &LP_ONLY,
+        FeeConsentKind::PermissionlessActivationFee => &CREATOR_ONLY,
+    }
+}
+
+fn fee_consent_gain_actor(kind: FeeConsentKind) -> Option<usize> {
+    matches!(
+        kind,
+        FeeConsentKind::CpiCallerFee | FeeConsentKind::BatchCpiCallerFee
+    )
+    .then_some(0)
+}
+
+fn fee_consent_actor_value(env: &V16Svm, actors: &[usize]) -> Result<u128, String> {
+    let mut total = 0u128;
+    for (index, actor) in actors.iter().copied().enumerate() {
+        if actors[..index].contains(&actor) {
+            return Err(format!("fee-consent value set repeats actor {actor}"));
+        }
+        let portfolio = env.primary_portfolio(actor);
+        if portfolio.pnl.get() != 0 {
+            return Err(format!(
+                "fee-consent actor {actor} has nonzero unsettled PnL {}",
+                portfolio.pnl.get()
+            ));
+        }
+        total = total
+            .checked_add(u128::from(env.token_amount(env.actors[actor].source_token)))
+            .and_then(|value| {
+                value.checked_add(u128::from(
+                    env.token_amount(env.actors[actor].destination_token),
+                ))
+            })
+            .and_then(|value| value.checked_add(portfolio.capital.get()))
+            .ok_or_else(|| "fee-consent actor value overflowed".to_string())?;
+    }
+    Ok(total)
+}
+
 fn finish_fee_consent_discovery(
-    env: &V16Svm,
+    env: &mut V16Svm,
     kind: FeeConsentKind,
     before: EconomicFingerprint,
     execution: Result<u64, String>,
     terms_were_unconsented: bool,
     authorized_debit: u128,
     observed_debit: u128,
+    victim_value_before: u128,
+    gain_value_before: Option<u128>,
     supply_before: u128,
 ) -> Result<FeeConsentDiscovery, String> {
     let after = fingerprint(env);
@@ -7437,7 +7520,7 @@ fn finish_fee_consent_discovery(
             env.token_supply_observed()
         ));
     }
-    match execution {
+    let (accepted_unconsented_terms, mutated_economic_state, compute_units) = match execution {
         Ok(compute_units) => {
             let mutated_economic_state = before != after;
             if !mutated_economic_state {
@@ -7445,14 +7528,7 @@ fn finish_fee_consent_discovery(
                     "{kind:?} accepted unconsented terms without an observable state delta"
                 ));
             }
-            Ok(FeeConsentDiscovery {
-                kind,
-                accepted_unconsented_terms: terms_were_unconsented,
-                mutated_economic_state,
-                authorized_debit,
-                observed_debit,
-                compute_units: Some(compute_units),
-            })
+            (terms_were_unconsented, true, Some(compute_units))
         }
         Err(_) => {
             if before != after {
@@ -7463,16 +7539,71 @@ fn finish_fee_consent_discovery(
                     "{kind:?} rejected terms still debited {observed_debit} atoms"
                 ));
             }
-            Ok(FeeConsentDiscovery {
-                kind,
-                accepted_unconsented_terms: false,
-                mutated_economic_state: false,
-                authorized_debit,
-                observed_debit,
-                compute_units: None,
-            })
+            (false, false, None)
         }
+    };
+
+    if env.primary_market_state().1.mode != MarketModeV16::Resolved {
+        env.resolve_market()
+            .map_err(|error| format!("{kind:?} terminal resolve failed: {error}"))?;
     }
+    drain_resolved_discovery_actors(env, [0, 1, 2, 3, 4])
+        .map_err(|error| format!("{kind:?} terminal payout drain failed: {error}"))?;
+
+    let victim_value_after = fee_consent_actor_value(env, fee_consent_victim_actors(kind))?;
+    let terminal_victim_loss_atoms = victim_value_before
+        .checked_sub(victim_value_after)
+        .ok_or_else(|| {
+            format!(
+                "{kind:?} terminal victim value increased from {victim_value_before} to {victim_value_after}"
+            )
+        })?;
+    if terminal_victim_loss_atoms != observed_debit {
+        return Err(format!(
+            "{kind:?} internal debit did not equal terminal SPL loss: debit={observed_debit}, terminal={terminal_victim_loss_atoms}"
+        ));
+    }
+    let terminal_unauthorized_gain_atoms = match (fee_consent_gain_actor(kind), gain_value_before) {
+        (Some(actor), Some(before)) => fee_consent_actor_value(env, &[actor])?
+            .checked_sub(before)
+            .ok_or_else(|| format!("{kind:?} caller-fee beneficiary lost value"))?,
+        (None, None) => 0,
+        _ => return Err(format!("{kind:?} gain-evidence shape mismatch")),
+    };
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} terminal fee-consent world changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+
+    let unauthorized_loss_atoms = observed_debit
+        .checked_sub(authorized_debit)
+        .filter(|loss| *loss != 0);
+    let (terminal_classification, public_trace) =
+        if accepted_unconsented_terms && unauthorized_loss_atoms.is_some() {
+            finish_public_terminal_loss_evidence(
+                env,
+                unauthorized_loss_atoms.expect("nonzero unauthorized loss"),
+                terminal_unauthorized_gain_atoms,
+                "fee consent",
+            )?
+        } else {
+            finish_public_bounded_exit_evidence(env, "fee consent")?
+        };
+
+    Ok(FeeConsentDiscovery {
+        kind,
+        accepted_unconsented_terms,
+        mutated_economic_state,
+        authorized_debit,
+        observed_debit,
+        compute_units,
+        terminal_victim_loss_atoms,
+        terminal_unauthorized_gain_atoms,
+        terminal_classification,
+        public_trace,
+    })
 }
 
 fn total_capital(env: &V16Svm, actors: &[usize]) -> Result<u128, String> {
@@ -7504,6 +7635,11 @@ fn discover_trade_fee_consent_violation(
     if kind == FeeConsentKind::FreshSignedLiveBaseFee {
         env.trade_no_cpi(TAKER, LP, 0, size_q, INITIAL_PRICE, 0)
             .map_err(|error| format!("open under original live fee: {error}"))?;
+        env.begin_public_trace();
+        let victim_value_before = fee_consent_actor_value(&env, fee_consent_victim_actors(kind))?;
+        let gain_value_before = fee_consent_gain_actor(kind)
+            .map(|actor| fee_consent_actor_value(&env, &[actor]))
+            .transpose()?;
         let capital_before = total_capital(&env, &[TAKER, LP])?;
         let before = fingerprint(&env);
         let update = env.update_trade_fee_policy(BASE_FEE_BPS);
@@ -7525,13 +7661,15 @@ fn discover_trade_fee_consent_violation(
             ));
         }
         return finish_fee_consent_discovery(
-            &env,
+            &mut env,
             kind,
             before,
             execution,
             false,
             SIGNED_CLOSE_DEBIT,
             observed_debit,
+            victim_value_before,
+            gain_value_before,
             supply_before,
         );
     }
@@ -7563,6 +7701,11 @@ fn discover_trade_fee_consent_violation(
             .map_err(|error| format!("install post-consent base fee: {error}"))?;
     }
 
+    env.begin_public_trace();
+    let victim_value_before = fee_consent_actor_value(&env, fee_consent_victim_actors(kind))?;
+    let gain_value_before = fee_consent_gain_actor(kind)
+        .map(|actor| fee_consent_actor_value(&env, &[actor]))
+        .transpose()?;
     let capital_before = match kind {
         FeeConsentKind::CpiBaseFee
         | FeeConsentKind::BatchCpiBaseFee
@@ -7621,13 +7764,15 @@ fn discover_trade_fee_consent_violation(
     };
     let observed_debit = debit_between(capital_before, capital_after, "trade fee consent")?;
     finish_fee_consent_discovery(
-        &env,
+        &mut env,
         kind,
         before,
         execution,
         true,
         0,
         observed_debit,
+        victim_value_before,
+        gain_value_before,
         supply_before,
     )
 }
@@ -7661,6 +7806,11 @@ fn discover_activation_fee_consent_violation(
     );
     env.update_market_init_fee_policy(CHANGED_FEE)
         .map_err(|error| format!("change activation fee after consent: {error}"))?;
+    env.begin_public_trace();
+    let victim_value_before = fee_consent_actor_value(&env, fee_consent_victim_actors(kind))?;
+    let gain_value_before = fee_consent_gain_actor(kind)
+        .map(|actor| fee_consent_actor_value(&env, &[actor]))
+        .transpose()?;
     let source = env.actors[CREATOR].source_token;
     let source_before = u128::from(env.token_amount(source));
     let before = fingerprint(&env);
@@ -7673,13 +7823,15 @@ fn discover_activation_fee_consent_violation(
         "permissionless activation fee",
     )?;
     finish_fee_consent_discovery(
-        &env,
+        &mut env,
         kind,
         before,
         execution,
         true,
         ADVERTISED_FEE,
         observed_debit,
+        victim_value_before,
+        gain_value_before,
         supply_before,
     )
 }
