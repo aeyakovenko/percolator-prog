@@ -323,6 +323,12 @@ pub enum AdlReductionBoundary {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AdlForceCloseAccountOrder {
+    WinnerFirst,
+    LoserFirst,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StaleCohortRoute {
     NoCpi,
     BatchNoCpi,
@@ -368,6 +374,17 @@ impl AdlReductionBoundary {
             Self::ExactEffective => 1,
             Self::AboveEffective => 2,
             Self::RawBasis => 3,
+        }
+    }
+}
+
+impl AdlForceCloseAccountOrder {
+    pub const ALL: [Self; 2] = [Self::WinnerFirst, Self::LoserFirst];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::WinnerFirst => 0,
+            Self::LoserFirst => 1,
         }
     }
 }
@@ -1139,6 +1156,31 @@ pub struct AdlReductionClampDiscovery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdlForceCloseClampDiscovery {
+    pub route: DiscoveryTradeRoute,
+    pub boundary: AdlReductionBoundary,
+    pub account_order: AdlForceCloseAccountOrder,
+    pub winner_raw_basis_before_q: u128,
+    pub loser_raw_basis_before_q: u128,
+    pub effective_before_q: u128,
+    pub requested_close_q: u128,
+    pub expected_close_q: u128,
+    pub observed_long_close_q: u128,
+    pub observed_short_close_q: u128,
+    pub winner_effective_after_q: u128,
+    pub loser_effective_after_q: u128,
+    pub first_close_moved_no_tokens: bool,
+    pub users_terminal: bool,
+    pub portfolios_closed: bool,
+    pub winner_external_payout: u128,
+    pub loser_external_payout: u128,
+    pub winner_funded_value: u128,
+    pub loser_funded_value: u128,
+    pub canonical_vault_after: u128,
+    pub token_supply_conserved: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StaleCohortNovationCertification {
     pub route: StaleCohortRoute,
     pub pre_stale_long_count: u64,
@@ -1207,6 +1249,25 @@ impl AdlReductionClampDiscovery {
             && self.portfolios_closed
             && u128::from(self.winner_external_payout) == self.winner_funded_value
             && u128::from(self.loser_external_payout) == self.loser_funded_value
+            && self.canonical_vault_after == 0
+            && self.token_supply_conserved
+    }
+}
+
+impl AdlForceCloseClampDiscovery {
+    pub fn satisfies_invariant(&self) -> bool {
+        self.winner_raw_basis_before_q > self.effective_before_q
+            && self.loser_raw_basis_before_q >= self.effective_before_q
+            && self.expected_close_q != 0
+            && self.observed_long_close_q == self.expected_close_q
+            && self.observed_short_close_q == self.expected_close_q
+            && self.winner_effective_after_q == self.effective_before_q - self.expected_close_q
+            && self.loser_effective_after_q == self.effective_before_q - self.expected_close_q
+            && self.first_close_moved_no_tokens
+            && self.users_terminal
+            && self.portfolios_closed
+            && self.winner_external_payout == self.winner_funded_value
+            && self.loser_external_payout == self.loser_funded_value
             && self.canonical_vault_after == 0
             && self.token_supply_conserved
     }
@@ -16609,6 +16670,291 @@ pub fn verify_adl_reduction_clamp_matrix(
                     route,
                     boundary,
                     close_order,
+                )?);
+            }
+        }
+    }
+    Ok(discoveries)
+}
+
+fn verify_one_adl_force_close_clamp(
+    mut seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+    boundary: AdlReductionBoundary,
+    account_order: AdlForceCloseAccountOrder,
+) -> Result<AdlForceCloseClampDiscovery, String> {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const CRANKER: usize = 2;
+    const OPEN_MARK: u64 = 100;
+    const BANKRUPTCY_MARK: u64 = 500;
+    const WINNER_DEPOSIT: u128 = 1_000;
+    const LOSER_DEPOSIT: u128 = 900;
+    const TRADE_SIZE_Q: i128 = (2 * POS_SCALE) as i128;
+    const SHUTDOWN_SLOT: u64 = 7;
+    const FORCE_CLOSE_SLOT: u64 = 8;
+
+    seed[0] ^= 0xfc;
+    seed[1] ^= route.discriminator();
+    seed[2] ^= boundary.discriminator();
+    seed[3] ^= account_order.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_MARK,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [WINNER_DEPOSIT, LOSER_DEPOSIT, 0, 0, 0],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(1_000, 1)
+        .map_err(|error| format!("configure ADL force-close delay: {error}"))?;
+    execute_discovery_trade_route(&mut env, route, WINNER, LOSER, 0, TRADE_SIZE_Q, OPEN_MARK)
+        .map_err(|error| format!("open ADL force-close pair through {route:?}: {error}"))?;
+    env.warp_to_slot(6);
+    env.push_auth_mark(0, 6, BANKRUPTCY_MARK)
+        .map_err(|error| format!("publish ADL force-close bankruptcy mark: {error}"))?;
+    crank_asset_progress(&mut env, LOSER, 6, 0, 16)
+        .map_err(|error| format!("ADL force-close loser progress: {error}"))?;
+    crank_asset_progress(&mut env, WINNER, 6, 0, 16)
+        .map_err(|error| format!("ADL force-close winner progress: {error}"))?;
+
+    let (_, live_group) = env.primary_market_state();
+    let winner_leg = env
+        .primary_portfolio(WINNER)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .ok_or_else(|| "ADL force-close winner has no active leg".to_string())?;
+    let loser_leg = env
+        .primary_portfolio(LOSER)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .ok_or_else(|| "ADL force-close loser has no active leg".to_string())?;
+    let winner_raw_basis_before_q = winner_leg.basis_pos_q.unsigned_abs();
+    let loser_raw_basis_before_q = loser_leg.basis_pos_q.unsigned_abs();
+    let winner_effective_before_q = super::reference_math::mul_div_ceil(
+        winner_raw_basis_before_q,
+        live_group.assets[0].a_long,
+        winner_leg.a_basis,
+    )?;
+    let loser_effective_before_q = super::reference_math::mul_div_ceil(
+        loser_raw_basis_before_q,
+        live_group.assets[0].a_short,
+        loser_leg.a_basis,
+    )?;
+    if winner_leg.basis_pos_q <= 0
+        || loser_leg.basis_pos_q >= 0
+        || live_group.assets[0].a_long >= ADL_ONE
+        || winner_raw_basis_before_q <= winner_effective_before_q
+        || winner_effective_before_q <= 1
+        || winner_effective_before_q != loser_effective_before_q
+        || live_group.assets[0].oi_eff_long_q != winner_effective_before_q
+        || live_group.assets[0].oi_eff_short_q != winner_effective_before_q
+    {
+        return Err(format!(
+            "ADL force-close setup is not one balanced scaled pair: winner={winner_leg:?}, loser={loser_leg:?}, winner_effective={winner_effective_before_q}, loser_effective={loser_effective_before_q}, asset={:?}",
+            live_group.assets[0]
+        ));
+    }
+    let effective_before_q = winner_effective_before_q;
+    let requested_close_q = match boundary {
+        AdlReductionBoundary::BelowEffective => effective_before_q - 1,
+        AdlReductionBoundary::ExactEffective => effective_before_q,
+        AdlReductionBoundary::AboveEffective => effective_before_q
+            .checked_add(1)
+            .ok_or_else(|| "ADL force-close above-effective request overflow".to_string())?,
+        AdlReductionBoundary::RawBasis => winner_raw_basis_before_q,
+    };
+    let expected_close_q = requested_close_q
+        .min(winner_effective_before_q)
+        .min(loser_effective_before_q)
+        .min(live_group.assets[0].oi_eff_long_q)
+        .min(live_group.assets[0].oi_eff_short_q);
+
+    env.warp_to_slot(SHUTDOWN_SLOT);
+    env.shutdown_asset(0, SHUTDOWN_SLOT)
+        .map_err(|error| format!("shut down ADL force-close asset: {error}"))?;
+    let (_, recovery_before) = env.primary_market_state();
+    if recovery_before.assets[0].lifecycle != percolator::AssetLifecycleV16::Recovery
+        || recovery_before.assets[0].oi_eff_long_q != effective_before_q
+        || recovery_before.assets[0].oi_eff_short_q != effective_before_q
+    {
+        return Err("ADL force-close shutdown changed the pre-state quantity clamp".into());
+    }
+    env.warp_to_slot(FORCE_CLOSE_SLOT);
+    let tokens_before_close = env.all_token_account_data();
+    let (account_a, account_b) = match account_order {
+        AdlForceCloseAccountOrder::WinnerFirst => (WINNER, LOSER),
+        AdlForceCloseAccountOrder::LoserFirst => (LOSER, WINNER),
+    };
+    env.force_close_abandoned_asset(
+        CRANKER,
+        account_a,
+        account_b,
+        0,
+        FORCE_CLOSE_SLOT,
+        requested_close_q,
+    )
+    .map_err(|error| {
+        format!(
+            "ADL force close rejected {route:?}/{boundary:?}/{account_order:?}: requested={requested_close_q}, effective={effective_before_q}, winner_raw={winner_raw_basis_before_q}, loser_raw={loser_raw_basis_before_q}: {error}"
+        )
+    })?;
+    let first_close_moved_no_tokens = env.all_token_account_data() == tokens_before_close;
+    let (_, recovery_after) = env.primary_market_state();
+    let observed_long_close_q = recovery_before.assets[0]
+        .oi_eff_long_q
+        .checked_sub(recovery_after.assets[0].oi_eff_long_q)
+        .ok_or_else(|| "ADL force close increased long OI".to_string())?;
+    let observed_short_close_q = recovery_before.assets[0]
+        .oi_eff_short_q
+        .checked_sub(recovery_after.assets[0].oi_eff_short_q)
+        .ok_or_else(|| "ADL force close increased short OI".to_string())?;
+    let winner_effective_after_q = env
+        .primary_portfolio(WINNER)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .map(|leg| {
+            super::reference_math::mul_div_ceil(
+                leg.basis_pos_q.unsigned_abs(),
+                recovery_after.assets[0].a_long,
+                leg.a_basis,
+            )
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let loser_effective_after_q = env
+        .primary_portfolio(LOSER)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .map(|leg| {
+            super::reference_math::mul_div_ceil(
+                leg.basis_pos_q.unsigned_abs(),
+                recovery_after.assets[0].a_short,
+                leg.a_basis,
+            )
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let expected_effective_after_q = effective_before_q
+        .checked_sub(expected_close_q)
+        .ok_or_else(|| "ADL force-close expected remainder underflow".to_string())?;
+    if observed_long_close_q != expected_close_q
+        || observed_short_close_q != expected_close_q
+        || winner_effective_after_q != expected_effective_after_q
+        || loser_effective_after_q != expected_effective_after_q
+    {
+        return Err(format!(
+            "ADL force-close clamp diverged for {route:?}/{boundary:?}/{account_order:?}: expected_close={expected_close_q}, observed=({observed_long_close_q},{observed_short_close_q}), expected_remaining={expected_effective_after_q}, observed_remaining=({winner_effective_after_q},{loser_effective_after_q})"
+        ));
+    }
+
+    if expected_effective_after_q != 0 {
+        env.force_close_abandoned_asset(
+            CRANKER,
+            account_a,
+            account_b,
+            0,
+            FORCE_CLOSE_SLOT,
+            expected_effective_after_q,
+        )
+        .map_err(|error| format!("clear ADL force-close remainder: {error}"))?;
+    }
+    env.resolve_market()
+        .map_err(|error| format!("resolve ADL force-close market: {error}"))?;
+    let winner_at_resolve = env.primary_portfolio(WINNER);
+    let loser_at_resolve = env.primary_portfolio(LOSER);
+    let winner_funded_value = winner_at_resolve
+        .capital
+        .get()
+        .checked_add(winner_at_resolve.pnl.get().max(0) as u128)
+        .ok_or_else(|| "ADL force-close winner funded-value overflow".to_string())?;
+    let loser_funded_value = loser_at_resolve
+        .capital
+        .get()
+        .checked_add(loser_at_resolve.pnl.get().max(0) as u128)
+        .ok_or_else(|| "ADL force-close loser funded-value overflow".to_string())?;
+    let payout_order = match account_order {
+        AdlForceCloseAccountOrder::WinnerFirst => [WINNER, LOSER],
+        AdlForceCloseAccountOrder::LoserFirst => [LOSER, WINNER],
+    };
+    let winner_destination = env.actors[WINNER].destination_token;
+    let loser_destination = env.actors[LOSER].destination_token;
+    let winner_destination_before = env.token_amount(winner_destination);
+    let loser_destination_before = env.token_amount(loser_destination);
+    for actor in payout_order {
+        if discovery_portfolio_is_terminal(&env.primary_portfolio(actor))? {
+            continue;
+        }
+        env.crank_resolved_primary_signed(actor, FORCE_CLOSE_SLOT, Vec::new())
+            .map_err(|error| format!("signed ADL force-close terminal crank: {error}"))?;
+    }
+    let _ = drain_resolved_discovery_actors(&mut env, payout_order)?;
+    let winner_external_payout = u128::from(
+        env.token_amount(winner_destination)
+            .checked_sub(winner_destination_before)
+            .ok_or_else(|| "ADL force-close winner payout decreased".to_string())?,
+    );
+    let loser_external_payout = u128::from(
+        env.token_amount(loser_destination)
+            .checked_sub(loser_destination_before)
+            .ok_or_else(|| "ADL force-close loser payout decreased".to_string())?,
+    );
+    let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(WINNER))?
+        && discovery_portfolio_is_terminal(&env.primary_portfolio(LOSER))?;
+    let portfolios_closed =
+        env.close_primary_portfolio(WINNER).is_ok() && env.close_primary_portfolio(LOSER).is_ok();
+
+    Ok(AdlForceCloseClampDiscovery {
+        route,
+        boundary,
+        account_order,
+        winner_raw_basis_before_q,
+        loser_raw_basis_before_q,
+        effective_before_q,
+        requested_close_q,
+        expected_close_q,
+        observed_long_close_q,
+        observed_short_close_q,
+        winner_effective_after_q,
+        loser_effective_after_q,
+        first_close_moved_no_tokens,
+        users_terminal,
+        portfolios_closed,
+        winner_external_payout,
+        loser_external_payout,
+        winner_funded_value,
+        loser_funded_value,
+        canonical_vault_after: u128::from(env.token_amount(env.vault)),
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+    })
+}
+
+pub fn verify_adl_force_close_clamp_matrix(
+    seed: [u8; 32],
+) -> Result<Vec<AdlForceCloseClampDiscovery>, String> {
+    let mut discoveries = Vec::new();
+    for route in DiscoveryTradeRoute::ALL {
+        for boundary in AdlReductionBoundary::ALL {
+            for account_order in AdlForceCloseAccountOrder::ALL {
+                discoveries.push(verify_one_adl_force_close_clamp(
+                    seed,
+                    route,
+                    boundary,
+                    account_order,
                 )?);
             }
         }

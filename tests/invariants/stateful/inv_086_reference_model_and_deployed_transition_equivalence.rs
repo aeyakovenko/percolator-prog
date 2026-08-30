@@ -45,6 +45,9 @@
 //! leg's independently recomputed post-reduction effective quantity must match that clamp before
 //! both terminal claimant orders return exactly the funded value. This covers accepted overshoot
 //! as a liveness requirement: a stale or raw-basis work request is safely clamped, not rejected.
+//! The paired Recovery matrix repeats those boundaries through delayed permissionless force-close,
+//! crosses both public account orders, and requires the same pre-state clamp, two-sided OI delta,
+//! no SPL movement, and exact terminal payout after shutdown.
 //! This is finite reachability evidence, not equivalence over unbounded sequences.
 
 use super::*;
@@ -240,6 +243,33 @@ fn v16_program_adl_reduction_clamp_matrix_matches_public_terminal_routes() {
         );
         assert_eq!(
             discovery.expected_effective_after_q,
+            u128::from(matches!(
+                discovery.boundary,
+                AdlReductionBoundary::BelowEffective
+            )),
+            "only effective-minus-one must retain one live quantity atom: {discovery:?}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_adl_force_close_clamp_matrix_matches_recovery_terminal_routes() {
+    let discoveries = verify_adl_force_close_clamp_matrix([0xfc; 32])
+        .expect("INV-086 ADL force-close clamp matrix");
+    assert_eq!(
+        discoveries.len(),
+        DiscoveryTradeRoute::ALL.len()
+            * AdlReductionBoundary::ALL.len()
+            * AdlForceCloseAccountOrder::ALL.len(),
+        "must cross every opening route, force-close boundary, and account order"
+    );
+    for discovery in discoveries {
+        assert!(
+            discovery.satisfies_invariant(),
+            "ADL force-close clamp composition failed: {discovery:?}"
+        );
+        assert_eq!(
+            discovery.winner_effective_after_q,
             u128::from(matches!(
                 discovery.boundary,
                 AdlReductionBoundary::BelowEffective
