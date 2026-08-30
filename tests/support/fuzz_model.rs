@@ -4,8 +4,9 @@ use super::v16_svm::{
 };
 use percolator::{
     active_bitmap_is_empty, v16_domain_pair_for_asset_index, AssetLifecycleV16, AssetStateV16,
-    BackingBucketStatusV16, CloseProgressLedgerV16, MarketModeV16, PortfolioLegV16, SideModeV16,
-    SideV16, BOUND_SCALE, CREDIT_RATE_SCALE, PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
+    BackingBucketStatusV16, CloseProgressLedgerV16, MarketModeV16, PortfolioLegV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16, BOUND_SCALE,
+    CREDIT_RATE_SCALE, PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -11652,6 +11653,10 @@ pub struct ResolvedReceiptSplitTopupEvidence {
     pub second_paid: u128,
     pub first_payout: u128,
     pub second_payout: u128,
+    pub first_floor_remainder_num: u128,
+    pub first_floor_remainder_den: u128,
+    pub second_floor_remainder_num: u128,
+    pub second_floor_remainder_den: u128,
     pub identity_substitutions_rejected: usize,
     pub premature_close_rejections: usize,
     pub terminal_close_succeeded: bool,
@@ -13164,6 +13169,32 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
             .checked_sub(senior)
             .ok_or_else(|| "INV-068 senior stocks exceed vault custody".to_string())
     };
+    let verify_floor_partition = |label: &str,
+                                  ledger: ResolvedPayoutLedgerV16,
+                                  before: ResolvedPayoutReceiptV16,
+                                  after: ResolvedPayoutReceiptV16,
+                                  route_payout: u128| {
+        let (gross_entitlement, remainder) = super::reference_math::mul_div_floor_with_remainder(
+            before.terminal_positive_claim_face,
+            ledger.current_payout_rate_num,
+            ledger.current_payout_rate_den,
+        )?;
+        let expected_payout = gross_entitlement
+            .checked_sub(before.paid_effective)
+            .ok_or_else(|| format!("{label} payout rate rolled back prior entitlement"))?;
+        if after.terminal_positive_claim_face != before.terminal_positive_claim_face
+            || route_payout != expected_payout
+            || after.paid_effective != gross_entitlement
+            || remainder >= ledger.current_payout_rate_den
+        {
+            return Err(format!(
+                "{label} violated exact payout quotient/remainder partition: ledger={ledger:?}, \
+                 receipt={before:?}->{after:?}, payout={route_payout}, gross={gross_entitlement}, \
+                 remainder={remainder}"
+            ));
+        }
+        Ok(remainder)
+    };
     let initial = read_receipt(&runner)?;
     if !initial.present
         || initial.finalized
@@ -13240,6 +13271,13 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
              result={first_topup:?}, {initial:?}->{after_first:?}"
         ));
     }
+    let first_floor_remainder_num = verify_floor_partition(
+        "INV-038 first resolved top-up",
+        after_first_release.resolved_payout_ledger,
+        initial,
+        after_first,
+        first_topup.payout,
+    )?;
     require_nonfinal_receipt_blocks_portfolio_close(
         &mut runner,
         CLAIMANT,
@@ -13299,6 +13337,13 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
              result={second_topup:?}, {after_first:?}->{after_second:?}"
         ));
     }
+    let second_floor_remainder_num = verify_floor_partition(
+        "INV-038 second resolved top-up",
+        after_second_release.resolved_payout_ledger,
+        after_first,
+        after_second,
+        second_topup.payout,
+    )?;
     require_nonfinal_receipt_blocks_portfolio_close(
         &mut runner,
         CLAIMANT,
@@ -13386,6 +13431,14 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
         second_paid: after_second.paid_effective,
         first_payout: first_topup.payout,
         second_payout: second_topup.payout,
+        first_floor_remainder_num,
+        first_floor_remainder_den: after_first_release
+            .resolved_payout_ledger
+            .current_payout_rate_den,
+        second_floor_remainder_num,
+        second_floor_remainder_den: after_second_release
+            .resolved_payout_ledger
+            .current_payout_rate_den,
         identity_substitutions_rejected,
         premature_close_rejections,
         terminal_close_succeeded,

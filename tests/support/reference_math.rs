@@ -10,6 +10,15 @@ fn add_mod_with_carry(lhs: u128, rhs: u128, modulus: u128) -> (u128, u128) {
 
 /// Exact `floor(lhs * rhs / denominator)` without using the engine's wide arithmetic.
 pub fn mul_div_floor(lhs: u128, rhs: u128, denominator: u128) -> Result<u128, String> {
+    mul_div_floor_with_remainder(lhs, rhs, denominator).map(|(quotient, _)| quotient)
+}
+
+/// Exact quotient and remainder for `lhs * rhs / denominator` without wide multiplication.
+pub fn mul_div_floor_with_remainder(
+    lhs: u128,
+    rhs: u128,
+    denominator: u128,
+) -> Result<(u128, u128), String> {
     if denominator == 0 {
         return Err("reference division by zero".into());
     }
@@ -37,9 +46,10 @@ pub fn mul_div_floor(lhs: u128, rhs: u128, denominator: u128) -> Result<u128, St
             remainder = next;
         }
     }
-    quotient
+    let quotient = quotient
         .checked_add(fractional)
-        .ok_or_else(|| "reference result overflow".into())
+        .ok_or_else(|| "reference result overflow".to_string())?;
+    Ok((quotient, remainder))
 }
 
 fn gcd(mut lhs: u128, mut rhs: u128) -> u128 {

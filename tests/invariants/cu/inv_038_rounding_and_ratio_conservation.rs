@@ -9,6 +9,327 @@
 
 use super::*;
 
+// This module now owns deployed public evidence for exact social-loss B booking, per-account B
+// settlement, and zero-OI carry normalization. Each route checks the persisted quotient/remainder
+// partition rather than inferring correctness from a balanced final vault alone.
+
+// The public bankruptcy route has two independent rounded allocations. Booking converts collateral
+// atoms into a side-local B-index delta and persists the division remainder on the market. Settling
+// that B delta converts it back into an account loss and persists the second remainder on the leg.
+// The close ledger and the first account settlement expose atom outputs independently; the terminal
+// combined forfeit is additionally bound by its persisted leg carry and exact SPL custody. Together
+// the identities detect a dropped, duplicated, or misattributed sub-atom carry in deployed code.
+#[test]
+fn v16_program_social_loss_booking_and_settlement_preserve_exact_remainders() {
+    const ASSET: usize = 1;
+
+    let PublicActiveCloseFixture {
+        mut env,
+        loss_owner,
+        loss,
+        asset1_counterparty_owner,
+        asset1_counterparty,
+        ..
+    } = public_asset1_bankrupt_close_fixture();
+
+    let before_market = env.market_state().1;
+    let before_asset = before_market.assets[ASSET];
+    let before_close = close_progress(&env.portfolio_state(loss));
+    assert!(before_close.active && before_close.residual_remaining > 0);
+    assert!(before_asset.loss_weight_sum_long > 0);
+
+    env.svm.expire_blockhash();
+    let booking_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loss, false),
+            ],
+            &[],
+        )
+        .expect("public close continuation must book a social-loss chunk");
+    assert_cu_within(
+        "INV-038 exact social-loss booking partition",
+        booking_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let after_booking_market = env.market_state().1;
+    let after_booking_asset = after_booking_market.assets[ASSET];
+    let after_close = close_progress(&env.portfolio_state(loss));
+    let booked_atoms = after_close
+        .b_loss_booked
+        .checked_sub(before_close.b_loss_booked)
+        .expect("booked-loss ledger must be monotonic");
+    let booked_delta_b = after_booking_asset
+        .b_long_num
+        .checked_sub(before_asset.b_long_num)
+        .expect("loss-side B index must be monotonic");
+    assert!(booked_atoms > 0 && booked_delta_b > 0);
+    assert_eq!(
+        after_booking_asset.loss_weight_sum_long, before_asset.loss_weight_sum_long,
+        "booking must use one stable loss-weight denominator"
+    );
+    let booking_numerator = booked_atoms
+        .checked_mul(percolator::SOCIAL_LOSS_DEN)
+        .and_then(|value| value.checked_add(before_asset.social_loss_remainder_long_num))
+        .expect("bounded booking numerator");
+    let booking_partition = booked_delta_b
+        .checked_mul(before_asset.loss_weight_sum_long)
+        .and_then(|value| value.checked_add(after_booking_asset.social_loss_remainder_long_num))
+        .expect("bounded booking quotient/remainder partition");
+    assert_eq!(
+        booking_partition, booking_numerator,
+        "booked atoms must equal B-index allocation plus the persisted market remainder"
+    );
+    assert!(
+        after_booking_asset.social_loss_remainder_long_num < before_asset.loss_weight_sum_long,
+        "market booking remainder must be strictly below its denominator"
+    );
+
+    let before_account = env.portfolio_state(asset1_counterparty);
+    let before_leg = active_leg_for_asset(&before_account, ASSET);
+    let target_b = after_booking_asset.b_long_num;
+    assert!(target_b > before_leg.b_snap);
+    let settlement_cu = env.forfeit_recovery_leg_with_cu(
+        &asset1_counterparty_owner,
+        asset1_counterparty,
+        ASSET as u16,
+        1,
+    );
+    assert_cu_within(
+        "INV-038 exact account B settlement partition",
+        settlement_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let after_account = env.portfolio_state(asset1_counterparty);
+    let after_leg = active_leg_for_asset(&after_account, ASSET);
+    let settled_delta_b = after_leg
+        .b_snap
+        .checked_sub(before_leg.b_snap)
+        .expect("account B snapshot must be monotonic");
+    let settled_atoms = before_account
+        .pnl
+        .get()
+        .checked_sub(after_account.pnl.get())
+        .and_then(|value| u128::try_from(value).ok())
+        .expect("public settlement must debit a nonnegative atom amount");
+    assert!(settled_delta_b > 0 && settled_atoms > 0);
+    assert_eq!(after_leg.loss_weight, before_leg.loss_weight);
+    let settlement_numerator = before_leg
+        .loss_weight
+        .checked_mul(settled_delta_b)
+        .and_then(|value| value.checked_add(before_leg.b_rem))
+        .expect("bounded settlement numerator");
+    let settlement_partition = settled_atoms
+        .checked_mul(percolator::SOCIAL_LOSS_DEN)
+        .and_then(|value| value.checked_add(after_leg.b_rem))
+        .expect("bounded settlement quotient/remainder partition");
+    assert_eq!(
+        settlement_partition, settlement_numerator,
+        "account loss plus persisted leg remainder must exactly reconstruct the B allocation"
+    );
+    assert!(
+        after_leg.b_rem < percolator::SOCIAL_LOSS_DEN,
+        "account settlement remainder must be strictly below its denominator"
+    );
+    assert!(
+        after_leg.b_snap <= target_b,
+        "bounded settlement cannot consume beyond the committed B target"
+    );
+
+    // The next owner-signed recovery step consumes the final committed B delta. Auto-crank dispatch
+    // is intentionally one action per call, so a later call detaches the now-current recovery leg.
+    let remaining_delta_b = target_b
+        .checked_sub(after_leg.b_snap)
+        .expect("settled leg cannot pass the committed B target");
+    assert!(
+        remaining_delta_b > 0,
+        "fixture must retain one final B chunk"
+    );
+    let final_settlement_numerator = after_leg
+        .loss_weight
+        .checked_mul(remaining_delta_b)
+        .and_then(|value| value.checked_add(after_leg.b_rem))
+        .expect("bounded final settlement numerator");
+    let final_settlement_loss = final_settlement_numerator / percolator::SOCIAL_LOSS_DEN;
+    let final_leg_remainder = final_settlement_numerator % percolator::SOCIAL_LOSS_DEN;
+    assert!(final_settlement_loss > 0);
+
+    let final_settlement_cu = env.forfeit_recovery_leg_with_cu(
+        &asset1_counterparty_owner,
+        asset1_counterparty,
+        ASSET as u16,
+        1,
+    );
+    assert_cu_within(
+        "INV-038 exact final account B settlement partition",
+        final_settlement_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let current_account = env.portfolio_state(asset1_counterparty);
+    let current_leg = active_leg_for_asset(&current_account, ASSET);
+    assert_eq!(current_leg.b_snap, target_b);
+    assert_eq!(current_leg.b_rem, final_leg_remainder);
+    assert_eq!(
+        final_settlement_loss
+            .checked_mul(percolator::SOCIAL_LOSS_DEN)
+            .and_then(|value| value.checked_add(current_leg.b_rem)),
+        Some(final_settlement_numerator),
+        "the terminal combined forfeit must persist the exact final B quotient/remainder"
+    );
+    assert_eq!(current_leg.basis_pos_q, 0);
+    assert_eq!(current_account.pnl.get(), 0);
+
+    // The opposite bankrupt episode owns the domain barrier until its close ledger finalizes and
+    // its owner forfeits the remaining Recovery basis. Releasing the surviving obligation before
+    // this point would misattribute its carry.
+    for step in 0..8 {
+        if close_progress(&env.portfolio_state(loss)).finalized {
+            break;
+        }
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 0,
+                    observations: crank_observations(ASSET as u16),
+                },
+                vec![
+                    AccountMeta::new_readonly(env.payer.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(loss, false),
+                ],
+                &[],
+            )
+            .unwrap_or_else(|error| {
+                panic!("permissionless close-finalization crank {step} must progress: {error}")
+            });
+        assert_cu_within("INV-038 domain-barrier close progress", cu, CRANK_CU_LIMIT);
+    }
+    assert!(
+        close_progress(&env.portfolio_state(loss)).finalized,
+        "bounded public cranks must finalize the zero-residual close ledger"
+    );
+    if has_active_leg_for_asset(&env.portfolio_state(loss), ASSET) {
+        let owner_forfeit_cu = env.forfeit_recovery_leg_with_cu(&loss_owner, loss, ASSET as u16, 1);
+        assert_cu_within(
+            "INV-038 finalized bankrupt owner forfeit",
+            owner_forfeit_cu,
+            CUSTODY_CU_LIMIT,
+        );
+    }
+    for step in 0..8 {
+        if !has_active_leg_for_asset(&env.portfolio_state(loss), ASSET) {
+            break;
+        }
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 0,
+                    observations: crank_observations(ASSET as u16),
+                },
+                vec![
+                    AccountMeta::new_readonly(env.payer.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(loss, false),
+                ],
+                &[],
+            )
+            .unwrap_or_else(|error| {
+                panic!("permissionless bankrupt-obligation crank {step} must progress: {error}")
+            });
+        assert_cu_within("INV-038 bankrupt-obligation release", cu, CRANK_CU_LIMIT);
+    }
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(loss), ASSET),
+        "bounded public cranks must clear the completed bankrupt episode"
+    );
+
+    // Detaching moves the leg's persisted sub-atom carry, plus any side-level booking remainder
+    // that becomes economically exhausted at zero OI, into dust/explicit loss exactly once.
+    let mut carry_normalization_checked = false;
+    for step in 0..8 {
+        let before_detach_account = env.portfolio_state(asset1_counterparty);
+        let before_detach_leg = active_leg_for_asset(&before_detach_account, ASSET);
+        let before_detach_asset = env.market_state().1.assets[ASSET];
+        env.svm.expire_blockhash();
+        let detach_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 0,
+                    observations: crank_observations(ASSET as u16),
+                },
+                vec![
+                    AccountMeta::new_readonly(env.payer.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(asset1_counterparty, false),
+                ],
+                &[],
+            )
+            .unwrap_or_else(|error| {
+                panic!("permissionless residue crank {step} must progress: {error}")
+            });
+        assert_cu_within(
+            "INV-038 exact social-loss carry normalization",
+            detach_cu,
+            CRANK_CU_LIMIT,
+        );
+        let after_detach_account = env.portfolio_state(asset1_counterparty);
+        if has_active_leg_for_asset(&after_detach_account, ASSET) {
+            continue;
+        }
+
+        let after_detach_asset = env.market_state().1.assets[ASSET];
+        let consumed_market_remainder = before_detach_asset
+            .social_loss_remainder_long_num
+            .checked_sub(after_detach_asset.social_loss_remainder_long_num)
+            .expect("zero-OI normalization cannot increase the booking remainder");
+        assert!(
+            after_detach_asset.social_loss_remainder_long_num == 0
+                || after_detach_asset.social_loss_remainder_long_num
+                    == before_detach_asset.social_loss_remainder_long_num,
+            "booking remainder must either stay live or be consumed in full"
+        );
+        let carry_numerator = before_detach_asset
+            .social_loss_dust_long_num
+            .checked_add(before_detach_leg.b_rem)
+            .and_then(|value| value.checked_add(consumed_market_remainder))
+            .expect("bounded terminal carry numerator");
+        let expected_explicit_increment = carry_numerator / percolator::SOCIAL_LOSS_DEN;
+        let expected_dust = carry_numerator % percolator::SOCIAL_LOSS_DEN;
+        assert_eq!(
+            after_detach_asset.social_loss_dust_long_num, expected_dust,
+            "detached leg and exhausted booking carries must remain as exact side-local dust"
+        );
+        assert_eq!(
+            after_detach_asset.explicit_unallocated_loss_long,
+            before_detach_asset
+                .explicit_unallocated_loss_long
+                .saturating_add(expected_explicit_increment),
+            "each full carry atom must be classified exactly once as explicit side-local loss"
+        );
+        carry_normalization_checked = true;
+        break;
+    }
+    assert!(
+        carry_normalization_checked,
+        "bounded public cranks must reach the exact carry-normalization transition"
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "bookkeeping-only rounding transitions cannot change SPL custody"
+    );
+}
+
 // security.md sweep — rounding asymmetry (#37 dust): trade fees must round UP (ceil, protocol favor)
 // so dust-notional trades are never free and repeated churn never leaks value to the trader. Attacker
 // success = a fee that floors to 0 (free trade) or insurance that fails to grow on a fee'd dust trade.

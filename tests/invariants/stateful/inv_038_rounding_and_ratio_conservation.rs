@@ -16,6 +16,12 @@
 //! until the target is reached. Its public trace attempts both crank and stale-resolution routes,
 //! terminalizes every actor, and binds any stalled-price short underpayment to the long's exact
 //! terminal overpayment.
+//! `v16_program_resolved_topups_preserve_exact_floor_remainders` creates a real underfunded terminal
+//! receipt and raises its common payout rate twice through public backing expiry. An independent
+//! shift/add oracle reconstructs each full-width quotient and remainder, then requires the public
+//! payout and cumulative receipt payment to equal the quotient exactly. The second claim computes
+//! from immutable face rather than from the prior floor, so retained fractional entitlement cannot
+//! disappear across top-ups.
 //! Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -23,6 +29,32 @@
 //! Guarantee boundary: all three matrices are fixed-pin public-route certifications.
 
 use super::*;
+
+#[test]
+fn v16_program_resolved_topups_preserve_exact_floor_remainders() {
+    let evidence = verify_resolved_receipt_split_topups()
+        .expect("public resolved top-ups must preserve exact floor partitions");
+
+    assert!(evidence.first_payout > 0 && evidence.second_payout > 0);
+    assert!(evidence.first_floor_remainder_den > 0);
+    assert!(evidence.second_floor_remainder_den > 0);
+    assert!(evidence.first_floor_remainder_num < evidence.first_floor_remainder_den);
+    assert!(evidence.second_floor_remainder_num < evidence.second_floor_remainder_den);
+    assert!(
+        evidence.first_floor_remainder_num > 0 || evidence.second_floor_remainder_num > 0,
+        "the public fixture must exercise a nonzero payout-floor remainder: {evidence:?}"
+    );
+    assert_eq!(
+        evidence.first_paid - evidence.initial_paid,
+        evidence.first_payout
+    );
+    assert_eq!(
+        evidence.second_paid - evidence.first_paid,
+        evidence.second_payout
+    );
+    assert!(evidence.second_paid < evidence.receipt_face);
+    assert_eq!(evidence.final_engine_vault, evidence.final_spl_vault);
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {
