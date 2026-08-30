@@ -7,8 +7,12 @@
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: the route matrix certifies the independently discovered negative-size
-//! account-ordering case through terminal payout. Broader fee-policy and route cross-products
-//! remain tracked in the invariant roadmap.
+//! account-ordering case through terminal payout. The source-complete policy/destination census at
+//! the end of this file classifies every fee-bearing wrapper field, every policy sequence lane,
+//! every public fee-policy writer, and every deployed fee destination. It composes those classes
+//! with the exact engine-call, SPL-custody, value-flow, stock, seniority, and policy-supersession
+//! owners in adjacent invariants instead of repeating their proofs. A new fee field, policy writer,
+//! destination helper, engine pin, or loss of a public witness reopens the current-surface closure.
 
 use super::*;
 
@@ -1470,4 +1474,368 @@ fn v16_attack_permissionless_create_fee_funds_asset0_insurance() {
         "senior conservation"
     );
     assert_domain_budget_remaining_total_consistent(&after, "permissionless create fee");
+}
+
+#[derive(Clone, Copy)]
+struct Inv036FeeClass {
+    name: &'static str,
+    wrapper_fields: &'static [&'static str],
+    collection_anchor: &'static str,
+    destination_anchor: &'static str,
+    public_witness: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct Inv036PolicyWriter {
+    instruction: &'static str,
+    sequence_field: &'static str,
+    handler_anchor: &'static str,
+    supersession_kinds: &'static [&'static str],
+}
+
+fn inv036_struct_fields(
+    source: &str,
+    start: &str,
+    end: &str,
+) -> std::collections::BTreeSet<String> {
+    let body = source
+        .split_once(start)
+        .and_then(|(_, rest)| rest.split_once(end).map(|(body, _)| body))
+        .unwrap_or_else(|| panic!("missing source interval {start:?}..{end:?}"));
+    body.lines()
+        .filter_map(|line| {
+            let declaration = line.trim().strip_prefix("pub ")?;
+            let (field, _) = declaration.split_once(':')?;
+            field
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                .then(|| field.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn v16_program_fee_policy_and_destination_census_is_source_complete() {
+    const ENGINE_PIN: &str = "d604ca09b7e584d3875ce4516bab1186346bf4a6";
+    const FEE_CLASSES: &[Inv036FeeClass] = &[
+        Inv036FeeClass {
+            name: "trade-base",
+            wrapper_fields: &["trade_fee_base_bps"],
+            collection_anchor: "execute_trade_with_fee_loss_stale_scoped_not_atomic",
+            destination_anchor: "credit_trade_fees_with_mark_externality_view",
+            public_witness:
+                "v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value",
+        },
+        Inv036FeeClass {
+            name: "trade-mark-externality",
+            wrapper_fields: &["mark_min_fee"],
+            collection_anchor: "trade_fee_budgeted_amounts_with_mark_externality_view",
+            destination_anchor: "outside every operator-withdrawable budget",
+            public_witness:
+                "v16_program_pr225_mark_movement_fee_is_nonwithdrawable_and_terminally_burned",
+        },
+        Inv036FeeClass {
+            name: "source-backing",
+            wrapper_fields: &[
+                "backing_trade_fee_bps_long",
+                "backing_trade_fee_bps_short",
+                "backing_trade_fee_policy_count",
+                "backing_trade_fee_insurance_share_bps_long",
+                "backing_trade_fee_insurance_share_bps_short",
+            ],
+            collection_anchor: "charge_account_backing_fee_not_atomic",
+            destination_anchor: "apply_backing_domain_fees_after_trade_view",
+            public_witness: "v16_attack_backing_fee_split_conserves",
+        },
+        Inv036FeeClass {
+            name: "maintenance",
+            wrapper_fields: &[
+                "maintenance_fee_per_slot",
+                "maintenance_cranker_fee_share_bps",
+            ],
+            collection_anchor: "sync_account_fee_to_slot_not_atomic",
+            destination_anchor: "credit_maintenance_fee_to_active_market_budgets_view",
+            public_witness: "v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded",
+        },
+        Inv036FeeClass {
+            name: "liquidation",
+            wrapper_fields: &["liquidation_cranker_fee_share_bps"],
+            collection_anchor: "permissionless_auto_crank_not_atomic",
+            destination_anchor: "credit_market_fee_split_across_domains_view",
+            public_witness:
+                "v16_program_issue408_liquidation_reward_cannot_preempt_aged_maintenance_collateral",
+        },
+        Inv036FeeClass {
+            name: "fee-redirect",
+            wrapper_fields: &["fee_redirect_to_market_0_bps"],
+            collection_anchor: "fee_share_floor(amount, cfg.fee_redirect_to_market_0_bps)",
+            destination_anchor: "credit_market_insurance_budget_view(group, 0, redirect)",
+            public_witness: "v16_attack_fee_redirect_split_lands_correctly",
+        },
+        Inv036FeeClass {
+            name: "permissionless-activation",
+            wrapper_fields: &["permissionless_market_init_fee"],
+            collection_anchor: "permissionless_market_init_fee_for_asset",
+            destination_anchor: "deposit_market_zero_insurance_view(&mut group, init_fee)",
+            public_witness: "v16_attack_permissionless_create_fee_funds_asset0_insurance",
+        },
+    ];
+    const POLICY_WRITERS: &[Inv036PolicyWriter] = &[
+        Inv036PolicyWriter {
+            instruction: "UpdateTradeFeePolicy",
+            sequence_field: "trade_fee",
+            handler_anchor: "handle_update_trade_fee_policy",
+            supersession_kinds: &["TradeFeePolicy"],
+        },
+        Inv036PolicyWriter {
+            instruction: "UpdateBackingFeePolicy",
+            sequence_field: "backing_fee",
+            handler_anchor: "handle_update_backing_fee_policy",
+            supersession_kinds: &["BackingFeePolicy", "BackingFeePolicyShort"],
+        },
+        Inv036PolicyWriter {
+            instruction: "UpdateLiquidationFeePolicy",
+            sequence_field: "liquidation_fee",
+            handler_anchor: "MarketAuthorityPolicyUpdate::LiquidationCrankerShare",
+            supersession_kinds: &["LiquidationFeePolicy"],
+        },
+        Inv036PolicyWriter {
+            instruction: "UpdateMaintenanceFeePolicy",
+            sequence_field: "maintenance_fee",
+            handler_anchor: "MarketAuthorityPolicyUpdate::MaintenanceCrankerShare",
+            supersession_kinds: &["MaintenanceFeePolicy"],
+        },
+        Inv036PolicyWriter {
+            instruction: "UpdateFeeRedirectPolicy",
+            sequence_field: "fee_redirect",
+            handler_anchor: "MarketAuthorityPolicyUpdate::FeeRedirect",
+            supersession_kinds: &["FeeRedirectPolicy"],
+        },
+        Inv036PolicyWriter {
+            instruction: "UpdateMarketInitFeePolicy",
+            sequence_field: "market_init_fee",
+            handler_anchor: "MarketAuthorityPolicyUpdate::MarketInitFee",
+            supersession_kinds: &["MarketInitFeePolicy"],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-036 engine fee-flow composition must be re-audited on every pin change",
+    );
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    let wrapper_fields = inv036_struct_fields(
+        production,
+        "pub struct WrapperConfigV16 {",
+        "pub struct AssetOracleProfileV16 {",
+    );
+    let actual_fee_fields = wrapper_fields
+        .into_iter()
+        .filter(|field| field.contains("fee") && field != "oracle_leg_feeds")
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut expected_fee_fields = std::collections::BTreeSet::new();
+    for class in FEE_CLASSES {
+        assert!(!class.name.is_empty());
+        for field in class.wrapper_fields {
+            assert!(
+                expected_fee_fields.insert((*field).to_string()),
+                "fee field {field} has more than one semantic owner",
+            );
+        }
+        assert!(
+            production.contains(class.collection_anchor),
+            "{} lost collection anchor {}",
+            class.name,
+            class.collection_anchor,
+        );
+        assert!(
+            production.contains(class.destination_anchor),
+            "{} lost destination anchor {}",
+            class.name,
+            class.destination_anchor,
+        );
+    }
+    assert_eq!(
+        actual_fee_fields, expected_fee_fields,
+        "every persisted wrapper fee field needs exactly one INV-036 semantic class",
+    );
+    let profile_fields = inv036_struct_fields(
+        production,
+        "pub struct AssetOracleProfileV16 {",
+        "const _: [(); ASSET_ORACLE_PROFILE_LEN]",
+    );
+    let actual_profile_fee_fields = profile_fields
+        .into_iter()
+        .filter(|field| field.contains("fee") && field != "oracle_leg_feeds")
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_profile_fee_fields = [
+        "backing_trade_fee_bps_long",
+        "backing_trade_fee_bps_short",
+        "backing_trade_fee_insurance_share_bps_long",
+        "backing_trade_fee_insurance_share_bps_short",
+        "mark_min_fee",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_profile_fee_fields, expected_profile_fee_fields,
+        "every per-asset persisted fee field needs an INV-036 semantic owner",
+    );
+
+    let sequence_fields = inv036_struct_fields(
+        production,
+        "pub struct AssetControlSequencesV16 {",
+        "const _: [(); ASSET_CONTROL_SEQUENCES_LEN]",
+    );
+    let actual_fee_sequences = sequence_fields
+        .into_iter()
+        .filter(|field| field.contains("fee"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_fee_sequences = POLICY_WRITERS
+        .iter()
+        .map(|writer| writer.sequence_field.to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_fee_sequences, expected_fee_sequences,
+        "every persisted fee-policy sequence needs exactly one public writer",
+    );
+
+    let instruction_enum = production
+        .split_once("pub enum Instruction {")
+        .and_then(|(_, rest)| rest.split_once("impl Instruction {").map(|(body, _)| body))
+        .expect("instruction enum interval exists");
+    let actual_policy_variants = instruction_enum
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            (line.starts_with("Update") && line.contains("Fee") && line.ends_with('{'))
+                .then(|| line.trim_end_matches('{').trim().to_string())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_policy_variants = POLICY_WRITERS
+        .iter()
+        .map(|writer| writer.instruction.to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_policy_variants, expected_policy_variants,
+        "every public fee-policy writer needs an INV-036 policy and destination disposition",
+    );
+    let supersession_model = include_str!("../../support/invariant_discovery.rs");
+    for writer in POLICY_WRITERS {
+        assert_eq!(
+            instruction_enum
+                .matches(&format!("{} {{", writer.instruction))
+                .count(),
+            1,
+            "{} must remain one canonical public instruction",
+            writer.instruction,
+        );
+        assert!(
+            production.contains(writer.handler_anchor),
+            "{} lost canonical handler {}",
+            writer.instruction,
+            writer.handler_anchor,
+        );
+        for kind in writer.supersession_kinds {
+            assert!(
+                supersession_model.matches(&format!("Self::{kind}")).count() >= 2,
+                "{} lacks bidirectional INV-014 supersession ownership",
+                writer.instruction,
+            );
+        }
+    }
+    for (instruction, supersession_kind, handler) in [
+        (
+            "ConfigureEwmaMark",
+            "ConfigureEwmaMark",
+            "handle_configure_managed_mark",
+        ),
+        (
+            "ConfigureHybridOracle",
+            "ConfigureHybridOracle",
+            "handle_configure_hybrid_oracle",
+        ),
+    ] {
+        assert_eq!(
+            instruction_enum
+                .matches(&format!("{instruction} {{"))
+                .count(),
+            1,
+            "mark_min_fee must have one canonical {instruction} writer",
+        );
+        assert!(production.contains(handler));
+        assert!(
+            supersession_model
+                .matches(&format!("Self::{supersession_kind}"))
+                .count()
+                >= 2,
+            "{instruction} lacks bidirectional INV-014 supersession ownership",
+        );
+    }
+    assert!(
+        production
+            .matches("ControlSequenceLane::OracleObservation")
+            .count()
+            >= 2,
+        "both public mark_min_fee writers must consume the shared oracle-observation sequence",
+    );
+    for engine_fee_field in [
+        "cfg.max_trading_fee_bps = max_trading_fee_bps;",
+        "cfg.liquidation_fee_bps = liquidation_fee_bps;",
+        "cfg.liquidation_fee_cap = liquidation_fee_cap;",
+    ] {
+        assert!(
+            production.contains(engine_fee_field),
+            "engine-owned immutable fee policy lost its canonical InitMarket assignment: {engine_fee_field}",
+        );
+    }
+
+    let witness_sources = [
+        include_str!("inv_027_protected_principal_seniority.rs"),
+        include_str!("inv_036_fee_destination_and_policy_version_integrity.rs"),
+        include_str!("inv_038_rounding_and_ratio_conservation.rs"),
+        include_str!("inv_040_no_fee_seniority.rs"),
+        include_str!("inv_061_deterministic_bounded_liquidation.rs"),
+        include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
+        include_str!("../public_sbf/inv_045_no_free_mark_movement.rs"),
+    ];
+    for class in FEE_CLASSES {
+        assert!(
+            witness_sources
+                .iter()
+                .any(|source| source.contains(&format!("fn {}", class.public_witness))),
+            "{} lacks executable public destination witness {}",
+            class.name,
+            class.public_witness,
+        );
+    }
+
+    let supersession_evidence =
+        include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs");
+    assert!(supersession_evidence
+        .contains("fn v16_program_superseded_control_matrix_rejects_stale_overwrites"));
+    let custody_evidence =
+        include_str!("inv_018_quote_mint_vault_token_program_and_authority_integrity.rs");
+    assert!(custody_evidence
+        .contains("fn v16_primary_quote_routes_match_actual_spl_and_internal_accounting_deltas"));
+    let stock_evidence = include_str!("inv_025_exact_stock_reconciliation.rs");
+    assert!(stock_evidence.contains(
+        "fn v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks"
+    ));
+    let seniority_evidence = include_str!("inv_040_no_fee_seniority.rs");
+    assert!(seniority_evidence
+        .contains("fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed"));
+    let transition_evidence =
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transition_evidence.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
 }
