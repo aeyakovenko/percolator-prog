@@ -7,16 +7,169 @@
 //! context replay across public same-pubkey context and LP close/reinit, zero-fill batch atomicity,
 //! and hostile single/batch matcher outputs that forge size, sign, asset, oracle, request id, LP id,
 //! price, or partial-fill flags. An eight-world stateful campaign composes both CPI routes in both
-//! orders across repeated public context incarnations, stale/no-write rollback, fresh retry, exit,
-//! OI cleanup, and custody reconciliation. These tests exercise the deployed public
+//! orders across repeated public context incarnations without matcher-capability reauthorization,
+//! stale/no-write rollback, fresh retry, exit, OI cleanup, and custody reconciliation. A
+//! production-source census owns every fixed CPI account identity plus the context and return-data
+//! transports. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: this closes the current matcher-CPI surface by composing the full-width
+//! return validator proof, the production-derived account/transport census, and public lifecycle
+//! evidence. The LP authorizes the matcher program and context addresses; an external program
+//! upgrade is inside that capability's trust boundary. A new matcher transport, fixed account
+//! role, detached capability account, or return consumer reopens the invariant.
 
 use super::*;
+
+fn inv019_function_body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start = source
+        .find(start)
+        .unwrap_or_else(|| panic!("missing production function {start}"));
+    let tail = &source[start..];
+    let end = tail
+        .find(end)
+        .unwrap_or_else(|| panic!("missing production successor {end}"));
+    &tail[..end]
+}
+
+fn inv019_fixed_account_roles(body: &str) -> Vec<&str> {
+    body.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let tail = line.strip_prefix("let ")?;
+            if !tail.contains("= account(accounts, ") {
+                return None;
+            }
+            tail.split_whitespace().next()
+        })
+        .collect()
+}
+
+#[test]
+fn v16_program_matcher_cpi_identity_incarnation_census_is_source_complete() {
+    let source = include_str!("../../../src/v16_program.rs");
+    let single = inv019_function_body(
+        source,
+        "fn handle_trade_cpi<'a>(",
+        "fn handle_set_matcher_config<'a>(",
+    );
+    let batch = inv019_function_body(
+        source,
+        "fn handle_batch_trade_cpi<'a>(",
+        "fn handle_close_portfolio<'a>(",
+    );
+    let delegate = inv019_function_body(
+        source,
+        "fn derive_matcher_delegate(",
+        "fn matcher_lp_account_id(",
+    );
+    let tail_guard = inv019_function_body(
+        source,
+        "fn validate_matcher_tail<'a>(",
+        "#[inline(never)]\n    fn handle_trade_cpi<'a>(",
+    );
+
+    let fixed_roles = [
+        "signer_a",
+        "market_ai",
+        "account_a_ai",
+        "account_b_ai",
+        "matcher_prog",
+        "matcher_ctx",
+        "matcher_delegate",
+    ];
+    assert_eq!(inv019_fixed_account_roles(single), fixed_roles);
+    assert_eq!(inv019_fixed_account_roles(batch), fixed_roles);
+
+    for (route, body) in [("TradeCpi", single), ("BatchTradeCpi", batch)] {
+        assert_eq!(
+            body.matches("expect_portfolio_position_binding(").count(),
+            2,
+            "{route} must bind both portfolio incarnations and position episodes"
+        );
+        for guard in [
+            "account_a_header.portfolio_account_id != account_a_ai.key.to_bytes()",
+            "account_b_header.portfolio_account_id != account_b_ai.key.to_bytes()",
+            "matcher_prog.key == program_id",
+            "!matcher_prog.executable",
+            "matcher_ctx.executable",
+            "matcher_ctx.owner != matcher_prog.key",
+            "derive_matcher_delegate(",
+            "expect_key(matcher_delegate, &delegate)?",
+            "matcher_tail_start_or_verify_lp_config(",
+            "state::bump_matcher_req_seq",
+            "validate_matcher_tail(",
+        ] {
+            assert!(body.contains(guard), "{route} lost identity guard {guard}");
+        }
+    }
+    assert!(single.contains("market_id != expected_market_id"));
+    assert!(batch.contains("leg.market_id != *market_id"));
+
+    // The delegate has no mutable account state or incarnation. Its complete seed tuple binds the
+    // wrapper deployment, market address, LP portfolio and owner, matcher program, and context.
+    for seed in [
+        "b\"matcher\"",
+        "market_key.as_ref()",
+        "maker_account.as_ref()",
+        "maker_owner.as_ref()",
+        "matcher_program.as_ref()",
+        "matcher_context.as_ref()",
+    ] {
+        assert!(delegate.contains(seed), "matcher delegate lost seed {seed}");
+    }
+
+    // Matcher tails are untrusted forwarding inputs, never capability or result identities. They
+    // cannot alias a fixed role, carry a signer, or expose wrapper-owned protocol state.
+    for forbidden in [
+        "ai.is_signer",
+        "ai.key == signer_a_ai.key",
+        "ai.key == market_ai.key",
+        "ai.key == account_a_ai.key",
+        "ai.key == account_b_ai.key",
+        "ai.key == matcher_prog.key",
+        "ai.key == matcher_ctx.key",
+        "ai.key == matcher_delegate.key",
+        "ai.key == program_id",
+        "ai.owner == program_id",
+    ] {
+        assert!(
+            tail_guard.contains(forbidden),
+            "matcher tail lost exclusion {forbidden}"
+        );
+    }
+
+    // Single CPI consumes only freshly request-bound bytes in the exact configured context. Batch
+    // CPI consumes runtime return data, clears the channel before invocation, and binds producer,
+    // exact length, request id, LP delegate id, asset, oracle price, and signed size.
+    assert!(single.contains("matcher_ctx.try_borrow_data()?"));
+    assert!(single.contains("matcher_abi::validate_matcher_return("));
+    assert!(!single.contains("get_return_data()"));
+    let clear = batch
+        .find("solana_program::program::set_return_data(&[]);")
+        .expect("batch clears stale return data");
+    let invoke = batch
+        .find("invoke_matcher_batch(")
+        .expect("batch invokes configured matcher");
+    let read = batch
+        .find("solana_program::program::get_return_data()")
+        .expect("batch reads current return data");
+    assert!(clear < invoke && invoke < read);
+    assert!(batch.contains("ret_program != *matcher_prog.key"));
+    assert!(batch.contains("ret_data.len() != legs.len() * matcher_abi::MATCHER_RETURN_BYTES"));
+    assert!(batch.contains("matcher_abi::validate_atomic_batch_matcher_return("));
+
+    // There are exactly two matcher-CPI consumers. A new transport or account class must extend
+    // this census and add a public close/recreate disposition before INV-019 can remain closed.
+    assert_eq!(source.matches("fn invoke_matcher<'a>(").count(), 1);
+    assert_eq!(source.matches("\n        invoke_matcher(\n").count(), 1);
+    assert_eq!(source.matches("fn invoke_matcher_batch<'a>(").count(), 1);
+    assert_eq!(
+        source.matches("\n        invoke_matcher_batch(\n").count(),
+        1
+    );
+}
 
 fn inv019_system_create_account(
     env: &mut V16CuEnv,
@@ -688,6 +841,7 @@ fn v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi() {
             inv019_assert_flat(&env, taker, lp, &format!("{label} pre-recreate"));
 
             let stale_req_id = env.market_state().0.matcher_req_seq;
+            let capability_before_recreate = env.portfolio_matcher_config(lp);
             let close_recipient = env.payer.pubkey();
             inv019_hostile_context_control(
                 &mut env,
@@ -711,7 +865,11 @@ fn v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi() {
                 vec![10],
                 None,
             );
-            env.set_matcher_config(matcher_program, &lp_owner, lp, context, delegate, 1);
+            assert_eq!(
+                env.portfolio_matcher_config(lp),
+                capability_before_recreate,
+                "{label}: external context recreation must not rewrite or reauthorize the LP capability"
+            );
             inv019_seed_hostile_single_response(
                 &mut env,
                 matcher_program,
