@@ -41,6 +41,48 @@ fn v16_program_pr343_trade_retry_variants_reject_stale_and_land_fresh() {
 }
 
 #[test]
+fn v16_program_retained_trade_retries_preserve_terminal_value_on_every_route() {
+    let discoveries = discover_trade_intent_retry_terminals([0x45; 32])
+        .expect("finding-blind terminal retained-trade retry matrix");
+    assert_eq!(discoveries.len(), 4);
+    for (expected, discovery) in [
+        RetryIntentKind::TradeNoCpi,
+        RetryIntentKind::TradeCpi,
+        RetryIntentKind::BatchTradeNoCpi,
+        RetryIntentKind::BatchTradeCpi,
+    ]
+    .into_iter()
+    .zip(discoveries)
+    {
+        assert_eq!(discovery.kind, expected);
+        assert!(
+            discovery.certifies_exact_once_and_bounded_exit(),
+            "{expected:?} retry changed terminal value: {discovery:?}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_direct_debit_retries_bind_exact_external_loss() {
+    let discoveries = discover_debited_intent_retries([0x46; 32])
+        .expect("finding-blind direct-debit retry matrix");
+    assert_eq!(discoveries.len(), 2);
+    for (expected, discovery) in [
+        RetryIntentKind::InsuranceTopUp,
+        RetryIntentKind::AssetActivation,
+    ]
+    .into_iter()
+    .zip(discoveries)
+    {
+        assert_eq!(discovery.kind, expected);
+        assert!(
+            discovery.certifies_atomic_rejection(),
+            "{expected:?} retry did not reject atomically: {discovery:?}"
+        );
+    }
+}
+
+#[test]
 fn v16_program_pr344_insurance_top_up_retry_rejects_stale_and_lands_fresh() {
     let protection = discover_intent_retry([0x44; 32], RetryIntentKind::InsuranceTopUp)
         .unwrap_or_else(|error| panic!("PR 344 protection failed: {error}"));

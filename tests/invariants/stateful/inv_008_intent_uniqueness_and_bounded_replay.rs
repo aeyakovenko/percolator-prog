@@ -252,4 +252,41 @@ proptest! {
             result.unwrap_err()
         );
     }
+
+    #[test]
+    fn v16_program_retained_trade_retry_preserves_terminal_value(
+        seed in any::<[u8; 32]>(),
+        route_index in 0usize..4,
+    ) {
+        let kind = [
+            RetryIntentKind::TradeNoCpi,
+            RetryIntentKind::TradeCpi,
+            RetryIntentKind::BatchTradeNoCpi,
+            RetryIntentKind::BatchTradeCpi,
+        ][route_index];
+        let discovery = discover_trade_intent_retry_terminal(seed, kind)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discovery.kind, kind);
+        prop_assert!(
+            discovery.certifies_exact_once_and_bounded_exit(),
+            "retained trade retry changed terminal value: {discovery:?}"
+        );
+    }
+
+    #[test]
+    fn v16_program_direct_debit_retries_are_atomic(
+        seed in any::<[u8; 32]>(),
+        kind_index in 0usize..2,
+    ) {
+        let kind = [
+            RetryIntentKind::InsuranceTopUp,
+            RetryIntentKind::AssetActivation,
+        ][kind_index];
+        let discovery = discover_debited_intent_retry(seed, kind)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(
+            discovery.certifies_atomic_rejection(),
+            "direct-debit retry was not atomic: {discovery:?}"
+        );
+    }
 }

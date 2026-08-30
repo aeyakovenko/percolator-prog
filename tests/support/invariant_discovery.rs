@@ -1141,6 +1141,34 @@ pub struct IntentReplayDiscovery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TradeIntentReplayTerminalDiscovery {
+    pub kind: RetryIntentKind,
+    pub retry_landed: bool,
+    pub retry_rejected_exact_rollback: bool,
+    pub control_victim_payout: u128,
+    pub replay_victim_payout: u128,
+    pub victim_loss: u128,
+    pub counterparty_gain: u128,
+    pub control_total_payout: u128,
+    pub replay_total_payout: u128,
+    pub terminal_evidence: PairedTerminalPayoutEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DebitedIntentReplayDiscovery {
+    pub kind: RetryIntentKind,
+    pub retry_landed: bool,
+    pub retry_rejected_exact_rollback: bool,
+    pub source_token: Pubkey,
+    pub vault: Pubkey,
+    pub source_debit: u128,
+    pub vault_credit: u128,
+    pub accounting_vault_credit: u128,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BundledIntentReplayDiscovery {
     pub kind: RetryIntentKind,
     pub bundle_rejected: bool,
@@ -3291,6 +3319,82 @@ impl SupersessionDiscovery {
 impl IntentReplayDiscovery {
     pub fn is_violation(&self) -> bool {
         self.accepted_retry && self.duplicated_economic_effect
+    }
+}
+
+impl TradeIntentReplayTerminalDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.retry_landed
+            && self.victim_loss != 0
+            && self.counterparty_gain != 0
+            && self.terminal_evidence.certifies_exact_loss(
+                self.victim_loss,
+                self.counterparty_gain,
+                self.control_total_payout,
+                self.replay_total_payout,
+            )
+    }
+
+    pub fn certifies_exact_once_and_bounded_exit(&self) -> bool {
+        !self.is_violation()
+            && !self.retry_landed
+            && self.retry_rejected_exact_rollback
+            && self.control_victim_payout == self.replay_victim_payout
+            && self.victim_loss == 0
+            && self.counterparty_gain == 0
+            && self.terminal_evidence.certifies_bounded_exit(
+                self.victim_loss,
+                self.control_total_payout,
+                self.replay_total_payout,
+            )
+    }
+}
+
+impl DebitedIntentReplayDiscovery {
+    pub fn is_unconsented_debit(&self) -> bool {
+        let Ok(source_debit) = i128::try_from(self.source_debit) else {
+            return false;
+        };
+        let Ok(vault_credit) = i128::try_from(self.vault_credit) else {
+            return false;
+        };
+
+        self.retry_landed
+            && self.source_debit != 0
+            && self.vault_credit == self.source_debit
+            && self.accounting_vault_credit == self.source_debit
+            && self
+                .public_trace
+                .token_delta_for_accounts(&[self.source_token])
+                == Ok(-source_debit)
+            && self.public_trace.token_delta_for_accounts(&[self.vault]) == Ok(vault_credit)
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+
+    pub fn is_violation(&self) -> bool {
+        self.kind == RetryIntentKind::AssetActivation
+            && self.is_unconsented_debit()
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms: 0,
+                } if victim_loss_atoms == self.source_debit
+            )
+    }
+
+    pub fn certifies_atomic_rejection(&self) -> bool {
+        !self.is_violation()
+            && !self.retry_landed
+            && self.retry_rejected_exact_rollback
+            && self.source_debit == 0
+            && self.vault_credit == 0
+            && self.accounting_vault_credit == 0
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::AtomicRejection
+            )
+            && self.public_trace.validate_public_execution().is_ok()
     }
 }
 
@@ -6802,6 +6906,299 @@ pub fn discover_intent_retry(
             })
         }
     }
+}
+
+pub fn discover_debited_intent_retry(
+    seed: [u8; 32],
+    kind: RetryIntentKind,
+) -> Result<DebitedIntentReplayDiscovery, String> {
+    const INSURANCE_AUTHORITY: usize = 2;
+    const ACTIVATION_PAYER: usize = 0;
+    if !matches!(
+        kind,
+        RetryIntentKind::InsuranceTopUp | RetryIntentKind::AssetActivation
+    ) {
+        return Err(format!("{kind:?} is not a direct-debit retry family"));
+    }
+    let mut env = prepare_intent_retry_environment(seed, kind)?;
+    let supply_before = env.token_supply_observed();
+    let (intended, retry) = retained_retry_pair(&mut env, kind);
+    env.land_retained(intended)
+        .map_err(|error| format!("{kind:?} initial debit rejected: {error}"))?;
+    if kind == RetryIntentKind::AssetActivation {
+        env.warp_to_slot(4);
+        env.retire_asset(1, 4)
+            .map_err(|error| format!("retire first activated generation: {error}"))?;
+        env.warp_to_slot(5);
+    }
+
+    let actor = match kind {
+        RetryIntentKind::InsuranceTopUp => INSURANCE_AUTHORITY,
+        RetryIntentKind::AssetActivation => ACTIVATION_PAYER,
+        _ => unreachable!("direct-debit kind checked above"),
+    };
+    let source_token = env.actors[actor].source_token;
+    let source_before = u128::from(env.token_amount(source_token));
+    let vault_before = u128::from(env.token_amount(env.vault));
+    let accounting_vault_before = env.primary_market_state().1.vault;
+    let before_retry = fingerprint(&env);
+    env.begin_public_trace();
+    let result = env.land_retained(retry);
+    let after_retry = fingerprint(&env);
+    let retry_landed = result.is_ok();
+    let retry_rejected_exact_rollback = result.is_err() && before_retry == after_retry;
+    let source_after = u128::from(env.token_amount(source_token));
+    let vault_after = u128::from(env.token_amount(env.vault));
+    let accounting_vault_after = env.primary_market_state().1.vault;
+    let source_debit = source_before.checked_sub(source_after).ok_or_else(|| {
+        format!("{kind:?} replay unexpectedly increased the payer source balance")
+    })?;
+    let vault_credit = vault_after
+        .checked_sub(vault_before)
+        .ok_or_else(|| format!("{kind:?} replay unexpectedly reduced SPL vault custody"))?;
+    let accounting_vault_credit = accounting_vault_after
+        .checked_sub(accounting_vault_before)
+        .ok_or_else(|| format!("{kind:?} replay unexpectedly reduced accounting vault"))?;
+    if retry_landed
+        && (source_debit == 0
+            || source_debit != vault_credit
+            || source_debit != accounting_vault_credit)
+    {
+        return Err(format!(
+            "{kind:?} landed retry had an inexact debit: source={source_debit}, SPL vault={vault_credit}, accounting vault={accounting_vault_credit}"
+        ));
+    }
+    if !retry_landed
+        && (!retry_rejected_exact_rollback
+            || source_debit != 0
+            || vault_credit != 0
+            || accounting_vault_credit != 0)
+    {
+        return Err(format!("{kind:?} rejected retry was not an exact rollback"));
+    }
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} retry changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+    let public_trace = env.finish_public_trace();
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: if retry_landed && kind == RetryIntentKind::AssetActivation {
+                source_debit
+            } else {
+                0
+            },
+            unauthorized_gain_atoms: 0,
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: false,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("{kind:?} debit replay evidence is invalid: {error}"))?;
+    Ok(DebitedIntentReplayDiscovery {
+        kind,
+        retry_landed,
+        retry_rejected_exact_rollback,
+        source_token,
+        vault: env.vault,
+        source_debit,
+        vault_credit,
+        accounting_vault_credit,
+        terminal_classification,
+        public_trace,
+    })
+}
+
+pub fn discover_debited_intent_retries(
+    seed: [u8; 32],
+) -> Result<Vec<DebitedIntentReplayDiscovery>, String> {
+    [
+        RetryIntentKind::InsuranceTopUp,
+        RetryIntentKind::AssetActivation,
+    ]
+    .into_iter()
+    .map(|kind| discover_debited_intent_retry(seed, kind))
+    .collect()
+}
+
+#[derive(Clone, Debug)]
+struct TradeIntentReplayTerminalWorld {
+    retry_landed: bool,
+    retry_rejected_exact_rollback: bool,
+    payouts: [u128; 2],
+    counterparty_destination: Pubkey,
+    victim_destination: Pubkey,
+    public_trace: PublicTraceEvidence,
+}
+
+fn build_retained_trade_retry(
+    env: &mut V16Svm,
+    kind: RetryIntentKind,
+    size_q: i128,
+) -> Result<Transaction, String> {
+    const TAKER: usize = 0;
+    const MAKER: usize = 1;
+    const ASSET: u16 = 0;
+    match kind {
+        RetryIntentKind::TradeNoCpi => {
+            Ok(env.build_retained_no_cpi_trade(TAKER, MAKER, ASSET, size_q, INITIAL_PRICE))
+        }
+        RetryIntentKind::TradeCpi => {
+            Ok(env.build_retained_cpi_trade(TAKER, MAKER, ASSET, size_q, 0))
+        }
+        RetryIntentKind::BatchTradeNoCpi => {
+            Ok(env.build_retained_batch_no_cpi_trade(TAKER, MAKER, ASSET, size_q, INITIAL_PRICE))
+        }
+        RetryIntentKind::BatchTradeCpi => {
+            Ok(env.build_retained_batch_cpi_trade(TAKER, MAKER, ASSET, size_q, 0))
+        }
+        _ => Err(format!("{kind:?} is not a retained trade route")),
+    }
+}
+
+fn run_trade_intent_retry_terminal_world(
+    mut seed: [u8; 32],
+    kind: RetryIntentKind,
+    submit_retry: bool,
+) -> Result<TradeIntentReplayTerminalWorld, String> {
+    const PRICE: u64 = INITIAL_PRICE;
+    const ADVERSE_MARK: u64 = INITIAL_PRICE * 2;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = POS_SCALE as i128 / 4;
+    const MARK_SLOT: u64 = 2;
+    seed[0] ^= 0xe2;
+    seed[1] ^= kind.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 0, 0, 0],
+            actor_token_balances: [2_000_000, 2_000_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let intended = build_retained_trade_retry(&mut env, kind, SIZE_Q)?;
+    let retry = build_retained_trade_retry(&mut env, kind, SIZE_Q)?;
+    env.begin_public_trace();
+    env.land_retained(intended)
+        .map_err(|error| format!("{kind:?} terminal control execution rejected: {error}"))?;
+
+    let (retry_landed, retry_rejected_exact_rollback) = if submit_retry {
+        let before_retry = fingerprint(&env);
+        match env.land_retained(retry) {
+            Ok(_) => (true, false),
+            Err(_) => (false, fingerprint(&env) == before_retry),
+        }
+    } else {
+        (false, true)
+    };
+
+    env.warp_to_slot(MARK_SLOT);
+    env.push_auth_mark(0, MARK_SLOT, ADVERSE_MARK)
+        .map_err(|error| format!("{kind:?} publish terminal adverse mark: {error}"))?;
+    let observation = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    env.crank(0, MARK_SLOT, observation.clone())
+        .map_err(|error| format!("{kind:?} refresh terminal winner: {error}"))?;
+    env.crank(1, MARK_SLOT, observation)
+        .map_err(|error| format!("{kind:?} refresh terminal victim: {error}"))?;
+    env.resolve_market()
+        .map_err(|error| format!("{kind:?} resolve terminal replay market: {error}"))?;
+    let counterparty_destination = env.actors[0].destination_token;
+    let victim_destination = env.actors[1].destination_token;
+    let payouts = drain_resolved_discovery_actors(&mut env, [0, 1])
+        .map_err(|error| format!("{kind:?} drain terminal replay actors: {error}"))?;
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} terminal replay world changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("{kind:?} terminal replay trace is invalid: {error}"))?;
+    Ok(TradeIntentReplayTerminalWorld {
+        retry_landed,
+        retry_rejected_exact_rollback,
+        payouts,
+        counterparty_destination,
+        victim_destination,
+        public_trace,
+    })
+}
+
+pub fn discover_trade_intent_retry_terminal(
+    seed: [u8; 32],
+    kind: RetryIntentKind,
+) -> Result<TradeIntentReplayTerminalDiscovery, String> {
+    let control = run_trade_intent_retry_terminal_world(seed, kind, false)?;
+    let replay = run_trade_intent_retry_terminal_world(seed, kind, true)?;
+    let victim_loss = control.payouts[1].saturating_sub(replay.payouts[1]);
+    let counterparty_gain = replay.payouts[0].saturating_sub(control.payouts[0]);
+    let control_total_payout = control.payouts[0]
+        .checked_add(control.payouts[1])
+        .ok_or_else(|| format!("{kind:?} control payout overflow"))?;
+    let replay_total_payout = replay.payouts[0]
+        .checked_add(replay.payouts[1])
+        .ok_or_else(|| format!("{kind:?} replay payout overflow"))?;
+    if control.counterparty_destination != replay.counterparty_destination
+        || control.victim_destination != replay.victim_destination
+    {
+        return Err(format!(
+            "{kind:?} paired worlds used different payout accounts"
+        ));
+    }
+    let terminal_evidence = build_paired_terminal_payout_evidence(
+        &format!("{kind:?} retained-trade replay"),
+        vec![control.victim_destination],
+        vec![control.counterparty_destination],
+        0,
+        true,
+        victim_loss,
+        counterparty_gain,
+        control_total_payout,
+        replay_total_payout,
+        control.public_trace,
+        replay.public_trace,
+    )?;
+    Ok(TradeIntentReplayTerminalDiscovery {
+        kind,
+        retry_landed: replay.retry_landed,
+        retry_rejected_exact_rollback: replay.retry_rejected_exact_rollback,
+        control_victim_payout: control.payouts[1],
+        replay_victim_payout: replay.payouts[1],
+        victim_loss,
+        counterparty_gain,
+        control_total_payout,
+        replay_total_payout,
+        terminal_evidence,
+    })
+}
+
+pub fn discover_trade_intent_retry_terminals(
+    seed: [u8; 32],
+) -> Result<Vec<TradeIntentReplayTerminalDiscovery>, String> {
+    [
+        RetryIntentKind::TradeNoCpi,
+        RetryIntentKind::TradeCpi,
+        RetryIntentKind::BatchTradeNoCpi,
+        RetryIntentKind::BatchTradeCpi,
+    ]
+    .into_iter()
+    .map(|kind| discover_trade_intent_retry_terminal(seed, kind))
+    .collect()
 }
 
 struct AtomicRetryBundleOutcome {
