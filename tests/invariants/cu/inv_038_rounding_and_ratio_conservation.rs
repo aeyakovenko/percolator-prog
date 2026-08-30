@@ -330,6 +330,403 @@ fn v16_program_social_loss_booking_and_settlement_preserve_exact_remainders() {
     );
 }
 
+#[test]
+fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
+    #[derive(Clone, Copy)]
+    struct RoundingOwner {
+        function: &'static str,
+        operations: usize,
+        class: &'static str,
+        evidence: &'static str,
+    }
+
+    const ROWS: &[RoundingOwner] = &[
+        RoundingOwner {
+            function: "accrue_asset_to_not_atomic",
+            operations: 1,
+            class: "ENGINE",
+            evidence: "INV-085",
+        },
+        RoundingOwner {
+            function: "accumulate_fee_to_domain_budget_credits",
+            operations: 2,
+            class: "EXACT_PARTITION",
+            evidence: "v16_program_public_odd_atom_partitions_conserve_every_atom",
+        },
+        RoundingOwner {
+            function: "asset_index",
+            operations: 1,
+            class: "STRUCTURAL",
+            evidence: "INV-034",
+        },
+        RoundingOwner {
+            function: "backing_domain_parts_view",
+            operations: 2,
+            class: "STRUCTURAL",
+            evidence: "INV-034",
+        },
+        RoundingOwner {
+            function: "backing_fee_policy_for_domain_view",
+            operations: 2,
+            class: "STRUCTURAL",
+            evidence: "INV-036",
+        },
+        RoundingOwner {
+            function: "backing_unavailable_principal_atoms",
+            operations: 1,
+            class: "CUMULATIVE_FLOOR",
+            evidence: "v16_bpf_backing_residual_reward_counter_covers_all_trade_paths",
+        },
+        RoundingOwner {
+            function: "ceil_div_u128",
+            operations: 2,
+            class: "POLICY",
+            evidence: "v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries",
+        },
+        RoundingOwner {
+            function: "clamp_toward_engine_dt",
+            operations: 1,
+            class: "ORACLE",
+            evidence:
+                "v16_program_pr365_fractional_cap_reaches_target_and_preserves_terminal_payouts",
+        },
+        RoundingOwner {
+            function: "collected_fee_supported_mark",
+            operations: 2,
+            class: "POLICY",
+            evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus",
+        },
+        RoundingOwner {
+            function: "compose_price_e6",
+            operations: 2,
+            class: "ORACLE",
+            evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms",
+        },
+        RoundingOwner {
+            function: "credit_fee_to_domain_budget_view",
+            operations: 1,
+            class: "STRUCTURAL",
+            evidence: "INV-036",
+        },
+        RoundingOwner {
+            function: "credit_market_insurance_budget_view",
+            operations: 1,
+            class: "EXACT_PARTITION",
+            evidence: "v16_attack_fee_redirect_split_lands_correctly",
+        },
+        RoundingOwner {
+            function: "deposit_market_zero_insurance_view",
+            operations: 1,
+            class: "EXACT_PARTITION",
+            evidence: "v16_program_public_odd_atom_partitions_conserve_every_atom",
+        },
+        RoundingOwner {
+            function: "domain_authorities_from_view",
+            operations: 1,
+            class: "STRUCTURAL",
+            evidence: "INV-034",
+        },
+        RoundingOwner {
+            function: "ensure_source_credit_full_rate_for_domain_view",
+            operations: 2,
+            class: "STRUCTURAL",
+            evidence: "INV-030",
+        },
+        RoundingOwner {
+            function: "ewma_effective_alpha_bps",
+            operations: 1,
+            class: "POLICY",
+            evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus",
+        },
+        RoundingOwner {
+            function: "ewma_update",
+            operations: 3,
+            class: "POLICY",
+            evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus",
+        },
+        RoundingOwner {
+            function: "fee_bps_for_two_sided_fee_paid",
+            operations: 1,
+            class: "POLICY",
+            evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus",
+        },
+        RoundingOwner {
+            function: "handle_top_up_backing_bucket",
+            operations: 8,
+            class: "STRUCTURAL",
+            evidence: "INV-002",
+        },
+        RoundingOwner {
+            function: "handle_update_backing_fee_policy",
+            operations: 3,
+            class: "STRUCTURAL",
+            evidence: "INV-036",
+        },
+        RoundingOwner {
+            function: "handle_withdraw_backing_bucket",
+            operations: 2,
+            class: "STRUCTURAL",
+            evidence: "INV-032",
+        },
+        RoundingOwner {
+            function: "handle_withdraw_backing_bucket_earnings",
+            operations: 2,
+            class: "STRUCTURAL",
+            evidence: "INV-036",
+        },
+        RoundingOwner {
+            function: "hybrid_trade_fee_quote_view",
+            operations: 1,
+            class: "POLICY",
+            evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus",
+        },
+        RoundingOwner {
+            function: "live_domain_withdraw_health_or_shutdown_view",
+            operations: 2,
+            class: "STRUCTURAL",
+            evidence: "INV-064",
+        },
+        RoundingOwner {
+            function: "mul_div_u128_by_u64",
+            operations: 4,
+            class: "POLICY",
+            evidence: "v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries",
+        },
+        RoundingOwner {
+            function: "permissionless_market_init_fee_for_asset",
+            operations: 1,
+            class: "POLICY",
+            evidence: "v16_attack_permissionless_create_fee_funds_asset0_insurance",
+        },
+        RoundingOwner {
+            function: "premium_funding_rate_e9",
+            operations: 1,
+            class: "POLICY",
+            evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus",
+        },
+        RoundingOwner {
+            function: "price_move_bps_ceil",
+            operations: 1,
+            class: "POLICY",
+            evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus",
+        },
+        RoundingOwner {
+            function: "read_pyth_price_e6_from_bytes",
+            operations: 1,
+            class: "ORACLE",
+            evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms",
+        },
+        RoundingOwner {
+            function: "reject_lapsed_source_backing_for_conversion_view",
+            operations: 2,
+            class: "STRUCTURAL",
+            evidence: "INV-063",
+        },
+        RoundingOwner {
+            function: "require_domain_accepts_live_topup_view",
+            operations: 1,
+            class: "STRUCTURAL",
+            evidence: "INV-034",
+        },
+        RoundingOwner {
+            function: "scale_decimal_to_e6",
+            operations: 1,
+            class: "ORACLE",
+            evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms",
+        },
+        RoundingOwner {
+            function: "trade_fee_budgeted_amounts_with_mark_externality_view",
+            operations: 1,
+            class: "EXACT_PARTITION",
+            evidence:
+                "v16_program_pr225_mark_movement_fee_is_nonwithdrawable_and_terminally_burned",
+        },
+        RoundingOwner {
+            function: "validate_switchboard_observation_e6",
+            operations: 1,
+            class: "ORACLE",
+            evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms",
+        },
+        RoundingOwner {
+            function: "verify_domain_withdrawal_preflight",
+            operations: 1,
+            class: "STRUCTURAL",
+            evidence: "INV-032",
+        },
+        RoundingOwner {
+            function: "write_market_wire",
+            operations: 2,
+            class: "AGGREGATE_CEIL",
+            evidence:
+                "v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks",
+        },
+    ];
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    let mut current_function = "<module>";
+    let mut actual = std::collections::BTreeMap::<String, usize>::new();
+    for line in production.lines() {
+        let code = line.split("//").next().unwrap_or(line);
+        let trimmed = code.trim_start();
+        if let Some(fn_offset) = trimmed.find("fn ") {
+            let prefix = &trimmed[..fn_offset];
+            if prefix.is_empty() || prefix.starts_with("pub") || prefix.starts_with("unsafe") {
+                let rest = &trimmed[fn_offset + 3..];
+                let end = rest
+                    .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .unwrap_or(rest.len());
+                current_function = &rest[..end];
+            }
+        }
+        let truncating_operations = code.matches(" / ").count()
+            + code.matches(" % ").count()
+            + code.matches(".checked_div(").count();
+        if truncating_operations != 0 {
+            *actual.entry(current_function.to_owned()).or_default() += truncating_operations;
+        }
+    }
+
+    let witness_sources = [
+        include_str!("inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
+        include_str!("inv_025_exact_stock_reconciliation.rs"),
+        include_str!("inv_036_fee_destination_and_policy_version_integrity.rs"),
+        include_str!("inv_037_exact_residual_partition.rs"),
+        include_str!("inv_038_rounding_and_ratio_conservation.rs"),
+        include_str!("inv_085_proven_arithmetic_equals_deployed_arithmetic.rs"),
+        include_str!("../public_sbf/inv_038_rounding_and_ratio_conservation.rs"),
+        include_str!("../public_sbf/inv_045_no_free_mark_movement.rs"),
+    ];
+    let mut expected = std::collections::BTreeMap::new();
+    for row in ROWS {
+        assert!(
+            expected
+                .insert(row.function.to_owned(), row.operations)
+                .is_none(),
+            "duplicate truncating-arithmetic owner {}",
+            row.function
+        );
+        match row.class {
+            "ENGINE" | "STRUCTURAL" => assert!(row.evidence.starts_with("INV-")),
+            "AGGREGATE_CEIL" | "ORACLE" | "POLICY" | "EXACT_PARTITION" | "CUMULATIVE_FLOOR" => {
+                assert!(
+                    witness_sources
+                        .iter()
+                        .any(|source| source.contains(&format!("fn {}", row.evidence))),
+                    "{} lacks executable semantic rounding evidence {}",
+                    row.function,
+                    row.evidence
+                )
+            }
+            other => panic!("unknown truncating-arithmetic ownership class {other}"),
+        }
+    }
+    assert_eq!(
+        actual, expected,
+        "every production division/modulo site needs one semantic residue owner"
+    );
+}
+
+#[test]
+fn v16_program_public_odd_atom_partitions_conserve_every_atom() {
+    const ODD_ACTIVATION_FEE: u128 = 41;
+    let mut activation = V16CuEnv::new();
+    activation.update_market_init_fee_policy_with_cu(ODD_ACTIVATION_FEE);
+    activation.svm.warp_to_slot(1);
+    let before = activation.market_state().1;
+    let creator = Keypair::new();
+    let authority = Keypair::new();
+    let market_authority = activation.admin.pubkey();
+    let (_, activation_cu) = activation.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        authority.pubkey(),
+        authority.pubkey(),
+        authority.pubkey(),
+        market_authority,
+        ODD_ACTIVATION_FEE,
+    );
+    assert_cu_within(
+        "INV-038 odd activation-fee partition",
+        activation_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let after = activation.market_state().1;
+    let activation_long = after.insurance_domain_budget[0] - before.insurance_domain_budget[0];
+    let activation_short = after.insurance_domain_budget[1] - before.insurance_domain_budget[1];
+    assert_eq!((activation_long, activation_short), (20, 21));
+    assert_eq!(activation_long + activation_short, ODD_ACTIVATION_FEE);
+    assert_eq!(after.insurance - before.insurance, ODD_ACTIVATION_FEE);
+    assert_eq!(after.vault - before.vault, ODD_ACTIVATION_FEE);
+    assert_eq!(
+        after.vault as u64,
+        activation.token_amount(activation.vault)
+    );
+
+    const PRICE: u64 = 100;
+    const FEE_BPS: u64 = 100;
+    assert_eq!(
+        percolator_prog::policy_v16::batch_leg_fee(POS_SCALE, PRICE, FEE_BPS),
+        Some(1),
+        "each side must contribute one odd redirect atom"
+    );
+    let mut batch = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    batch.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
+    batch.update_fee_redirect_policy_with_cu(10_000);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = batch.create_portfolio(&taker_owner);
+    let lp = batch.create_portfolio(&lp_owner);
+    batch.deposit(&taker_owner, taker, 1_000_000);
+    batch.deposit(&lp_owner, lp, 1_000_000);
+    let before = batch.market_state().1;
+    batch.svm.expire_blockhash();
+    let batch_cu = batch
+        .send(
+            batch.batch_trade_no_cpi_ix(
+                taker,
+                lp,
+                vec![BatchTradeLeg {
+                    asset_index: 1,
+                    market_id: first_generation_market_id(1),
+                    size_q: POS_SCALE as i128,
+                    exec_price: PRICE,
+                    fee_bps: FEE_BPS,
+                }],
+            ),
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(lp_owner.pubkey(), true),
+                AccountMeta::new(batch.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(lp, false),
+            ],
+            &[&taker_owner, &lp_owner],
+        )
+        .expect("odd-atom batch redirect must execute");
+    assert_cu_within(
+        "INV-038 odd batch fee-redirect partition",
+        batch_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    let after = batch.market_state().1;
+    let deltas: Vec<u128> = (0..4)
+        .map(|domain| {
+            after.insurance_domain_budget[domain] - before.insurance_domain_budget[domain]
+        })
+        .collect();
+    assert_eq!(deltas, vec![0, 2, 0, 0]);
+    assert_eq!(deltas.iter().sum::<u128>(), 2);
+    assert_eq!(after.insurance - before.insurance, 2);
+    assert_eq!(after.vault, before.vault);
+    assert_eq!(after.vault as u64, batch.token_amount(batch.vault));
+}
+
 // security.md sweep — rounding asymmetry (#37 dust): trade fees must round UP (ceil, protocol favor)
 // so dust-notional trades are never free and repeated churn never leaks value to the trader. Attacker
 // success = a fee that floors to 0 (free trade) or insurance that fails to grow on a fee'd dust trade.
