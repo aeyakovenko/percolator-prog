@@ -2042,7 +2042,8 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
     const ASSET0_SIZE_Q: i128 = 20 * POS_SCALE as i128;
     const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const DEPOSIT: u128 = 320;
-    const EXPECTED_NET_PNL_AFTER_NEGATIVE_CLOSE: i128 = 50;
+    const EXPECTED_GROSS_SOURCE_PNL: i128 = 100;
+    const EXPECTED_ADVERSE_LOSS: u128 = 50;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
     env.svm.warp_to_slot(1);
@@ -2110,10 +2111,13 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
     let cross_before_close = env.portfolio_state(cross_account);
     assert_eq!(
         cross_before_close.pnl.get(),
-        EXPECTED_NET_PNL_AFTER_NEGATIVE_CLOSE,
-        "complete refresh must retain positive net PnL before the reducing close",
+        EXPECTED_GROSS_SOURCE_PNL,
+        "complete refresh must retain gross source-attributed PnL before the reducing close",
     );
-    assert_eq!(cross_before_close.capital.get(), DEPOSIT);
+    assert_eq!(
+        cross_before_close.capital.get(),
+        DEPOSIT - EXPECTED_ADVERSE_LOSS
+    );
     assert_eq!(
         active_leg_for_asset(&cross_before_close, 1).basis_pos_q,
         ASSET1_SIZE_Q,
@@ -2145,11 +2149,14 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
         !has_active_leg_for_asset(&cross_after_close, 1),
         "negative-PnL leg should close without converting positive PnL first"
     );
-    assert_eq!(cross_after_close.capital.get(), DEPOSIT);
+    assert_eq!(
+        cross_after_close.capital.get(),
+        DEPOSIT - EXPECTED_ADVERSE_LOSS
+    );
     assert_eq!(
         cross_after_close.pnl.get(),
-        EXPECTED_NET_PNL_AFTER_NEGATIVE_CLOSE,
-        "asset[1] loss should net against the existing source-backed positive PnL"
+        EXPECTED_GROSS_SOURCE_PNL,
+        "closing the adverse leg must not consume the independent source-backed claim"
     );
 }
 

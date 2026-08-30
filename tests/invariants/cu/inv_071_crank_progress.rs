@@ -1053,11 +1053,18 @@ fn v16_program_prospective_loss_expiry_matrix_keeps_resolved_exit_live() {
             observations: crank_observations(0),
         },
     );
-    assert!(env
-        .portfolio_state(short)
-        .source_domains
-        .iter()
-        .all(|source| !source.is_occupied()));
+    let short_after_refresh = env.portfolio_state(short);
+    assert_eq!(short_after_refresh.pnl.get(), 200_000);
+    assert_eq!(short_after_refresh.capital.get(), DEPOSIT - 200_000);
+    assert_eq!(
+        short_after_refresh
+            .source_domains
+            .iter()
+            .map(|source| source.source_claim_bound_num.get())
+            .sum::<u128>(),
+        200_000 * BOUND_SCALE,
+        "the favorable leg remains gross-attributed while the unrelated loss is capitalized"
+    );
     env.crank(
         long,
         ProgInstruction::PermissionlessCrank {

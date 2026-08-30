@@ -24,7 +24,8 @@ fn v16_program_source_credit_reservation_labels_do_not_free_backing_value() {
     const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
     const TOO_LARGE_INCREASE_Q: i128 = 30 * POS_SCALE as i128;
     const DEPOSIT: u128 = 313;
-    const EXPECTED_POSITIVE_PNL: i128 = 50;
+    const EXPECTED_GROSS_SOURCE_CLAIM: i128 = 100;
+    const EXPECTED_ADVERSE_LOSS: u128 = 50;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
     env.svm.warp_to_slot(1);
@@ -78,8 +79,12 @@ fn v16_program_source_credit_reservation_labels_do_not_free_backing_value() {
     }
 
     let cross_before = env.portfolio_state(cross_account);
-    assert_eq!(cross_before.pnl.get(), EXPECTED_POSITIVE_PNL);
-    assert_eq!(cross_before.capital.get(), DEPOSIT);
+    assert_eq!(cross_before.pnl.get(), EXPECTED_GROSS_SOURCE_CLAIM);
+    assert_eq!(
+        cross_before.capital.get(),
+        DEPOSIT - EXPECTED_ADVERSE_LOSS,
+        "the unrelated adverse leg must reduce capital instead of consuming another domain's claim"
+    );
     assert_eq!(
         active_leg_for_asset(&cross_before, 1).basis_pos_q,
         ASSET1_SIZE_Q,
@@ -92,8 +97,8 @@ fn v16_program_source_credit_reservation_labels_do_not_free_backing_value() {
         before_watermark_group.source_credit[1].positive_claim_bound_num;
     assert_eq!(
         positive_claim_before_withdraw,
-        EXPECTED_POSITIVE_PNL as u128 * BOUND_SCALE,
-        "the source-domain claim must match complete-account positive PnL",
+        EXPECTED_GROSS_SOURCE_CLAIM as u128 * BOUND_SCALE,
+        "the source-domain claim must preserve gross attributable positive PnL",
     );
 
     let watermark_withdraw_dest = env.token_account(env.admin.pubkey(), 0);
@@ -172,8 +177,8 @@ fn v16_program_source_credit_reservation_labels_do_not_free_backing_value() {
         active_leg_for_asset(&cross_after, 1).basis_pos_q,
         ASSET1_SIZE_Q + SAFE_INCREASE_Q,
     );
-    assert_eq!(cross_after.capital.get(), DEPOSIT);
-    assert_eq!(cross_after.pnl.get(), EXPECTED_POSITIVE_PNL);
+    assert_eq!(cross_after.capital.get(), DEPOSIT - EXPECTED_ADVERSE_LOSS);
+    assert_eq!(cross_after.pnl.get(), EXPECTED_GROSS_SOURCE_CLAIM);
     assert!(
         cross_after.capital.get() < health_cert(&cross_after).certified_initial_req,
         "without positive PnL credit this risk increase would fail initial margin",

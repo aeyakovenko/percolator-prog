@@ -5283,8 +5283,13 @@ fn clear_source_backing_generation(
                 "base source claim is not atom-exact: {base_claim_num}"
             ));
         }
-        env.top_up_backing_bucket_without_ledger(0, base_claim_atoms, 100)
-            .map_err(|error| format!("fund unrelated base source claim: {error}"))?;
+        let group = env.primary_market_state().1;
+        let source = group.source_credit[0];
+        if source.credit_rate_num != percolator::CREDIT_RATE_SCALE {
+            let expiry_slot = group.source_backing_buckets[0].expiry_slot.max(100);
+            env.top_up_backing_bucket_without_ledger(0, base_claim_atoms, expiry_slot)
+                .map_err(|error| format!("fund unrelated base source claim: {error}"))?;
+        }
         crank_discovery_steps_for_assets(env, MARKET_TRADER, 6, &[0])?;
         env.convert_released_pnl(MARKET_TRADER, base_claim_atoms)
             .map_err(|error| format!("convert unrelated base source claim: {error}"))?;
@@ -5486,10 +5491,14 @@ fn discover_backing_earnings_generation_replay(
     );
     clear_source_backing_generation(&mut env, earnings, REPLAY_AMOUNT)?;
     let lp_capital = env.primary_portfolio(LP).capital.get();
-    let replacement_starting_capital = 3_190u128;
+    // Stay off the initial-margin boundary while retaining a nonzero source lien and fee.
+    let replacement_starting_capital = 3_500u128;
     if lp_capital > replacement_starting_capital {
         env.withdraw_primary(LP, lp_capital - replacement_starting_capital)
             .map_err(|error| format!("withdraw flat old-generation LP surplus: {error}"))?;
+    } else if lp_capital < replacement_starting_capital {
+        env.deposit_primary(LP, replacement_starting_capital - lp_capital)
+            .map_err(|error| format!("restore flat replacement-generation LP capital: {error}"))?;
     }
 
     env.warp_to_slot(7);
@@ -7753,7 +7762,7 @@ fn prepare_source_backed_fee_world(seed: [u8; 32]) -> Result<V16Svm, String> {
             max_accrual_dt_slots: 1,
             min_funding_lifetime_slots: 1,
             maintenance_fee_per_slot: 30,
-            actor_deposits: [10_000, 10_000, 3_190, USER_DEPOSIT, USER_DEPOSIT],
+            actor_deposits: [10_000, 10_000, 3_200, USER_DEPOSIT, USER_DEPOSIT],
             ..MarketConfig::default()
         },
     );
@@ -8131,7 +8140,7 @@ fn discover_one_backing_provider_consent_violation(
             max_accrual_dt_slots: 1,
             min_funding_lifetime_slots: 1,
             maintenance_fee_per_slot: 30,
-            actor_deposits: [10_000, 1, 1, 10_000, 3_130],
+            actor_deposits: [10_000, 1, 1, 10_000, 3_140],
             ..MarketConfig::default()
         },
     );

@@ -2125,8 +2125,9 @@ fn v16_attack_source_backed_force_close_preserves_bounded_resolved_exits() {
     let try_close = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey, dest: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::CloseResolved {
-                fee_rate_per_slot: 0,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: force_slot,
+                observations: vec![],
             },
             vec![
                 AccountMeta::new_readonly(owner.pubkey(), true),
@@ -2155,22 +2156,31 @@ fn v16_attack_source_backed_force_close_preserves_bounded_resolved_exits() {
     let mut max_close_cu = 0;
     let mut close_rounds = 0;
     for round in 0..8 {
-        let counterparty_cu = try_close(
-            &mut env,
-            &counterparty_owner,
-            counterparty,
-            counterparty_dest,
-        )
-        .expect("counterparty resolved close must make bounded progress");
-        let winner_cu = try_close(&mut env, &winner_owner, winner, winner_dest)
-            .expect("source-backed winner resolved close must make bounded progress");
-        max_close_cu = max_close_cu.max(counterparty_cu).max(winner_cu);
+        let mut progressed = false;
+        if !is_terminal(&env.portfolio_state(counterparty)) {
+            let cu = try_close(
+                &mut env,
+                &counterparty_owner,
+                counterparty,
+                counterparty_dest,
+            )
+            .expect("counterparty resolved close must make bounded progress");
+            max_close_cu = max_close_cu.max(cu);
+            progressed = true;
+        }
+        if !is_terminal(&env.portfolio_state(winner)) {
+            let cu = try_close(&mut env, &winner_owner, winner, winner_dest)
+                .expect("source-backed winner resolved close must make bounded progress");
+            max_close_cu = max_close_cu.max(cu);
+            progressed = true;
+        }
         close_rounds = round + 1;
         if is_terminal(&env.portfolio_state(winner))
             && is_terminal(&env.portfolio_state(counterparty))
         {
             break;
         }
+        assert!(progressed, "resolved wind-down reached a nonterminal fixed point");
     }
 
     let winner_after = env.portfolio_state(winner);

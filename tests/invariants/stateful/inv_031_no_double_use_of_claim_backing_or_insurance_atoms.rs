@@ -123,6 +123,7 @@ fn verify_live_lien_route_pair_preserves_single_ownership(
     const ADVERSE_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const RISK_INCREMENT_Q: i128 = (POS_SCALE / 10) as i128;
     const BACKING_ATOMS: u128 = 6;
+    const WINNER_DEPOSIT: u128 = 363;
 
     let direction = if winner_long { 1i128 } else { -1i128 };
     let winning_mark = if winner_long { 105 } else { 95 };
@@ -152,8 +153,8 @@ fn verify_live_lien_route_pair_preserves_single_ownership(
             max_abs_funding_e9_per_slot: 0,
             min_funding_lifetime_slots: 1,
             maintenance_fee_per_slot: 0,
-            actor_deposits: [313, 1_000, 1, 1, 1],
-            actor_token_balances: [313, 1_000, 1, 1, 1],
+            actor_deposits: [WINNER_DEPOSIT, 1_000, 1, 1, 1],
+            actor_token_balances: [WINNER_DEPOSIT as u64, 1_000, 1, 1, 1],
             ..MarketConfig::default()
         },
     );
@@ -199,10 +200,23 @@ fn verify_live_lien_route_pair_preserves_single_ownership(
         env.crank(actor, 2, observations.clone())
             .map_err(|error| format!("{label} settle actor {actor}: {error}"))?;
     }
-    if env.primary_portfolio(WINNER).pnl.get() != 50 {
+    let expected_claim = (WINNING_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
+        .checked_mul(u128::from(START_PRICE.abs_diff(winning_mark)))
+        .ok_or_else(|| format!("{label} winning PnL oracle overflow"))?;
+    let expected_loss = (ADVERSE_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
+        .checked_mul(u128::from(START_PRICE.abs_diff(adverse_mark)))
+        .ok_or_else(|| format!("{label} adverse PnL oracle overflow"))?;
+    let expected_claim_i128 = i128::try_from(expected_claim)
+        .map_err(|_| format!("{label} source claim does not fit i128"))?;
+    let expected_capital = WINNER_DEPOSIT
+        .checked_sub(expected_loss)
+        .ok_or_else(|| format!("{label} adverse loss exceeds funded capital"))?;
+    let winner = env.primary_portfolio(WINNER);
+    if winner.pnl.get() != expected_claim_i128 || winner.capital.get() != expected_capital {
         return Err(format!(
-            "{label} did not create the expected source-backed claim: {}",
-            env.primary_portfolio(WINNER).pnl.get()
+            "{label} did not preserve gross source claim and disjoint capital loss: capital={}, pnl={}, expected_capital={expected_capital}, expected_claim={expected_claim}",
+            winner.capital.get(),
+            winner.pnl.get(),
         ));
     }
     assert_inv_031_censuses(&format!("{label} before lien"), &env)?;
@@ -438,6 +452,7 @@ fn verify_two_account_concurrent_lien_ownership(
     const ADVERSE_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const RISK_INCREMENT_Q: i128 = (POS_SCALE / 10) as i128;
     const BACKING_ATOMS: u128 = 12;
+    const WINNER_DEPOSIT: u128 = 363;
 
     let direction = if winner_long { 1i128 } else { -1i128 };
     let winning_mark = if winner_long { 105 } else { 95 };
@@ -468,8 +483,14 @@ fn verify_two_account_concurrent_lien_ownership(
             max_abs_funding_e9_per_slot: 0,
             min_funding_lifetime_slots: 1,
             maintenance_fee_per_slot: 0,
-            actor_deposits: [313, 313, 1_000, 1_000, 1],
-            actor_token_balances: [313, 313, 1_000, 1_000, 1],
+            actor_deposits: [WINNER_DEPOSIT, WINNER_DEPOSIT, 1_000, 1_000, 1],
+            actor_token_balances: [
+                WINNER_DEPOSIT as u64,
+                WINNER_DEPOSIT as u64,
+                1_000,
+                1_000,
+                1,
+            ],
             ..MarketConfig::default()
         },
     );
@@ -527,11 +548,24 @@ fn verify_two_account_concurrent_lien_ownership(
         env.crank(actor, 2, observations.clone())
             .map_err(|error| format!("{label} settle actor {actor}: {error}"))?;
     }
+    let expected_claim = (WINNING_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
+        .checked_mul(u128::from(START_PRICE.abs_diff(winning_mark)))
+        .ok_or_else(|| format!("{label} winning PnL oracle overflow"))?;
+    let expected_loss = (ADVERSE_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
+        .checked_mul(u128::from(START_PRICE.abs_diff(adverse_mark)))
+        .ok_or_else(|| format!("{label} adverse PnL oracle overflow"))?;
+    let expected_claim_i128 = i128::try_from(expected_claim)
+        .map_err(|_| format!("{label} source claim does not fit i128"))?;
+    let expected_capital = WINNER_DEPOSIT
+        .checked_sub(expected_loss)
+        .ok_or_else(|| format!("{label} adverse loss exceeds funded capital"))?;
     for winner in WINNERS {
-        if env.primary_portfolio(winner).pnl.get() != 50 {
+        let account = env.primary_portfolio(winner);
+        if account.pnl.get() != expected_claim_i128 || account.capital.get() != expected_capital {
             return Err(format!(
-                "{label} winner {winner} did not create the expected source-backed claim: {}",
-                env.primary_portfolio(winner).pnl.get()
+                "{label} winner {winner} did not preserve gross source claim and disjoint capital loss: capital={}, pnl={}, expected_capital={expected_capital}, expected_claim={expected_claim}",
+                account.capital.get(),
+                account.pnl.get(),
             ));
         }
     }

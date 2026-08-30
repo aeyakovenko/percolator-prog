@@ -16283,9 +16283,9 @@ pub fn verify_cpi_backing_fee_consent(
         env.crank(actor, 5, complete_lp_observations.clone())
             .map_err(|error| format!("fully refresh LP source-PnL actor {actor}: {error}"))?;
     }
-    if env.primary_portfolio(2).pnl.get() != 1_000 {
+    if env.primary_portfolio(2).pnl.get() != 1_500 {
         return Err(format!(
-            "LP source-PnL setup reached {}, expected 1000",
+            "LP source-PnL setup reached {}, expected 1500",
             env.primary_portfolio(2).pnl.get()
         ));
     }
@@ -26928,13 +26928,31 @@ pub fn verify_counterparty_encumbrance_route_matrix(mut seed: [u8; 32]) -> Resul
                     )
                     .map_err(|error| format!("{label} settle actor {actor}: {error}"))?;
                 }
-                if env.primary_portfolio(WINNER).pnl.get() != 50 {
+                let expected_claim = (WINNING_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
+                    .checked_mul(u128::from(START_PRICE.abs_diff(winning_mark)))
+                    .ok_or_else(|| format!("{label}: winning PnL oracle overflow"))?;
+                let expected_loss = (ADVERSE_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
+                    .checked_mul(u128::from(START_PRICE.abs_diff(adverse_mark)))
+                    .ok_or_else(|| format!("{label}: adverse PnL oracle overflow"))?;
+                let expected_claim_i128 = i128::try_from(expected_claim)
+                    .map_err(|_| format!("{label}: source claim does not fit i128"))?;
+                let expected_capital = WINNER_DEPOSIT
+                    .checked_sub(expected_loss)
+                    .ok_or_else(|| format!("{label}: adverse loss exceeds funded capital"))?;
+                let winner = env.primary_portfolio(WINNER);
+                if winner.pnl.get() != expected_claim_i128
+                    || winner.capital.get() != expected_capital
+                {
                     return Err(format!(
-                        "{label}: paired marks produced PnL {}, expected 50",
-                        env.primary_portfolio(WINNER).pnl.get(),
+                        "{label}: paired marks did not preserve gross source claim and disjoint capital loss: capital={}, pnl={}, expected_capital={expected_capital}, expected_claim={expected_claim}",
+                        winner.capital.get(),
+                        winner.pnl.get(),
                     ));
                 }
                 assert_public_encumbrance_census(&format!("{label} after settlement"), &env)?;
+                let (_, before_lien) = env.primary_market_state();
+                let source_before_lien = before_lien.source_credit[source_domain];
+                let bucket_before_lien = before_lien.source_backing_buckets[source_domain];
 
                 execute_trade_route(
                     &mut env,
@@ -27051,7 +27069,18 @@ pub fn verify_counterparty_encumbrance_route_matrix(mut seed: [u8; 32]) -> Resul
                         || recovered_source.impaired_liened_backing_num != 0
                         || recovered_bucket.valid_liened_backing_num != 0
                         || recovered_bucket.impaired_liened_backing_num != 0
-                        || recovered_bucket.consumed_liened_backing_num != 50 * BOUND_SCALE
+                        || recovered_source.positive_claim_bound_num
+                            != source_before_lien.positive_claim_bound_num
+                        || recovered_source.exact_positive_claim_num
+                            != source_before_lien.exact_positive_claim_num
+                        || recovered_source.fresh_reserved_backing_num
+                            != source_before_lien.fresh_reserved_backing_num
+                        || recovered_source.provider_receivable_num
+                            != source_before_lien.provider_receivable_num
+                        || recovered_bucket.fresh_unliened_backing_num
+                            != bucket_before_lien.fresh_unliened_backing_num
+                        || recovered_bucket.consumed_liened_backing_num
+                            != bucket_before_lien.consumed_liened_backing_num
                         || recovered_source.provider_receivable_num
                             != recovered_bucket.consumed_liened_backing_num
                         || env.token_supply_observed() != supply_before

@@ -108,6 +108,7 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
     const BACKING_ATOMS: u128 = 150;
     const EXPIRY_SLOT: u64 = 3;
     const EXPIRY_COUNTERPARTY_LOSS: i128 = 20;
+    const WINNER_DEPOSIT: u128 = 313;
 
     let route_index = match route {
         TradeRoute::NoCpi => 0,
@@ -134,8 +135,8 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
             max_abs_funding_e9_per_slot: 0,
             min_funding_lifetime_slots: 1,
             maintenance_fee_per_slot: 0,
-            actor_deposits: [313, 1_000, 1, 1, 1],
-            actor_token_balances: [313, 1_000, 1, 1, 1],
+            actor_deposits: [WINNER_DEPOSIT, 1_000, 1, 1, 1],
+            actor_token_balances: [WINNER_DEPOSIT as u64, 1_000, 1, 1, 1],
             ..MarketConfig::default()
         },
     );
@@ -185,10 +186,24 @@ fn run_liened_backing_expiry_world(route: TradeRoute, winner_long: bool) {
             &format!("{label} settle actor {actor}"),
         );
     }
+    let expected_claim = (WINNING_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
+        .checked_mul(u128::from(START_PRICE.abs_diff(winning_mark)))
+        .expect("winning PnL oracle overflow");
+    let expected_loss = (ADVERSE_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
+        .checked_mul(u128::from(START_PRICE.abs_diff(adverse_mark)))
+        .expect("adverse PnL oracle overflow");
+    let winner = env.primary_portfolio(WINNER);
     assert_eq!(
-        env.primary_portfolio(WINNER).pnl.get(),
-        50,
-        "{label} paired marks must produce a real source-backed claim"
+        winner.pnl.get(),
+        i128::try_from(expected_claim).expect("source claim fits i128"),
+        "{label} must retain the gross source-domain claim"
+    );
+    assert_eq!(
+        winner.capital.get(),
+        WINNER_DEPOSIT
+            .checked_sub(expected_loss)
+            .expect("adverse loss is funded"),
+        "{label} must settle the disjoint adverse-domain loss from capital"
     );
 
     execute_trade_route(

@@ -282,7 +282,8 @@ fn v16_attack_source_lien_risk_epoch_invalidates_unrelated_released_pnl_cert() {
             },
         );
     }
-    assert_eq!(env.portfolio_state(cross).pnl.get(), 500_000);
+    assert_eq!(env.portfolio_state(cross).pnl.get(), 1_000_000);
+    assert_eq!(env.portfolio_state(cross).capital.get(), 2_630_000);
     refresh_public_claim_certificate(&mut env, claimant);
 
     let before = env.market_state().1;

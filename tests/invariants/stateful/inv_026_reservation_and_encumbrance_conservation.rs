@@ -20,10 +20,11 @@
 //!
 //! The Resolved path requires the persisted account lien to disappear,
 //! valid/impaired market labels to clear, and backing to enter the
-//! consumed/provider-receivable class exactly once. The Recovery path first
-//! consumes the exact realizable claim tranche while retaining the risk lien for
-//! the surviving live leg, then closes that leg and requires bounded public cranks
-//! to release the remaining lien. SPL supply must not move in either path. The
+//! consumed/provider-receivable class exactly once. The Recovery path forfeits the
+//! unrelated adverse leg, closes the surviving live leg at the current mark, and
+//! requires bounded public cranks to release its risk lien back to the exact
+//! pre-lien fresh-backing class without consuming the still-live source claim.
+//! SPL supply must not move in either path. The
 //! shared census also runs after every generated public action in the stateful
 //! runner. Direct insurance-backed lien creation remains unavailable through the
 //! wrapper API and is therefore not claimed by this test.

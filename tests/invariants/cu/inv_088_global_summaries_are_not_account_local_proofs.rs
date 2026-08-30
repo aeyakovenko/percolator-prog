@@ -710,8 +710,13 @@ fn inv_088_realize_backing_earnings(env: &mut V16CuEnv, cohort: &Inv088EarningsC
     }
     assert_eq!(
         env.portfolio_state(cohort.cross_portfolio).capital.get(),
-        2_600,
-        "maintenance transition must reach the intended source-credit boundary"
+        2_100,
+        "maintenance and the adverse hedge loss must both reduce capital"
+    );
+    assert_eq!(
+        env.portfolio_state(cohort.cross_portfolio).pnl.get(),
+        1_000,
+        "the favorable leg must remain a gross source-attributed claim"
     );
     assert!(
         env.market_state().1.source_credit[cohort.domain as usize].positive_claim_bound_num > 0

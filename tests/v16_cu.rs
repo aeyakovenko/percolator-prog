@@ -41,8 +41,8 @@ const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 const MAX_10M_MARKET_SLOTS: usize = 5_782;
 const CERTIFIED_ENGINE_GIT_SOURCE: &str =
-    "git+https://github.com/aeyakovenko/percolator?rev=07208fb1894e54ebba21553ab0272d97286bd951#\
-     07208fb1894e54ebba21553ab0272d97286bd951";
+    "git+https://github.com/aeyakovenko/percolator?rev=a6e3c79f2d6c3afdfb82260951d8a5be85f8fa5d#\
+     a6e3c79f2d6c3afdfb82260951d8a5be85f8fa5d";
 
 fn assert_certified_engine_pin(context: &str) {
     assert!(
@@ -4950,8 +4950,13 @@ fn public_backing_earnings_fixture() -> PublicBackingEarningsFixture {
     }
     assert_eq!(
         env.portfolio_state(cross_portfolio).capital.get(),
-        INITIAL_CAPITAL - MAINTENANCE_FEE,
-        "the public maintenance transition must create the intended margin boundary"
+        INITIAL_CAPITAL - MAINTENANCE_FEE - 500,
+        "the public transition must charge maintenance and capitalize the adverse hedge loss"
+    );
+    assert_eq!(
+        env.portfolio_state(cross_portfolio).pnl.get(),
+        1_000,
+        "the favorable leg must remain a gross source-attributed claim"
     );
     assert!(
         env.market_state().1.source_credit[DOMAIN as usize].positive_claim_bound_num > 0,
@@ -5914,7 +5919,7 @@ fn run_source_credit_watermark_trade_case(
     const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
     const DEPOSIT: u128 = 313;
-    const EXPECTED_POSITIVE_PNL: i128 = 50;
+    const EXPECTED_GROSS_SOURCE_CLAIM: i128 = 100;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
     let matcher_program = match path {
@@ -5988,13 +5993,13 @@ fn run_source_credit_watermark_trade_case(
     let cross_before = env.portfolio_state(cross_account);
     assert_eq!(
         cross_before.pnl.get(),
-        EXPECTED_POSITIVE_PNL,
-        "{path:?} {direction:?} setup must retain positive net PnL after complete refresh"
+        EXPECTED_GROSS_SOURCE_CLAIM,
+        "{path:?} {direction:?} setup must retain the gross source-attributed claim after complete refresh"
     );
     let (_, before_withdraw_group) = env.market_state();
     assert_eq!(
         before_withdraw_group.source_credit[winning_domain].positive_claim_bound_num,
-        EXPECTED_POSITIVE_PNL as u128 * BOUND_SCALE
+        EXPECTED_GROSS_SOURCE_CLAIM as u128 * BOUND_SCALE
     );
     let surplus_backing = before_withdraw_group.source_credit[winning_domain]
         .fresh_reserved_backing_num
