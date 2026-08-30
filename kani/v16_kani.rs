@@ -58,6 +58,12 @@ mod inv_020_authenticated_clock_slot_and_oracle_provenance;
 #[path = "../tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs"]
 mod inv_022_instruction_decoding_and_schema_upgrade_safety;
 
+#[path = "../tests/invariants/kani/inv_024_attributed_quote_value_conservation.rs"]
+mod inv_024_attributed_quote_value_conservation;
+
+#[path = "../tests/invariants/kani/inv_025_exact_stock_reconciliation.rs"]
+mod inv_025_exact_stock_reconciliation;
+
 #[path = "../tests/invariants/kani/inv_036_fee_destination_and_policy_version_integrity.rs"]
 mod inv_036_fee_destination_and_policy_version_integrity;
 

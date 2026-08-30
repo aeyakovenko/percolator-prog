@@ -1985,7 +1985,85 @@ fn assert_reservation_encumbrance_census(
     let mut account_counterparty_backing = vec![0u128; domain_count];
     let mut account_insurance_backing = vec![0u128; domain_count];
     let mut account_impaired_insurance_backing = vec![0u128; domain_count];
+    let mut pending_obligation_long = vec![0u64; group.assets.len()];
+    let mut pending_obligation_short = vec![0u64; group.assets.len()];
     for (portfolio_index, portfolio) in portfolios.iter().enumerate() {
+        for (slot, encoded_leg) in portfolio.legs.iter().enumerate() {
+            let leg = encoded_leg.try_to_runtime().map_err(|error| {
+                format!("{label}: portfolio {portfolio_index} leg {slot} decode failed: {error:?}")
+            })?;
+            if !leg.active || leg.basis_pos_q != 0 || leg.loss_weight == 0 {
+                continue;
+            }
+            let asset = leg.asset_index as usize;
+            if asset >= group.assets.len() {
+                return Err(format!(
+                    "{label}: portfolio {portfolio_index} pending obligation names missing asset {asset}"
+                ));
+            }
+            let counter = match leg.side {
+                SideV16::Long => &mut pending_obligation_long[asset],
+                SideV16::Short => &mut pending_obligation_short[asset],
+            };
+            *counter = counter.checked_add(1).ok_or_else(|| {
+                format!("{label}: asset {asset} pending-obligation count overflow")
+            })?;
+        }
+
+        let close = portfolio.close_progress.try_to_runtime().map_err(|error| {
+            format!("{label}: portfolio {portfolio_index} close decode failed: {error:?}")
+        })?;
+        verify_close_residual_partition(
+            &format!("{label}: portfolio {portfolio_index} close"),
+            &close,
+        )?;
+        let irreversible_close_progress = close.support_consumed != 0
+            || close.junior_face_burned != 0
+            || close.insurance_spent != 0
+            || close.b_loss_booked != 0
+            || close.explicit_loss_assigned != 0
+            || close.quantity_adl_applied_q != 0
+            || close.drift_consumed != 0;
+        if close.canceled {
+            if close.active
+                || close.finalized
+                || close.close_id == 0
+                || close.asset_index as usize >= group.assets.len()
+                || close.drift_reference_slot > close.max_close_slot
+                || irreversible_close_progress
+                || close.residual_remaining != close.gross_loss_at_close_start
+            {
+                return Err(format!(
+                    "{label}: portfolio {portfolio_index} has malformed canceled close {close:?}"
+                ));
+            }
+        } else if !close.active {
+            if !close.is_empty() {
+                return Err(format!(
+                    "{label}: portfolio {portfolio_index} has nonempty inactive close {close:?}"
+                ));
+            }
+        } else {
+            let asset = close.asset_index as usize;
+            if close.close_id == 0
+                || asset >= group.assets.len()
+                || close.market_id != group.assets[asset].market_id
+                || close.drift_reference_slot > close.max_close_slot
+                || (close.finalized && close.residual_remaining != 0)
+                || (close.quantity_adl_applied_q != 0
+                    && (!close.finalized || close.residual_remaining != 0))
+            {
+                return Err(format!(
+                    "{label}: portfolio {portfolio_index} has malformed active close {close:?}"
+                ));
+            }
+        }
+        if portfolio.cancel_deposit_escrow.get() != 0 {
+            return Err(format!(
+                "{label}: portfolio {portfolio_index} reached the currently unwritable cancel-deposit escrow lane"
+            ));
+        }
+
         for (slot, account_source) in portfolio.source_domains.iter().copied().enumerate() {
             if !account_source.is_occupied() {
                 continue;
@@ -2043,6 +2121,20 @@ fn assert_reservation_encumbrance_census(
                 impaired_insurance_backing,
                 &format!("{label} domain {domain} account impaired insurance liens"),
             )?;
+        }
+    }
+
+    for (asset, engine_asset) in group.assets.iter().enumerate() {
+        if pending_obligation_long[asset] != engine_asset.pending_obligation_count_long
+            || pending_obligation_short[asset] != engine_asset.pending_obligation_count_short
+        {
+            return Err(format!(
+                "{label}: asset {asset} pending-obligation owners {}/{} != market counters {}/{}",
+                pending_obligation_long[asset],
+                pending_obligation_short[asset],
+                engine_asset.pending_obligation_count_long,
+                engine_asset.pending_obligation_count_short,
+            ));
         }
     }
 

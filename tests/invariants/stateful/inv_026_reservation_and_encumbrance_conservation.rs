@@ -13,6 +13,10 @@
 //! - account-local insurance backing agrees separately with valid and impaired
 //!   insurance reservations; and
 //! - classified backing equals effective reserved credit times `BOUND_SCALE`.
+//! - every zero-basis loss-weight obligation has one account owner and one exact
+//!   market side counter; and
+//! - every close ledger preserves its exact gross-loss-plus-drift partition and
+//!   valid active/canceled/finalized lifecycle shape.
 //!
 //! The Resolved path requires the persisted account lien to disappear,
 //! valid/impaired market labels to clear, and backing to enter the
@@ -23,6 +27,8 @@
 //! shared census also runs after every generated public action in the stateful
 //! runner. Direct insurance-backed lien creation remains unavailable through the
 //! wrapper API and is therefore not claimed by this test.
+//! The current wrapper also has no public writer for `cancel_deposit_escrow`; the
+//! shared census fails if that dormant lane becomes reachable without a new owner.
 
 use super::*;
 

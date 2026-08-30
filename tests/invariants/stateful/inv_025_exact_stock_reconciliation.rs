@@ -14,8 +14,10 @@
 //!   derived junior residual.
 //!
 //! The same census also runs after every generated action in the shared stateful
-//! runner. This test does not claim independent persisted ledgers for rounding
-//! residue or protocol surplus; those remain represented by the derived residual.
+//! runner. Rounding residue and protocol surplus are engine proof classes, not
+//! duplicate persisted wrapper ledgers. The invariant-owned Kani composition
+//! proves their combined residual closes the pinned engine stock proof against
+//! the wrapper-observed SPL vault; INV-038 separately owns each rounding identity.
 
 use super::*;
 
