@@ -50,10 +50,21 @@
 //! no SPL movement, and exact terminal payout after shutdown.
 //! A finding-blind dual-ADL prefix then uses only public trades, mark updates, maintenance sync, and
 //! liquidation to make both side A indices non-unit while both retained raw legs exceed canonical
-//! effective OI. The corresponding 32-world Recovery matrix crosses every opening transport,
-//! request boundary, and account order. Stale overshoot and raw-basis requests are work budgets:
-//! they must land the independently derived effective quantity instead of rejecting because the
-//! caller observed an earlier state.
+//! effective OI. An independent implementation of the liquidation maintenance, fee, floor, and
+//! binary-search equations consumes the authenticated pre-liquidation certificate and predicts the
+//! exact selector-sized close. All four opening transports must apply precisely that amount to both
+//! OI sides and to the scaled leg without moving SPL tokens or exceeding the CU ceiling. The
+//! Recovery-forfeit composition then crosses both owner landing orders and one/max B work budgets.
+//! Each owner must retire exactly its independently reconstructed effective quantity from only its
+//! own OI side; the first exit becomes one zero-basis obligation, the second detaches, and bounded
+//! permissionless work clears the obligation before each owner exits while the market remains Live.
+//! The pre-exit value partitions exactly between the configured maintenance fee and SPL payout;
+//! one/max B budgets and both owner orders converge to the same terminal economics. This
+//! distinguishes a B settlement budget from a caller-selected position quantity. The corresponding
+//! 32-world Recovery matrix crosses every opening transport, request boundary, and
+//! account order. Stale overshoot and raw-basis requests are work budgets: they must land the
+//! independently derived effective quantity instead of rejecting because the caller observed an
+//! earlier state.
 //! This is finite reachability evidence, not equivalence over unbounded sequences.
 
 use super::*;
@@ -299,6 +310,230 @@ fn v16_program_public_sequence_reaches_dual_nonunit_adl_indices() {
             discovery.satisfies_invariant(),
             "public dual-ADL prefix failed: {discovery:?}"
         );
+    }
+}
+
+#[test]
+fn v16_program_scaled_liquidation_matches_independent_selector_model() {
+    let discoveries = verify_dual_adl_liquidation_sizing([0x1a; 32])
+        .expect("INV-086 scaled liquidation sizing matrix");
+    assert_eq!(
+        discoveries.len(),
+        DiscoveryTradeRoute::ALL.len(),
+        "every opening transport must reach one independently modeled scaled liquidation"
+    );
+    for discovery in &discoveries {
+        assert!(
+            discovery.satisfies_invariant(),
+            "scaled liquidation diverged from the independent pre-state model: {discovery:?}"
+        );
+    }
+    let control = discoveries[0];
+    for candidate in discoveries.iter().skip(1) {
+        assert_eq!(
+            (
+                candidate.pre_long_a,
+                candidate.pre_short_a,
+                candidate.pre_raw_basis_q,
+                candidate.pre_effective_q,
+                candidate.pre_long_oi_q,
+                candidate.pre_short_oi_q,
+                candidate.pre_certified_liq_deficit,
+                candidate.expected_close_q,
+                candidate.observed_long_oi_reduce_q,
+                candidate.observed_short_oi_reduce_q,
+                candidate.expected_effective_after_q,
+                candidate.observed_effective_after_q,
+            ),
+            (
+                control.pre_long_a,
+                control.pre_short_a,
+                control.pre_raw_basis_q,
+                control.pre_effective_q,
+                control.pre_long_oi_q,
+                control.pre_short_oi_q,
+                control.pre_certified_liq_deficit,
+                control.expected_close_q,
+                control.observed_long_oi_reduce_q,
+                control.observed_short_oi_reduce_q,
+                control.expected_effective_after_q,
+                control.observed_effective_after_q,
+            ),
+            "opening transport changed scaled-liquidation economics: control={control:?}, candidate={candidate:?}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_dual_adl_recovery_forfeit_matches_effective_oi_model() {
+    let discoveries = verify_dual_adl_recovery_forfeit_matrix([0x4f; 32])
+        .expect("INV-086 dual-ADL Recovery-forfeit matrix");
+    assert_eq!(
+        discoveries.len(),
+        DiscoveryTradeRoute::ALL.len()
+            * AdlForceCloseAccountOrder::ALL.len()
+            * RecoveryForfeitBudget::ALL.len(),
+        "must cross every opening route, owner order, and B work-budget boundary"
+    );
+    for discovery in &discoveries {
+        assert!(
+            discovery.satisfies_invariant(),
+            "dual-ADL Recovery-forfeit composition failed: {discovery:?}"
+        );
+    }
+
+    for route_worlds in discoveries
+        .chunks_exact(AdlForceCloseAccountOrder::ALL.len() * RecoveryForfeitBudget::ALL.len())
+    {
+        for budget_pair in route_worlds.chunks_exact(RecoveryForfeitBudget::ALL.len()) {
+            let one = budget_pair[0];
+            let maximum = budget_pair[1];
+            assert_eq!(one.budget, RecoveryForfeitBudget::One);
+            assert_eq!(maximum.budget, RecoveryForfeitBudget::Maximum);
+            assert_eq!(
+                (
+                    one.route,
+                    one.account_order,
+                    one.long_a_before,
+                    one.short_a_before,
+                    one.first_raw_basis_q,
+                    one.first_effective_q,
+                    one.second_raw_basis_q,
+                    one.second_effective_q,
+                    one.first_own_oi_reduce_q,
+                    one.first_other_oi_reduce_q,
+                    one.second_own_oi_reduce_q,
+                    one.second_other_oi_reduce_q,
+                ),
+                (
+                    maximum.route,
+                    maximum.account_order,
+                    maximum.long_a_before,
+                    maximum.short_a_before,
+                    maximum.first_raw_basis_q,
+                    maximum.first_effective_q,
+                    maximum.second_raw_basis_q,
+                    maximum.second_effective_q,
+                    maximum.first_own_oi_reduce_q,
+                    maximum.first_other_oi_reduce_q,
+                    maximum.second_own_oi_reduce_q,
+                    maximum.second_other_oi_reduce_q,
+                ),
+                "B work budget changed Recovery-forfeit quantity or OI attribution: one={one:?}, maximum={maximum:?}"
+            );
+            assert_eq!(
+                (
+                    one.winner_external_payout,
+                    one.loser_external_payout,
+                    one.winner_funded_value,
+                    one.loser_funded_value,
+                    one.winner_exit_fee,
+                    one.loser_exit_fee,
+                    one.classified_protocol_value_after,
+                    one.canonical_vault_after,
+                    one.users_terminal,
+                    one.portfolios_closed,
+                ),
+                (
+                    maximum.winner_external_payout,
+                    maximum.loser_external_payout,
+                    maximum.winner_funded_value,
+                    maximum.loser_funded_value,
+                    maximum.winner_exit_fee,
+                    maximum.loser_exit_fee,
+                    maximum.classified_protocol_value_after,
+                    maximum.canonical_vault_after,
+                    maximum.users_terminal,
+                    maximum.portfolios_closed,
+                ),
+                "B work budget changed the terminal economic outcome: one={one:?}, maximum={maximum:?}"
+            );
+        }
+
+        for budget_index in 0..RecoveryForfeitBudget::ALL.len() {
+            let winner_first = route_worlds[budget_index];
+            let loser_first = route_worlds[RecoveryForfeitBudget::ALL.len() + budget_index];
+            assert_eq!(
+                winner_first.account_order,
+                AdlForceCloseAccountOrder::WinnerFirst
+            );
+            assert_eq!(
+                loser_first.account_order,
+                AdlForceCloseAccountOrder::LoserFirst
+            );
+            assert_eq!(winner_first.budget, loser_first.budget);
+            assert_eq!(
+                (
+                    winner_first.winner_external_payout,
+                    winner_first.loser_external_payout,
+                    winner_first.classified_protocol_value_after,
+                    winner_first.canonical_vault_after,
+                    winner_first.users_terminal,
+                    winner_first.portfolios_closed,
+                ),
+                (
+                    loser_first.winner_external_payout,
+                    loser_first.loser_external_payout,
+                    loser_first.classified_protocol_value_after,
+                    loser_first.canonical_vault_after,
+                    loser_first.users_terminal,
+                    loser_first.portfolios_closed,
+                ),
+                "owner landing order changed the terminal economic outcome: winner_first={winner_first:?}, loser_first={loser_first:?}"
+            );
+        }
+    }
+
+    let worlds_per_route = AdlForceCloseAccountOrder::ALL.len() * RecoveryForfeitBudget::ALL.len();
+    for variant_index in 0..worlds_per_route {
+        let control = discoveries[variant_index];
+        for route_index in 1..DiscoveryTradeRoute::ALL.len() {
+            let candidate = discoveries[route_index * worlds_per_route + variant_index];
+            assert_eq!(control.account_order, candidate.account_order);
+            assert_eq!(control.budget, candidate.budget);
+            assert_eq!(
+                (
+                    control.long_a_before,
+                    control.short_a_before,
+                    control.first_raw_basis_q,
+                    control.first_effective_q,
+                    control.second_raw_basis_q,
+                    control.second_effective_q,
+                    control.first_own_oi_reduce_q,
+                    control.first_other_oi_reduce_q,
+                    control.second_own_oi_reduce_q,
+                    control.second_other_oi_reduce_q,
+                ),
+                (
+                    candidate.long_a_before,
+                    candidate.short_a_before,
+                    candidate.first_raw_basis_q,
+                    candidate.first_effective_q,
+                    candidate.second_raw_basis_q,
+                    candidate.second_effective_q,
+                    candidate.first_own_oi_reduce_q,
+                    candidate.first_other_oi_reduce_q,
+                    candidate.second_own_oi_reduce_q,
+                    candidate.second_other_oi_reduce_q,
+                ),
+                "opening transport changed Recovery-forfeit quantity or attribution: control={control:?}, candidate={candidate:?}"
+            );
+            assert_eq!(
+                (
+                    control.winner_external_payout,
+                    control.loser_external_payout,
+                    control.classified_protocol_value_after,
+                    control.canonical_vault_after,
+                ),
+                (
+                    candidate.winner_external_payout,
+                    candidate.loser_external_payout,
+                    candidate.classified_protocol_value_after,
+                    candidate.canonical_vault_after,
+                ),
+                "opening transport changed Recovery-forfeit terminal economics: control={control:?}, candidate={candidate:?}"
+            );
+        }
     }
 }
 

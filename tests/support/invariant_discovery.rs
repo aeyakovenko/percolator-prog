@@ -3,7 +3,8 @@ use super::v16_svm::{
     V16Svm, EXIT_MAKER_DEPOSIT, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
 };
 use percolator::{
-    BackingBucketStatusV16, MarketModeV16, SideModeV16, ADL_ONE, BOUND_SCALE, POS_SCALE,
+    BackingBucketStatusV16, HealthCertV16, MarketModeV16, SideModeV16, SideV16, V16Config, ADL_ONE,
+    BOUND_SCALE, MAX_MARGIN_BPS, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -329,6 +330,12 @@ pub enum AdlForceCloseAccountOrder {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RecoveryForfeitBudget {
+    One,
+    Maximum,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StaleCohortRoute {
     NoCpi,
     BatchNoCpi,
@@ -374,6 +381,17 @@ impl AdlReductionBoundary {
             Self::ExactEffective => 1,
             Self::AboveEffective => 2,
             Self::RawBasis => 3,
+        }
+    }
+}
+
+impl RecoveryForfeitBudget {
+    pub const ALL: [Self; 2] = [Self::One, Self::Maximum];
+
+    fn value(self) -> u128 {
+        match self {
+            Self::One => 1,
+            Self::Maximum => u128::MAX,
         }
     }
 }
@@ -1203,6 +1221,66 @@ pub struct DualAdlPrefixDiscovery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdlLiquidationSizingDiscovery {
+    pub route: DiscoveryTradeRoute,
+    pub selector_steps: u8,
+    pub liquidation_compute_units: u64,
+    pub pre_long_a: u128,
+    pub pre_short_a: u128,
+    pub pre_raw_basis_q: u128,
+    pub pre_effective_q: u128,
+    pub pre_long_oi_q: u128,
+    pub pre_short_oi_q: u128,
+    pub pre_certificate_valid: bool,
+    pub pre_certified_liq_deficit: u128,
+    pub expected_close_q: u128,
+    pub observed_long_oi_reduce_q: u128,
+    pub observed_short_oi_reduce_q: u128,
+    pub expected_effective_after_q: u128,
+    pub observed_effective_after_q: u128,
+    pub post_short_a: u128,
+    pub liquidation_moved_no_tokens: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdlRecoveryForfeitDiscovery {
+    pub route: DiscoveryTradeRoute,
+    pub account_order: AdlForceCloseAccountOrder,
+    pub budget: RecoveryForfeitBudget,
+    pub long_a_before: u128,
+    pub short_a_before: u128,
+    pub first_raw_basis_q: u128,
+    pub first_effective_q: u128,
+    pub second_raw_basis_q: u128,
+    pub second_effective_q: u128,
+    pub first_own_oi_reduce_q: u128,
+    pub first_other_oi_reduce_q: u128,
+    pub second_own_oi_reduce_q: u128,
+    pub second_other_oi_reduce_q: u128,
+    pub first_retained_zero_basis_obligation: bool,
+    pub second_detached: bool,
+    pub obligation_clear_steps: u8,
+    pub max_compute_units: u64,
+    pub forfeit_steps_moved_no_tokens: bool,
+    pub all_oi_and_obligations_cleared: bool,
+    pub owners_exited_while_market_live: bool,
+    pub users_terminal: bool,
+    pub portfolios_closed: bool,
+    pub winner_funded_value: u128,
+    pub loser_funded_value: u128,
+    pub winner_exit_fee: u128,
+    pub loser_exit_fee: u128,
+    pub winner_external_payout: u128,
+    pub loser_external_payout: u128,
+    pub classified_protocol_value_before_exit: u128,
+    pub canonical_vault_before_exit: u128,
+    pub canonical_vault_after: u128,
+    pub classified_protocol_value_after: u128,
+    pub c_tot_after: u128,
+    pub token_supply_conserved: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StaleCohortNovationCertification {
     pub route: StaleCohortRoute,
     pub pre_stale_long_count: u64,
@@ -1312,6 +1390,82 @@ impl DualAdlPrefixDiscovery {
             && self.long_effective_q == self.short_effective_q
             && self.long_oi_q == self.long_effective_q
             && self.short_oi_q == self.short_effective_q
+            && self.token_supply_conserved
+    }
+}
+
+impl AdlLiquidationSizingDiscovery {
+    pub fn satisfies_invariant(&self) -> bool {
+        self.selector_steps != 0
+            && self.selector_steps <= 16
+            && self.liquidation_compute_units != 0
+            && self.liquidation_compute_units < super::v16_svm::TX_CU_LIMIT
+            && self.pre_long_a < ADL_ONE
+            && self.pre_short_a == ADL_ONE
+            && self.pre_raw_basis_q > self.pre_effective_q
+            && self.pre_long_oi_q == self.pre_effective_q
+            && self.pre_short_oi_q == self.pre_effective_q
+            && self.pre_certificate_valid
+            && self.pre_certified_liq_deficit != 0
+            && self.expected_close_q != 0
+            && self.expected_close_q < self.pre_effective_q
+            && self.observed_long_oi_reduce_q == self.expected_close_q
+            && self.observed_short_oi_reduce_q == self.expected_close_q
+            && self.observed_effective_after_q == self.expected_effective_after_q
+            && self.expected_effective_after_q == self.pre_effective_q - self.expected_close_q
+            && self.post_short_a < ADL_ONE
+            && self.liquidation_moved_no_tokens
+    }
+}
+
+impl AdlRecoveryForfeitDiscovery {
+    pub fn satisfies_invariant(&self) -> bool {
+        self.long_a_before < ADL_ONE
+            && self.short_a_before < ADL_ONE
+            && self.first_raw_basis_q > self.first_effective_q
+            && self.second_raw_basis_q > self.second_effective_q
+            && self.first_effective_q != 0
+            && self.first_effective_q == self.second_effective_q
+            && self.first_own_oi_reduce_q == self.first_effective_q
+            && self.first_other_oi_reduce_q == 0
+            && self.second_own_oi_reduce_q == self.second_effective_q
+            && self.second_other_oi_reduce_q == 0
+            && self.first_retained_zero_basis_obligation
+            && self.second_detached
+            && self.obligation_clear_steps != 0
+            && self.obligation_clear_steps <= 8
+            && self.max_compute_units != 0
+            && self.max_compute_units < super::v16_svm::TX_CU_LIMIT
+            && self.forfeit_steps_moved_no_tokens
+            && self.all_oi_and_obligations_cleared
+            && self.owners_exited_while_market_live
+            && self.users_terminal
+            && self.portfolios_closed
+            && self
+                .winner_external_payout
+                .checked_add(self.winner_exit_fee)
+                == Some(self.winner_funded_value)
+            && self.loser_external_payout.checked_add(self.loser_exit_fee)
+                == Some(self.loser_funded_value)
+            && self
+                .classified_protocol_value_before_exit
+                .checked_add(self.winner_exit_fee)
+                .and_then(|value| value.checked_add(self.loser_exit_fee))
+                == Some(self.classified_protocol_value_after)
+            && self.canonical_vault_before_exit
+                == self
+                    .winner_funded_value
+                    .checked_add(self.loser_funded_value)
+                    .and_then(|value| value.checked_add(self.classified_protocol_value_before_exit))
+                    .unwrap_or(u128::MAX)
+            && self
+                .canonical_vault_before_exit
+                .checked_sub(self.canonical_vault_after)
+                == self
+                    .winner_external_payout
+                    .checked_add(self.loser_external_payout)
+            && self.canonical_vault_after == self.classified_protocol_value_after
+            && self.c_tot_after == 0
             && self.token_supply_conserved
     }
 }
@@ -16720,10 +16874,356 @@ pub fn verify_adl_reduction_clamp_matrix(
     Ok(discoveries)
 }
 
+fn reference_liquidation_risk_notional_ceil(abs_pos_q: u128, price: u64) -> Result<u128, String> {
+    if abs_pos_q == 0 {
+        return Ok(0);
+    }
+    super::reference_math::mul_div_ceil(abs_pos_q, u128::from(price), POS_SCALE)
+}
+
+fn reference_liquidation_leg_maintenance(
+    config: V16Config,
+    abs_q: u128,
+    side: SideV16,
+    effective_price: u64,
+    raw_target_price: u64,
+) -> Result<u128, String> {
+    if abs_q == 0 {
+        return Ok(0);
+    }
+    let risk_notional = reference_liquidation_risk_notional_ceil(abs_q, effective_price)?;
+    let adverse_delta = match side {
+        SideV16::Long if raw_target_price < effective_price => effective_price - raw_target_price,
+        SideV16::Short if raw_target_price > effective_price => raw_target_price - effective_price,
+        _ => 0,
+    };
+    let lag_penalty = reference_liquidation_risk_notional_ceil(abs_q, adverse_delta)?;
+    let base = super::reference_math::mul_div_ceil(
+        risk_notional,
+        u128::from(config.maintenance_margin_bps),
+        u128::from(MAX_MARGIN_BPS),
+    )?
+    .max(config.min_nonzero_mm_req);
+    base.checked_add(lag_penalty)
+        .ok_or_else(|| "reference liquidation maintenance overflow".to_string())
+}
+
+fn reference_liquidation_fee(
+    config: V16Config,
+    close_q: u128,
+    effective_price: u64,
+    closes_full_position: bool,
+) -> Result<Option<u128>, String> {
+    let fee_notional = reference_liquidation_risk_notional_ceil(close_q, effective_price)?;
+    let raw_fee = super::reference_math::mul_div_ceil(
+        fee_notional,
+        u128::from(config.liquidation_fee_bps),
+        u128::from(MAX_MARGIN_BPS),
+    )?;
+    if !closes_full_position
+        && config.min_liquidation_abs != 0
+        && raw_fee < config.min_liquidation_abs
+    {
+        return Ok(None);
+    }
+    Ok(Some(
+        raw_fee
+            .max(config.min_liquidation_abs)
+            .min(config.liquidation_fee_cap),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reference_liquidation_projected_healthy(
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    side: SideV16,
+    old_abs_q: u128,
+    effective_price: u64,
+    raw_target_price: u64,
+    close_q: u128,
+) -> Result<bool, String> {
+    if close_q == 0 || close_q > old_abs_q {
+        return Ok(false);
+    }
+    let Some(fee) =
+        reference_liquidation_fee(config, close_q, effective_price, close_q == old_abs_q)?
+    else {
+        return Ok(false);
+    };
+    let old_maintenance = reference_liquidation_leg_maintenance(
+        config,
+        old_abs_q,
+        side,
+        effective_price,
+        raw_target_price,
+    )?;
+    let new_maintenance = reference_liquidation_leg_maintenance(
+        config,
+        old_abs_q - close_q,
+        side,
+        effective_price,
+        raw_target_price,
+    )?;
+    let post_maintenance = cert
+        .certified_maintenance_req
+        .checked_sub(old_maintenance)
+        .and_then(|value| value.checked_add(new_maintenance))
+        .ok_or_else(|| "reference liquidation maintenance projection overflow".to_string())?;
+    let charged_fee = if pnl >= 0 { fee.min(capital) } else { 0 };
+    let post_equity = cert
+        .certified_equity
+        .checked_sub(
+            i128::try_from(charged_fee)
+                .map_err(|_| "reference liquidation fee exceeds signed width")?,
+        )
+        .ok_or_else(|| "reference liquidation equity projection overflow".to_string())?;
+    Ok(post_equity >= 0 && post_maintenance <= post_equity as u128)
+}
+
+fn reference_liquidation_close_request_q(
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    side: SideV16,
+    old_abs_q: u128,
+    effective_price: u64,
+    raw_target_price: u64,
+) -> Result<u128, String> {
+    if old_abs_q == 0 {
+        return Err("reference liquidation received an empty leg".into());
+    }
+    if cert.certified_equity < 0 || pnl < 0 {
+        return Ok(old_abs_q);
+    }
+    if !reference_liquidation_projected_healthy(
+        config,
+        cert,
+        capital,
+        pnl,
+        side,
+        old_abs_q,
+        effective_price,
+        raw_target_price,
+        old_abs_q,
+    )? {
+        return Ok(old_abs_q);
+    }
+    if config.maintenance_margin_bps == 0 {
+        return Ok(old_abs_q);
+    }
+    let floor_exit_notional = super::reference_math::mul_div_ceil(
+        config.min_nonzero_mm_req,
+        u128::from(MAX_MARGIN_BPS),
+        u128::from(config.maintenance_margin_bps),
+    )?;
+    let floor_exit_q = if floor_exit_notional == 0 {
+        0
+    } else {
+        super::reference_math::mul_div_ceil(
+            floor_exit_notional,
+            POS_SCALE,
+            u128::from(effective_price),
+        )?
+    };
+    let partial_hi = old_abs_q.saturating_sub(floor_exit_q);
+    if partial_hi == 0
+        || !reference_liquidation_projected_healthy(
+            config,
+            cert,
+            capital,
+            pnl,
+            side,
+            old_abs_q,
+            effective_price,
+            raw_target_price,
+            partial_hi,
+        )?
+    {
+        return Ok(old_abs_q);
+    }
+
+    let mut lo = 1u128;
+    let mut hi = partial_hi;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if reference_liquidation_projected_healthy(
+            config,
+            cert,
+            capital,
+            pnl,
+            side,
+            old_abs_q,
+            effective_price,
+            raw_target_price,
+            mid,
+        )? {
+            hi = mid;
+        } else {
+            lo = mid
+                .checked_add(1)
+                .ok_or_else(|| "reference liquidation search overflow".to_string())?;
+        }
+    }
+    if reference_liquidation_projected_healthy(
+        config,
+        cert,
+        capital,
+        pnl,
+        side,
+        old_abs_q,
+        effective_price,
+        raw_target_price,
+        lo,
+    )? {
+        Ok(lo)
+    } else {
+        Ok(old_abs_q)
+    }
+}
+
+fn crank_scaled_liquidation_with_oracle(
+    env: &mut V16Svm,
+    actor: usize,
+    slot: u64,
+    asset_index: u16,
+    route: DiscoveryTradeRoute,
+) -> Result<AdlLiquidationSizingDiscovery, String> {
+    let oracle_accounts = env.primary_profile(asset_index as usize).oracle_leg_count;
+    let mut progressed = false;
+    let mut liquidation = None;
+    for attempt in 0..16u8 {
+        let (_, before_group) = env.primary_market_state();
+        let before_account = env.primary_portfolio(actor);
+        let before_leg = before_account
+            .legs
+            .iter()
+            .filter_map(|leg| leg.try_to_runtime().ok())
+            .find(|leg| leg.active && leg.asset_index == u32::from(asset_index));
+        let tokens_before = env.all_token_account_data();
+        let result = env.crank(
+            actor,
+            slot,
+            vec![CrankObservationHint {
+                asset_index,
+                oracle_accounts,
+            }],
+        );
+        let success = match result {
+            Ok(success) => {
+                progressed = true;
+                success
+            }
+            Err(error) if progressed && error.contains("Custom(22)") => break,
+            Err(error) => {
+                return Err(format!(
+                    "scaled liquidation selector failed before progress on step {attempt}: {error}"
+                ))
+            }
+        };
+        let (_, after_group) = env.primary_market_state();
+        let observed_long_oi_reduce_q = before_group.assets[asset_index as usize]
+            .oi_eff_long_q
+            .checked_sub(after_group.assets[asset_index as usize].oi_eff_long_q)
+            .ok_or_else(|| "scaled liquidation increased long OI".to_string())?;
+        let observed_short_oi_reduce_q = before_group.assets[asset_index as usize]
+            .oi_eff_short_q
+            .checked_sub(after_group.assets[asset_index as usize].oi_eff_short_q)
+            .ok_or_else(|| "scaled liquidation increased short OI".to_string())?;
+        if observed_long_oi_reduce_q == 0 && observed_short_oi_reduce_q == 0 {
+            continue;
+        }
+        if liquidation.is_some() {
+            return Err("one selector episode executed more than one liquidation".into());
+        }
+        let leg = before_leg
+            .ok_or_else(|| "scaled liquidation changed OI without an active pre-state leg")?;
+        let asset = before_group.assets[asset_index as usize];
+        let pre_effective_q = super::reference_math::mul_div_ceil(
+            leg.basis_pos_q.unsigned_abs(),
+            match leg.side {
+                SideV16::Long => asset.a_long,
+                SideV16::Short => asset.a_short,
+            },
+            leg.a_basis,
+        )?;
+        let cert = before_account
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("decode scaled-liquidation certificate: {error:?}"))?;
+        let close_request_q = reference_liquidation_close_request_q(
+            before_group.config,
+            cert,
+            before_account.capital.get(),
+            before_account.pnl.get(),
+            leg.side,
+            pre_effective_q,
+            asset.effective_price,
+            asset.raw_oracle_target_price,
+        )?;
+        let expected_close_q = close_request_q
+            .min(pre_effective_q)
+            .min(asset.oi_eff_long_q)
+            .min(asset.oi_eff_short_q);
+        let expected_effective_after_q = pre_effective_q
+            .checked_sub(expected_close_q)
+            .ok_or_else(|| "reference scaled liquidation underflow".to_string())?;
+        let observed_effective_after_q = env
+            .primary_portfolio(actor)
+            .legs
+            .iter()
+            .filter_map(|candidate| candidate.try_to_runtime().ok())
+            .find(|candidate| candidate.active && candidate.asset_index == u32::from(asset_index))
+            .map(|candidate| {
+                super::reference_math::mul_div_ceil(
+                    candidate.basis_pos_q.unsigned_abs(),
+                    match candidate.side {
+                        SideV16::Long => after_group.assets[asset_index as usize].a_long,
+                        SideV16::Short => after_group.assets[asset_index as usize].a_short,
+                    },
+                    candidate.a_basis,
+                )
+            })
+            .transpose()?
+            .unwrap_or(0);
+        liquidation = Some(AdlLiquidationSizingDiscovery {
+            route,
+            selector_steps: attempt + 1,
+            liquidation_compute_units: success.compute_units,
+            pre_long_a: asset.a_long,
+            pre_short_a: asset.a_short,
+            pre_raw_basis_q: leg.basis_pos_q.unsigned_abs(),
+            pre_effective_q,
+            pre_long_oi_q: asset.oi_eff_long_q,
+            pre_short_oi_q: asset.oi_eff_short_q,
+            pre_certificate_valid: cert.valid,
+            pre_certified_liq_deficit: cert.certified_liq_deficit,
+            expected_close_q,
+            observed_long_oi_reduce_q,
+            observed_short_oi_reduce_q,
+            expected_effective_after_q,
+            observed_effective_after_q,
+            post_short_a: after_group.assets[asset_index as usize].a_short,
+            liquidation_moved_no_tokens: env.all_token_account_data() == tokens_before,
+        });
+    }
+    liquidation.ok_or_else(|| "selector episode never executed scaled liquidation".into())
+}
+
 fn build_dual_adl_prefix(
     mut seed: [u8; 32],
     route: DiscoveryTradeRoute,
-) -> Result<(V16Svm, DualAdlPrefixDiscovery), String> {
+) -> Result<
+    (
+        V16Svm,
+        DualAdlPrefixDiscovery,
+        AdlLiquidationSizingDiscovery,
+    ),
+    String,
+> {
     const WINNER: usize = 0;
     const LOSER: usize = 1;
     const MARK: u64 = 100;
@@ -16816,7 +17316,7 @@ fn build_dual_adl_prefix(
     env.warp_to_slot(3);
     env.push_auth_mark(0, 3, MARK)
         .map_err(|error| format!("advance reverse dual-ADL fee slot: {error}"))?;
-    crank_asset_progress(&mut env, WINNER, 3, 0, 16)
+    let liquidation = crank_scaled_liquidation_with_oracle(&mut env, WINNER, 3, 0, route)
         .map_err(|error| format!("reverse dual-ADL long progress: {error}"))?;
     crank_asset_progress(&mut env, LOSER, 3, 0, 16)
         .map_err(|error| format!("settle reverse dual-ADL short: {error}"))?;
@@ -16870,14 +17370,305 @@ fn build_dual_adl_prefix(
             "public dual-ADL prefix did not leave two scaled live sides: {discovery:?}, long={long_leg:?}, short={short_leg:?}"
         ));
     }
-    Ok((env, discovery))
+    Ok((env, discovery, liquidation))
 }
 
 pub fn verify_dual_adl_prefixes(seed: [u8; 32]) -> Result<Vec<DualAdlPrefixDiscovery>, String> {
     DiscoveryTradeRoute::ALL
         .into_iter()
-        .map(|route| build_dual_adl_prefix(seed, route).map(|(_, discovery)| discovery))
+        .map(|route| build_dual_adl_prefix(seed, route).map(|(_, discovery, _)| discovery))
         .collect()
+}
+
+pub fn verify_dual_adl_liquidation_sizing(
+    seed: [u8; 32],
+) -> Result<Vec<AdlLiquidationSizingDiscovery>, String> {
+    DiscoveryTradeRoute::ALL
+        .into_iter()
+        .map(|route| build_dual_adl_prefix(seed, route).map(|(_, _, liquidation)| liquidation))
+        .collect()
+}
+
+fn asset_side_oi(asset: percolator::AssetStateV16, side: SideV16) -> u128 {
+    match side {
+        SideV16::Long => asset.oi_eff_long_q,
+        SideV16::Short => asset.oi_eff_short_q,
+    }
+}
+
+fn asset_side_pending_count(asset: percolator::AssetStateV16, side: SideV16) -> u64 {
+    match side {
+        SideV16::Long => asset.pending_obligation_count_long,
+        SideV16::Short => asset.pending_obligation_count_short,
+    }
+}
+
+fn verify_one_dual_adl_recovery_forfeit(
+    mut seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+    account_order: AdlForceCloseAccountOrder,
+    budget: RecoveryForfeitBudget,
+) -> Result<AdlRecoveryForfeitDiscovery, String> {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const RECOVERY_SLOT: u64 = 4;
+
+    seed[0] ^= 0x4f;
+    let (mut env, prefix, liquidation) = build_dual_adl_prefix(seed, route)?;
+    if !prefix.satisfies_invariant() || !liquidation.satisfies_invariant() {
+        return Err(format!(
+            "Recovery-forfeit prefix is not a proven dual-ADL state: prefix={prefix:?}, liquidation={liquidation:?}"
+        ));
+    }
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(1_000, 1)
+        .map_err(|error| format!("configure dual-ADL Recovery-forfeit delay: {error}"))?;
+    env.warp_to_slot(RECOVERY_SLOT);
+    env.shutdown_asset(0, RECOVERY_SLOT)
+        .map_err(|error| format!("shut down dual-ADL Recovery-forfeit asset: {error}"))?;
+    let (_, before_group) = env.primary_market_state();
+    let before_asset = before_group.assets[0];
+    if before_asset.lifecycle != percolator::AssetLifecycleV16::Recovery {
+        return Err("dual-ADL Recovery-forfeit prefix did not enter Recovery".into());
+    }
+    let (first_actor, second_actor) = match account_order {
+        AdlForceCloseAccountOrder::WinnerFirst => (WINNER, LOSER),
+        AdlForceCloseAccountOrder::LoserFirst => (LOSER, WINNER),
+    };
+    let first_leg = env
+        .primary_portfolio(first_actor)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .ok_or_else(|| "first Recovery-forfeit owner has no active leg".to_string())?;
+    let second_leg = env
+        .primary_portfolio(second_actor)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .ok_or_else(|| "second Recovery-forfeit owner has no active leg".to_string())?;
+    let first_effective_q = super::reference_math::mul_div_ceil(
+        first_leg.basis_pos_q.unsigned_abs(),
+        match first_leg.side {
+            SideV16::Long => before_asset.a_long,
+            SideV16::Short => before_asset.a_short,
+        },
+        first_leg.a_basis,
+    )?;
+    let second_effective_q = super::reference_math::mul_div_ceil(
+        second_leg.basis_pos_q.unsigned_abs(),
+        match second_leg.side {
+            SideV16::Long => before_asset.a_long,
+            SideV16::Short => before_asset.a_short,
+        },
+        second_leg.a_basis,
+    )?;
+    if first_leg.side == second_leg.side {
+        return Err("dual-ADL Recovery-forfeit owners are not opposite sides".into());
+    }
+
+    let token_state_before_forfeits = env.all_token_account_data();
+    let first_success = env
+        .forfeit_recovery_leg(first_actor, 0, budget.value())
+        .map_err(|error| format!("first dual-ADL Recovery forfeit failed: {error}"))?;
+    let (_, after_first_group) = env.primary_market_state();
+    let after_first_asset = after_first_group.assets[0];
+    let first_own_oi_reduce_q = asset_side_oi(before_asset, first_leg.side)
+        .checked_sub(asset_side_oi(after_first_asset, first_leg.side))
+        .ok_or_else(|| "first Recovery forfeit increased own-side OI".to_string())?;
+    let first_other_oi_reduce_q = asset_side_oi(before_asset, second_leg.side)
+        .checked_sub(asset_side_oi(after_first_asset, second_leg.side))
+        .ok_or_else(|| "first Recovery forfeit increased opposite-side OI".to_string())?;
+    let retained_first_leg = env
+        .primary_portfolio(first_actor)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0);
+    let first_retained_zero_basis_obligation = retained_first_leg
+        .map(|leg| {
+            leg.basis_pos_q == 0
+                && leg.loss_weight != 0
+                && asset_side_pending_count(after_first_asset, leg.side) == 1
+        })
+        .unwrap_or(false);
+
+    let before_second_asset = after_first_asset;
+    let second_success = env
+        .forfeit_recovery_leg(second_actor, 0, budget.value())
+        .map_err(|error| format!("second dual-ADL Recovery forfeit failed: {error}"))?;
+    let (_, after_second_group) = env.primary_market_state();
+    let after_second_asset = after_second_group.assets[0];
+    let second_own_oi_reduce_q = asset_side_oi(before_second_asset, second_leg.side)
+        .checked_sub(asset_side_oi(after_second_asset, second_leg.side))
+        .ok_or_else(|| "second Recovery forfeit increased own-side OI".to_string())?;
+    let second_other_oi_reduce_q = asset_side_oi(before_second_asset, first_leg.side)
+        .checked_sub(asset_side_oi(after_second_asset, first_leg.side))
+        .ok_or_else(|| "second Recovery forfeit increased opposite-side OI".to_string())?;
+    let second_detached = !env
+        .primary_portfolio(second_actor)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .any(|leg| leg.active && leg.asset_index == 0);
+
+    let oracle_accounts = env.primary_profile(0).oracle_leg_count;
+    let mut obligation_clear_steps = 0u8;
+    let mut max_compute_units = first_success
+        .compute_units
+        .max(second_success.compute_units);
+    for _ in 0..8 {
+        let first_has_leg = env
+            .primary_portfolio(first_actor)
+            .legs
+            .iter()
+            .filter_map(|leg| leg.try_to_runtime().ok())
+            .any(|leg| leg.active && leg.asset_index == 0);
+        if !first_has_leg {
+            break;
+        }
+        let success = env
+            .crank_if_actionable(
+                first_actor,
+                RECOVERY_SLOT,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts,
+                }],
+            )?
+            .ok_or_else(|| "retained Recovery obligation had no public continuation".to_string())?;
+        obligation_clear_steps = obligation_clear_steps
+            .checked_add(1)
+            .ok_or_else(|| "Recovery obligation step count overflow".to_string())?;
+        max_compute_units = max_compute_units.max(success.compute_units);
+    }
+    let (_, settled_group) = env.primary_market_state();
+    let settled_asset = settled_group.assets[0];
+    let all_oi_and_obligations_cleared = settled_asset.oi_eff_long_q == 0
+        && settled_asset.oi_eff_short_q == 0
+        && settled_asset.stored_pos_count_long == 0
+        && settled_asset.stored_pos_count_short == 0
+        && settled_asset.pending_obligation_count_long == 0
+        && settled_asset.pending_obligation_count_short == 0
+        && settled_asset.loss_weight_sum_long == 0
+        && settled_asset.loss_weight_sum_short == 0;
+    let forfeit_steps_moved_no_tokens = env.all_token_account_data() == token_state_before_forfeits;
+
+    let winner_before_exit = env.primary_portfolio(WINNER);
+    let loser_before_exit = env.primary_portfolio(LOSER);
+    let winner_funded_value = winner_before_exit
+        .capital
+        .get()
+        .checked_add(winner_before_exit.pnl.get().max(0) as u128)
+        .ok_or_else(|| "Recovery-forfeit winner funded-value overflow".to_string())?;
+    let loser_funded_value = loser_before_exit
+        .capital
+        .get()
+        .checked_add(loser_before_exit.pnl.get().max(0) as u128)
+        .ok_or_else(|| "Recovery-forfeit loser funded-value overflow".to_string())?;
+    if winner_before_exit.pnl.get() != 0 || loser_before_exit.pnl.get() != 0 {
+        return Err(format!(
+            "Recovery forfeits did not crystallize PnL before live exit: winner_pnl={}, loser_pnl={}",
+            winner_before_exit.pnl.get(),
+            loser_before_exit.pnl.get()
+        ));
+    }
+    let winner_destination = env.actors[WINNER].destination_token;
+    let loser_destination = env.actors[LOSER].destination_token;
+    let winner_destination_before = env.token_amount(winner_destination);
+    let loser_destination_before = env.token_amount(loser_destination);
+    let classified_protocol_value_before_exit = env.primary_market_state().1.insurance;
+    let canonical_vault_before_exit = u128::from(env.token_amount(env.vault));
+    let mut exit_fees = [0u128; 2];
+    for actor in [first_actor, second_actor] {
+        let amount = env.primary_portfolio(actor).capital.get();
+        let insurance_before = env.primary_market_state().1.insurance;
+        let success = env
+            .withdraw_primary(actor, amount)
+            .map_err(|error| format!("dual-ADL Recovery live withdrawal failed: {error}"))?;
+        max_compute_units = max_compute_units.max(success.compute_units);
+        exit_fees[actor] = env
+            .primary_market_state()
+            .1
+            .insurance
+            .checked_sub(insurance_before)
+            .ok_or_else(|| "Recovery-forfeit withdrawal reduced insurance".to_string())?;
+    }
+    let winner_external_payout = u128::from(
+        env.token_amount(winner_destination)
+            .checked_sub(winner_destination_before)
+            .ok_or_else(|| "Recovery-forfeit winner payout decreased".to_string())?,
+    );
+    let loser_external_payout = u128::from(
+        env.token_amount(loser_destination)
+            .checked_sub(loser_destination_before)
+            .ok_or_else(|| "Recovery-forfeit loser payout decreased".to_string())?,
+    );
+    let (_, live_exit_group) = env.primary_market_state();
+    let owners_exited_while_market_live = live_exit_group.mode == percolator::MarketModeV16::Live
+        && live_exit_group.assets[0].lifecycle == percolator::AssetLifecycleV16::Recovery;
+    let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(WINNER))?
+        && discovery_portfolio_is_terminal(&env.primary_portfolio(LOSER))?;
+    let portfolios_closed =
+        env.close_primary_portfolio(WINNER).is_ok() && env.close_primary_portfolio(LOSER).is_ok();
+
+    Ok(AdlRecoveryForfeitDiscovery {
+        route,
+        account_order,
+        budget,
+        long_a_before: before_asset.a_long,
+        short_a_before: before_asset.a_short,
+        first_raw_basis_q: first_leg.basis_pos_q.unsigned_abs(),
+        first_effective_q,
+        second_raw_basis_q: second_leg.basis_pos_q.unsigned_abs(),
+        second_effective_q,
+        first_own_oi_reduce_q,
+        first_other_oi_reduce_q,
+        second_own_oi_reduce_q,
+        second_other_oi_reduce_q,
+        first_retained_zero_basis_obligation,
+        second_detached,
+        obligation_clear_steps,
+        max_compute_units,
+        forfeit_steps_moved_no_tokens,
+        all_oi_and_obligations_cleared,
+        owners_exited_while_market_live,
+        users_terminal,
+        portfolios_closed,
+        winner_funded_value,
+        loser_funded_value,
+        winner_exit_fee: exit_fees[WINNER],
+        loser_exit_fee: exit_fees[LOSER],
+        winner_external_payout,
+        loser_external_payout,
+        classified_protocol_value_before_exit,
+        canonical_vault_before_exit,
+        canonical_vault_after: u128::from(env.token_amount(env.vault)),
+        classified_protocol_value_after: env.primary_market_state().1.insurance,
+        c_tot_after: env.primary_market_state().1.c_tot,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+    })
+}
+
+pub fn verify_dual_adl_recovery_forfeit_matrix(
+    seed: [u8; 32],
+) -> Result<Vec<AdlRecoveryForfeitDiscovery>, String> {
+    let mut discoveries = Vec::new();
+    for route in DiscoveryTradeRoute::ALL {
+        for account_order in AdlForceCloseAccountOrder::ALL {
+            for budget in RecoveryForfeitBudget::ALL {
+                discoveries.push(verify_one_dual_adl_recovery_forfeit(
+                    seed,
+                    route,
+                    account_order,
+                    budget,
+                )?);
+            }
+        }
+    }
+    Ok(discoveries)
 }
 
 fn finish_adl_force_close_clamp(
@@ -17423,10 +18214,15 @@ fn verify_one_dual_adl_force_close_clamp(
     seed[0] ^= 0x2a;
     seed[2] ^= boundary.discriminator();
     seed[3] ^= account_order.discriminator();
-    let (env, prefix) = build_dual_adl_prefix(seed, route)?;
+    let (env, prefix, liquidation) = build_dual_adl_prefix(seed, route)?;
     if !prefix.satisfies_invariant() {
         return Err(format!(
             "dual-ADL force-close prefix lost its public topology: {prefix:?}"
+        ));
+    }
+    if !liquidation.satisfies_invariant() {
+        return Err(format!(
+            "dual-ADL force-close prefix lost exact liquidation sizing: {liquidation:?}"
         ));
     }
     let supply_before = env.token_supply_observed();
