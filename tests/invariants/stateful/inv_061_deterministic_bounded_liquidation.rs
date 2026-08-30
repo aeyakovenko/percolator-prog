@@ -27,9 +27,10 @@
 //! receipt, a value-moving top-up, and terminal custody.
 //!
 //! Guarantee boundary: these finite matrices cover two-user terminal landing orders, three-asset
-//! unequal-loss selection, and liquidation-to-partial-receipt composition. Arbitrary close
-//! splitting, transfer, retirement, and remaining maximum-shape cross-products remain in the audit
-//! ledger.
+//! unequal-loss selection, and liquidation-to-partial-receipt composition. Close size is not
+//! caller-controlled on the sole public crank, and INV-059 source-locks that surface.
+//! Larger account partitions, repeated authenticated liquidation episodes, transfer, retirement,
+//! and remaining maximum-shape cross-products remain in the audit ledger.
 
 use super::*;
 

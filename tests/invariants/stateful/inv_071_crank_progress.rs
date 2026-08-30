@@ -24,17 +24,25 @@
 //! winner's released zero-basis loss obligation to be detached by a bounded permissionless crank;
 //! a successful byte-identical crank while the obligation and market lock remain is a concrete
 //! liveness violation, not progress.
+//! `v16_program_unattributed_multi_asset_loss_reaches_liquidation_and_terminal_payout` creates two
+//! adverse legs on one portfolio through each public trade transport. Closing one leg while the
+//! other remains currently liquidatable must retain the loss under `liquidation_lock` without
+//! creating a phantom pending-close rank. The next automatic crank must liquidate the surviving
+//! leg and compose through preconfigured permissionless resolution to terminal custody. Together
+//! with INV-055's all-route rejection of fresh risk behind an actual active close, this publicly
+//! excludes the otherwise concerning `AdvanceClose`/`Liquidate` overlap.
 //!
-//! Guarantee boundary: this is deployed LiteSVM evidence for the four wrapper trade routes and the
-//! uniquely attributable one-asset residual class. The engine's production selector and rank
-//! proofs cover the local transition; bounded reachability across every lifecycle class remains
-//! shared with INV-082.
+//! Guarantee boundary: this is deployed LiteSVM evidence for the four wrapper trade routes, the
+//! uniquely attributable one-asset residual class, and one cross-asset unattributed-loss
+//! disposition. The engine's production selector and rank proofs cover the local transition;
+//! bounded reachability across every lifecycle class remains shared with INV-082.
 
 use super::*;
 use crate::support::{
     fuzz_model::{
         assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
         run_cure_pending_obligation_dos_probe, run_pending_close_rank_oracle,
+        verify_unattributed_loss_liquidations,
     },
     v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
 };
@@ -80,6 +88,82 @@ fn v16_program_cured_close_releases_counterparty_obligation() {
         assert!(
             !evidence.unrelated_trade_rejected && !evidence.owner_withdraw_rejected,
             "a surviving aggregate lock must remain scope-local: {evidence:?}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_unattributed_multi_asset_loss_reaches_liquidation_and_terminal_payout() {
+    let evidence = verify_unattributed_loss_liquidations()
+        .expect("public unattributed multi-asset loss must terminate");
+    assert_eq!(evidence.len(), 4, "every public trade route must run");
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        let observed = evidence
+            .iter()
+            .find(|observed| observed.route == route)
+            .unwrap_or_else(|| panic!("missing unattributed-loss route for {route:?}"));
+        assert!(
+            observed.initial_close_empty
+                && observed.initial_liquidation_lock
+                && observed.initial_liquidation_deficit != 0,
+            "open-risk loss must not create an unserviceable close ledger: {observed:?}"
+        );
+        assert_eq!(
+            observed.open_position_after, 0,
+            "the sole public crank must remove the surviving adverse leg: {observed:?}"
+        );
+        assert!(
+            observed.liquidated_abs_q == observed.open_position_before.unsigned_abs()
+                && observed.liquidation_compute_units != 0
+                && observed.liquidation_compute_units < TX_CU_LIMIT,
+            "unattributed loss must reach complete bounded liquidation: {observed:?}"
+        );
+        assert!(
+            observed.permissionless_resolved
+                && observed.terminal_actor_count == PRIMARY_ACTOR_COUNT
+                && observed.terminal_payout != 0
+                && observed.final_engine_vault == observed.final_spl_vault
+                && observed.max_compute_units < TX_CU_LIMIT,
+            "unattributed loss must compose through terminal custody: {observed:?}"
+        );
+    }
+    let baseline = &evidence[0];
+    for observed in evidence.iter().skip(1) {
+        assert_eq!(
+            (
+                observed.initial_close_empty,
+                observed.initial_liquidation_lock,
+                observed.initial_liquidation_deficit,
+                observed.open_position_before,
+                observed.open_position_after,
+                observed.liquidated_abs_q,
+                observed.liquidation_compute_units,
+                observed.permissionless_resolved,
+                observed.terminal_actor_count,
+                observed.terminal_payout,
+                observed.final_engine_vault,
+                observed.final_spl_vault,
+            ),
+            (
+                baseline.initial_close_empty,
+                baseline.initial_liquidation_lock,
+                baseline.initial_liquidation_deficit,
+                baseline.open_position_before,
+                baseline.open_position_after,
+                baseline.liquidated_abs_q,
+                baseline.liquidation_compute_units,
+                baseline.permissionless_resolved,
+                baseline.terminal_actor_count,
+                baseline.terminal_payout,
+                baseline.final_engine_vault,
+                baseline.final_spl_vault,
+            ),
+            "opening transport changed unattributed-loss disposition: baseline={baseline:?}, observed={observed:?}"
         );
     }
 }

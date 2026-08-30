@@ -11620,6 +11620,7 @@ enum UnderfundedBridgeDisposition {
     None,
     SignedClose,
     PermissionlessLiquidation,
+    UnattributedLossLiquidation,
 }
 
 const DEFAULT_UNDERFUNDED_BACKING_PLAN: UnderfundedBackingPlan = UnderfundedBackingPlan {
@@ -12002,6 +12003,24 @@ pub struct LiquidationToPartialReceiptEvidence {
     pub terminal: CloseToPartialReceiptEvidence,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnattributedLossLiquidationEvidence {
+    pub route: TradeRoute,
+    pub initial_close_empty: bool,
+    pub initial_liquidation_lock: bool,
+    pub initial_liquidation_deficit: u128,
+    pub open_position_before: i128,
+    pub open_position_after: i128,
+    pub liquidated_abs_q: u128,
+    pub liquidation_compute_units: u64,
+    pub permissionless_resolved: bool,
+    pub terminal_actor_count: usize,
+    pub terminal_payout: u128,
+    pub final_engine_vault: u128,
+    pub final_spl_vault: u128,
+    pub max_compute_units: u64,
+}
+
 struct UnderfundedTerminalGraphEvidence {
     world_count: usize,
     transition_count: usize,
@@ -12142,6 +12161,7 @@ fn build_underfunded_live_reference_prefix(
     const SIZE_Q: i128 = 20 * POS_SCALE as i128;
     const EXTRA_BACKED_SIZE_Q: i128 = 4 * POS_SCALE as i128;
     const BRIDGE_SIZE_Q: i128 = 70 * POS_SCALE as i128;
+    const OVERLAP_SIZE_Q: i128 = 5 * POS_SCALE as i128;
     const SNAPSHOT_SLOT: u64 = 12;
     const EXPIRY_SLOT: u64 = 13;
 
@@ -12164,6 +12184,12 @@ fn build_underfunded_live_reference_prefix(
             ..MarketConfig::default()
         },
     )?;
+    if bridge_disposition == UnderfundedBridgeDisposition::UnattributedLossLiquidation {
+        runner.run_safety_prefix(&[Action::ConfigurePermissionlessResolve {
+            stale_slots: 1,
+            force_close_delay_slots: 1,
+        }])?;
+    }
 
     bounded_reference_top_up_backing(&mut runner, JUNIOR_DOMAIN, 1, SNAPSHOT_SLOT, true)?;
     bounded_reference_top_up_backing(
@@ -12220,6 +12246,18 @@ fn build_underfunded_live_reference_prefix(
         )?;
         runner.assert_global_invariants()?;
     }
+    if bridge_disposition == UnderfundedBridgeDisposition::UnattributedLossLiquidation {
+        runner.execute_trade(
+            trade_route,
+            BACKED_WINNER,
+            PROVIDER,
+            vec![(0, OVERLAP_SIZE_Q)],
+            0,
+            0,
+            true,
+        )?;
+        runner.assert_global_invariants()?;
+    }
 
     for (offset, mark) in (105..=WINNING_MARK).step_by(5).enumerate() {
         let slot = 2 + u64::try_from(offset).expect("bounded INV-086 mark sequence");
@@ -12270,7 +12308,11 @@ fn build_underfunded_live_reference_prefix(
         )?;
         runner.assert_global_invariants()?;
     }
-    if bridge_disposition == UnderfundedBridgeDisposition::SignedClose {
+    if matches!(
+        bridge_disposition,
+        UnderfundedBridgeDisposition::SignedClose
+            | UnderfundedBridgeDisposition::UnattributedLossLiquidation
+    ) {
         // Keep the bridge loser stale until this terminal reduction. The trade's own refresh then
         // observes the deficit while its pre-refresh one-leg attribution is still unambiguous.
         runner.execute_trade(
@@ -12666,6 +12708,7 @@ fn build_underfunded_resolved_reference_seed(
 fn finish_close_to_partial_receipt_composition(
     mut runner: ScenarioRunner,
     expectation: CloseBridgeExpectation,
+    expected_close_asset: usize,
 ) -> Result<CloseToPartialReceiptEvidence, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
@@ -12689,7 +12732,7 @@ fn finish_close_to_partial_receipt_composition(
     };
     if !close_before.active
         || close_before.canceled
-        || close_before.asset_index != 2
+        || close_before.asset_index != expected_close_asset as u32
         || close_before.gross_loss_at_close_start == 0
         || !expected_phase
         || runner.positions[CLOSE_LOSER]
@@ -12855,7 +12898,7 @@ pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialRec
         TradeRoute::NoCpi,
         DEFAULT_UNDERFUNDED_BACKING_PLAN,
     )?;
-    finish_close_to_partial_receipt_composition(runner, CloseBridgeExpectation::Pending)
+    finish_close_to_partial_receipt_composition(runner, CloseBridgeExpectation::Pending, 2)
 }
 
 fn verify_one_liquidation_to_partial_receipt_composition(
@@ -12972,8 +13015,11 @@ fn verify_one_liquidation_to_partial_receipt_composition(
         ));
     }
 
-    let terminal =
-        finish_close_to_partial_receipt_composition(runner, CloseBridgeExpectation::Finalized)?;
+    let terminal = finish_close_to_partial_receipt_composition(
+        runner,
+        CloseBridgeExpectation::Finalized,
+        BRIDGE_ASSET,
+    )?;
     Ok(LiquidationToPartialReceiptEvidence {
         route,
         selected_route_trade_count,
@@ -12997,6 +13043,157 @@ pub fn verify_liquidation_to_partial_receipt_compositions(
     ]
     .into_iter()
     .map(verify_one_liquidation_to_partial_receipt_composition)
+    .collect()
+}
+
+fn verify_one_unattributed_loss_liquidation(
+    route: TradeRoute,
+) -> Result<UnattributedLossLiquidationEvidence, String> {
+    const CLOSE_LOSER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
+    const LIQUIDATION_ASSET: usize = 0;
+
+    let mut seed = [0x8d; 32];
+    seed[0] ^= u8::try_from(route.index()).expect("four trade routes fit u8");
+    let mut runner = build_underfunded_live_reference_prefix(
+        seed,
+        UnderfundedBridgeDisposition::UnattributedLossLiquidation,
+        route,
+        DEFAULT_UNDERFUNDED_BACKING_PLAN,
+    )?;
+    let initial_account = runner.env.primary_portfolio(CLOSE_LOSER);
+    let initial_close = initial_account
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-071 unattributed-loss initial close decode: {error:?}"))?;
+    let initial_cert = initial_account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("INV-071 unattributed-loss initial cert decode: {error:?}"))?;
+    let open_position_before = runner.positions[CLOSE_LOSER][LIQUIDATION_ASSET];
+    let initial_close_empty = initial_close == percolator::CloseProgressLedgerV16::EMPTY;
+    let initial_liquidation_lock = initial_account.liquidation_lock != 0;
+    if !initial_close_empty
+        || !initial_liquidation_lock
+        || open_position_before == 0
+        || !runner.current_liquidation_authorization(CLOSE_LOSER)
+    {
+        return Err(format!(
+            "INV-071 public prefix did not retain unattributed loss for current liquidation: close={initial_close:?}, lock={}, cert={initial_cert:?}, position={open_position_before}, positions={:?}",
+            initial_account.liquidation_lock,
+            runner.positions[CLOSE_LOSER]
+        ));
+    }
+
+    let liquidated_before = runner.coverage.liquidated_abs_q;
+    runner
+        .execute_crank(CLOSE_LOSER, HintMode::Complete, true)
+        .map_err(CrankFailure::into_message)?;
+    runner.assert_global_invariants()?;
+    let liquidation_compute_units = runner
+        .last_crank_compute_units
+        .ok_or("INV-071 unattributed-loss liquidation did not record compute")?;
+    let liquidated_abs_q = runner
+        .coverage
+        .liquidated_abs_q
+        .checked_sub(liquidated_before)
+        .ok_or("INV-071 unattributed-loss liquidation quantity decreased")?;
+    let open_position_after = runner.positions[CLOSE_LOSER][LIQUIDATION_ASSET];
+    let close_after_liquidation = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-071 unattributed-loss close decode: {error:?}"))?;
+    if liquidated_abs_q == 0
+        || liquidation_compute_units == 0
+        || runner.positions[CLOSE_LOSER]
+            .iter()
+            .any(|position| *position != 0)
+        || close_after_liquidation != initial_close
+    {
+        return Err(format!(
+            "INV-071 unattributed-loss liquidation did not preserve the attribution boundary: liquidated={liquidated_abs_q}, CU={liquidation_compute_units}, close={initial_close:?}->{close_after_liquidation:?}, positions={:?}",
+            runner.positions[CLOSE_LOSER]
+        ));
+    }
+
+    let destinations_before = std::array::from_fn::<_, PRIMARY_ACTOR_COUNT, _>(|actor| {
+        u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        )
+    });
+    let resolution_slot = runner
+        .env
+        .current_slot()
+        .checked_add(100)
+        .ok_or("INV-071 unattributed-loss resolution slot overflow")?;
+    runner.execute_permissionless_stale_resolution(resolution_slot)?;
+    let permissionless_resolved =
+        runner.env.primary_market_state().1.mode == MarketModeV16::Resolved;
+    if !permissionless_resolved {
+        return Err(format!(
+            "INV-071 configured permissionless resolution did not dispose the flat unattributed loss at slot {resolution_slot}"
+        ));
+    }
+    runner.run_terminal_payout_campaign()?;
+    runner.assert_global_invariants()?;
+    let terminal_actor_count = (0..PRIMARY_ACTOR_COUNT)
+        .map(|actor| runner.portfolio_is_economically_terminal(actor))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|terminal| *terminal)
+        .count();
+    let terminal_payout = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+        let after = u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[actor].destination_token),
+        );
+        let payout = after
+            .checked_sub(destinations_before[actor])
+            .ok_or("INV-071 terminal destination decreased")?;
+        total
+            .checked_add(payout)
+            .ok_or("INV-071 terminal payout overflow")
+    })?;
+    let final_engine_vault = runner.env.primary_market_state().1.vault;
+    let final_spl_vault = u128::from(runner.env.token_amount(runner.env.vault));
+    let max_compute_units = runner.coverage.max_cu;
+    if terminal_actor_count != PRIMARY_ACTOR_COUNT || terminal_payout == 0 {
+        return Err(format!(
+            "INV-071 unattributed-loss terminal path did not pay and terminate: payout={terminal_payout}, terminal={terminal_actor_count}/{PRIMARY_ACTOR_COUNT}"
+        ));
+    }
+    Ok(UnattributedLossLiquidationEvidence {
+        route,
+        initial_close_empty,
+        initial_liquidation_lock,
+        initial_liquidation_deficit: initial_cert.certified_liq_deficit,
+        open_position_before,
+        open_position_after,
+        liquidated_abs_q,
+        liquidation_compute_units,
+        permissionless_resolved,
+        terminal_actor_count,
+        terminal_payout,
+        final_engine_vault,
+        final_spl_vault,
+        max_compute_units,
+    })
+}
+
+pub fn verify_unattributed_loss_liquidations(
+) -> Result<Vec<UnattributedLossLiquidationEvidence>, String> {
+    [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .map(verify_one_unattributed_loss_liquidation)
     .collect()
 }
 
