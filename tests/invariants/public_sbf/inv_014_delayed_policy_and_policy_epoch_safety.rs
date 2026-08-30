@@ -183,3 +183,23 @@ fn v16_program_revoked_matcher_cannot_recover_terminal_value_with_stale_consent(
         "stale matcher consent changed LP terminal value: {discovery:?}"
     );
 }
+
+#[test]
+fn v16_program_maintenance_share_supersession_changes_attribution_not_payer_value() {
+    let discovery = discover_maintenance_share_supersession([0x37; 32])
+        .unwrap_or_else(|error| panic!("maintenance-share terminal world failed: {error}"));
+    assert!(
+        discovery.certifies_attribution_only(),
+        "maintenance share changed fee or payer terminal value: {discovery:?}"
+    );
+}
+
+#[test]
+fn v16_program_liquidation_share_supersession_changes_attribution_not_victim_value() {
+    let discovery = discover_liquidation_share_supersession([0x36; 32])
+        .unwrap_or_else(|error| panic!("liquidation-share terminal world failed: {error}"));
+    assert!(
+        discovery.certifies_attribution_only(),
+        "liquidation share changed fee or victim terminal value: {discovery:?}"
+    );
+}

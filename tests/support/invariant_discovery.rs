@@ -240,6 +240,12 @@ pub enum SupersessionPayloadOrder {
     RetainedLower,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeeSharePolicyKind {
+    Liquidation,
+    Maintenance,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FeeConsentKind {
     FreshSignedLiveBaseFee,
@@ -3313,6 +3319,31 @@ pub struct MatcherRevocationTerminalDiscovery {
     pub mutation_witness_evidence: PairedTerminalPayoutEvidence,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeeShareSupersessionDiscovery {
+    pub kind: FeeSharePolicyKind,
+    pub stale_policy_landed: bool,
+    pub stale_policy_rejected_exact_rollback: bool,
+    pub control_fee_debit: u128,
+    pub replay_fee_debit: u128,
+    pub mutation_fee_debit: u128,
+    pub control_payer_payout: u128,
+    pub replay_payer_payout: u128,
+    pub mutation_payer_payout: u128,
+    pub control_cranker_payout: u128,
+    pub replay_cranker_payout: u128,
+    pub mutation_cranker_payout: u128,
+    pub control_insurance_retained: u128,
+    pub replay_insurance_retained: u128,
+    pub mutation_insurance_retained: u128,
+    pub control_classification: PublicTerminalClassification,
+    pub replay_classification: PublicTerminalClassification,
+    pub mutation_classification: PublicTerminalClassification,
+    pub control_public_trace: PublicTraceEvidence,
+    pub replay_public_trace: PublicTraceEvidence,
+    pub mutation_public_trace: PublicTraceEvidence,
+}
+
 impl MatcherMutationOrderDiscovery {
     pub fn satisfies_invariant(&self) -> bool {
         self.revoked_trade_rejected
@@ -3365,6 +3396,54 @@ impl MatcherRevocationTerminalDiscovery {
                 self.control_total_payout,
                 self.mutation_witness_total_payout,
             )
+    }
+}
+
+impl FeeShareSupersessionDiscovery {
+    pub fn certifies_attribution_only(&self) -> bool {
+        let control_distribution = self
+            .control_cranker_payout
+            .checked_add(self.control_insurance_retained);
+        let replay_distribution = self
+            .replay_cranker_payout
+            .checked_add(self.replay_insurance_retained);
+        let mutation_distribution = self
+            .mutation_cranker_payout
+            .checked_add(self.mutation_insurance_retained);
+        !self.stale_policy_landed
+            && self.stale_policy_rejected_exact_rollback
+            && self.control_fee_debit != 0
+            && self.control_fee_debit == self.replay_fee_debit
+            && self.control_fee_debit == self.mutation_fee_debit
+            && self.control_payer_payout == self.replay_payer_payout
+            && self.control_payer_payout == self.mutation_payer_payout
+            && self.control_cranker_payout == self.replay_cranker_payout
+            && self.control_insurance_retained == self.replay_insurance_retained
+            && self.control_cranker_payout != self.mutation_cranker_payout
+            && self.control_insurance_retained != self.mutation_insurance_retained
+            && control_distribution == replay_distribution
+            && control_distribution == mutation_distribution
+            && matches!(
+                self.control_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && matches!(
+                self.replay_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && matches!(
+                self.mutation_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && self
+                .control_public_trace
+                .validate_public_execution()
+                .is_ok()
+            && self.replay_public_trace.validate_public_execution().is_ok()
+            && self
+                .mutation_public_trace
+                .validate_public_execution()
+                .is_ok()
     }
 }
 
@@ -7919,7 +7998,7 @@ struct MatcherRevocationTerminalWorld {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MatcherGrantAttempt {
+enum SupersededMutationAttempt {
     None,
     RetainedStale,
     FreshEquivalent,
@@ -7927,7 +8006,7 @@ enum MatcherGrantAttempt {
 
 fn run_matcher_revocation_terminal_world(
     mut seed: [u8; 32],
-    grant_attempt: MatcherGrantAttempt,
+    grant_attempt: SupersededMutationAttempt,
 ) -> Result<MatcherRevocationTerminalWorld, String> {
     const PRICE: u64 = INITIAL_PRICE;
     const ADVERSE_MARK: u64 = INITIAL_PRICE * 2;
@@ -7958,15 +8037,15 @@ fn run_matcher_revocation_terminal_world(
     env.set_matcher_config(LP, 0)
         .map_err(|error| format!("revoke LP matcher: {error}"))?;
     let (grant_landed, grant_rejected_exact_rollback) = match grant_attempt {
-        MatcherGrantAttempt::None => (false, true),
-        MatcherGrantAttempt::RetainedStale => {
+        SupersededMutationAttempt::None => (false, true),
+        SupersededMutationAttempt::RetainedStale => {
             let before = fingerprint(&env);
             match env.land_retained(retained_enable) {
                 Ok(_) => (true, false),
                 Err(_) => (false, fingerprint(&env) == before),
             }
         }
-        MatcherGrantAttempt::FreshEquivalent => {
+        SupersededMutationAttempt::FreshEquivalent => {
             env.set_matcher_config(LP, 1)
                 .map_err(|error| format!("fresh equivalent matcher grant rejected: {error}"))?;
             (true, false)
@@ -8025,10 +8104,11 @@ fn run_matcher_revocation_terminal_world(
 pub fn discover_matcher_revocation_terminal_loss(
     seed: [u8; 32],
 ) -> Result<MatcherRevocationTerminalDiscovery, String> {
-    let control = run_matcher_revocation_terminal_world(seed, MatcherGrantAttempt::None)?;
-    let replay = run_matcher_revocation_terminal_world(seed, MatcherGrantAttempt::RetainedStale)?;
+    let control = run_matcher_revocation_terminal_world(seed, SupersededMutationAttempt::None)?;
+    let replay =
+        run_matcher_revocation_terminal_world(seed, SupersededMutationAttempt::RetainedStale)?;
     let mutation =
-        run_matcher_revocation_terminal_world(seed, MatcherGrantAttempt::FreshEquivalent)?;
+        run_matcher_revocation_terminal_world(seed, SupersededMutationAttempt::FreshEquivalent)?;
     if control.lp_destination != replay.lp_destination
         || control.attacker_destination != replay.attacker_destination
         || control.lp_destination != mutation.lp_destination
@@ -8093,6 +8173,288 @@ pub fn discover_matcher_revocation_terminal_loss(
         mutation_witness_total_payout,
         mutation_witness_evidence,
     })
+}
+
+#[derive(Clone, Debug)]
+struct FeeShareTerminalWorld {
+    policy_landed: bool,
+    policy_rejected_exact_rollback: bool,
+    fee_debit: u128,
+    payer_payout: u128,
+    cranker_payout: u128,
+    insurance_retained: u128,
+    terminal_classification: PublicTerminalClassification,
+    public_trace: PublicTraceEvidence,
+}
+
+fn run_maintenance_share_terminal_world(
+    mut seed: [u8; 32],
+    policy_attempt: SupersededMutationAttempt,
+) -> Result<FeeShareTerminalWorld, String> {
+    const PAYER: usize = 0;
+    const CRANKER: usize = 1;
+    const LOW_SHARE_BPS: u16 = 1_000;
+    const HIGH_SHARE_BPS: u16 = 9_000;
+    const MAINTENANCE_FEE_PER_SLOT: u128 = 100;
+    const FEE_SLOT: u64 = 10;
+
+    seed[0] ^= 0x57;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            maintenance_fee_per_slot: MAINTENANCE_FEE_PER_SLOT,
+            actor_deposits: [100_000, 100_000, 0, 0, 0],
+            actor_token_balances: [200_000, 200_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let retained_low_share = env.build_retained_maintenance_fee_policy(LOW_SHARE_BPS);
+    env.begin_public_trace();
+    env.update_maintenance_fee_policy(HIGH_SHARE_BPS)
+        .map_err(|error| format!("install maintenance high-share policy: {error}"))?;
+    let (policy_landed, policy_rejected_exact_rollback) = match policy_attempt {
+        SupersededMutationAttempt::None => (false, true),
+        SupersededMutationAttempt::RetainedStale => {
+            let before = fingerprint(&env);
+            match env.land_retained(retained_low_share) {
+                Ok(_) => (true, false),
+                Err(_) => (false, fingerprint(&env) == before),
+            }
+        }
+        SupersededMutationAttempt::FreshEquivalent => {
+            env.update_maintenance_fee_policy(LOW_SHARE_BPS)
+                .map_err(|error| format!("install maintenance low-share witness: {error}"))?;
+            (true, false)
+        }
+    };
+
+    env.warp_to_slot(FEE_SLOT);
+    let payer_before = env.primary_portfolio(PAYER).capital.get();
+    env.sync_maintenance_fee_with_reward(PAYER, CRANKER, FEE_SLOT)
+        .map_err(|error| format!("sync maintenance share fee: {error}"))?;
+    let fee_debit = payer_before
+        .checked_sub(env.primary_portfolio(PAYER).capital.get())
+        .ok_or_else(|| "maintenance share sync increased payer capital".to_string())?;
+    if fee_debit == 0 {
+        return Err("maintenance share world charged no fee".into());
+    }
+
+    env.resolve_market()
+        .map_err(|error| format!("resolve maintenance share world: {error}"))?;
+    let payouts = drain_resolved_discovery_actors(&mut env, [0, 1, 2, 3, 4])
+        .map_err(|error| format!("drain maintenance share users: {error}"))?;
+    let insurance_retained = env.primary_market_state().1.insurance;
+    if env.token_supply_observed() != supply_before {
+        return Err("maintenance share world changed SPL supply".into());
+    }
+    let (terminal_classification, public_trace) =
+        finish_public_bounded_exit_evidence(&mut env, "maintenance share supersession")?;
+    Ok(FeeShareTerminalWorld {
+        policy_landed,
+        policy_rejected_exact_rollback,
+        fee_debit,
+        payer_payout: payouts[PAYER],
+        cranker_payout: payouts[CRANKER],
+        insurance_retained,
+        terminal_classification,
+        public_trace,
+    })
+}
+
+fn run_liquidation_share_terminal_world(
+    mut seed: [u8; 32],
+    policy_attempt: SupersededMutationAttempt,
+) -> Result<FeeShareTerminalWorld, String> {
+    const MARK: u64 = 1_000_000;
+    const ADVERSE_MARK: u64 = 999_800;
+    const VICTIM: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const CRANKER: usize = 2;
+    const LOW_SHARE_BPS: u16 = 1_000;
+    const HIGH_SHARE_BPS: u16 = 9_000;
+    const LIQUIDATION_SLOT: u64 = 2;
+
+    seed[0] ^= 0x58;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            min_liquidation_abs: 500,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [50_000, 2_000_000, 100_000, 0, 0],
+            actor_token_balances: [100_000, 3_000_000, 200_000, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_auth_mark(false, 0, 1, MARK)
+        .map_err(|error| format!("configure liquidation share mark: {error}"))?;
+    env.trade_no_cpi(VICTIM, COUNTERPARTY, 0, POS_SCALE as i128, MARK, 0)
+        .map_err(|error| format!("open liquidation share pair: {error}"))?;
+    let supply_before = env.token_supply_observed();
+    let retained_low_share = env.build_retained_liquidation_fee_policy(LOW_SHARE_BPS);
+    env.begin_public_trace();
+    env.update_liquidation_fee_policy(HIGH_SHARE_BPS)
+        .map_err(|error| format!("install liquidation high-share policy: {error}"))?;
+    let (policy_landed, policy_rejected_exact_rollback) = match policy_attempt {
+        SupersededMutationAttempt::None => (false, true),
+        SupersededMutationAttempt::RetainedStale => {
+            let before = fingerprint(&env);
+            match env.land_retained(retained_low_share) {
+                Ok(_) => (true, false),
+                Err(_) => (false, fingerprint(&env) == before),
+            }
+        }
+        SupersededMutationAttempt::FreshEquivalent => {
+            env.update_liquidation_fee_policy(LOW_SHARE_BPS)
+                .map_err(|error| format!("install liquidation low-share witness: {error}"))?;
+            (true, false)
+        }
+    };
+
+    env.warp_to_slot(LIQUIDATION_SLOT);
+    env.push_auth_mark(0, LIQUIDATION_SLOT, ADVERSE_MARK)
+        .map_err(|error| format!("publish liquidation share mark: {error}"))?;
+    let oi_before = env.primary_market_state().1.assets[0].oi_eff_long_q;
+    let cranker_before = env.primary_portfolio(CRANKER).capital.get();
+    let insurance_before = env.primary_market_state().1.insurance;
+    for attempt in 0..8 {
+        env.crank_with_reward(
+            CRANKER,
+            VICTIM,
+            LIQUIDATION_SLOT,
+            if attempt == 0 {
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }]
+            } else {
+                Vec::new()
+            },
+            &[],
+        )
+        .map_err(|error| format!("liquidation share crank {attempt}: {error}"))?;
+        if env.primary_market_state().1.assets[0].oi_eff_long_q < oi_before {
+            break;
+        }
+    }
+    if env.primary_market_state().1.assets[0].oi_eff_long_q >= oi_before {
+        return Err("liquidation share world made no liquidation progress".into());
+    }
+    let cranker_reward = env
+        .primary_portfolio(CRANKER)
+        .capital
+        .get()
+        .checked_sub(cranker_before)
+        .ok_or_else(|| "liquidation share reduced cranker capital".to_string())?;
+    let insurance_fee = env
+        .primary_market_state()
+        .1
+        .insurance
+        .checked_sub(insurance_before)
+        .ok_or_else(|| "liquidation share reduced insurance".to_string())?;
+    let fee_debit = cranker_reward
+        .checked_add(insurance_fee)
+        .ok_or_else(|| "liquidation share fee overflowed".to_string())?;
+    if fee_debit == 0 || cranker_reward == 0 || insurance_fee == 0 {
+        return Err(format!(
+            "liquidation share split was vacuous: fee={fee_debit}, reward={cranker_reward}, insurance={insurance_fee}"
+        ));
+    }
+
+    env.resolve_market()
+        .map_err(|error| format!("resolve liquidation share world: {error}"))?;
+    let payouts = drain_resolved_discovery_actors(&mut env, [0, 1, 2, 3, 4])
+        .map_err(|error| format!("drain liquidation share users: {error}"))?;
+    let insurance_retained = env.primary_market_state().1.insurance;
+    if env.token_supply_observed() != supply_before {
+        return Err("liquidation share world changed SPL supply".into());
+    }
+    let (terminal_classification, public_trace) =
+        finish_public_bounded_exit_evidence(&mut env, "liquidation share supersession")?;
+    Ok(FeeShareTerminalWorld {
+        policy_landed,
+        policy_rejected_exact_rollback,
+        fee_debit,
+        payer_payout: payouts[VICTIM],
+        cranker_payout: payouts[CRANKER],
+        insurance_retained,
+        terminal_classification,
+        public_trace,
+    })
+}
+
+fn compose_fee_share_supersession(
+    kind: FeeSharePolicyKind,
+    control: FeeShareTerminalWorld,
+    replay: FeeShareTerminalWorld,
+    mutation: FeeShareTerminalWorld,
+) -> FeeShareSupersessionDiscovery {
+    FeeShareSupersessionDiscovery {
+        kind,
+        stale_policy_landed: replay.policy_landed,
+        stale_policy_rejected_exact_rollback: replay.policy_rejected_exact_rollback,
+        control_fee_debit: control.fee_debit,
+        replay_fee_debit: replay.fee_debit,
+        mutation_fee_debit: mutation.fee_debit,
+        control_payer_payout: control.payer_payout,
+        replay_payer_payout: replay.payer_payout,
+        mutation_payer_payout: mutation.payer_payout,
+        control_cranker_payout: control.cranker_payout,
+        replay_cranker_payout: replay.cranker_payout,
+        mutation_cranker_payout: mutation.cranker_payout,
+        control_insurance_retained: control.insurance_retained,
+        replay_insurance_retained: replay.insurance_retained,
+        mutation_insurance_retained: mutation.insurance_retained,
+        control_classification: control.terminal_classification,
+        replay_classification: replay.terminal_classification,
+        mutation_classification: mutation.terminal_classification,
+        control_public_trace: control.public_trace,
+        replay_public_trace: replay.public_trace,
+        mutation_public_trace: mutation.public_trace,
+    }
+}
+
+pub fn discover_maintenance_share_supersession(
+    seed: [u8; 32],
+) -> Result<FeeShareSupersessionDiscovery, String> {
+    let control = run_maintenance_share_terminal_world(seed, SupersededMutationAttempt::None)?;
+    let replay =
+        run_maintenance_share_terminal_world(seed, SupersededMutationAttempt::RetainedStale)?;
+    let mutation =
+        run_maintenance_share_terminal_world(seed, SupersededMutationAttempt::FreshEquivalent)?;
+    Ok(compose_fee_share_supersession(
+        FeeSharePolicyKind::Maintenance,
+        control,
+        replay,
+        mutation,
+    ))
+}
+
+pub fn discover_liquidation_share_supersession(
+    seed: [u8; 32],
+) -> Result<FeeShareSupersessionDiscovery, String> {
+    let control = run_liquidation_share_terminal_world(seed, SupersededMutationAttempt::None)?;
+    let replay =
+        run_liquidation_share_terminal_world(seed, SupersededMutationAttempt::RetainedStale)?;
+    let mutation =
+        run_liquidation_share_terminal_world(seed, SupersededMutationAttempt::FreshEquivalent)?;
+    Ok(compose_fee_share_supersession(
+        FeeSharePolicyKind::Liquidation,
+        control,
+        replay,
+        mutation,
+    ))
 }
 
 fn fee_consent_victim_actors(kind: FeeConsentKind) -> &'static [usize] {

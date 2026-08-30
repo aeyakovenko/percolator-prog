@@ -72,6 +72,56 @@ proptest! {
         max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
         failure_persistence: Some(Box::new(
             proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_014_liquidation_share_terminal.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_liquidation_share_supersession_preserves_victim_value(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_liquidation_share_supersession(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(
+            discovery.certifies_attribution_only(),
+            "liquidation share changed fee or victim terminal value: {discovery:?}"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_014_maintenance_share_terminal.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_maintenance_share_supersession_preserves_payer_value(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_maintenance_share_supersession(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(
+            discovery.certifies_attribution_only(),
+            "maintenance share changed fee or payer terminal value: {discovery:?}"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
                 "proptest-regressions/inv_014_matcher_revocation_terminal.txt",
             ),
         )),

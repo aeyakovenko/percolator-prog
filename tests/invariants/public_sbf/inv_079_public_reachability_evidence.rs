@@ -495,6 +495,7 @@ fn v16_program_open_lof_manifest_snapshot_is_structurally_honest() {
 
 #[test]
 fn v16_superseded_control_terminal_dispositions_are_source_complete() {
+    let discovery_source = include_str!("../../support/invariant_discovery.rs");
     let terminal_oracles = include_str!("../inv_079_violation_oracle_coverage.tsv")
         .lines()
         .filter(|line| !line.starts_with('#') && !line.is_empty())
@@ -513,6 +514,7 @@ fn v16_superseded_control_terminal_dispositions_are_source_complete() {
                 "TERMINAL_LOF"
                     | "TERMINAL_VALUE_CANDIDATE"
                     | "SIGNED_ECONOMIC_BOUND"
+                    | "ATTRIBUTION_ONLY"
                     | "ATTRIBUTION_CANDIDATE"
                     | "LIVENESS_CANDIDATE"
                     | "PROVIDER_CONSENT_BOUND"
@@ -527,6 +529,16 @@ fn v16_superseded_control_terminal_dispositions_are_source_complete() {
             assert!(
                 terminal_oracles.contains(fields[2]),
                 "supersession row names an unregistered terminal oracle: {line}"
+            );
+        } else if fields[1] == "ATTRIBUTION_ONLY" {
+            assert_eq!(
+                fields[2], "FeeShareSupersessionDiscovery",
+                "closed attribution row needs its exact public evidence owner: {line}"
+            );
+            assert!(
+                discovery_source.contains("pub struct FeeShareSupersessionDiscovery")
+                    && discovery_source.contains("pub fn certifies_attribution_only"),
+                "closed attribution evidence owner is missing"
             );
         } else {
             assert_eq!(
@@ -570,11 +582,18 @@ fn v16_superseded_control_terminal_dispositions_are_source_complete() {
             "ConfigureAuthMark",
             "ConfigureEwmaMark",
             "ConfigureHybridOracle",
-            "LiquidationFeePolicy",
-            "MaintenanceFeePolicy",
             "PushAuthMark",
             "PushEwmaMark",
         ]
+    );
+    assert_eq!(
+        dispositions
+            .iter()
+            .filter_map(|(kind, disposition)| {
+                (*disposition == "ATTRIBUTION_ONLY").then_some(*kind)
+            })
+            .collect::<Vec<_>>(),
+        ["LiquidationFeePolicy", "MaintenanceFeePolicy"]
     );
 }
 
