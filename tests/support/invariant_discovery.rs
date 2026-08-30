@@ -563,6 +563,14 @@ impl SupersededIntentKind {
         Self::BackingFeePolicyShort,
     ];
 
+    pub const ORACLE_TERMINAL_CANDIDATES: [Self; 5] = [
+        Self::PushAuthMark,
+        Self::ConfigureAuthMark,
+        Self::PushEwmaMark,
+        Self::ConfigureEwmaMark,
+        Self::ConfigureHybridOracle,
+    ];
+
     fn discriminator(self) -> u8 {
         match self {
             Self::MatcherConfig => 0,
@@ -2960,7 +2968,9 @@ fn build_paired_terminal_payout_evidence(
             .is_some_and(|residue| residue <= terminal_rounding_residue_bound);
     if victim_payout_loss != 0 && !exact_terminal_loss && !bounded_terminal_residue {
         return Err(format!(
-            "{context} observed a victim payout loss without an exact counterparty gain or bounded terminal residue"
+            "{context} observed victim loss {victim_payout_loss}, counterparty gain \
+             {counterparty_payout_gain}, control total {control_total_payout}, reordered total \
+             {reordered_total_payout}, and residue bound {terminal_rounding_residue_bound}"
         ));
     }
     let terminal_classification = public_trace
@@ -3344,6 +3354,38 @@ pub struct FeeShareSupersessionDiscovery {
     pub mutation_public_trace: PublicTraceEvidence,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OracleSupersessionTerminalDiscovery {
+    pub kind: SupersededIntentKind,
+    pub stale_control_landed: bool,
+    pub stale_control_rejected_exact_rollback: bool,
+    pub control_mark: u64,
+    pub replay_mark: u64,
+    pub mutation_mark: u64,
+    pub control_payouts: [u128; 3],
+    pub replay_payouts: [u128; 3],
+    pub mutation_payouts: [u128; 3],
+    pub replay_victim_loss: u128,
+    pub replay_counterparty_gain: u128,
+    pub replay_burn_increase: u128,
+    pub mutation_victim_loss: u128,
+    pub mutation_counterparty_gain: u128,
+    pub mutation_burn_increase: u128,
+    pub replay_terminal_evidence: OracleTerminalDeltaEvidence,
+    pub mutation_terminal_evidence: OracleTerminalDeltaEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OracleTerminalDeltaEvidence {
+    pub payout_destinations: [Pubkey; 2],
+    pub control_terminal_values: [u128; 3],
+    pub observed_terminal_values: [u128; 3],
+    pub users_terminal: bool,
+    pub terminal_classification: PublicTerminalClassification,
+    pub control_public_trace: PublicTraceEvidence,
+    pub public_trace: PublicTraceEvidence,
+}
+
 impl MatcherMutationOrderDiscovery {
     pub fn satisfies_invariant(&self) -> bool {
         self.revoked_trade_rejected
@@ -3444,6 +3486,198 @@ impl FeeShareSupersessionDiscovery {
                 .mutation_public_trace
                 .validate_public_execution()
                 .is_ok()
+    }
+}
+
+impl OracleTerminalDeltaEvidence {
+    fn traced_user_payouts(
+        trace: &PublicTraceEvidence,
+        destinations: [Pubkey; 2],
+    ) -> Option<[u128; 2]> {
+        let long = u128::try_from(trace.token_delta_for_accounts(&destinations[..1]).ok()?).ok()?;
+        let short =
+            u128::try_from(trace.token_delta_for_accounts(&destinations[1..]).ok()?).ok()?;
+        Some([long, short])
+    }
+
+    pub fn certifies_exact_loss(
+        &self,
+        victim_loss: u128,
+        beneficiary_gain: u128,
+        burn_increase: u128,
+        control_total: u128,
+        observed_total: u128,
+    ) -> bool {
+        let Some(control_payouts) =
+            Self::traced_user_payouts(&self.control_public_trace, self.payout_destinations)
+        else {
+            return false;
+        };
+        let Some(observed_payouts) =
+            Self::traced_user_payouts(&self.public_trace, self.payout_destinations)
+        else {
+            return false;
+        };
+        let observed_victim_loss = control_payouts
+            .iter()
+            .zip(observed_payouts.iter())
+            .try_fold(0u128, |total, (control, observed)| {
+                total.checked_add(control.saturating_sub(*observed))
+            });
+        let observed_beneficiary_gain = control_payouts
+            .iter()
+            .zip(observed_payouts.iter())
+            .try_fold(0u128, |total, (control, observed)| {
+                total.checked_add(observed.saturating_sub(*control))
+            });
+        let observed_burn_increase =
+            self.observed_terminal_values[2].saturating_sub(self.control_terminal_values[2]);
+        let observed_burn_decrease =
+            self.control_terminal_values[2].saturating_sub(self.observed_terminal_values[2]);
+        victim_loss != 0
+            && (beneficiary_gain != 0 || burn_increase != 0)
+            && observed_victim_loss == Some(victim_loss)
+            && observed_beneficiary_gain == Some(beneficiary_gain)
+            && observed_burn_increase == burn_increase
+            && victim_loss.checked_add(observed_burn_decrease)
+                == beneficiary_gain.checked_add(burn_increase)
+            && self.control_terminal_values[..2] == control_payouts
+            && self.observed_terminal_values[..2] == observed_payouts
+            && self
+                .control_terminal_values
+                .iter()
+                .try_fold(0u128, |total, value| total.checked_add(*value))
+                == Some(control_total)
+            && self
+                .observed_terminal_values
+                .iter()
+                .try_fold(0u128, |total, value| total.checked_add(*value))
+                == Some(observed_total)
+            && control_total == observed_total
+            && self.users_terminal
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == victim_loss
+                    && unauthorized_gain_atoms == beneficiary_gain
+            )
+            && self
+                .control_public_trace
+                .validate_public_execution()
+                .is_ok()
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+
+    pub fn certifies_bounded_exit(&self, control_total: u128, observed_total: u128) -> bool {
+        let Some(control_payouts) =
+            Self::traced_user_payouts(&self.control_public_trace, self.payout_destinations)
+        else {
+            return false;
+        };
+        let Some(observed_payouts) =
+            Self::traced_user_payouts(&self.public_trace, self.payout_destinations)
+        else {
+            return false;
+        };
+        self.control_terminal_values == self.observed_terminal_values
+            && self.control_terminal_values[..2] == control_payouts
+            && self.observed_terminal_values[..2] == observed_payouts
+            && self
+                .control_terminal_values
+                .iter()
+                .try_fold(0u128, |total, value| total.checked_add(*value))
+                == Some(control_total)
+            && self
+                .observed_terminal_values
+                .iter()
+                .try_fold(0u128, |total, value| total.checked_add(*value))
+                == Some(observed_total)
+            && control_total == observed_total
+            && self.users_terminal
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && self
+                .control_public_trace
+                .validate_public_execution()
+                .is_ok()
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+}
+
+impl OracleSupersessionTerminalDiscovery {
+    pub fn is_violation(&self) -> bool {
+        let Some(control_total) = self
+            .control_payouts
+            .iter()
+            .try_fold(0u128, |total, payout| total.checked_add(*payout))
+        else {
+            return false;
+        };
+        let Some(replay_total) = self
+            .replay_payouts
+            .iter()
+            .try_fold(0u128, |total, payout| total.checked_add(*payout))
+        else {
+            return false;
+        };
+        self.stale_control_landed
+            && self.replay_victim_loss != 0
+            && (self.replay_counterparty_gain != 0 || self.replay_burn_increase != 0)
+            && self.replay_terminal_evidence.certifies_exact_loss(
+                self.replay_victim_loss,
+                self.replay_counterparty_gain,
+                self.replay_burn_increase,
+                control_total,
+                replay_total,
+            )
+    }
+
+    pub fn certifies_terminal_supersession(&self) -> bool {
+        let Some(control_total) = self
+            .control_payouts
+            .iter()
+            .try_fold(0u128, |total, payout| total.checked_add(*payout))
+        else {
+            return false;
+        };
+        let Some(replay_total) = self
+            .replay_payouts
+            .iter()
+            .try_fold(0u128, |total, payout| total.checked_add(*payout))
+        else {
+            return false;
+        };
+        let Some(mutation_total) = self
+            .mutation_payouts
+            .iter()
+            .try_fold(0u128, |total, payout| total.checked_add(*payout))
+        else {
+            return false;
+        };
+        !self.is_violation()
+            && !self.stale_control_landed
+            && self.stale_control_rejected_exact_rollback
+            && self.control_mark == self.replay_mark
+            && self.control_payouts == self.replay_payouts
+            && self.replay_victim_loss == 0
+            && self.replay_counterparty_gain == 0
+            && self.replay_burn_increase == 0
+            && self
+                .replay_terminal_evidence
+                .certifies_bounded_exit(control_total, replay_total)
+            && self.mutation_victim_loss != 0
+            && (self.mutation_counterparty_gain != 0 || self.mutation_burn_increase != 0)
+            && self.mutation_terminal_evidence.certifies_exact_loss(
+                self.mutation_victim_loss,
+                self.mutation_counterparty_gain,
+                self.mutation_burn_increase,
+                control_total,
+                mutation_total,
+            )
     }
 }
 
@@ -7647,7 +7881,7 @@ fn prepare_superseded_intent(
             let (retained_mark, committed_mark) =
                 payload_order.ordered(INITIAL_PRICE * 9 / 10, INITIAL_PRICE * 11 / 10);
             env.set_clock(1, 100);
-            let feed = env.set_pyth_price(&FEED_ID, retained_mark as i64, 0, 0, 100);
+            let feed = env.set_pyth_price(&FEED_ID, retained_mark as i64, -6, 0, 100);
             let retained = env.build_retained_hybrid_oracle_config(
                 0,
                 1,
@@ -7660,7 +7894,7 @@ fn prepare_superseded_intent(
             );
             env.configure_auth_mark(false, 0, 1, committed_mark)
                 .map_err(|error| format!("install newer cross-mode configuration: {error}"))?;
-            let fresh_feed = env.set_pyth_price(&FRESH_FEED_ID, INITIAL_PRICE as i64, 0, 1, 100);
+            let fresh_feed = env.set_pyth_price(&FRESH_FEED_ID, retained_mark as i64, -6, 1, 100);
             let fresh = env.build_retained_hybrid_oracle_config(
                 0,
                 1,
@@ -8455,6 +8689,395 @@ pub fn discover_liquidation_share_supersession(
         replay,
         mutation,
     ))
+}
+
+#[derive(Clone, Debug)]
+struct OracleSupersessionTerminalWorld {
+    control_landed: bool,
+    control_rejected_exact_rollback: bool,
+    terminal_mark: u64,
+    payouts: [u128; 3],
+    payout_destinations: [Pubkey; 2],
+    public_trace: PublicTraceEvidence,
+}
+
+fn oracle_terminal_payout_delta(
+    context: &str,
+    control: &OracleSupersessionTerminalWorld,
+    observed: &OracleSupersessionTerminalWorld,
+) -> Result<(u128, u128, u128, u128, u128), String> {
+    if control.payout_destinations != observed.payout_destinations {
+        return Err(format!(
+            "{context} paired worlds used different payout accounts"
+        ));
+    }
+    let control_total = control.payouts.iter().try_fold(0u128, |total, payout| {
+        total
+            .checked_add(*payout)
+            .ok_or_else(|| format!("{context} control payout overflow"))
+    })?;
+    let observed_total = observed.payouts.iter().try_fold(0u128, |total, payout| {
+        total
+            .checked_add(*payout)
+            .ok_or_else(|| format!("{context} observed payout overflow"))
+    })?;
+    let mut victim_loss = 0u128;
+    let mut beneficiary_gain = 0u128;
+    for index in 0..2 {
+        if control.payouts[index] > observed.payouts[index] {
+            victim_loss = victim_loss
+                .checked_add(control.payouts[index] - observed.payouts[index])
+                .ok_or_else(|| format!("{context} victim loss overflow"))?;
+        } else if observed.payouts[index] > control.payouts[index] {
+            beneficiary_gain = beneficiary_gain
+                .checked_add(observed.payouts[index] - control.payouts[index])
+                .ok_or_else(|| format!("{context} beneficiary gain overflow"))?;
+        }
+    }
+    let burn_increase = observed.payouts[2].saturating_sub(control.payouts[2]);
+    Ok((
+        victim_loss,
+        beneficiary_gain,
+        burn_increase,
+        control_total,
+        observed_total,
+    ))
+}
+
+fn build_oracle_terminal_delta_evidence(
+    context: &str,
+    control: &OracleSupersessionTerminalWorld,
+    observed: &OracleSupersessionTerminalWorld,
+    victim_loss: u128,
+    beneficiary_gain: u128,
+    burn_increase: u128,
+    control_total: u128,
+    observed_total: u128,
+) -> Result<OracleTerminalDeltaEvidence, String> {
+    let exact_loss = victim_loss != 0 && (beneficiary_gain != 0 || burn_increase != 0);
+    let terminal_classification = observed
+        .public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: if exact_loss { victim_loss } else { 0 },
+            unauthorized_gain_atoms: if exact_loss { beneficiary_gain } else { 0 },
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: !exact_loss,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("{context} terminal classification failed: {error}"))?;
+    let evidence = OracleTerminalDeltaEvidence {
+        payout_destinations: control.payout_destinations,
+        control_terminal_values: control.payouts,
+        observed_terminal_values: observed.payouts,
+        users_terminal: true,
+        terminal_classification,
+        control_public_trace: control.public_trace.clone(),
+        public_trace: observed.public_trace.clone(),
+    };
+    let certified = if exact_loss {
+        evidence.certifies_exact_loss(
+            victim_loss,
+            beneficiary_gain,
+            burn_increase,
+            control_total,
+            observed_total,
+        )
+    } else {
+        evidence.certifies_bounded_exit(control_total, observed_total)
+    };
+    if !certified {
+        return Err(format!(
+            "{context} terminal payouts and burned supply do not reconcile"
+        ));
+    }
+    Ok(evidence)
+}
+
+fn run_oracle_supersession_terminal_world(
+    mut seed: [u8; 32],
+    kind: SupersededIntentKind,
+    control_attempt: SupersededMutationAttempt,
+) -> Result<OracleSupersessionTerminalWorld, String> {
+    const LONG: usize = 0;
+    const SHORT: usize = 1;
+    const DEPOSIT: u128 = 2_000_000;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+
+    if !SupersededIntentKind::ORACLE_TERMINAL_CANDIDATES.contains(&kind) {
+        return Err(format!("{kind:?} is not an oracle supersession candidate"));
+    }
+    seed[0] ^= 0x59;
+    seed[1] ^= kind.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: INITIAL_PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 0, 0, 0],
+            actor_token_balances: [3_000_000, 3_000_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.begin_public_trace();
+    let ((retained, fresh), position_already_open) = match kind {
+        SupersededIntentKind::PushAuthMark => {
+            let (retained_mark, committed_mark) = SupersessionPayloadOrder::RetainedLower
+                .ordered(INITIAL_PRICE * 9 / 10, INITIAL_PRICE * 11 / 10);
+            let initial_slot = env.current_slot();
+            env.configure_auth_mark(false, 0, initial_slot, INITIAL_PRICE)
+                .map_err(|error| format!("configure terminal AuthMark: {error}"))?;
+            let retained = env.build_retained_auth_mark(0, retained_mark);
+            env.trade_no_cpi(LONG, SHORT, 0, SIZE_Q, INITIAL_PRICE, 0)
+                .map_err(|error| format!("open pre-existing AuthMark exposure: {error}"))?;
+            let mark_slot = initial_slot
+                .checked_add(1)
+                .ok_or_else(|| "AuthMark terminal supersession slot overflow".to_string())?;
+            env.warp_to_slot(mark_slot);
+            env.push_auth_mark(0, mark_slot, committed_mark)
+                .map_err(|error| format!("install newer authenticated mark: {error}"))?;
+            let fresh = env.build_retained_auth_mark(0, retained_mark);
+            ((retained, fresh), true)
+        }
+        SupersededIntentKind::PushEwmaMark => {
+            let (retained_mark, committed_mark) = SupersessionPayloadOrder::RetainedLower
+                .ordered(INITIAL_PRICE * 9 / 10, INITIAL_PRICE * 11 / 10);
+            let initial_slot = env.current_slot();
+            env.configure_ewma_mark(0, initial_slot, INITIAL_PRICE, 1, 0)
+                .map_err(|error| format!("configure terminal EWMA mark: {error}"))?;
+            let retained = env.build_retained_ewma_mark(0, retained_mark);
+            env.trade_no_cpi(LONG, SHORT, 0, SIZE_Q, INITIAL_PRICE, 0)
+                .map_err(|error| format!("open pre-existing EWMA exposure: {error}"))?;
+            let mark_slot = initial_slot
+                .checked_add(1)
+                .ok_or_else(|| "EWMA terminal supersession slot overflow".to_string())?;
+            env.warp_to_slot(mark_slot);
+            env.push_ewma_mark(0, mark_slot, committed_mark)
+                .map_err(|error| format!("install newer EWMA observation: {error}"))?;
+            let fresh_slot = mark_slot
+                .checked_add(1)
+                .ok_or_else(|| "fresh EWMA terminal supersession slot overflow".to_string())?;
+            env.warp_to_slot(fresh_slot);
+            let fresh = env.build_retained_ewma_mark(0, retained_mark);
+            ((retained, fresh), true)
+        }
+        _ => (
+            prepare_superseded_intent(&mut env, kind, SupersessionPayloadOrder::RetainedLower)?,
+            false,
+        ),
+    };
+    let fresh_oracle_accounts = fresh
+        .message
+        .account_keys
+        .iter()
+        .copied()
+        .filter(|key| {
+            env.svm.get_account(key).is_some_and(|account| {
+                account.owner == percolator_prog::oracle_v16::PYTH_RECEIVER_PROGRAM_ID
+            })
+        })
+        .collect::<Vec<_>>();
+    let (control_landed, control_rejected_exact_rollback) = match control_attempt {
+        SupersededMutationAttempt::None => (false, true),
+        SupersededMutationAttempt::RetainedStale => {
+            let before = fingerprint(&env);
+            match env.land_retained(retained) {
+                Ok(_) => (true, false),
+                Err(_) => (false, fingerprint(&env) == before),
+            }
+        }
+        SupersededMutationAttempt::FreshEquivalent => {
+            env.land_retained(fresh)
+                .map_err(|error| format!("{kind:?} fresh terminal mutation rejected: {error}"))?;
+            (true, false)
+        }
+    };
+    let oracle_accounts = env.primary_profile(0).oracle_leg_count;
+    let crank_oracles = if oracle_accounts == 0 {
+        &[][..]
+    } else {
+        fresh_oracle_accounts.as_slice()
+    };
+    let crank_slot = env
+        .current_slot()
+        .checked_add(1)
+        .ok_or_else(|| format!("{kind:?} oracle supersession slot overflow"))?;
+    env.warp_to_slot(crank_slot);
+    env.crank_with_oracles_if_actionable(
+        LONG,
+        crank_slot,
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts,
+        }],
+        crank_oracles,
+    )
+    .map_err(|error| format!("{kind:?} settle oracle control before trade: {error}"))?;
+    if !position_already_open {
+        env.trade_no_cpi(LONG, SHORT, 0, SIZE_Q, INITIAL_PRICE, 0)
+            .map_err(|error| {
+                format!("{kind:?}/{control_attempt:?} open terminal supersession pair: {error}")
+            })?;
+
+        let common_mark_slot = env
+            .current_slot()
+            .checked_add(1)
+            .ok_or_else(|| format!("{kind:?} common terminal mark slot overflow"))?;
+        env.warp_to_slot(common_mark_slot);
+        let common_oracles = match kind {
+            SupersededIntentKind::ConfigureAuthMark => {
+                env.push_auth_mark(0, common_mark_slot, INITIAL_PRICE)
+                    .map_err(|error| format!("push common AuthMark target: {error}"))?;
+                Vec::new()
+            }
+            SupersededIntentKind::ConfigureEwmaMark => {
+                env.push_ewma_mark(0, common_mark_slot, INITIAL_PRICE)
+                    .map_err(|error| format!("push common EWMA target: {error}"))?;
+                Vec::new()
+            }
+            SupersededIntentKind::ConfigureHybridOracle => {
+                if env.primary_profile(0).oracle_leg_count == 0 {
+                    env.push_auth_mark(0, common_mark_slot, INITIAL_PRICE)
+                        .map_err(|error| {
+                            format!("push common cross-mode AuthMark target: {error}")
+                        })?;
+                    Vec::new()
+                } else {
+                    const FRESH_FEED_ID: [u8; 32] = [0x42; 32];
+                    env.set_clock(common_mark_slot, 101);
+                    vec![env.set_pyth_price(&FRESH_FEED_ID, INITIAL_PRICE as i64, -6, 1, 101)]
+                }
+            }
+            _ => unreachable!("pre-existing push exposure was handled above"),
+        };
+        let common_oracle_count = env.primary_profile(0).oracle_leg_count;
+        env.crank_with_oracles_if_actionable(
+            LONG,
+            common_mark_slot,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: common_oracle_count,
+            }],
+            &common_oracles,
+        )
+        .map_err(|error| format!("{kind:?} settle common terminal mark: {error}"))?;
+    }
+    let terminal_mark = env.primary_market_state().1.assets[0].effective_price;
+    env.resolve_market()
+        .map_err(|error| format!("{kind:?} resolve supersession world: {error}"))?;
+    let all_payouts = drain_resolved_discovery_actors(&mut env, [0, 1, 2, 3, 4])
+        .map_err(|error| format!("{kind:?} drain supersession users: {error}"))?;
+    for actor in 0..5 {
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("{kind:?} close terminal portfolio {actor}: {error}"))?;
+    }
+    env.close_primary_slab()
+        .map_err(|error| format!("{kind:?} close terminal slab: {error}"))?;
+    let supply_after = env.token_supply_observed();
+    let burned = supply_before
+        .checked_sub(supply_after)
+        .ok_or_else(|| format!("{kind:?} terminal route increased SPL supply"))?;
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("{kind:?} supersession trace is invalid: {error}"))?;
+    Ok(OracleSupersessionTerminalWorld {
+        control_landed,
+        control_rejected_exact_rollback,
+        terminal_mark,
+        payouts: [all_payouts[LONG], all_payouts[SHORT], burned],
+        payout_destinations: [
+            env.actors[LONG].destination_token,
+            env.actors[SHORT].destination_token,
+        ],
+        public_trace,
+    })
+}
+
+pub fn discover_oracle_supersession_terminal_losses(
+    seed: [u8; 32],
+) -> Result<Vec<OracleSupersessionTerminalDiscovery>, String> {
+    let mut discoveries =
+        Vec::with_capacity(SupersededIntentKind::ORACLE_TERMINAL_CANDIDATES.len());
+    for kind in SupersededIntentKind::ORACLE_TERMINAL_CANDIDATES {
+        let control =
+            run_oracle_supersession_terminal_world(seed, kind, SupersededMutationAttempt::None)?;
+        let replay = run_oracle_supersession_terminal_world(
+            seed,
+            kind,
+            SupersededMutationAttempt::RetainedStale,
+        )?;
+        let mutation = run_oracle_supersession_terminal_world(
+            seed,
+            kind,
+            SupersededMutationAttempt::FreshEquivalent,
+        )?;
+        let (
+            replay_victim_loss,
+            replay_counterparty_gain,
+            replay_burn_increase,
+            control_total,
+            replay_total,
+        ) = oracle_terminal_payout_delta(&format!("{kind:?} retained replay"), &control, &replay)?;
+        let (
+            mutation_victim_loss,
+            mutation_counterparty_gain,
+            mutation_burn_increase,
+            mutation_control_total,
+            mutation_total,
+        ) = oracle_terminal_payout_delta(&format!("{kind:?} fresh mutation"), &control, &mutation)?;
+        if mutation_control_total != control_total {
+            return Err(format!(
+                "{kind:?} control payout total changed across pairs"
+            ));
+        }
+        let replay_terminal_evidence = build_oracle_terminal_delta_evidence(
+            &format!("{kind:?} retained oracle supersession"),
+            &control,
+            &replay,
+            replay_victim_loss,
+            replay_counterparty_gain,
+            replay_burn_increase,
+            control_total,
+            replay_total,
+        )?;
+        let mutation_terminal_evidence = build_oracle_terminal_delta_evidence(
+            &format!("{kind:?} fresh oracle supersession witness"),
+            &control,
+            &mutation,
+            mutation_victim_loss,
+            mutation_counterparty_gain,
+            mutation_burn_increase,
+            control_total,
+            mutation_total,
+        )?;
+        discoveries.push(OracleSupersessionTerminalDiscovery {
+            kind,
+            stale_control_landed: replay.control_landed,
+            stale_control_rejected_exact_rollback: replay.control_rejected_exact_rollback,
+            control_mark: control.terminal_mark,
+            replay_mark: replay.terminal_mark,
+            mutation_mark: mutation.terminal_mark,
+            control_payouts: control.payouts,
+            replay_payouts: replay.payouts,
+            mutation_payouts: mutation.payouts,
+            replay_victim_loss,
+            replay_counterparty_gain,
+            replay_burn_increase,
+            mutation_victim_loss,
+            mutation_counterparty_gain,
+            mutation_burn_increase,
+            replay_terminal_evidence,
+            mutation_terminal_evidence,
+        });
+    }
+    Ok(discoveries)
 }
 
 fn fee_consent_victim_actors(kind: FeeConsentKind) -> &'static [usize] {

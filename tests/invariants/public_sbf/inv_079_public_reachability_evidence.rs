@@ -239,7 +239,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 54,
+        consumers, 55,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
@@ -309,6 +309,7 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
             "FeeConsentDiscovery",
             "FractionalMovementDiscovery",
             "MatcherRevocationTerminalDiscovery",
+            "OracleSupersessionTerminalDiscovery",
             "PendingMarkAdmissionDiscovery",
             "PendingMarkInheritanceDiscovery",
             "PendingZeroMoveTerminalDiscovery",
@@ -369,7 +370,7 @@ fn v16_finding_blind_violation_oracle_evidence_roster_is_source_complete() {
     assert!(cohort_body.contains("classify_terminal"));
     assert!(cohort_body.contains("certifies_exact_loss"));
     assert!(cohort_body.contains("certifies_nonextraction"));
-    assert_eq!(roster.len(), 30, "finding-blind oracle inventory changed");
+    assert_eq!(roster.len(), 31, "finding-blind oracle inventory changed");
 }
 
 #[test]
@@ -569,22 +570,20 @@ fn v16_superseded_control_terminal_dispositions_are_source_complete() {
             .iter()
             .filter_map(|(kind, disposition)| (*disposition == "TERMINAL_LOF").then_some(*kind))
             .collect::<Vec<_>>(),
-        ["MatcherConfig"]
-    );
-    assert_eq!(
-        dispositions
-            .iter()
-            .filter_map(|(kind, disposition)| {
-                (*disposition == "TERMINAL_VALUE_CANDIDATE").then_some(*kind)
-            })
-            .collect::<Vec<_>>(),
         [
             "ConfigureAuthMark",
             "ConfigureEwmaMark",
             "ConfigureHybridOracle",
+            "MatcherConfig",
             "PushAuthMark",
             "PushEwmaMark",
         ]
+    );
+    assert!(
+        dispositions
+            .values()
+            .all(|disposition| *disposition != "TERMINAL_VALUE_CANDIDATE"),
+        "every terminal-value supersession candidate must have exact terminal evidence"
     );
     assert_eq!(
         dispositions

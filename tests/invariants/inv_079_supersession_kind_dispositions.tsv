@@ -1,10 +1,10 @@
 # superseded_kind	disposition	terminal_oracle	rationale
 MatcherConfig	TERMINAL_LOF	MatcherRevocationTerminalDiscovery	stale re-enablement can authorize an unsigned matcher CPI fill; the paired public world binds exact LP terminal loss and attacker gain
-PushAuthMark	TERMINAL_VALUE_CANDIDATE	-	a stale authenticated mark can change settlement value; exact paired terminal evidence for this sequence family remains to be added
-ConfigureAuthMark	TERMINAL_VALUE_CANDIDATE	-	a stale AuthMark configuration can replace both mode and price state; exact paired terminal evidence remains to be added
-PushEwmaMark	TERMINAL_VALUE_CANDIDATE	-	a stale EWMA observation can change settlement value; exact paired terminal evidence remains to be added
-ConfigureEwmaMark	TERMINAL_VALUE_CANDIDATE	-	a stale EWMA configuration can replace price and movement policy; exact paired terminal evidence remains to be added
-ConfigureHybridOracle	TERMINAL_VALUE_CANDIDATE	-	a stale Hybrid configuration can replace feed identity and fallback policy; exact paired terminal evidence remains to be added
+PushAuthMark	TERMINAL_LOF	OracleSupersessionTerminalDiscovery	paired public long/short worlds bind stale authenticated-mark acceptance to exact terminal victim loss offset by counterparty gain and/or terminal supply burn
+ConfigureAuthMark	TERMINAL_LOF	OracleSupersessionTerminalDiscovery	paired public long/short worlds bind stale AuthMark configuration acceptance to exact terminal victim loss offset by counterparty gain and/or terminal supply burn
+PushEwmaMark	TERMINAL_LOF	OracleSupersessionTerminalDiscovery	paired public long/short worlds bind stale EWMA observation acceptance to exact terminal victim loss offset by counterparty gain and/or terminal supply burn
+ConfigureEwmaMark	TERMINAL_LOF	OracleSupersessionTerminalDiscovery	paired public long/short worlds bind stale EWMA configuration acceptance to exact terminal victim loss offset by counterparty gain and/or terminal supply burn
+ConfigureHybridOracle	TERMINAL_LOF	OracleSupersessionTerminalDiscovery	paired public long/short worlds bind stale Hybrid configuration acceptance to exact terminal victim loss offset by counterparty gain and/or terminal supply burn
 TradeFeePolicy	SIGNED_ECONOMIC_BOUND	-	every charged trade fee remains bounded by the affected signers' retained fee consent; sequence rejection is still required for policy integrity
 FeeRedirectPolicy	ATTRIBUTION_CANDIDATE	-	the policy redistributes already charged fees between insurance domains; downstream domain-loss impact is not yet terminally quantified
 LiquidationFeePolicy	ATTRIBUTION_ONLY	FeeShareSupersessionDiscovery	the share cannot change the victim's liquidation fee; three public terminal worlds prove stale rejection, exact victim payout, and a nonvacuous inverse cranker/insurance allocation change

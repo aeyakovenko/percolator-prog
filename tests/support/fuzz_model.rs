@@ -3347,7 +3347,6 @@ impl ScenarioRunner {
                     .token_amount(self.env.actors[actor].destination_token);
                 match self.env.withdraw_primary(actor, amount) {
                     Ok(success) => {
-                        self.coverage.withdrawals += 1;
                         self.coverage.observe_success(None, &success);
                         self.assert_portfolio_frame(&before, &[actor])?;
                         let capital_after = self.env.primary_portfolio(actor).capital.get();
@@ -3364,18 +3363,26 @@ impl ScenarioRunner {
                         let capital_debit = capital_before
                             .checked_sub(capital_after)
                             .ok_or("withdrawal increased owner capital")?;
-                        if payout == 0
-                            || payout > amount
-                            || capital_debit
-                                != payout
+                        let vault_after = u128::from(self.env.token_amount(self.env.vault));
+                        let valid_zero_withdrawal = amount == 0
+                            && payout == 0
+                            && capital_debit == maintenance
+                            && vault_after == before_vault;
+                        let valid_value_withdrawal = amount != 0
+                            && payout != 0
+                            && payout <= amount
+                            && capital_debit
+                                == payout
                                     .checked_add(maintenance)
                                     .ok_or("withdrawal payout plus maintenance overflowed")?
-                            || u128::from(self.env.token_amount(self.env.vault)).checked_add(payout)
-                                != Some(before_vault)
-                        {
+                            && vault_after.checked_add(payout) == Some(before_vault);
+                        if !valid_zero_withdrawal && !valid_value_withdrawal {
                             return Err(
                                 "withdrawal debit/credit did not match owner authorization".into(),
                             );
+                        }
+                        if payout != 0 || maintenance != 0 {
+                            self.coverage.withdrawals += 1;
                         }
                         self.assert_token_frame(
                             &before,

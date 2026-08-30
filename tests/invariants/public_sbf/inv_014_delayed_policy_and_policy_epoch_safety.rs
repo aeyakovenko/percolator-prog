@@ -203,3 +203,37 @@ fn v16_program_liquidation_share_supersession_changes_attribution_not_victim_val
         "liquidation share changed fee or victim terminal value: {discovery:?}"
     );
 }
+
+#[test]
+fn v16_program_oracle_supersession_is_bound_to_terminal_value() {
+    let discoveries = discover_oracle_supersession_terminal_losses([0x38; 32])
+        .unwrap_or_else(|error| panic!("oracle-supersession terminal matrix failed: {error}"));
+    assert_eq!(
+        discoveries.len(),
+        SupersededIntentKind::ORACLE_TERMINAL_CANDIDATES.len()
+    );
+    for (expected, discovery) in SupersededIntentKind::ORACLE_TERMINAL_CANDIDATES
+        .into_iter()
+        .zip(&discoveries)
+    {
+        assert_eq!(discovery.kind, expected);
+        assert!(
+            discovery.certifies_terminal_supersession(),
+            "{expected:?} terminal supersession evidence failed: landed={}, rollback={}, marks={}/{}/{}, payouts={:?}/{:?}/{:?}, replay delta={}/{}/{}, mutation delta={}/{}/{}",
+            discovery.stale_control_landed,
+            discovery.stale_control_rejected_exact_rollback,
+            discovery.control_mark,
+            discovery.replay_mark,
+            discovery.mutation_mark,
+            discovery.control_payouts,
+            discovery.replay_payouts,
+            discovery.mutation_payouts,
+            discovery.replay_victim_loss,
+            discovery.replay_counterparty_gain,
+            discovery.replay_burn_increase,
+            discovery.mutation_victim_loss,
+            discovery.mutation_counterparty_gain,
+            discovery.mutation_burn_increase,
+        );
+    }
+}

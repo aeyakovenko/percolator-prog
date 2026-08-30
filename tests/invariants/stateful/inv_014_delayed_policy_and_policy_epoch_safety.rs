@@ -72,6 +72,39 @@ proptest! {
         max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
         failure_persistence: Some(Box::new(
             proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_014_oracle_supersession_terminal.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_oracle_supersession_retains_terminal_value(seed in any::<[u8; 32]>()) {
+        let discoveries = discover_oracle_supersession_terminal_losses(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(
+            discoveries.len(),
+            SupersededIntentKind::ORACLE_TERMINAL_CANDIDATES.len()
+        );
+        for (expected, discovery) in SupersededIntentKind::ORACLE_TERMINAL_CANDIDATES
+            .into_iter()
+            .zip(&discoveries)
+        {
+            prop_assert_eq!(discovery.kind, expected);
+            prop_assert!(
+                discovery.certifies_terminal_supersession(),
+                "{expected:?} terminal supersession evidence failed: {discovery:?}"
+            );
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
                 "proptest-regressions/inv_014_liquidation_share_terminal.txt",
             ),
         )),

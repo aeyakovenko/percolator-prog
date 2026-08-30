@@ -16,6 +16,7 @@ IntentReplayDiscovery	REPLAY_ONLY	duplicate economic mutation is not itself quan
 MarketIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
 MarkMovementReserveDiscovery	LOCAL_SAFETY_ONLY	public terminal evidence proves nonextraction, but rollback and reserve-admission failures are not themselves terminal LoF
 MatcherRevocationTerminalDiscovery	TERMINAL_LOF	paired public traces revoke matcher consent, attempt the retained grant and unsigned CPI fill, then resolve both users; exact LP loss and attacker gain are classifier-bound
+OracleSupersessionTerminalDiscovery	TERMINAL_LOF	paired public long/short traces cover all five retained oracle controls and bind stale acceptance to exact settlement loss and counterparty gain
 PendingMarkAdmissionDiscovery	TERMINAL_LOF	paired public worlds bind any stale-price risk admission to exact attacker payout gain and victim terminal loss; guard and liveness checks remain separate certification conditions
 PendingMarkInheritanceDiscovery	TERMINAL_LOF	paired public worlds bind any retained pre-target fill to exact attacker payout gain and victim terminal loss across all four trade encodings
 PendingTargetOverrideDiscovery	LOCAL_SAFETY_ONLY	paired public terminal evidence binds any payout extraction, while target and rollback failures remain local safety claims

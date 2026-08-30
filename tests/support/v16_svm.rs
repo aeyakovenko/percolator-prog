@@ -166,6 +166,7 @@ pub struct PublicTraceStep {
     pub rejected_exact_writable_rollback: Option<bool>,
     pub rejected_no_program_lamport_delta: Option<bool>,
     pub token_deltas: Vec<(Pubkey, i128)>,
+    pub mint_supply_deltas: Vec<(Pubkey, i128)>,
     pub token_authorities: Vec<(Pubkey, Pubkey)>,
     pub lamport_deltas: Vec<(Pubkey, i128)>,
 }
@@ -286,6 +287,11 @@ impl PublicTraceEvidence {
                         "rejected trace step {index} changed an SPL token balance"
                     ));
                 }
+                if step.mint_supply_deltas.iter().any(|(_, delta)| *delta != 0) {
+                    return Err(format!(
+                        "rejected trace step {index} changed an SPL mint supply"
+                    ));
+                }
             }
         }
         Ok(())
@@ -313,10 +319,28 @@ impl PublicTraceEvidence {
                 changed.push(*key);
             }
         }
-        if net_delta != 0 {
+        let mint_supply_delta = step
+            .mint_supply_deltas
+            .iter()
+            .try_fold(0i128, |total, (_, delta)| total.checked_add(*delta))
+            .ok_or_else(|| format!("wrapper trace step {index} mint delta sum overflowed"))?;
+        if net_delta != mint_supply_delta {
             return Err(format!(
-                "wrapper trace step {index} created or destroyed {net_delta} tracked quote atoms"
+                "wrapper trace step {index} token delta {net_delta} does not match mint supply \
+                 delta {mint_supply_delta}"
             ));
+        }
+        for (mint, delta) in &step.mint_supply_deltas {
+            if *delta != 0
+                && !step
+                    .accounts
+                    .iter()
+                    .any(|meta| meta.key == *mint && meta.is_writable)
+            {
+                return Err(format!(
+                    "wrapper trace step {index} changed non-writable SPL mint {mint}"
+                ));
+            }
         }
         if step.token_authorities.len() != changed.len() {
             return Err(format!(
@@ -509,6 +533,7 @@ struct PendingPublicTraceStep {
     accounts: Vec<PublicTraceAccountMeta>,
     writable_before: Vec<(Pubkey, Option<TraceAccountState>)>,
     token_accounts_before: Vec<TraceTokenAccount>,
+    mint_supplies_before: Vec<(Pubkey, u64)>,
     lamports_before: Vec<(Pubkey, u64)>,
 }
 
@@ -5191,6 +5216,20 @@ impl V16Svm {
             .checked_sub(message.header.num_readonly_unsigned_accounts as usize)
             .expect("message unsigned-account header");
         let transaction_signers = message.account_keys[..required_signers].to_vec();
+        let mint_supplies_before = message
+            .account_keys
+            .iter()
+            .filter_map(|key| {
+                let account = self.svm.get_account(key)?;
+                (account.owner == spl_token::ID)
+                    .then(|| {
+                        Mint::unpack(&account.data)
+                            .ok()
+                            .map(|mint| (*key, mint.supply))
+                    })
+                    .flatten()
+            })
+            .collect();
         let accounts: Vec<_> = instruction
             .accounts
             .iter()
@@ -5242,6 +5281,7 @@ impl V16Svm {
             accounts,
             writable_before,
             token_accounts_before: self.trace_token_accounts(),
+            mint_supplies_before,
             lamports_before,
         })
     }
@@ -5295,6 +5335,18 @@ impl V16Svm {
             })
             .map(|account| (account.key, account.authority))
             .collect();
+        let mint_supply_deltas = pending
+            .mint_supplies_before
+            .iter()
+            .map(|(key, before)| {
+                let after = self
+                    .svm
+                    .get_account(key)
+                    .and_then(|account| Mint::unpack(&account.data).ok())
+                    .map_or(0, |mint| mint.supply);
+                (*key, i128::from(after) - i128::from(*before))
+            })
+            .collect();
         let lamport_deltas = pending
             .lamports_before
             .iter()
@@ -5330,6 +5382,7 @@ impl V16Svm {
             rejected_exact_writable_rollback,
             rejected_no_program_lamport_delta,
             token_deltas,
+            mint_supply_deltas,
             token_authorities,
             lamport_deltas,
         });
