@@ -72,6 +72,31 @@ proptest! {
         max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
         failure_persistence: Some(Box::new(
             proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_014_fee_redirect_terminal.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_fee_redirect_supersession_preserves_terminal_domain_value(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_fee_redirect_supersession(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(
+            discovery.certifies_terminal_supersession(),
+            "stale fee redirect changed terminal domain value: {discovery:?}"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
                 "proptest-regressions/inv_014_oracle_supersession_terminal.txt",
             ),
         )),

@@ -9,6 +9,7 @@ BilateralMarkFeeDiscovery	TERMINAL_LOF	all six portfolios resolve through public
 CompositeRoundingDiscovery	TERMINAL_LOF	all five portfolios resolve through public payout rails; exact destination-token traces bind any rounded-composite liquidation loss and cranker gain to the terminal classifier
 DebitedIntentReplayDiscovery	TERMINAL_LOF	permissionless activation retries bind any accepted duplicate to a nonrecoverable exact payer SPL debit and matching canonical-vault credit; insurance top-up remains a recoverable consent/atomicity check
 FeeConsentDiscovery	TERMINAL_LOF	all eight signed fee families resolve every funded actor through public payout rails; exact affected-signer value loss and caller-fee beneficiary gain are bound to the terminal classifier
+FeeRedirectSupersessionDiscovery	TERMINAL_LOF	paired public traces flatten every position, withdraw every portfolio, and close the slab; stale acceptance binds the asset operator's exact SPL gain to the protected-domain terminal-value reduction
 FractionalMovementDiscovery	TERMINAL_LOF	public trace binds a stalled target's exact short underpayment to long overpayment while stale resolution proves it is not persistent DoS
 FundedRoleDiscovery	PRIVILEGED_TRANSFER	exact principal transfer requires the currently authorized asset admin to rotate the funded role
 IncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS

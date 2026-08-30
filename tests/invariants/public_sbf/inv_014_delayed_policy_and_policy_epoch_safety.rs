@@ -205,6 +205,16 @@ fn v16_program_liquidation_share_supersession_changes_attribution_not_victim_val
 }
 
 #[test]
+fn v16_program_fee_redirect_supersession_preserves_terminal_domain_value() {
+    let discovery = discover_fee_redirect_supersession([0x39; 32])
+        .unwrap_or_else(|error| panic!("fee-redirect terminal world failed: {error}"));
+    assert!(
+        discovery.certifies_terminal_supersession(),
+        "stale fee redirect changed terminal domain value: {discovery:?}"
+    );
+}
+
+#[test]
 fn v16_program_oracle_supersession_is_bound_to_terminal_value() {
     let discoveries = discover_oracle_supersession_terminal_losses([0x38; 32])
         .unwrap_or_else(|error| panic!("oracle-supersession terminal matrix failed: {error}"));

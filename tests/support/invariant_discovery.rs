@@ -3355,6 +3355,27 @@ pub struct FeeShareSupersessionDiscovery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeeRedirectSupersessionDiscovery {
+    pub stale_policy_landed: bool,
+    pub stale_policy_rejected_exact_rollback: bool,
+    pub control_protected_credit: u128,
+    pub replay_protected_credit: u128,
+    pub mutation_protected_credit: u128,
+    pub control_operator_credit: u128,
+    pub replay_operator_credit: u128,
+    pub mutation_operator_credit: u128,
+    pub control_terminal_values: [u128; 7],
+    pub replay_terminal_values: [u128; 7],
+    pub mutation_terminal_values: [u128; 7],
+    pub control_terminal_classification: PublicTerminalClassification,
+    pub replay_terminal_classification: PublicTerminalClassification,
+    pub mutation_terminal_classification: PublicTerminalClassification,
+    pub control_public_trace: PublicTraceEvidence,
+    pub replay_public_trace: PublicTraceEvidence,
+    pub mutation_public_trace: PublicTraceEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OracleSupersessionTerminalDiscovery {
     pub kind: SupersededIntentKind,
     pub stale_control_landed: bool,
@@ -3476,6 +3497,106 @@ impl FeeShareSupersessionDiscovery {
             && matches!(
                 self.mutation_classification,
                 PublicTerminalClassification::BoundedExit
+            )
+            && self
+                .control_public_trace
+                .validate_public_execution()
+                .is_ok()
+            && self.replay_public_trace.validate_public_execution().is_ok()
+            && self
+                .mutation_public_trace
+                .validate_public_execution()
+                .is_ok()
+    }
+}
+
+impl FeeRedirectSupersessionDiscovery {
+    fn terminal_delta(control: &[u128; 7], observed: &[u128; 7]) -> Option<(u128, u128)> {
+        let operator_gain = observed[2].checked_sub(control[2])?;
+        let protected_loss = control[5].checked_sub(observed[5])?;
+        Some((protected_loss, operator_gain))
+    }
+
+    fn total(values: &[u128; 7]) -> Option<u128> {
+        values
+            .iter()
+            .try_fold(0u128, |total, value| total.checked_add(*value))
+    }
+
+    pub fn is_violation(&self) -> bool {
+        let Some((protected_loss, operator_gain)) =
+            Self::terminal_delta(&self.control_terminal_values, &self.replay_terminal_values)
+        else {
+            return false;
+        };
+        self.stale_policy_landed
+            && protected_loss != 0
+            && protected_loss == operator_gain
+            && self
+                .control_protected_credit
+                .checked_sub(self.replay_protected_credit)
+                == Some(protected_loss)
+            && self
+                .replay_operator_credit
+                .checked_sub(self.control_operator_credit)
+                == Some(operator_gain)
+            && Self::total(&self.control_terminal_values)
+                == Self::total(&self.replay_terminal_values)
+            && matches!(
+                self.replay_terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == protected_loss
+                    && unauthorized_gain_atoms == operator_gain
+            )
+            && self
+                .control_public_trace
+                .validate_public_execution()
+                .is_ok()
+            && self.replay_public_trace.validate_public_execution().is_ok()
+    }
+
+    pub fn certifies_terminal_supersession(&self) -> bool {
+        let Some((protected_loss, operator_gain)) = Self::terminal_delta(
+            &self.control_terminal_values,
+            &self.mutation_terminal_values,
+        ) else {
+            return false;
+        };
+        !self.is_violation()
+            && !self.stale_policy_landed
+            && self.stale_policy_rejected_exact_rollback
+            && self.control_protected_credit == self.replay_protected_credit
+            && self.control_operator_credit == self.replay_operator_credit
+            && self.control_terminal_values == self.replay_terminal_values
+            && self.control_protected_credit != 0
+            && self.control_operator_credit == 0
+            && self.mutation_protected_credit == 0
+            && self.mutation_operator_credit == self.control_protected_credit
+            && protected_loss == self.control_protected_credit
+            && operator_gain == self.mutation_operator_credit
+            && protected_loss == operator_gain
+            && self.control_terminal_values[0..2] == self.mutation_terminal_values[0..2]
+            && self.control_terminal_values[3..5] == self.mutation_terminal_values[3..5]
+            && self.control_terminal_values[6] == self.mutation_terminal_values[6]
+            && Self::total(&self.control_terminal_values)
+                == Self::total(&self.mutation_terminal_values)
+            && matches!(
+                self.control_terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && matches!(
+                self.replay_terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && matches!(
+                self.mutation_terminal_classification,
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms,
+                    unauthorized_gain_atoms,
+                } if victim_loss_atoms == protected_loss
+                    && unauthorized_gain_atoms == operator_gain
             )
             && self
                 .control_public_trace
@@ -8689,6 +8810,243 @@ pub fn discover_liquidation_share_supersession(
         replay,
         mutation,
     ))
+}
+
+#[derive(Clone, Debug)]
+struct FeeRedirectTerminalWorld {
+    policy_landed: bool,
+    policy_rejected_exact_rollback: bool,
+    protected_credit: u128,
+    operator_credit: u128,
+    terminal_values: [u128; 7],
+    destinations: [Pubkey; 6],
+    public_trace: PublicTraceEvidence,
+}
+
+fn asset_insurance_budget(env: &V16Svm, asset_index: usize) -> Result<u128, String> {
+    let (_, group) = env.primary_market_state();
+    group.insurance_domain_budget[asset_index * 2]
+        .checked_add(group.insurance_domain_budget[asset_index * 2 + 1])
+        .ok_or_else(|| format!("asset {asset_index} insurance budget overflow"))
+}
+
+fn run_fee_redirect_terminal_world(
+    mut seed: [u8; 32],
+    policy_attempt: SupersededMutationAttempt,
+) -> Result<FeeRedirectTerminalWorld, String> {
+    const TRADER_A: usize = 0;
+    const TRADER_B: usize = 1;
+    const OPERATOR: usize = 2;
+    const BASE_ASSET: usize = 0;
+    const TRADED_ASSET: usize = 1;
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 10_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const TRADE_FEE_BPS: u64 = 10_000;
+    const RETAINED_REDIRECT_BPS: u16 = 0;
+    const CURRENT_REDIRECT_BPS: u16 = 10_000;
+
+    seed[0] ^= 0x5a;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_trading_fee_bps: TRADE_FEE_BPS,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            actor_token_balances: [20_000, 20_000, 10, 10, 10],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let destinations = [
+        env.actors[0].destination_token,
+        env.actors[1].destination_token,
+        env.actors[2].destination_token,
+        env.actors[3].destination_token,
+        env.actors[4].destination_token,
+        env.provider_destination_token,
+    ];
+    env.begin_public_trace();
+    env.update_asset_authority_from_admin(
+        TRADED_ASSET as u16,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        OPERATOR,
+    )
+    .map_err(|error| format!("install fee-redirect asset operator: {error}"))?;
+    env.update_trade_fee_policy(TRADE_FEE_BPS)
+        .map_err(|error| format!("install fee-redirect trade fee: {error}"))?;
+    let retained = env.build_retained_fee_redirect_policy(RETAINED_REDIRECT_BPS);
+    env.update_fee_redirect_policy(CURRENT_REDIRECT_BPS)
+        .map_err(|error| format!("install protected fee redirect: {error}"))?;
+    let fresh = env.build_retained_fee_redirect_policy(RETAINED_REDIRECT_BPS);
+    let (policy_landed, policy_rejected_exact_rollback) = match policy_attempt {
+        SupersededMutationAttempt::None => (false, true),
+        SupersededMutationAttempt::RetainedStale => {
+            let before = fingerprint(&env);
+            match env.land_retained(retained) {
+                Ok(_) => (true, false),
+                Err(_) => (false, fingerprint(&env) == before),
+            }
+        }
+        SupersededMutationAttempt::FreshEquivalent => {
+            env.land_retained(fresh)
+                .map_err(|error| format!("install fresh fee-redirect witness: {error}"))?;
+            (true, false)
+        }
+    };
+
+    let protected_before = asset_insurance_budget(&env, BASE_ASSET)?;
+    let operator_before = asset_insurance_budget(&env, TRADED_ASSET)?;
+    env.trade_no_cpi(
+        TRADER_A,
+        TRADER_B,
+        TRADED_ASSET as u16,
+        SIZE_Q,
+        PRICE,
+        TRADE_FEE_BPS,
+    )
+    .map_err(|error| format!("execute fee-redirect charged trade: {error}"))?;
+    let protected_credit = asset_insurance_budget(&env, BASE_ASSET)?
+        .checked_sub(protected_before)
+        .ok_or_else(|| "fee redirect reduced the protected budget".to_string())?;
+    let operator_credit = asset_insurance_budget(&env, TRADED_ASSET)?
+        .checked_sub(operator_before)
+        .ok_or_else(|| "fee redirect reduced the operator budget".to_string())?;
+    if protected_credit.checked_add(operator_credit) != Some(2_000) {
+        return Err(format!(
+            "fee redirect did not account for the exact charged fee: protected={protected_credit}, operator={operator_credit}"
+        ));
+    }
+
+    if operator_credit != 0 {
+        env.withdraw_insurance_asset(OPERATOR, TRADED_ASSET as u16, operator_credit)
+            .map_err(|error| format!("withdraw redirected fee stock: {error}"))?;
+    }
+    if protected_credit != 0 {
+        env.withdraw_insurance_asset_as_admin(BASE_ASSET as u16, protected_credit)
+            .map_err(|error| format!("withdraw protected fee stock: {error}"))?;
+    }
+    env.update_trade_fee_policy(0)
+        .map_err(|error| format!("disable fee before neutral close: {error}"))?;
+    env.trade_no_cpi(TRADER_A, TRADER_B, TRADED_ASSET as u16, -SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("close fee-redirect exposure: {error}"))?;
+
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let capital = env.primary_portfolio(actor).capital.get();
+        env.withdraw_primary(actor, capital)
+            .map_err(|error| format!("withdraw fee-redirect actor {actor}: {error}"))?;
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("close fee-redirect actor {actor}: {error}"))?;
+    }
+    env.resolve_market()
+        .map_err(|error| format!("resolve fee-redirect world: {error}"))?;
+    env.close_primary_slab()
+        .map_err(|error| format!("close fee-redirect slab: {error}"))?;
+    let supply_after = env.token_supply_observed();
+    let burned = supply_before
+        .checked_sub(supply_after)
+        .ok_or_else(|| "fee-redirect terminal route increased SPL supply".to_string())?;
+    let terminal_values = [
+        u128::from(env.token_amount(destinations[0])),
+        u128::from(env.token_amount(destinations[1])),
+        u128::from(env.token_amount(destinations[2])),
+        u128::from(env.token_amount(destinations[3])),
+        u128::from(env.token_amount(destinations[4])),
+        u128::from(env.token_amount(destinations[5])),
+        burned,
+    ];
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("fee-redirect terminal trace is invalid: {error}"))?;
+    for (index, destination) in destinations.iter().enumerate() {
+        let traced = u128::try_from(public_trace.token_delta_for_accounts(&[*destination])?)
+            .map_err(|_| format!("fee-redirect recipient {index} had a negative terminal delta"))?;
+        if traced != terminal_values[index] {
+            return Err(format!(
+                "fee-redirect recipient {index} payout disagrees with trace: {}/{traced}",
+                terminal_values[index]
+            ));
+        }
+    }
+    Ok(FeeRedirectTerminalWorld {
+        policy_landed,
+        policy_rejected_exact_rollback,
+        protected_credit,
+        operator_credit,
+        terminal_values,
+        destinations,
+        public_trace,
+    })
+}
+
+fn classify_fee_redirect_terminal_world(
+    world: &FeeRedirectTerminalWorld,
+    protected_loss: u128,
+    operator_gain: u128,
+) -> Result<PublicTerminalClassification, String> {
+    world
+        .public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: protected_loss,
+            unauthorized_gain_atoms: operator_gain,
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: protected_loss == 0 && operator_gain == 0,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes: 0,
+            attempted_exit_routes: 0,
+            progressing_exit_routes: 0,
+        })
+        .map_err(|error| format!("fee-redirect terminal classification failed: {error}"))
+}
+
+pub fn discover_fee_redirect_supersession(
+    seed: [u8; 32],
+) -> Result<FeeRedirectSupersessionDiscovery, String> {
+    let control = run_fee_redirect_terminal_world(seed, SupersededMutationAttempt::None)?;
+    let replay = run_fee_redirect_terminal_world(seed, SupersededMutationAttempt::RetainedStale)?;
+    let mutation =
+        run_fee_redirect_terminal_world(seed, SupersededMutationAttempt::FreshEquivalent)?;
+    if control.destinations != replay.destinations || control.destinations != mutation.destinations
+    {
+        return Err("fee-redirect paired worlds used different payout destinations".into());
+    }
+    let replay_operator_gain = replay.terminal_values[2].saturating_sub(control.terminal_values[2]);
+    let replay_protected_loss =
+        control.terminal_values[5].saturating_sub(replay.terminal_values[5]);
+    let mutation_operator_gain =
+        mutation.terminal_values[2].saturating_sub(control.terminal_values[2]);
+    let mutation_protected_loss =
+        control.terminal_values[5].saturating_sub(mutation.terminal_values[5]);
+    let control_terminal_classification = classify_fee_redirect_terminal_world(&control, 0, 0)?;
+    let replay_terminal_classification =
+        classify_fee_redirect_terminal_world(&replay, replay_protected_loss, replay_operator_gain)?;
+    let mutation_terminal_classification = classify_fee_redirect_terminal_world(
+        &mutation,
+        mutation_protected_loss,
+        mutation_operator_gain,
+    )?;
+    Ok(FeeRedirectSupersessionDiscovery {
+        stale_policy_landed: replay.policy_landed,
+        stale_policy_rejected_exact_rollback: replay.policy_rejected_exact_rollback,
+        control_protected_credit: control.protected_credit,
+        replay_protected_credit: replay.protected_credit,
+        mutation_protected_credit: mutation.protected_credit,
+        control_operator_credit: control.operator_credit,
+        replay_operator_credit: replay.operator_credit,
+        mutation_operator_credit: mutation.operator_credit,
+        control_terminal_values: control.terminal_values,
+        replay_terminal_values: replay.terminal_values,
+        mutation_terminal_values: mutation.terminal_values,
+        control_terminal_classification,
+        replay_terminal_classification,
+        mutation_terminal_classification,
+        control_public_trace: control.public_trace,
+        replay_public_trace: replay.public_trace,
+        mutation_public_trace: mutation.public_trace,
+    })
 }
 
 #[derive(Clone, Debug)]
