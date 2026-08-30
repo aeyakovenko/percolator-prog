@@ -100,6 +100,13 @@
 //! failure, even when principal withdrawal still succeeds. The
 //! same public world builder is reused by INV-041's asymmetric-fee insertion-order regression;
 //! INV-041 owns that test and no route is executed twice merely for file organization.
+//! `v16_program_backing_fee_partitions_are_conservative_and_value_exact` applies a nonintegral
+//! 3,333-bps backing fee to the same two source domains represented by one or two accounts each.
+//! Direct and matcher-CPI routes plus both domain orders must agree. An independent ceil oracle
+//! permits at most one extra fee atom per additional account; after assigning those atoms to the
+//! provider bucket, fee-adjusted user value, custody, OI, and terminal stocks are exact. Batch
+//! routes are not an alternate for this product because their signed schema carries no backing-fee
+//! consent and rejects a nonzero cap before execution.
 //!
 //! Guarantee boundary: target publication order and target lifetime are identical across the
 //! compared executions. Reordering authenticated observations is a different economic history,
@@ -4421,6 +4428,117 @@ pub(super) fn verify_public_source_lien_allocation_is_domain_order_canonical() {
         assert!(first_high.economics.peak_bucket[0].utilization_fee_earnings > 0);
         assert!(first_high.max_compute_units < TX_CU_LIMIT);
         assert!(first_free.max_compute_units < TX_CU_LIMIT);
+    }
+}
+
+#[test]
+fn v16_program_backing_fee_partitions_are_conservative_and_value_exact() {
+    const FEE_BPS: u16 = 3_333;
+
+    fn fee_ceil(atoms: u128) -> u128 {
+        let numerator = atoms
+            .checked_mul(u128::from(FEE_BPS))
+            .expect("bounded INV-052 backing-fee numerator");
+        numerator / 10_000 + u128::from(numerator % 10_000 != 0)
+    }
+
+    fn total_fee(outcome: &MultiDomainSourceLienOutcome) -> u128 {
+        outcome
+            .economics
+            .peak_bucket
+            .iter()
+            .map(|bucket| bucket.utilization_fee_earnings)
+            .sum()
+    }
+
+    fn fee_adjusted_terminal_frame(
+        outcome: &MultiDomainSourceLienOutcome,
+    ) -> (u128, i128, u128, [[u128; 2]; 2], u128, u128, u128) {
+        let fee = total_fee(outcome);
+        (
+            outcome.economics.target_payout.checked_add(fee).unwrap(),
+            outcome
+                .economics
+                .target_value_before_withdrawal
+                .checked_add(i128::try_from(fee).unwrap())
+                .unwrap(),
+            outcome.economics.c_tot_plus_insurance,
+            outcome.economics.oi_q,
+            outcome.economics.vault.checked_sub(fee).unwrap(),
+            outcome.economics.spl_vault.checked_sub(fee).unwrap(),
+            outcome.economics.token_supply,
+        )
+    }
+
+    let mut canonical_isolated = None;
+    let mut canonical_split = None;
+    for route in [TradeRoute::NoCpi, TradeRoute::Cpi] {
+        let run = |partition, reverse_domain_order| {
+            run_multi_domain_source_lien_partition_with_fees(
+                partition,
+                reverse_domain_order,
+                route,
+                3,
+                [FEE_BPS, FEE_BPS],
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "INV-052 fee partition {partition:?} reverse={reverse_domain_order} via {route:?}: {error}"
+                )
+            })
+        };
+        let isolated = run(MultiDomainSourceLienPartition::DomainIsolated, false);
+        let isolated_reversed = run(MultiDomainSourceLienPartition::DomainIsolated, true);
+        let split = run(MultiDomainSourceLienPartition::SplitFour, false);
+        let split_reversed = run(MultiDomainSourceLienPartition::SplitFour, true);
+
+        assert_eq!(isolated.economics, isolated_reversed.economics);
+        assert_eq!(split.economics, split_reversed.economics);
+        let isolated_fee = total_fee(&isolated);
+        let split_fee = total_fee(&split);
+        assert!(isolated_fee > 0);
+        assert!(split_fee >= isolated_fee);
+        for domain_slot in 0..2 {
+            let isolated_lien_num = isolated.economics.peak_local[domain_slot][5];
+            let split_lien_num = split.economics.peak_local[domain_slot][5];
+            assert_eq!(isolated_lien_num % BOUND_SCALE, 0);
+            assert_eq!(split_lien_num % BOUND_SCALE, 0);
+            let isolated_atoms = isolated_lien_num / BOUND_SCALE;
+            let split_atoms = split_lien_num / BOUND_SCALE;
+            let isolated_domain_fee =
+                isolated.economics.peak_bucket[domain_slot].utilization_fee_earnings;
+            let split_domain_fee =
+                split.economics.peak_bucket[domain_slot].utilization_fee_earnings;
+            assert_eq!(isolated_domain_fee, fee_ceil(isolated_atoms));
+            assert!(split_domain_fee >= fee_ceil(split_atoms));
+            assert!(
+                split_domain_fee <= fee_ceil(split_atoms).checked_add(1).unwrap(),
+                "two accounts may add at most one conservative ceil atom in domain {domain_slot} via {route:?}"
+            );
+            assert!(split_domain_fee >= isolated_domain_fee);
+        }
+        assert_eq!(
+            fee_adjusted_terminal_frame(&isolated),
+            fee_adjusted_terminal_frame(&split),
+            "account partition changed value beyond the exact backing fee via {route:?}"
+        );
+        assert_eq!(
+            isolated.economics.target_payout - split.economics.target_payout,
+            split_fee - isolated_fee
+        );
+        assert!(isolated.max_compute_units < TX_CU_LIMIT);
+        assert!(split.max_compute_units < TX_CU_LIMIT);
+
+        if let Some(expected) = &canonical_isolated {
+            assert_eq!(&isolated.economics, expected);
+        } else {
+            canonical_isolated = Some(isolated.economics);
+        }
+        if let Some(expected) = &canonical_split {
+            assert_eq!(&split.economics, expected);
+        } else {
+            canonical_split = Some(split.economics);
+        }
     }
 }
 
