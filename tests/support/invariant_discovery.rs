@@ -1,10 +1,10 @@
 use super::v16_svm::{
     MarketConfig, PublicTerminalClassification, PublicTerminalObservation, PublicTraceEvidence,
-    V16Svm, EXIT_MAKER_DEPOSIT, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
+    V16Svm, ASSET_COUNT, EXIT_MAKER_DEPOSIT, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
 };
 use percolator::{
-    BackingBucketStatusV16, HealthCertV16, MarketModeV16, SideModeV16, SideV16, V16Config, ADL_ONE,
-    BOUND_SCALE, MAX_MARGIN_BPS, POS_SCALE,
+    BackingBucketStatusV16, HealthCertV16, MarketModeV16, PortfolioLegV16, SideModeV16, SideV16,
+    V16Config, ADL_ONE, BOUND_SCALE, MAX_MARGIN_BPS, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -492,6 +492,23 @@ impl ActiveLegOrder {
         match self {
             Self::RescueFirst => 0,
             Self::RescueLast => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EqualRiskAssetOrder {
+    AssetZeroFirst,
+    AssetOneFirst,
+}
+
+impl EqualRiskAssetOrder {
+    pub const ALL: [Self; 2] = [Self::AssetZeroFirst, Self::AssetOneFirst];
+
+    fn assets(self) -> [u16; 2] {
+        match self {
+            Self::AssetZeroFirst => [0, 1],
+            Self::AssetOneFirst => [1, 0],
         }
     }
 }
@@ -1243,6 +1260,45 @@ pub struct AdlLiquidationSizingDiscovery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MultiAssetAdlLiquidationDiscovery {
+    pub route: DiscoveryTradeRoute,
+    pub leg_order: EqualRiskAssetOrder,
+    pub accrual_order: EqualRiskAssetOrder,
+    pub first_active_asset: u16,
+    pub selected_asset: u16,
+    pub pre_certificate_valid: bool,
+    pub pre_certified_liq_deficit: u128,
+    pub pre_liquidation_lock: bool,
+    pub pre_long_a: [u128; 2],
+    pub pre_short_a: [u128; 2],
+    pub pre_raw_basis_q: [u128; 2],
+    pub pre_effective_q: [u128; 2],
+    pub pre_oi_q: [[u128; 2]; 2],
+    pub expected_close_q: u128,
+    pub observed_oi_reduce_q: [[u128; 2]; 2],
+    pub post_effective_q: [u128; 2],
+    pub post_certified_liq_deficit: u128,
+    pub liquidation_fee: u128,
+    pub expected_liquidation_fee: u128,
+    pub insurance_domain_budget_delta: [u128; ASSET_COUNT * 2],
+    pub nonselected_asset_framed: bool,
+    pub counterparties_framed: bool,
+    pub liquidation_moved_no_tokens: bool,
+    pub max_compute_units: u64,
+    pub owner_exit_steps: u8,
+    pub users_exited_while_live: bool,
+    pub portfolios_closed: bool,
+    pub participant_payout: u128,
+    pub initial_participant_value: u128,
+    pub final_insurance: u128,
+    pub final_c_tot: u128,
+    pub final_vault: u128,
+    pub final_spl_vault: u128,
+    pub token_supply_conserved: bool,
+    pub public_trace_valid: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdlRecoveryForfeitDiscovery {
     pub route: DiscoveryTradeRoute,
     pub account_order: AdlForceCloseAccountOrder,
@@ -1415,6 +1471,70 @@ impl AdlLiquidationSizingDiscovery {
             && self.expected_effective_after_q == self.pre_effective_q - self.expected_close_q
             && self.post_short_a < ADL_ONE
             && self.liquidation_moved_no_tokens
+    }
+}
+
+impl MultiAssetAdlLiquidationDiscovery {
+    pub fn satisfies_invariant(&self) -> bool {
+        let selected = usize::from(self.selected_asset);
+        let nonselected = selected ^ 1;
+        let selected_domains = [selected * 2, selected * 2 + 1];
+        let selected_budget_delta = selected_domains
+            .into_iter()
+            .map(|domain| self.insurance_domain_budget_delta[domain])
+            .sum::<u128>();
+        let unselected_budget_delta = self
+            .insurance_domain_budget_delta
+            .iter()
+            .enumerate()
+            .filter(|(domain, _)| !selected_domains.contains(domain))
+            .map(|(_, delta)| *delta)
+            .sum::<u128>();
+
+        self.first_active_asset == self.leg_order.assets()[0]
+            && self.selected_asset == self.first_active_asset
+            && selected < 2
+            && self.pre_certificate_valid
+            && self.pre_certified_liq_deficit != 0
+            && !self.pre_liquidation_lock
+            && self.pre_long_a.iter().all(|a| *a < ADL_ONE)
+            && self.pre_short_a.iter().all(|a| *a == ADL_ONE)
+            && self
+                .pre_raw_basis_q
+                .iter()
+                .zip(self.pre_effective_q)
+                .all(|(raw, effective)| *raw > effective && effective != 0)
+            && self.pre_effective_q[0] == self.pre_effective_q[1]
+            && self.pre_oi_q[0] == [self.pre_effective_q[0], self.pre_effective_q[0]]
+            && self.pre_oi_q[1] == [self.pre_effective_q[1], self.pre_effective_q[1]]
+            && self.expected_close_q != 0
+            && self.expected_close_q < self.pre_effective_q[selected]
+            && self.observed_oi_reduce_q[selected] == [self.expected_close_q, self.expected_close_q]
+            && self.observed_oi_reduce_q[nonselected] == [0, 0]
+            && self.post_effective_q[selected]
+                == self.pre_effective_q[selected] - self.expected_close_q
+            && self.post_effective_q[nonselected] == self.pre_effective_q[nonselected]
+            && self.post_certified_liq_deficit == 0
+            && self.liquidation_fee != 0
+            && self.liquidation_fee == self.expected_liquidation_fee
+            && selected_budget_delta == self.liquidation_fee
+            && unselected_budget_delta == 0
+            && self.nonselected_asset_framed
+            && self.counterparties_framed
+            && self.liquidation_moved_no_tokens
+            && self.max_compute_units != 0
+            && self.max_compute_units < super::v16_svm::TX_CU_LIMIT
+            && self.owner_exit_steps != 0
+            && self.owner_exit_steps <= 32
+            && self.users_exited_while_live
+            && self.portfolios_closed
+            && self.participant_payout.checked_add(self.final_insurance)
+                == Some(self.initial_participant_value)
+            && self.final_c_tot == 0
+            && self.final_vault == self.final_insurance
+            && self.final_spl_vault == self.final_vault
+            && self.token_supply_conserved
+            && self.public_trace_valid
     }
 }
 
@@ -17387,6 +17507,547 @@ pub fn verify_dual_adl_liquidation_sizing(
         .into_iter()
         .map(|route| build_dual_adl_prefix(seed, route).map(|(_, _, liquidation)| liquidation))
         .collect()
+}
+
+fn discovery_leg_for_asset(
+    account: &percolator_prog::state::PortfolioAccountV16,
+    asset_index: u16,
+) -> Result<Option<PortfolioLegV16>, String> {
+    let mut found = None;
+    for encoded in &account.legs {
+        let leg = encoded
+            .try_to_runtime()
+            .map_err(|error| format!("decode asset-{asset_index} leg: {error:?}"))?;
+        if leg.active && leg.asset_index == u32::from(asset_index) {
+            if found.replace(leg).is_some() {
+                return Err(format!(
+                    "portfolio retained duplicate active asset-{asset_index} legs"
+                ));
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn discovery_effective_leg_q(
+    asset: percolator::AssetStateV16,
+    leg: PortfolioLegV16,
+) -> Result<u128, String> {
+    super::reference_math::mul_div_ceil(
+        leg.basis_pos_q.unsigned_abs(),
+        match leg.side {
+            SideV16::Long => asset.a_long,
+            SideV16::Short => asset.a_short,
+        },
+        leg.a_basis,
+    )
+}
+
+fn discovery_certificate_is_current(
+    group: &percolator_prog::state::MarketGroupV16,
+    account: &percolator_prog::state::PortfolioAccountV16,
+) -> Result<bool, String> {
+    let cert = account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode health certificate: {error:?}"))?;
+    Ok(cert.valid
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch
+        && cert.active_bitmap_at_cert == account.active_bitmap.map(percolator::V16PodU64::get))
+}
+
+fn discovery_observations_for_order(
+    env: &V16Svm,
+    order: EqualRiskAssetOrder,
+) -> Vec<CrankObservationHint> {
+    order
+        .assets()
+        .into_iter()
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
+        })
+        .collect()
+}
+
+fn verify_one_multi_asset_adl_liquidation(
+    mut seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+    leg_order: EqualRiskAssetOrder,
+    accrual_order: EqualRiskAssetOrder,
+) -> Result<MultiAssetAdlLiquidationDiscovery, String> {
+    const TARGET: usize = 0;
+    const ASSET_ZERO_COUNTERPARTY: usize = 1;
+    const ASSET_ONE_COUNTERPARTY: usize = 2;
+    const HELPER: usize = 3;
+    const MARK: u64 = 100;
+    const TRADE_SIZE_Q: i128 = (2 * POS_SCALE) as i128;
+    const TARGET_DEPOSIT: u128 = 400;
+    const COUNTERPARTY_DEPOSIT: u128 = 200;
+    const FIRST_WAVE_SLOT: u64 = 2;
+    const LIQUIDATION_FEE_BPS: u64 = 5;
+
+    seed[0] ^= 0x61;
+    seed[1] ^= route.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            h_max: 10,
+            min_nonzero_mm_req: 2,
+            min_nonzero_im_req: 3,
+            maintenance_margin_bps: 9_990,
+            initial_margin_bps: 10_000,
+            liquidation_fee_bps: LIQUIDATION_FEE_BPS,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 1,
+            actor_deposits: [
+                TARGET_DEPOSIT,
+                COUNTERPARTY_DEPOSIT,
+                COUNTERPARTY_DEPOSIT,
+                0,
+                0,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.begin_public_trace();
+
+    for asset_index in leg_order.assets() {
+        let counterparty = match asset_index {
+            0 => ASSET_ZERO_COUNTERPARTY,
+            1 => ASSET_ONE_COUNTERPARTY,
+            _ => return Err("equal-risk fixture selected an unsupported asset".into()),
+        };
+        execute_discovery_trade_route(
+            &mut env,
+            route,
+            TARGET,
+            counterparty,
+            asset_index,
+            TRADE_SIZE_Q,
+            MARK,
+        )
+        .map_err(|error| {
+            format!("open equal-risk asset {asset_index} through {route:?}: {error}")
+        })?;
+    }
+    let opened_target = env.primary_portfolio(TARGET);
+    let active_assets = opened_target
+        .legs
+        .iter()
+        .filter_map(|encoded| encoded.try_to_runtime().ok())
+        .filter(|leg| leg.active)
+        .map(|leg| leg.asset_index as u16)
+        .collect::<Vec<_>>();
+    if active_assets != leg_order.assets() {
+        return Err(format!(
+            "equal-risk opening route lost target leg order: expected={:?}, observed={active_assets:?}",
+            leg_order.assets()
+        ));
+    }
+
+    env.warp_to_slot(FIRST_WAVE_SLOT);
+    for asset_index in accrual_order.assets() {
+        env.push_auth_mark(asset_index, FIRST_WAVE_SLOT, MARK)
+            .map_err(|error| format!("stage first-wave asset {asset_index}: {error}"))?;
+    }
+    for asset_index in accrual_order.assets() {
+        let counterparty = usize::from(asset_index) + 1;
+        crank_asset_progress(&mut env, counterparty, FIRST_WAVE_SLOT, asset_index, 16).map_err(
+            |error| format!("scale equal-risk asset {asset_index} counterparty: {error}"),
+        )?;
+    }
+
+    let mut max_compute_units = 0u64;
+    for step in 0..8 {
+        let (_, group) = env.primary_market_state();
+        let account = env.primary_portfolio(TARGET);
+        if discovery_certificate_is_current(&group, &account)? {
+            break;
+        }
+        let success = env
+            .crank(TARGET, FIRST_WAVE_SLOT, Vec::new())
+            .map_err(|error| format!("refresh equal-risk target at step {step}: {error}"))?;
+        max_compute_units = max_compute_units.max(success.compute_units);
+    }
+    let (_, floor_group) = env.primary_market_state();
+    let floor_account = env.primary_portfolio(TARGET);
+    if !discovery_certificate_is_current(&floor_group, &floor_account)? {
+        return Err("equal-risk target never reached a current first-wave certificate".into());
+    }
+    let floor_cert = floor_account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode equal-risk floor certificate: {error:?}"))?;
+    if floor_cert.certified_equity < 0
+        || (floor_cert.certified_equity as u128) < floor_cert.certified_maintenance_req
+    {
+        return Err(format!(
+            "equal-risk target was already unhealthy after the first wave: {floor_cert:?}"
+        ));
+    }
+    let mut liquidation_slot = None;
+    for slot in (FIRST_WAVE_SLOT + 1)..=(FIRST_WAVE_SLOT + 16) {
+        env.warp_to_slot(slot);
+        for asset_index in accrual_order.assets() {
+            let success = env
+                .push_auth_mark(asset_index, slot, MARK)
+                .map_err(|error| {
+                    format!("stage equal-risk slot {slot} asset {asset_index}: {error}")
+                })?;
+            max_compute_units = max_compute_units.max(success.compute_units);
+        }
+        let observations = discovery_observations_for_order(&env, accrual_order);
+        let accrual = env.crank(HELPER, slot, observations).map_err(|error| {
+            format!("commit equal-risk slot {slot} order {accrual_order:?}: {error}")
+        })?;
+        max_compute_units = max_compute_units.max(accrual.compute_units);
+        let fee_sync = env
+            .sync_maintenance_fee(TARGET, slot)
+            .map_err(|error| format!("charge equal-risk target maintenance: {error}"))?;
+        max_compute_units = max_compute_units.max(fee_sync.compute_units);
+        let refresh = env
+            .crank(TARGET, slot, Vec::new())
+            .map_err(|error| format!("certify equal-risk liquidation target: {error}"))?;
+        max_compute_units = max_compute_units.max(refresh.compute_units);
+
+        let (_, group) = env.primary_market_state();
+        let account = env.primary_portfolio(TARGET);
+        let cert = account
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("decode equal-risk progression certificate: {error:?}"))?;
+        if discovery_certificate_is_current(&group, &account)? && cert.certified_liq_deficit != 0 {
+            liquidation_slot = Some(slot);
+            break;
+        }
+    }
+    let liquidation_slot = liquidation_slot.ok_or_else(|| {
+        "equal-risk target stayed healthy through 16 public fee steps".to_string()
+    })?;
+
+    let (_, before_group) = env.primary_market_state();
+    let before_account = env.primary_portfolio(TARGET);
+    let cert = before_account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode equal-risk liquidation certificate: {error:?}"))?;
+    if !discovery_certificate_is_current(&before_group, &before_account)?
+        || cert.certified_liq_deficit == 0
+    {
+        return Err(format!(
+            "equal-risk target did not reach a current liquidation state: {cert:?}"
+        ));
+    }
+    let first_active_asset = before_account
+        .legs
+        .iter()
+        .map(|encoded| encoded.try_to_runtime())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("decode equal-risk target leg order: {error:?}"))?
+        .into_iter()
+        .find(|leg| leg.active)
+        .map(|leg| leg.asset_index as u16)
+        .ok_or_else(|| "equal-risk target lost both active legs".to_string())?;
+    let expected_selected_asset = first_active_asset;
+    let mut pre_long_a = [0u128; 2];
+    let mut pre_short_a = [0u128; 2];
+    let mut pre_raw_basis_q = [0u128; 2];
+    let mut pre_effective_q = [0u128; 2];
+    let mut pre_oi_q = [[0u128; 2]; 2];
+    let mut selected_leg = None;
+    for asset_index in [0u16, 1] {
+        let index = asset_index as usize;
+        let asset = before_group.assets[index];
+        let leg = discovery_leg_for_asset(&before_account, asset_index)?
+            .ok_or_else(|| format!("equal-risk target lost asset-{asset_index} leg"))?;
+        pre_long_a[index] = asset.a_long;
+        pre_short_a[index] = asset.a_short;
+        pre_raw_basis_q[index] = leg.basis_pos_q.unsigned_abs();
+        pre_effective_q[index] = discovery_effective_leg_q(asset, leg)?;
+        pre_oi_q[index] = [asset.oi_eff_long_q, asset.oi_eff_short_q];
+        if asset_index == expected_selected_asset {
+            selected_leg = Some(leg);
+        }
+    }
+    let expected_selected_index = expected_selected_asset as usize;
+    let selected_leg = selected_leg.ok_or_else(|| "selected equal-risk leg missing".to_string())?;
+    let selected_state = before_group.assets[expected_selected_index];
+    let close_request_q = reference_liquidation_close_request_q(
+        before_group.config,
+        cert,
+        before_account.capital.get(),
+        before_account.pnl.get(),
+        selected_leg.side,
+        pre_effective_q[expected_selected_index],
+        selected_state.effective_price,
+        selected_state.raw_oracle_target_price,
+    )?;
+    let expected_close_q = close_request_q
+        .min(pre_effective_q[expected_selected_index])
+        .min(selected_state.oi_eff_long_q)
+        .min(selected_state.oi_eff_short_q);
+    let expected_liquidation_fee = reference_liquidation_fee(
+        before_group.config,
+        expected_close_q,
+        selected_state.effective_price,
+        expected_close_q == pre_effective_q[expected_selected_index],
+    )?
+    .ok_or_else(|| "equal-risk independent model selected a fee-free close".to_string())?;
+
+    let counterparties_before = [ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY]
+        .map(|actor| env.primary_portfolio_data(actor));
+    let token_state_before_liquidation = env.all_token_account_data();
+    let liquidation = env
+        .crank(TARGET, liquidation_slot, Vec::new())
+        .map_err(|error| format!("execute equal-risk selected liquidation: {error}"))?;
+    max_compute_units = max_compute_units.max(liquidation.compute_units);
+    let (_, after_group) = env.primary_market_state();
+    let after_account = env.primary_portfolio(TARGET);
+    let after_cert = after_account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode post-liquidation certificate: {error:?}"))?;
+    let mut observed_oi_reduce_q = [[0u128; 2]; 2];
+    let mut post_effective_q = [0u128; 2];
+    for asset_index in [0u16, 1] {
+        let index = asset_index as usize;
+        observed_oi_reduce_q[index] = [
+            pre_oi_q[index][0]
+                .checked_sub(after_group.assets[index].oi_eff_long_q)
+                .ok_or_else(|| format!("asset {asset_index} long OI increased"))?,
+            pre_oi_q[index][1]
+                .checked_sub(after_group.assets[index].oi_eff_short_q)
+                .ok_or_else(|| format!("asset {asset_index} short OI increased"))?,
+        ];
+        post_effective_q[index] = discovery_leg_for_asset(&after_account, asset_index)?
+            .map(|leg| discovery_effective_leg_q(after_group.assets[index], leg))
+            .transpose()?
+            .unwrap_or(0);
+    }
+    let selected_assets = [0u16, 1]
+        .into_iter()
+        .filter(|asset_index| observed_oi_reduce_q[*asset_index as usize] != [0, 0])
+        .collect::<Vec<_>>();
+    let selected_asset = match selected_assets.as_slice() {
+        [selected_asset] => *selected_asset,
+        _ => {
+            return Err(format!(
+                "equal-risk liquidation touched an invalid asset set: {selected_assets:?}"
+            ));
+        }
+    };
+    let selected_index = selected_asset as usize;
+    let liquidation_fee = after_group
+        .insurance
+        .checked_sub(before_group.insurance)
+        .ok_or_else(|| "equal-risk liquidation reduced insurance".to_string())?;
+    let mut insurance_domain_budget_delta = [0u128; ASSET_COUNT * 2];
+    for (domain, delta) in insurance_domain_budget_delta.iter_mut().enumerate() {
+        *delta = after_group.insurance_domain_budget[domain]
+            .checked_sub(before_group.insurance_domain_budget[domain])
+            .ok_or_else(|| format!("equal-risk liquidation reduced domain {domain} budget"))?;
+    }
+    if after_group.vault != before_group.vault
+        || after_group.c_tot.checked_add(after_group.insurance)
+            != before_group.c_tot.checked_add(before_group.insurance)
+        || before_account.pnl.get() != 0
+        || after_account.pnl.get() != 0
+        || before_account
+            .capital
+            .get()
+            .checked_sub(after_account.capital.get())
+            != Some(liquidation_fee)
+    {
+        return Err("equal-risk liquidation violated its exact internal value partition".into());
+    }
+    let nonselected_index = selected_index ^ 1;
+    let nonselected_asset_framed =
+        after_group.assets[nonselected_index] == before_group.assets[nonselected_index];
+    let counterparties_framed = [ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY]
+        .into_iter()
+        .zip(counterparties_before)
+        .all(|(actor, before)| env.primary_portfolio_data(actor) == before);
+    let liquidation_moved_no_tokens =
+        env.all_token_account_data() == token_state_before_liquidation;
+
+    let mut owner_exit_steps = 0u8;
+    for actor in [TARGET, ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY] {
+        for _ in 0..16 {
+            let account = env.primary_portfolio(actor);
+            let mut active = Vec::new();
+            for asset_index in [0u16, 1] {
+                if let Some(leg) = discovery_leg_for_asset(&account, asset_index)? {
+                    let asset = env.primary_market_state().1.assets[asset_index as usize];
+                    let effective_q = discovery_effective_leg_q(asset, leg)?;
+                    let close_capacity = effective_q
+                        .min(asset.oi_eff_long_q)
+                        .min(asset.oi_eff_short_q);
+                    active.push((asset_index, close_capacity));
+                }
+            }
+            if active.is_empty() {
+                break;
+            }
+            if let Some((asset_index, close_capacity)) = active
+                .iter()
+                .copied()
+                .find(|(_, close_capacity)| *close_capacity != 0)
+            {
+                let success = env
+                    .rebalance_reduce(actor, asset_index, close_capacity)
+                    .map_err(|error| {
+                        format!("owner {actor} reduce asset {asset_index} during exit: {error}")
+                    })?;
+                max_compute_units = max_compute_units.max(success.compute_units);
+            } else {
+                let success = env
+                    .crank_if_actionable(actor, liquidation_slot, Vec::new())?
+                    .ok_or_else(|| {
+                        format!(
+                            "owner {actor} retained an active zero-effective leg without progress"
+                        )
+                    })?;
+                max_compute_units = max_compute_units.max(success.compute_units);
+            }
+            owner_exit_steps = owner_exit_steps
+                .checked_add(1)
+                .ok_or_else(|| "equal-risk owner exit step overflow".to_string())?;
+        }
+        let terminal_account = env.primary_portfolio(actor);
+        for asset_index in [0u16, 1] {
+            if discovery_leg_for_asset(&terminal_account, asset_index)?.is_some() {
+                return Err(format!(
+                    "owner {actor} retained asset-{asset_index} risk after bounded equal-risk cleanup"
+                ));
+            }
+        }
+    }
+
+    let participant_destinations = [TARGET, ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY]
+        .map(|actor| env.actors[actor].destination_token);
+    let destination_before =
+        participant_destinations.map(|destination| env.token_amount(destination));
+    for actor in [TARGET, ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY] {
+        let account = env.primary_portfolio(actor);
+        if account.pnl.get() != 0 {
+            return Err(format!(
+                "equal-risk owner {actor} retained nonzero PnL before withdrawal: {}",
+                account.pnl.get()
+            ));
+        }
+        let capital = account.capital.get();
+        if capital != 0 {
+            let success = env
+                .withdraw_primary(actor, capital)
+                .map_err(|error| format!("withdraw equal-risk owner {actor}: {error}"))?;
+            max_compute_units = max_compute_units.max(success.compute_units);
+            owner_exit_steps = owner_exit_steps
+                .checked_add(1)
+                .ok_or_else(|| "equal-risk withdrawal step overflow".to_string())?;
+        }
+    }
+    let users_exited_while_live = env.primary_market_state().1.mode == MarketModeV16::Live
+        && [TARGET, ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY]
+            .into_iter()
+            .all(|actor| {
+                let account = env.primary_portfolio(actor);
+                account.capital.get() == 0
+                    && account.pnl.get() == 0
+                    && account.active_bitmap.iter().all(|word| word.get() == 0)
+            });
+    let mut portfolios_closed = true;
+    for actor in [TARGET, ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY] {
+        portfolios_closed &= env.close_primary_portfolio(actor).is_ok();
+    }
+    let participant_payout = participant_destinations
+        .into_iter()
+        .zip(destination_before)
+        .try_fold(0u128, |sum, (destination, before)| {
+            let delta = env
+                .token_amount(destination)
+                .checked_sub(before)
+                .ok_or_else(|| "equal-risk destination balance decreased".to_string())?;
+            sum.checked_add(u128::from(delta))
+                .ok_or_else(|| "equal-risk participant payout overflow".to_string())
+        })?;
+    let final_group = env.primary_market_state().1;
+    let trace = env.finish_public_trace();
+    max_compute_units = max_compute_units.max(
+        trace
+            .steps
+            .iter()
+            .filter_map(|step| step.compute_units)
+            .max()
+            .unwrap_or(0),
+    );
+    let public_trace_valid =
+        trace.out_of_band_economic_mutations == 0 && trace.validate_public_execution().is_ok();
+
+    Ok(MultiAssetAdlLiquidationDiscovery {
+        route,
+        leg_order,
+        accrual_order,
+        first_active_asset,
+        selected_asset,
+        pre_certificate_valid: cert.valid,
+        pre_certified_liq_deficit: cert.certified_liq_deficit,
+        pre_liquidation_lock: before_account.liquidation_lock != 0,
+        pre_long_a,
+        pre_short_a,
+        pre_raw_basis_q,
+        pre_effective_q,
+        pre_oi_q,
+        expected_close_q,
+        observed_oi_reduce_q,
+        post_effective_q,
+        post_certified_liq_deficit: after_cert.certified_liq_deficit,
+        liquidation_fee,
+        expected_liquidation_fee,
+        insurance_domain_budget_delta,
+        nonselected_asset_framed,
+        counterparties_framed,
+        liquidation_moved_no_tokens,
+        max_compute_units,
+        owner_exit_steps,
+        users_exited_while_live,
+        portfolios_closed,
+        participant_payout,
+        initial_participant_value: TARGET_DEPOSIT + 2 * COUNTERPARTY_DEPOSIT,
+        final_insurance: final_group.insurance,
+        final_c_tot: final_group.c_tot,
+        final_vault: final_group.vault,
+        final_spl_vault: u128::from(env.token_amount(env.vault)),
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+        public_trace_valid,
+    })
+}
+
+pub fn verify_multi_asset_adl_liquidation_permutations(
+    seed: [u8; 32],
+) -> Result<Vec<MultiAssetAdlLiquidationDiscovery>, String> {
+    let mut discoveries = Vec::new();
+    for route in DiscoveryTradeRoute::ALL {
+        for leg_order in EqualRiskAssetOrder::ALL {
+            for accrual_order in EqualRiskAssetOrder::ALL {
+                discoveries.push(verify_one_multi_asset_adl_liquidation(
+                    seed,
+                    route,
+                    leg_order,
+                    accrual_order,
+                )?);
+            }
+        }
+    }
+    Ok(discoveries)
 }
 
 fn asset_side_oi(asset: percolator::AssetStateV16, side: SideV16) -> u128 {

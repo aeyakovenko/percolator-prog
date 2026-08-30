@@ -11,9 +11,20 @@
 //! landing orders until both users are terminal. Every accepted call must
 //! mutate, each user receives exactly its funded value, SPL and internal custody reconcile to zero,
 //! token supply is conserved, and both portfolio accounts close.
+//! `v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete` builds a larger
+//! three-user topology with two equal-risk target legs. Public first-wave liquidations make each
+//! target leg ADL-scaled, then an authenticated account fee makes the combined portfolio
+//! liquidatable. Four opening transports, both persisted leg orders, and both market-accrual
+//! orders must select exactly the first live leg, match an independent close-size/fee oracle,
+//! mutate only that asset's OI and insurance domains, frame both counterparties and every SPL
+//! account, and restore health below the CU ceiling. All three owners must then clear their
+//! remaining effective or reset-obligation legs, withdraw the exact non-fee value, and close while
+//! the market remains Live.
 //!
-//! Guarantee boundary: this matrix covers both two-user terminal landing orders for a single ADL
-//! asset. Multi-asset and partial-receipt close compositions remain in the audit ledger.
+//! Guarantee boundary: these matrices cover two-user terminal landing orders for a single ADL
+//! asset and equal-risk first-step selection plus live owner exit for a two-asset/three-user ADL
+//! topology. Three-plus assets, unequal cross-domain losses, and partial-receipt close composition
+//! remain in the audit ledger.
 
 use super::*;
 
@@ -41,6 +52,141 @@ proptest! {
             prop_assert!(
                 discovery.satisfies_invariant(),
                 "resolved-ADL close-order invariant failed: {discovery:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete() {
+    let discoveries = verify_multi_asset_adl_liquidation_permutations([0x61; 32])
+        .expect("INV-061 multi-asset ADL liquidation permutations");
+    assert_eq!(
+        discoveries.len(),
+        DiscoveryTradeRoute::ALL.len()
+            * EqualRiskAssetOrder::ALL.len()
+            * EqualRiskAssetOrder::ALL.len(),
+        "must cross every opening transport, persisted leg order, and accrual order"
+    );
+    for discovery in &discoveries {
+        assert!(
+            discovery.satisfies_invariant(),
+            "multi-asset ADL liquidation invariant failed: {discovery:?}"
+        );
+    }
+
+    for route_worlds in
+        discoveries.chunks_exact(EqualRiskAssetOrder::ALL.len() * EqualRiskAssetOrder::ALL.len())
+    {
+        let control = route_worlds[0];
+        for candidate in route_worlds.iter().copied() {
+            assert_eq!(
+                (
+                    candidate.pre_long_a,
+                    candidate.pre_short_a,
+                    candidate.pre_raw_basis_q,
+                    candidate.pre_effective_q,
+                    candidate.pre_oi_q,
+                    candidate.pre_certified_liq_deficit,
+                    candidate.expected_close_q,
+                    candidate.liquidation_fee,
+                ),
+                (
+                    control.pre_long_a,
+                    control.pre_short_a,
+                    control.pre_raw_basis_q,
+                    control.pre_effective_q,
+                    control.pre_oi_q,
+                    control.pre_certified_liq_deficit,
+                    control.expected_close_q,
+                    control.liquidation_fee,
+                ),
+                "leg/accrual order changed equal-risk topology: control={control:?}, candidate={candidate:?}"
+            );
+            assert_eq!(
+                (
+                    candidate.expected_liquidation_fee,
+                    candidate.participant_payout,
+                    candidate.final_insurance,
+                    candidate.final_c_tot,
+                    candidate.final_vault,
+                ),
+                (
+                    control.expected_liquidation_fee,
+                    control.participant_payout,
+                    control.final_insurance,
+                    control.final_c_tot,
+                    control.final_vault,
+                ),
+                "leg/accrual order changed terminal equal-risk economics: control={control:?}, candidate={candidate:?}"
+            );
+        }
+    }
+
+    let route_stride = EqualRiskAssetOrder::ALL.len() * EqualRiskAssetOrder::ALL.len();
+    for permutation in 0..route_stride {
+        let control = discoveries[permutation];
+        for route_index in 1..DiscoveryTradeRoute::ALL.len() {
+            let candidate = discoveries[route_index * route_stride + permutation];
+            assert_eq!(
+                (
+                    candidate.leg_order,
+                    candidate.accrual_order,
+                    candidate.first_active_asset,
+                    candidate.selected_asset,
+                    candidate.pre_long_a,
+                    candidate.pre_short_a,
+                    candidate.pre_raw_basis_q,
+                    candidate.pre_effective_q,
+                    candidate.pre_oi_q,
+                    candidate.expected_close_q,
+                    candidate.observed_oi_reduce_q,
+                    candidate.post_effective_q,
+                ),
+                (
+                    control.leg_order,
+                    control.accrual_order,
+                    control.first_active_asset,
+                    control.selected_asset,
+                    control.pre_long_a,
+                    control.pre_short_a,
+                    control.pre_raw_basis_q,
+                    control.pre_effective_q,
+                    control.pre_oi_q,
+                    control.expected_close_q,
+                    control.observed_oi_reduce_q,
+                    control.post_effective_q,
+                ),
+                "opening transport changed selected liquidation state: control={control:?}, candidate={candidate:?}"
+            );
+            assert_eq!(
+                (
+                    candidate.pre_certified_liq_deficit,
+                    candidate.post_certified_liq_deficit,
+                    candidate.liquidation_fee,
+                    candidate.expected_liquidation_fee,
+                    candidate.insurance_domain_budget_delta,
+                    candidate.owner_exit_steps,
+                    candidate.participant_payout,
+                    candidate.final_insurance,
+                    candidate.final_c_tot,
+                    candidate.final_vault,
+                    candidate.final_spl_vault,
+                ),
+                (
+                    control.pre_certified_liq_deficit,
+                    control.post_certified_liq_deficit,
+                    control.liquidation_fee,
+                    control.expected_liquidation_fee,
+                    control.insurance_domain_budget_delta,
+                    control.owner_exit_steps,
+                    control.participant_payout,
+                    control.final_insurance,
+                    control.final_c_tot,
+                    control.final_vault,
+                    control.final_spl_vault,
+                ),
+                "opening transport changed equal-risk terminal economics: control={control:?}, candidate={candidate:?}"
             );
         }
     }
