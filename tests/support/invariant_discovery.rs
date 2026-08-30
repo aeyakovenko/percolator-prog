@@ -513,6 +513,55 @@ impl EqualRiskAssetOrder {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ThreeAssetLegOrder {
+    ZeroOneTwo,
+    ZeroTwoOne,
+    OneZeroTwo,
+    OneTwoZero,
+    TwoZeroOne,
+    TwoOneZero,
+}
+
+impl ThreeAssetLegOrder {
+    pub const ALL: [Self; 6] = [
+        Self::ZeroOneTwo,
+        Self::ZeroTwoOne,
+        Self::OneZeroTwo,
+        Self::OneTwoZero,
+        Self::TwoZeroOne,
+        Self::TwoOneZero,
+    ];
+
+    fn assets(self) -> [u16; 3] {
+        match self {
+            Self::ZeroOneTwo => [0, 1, 2],
+            Self::ZeroTwoOne => [0, 2, 1],
+            Self::OneZeroTwo => [1, 0, 2],
+            Self::OneTwoZero => [1, 2, 0],
+            Self::TwoZeroOne => [2, 0, 1],
+            Self::TwoOneZero => [2, 1, 0],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ThreeAssetAccrualOrder {
+    Forward,
+    Reverse,
+}
+
+impl ThreeAssetAccrualOrder {
+    pub const ALL: [Self; 2] = [Self::Forward, Self::Reverse];
+
+    fn assets(self) -> [u16; 3] {
+        match self {
+            Self::Forward => [0, 1, 2],
+            Self::Reverse => [2, 1, 0],
+        }
+    }
+}
+
 impl PendingMarkSource {
     pub const ALL: [Self; 4] = [
         Self::AuthenticatedPush,
@@ -1296,6 +1345,107 @@ pub struct MultiAssetAdlLiquidationDiscovery {
     pub final_spl_vault: u128,
     pub token_supply_conserved: bool,
     pub public_trace_valid: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockedLossLiquidationStep {
+    pub expected_asset: u16,
+    pub observed_asset: u16,
+    pub expected_close_q: u128,
+    pub observed_oi_reduce_q: [[u128; 2]; ASSET_COUNT],
+    pub account_value_framed: bool,
+    pub protocol_value_framed: bool,
+    pub loss_domains_framed: bool,
+    pub nonselected_assets_framed: bool,
+    pub counterparties_framed: bool,
+    pub spl_framed: bool,
+    pub compute_units: u64,
+}
+
+impl LockedLossLiquidationStep {
+    fn satisfies_invariant(&self) -> bool {
+        let selected = usize::from(self.observed_asset);
+        self.expected_asset == self.observed_asset
+            && selected < ASSET_COUNT
+            && self.expected_close_q != 0
+            && self.observed_oi_reduce_q[selected] == [self.expected_close_q, self.expected_close_q]
+            && self
+                .observed_oi_reduce_q
+                .iter()
+                .enumerate()
+                .all(|(asset, delta)| asset == selected || *delta == [0, 0])
+            && self.account_value_framed
+            && self.protocol_value_framed
+            && self.loss_domains_framed
+            && self.nonselected_assets_framed
+            && self.counterparties_framed
+            && self.spl_framed
+            && self.compute_units != 0
+            && self.compute_units < super::v16_svm::TX_CU_LIMIT
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreeAssetLockedLossDiscovery {
+    pub route: DiscoveryTradeRoute,
+    pub leg_order: ThreeAssetLegOrder,
+    pub accrual_order: ThreeAssetAccrualOrder,
+    pub effective_prices: [u64; ASSET_COUNT],
+    pub independent_loss_by_asset: [u128; ASSET_COUNT],
+    pub target_principal_consumed: u128,
+    pub pre_liquidation_pnl: i128,
+    pub pre_liquidation_deficit: u128,
+    pub pre_liquidation_lock: bool,
+    pub steps: Vec<LockedLossLiquidationStep>,
+    pub target_flat: bool,
+    pub market_live_before_resolution: bool,
+    pub terminal_payouts: [u128; PRIMARY_ACTOR_COUNT],
+    pub initial_participant_value: u128,
+    pub final_vault: u128,
+    pub final_c_tot: u128,
+    pub final_insurance: u128,
+    pub final_spl_vault: u128,
+    pub portfolios_closed: bool,
+    pub max_compute_units: u64,
+    pub token_supply_conserved: bool,
+    pub public_trace_valid: bool,
+}
+
+impl ThreeAssetLockedLossDiscovery {
+    pub fn satisfies_invariant(&self) -> bool {
+        let expected_loss = self.independent_loss_by_asset.iter().sum::<u128>();
+        let uncovered_loss = self
+            .pre_liquidation_pnl
+            .checked_neg()
+            .map(|pnl| pnl as u128);
+        self.effective_prices == [150, 140, 120]
+            && self.independent_loss_by_asset == [500, 240, 60]
+            && self.target_principal_consumed == 600
+            && uncovered_loss.and_then(|loss| loss.checked_add(self.target_principal_consumed))
+                == Some(expected_loss)
+            && self.pre_liquidation_deficit != 0
+            && self.pre_liquidation_lock
+            && self.steps.len() == ASSET_COUNT
+            && self
+                .steps
+                .iter()
+                .map(|step| step.expected_asset)
+                .eq(self.leg_order.assets())
+            && self.steps.iter().all(|step| step.satisfies_invariant())
+            && self.target_flat
+            && self.market_live_before_resolution
+            && self.terminal_payouts == [0, 875, 680, 545, 1]
+            && self.terminal_payouts.iter().sum::<u128>() == self.initial_participant_value
+            && self.final_vault == 0
+            && self.final_c_tot == 0
+            && self.final_insurance == 0
+            && self.final_spl_vault == 0
+            && self.portfolios_closed
+            && self.max_compute_units != 0
+            && self.max_compute_units < super::v16_svm::TX_CU_LIMIT
+            && self.token_supply_conserved
+            && self.public_trace_valid
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12090,9 +12240,14 @@ fn drain_resolved_discovery_actors<const N: usize>(
         let portfolios_before: [Vec<u8>; N] =
             std::array::from_fn(|index| env.primary_portfolio_data(actors[index]));
         let destinations_before = destinations.map(|destination| env.token_amount(destination));
+        let mut rejected_routes = Vec::new();
         for actor in actors {
-            let _ = env.close_resolved_primary(actor);
-            let _ = env.claim_resolved_payout_topup_primary(actor);
+            if let Err(error) = env.close_resolved_primary_signed(actor) {
+                rejected_routes.push(format!("actor {actor} close: {error}"));
+            }
+            if let Err(error) = env.claim_resolved_payout_topup_primary(actor) {
+                rejected_routes.push(format!("actor {actor} topup: {error}"));
+            }
         }
         let progressed = env.market_data(false) != market_before
             || actors.iter().enumerate().any(|(index, actor)| {
@@ -12108,8 +12263,9 @@ fn drain_resolved_discovery_actors<const N: usize>(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             return Err(format!(
-                "resolved payout rails reached a nonterminal fixed point: {}",
-                summaries.join("; ")
+                "resolved payout rails reached a nonterminal fixed point: {}; rejected={}",
+                summaries.join("; "),
+                rejected_routes.join(" | ")
             ));
         }
     }
@@ -18039,6 +18195,534 @@ pub fn verify_multi_asset_adl_liquidation_permutations(
         for leg_order in EqualRiskAssetOrder::ALL {
             for accrual_order in EqualRiskAssetOrder::ALL {
                 discoveries.push(verify_one_multi_asset_adl_liquidation(
+                    seed,
+                    route,
+                    leg_order,
+                    accrual_order,
+                )?);
+            }
+        }
+    }
+    Ok(discoveries)
+}
+
+fn locked_loss_asset_attribution_framed(
+    before: percolator::AssetStateV16,
+    after: percolator::AssetStateV16,
+) -> bool {
+    before.b_long_num == after.b_long_num
+        && before.b_short_num == after.b_short_num
+        && before.b_epoch_start_long_num == after.b_epoch_start_long_num
+        && before.b_epoch_start_short_num == after.b_epoch_start_short_num
+        && before.pending_obligation_count_long == after.pending_obligation_count_long
+        && before.pending_obligation_count_short == after.pending_obligation_count_short
+        && before.social_loss_remainder_long_num == after.social_loss_remainder_long_num
+        && before.social_loss_remainder_short_num == after.social_loss_remainder_short_num
+        && before.social_loss_dust_long_num == after.social_loss_dust_long_num
+        && before.social_loss_dust_short_num == after.social_loss_dust_short_num
+        && before.explicit_unallocated_loss_long == after.explicit_unallocated_loss_long
+        && before.explicit_unallocated_loss_short == after.explicit_unallocated_loss_short
+}
+
+fn locked_loss_domains_framed(
+    before: &percolator_prog::state::MarketGroupV16,
+    after: &percolator_prog::state::MarketGroupV16,
+    selected_asset: usize,
+) -> bool {
+    let selected_domains = [selected_asset * 2, selected_asset * 2 + 1];
+    let selected_bound_before = selected_domains
+        .into_iter()
+        .map(|domain| before.source_credit[domain].positive_claim_bound_num)
+        .sum::<u128>();
+    let selected_bound_after = selected_domains
+        .into_iter()
+        .map(|domain| after.source_credit[domain].positive_claim_bound_num)
+        .sum::<u128>();
+    let aggregate_bound_decrease = before
+        .source_claim_bound_total_num
+        .checked_sub(after.source_claim_bound_total_num);
+    let selected_bound_decrease = selected_bound_before.checked_sub(selected_bound_after);
+    let selected_blockers = |group: &percolator_prog::state::MarketGroupV16| {
+        let asset = group.assets[selected_asset];
+        asset
+            .stored_pos_count_long
+            .checked_add(asset.stored_pos_count_short)
+            .and_then(|value| value.checked_add(asset.stale_account_count_long))
+            .and_then(|value| value.checked_add(asset.stale_account_count_short))
+            .and_then(|value| {
+                value.checked_add(group.pending_domain_loss_barriers[selected_asset * 2])
+            })
+            .and_then(|value| {
+                value.checked_add(group.pending_domain_loss_barriers[selected_asset * 2 + 1])
+            })
+    };
+    let aggregate_blocker_decrease = before
+        .resolved_payout_blocker_count
+        .checked_sub(after.resolved_payout_blocker_count);
+    let selected_blocker_decrease = selected_blockers(before)
+        .zip(selected_blockers(after))
+        .and_then(|(before_count, after_count)| before_count.checked_sub(after_count));
+    let source_support_framed = before.source_credit.iter().zip(&after.source_credit).all(
+        |(before_source, after_source)| {
+            before_source.fresh_reserved_backing_num == after_source.fresh_reserved_backing_num
+                && before_source.spent_backing_num == after_source.spent_backing_num
+                && before_source.provider_receivable_num == after_source.provider_receivable_num
+                && before_source.valid_liened_backing_num == after_source.valid_liened_backing_num
+                && before_source.impaired_liened_backing_num
+                    == after_source.impaired_liened_backing_num
+                && before_source.insurance_credit_reserved_num
+                    == after_source.insurance_credit_reserved_num
+                && before_source.valid_liened_insurance_num
+                    == after_source.valid_liened_insurance_num
+                && before_source.impaired_liened_insurance_num
+                    == after_source.impaired_liened_insurance_num
+        },
+    );
+    let nonselected_source_domains_framed = before
+        .source_credit
+        .iter()
+        .zip(&after.source_credit)
+        .enumerate()
+        .all(|(domain, (before_source, after_source))| {
+            selected_domains.contains(&domain) || before_source == after_source
+        });
+
+    aggregate_bound_decrease == selected_bound_decrease
+        && aggregate_blocker_decrease == selected_blocker_decrease
+        && before.source_insurance_credit_reserved_total_atoms
+            == after.source_insurance_credit_reserved_total_atoms
+        && before.insurance_domain_budget_remaining_total
+            == after.insurance_domain_budget_remaining_total
+        && before.insurance_domain_budget == after.insurance_domain_budget
+        && before.insurance_domain_spent == after.insurance_domain_spent
+        && before.pending_domain_loss_barriers == after.pending_domain_loss_barriers
+        && source_support_framed
+        && nonselected_source_domains_framed
+        && before.source_backing_buckets == after.source_backing_buckets
+        && before.insurance_credit_reservations == after.insurance_credit_reservations
+        && before
+            .assets
+            .iter()
+            .zip(&after.assets)
+            .all(|(before_asset, after_asset)| {
+                locked_loss_asset_attribution_framed(*before_asset, *after_asset)
+            })
+}
+
+fn locked_loss_protocol_value_framed(
+    before: &percolator_prog::state::MarketGroupV16,
+    after: &percolator_prog::state::MarketGroupV16,
+) -> bool {
+    before.vault == after.vault
+        && before.insurance == after.insurance
+        && before.c_tot == after.c_tot
+        && before.pnl_pos_tot == after.pnl_pos_tot
+        && before.pnl_pos_bound_tot_num == after.pnl_pos_bound_tot_num
+        && before.pnl_pos_bound_tot == after.pnl_pos_bound_tot
+        && before.pnl_matured_pos_tot == after.pnl_matured_pos_tot
+        && before.backing_provider_earnings_total == after.backing_provider_earnings_total
+}
+
+fn locked_loss_account_value_framed(
+    before: &percolator_prog::state::PortfolioAccountV16,
+    after: &percolator_prog::state::PortfolioAccountV16,
+) -> bool {
+    before.capital == after.capital
+        && before.pnl == after.pnl
+        && before.reserved_pnl == after.reserved_pnl
+        && before.residual_crystallized_loss_atoms_total
+            == after.residual_crystallized_loss_atoms_total
+        && before.residual_spent_principal_atoms_total == after.residual_spent_principal_atoms_total
+        && before.residual_received_atoms_total == after.residual_received_atoms_total
+        && before.funding_long_paid_atoms_total == after.funding_long_paid_atoms_total
+        && before.funding_long_received_atoms_total == after.funding_long_received_atoms_total
+        && before.funding_short_paid_atoms_total == after.funding_short_paid_atoms_total
+        && before.funding_short_received_atoms_total == after.funding_short_received_atoms_total
+        && before.fee_credits == after.fee_credits
+        && before.cancel_deposit_escrow == after.cancel_deposit_escrow
+        && before.source_domains == after.source_domains
+        && before.close_progress == after.close_progress
+        && before.resolved_payout_receipt == after.resolved_payout_receipt
+}
+
+fn verify_one_three_asset_locked_loss_liquidation(
+    mut seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+    leg_order: ThreeAssetLegOrder,
+    accrual_order: ThreeAssetAccrualOrder,
+) -> Result<ThreeAssetLockedLossDiscovery, String> {
+    const TARGET: usize = 0;
+    const HELPER: usize = 4;
+    const OPEN_PRICE: u64 = 100;
+    const FINAL_PRICES: [u64; ASSET_COUNT] = [150, 140, 120];
+    const PRICE_STEP: [u64; ASSET_COUNT] = [5, 4, 2];
+    const POSITION_Q: [i128; ASSET_COUNT] = [
+        10 * POS_SCALE as i128,
+        6 * POS_SCALE as i128,
+        3 * POS_SCALE as i128,
+    ];
+    const TARGET_DEPOSIT: u128 = 600;
+    const COUNTERPARTY_DEPOSIT: u128 = 500;
+    const HELPER_DEPOSIT: u128 = 1;
+
+    seed[0] ^= 0xb7;
+    seed[1] ^= route.discriminator();
+    let actor_deposits = [
+        TARGET_DEPOSIT,
+        COUNTERPARTY_DEPOSIT,
+        COUNTERPARTY_DEPOSIT,
+        COUNTERPARTY_DEPOSIT,
+        HELPER_DEPOSIT,
+    ];
+    let initial_participant_value = actor_deposits.iter().sum::<u128>();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_PRICE,
+            h_max: 10,
+            min_nonzero_mm_req: 2,
+            min_nonzero_im_req: 3,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits,
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_permissionless_resolve(100, 1)
+        .map_err(|error| format!("configure three-asset stale resolution: {error}"))?;
+    let supply_before = env.token_supply_observed();
+    env.begin_public_trace();
+    let mut max_compute_units = 0u64;
+
+    for asset_index in leg_order.assets() {
+        let counterparty = usize::from(asset_index) + 1;
+        execute_discovery_trade_route(
+            &mut env,
+            route,
+            TARGET,
+            counterparty,
+            asset_index,
+            -POSITION_Q[usize::from(asset_index)],
+            OPEN_PRICE,
+        )
+        .map_err(|error| {
+            format!("open three-asset locked-loss leg {asset_index} through {route:?}: {error}")
+        })?;
+    }
+    let opened_target = env.primary_portfolio(TARGET);
+    let opened_assets = opened_target
+        .legs
+        .iter()
+        .map(|encoded| encoded.try_to_runtime())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("decode three-asset opening order: {error:?}"))?
+        .into_iter()
+        .filter(|leg| leg.active)
+        .map(|leg| leg.asset_index as u16)
+        .collect::<Vec<_>>();
+    if opened_assets != leg_order.assets() {
+        return Err(format!(
+            "three-asset opening route lost persisted leg order: expected={:?}, observed={opened_assets:?}",
+            leg_order.assets()
+        ));
+    }
+
+    let mut liquidation_slot = 1u64;
+    for step in 1u64..=10 {
+        liquidation_slot = step
+            .checked_add(1)
+            .ok_or_else(|| "three-asset price slot overflow".to_string())?;
+        env.warp_to_slot(liquidation_slot);
+        for asset_index in accrual_order.assets() {
+            let index = usize::from(asset_index);
+            let price = OPEN_PRICE
+                .checked_add(
+                    PRICE_STEP[index]
+                        .checked_mul(step)
+                        .ok_or_else(|| "three-asset price step overflow".to_string())?,
+                )
+                .ok_or_else(|| "three-asset price overflow".to_string())?
+                .min(FINAL_PRICES[index]);
+            let success = env
+                .push_auth_mark(asset_index, liquidation_slot, price)
+                .map_err(|error| {
+                    format!(
+                        "publish three-asset mark {asset_index}/{price} at {liquidation_slot}: {error}"
+                    )
+                })?;
+            max_compute_units = max_compute_units.max(success.compute_units);
+        }
+        let observations = accrual_order
+            .assets()
+            .into_iter()
+            .map(|asset_index| CrankObservationHint {
+                asset_index,
+                oracle_accounts: env
+                    .primary_profile(usize::from(asset_index))
+                    .oracle_leg_count,
+            })
+            .collect();
+        let success = env
+            .crank(HELPER, liquidation_slot, observations)
+            .map_err(|error| {
+                format!(
+                    "commit three-asset marks in {accrual_order:?} order at {liquidation_slot}: {error}"
+                )
+            })?;
+        max_compute_units = max_compute_units.max(success.compute_units);
+    }
+
+    for refresh_step in 0..8 {
+        let (_, group) = env.primary_market_state();
+        let account = env.primary_portfolio(TARGET);
+        if discovery_certificate_is_current(&group, &account)? {
+            break;
+        }
+        let success = env
+            .crank(TARGET, liquidation_slot, Vec::new())
+            .map_err(|error| {
+                format!("refresh three-asset target at step {refresh_step}: {error}")
+            })?;
+        max_compute_units = max_compute_units.max(success.compute_units);
+    }
+    let (_, before_liquidations_group) = env.primary_market_state();
+    let before_liquidations_account = env.primary_portfolio(TARGET);
+    if !discovery_certificate_is_current(&before_liquidations_group, &before_liquidations_account)?
+    {
+        return Err("three-asset target never reached a current certificate".into());
+    }
+    let cert = before_liquidations_account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode three-asset liquidation certificate: {error:?}"))?;
+    let effective_prices =
+        std::array::from_fn(|asset| before_liquidations_group.assets[asset].effective_price);
+    let independent_loss_by_asset = [
+        super::reference_math::mul_div_floor(
+            POSITION_Q[0].unsigned_abs(),
+            u128::from(effective_prices[0] - OPEN_PRICE),
+            POS_SCALE,
+        )?,
+        super::reference_math::mul_div_floor(
+            POSITION_Q[1].unsigned_abs(),
+            u128::from(effective_prices[1] - OPEN_PRICE),
+            POS_SCALE,
+        )?,
+        super::reference_math::mul_div_floor(
+            POSITION_Q[2].unsigned_abs(),
+            u128::from(effective_prices[2] - OPEN_PRICE),
+            POS_SCALE,
+        )?,
+    ];
+    if effective_prices != FINAL_PRICES
+        || independent_loss_by_asset != [500, 240, 60]
+        || before_liquidations_account.capital.get() != 0
+        || before_liquidations_account.pnl.get() != -200
+        || before_liquidations_account
+            .residual_crystallized_loss_atoms_total
+            .get()
+            != TARGET_DEPOSIT
+        || cert.certified_liq_deficit == 0
+        || before_liquidations_account.liquidation_lock == 0
+    {
+        return Err(format!(
+            "three-asset locked-loss precondition missing: prices={effective_prices:?}, losses={independent_loss_by_asset:?}, capital={}, pnl={}, consumed={}, cert={cert:?}, lock={}",
+            before_liquidations_account.capital.get(),
+            before_liquidations_account.pnl.get(),
+            before_liquidations_account
+                .residual_crystallized_loss_atoms_total
+                .get(),
+            before_liquidations_account.liquidation_lock
+        ));
+    }
+
+    let mut steps = Vec::new();
+    for liquidation_step in 0..12 {
+        let before_account = env.primary_portfolio(TARGET);
+        let active_legs = before_account
+            .legs
+            .iter()
+            .map(|encoded| encoded.try_to_runtime())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("decode locked-loss target legs: {error:?}"))?
+            .into_iter()
+            .filter(|leg| leg.active)
+            .collect::<Vec<_>>();
+        let Some(selected_leg) = active_legs.first().copied() else {
+            break;
+        };
+        let expected_asset = selected_leg.asset_index as u16;
+        let selected_index = usize::from(expected_asset);
+        let (_, before_group) = env.primary_market_state();
+        let before_cert = before_account
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("decode locked-loss step certificate: {error:?}"))?;
+        if !discovery_certificate_is_current(&before_group, &before_account)?
+            || before_cert.certified_liq_deficit == 0
+            || before_account.liquidation_lock == 0
+        {
+            return Err(format!(
+                "locked-loss step {liquidation_step} lost its current liquidation precondition: cert={before_cert:?}, lock={}",
+                before_account.liquidation_lock
+            ));
+        }
+        let effective_q =
+            discovery_effective_leg_q(before_group.assets[selected_index], selected_leg)?;
+        let close_request_q = reference_liquidation_close_request_q(
+            before_group.config,
+            before_cert,
+            before_account.capital.get(),
+            before_account.pnl.get(),
+            selected_leg.side,
+            effective_q,
+            before_group.assets[selected_index].effective_price,
+            before_group.assets[selected_index].raw_oracle_target_price,
+        )?;
+        let expected_close_q = close_request_q
+            .min(effective_q)
+            .min(before_group.assets[selected_index].oi_eff_long_q)
+            .min(before_group.assets[selected_index].oi_eff_short_q);
+        let before_oi: [[u128; 2]; ASSET_COUNT] = std::array::from_fn(|asset| {
+            [
+                before_group.assets[asset].oi_eff_long_q,
+                before_group.assets[asset].oi_eff_short_q,
+            ]
+        });
+        let counterparties_before = [1usize, 2, 3].map(|actor| env.primary_portfolio_data(actor));
+        let token_state_before = env.all_token_account_data();
+        let success = env
+            .crank(TARGET, liquidation_slot, Vec::new())
+            .map_err(|error| {
+                format!(
+                    "execute locked-loss liquidation step {liquidation_step}/{expected_asset}: {error}"
+                )
+            })?;
+        max_compute_units = max_compute_units.max(success.compute_units);
+        let (_, after_group) = env.primary_market_state();
+        let after_account = env.primary_portfolio(TARGET);
+        let mut observed_oi_reduce_q = [[0u128; 2]; ASSET_COUNT];
+        for asset in 0..ASSET_COUNT {
+            observed_oi_reduce_q[asset] = [
+                before_oi[asset][0]
+                    .checked_sub(after_group.assets[asset].oi_eff_long_q)
+                    .ok_or_else(|| format!("locked-loss asset {asset} long OI increased"))?,
+                before_oi[asset][1]
+                    .checked_sub(after_group.assets[asset].oi_eff_short_q)
+                    .ok_or_else(|| format!("locked-loss asset {asset} short OI increased"))?,
+            ];
+        }
+        let touched_assets = (0..ASSET_COUNT)
+            .filter(|asset| observed_oi_reduce_q[*asset] != [0, 0])
+            .collect::<Vec<_>>();
+        let observed_asset = match touched_assets.as_slice() {
+            [asset] => u16::try_from(*asset)
+                .map_err(|_| "locked-loss selected asset exceeded u16".to_string())?,
+            _ => {
+                return Err(format!(
+                    "locked-loss liquidation touched an invalid asset set: {touched_assets:?}"
+                ));
+            }
+        };
+        let nonselected_assets_framed = (0..ASSET_COUNT)
+            .filter(|asset| *asset != usize::from(observed_asset))
+            .all(|asset| before_group.assets[asset] == after_group.assets[asset]);
+        let counterparties_framed = [1usize, 2, 3]
+            .into_iter()
+            .zip(counterparties_before)
+            .all(|(actor, before)| env.primary_portfolio_data(actor) == before);
+        let loss_domains_framed =
+            locked_loss_domains_framed(&before_group, &after_group, usize::from(observed_asset));
+        steps.push(LockedLossLiquidationStep {
+            expected_asset,
+            observed_asset,
+            expected_close_q,
+            observed_oi_reduce_q,
+            account_value_framed: locked_loss_account_value_framed(&before_account, &after_account),
+            protocol_value_framed: locked_loss_protocol_value_framed(&before_group, &after_group),
+            loss_domains_framed,
+            nonselected_assets_framed,
+            counterparties_framed,
+            spl_framed: env.all_token_account_data() == token_state_before,
+            compute_units: success.compute_units,
+        });
+    }
+
+    let target_flat = (0u16..ASSET_COUNT as u16).try_fold(true, |flat, asset_index| {
+        discovery_leg_for_asset(&env.primary_portfolio(TARGET), asset_index)
+            .map(|leg| flat && leg.is_none())
+    })?;
+    let market_live_before_resolution = env.primary_market_state().1.mode == MarketModeV16::Live;
+    let resolution_slot = liquidation_slot
+        .checked_add(100)
+        .ok_or_else(|| "three-asset resolution slot overflow".to_string())?;
+    let resolve = env
+        .resolve_stale_permissionless(resolution_slot)
+        .map_err(|error| format!("resolve three-asset locked-loss market: {error}"))?;
+    max_compute_units = max_compute_units.max(resolve.compute_units);
+    if env.primary_market_state().1.mode != MarketModeV16::Resolved {
+        return Err("three-asset locked-loss market did not resolve".into());
+    }
+
+    let terminal_payouts = drain_resolved_discovery_actors(&mut env, [0usize, 1, 2, 3, HELPER])?;
+    let mut portfolios_closed = true;
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        portfolios_closed &= env.close_primary_portfolio(actor).is_ok();
+    }
+    let final_group = env.primary_market_state().1;
+    let trace = env.finish_public_trace();
+    max_compute_units = max_compute_units.max(
+        trace
+            .steps
+            .iter()
+            .filter_map(|step| step.compute_units)
+            .max()
+            .unwrap_or(0),
+    );
+    let public_trace_valid =
+        trace.out_of_band_economic_mutations == 0 && trace.validate_public_execution().is_ok();
+
+    Ok(ThreeAssetLockedLossDiscovery {
+        route,
+        leg_order,
+        accrual_order,
+        effective_prices,
+        independent_loss_by_asset,
+        target_principal_consumed: before_liquidations_account
+            .residual_crystallized_loss_atoms_total
+            .get(),
+        pre_liquidation_pnl: before_liquidations_account.pnl.get(),
+        pre_liquidation_deficit: cert.certified_liq_deficit,
+        pre_liquidation_lock: before_liquidations_account.liquidation_lock != 0,
+        steps,
+        target_flat,
+        market_live_before_resolution,
+        terminal_payouts,
+        initial_participant_value,
+        final_vault: final_group.vault,
+        final_c_tot: final_group.c_tot,
+        final_insurance: final_group.insurance,
+        final_spl_vault: u128::from(env.token_amount(env.vault)),
+        portfolios_closed,
+        max_compute_units,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+        public_trace_valid,
+    })
+}
+
+pub fn verify_three_asset_locked_loss_liquidation_permutations(
+    seed: [u8; 32],
+) -> Result<Vec<ThreeAssetLockedLossDiscovery>, String> {
+    let mut discoveries = Vec::new();
+    for route in DiscoveryTradeRoute::ALL {
+        for leg_order in ThreeAssetLegOrder::ALL {
+            for accrual_order in ThreeAssetAccrualOrder::ALL {
+                discoveries.push(verify_one_three_asset_locked_loss_liquidation(
                     seed,
                     route,
                     leg_order,
