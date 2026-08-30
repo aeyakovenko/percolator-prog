@@ -10,6 +10,6 @@ FeeRedirectPolicy	TERMINAL_LOF	FeeRedirectSupersessionDiscovery	paired public tr
 LiquidationFeePolicy	ATTRIBUTION_ONLY	FeeShareSupersessionDiscovery	the share cannot change the victim's liquidation fee; three public terminal worlds prove stale rejection, exact victim payout, and a nonvacuous inverse cranker/insurance allocation change
 MaintenanceFeePolicy	ATTRIBUTION_ONLY	FeeShareSupersessionDiscovery	the share cannot change the payer's maintenance fee; three public terminal worlds prove stale rejection, exact payer payout, and a nonvacuous inverse cranker/insurance allocation change
 MarketInitFeePolicy	SIGNED_ECONOMIC_BOUND	-	permissionless activation binds the creator's exact accepted fee, so stale policy acceptance alone is not terminal loss
-ResolvePolicy	LIVENESS_CANDIDATE	-	stale timing policy can alter when permissionless resolution is available; a complete funded-route liveness observation remains to be added
+ResolvePolicy	BOUNDED_LIVENESS	ResolvePolicyLivenessDiscovery	both policy directions attempt live withdrawal and early resolution, then require finite permissionless resolution plus crank/direct payouts and slab closure with exact funded value
 BackingFeePolicy	PROVIDER_CONSENT_BOUND	-	live provider principal freezes changed fee terms and each trade binds the charged source fee; stale overwrite remains a policy-integrity failure
 BackingFeePolicyShort	PROVIDER_CONSENT_BOUND	-	the short source domain has the same provider-principal freeze and signed source-fee bound as the long domain

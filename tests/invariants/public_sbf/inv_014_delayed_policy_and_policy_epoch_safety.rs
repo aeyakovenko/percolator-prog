@@ -215,6 +215,20 @@ fn v16_program_fee_redirect_supersession_preserves_terminal_domain_value() {
 }
 
 #[test]
+fn v16_program_resolve_policy_supersession_preserves_a_complete_funded_exit() {
+    for payload_order in SupersessionPayloadOrder::ALL {
+        let discovery = discover_resolve_policy_bounded_liveness([0x3a; 32], payload_order)
+            .unwrap_or_else(|error| {
+                panic!("resolve-policy {payload_order:?} liveness world failed: {error}")
+            });
+        assert!(
+            discovery.certifies_bounded_liveness(),
+            "resolve-policy supersession lost its funded exit: {discovery:?}"
+        );
+    }
+}
+
+#[test]
 fn v16_program_oracle_supersession_is_bound_to_terminal_value() {
     let discoveries = discover_oracle_supersession_terminal_losses([0x38; 32])
         .unwrap_or_else(|error| panic!("oracle-supersession terminal matrix failed: {error}"));

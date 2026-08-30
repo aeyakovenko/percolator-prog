@@ -3376,6 +3376,33 @@ pub struct FeeRedirectSupersessionDiscovery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvePolicyLivenessWorld {
+    pub active_stale_slots: u64,
+    pub policy_attempt_landed: bool,
+    pub policy_attempt_rejected_exact_rollback: bool,
+    pub funded_value_before: u128,
+    pub low_boundary_withdraw_landed: bool,
+    pub low_boundary_withdraw_rejected_exact_rollback: bool,
+    pub low_boundary_resolve_landed: bool,
+    pub low_boundary_resolve_rejected_exact_rollback: bool,
+    pub high_boundary_resolve_landed: bool,
+    pub terminal_values: [u128; 6],
+    pub required_exit_routes: u64,
+    pub attempted_exit_routes: u64,
+    pub progressing_exit_routes: u64,
+    pub terminal_classification: PublicTerminalClassification,
+    pub public_trace: PublicTraceEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvePolicyLivenessDiscovery {
+    pub payload_order: SupersessionPayloadOrder,
+    pub control: ResolvePolicyLivenessWorld,
+    pub replay: ResolvePolicyLivenessWorld,
+    pub mutation: ResolvePolicyLivenessWorld,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OracleSupersessionTerminalDiscovery {
     pub kind: SupersededIntentKind,
     pub stale_control_landed: bool,
@@ -3607,6 +3634,87 @@ impl FeeRedirectSupersessionDiscovery {
                 .mutation_public_trace
                 .validate_public_execution()
                 .is_ok()
+    }
+}
+
+const RESOLVE_POLICY_LOW_STALE_SLOTS: u64 = 3;
+const RESOLVE_POLICY_HIGH_STALE_SLOTS: u64 = 7;
+const RESOLVE_POLICY_DEPOSIT: u128 = 10_000;
+const RESOLVE_POLICY_WITHDRAW_ROUTE: u64 = 1 << 0;
+const RESOLVE_POLICY_LOW_RESOLVE_ROUTE: u64 = 1 << 1;
+const RESOLVE_POLICY_HIGH_RESOLVE_ROUTE: u64 = 1 << 2;
+const RESOLVE_POLICY_CRANK_PAYOUT_ROUTE: u64 = 1 << 3;
+const RESOLVE_POLICY_DIRECT_PAYOUT_ROUTE: u64 = 1 << 4;
+const RESOLVE_POLICY_CLOSE_ROUTE: u64 = 1 << 5;
+
+impl ResolvePolicyLivenessWorld {
+    fn certifies_bounded_liveness(&self) -> bool {
+        let high_policy = self.active_stale_slots == RESOLVE_POLICY_HIGH_STALE_SLOTS;
+        let expected_required = RESOLVE_POLICY_WITHDRAW_ROUTE
+            | RESOLVE_POLICY_LOW_RESOLVE_ROUTE
+            | RESOLVE_POLICY_CRANK_PAYOUT_ROUTE
+            | RESOLVE_POLICY_DIRECT_PAYOUT_ROUTE
+            | RESOLVE_POLICY_CLOSE_ROUTE
+            | if high_policy {
+                RESOLVE_POLICY_HIGH_RESOLVE_ROUTE
+            } else {
+                0
+            };
+        let expected_progress = RESOLVE_POLICY_CRANK_PAYOUT_ROUTE
+            | RESOLVE_POLICY_DIRECT_PAYOUT_ROUTE
+            | RESOLVE_POLICY_CLOSE_ROUTE
+            | if high_policy {
+                RESOLVE_POLICY_WITHDRAW_ROUTE | RESOLVE_POLICY_HIGH_RESOLVE_ROUTE
+            } else {
+                RESOLVE_POLICY_LOW_RESOLVE_ROUTE
+            };
+        matches!(
+            self.active_stale_slots,
+            RESOLVE_POLICY_LOW_STALE_SLOTS | RESOLVE_POLICY_HIGH_STALE_SLOTS
+        ) && self.funded_value_before == RESOLVE_POLICY_DEPOSIT * PRIMARY_ACTOR_COUNT as u128
+            && self.low_boundary_withdraw_landed == high_policy
+            && self.low_boundary_withdraw_rejected_exact_rollback == !high_policy
+            && self.low_boundary_resolve_landed == !high_policy
+            && self.low_boundary_resolve_rejected_exact_rollback == high_policy
+            && self.high_boundary_resolve_landed == high_policy
+            && self.terminal_values[..PRIMARY_ACTOR_COUNT]
+                .iter()
+                .all(|value| *value == RESOLVE_POLICY_DEPOSIT)
+            && self.terminal_values[PRIMARY_ACTOR_COUNT] == 0
+            && self.required_exit_routes == expected_required
+            && self.attempted_exit_routes == expected_required
+            && self.progressing_exit_routes == expected_progress
+            && matches!(
+                self.terminal_classification,
+                PublicTerminalClassification::BoundedExit
+            )
+            && self.public_trace.validate_public_execution().is_ok()
+    }
+}
+
+impl ResolvePolicyLivenessDiscovery {
+    pub fn certifies_bounded_liveness(&self) -> bool {
+        let (target_stale_slots, current_stale_slots) = self.payload_order.ordered(
+            RESOLVE_POLICY_LOW_STALE_SLOTS,
+            RESOLVE_POLICY_HIGH_STALE_SLOTS,
+        );
+        self.control.certifies_bounded_liveness()
+            && self.replay.certifies_bounded_liveness()
+            && self.mutation.certifies_bounded_liveness()
+            && self.control.active_stale_slots == current_stale_slots
+            && self.replay.active_stale_slots == current_stale_slots
+            && self.mutation.active_stale_slots == target_stale_slots
+            && !self.control.policy_attempt_landed
+            && !self.control.policy_attempt_rejected_exact_rollback
+            && !self.replay.policy_attempt_landed
+            && self.replay.policy_attempt_rejected_exact_rollback
+            && self.mutation.policy_attempt_landed
+            && !self.mutation.policy_attempt_rejected_exact_rollback
+            && self.control.terminal_values == self.replay.terminal_values
+            && self.control.terminal_values == self.mutation.terminal_values
+            && self.control.required_exit_routes == self.replay.required_exit_routes
+            && self.control.attempted_exit_routes == self.replay.attempted_exit_routes
+            && self.control.progressing_exit_routes == self.replay.progressing_exit_routes
     }
 }
 
@@ -9046,6 +9154,258 @@ pub fn discover_fee_redirect_supersession(
         control_public_trace: control.public_trace,
         replay_public_trace: replay.public_trace,
         mutation_public_trace: mutation.public_trace,
+    })
+}
+
+fn run_resolve_policy_liveness_world(
+    mut seed: [u8; 32],
+    current_stale_slots: u64,
+    target_stale_slots: u64,
+    policy_attempt: SupersededMutationAttempt,
+) -> Result<ResolvePolicyLivenessWorld, String> {
+    const LAST_GOOD_ORACLE_SLOT: u64 = 1;
+
+    seed[0] ^= 0xa7;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            actor_deposits: [RESOLVE_POLICY_DEPOSIT; PRIMARY_ACTOR_COUNT],
+            actor_token_balances: [20_000; PRIMARY_ACTOR_COUNT],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let destinations: [Pubkey; PRIMARY_ACTOR_COUNT] =
+        std::array::from_fn(|actor| env.actors[actor].destination_token);
+    env.begin_public_trace();
+    let retained =
+        env.build_retained_permissionless_resolve_policy(target_stale_slots, target_stale_slots);
+    env.configure_permissionless_resolve(current_stale_slots, current_stale_slots)
+        .map_err(|error| format!("install current permissionless-resolve policy: {error}"))?;
+    let fresh =
+        env.build_retained_permissionless_resolve_policy(target_stale_slots, target_stale_slots);
+    let (policy_attempt_landed, policy_attempt_rejected_exact_rollback) = match policy_attempt {
+        SupersededMutationAttempt::None => (false, false),
+        SupersededMutationAttempt::RetainedStale => {
+            let before = fingerprint(&env);
+            match env.land_retained(retained) {
+                Ok(_) => (true, false),
+                Err(_) => (false, fingerprint(&env) == before),
+            }
+        }
+        SupersededMutationAttempt::FreshEquivalent => {
+            env.land_retained(fresh)
+                .map_err(|error| format!("install fresh resolve-policy witness: {error}"))?;
+            (true, false)
+        }
+    };
+    let active_stale_slots = env
+        .primary_market_state()
+        .0
+        .permissionless_resolve_stale_slots;
+    if !matches!(
+        active_stale_slots,
+        RESOLVE_POLICY_LOW_STALE_SLOTS | RESOLVE_POLICY_HIGH_STALE_SLOTS
+    ) {
+        return Err(format!(
+            "resolve-policy world installed unsupported stale threshold {active_stale_slots}"
+        ));
+    }
+    let funded_value_before = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+        total
+            .checked_add(env.primary_portfolio(actor).capital.get())
+            .ok_or_else(|| "resolve-policy funded value overflowed".to_string())
+    })?;
+
+    let low_boundary = LAST_GOOD_ORACLE_SLOT
+        .checked_add(RESOLVE_POLICY_LOW_STALE_SLOTS)
+        .ok_or_else(|| "resolve-policy low boundary overflowed".to_string())?;
+    env.warp_to_slot(low_boundary);
+    let mut attempted_exit_routes = RESOLVE_POLICY_WITHDRAW_ROUTE;
+    let mut progressing_exit_routes = 0u64;
+    let before_withdraw = fingerprint(&env);
+    let low_boundary_withdraw = env.withdraw_primary(0, RESOLVE_POLICY_DEPOSIT);
+    let (low_boundary_withdraw_landed, low_boundary_withdraw_rejected_exact_rollback) =
+        match low_boundary_withdraw {
+            Ok(_) => {
+                progressing_exit_routes |= RESOLVE_POLICY_WITHDRAW_ROUTE;
+                (true, false)
+            }
+            Err(_) => (false, fingerprint(&env) == before_withdraw),
+        };
+
+    attempted_exit_routes |= RESOLVE_POLICY_LOW_RESOLVE_ROUTE;
+    let before_low_resolve = fingerprint(&env);
+    let low_boundary_resolve = env.resolve_stale_permissionless(low_boundary);
+    let (low_boundary_resolve_landed, low_boundary_resolve_rejected_exact_rollback) =
+        match low_boundary_resolve {
+            Ok(_) => {
+                progressing_exit_routes |= RESOLVE_POLICY_LOW_RESOLVE_ROUTE;
+                (true, false)
+            }
+            Err(_) => (false, fingerprint(&env) == before_low_resolve),
+        };
+
+    let high_policy = active_stale_slots == RESOLVE_POLICY_HIGH_STALE_SLOTS;
+    let mut required_exit_routes = RESOLVE_POLICY_WITHDRAW_ROUTE
+        | RESOLVE_POLICY_LOW_RESOLVE_ROUTE
+        | RESOLVE_POLICY_CRANK_PAYOUT_ROUTE
+        | RESOLVE_POLICY_DIRECT_PAYOUT_ROUTE
+        | RESOLVE_POLICY_CLOSE_ROUTE;
+    let mut high_boundary_resolve_landed = false;
+    let first_resolved_actor;
+    if high_policy {
+        if !low_boundary_withdraw_landed || low_boundary_resolve_landed {
+            return Err(
+                "high resolve threshold did not preserve the live owner exit before maturity"
+                    .into(),
+            );
+        }
+        attempted_exit_routes |= RESOLVE_POLICY_CLOSE_ROUTE;
+        env.close_primary_portfolio(0)
+            .map_err(|error| format!("close early-withdrawn resolve-policy portfolio: {error}"))?;
+        progressing_exit_routes |= RESOLVE_POLICY_CLOSE_ROUTE;
+        required_exit_routes |= RESOLVE_POLICY_HIGH_RESOLVE_ROUTE;
+        attempted_exit_routes |= RESOLVE_POLICY_HIGH_RESOLVE_ROUTE;
+        let high_boundary = LAST_GOOD_ORACLE_SLOT
+            .checked_add(RESOLVE_POLICY_HIGH_STALE_SLOTS)
+            .ok_or_else(|| "resolve-policy high boundary overflowed".to_string())?;
+        env.resolve_stale_permissionless(high_boundary)
+            .map_err(|error| format!("resolve high-threshold funded market: {error}"))?;
+        progressing_exit_routes |= RESOLVE_POLICY_HIGH_RESOLVE_ROUTE;
+        high_boundary_resolve_landed = true;
+        first_resolved_actor = 1;
+    } else {
+        if low_boundary_withdraw_landed || !low_boundary_resolve_landed {
+            return Err(
+                "low resolve threshold did not transfer the funded exit to resolution at maturity"
+                    .into(),
+            );
+        }
+        first_resolved_actor = 0;
+    }
+    if env.primary_market_state().1.mode != MarketModeV16::Resolved {
+        return Err("resolve-policy liveness world did not enter Resolved mode".into());
+    }
+
+    attempted_exit_routes |= RESOLVE_POLICY_CRANK_PAYOUT_ROUTE;
+    env.crank_resolved_primary_signed(first_resolved_actor, env.current_slot(), vec![])
+        .map_err(|error| format!("resolve-policy crank payout failed: {error}"))?;
+    progressing_exit_routes |= RESOLVE_POLICY_CRANK_PAYOUT_ROUTE;
+    let permissionless_payout_slot = env
+        .current_slot()
+        .checked_add(active_stale_slots)
+        .ok_or_else(|| "resolve-policy payout-delay boundary overflowed".to_string())?;
+    env.warp_to_slot(permissionless_payout_slot);
+    attempted_exit_routes |= RESOLVE_POLICY_DIRECT_PAYOUT_ROUTE;
+    let direct_actor = first_resolved_actor + 1;
+    env.close_resolved_primary(direct_actor)
+        .map_err(|error| format!("resolve-policy direct payout failed: {error}"))?;
+    progressing_exit_routes |= RESOLVE_POLICY_DIRECT_PAYOUT_ROUTE;
+    for actor in direct_actor + 1..PRIMARY_ACTOR_COUNT {
+        env.close_resolved_primary(actor)
+            .map_err(|error| format!("resolve-policy claimant {actor} payout failed: {error}"))?;
+    }
+
+    attempted_exit_routes |= RESOLVE_POLICY_CLOSE_ROUTE;
+    for actor in first_resolved_actor..PRIMARY_ACTOR_COUNT {
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("close resolve-policy portfolio {actor}: {error}"))?;
+    }
+    progressing_exit_routes |= RESOLVE_POLICY_CLOSE_ROUTE;
+    env.close_primary_slab()
+        .map_err(|error| format!("close resolve-policy slab: {error}"))?;
+
+    let supply_after = env.token_supply_observed();
+    let burned = supply_before
+        .checked_sub(supply_after)
+        .ok_or_else(|| "resolve-policy terminal route increased SPL supply".to_string())?;
+    let terminal_values = [
+        u128::from(env.token_amount(destinations[0])),
+        u128::from(env.token_amount(destinations[1])),
+        u128::from(env.token_amount(destinations[2])),
+        u128::from(env.token_amount(destinations[3])),
+        u128::from(env.token_amount(destinations[4])),
+        burned,
+    ];
+    let public_trace = env.finish_public_trace();
+    public_trace
+        .validate_public_execution()
+        .map_err(|error| format!("resolve-policy liveness trace is invalid: {error}"))?;
+    for (index, destination) in destinations.iter().enumerate() {
+        let traced = u128::try_from(public_trace.token_delta_for_accounts(&[*destination])?)
+            .map_err(|_| format!("resolve-policy recipient {index} had a negative payout"))?;
+        if traced != terminal_values[index] {
+            return Err(format!(
+                "resolve-policy recipient {index} payout disagrees with trace: {}/{traced}",
+                terminal_values[index]
+            ));
+        }
+    }
+    let terminal_classification = public_trace
+        .classify_terminal(PublicTerminalObservation {
+            victim_loss_atoms: 0,
+            unauthorized_gain_atoms: 0,
+            funded_value_remaining: 0,
+            unresolved_obligation: 0,
+            bounded_exit_succeeded: true,
+            terminal_receipt_created: false,
+            authorized_forfeit: false,
+            required_exit_routes,
+            attempted_exit_routes,
+            progressing_exit_routes,
+        })
+        .map_err(|error| format!("resolve-policy terminal classification failed: {error}"))?;
+    Ok(ResolvePolicyLivenessWorld {
+        active_stale_slots,
+        policy_attempt_landed,
+        policy_attempt_rejected_exact_rollback,
+        funded_value_before,
+        low_boundary_withdraw_landed,
+        low_boundary_withdraw_rejected_exact_rollback,
+        low_boundary_resolve_landed,
+        low_boundary_resolve_rejected_exact_rollback,
+        high_boundary_resolve_landed,
+        terminal_values,
+        required_exit_routes,
+        attempted_exit_routes,
+        progressing_exit_routes,
+        terminal_classification,
+        public_trace,
+    })
+}
+
+pub fn discover_resolve_policy_bounded_liveness(
+    seed: [u8; 32],
+    payload_order: SupersessionPayloadOrder,
+) -> Result<ResolvePolicyLivenessDiscovery, String> {
+    let (target_stale_slots, current_stale_slots) = payload_order.ordered(
+        RESOLVE_POLICY_LOW_STALE_SLOTS,
+        RESOLVE_POLICY_HIGH_STALE_SLOTS,
+    );
+    let control = run_resolve_policy_liveness_world(
+        seed,
+        current_stale_slots,
+        target_stale_slots,
+        SupersededMutationAttempt::None,
+    )?;
+    let replay = run_resolve_policy_liveness_world(
+        seed,
+        current_stale_slots,
+        target_stale_slots,
+        SupersededMutationAttempt::RetainedStale,
+    )?;
+    let mutation = run_resolve_policy_liveness_world(
+        seed,
+        current_stale_slots,
+        target_stale_slots,
+        SupersededMutationAttempt::FreshEquivalent,
+    )?;
+    Ok(ResolvePolicyLivenessDiscovery {
+        payload_order,
+        control,
+        replay,
+        mutation,
     })
 }
 

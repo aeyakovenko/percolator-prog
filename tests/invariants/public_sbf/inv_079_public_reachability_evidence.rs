@@ -239,7 +239,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 56,
+        consumers, 57,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
@@ -518,6 +518,7 @@ fn v16_superseded_control_terminal_dispositions_are_source_complete() {
                     | "SIGNED_ECONOMIC_BOUND"
                     | "ATTRIBUTION_ONLY"
                     | "ATTRIBUTION_CANDIDATE"
+                    | "BOUNDED_LIVENESS"
                     | "LIVENESS_CANDIDATE"
                     | "PROVIDER_CONSENT_BOUND"
             ),
@@ -541,6 +542,16 @@ fn v16_superseded_control_terminal_dispositions_are_source_complete() {
                 discovery_source.contains("pub struct FeeShareSupersessionDiscovery")
                     && discovery_source.contains("pub fn certifies_attribution_only"),
                 "closed attribution evidence owner is missing"
+            );
+        } else if fields[1] == "BOUNDED_LIVENESS" {
+            assert_eq!(
+                fields[2], "ResolvePolicyLivenessDiscovery",
+                "closed liveness row needs its exact public evidence owner: {line}"
+            );
+            assert!(
+                discovery_source.contains("pub struct ResolvePolicyLivenessDiscovery")
+                    && discovery_source.contains("pub fn certifies_bounded_liveness"),
+                "closed resolve-policy liveness evidence owner is missing"
             );
         } else {
             assert_eq!(

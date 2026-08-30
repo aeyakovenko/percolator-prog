@@ -72,6 +72,33 @@ proptest! {
         max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
         failure_persistence: Some(Box::new(
             proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_014_resolve_policy_liveness.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_resolve_policy_supersession_preserves_a_complete_funded_exit(
+        seed in any::<[u8; 32]>()
+    ) {
+        for payload_order in SupersessionPayloadOrder::ALL {
+            let discovery = discover_resolve_policy_bounded_liveness(seed, payload_order)
+                .map_err(TestCaseError::fail)?;
+            prop_assert!(
+                discovery.certifies_bounded_liveness(),
+                "resolve-policy supersession lost its funded exit: {discovery:?}"
+            );
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
                 "proptest-regressions/inv_014_fee_redirect_terminal.txt",
             ),
         )),
