@@ -15648,7 +15648,7 @@ pub mod processor {
         unpack_mint(mint_ai).map(|_| ())
     }
 
-    fn verify_token_program(token_program: &AccountInfo) -> Result<(), ProgramError> {
+    pub(crate) fn verify_token_program(token_program: &AccountInfo) -> Result<(), ProgramError> {
         if *token_program.key != spl_token::ID || !token_program.executable {
             return Err(PercolatorError::InvalidTokenProgram.into());
         }
@@ -15669,7 +15669,7 @@ pub mod processor {
             .map_err(|_| PercolatorError::InvalidTokenAccount.into())
     }
 
-    fn verify_user_token_account(
+    pub(crate) fn verify_user_token_account(
         token_ai: &AccountInfo,
         expected_owner: &Pubkey,
         expected_mint: &Pubkey,
@@ -15771,7 +15771,7 @@ pub mod processor {
         Ok(())
     }
 
-    fn require_token_balance(balance: u64, amount: u64) -> ProgramResult {
+    pub(crate) fn require_token_balance(balance: u64, amount: u64) -> ProgramResult {
         if balance < amount {
             return Err(PercolatorError::InvalidTokenAccount.into());
         }
@@ -16434,4 +16434,28 @@ pub mod entrypoint {
 
 pub mod risk {
     pub use percolator::*;
+}
+
+#[cfg(kani)]
+pub mod kani_token_boundary {
+    use solana_program::{
+        account_info::AccountInfo, entrypoint::ProgramResult, program_error::ProgramError,
+        pubkey::Pubkey,
+    };
+
+    pub fn verify_token_program(token_program: &AccountInfo) -> Result<(), ProgramError> {
+        super::processor::verify_token_program(token_program)
+    }
+
+    pub fn verify_user_token_account(
+        token_ai: &AccountInfo,
+        expected_owner: &Pubkey,
+        expected_mint: &Pubkey,
+    ) -> Result<u64, ProgramError> {
+        super::processor::verify_user_token_account(token_ai, expected_owner, expected_mint)
+    }
+
+    pub fn require_token_balance(balance: u64, amount: u64) -> ProgramResult {
+        super::processor::require_token_balance(balance, amount)
+    }
 }

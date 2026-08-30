@@ -13,9 +13,10 @@
 //!
 //! The source-complete gateway guard additionally proves every handler receives only facts returned
 //! by one classic-SPL parser and reuses those validated facts for balance and permissionless-payout
-//! checks. The remaining formal boundary is equivalence of SPL Token's trusted `Account::unpack`
-//! and CPI execution semantics, not a second wrapper parser. Arbitrary future token programs remain
-//! out of scope; production deliberately accepts classic SPL Token only.
+//! checks. Three adjacent Kani harnesses execute the production program, byte-parser/user-validator,
+//! and balance helpers over their full structural domains. Actual token execution remains in the
+//! named Solana/SPL Token platform TCB and is independently observed on every moving route here.
+//! Arbitrary future token programs remain out of scope; production accepts classic SPL Token only.
 
 use super::*;
 
