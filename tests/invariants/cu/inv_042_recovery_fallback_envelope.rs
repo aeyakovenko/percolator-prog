@@ -331,9 +331,24 @@ fn v16_program_recovery_fallback_pricing_is_absent_and_force_close_uses_frozen_m
         .find("fn matcher_tail_start_or_verify_lp_config")
         .expect("force-close handler end");
     let handler = &handler_tail[..handler_end];
-    assert!(handler.contains("let frozen_mark = asset.effective_price.get();"));
-    assert!(handler.contains("exec_price: frozen_mark"));
-    assert!(handler.contains("if frozen_mark == 0 || frozen_mark > percolator::MAX_ORACLE_PRICE"));
+    assert_eq!(
+        handler
+            .matches(".force_close_recovery_pair_not_atomic(")
+            .count(),
+        1,
+        "force-close must delegate price selection and effective-quantity clamping to the pinned engine transition",
+    );
+    for forbidden_local_pricing in [
+        "TradeRequestV16 {",
+        "exec_price:",
+        "frozen_mark",
+        "effective_price.get()",
+    ] {
+        assert!(
+            !handler.contains(forbidden_local_pricing),
+            "the wrapper reconstructed Recovery pricing locally: {forbidden_local_pricing}",
+        );
+    }
     for forbidden in [
         "max_recovery_fallback_deviation_bps",
         "recovery_fallback_price_enabled",
@@ -345,6 +360,11 @@ fn v16_program_recovery_fallback_pricing_is_absent_and_force_close_uses_frozen_m
             "reserved fallback control {forbidden} became active in force-close",
         );
     }
+
+    let public_recovery_evidence =
+        include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs");
+    assert!(public_recovery_evidence
+        .contains("fn v16_program_dual_adl_force_close_clamps_stale_and_raw_work"));
 
     crate::assert_certified_engine_pin("INV-042 disabled recovery-fallback profile evidence");
 }

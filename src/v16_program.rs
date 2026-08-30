@@ -8522,26 +8522,6 @@ pub mod processor {
         )
     }
 
-    fn active_leg_for_asset_view(
-        portfolio: &percolator::PortfolioV16ViewMut<'_>,
-        asset_index: usize,
-    ) -> Result<percolator::PortfolioLegV16, ProgramError> {
-        let mut found = None;
-        let mut slot = 0usize;
-        while slot < portfolio.header.legs.len() {
-            let leg = portfolio.header.legs[slot]
-                .try_to_runtime()
-                .map_err(map_v16_error)?;
-            if leg.active && leg.asset_index as usize == asset_index {
-                if found.replace(leg).is_some() {
-                    return Err(PercolatorError::EngineHiddenLeg.into());
-                }
-            }
-            slot += 1;
-        }
-        found.ok_or(PercolatorError::EngineInvalidLeg.into())
-    }
-
     fn portfolio_position_vector_view(
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
     ) -> [(u8, u32, u64, u8, i128); percolator::V16_MAX_PORTFOLIO_ASSETS_N] {
@@ -8839,11 +8819,6 @@ pub mod processor {
         {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        let frozen_mark = asset.effective_price.get();
-        if frozen_mark == 0 || frozen_mark > percolator::MAX_ORACLE_PRICE {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
-
         let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
         let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
         let mut account_a =
@@ -8902,42 +8877,14 @@ pub mod processor {
             }
             return Ok(());
         }
-        let leg_a = active_leg_for_asset_view(&account_a, asset_index_usize)?;
-        let leg_b = active_leg_for_asset_view(&account_b, asset_index_usize)?;
-        if leg_a.side == leg_b.side {
-            return Err(PercolatorError::EngineInvalidLeg.into());
-        }
-        let close_q = close_q
-            .min(leg_a.basis_pos_q.unsigned_abs())
-            .min(leg_b.basis_pos_q.unsigned_abs());
-        if close_q == 0 {
-            return Err(PercolatorError::EngineNonProgress.into());
-        }
-        let req = TradeRequestV16 {
-            asset_index: asset_index_usize,
-            // signed size_q; force-close direction is carried by the long/short orientation
-            // selected just below, so pass the positive close magnitude here.
-            size_q: close_q as i128,
-            exec_price: frozen_mark,
-            fee_bps: 0,
-        };
-        if leg_a.side == SideV16::Short {
-            group
-                .execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                    &mut account_a,
-                    &mut account_b,
-                    req,
-                )
-                .map_err(map_v16_error)?;
-        } else {
-            group
-                .execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                    &mut account_b,
-                    &mut account_a,
-                    req,
-                )
-                .map_err(map_v16_error)?;
-        }
+        group
+            .force_close_recovery_pair_not_atomic(
+                &mut account_a,
+                &mut account_b,
+                asset_index_usize,
+                close_q,
+            )
+            .map_err(map_v16_error)?;
         group.validate_shape().map_err(map_v16_error)?;
         account_a
             .validate_with_market(&group.as_view())

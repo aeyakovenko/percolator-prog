@@ -65,8 +65,20 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
     );
     assert_eq!(
         production.matches("map_err(map_v16_error)").count(),
-        135,
+        133,
         "engine-result mapping drift requires an INV-080 disposition review"
+    );
+    let recovery_handler = production
+        .split_once("fn handle_force_close_abandoned_asset")
+        .map(|(_, tail)| tail)
+        .and_then(|tail| tail.split_once("fn matcher_tail_start_or_verify_lp_config"))
+        .map(|(handler, _)| handler)
+        .expect("Recovery force-close handler exists");
+    assert!(
+        recovery_handler.contains(
+            ".force_close_recovery_pair_not_atomic(\n                &mut account_a,\n                &mut account_b,\n                asset_index_usize,\n                close_q,\n            )\n            .map_err(map_v16_error)?;"
+        ),
+        "the canonical Recovery-pair engine result must abort the instruction on every error",
     );
     assert!(
         !production.contains("Err(_) =>"),

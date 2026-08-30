@@ -264,7 +264,7 @@ fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
         .collect::<Vec<_>>();
     assert_eq!(
         direct_leg_reads.len(),
-        6,
+        5,
         "a new direct wrapper leg access needs structural-writer review"
     );
     assert!(
@@ -308,8 +308,8 @@ fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
         },
         Inv049LegWriterCallsite {
             owner: "handle_force_close_abandoned_asset",
-            method: "execute_trade_with_fee_loss_stale_scoped_not_atomic",
-            count: 2,
+            method: "force_close_recovery_pair_not_atomic",
+            count: 1,
         },
         Inv049LegWriterCallsite {
             owner: "handle_forfeit_recovery_leg",

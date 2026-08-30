@@ -68,6 +68,7 @@ use support::invariant_discovery::{
     discover_terminal_generation_replay, discover_trade_driven_liquidation_violations,
     discover_trade_intent_retry_terminal, verify_adl_force_close_clamp_matrix,
     verify_adl_reduction_clamp_matrix, verify_composite_time_coherence,
+    verify_dual_adl_force_close_clamp_matrix, verify_dual_adl_prefixes,
     verify_fractional_movement_convergence, verify_hybrid_terminal_time_coherence,
     verify_matcher_mutation_order_safety, verify_resolved_adl_close_orders,
     verify_stale_cohort_exact_reversal, verify_stale_cohort_novation_guards, AccrualOrderingKind,

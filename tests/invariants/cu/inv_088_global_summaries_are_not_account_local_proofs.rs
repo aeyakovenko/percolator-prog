@@ -1015,7 +1015,7 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
         Inv088EngineCallsite { owner: "handle_batch_execute_zero_copy", method: "credit_domain_insurance_budgets_not_atomic", count: 1, summary_family: "insurance-budget", witness: "v16_attack_backing_fee_split_conserves" },
         Inv088EngineCallsite { owner: "handle_batch_execute_zero_copy", method: "set_asset_raw_oracle_targets_not_atomic", count: 1, summary_family: "asset-oracle", witness: "v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered" },
         Inv088EngineCallsite { owner: "handle_force_close_abandoned_asset", method: "forfeit_recovery_leg_not_atomic", count: 2, summary_family: "position-pnl-certificate", witness: "v16_attack_locally_stale_permissionless_asset_can_shutdown_and_force_close" },
-        Inv088EngineCallsite { owner: "handle_force_close_abandoned_asset", method: "execute_trade_with_fee_loss_stale_scoped_not_atomic", count: 2, summary_family: "position-pnl-certificate", witness: "v16_attack_locally_stale_permissionless_asset_can_shutdown_and_force_close" },
+        Inv088EngineCallsite { owner: "handle_force_close_abandoned_asset", method: "force_close_recovery_pair_not_atomic", count: 1, summary_family: "position-pnl-certificate", witness: "v16_program_dual_adl_force_close_clamps_stale_and_raw_work" },
         Inv088EngineCallsite { owner: "handle_close_portfolio", method: "deregister_empty_materialized_portfolio_not_atomic", count: 1, summary_family: "materialized-portfolios", witness: "v16_program_materialized_portfolio_summary_tracks_close_and_recreate" },
         Inv088EngineCallsite { owner: "handle_top_up_insurance", method: "deposit_domain_insurance_not_atomic", count: 1, summary_family: "insurance-budget", witness: "v16_attack_live_insurance_asset_withdraw_uniform_for_asset0_and_permissionless_asset" },
         Inv088EngineCallsite { owner: "handle_top_up_backing_bucket", method: "deposit_fresh_counterparty_backing_not_atomic", count: 1, summary_family: "fresh-backing", witness: "v16_program_fresh_backing_global_summary_is_exact_in_every_four_domain_touch_order" },
@@ -1103,6 +1103,7 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
         include_str!("inv_078_permissionless_recovery_coverage.rs"),
         include_str!("inv_089_activation_reactivation_and_initialization_equivalence.rs"),
         include_str!("../stateful/inv_088_global_summaries_are_not_account_local_proofs.rs"),
+        include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs"),
         include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs"),
     ];
     for row in ROWS {

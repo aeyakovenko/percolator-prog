@@ -395,7 +395,7 @@ struct Inv040FeeIngress {
 
 #[test]
 fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
-    const ENGINE_PIN: &str = "a6e3c79f2d6c3afdfb82260951d8a5be85f8fa5d";
+    const ENGINE_PIN: &str = "ce590d9bd3e8f55eaf2e0321f36ef11fbc003d26";
     const ROWS: &[Inv040FeeIngress] = &[
         Inv040FeeIngress {
             owner: "collect_maintenance_fee_to_slot_before_value_debit_view",
@@ -417,13 +417,6 @@ fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
             count: 1,
             fee_class: "batch-cpi-and-no-cpi-trade",
             witness: "v16_program_mixed_direction_fee_allocation_matches_independent_side_ledger",
-        },
-        Inv040FeeIngress {
-            owner: "handle_force_close_abandoned_asset",
-            method: "execute_trade_with_fee_loss_stale_scoped_not_atomic",
-            count: 2,
-            fee_class: "fee-free-recovery-reduction",
-            witness: "v16_attack_locally_stale_permissionless_asset_can_shutdown_and_force_close",
         },
         Inv040FeeIngress {
             owner: "handle_sync_maintenance_fee",
@@ -565,6 +558,23 @@ fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
     assert_eq!(
         actual, expected,
         "every wrapper ingress to an engine fee-bearing transition needs an INV-040 class and public witness",
+    );
+    let recovery_handler = processor
+        .split_once("fn handle_force_close_abandoned_asset")
+        .map(|(_, tail)| tail)
+        .and_then(|tail| tail.split_once("fn matcher_tail_start_or_verify_lp_config"))
+        .map(|(handler, _)| handler)
+        .expect("Recovery force-close handler exists");
+    assert_eq!(
+        recovery_handler
+            .matches(".force_close_recovery_pair_not_atomic(")
+            .count(),
+        1,
+        "Recovery pair close must use the pinned zero-fee canonical transition",
+    );
+    assert!(
+        !recovery_handler.contains(".execute_trade_with_fee_loss_stale_scoped_not_atomic("),
+        "the wrapper must not reconstruct Recovery as an independently fee-bearing trade",
     );
 
     let activation_evidence =

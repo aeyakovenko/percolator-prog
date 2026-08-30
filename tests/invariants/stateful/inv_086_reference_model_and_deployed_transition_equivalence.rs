@@ -48,6 +48,12 @@
 //! The paired Recovery matrix repeats those boundaries through delayed permissionless force-close,
 //! crosses both public account orders, and requires the same pre-state clamp, two-sided OI delta,
 //! no SPL movement, and exact terminal payout after shutdown.
+//! A finding-blind dual-ADL prefix then uses only public trades, mark updates, maintenance sync, and
+//! liquidation to make both side A indices non-unit while both retained raw legs exceed canonical
+//! effective OI. The corresponding 32-world Recovery matrix crosses every opening transport,
+//! request boundary, and account order. Stale overshoot and raw-basis requests are work budgets:
+//! they must land the independently derived effective quantity instead of rejecting because the
+//! caller observed an earlier state.
 //! This is finite reachability evidence, not equivalence over unbounded sequences.
 
 use super::*;
@@ -267,6 +273,54 @@ fn v16_program_adl_force_close_clamp_matrix_matches_recovery_terminal_routes() {
         assert!(
             discovery.satisfies_invariant(),
             "ADL force-close clamp composition failed: {discovery:?}"
+        );
+        assert_eq!(
+            discovery.winner_effective_after_q,
+            u128::from(matches!(
+                discovery.boundary,
+                AdlReductionBoundary::BelowEffective
+            )),
+            "only effective-minus-one must retain one live quantity atom: {discovery:?}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_public_sequence_reaches_dual_nonunit_adl_indices() {
+    let discoveries =
+        verify_dual_adl_prefixes([0xda; 32]).expect("INV-086 public dual-ADL prefixes");
+    assert_eq!(
+        discoveries.len(),
+        DiscoveryTradeRoute::ALL.len(),
+        "every opening transport must reach the same dual-scaled topology"
+    );
+    for discovery in discoveries {
+        assert!(
+            discovery.satisfies_invariant(),
+            "public dual-ADL prefix failed: {discovery:?}"
+        );
+    }
+}
+
+#[test]
+fn v16_program_dual_adl_force_close_clamps_stale_and_raw_work() {
+    let discoveries = verify_dual_adl_force_close_clamp_matrix([0x2a; 32])
+        .expect("INV-086 dual-ADL force-close clamp matrix");
+    assert_eq!(
+        discoveries.len(),
+        DiscoveryTradeRoute::ALL.len()
+            * AdlReductionBoundary::ALL.len()
+            * AdlForceCloseAccountOrder::ALL.len(),
+        "must cross every opening route, force-close boundary, and account order"
+    );
+    for discovery in discoveries {
+        assert!(
+            discovery.satisfies_invariant()
+                && discovery.long_a_before < percolator::ADL_ONE
+                && discovery.short_a_before < percolator::ADL_ONE
+                && discovery.winner_raw_basis_before_q > discovery.effective_before_q
+                && discovery.loser_raw_basis_before_q > discovery.effective_before_q,
+            "dual-ADL force-close composition failed: {discovery:?}"
         );
         assert_eq!(
             discovery.winner_effective_after_q,
