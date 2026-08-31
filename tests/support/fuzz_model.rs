@@ -11692,6 +11692,8 @@ pub struct ResolvedReceiptOrderingEvidence {
     pub world_count: usize,
     pub scheduled_claim_attempt_count: usize,
     pub scheduled_paying_claim_count: usize,
+    pub scheduled_rational_partition_check_count: usize,
+    pub scheduled_nonzero_remainder_count: usize,
     pub scheduled_progress_only_claim_count: usize,
     pub scheduled_noop_claim_count: usize,
     pub receipt_face: u128,
@@ -14259,6 +14261,8 @@ pub fn verify_resolved_receipt_release_claim_order_matrix(
     let mut baseline: Option<(BoundedReferenceNode, [u128; PRIMARY_ACTOR_COUNT])> = None;
     let mut scheduled_claim_attempt_count = 0usize;
     let mut scheduled_paying_claim_count = 0usize;
+    let mut scheduled_rational_partition_check_count = 0usize;
+    let mut scheduled_nonzero_remainder_count = 0usize;
     let mut scheduled_progress_only_claim_count = 0usize;
     let mut scheduled_noop_claim_count = 0usize;
     let mut receipt_face = None;
@@ -14305,10 +14309,19 @@ pub fn verify_resolved_receipt_release_claim_order_matrix(
                                        label: &str,
                                        attempts: &mut usize,
                                        paying: &mut usize,
+                                       rational_checks: &mut usize,
+                                       nonzero_remainders: &mut usize,
                                        progress_only: &mut usize,
                                        noops: &mut usize|
          -> Result<(), String> {
             *attempts += 1;
+            let receipt_before = runner
+                .env
+                .primary_portfolio(CLAIMANT)
+                .resolved_payout_receipt
+                .try_to_runtime()
+                .map_err(|error| format!("{label} pre-receipt decode: {error:?}"))?;
+            let group_before = runner.env.primary_market_state().1;
             let result = runner.execute_terminal_route(CLAIMANT, TerminalRoute::Claim)?;
             if !result.landed || (result.payout != 0 && !result.mutated) {
                 return Err(format!(
@@ -14316,7 +14329,53 @@ pub fn verify_resolved_receipt_release_claim_order_matrix(
                 ));
             }
             if result.payout != 0 {
+                let receipt_after = runner
+                    .env
+                    .primary_portfolio(CLAIMANT)
+                    .resolved_payout_receipt
+                    .try_to_runtime()
+                    .map_err(|error| format!("{label} post-receipt decode: {error:?}"))?;
+                let group_after = runner.env.primary_market_state().1;
+                let ledger_before = group_before.resolved_payout_ledger;
+                let ledger_after = group_after.resolved_payout_ledger;
+                if !receipt_before.present
+                    || ledger_before.current_payout_rate_num != ledger_after.current_payout_rate_num
+                    || ledger_before.current_payout_rate_den != ledger_after.current_payout_rate_den
+                {
+                    return Err(format!(
+                        "{label} paid without a stable pre-existing receipt/rate: \
+                         receipt={receipt_before:?}, ledger={ledger_before:?}->{ledger_after:?}"
+                    ));
+                }
+                let (gross_entitlement, remainder) =
+                    super::reference_math::mul_div_floor_with_remainder(
+                        receipt_before.terminal_positive_claim_face,
+                        ledger_before.current_payout_rate_num,
+                        ledger_before.current_payout_rate_den,
+                    )?;
+                let expected_payout = gross_entitlement
+                    .checked_sub(receipt_before.paid_effective)
+                    .ok_or_else(|| format!("{label} payout rate rolled back prior entitlement"))?;
+                let observed_paid_after = if receipt_after.present {
+                    receipt_after.paid_effective
+                } else {
+                    gross_entitlement
+                };
+                if result.payout != expected_payout
+                    || observed_paid_after != gross_entitlement
+                    || remainder >= ledger_before.current_payout_rate_den
+                {
+                    return Err(format!(
+                        "{label} violated the independent quotient/remainder partition: \
+                         ledger={ledger_before:?}, receipt={receipt_before:?}->{receipt_after:?}, \
+                         payout={}, expected={expected_payout}, gross={gross_entitlement}, \
+                         remainder={remainder}",
+                        result.payout,
+                    ));
+                }
                 *paying += 1;
+                *rational_checks += 1;
+                *nonzero_remainders += usize::from(remainder != 0);
             } else if result.mutated {
                 *progress_only += 1;
             } else {
@@ -14333,6 +14392,8 @@ pub fn verify_resolved_receipt_release_claim_order_matrix(
                 "INV-066 claim before first release",
                 &mut scheduled_claim_attempt_count,
                 &mut scheduled_paying_claim_count,
+                &mut scheduled_rational_partition_check_count,
+                &mut scheduled_nonzero_remainder_count,
                 &mut scheduled_progress_only_claim_count,
                 &mut scheduled_noop_claim_count,
             )?;
@@ -14345,6 +14406,8 @@ pub fn verify_resolved_receipt_release_claim_order_matrix(
                 "INV-066 claim after first release",
                 &mut scheduled_claim_attempt_count,
                 &mut scheduled_paying_claim_count,
+                &mut scheduled_rational_partition_check_count,
+                &mut scheduled_nonzero_remainder_count,
                 &mut scheduled_progress_only_claim_count,
                 &mut scheduled_noop_claim_count,
             )?;
@@ -14369,6 +14432,8 @@ pub fn verify_resolved_receipt_release_claim_order_matrix(
                 "INV-066 claim before second release",
                 &mut scheduled_claim_attempt_count,
                 &mut scheduled_paying_claim_count,
+                &mut scheduled_rational_partition_check_count,
+                &mut scheduled_nonzero_remainder_count,
                 &mut scheduled_progress_only_claim_count,
                 &mut scheduled_noop_claim_count,
             )?;
@@ -14381,6 +14446,8 @@ pub fn verify_resolved_receipt_release_claim_order_matrix(
                 "INV-066 claim after second release",
                 &mut scheduled_claim_attempt_count,
                 &mut scheduled_paying_claim_count,
+                &mut scheduled_rational_partition_check_count,
+                &mut scheduled_nonzero_remainder_count,
                 &mut scheduled_progress_only_claim_count,
                 &mut scheduled_noop_claim_count,
             )?;
@@ -14474,10 +14541,21 @@ pub fn verify_resolved_receipt_release_claim_order_matrix(
             "INV-066 order matrix was vacuous: paying={scheduled_paying_claim_count}, progress-only={scheduled_progress_only_claim_count}, no-op={scheduled_noop_claim_count}"
         ));
     }
+    if scheduled_rational_partition_check_count != scheduled_paying_claim_count
+        || scheduled_nonzero_remainder_count == 0
+    {
+        return Err(format!(
+            "INV-066 rational payout oracle was vacuous: paying={scheduled_paying_claim_count}, \
+             checked={scheduled_rational_partition_check_count}, \
+             nonzero_remainders={scheduled_nonzero_remainder_count}"
+        ));
+    }
     Ok(ResolvedReceiptOrderingEvidence {
         world_count: 16,
         scheduled_claim_attempt_count,
         scheduled_paying_claim_count,
+        scheduled_rational_partition_check_count,
+        scheduled_nonzero_remainder_count,
         scheduled_progress_only_claim_count,
         scheduled_noop_claim_count,
         receipt_face: receipt_face.ok_or("INV-066 order matrix ran no worlds")?,

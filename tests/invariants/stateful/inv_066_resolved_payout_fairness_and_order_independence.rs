@@ -18,7 +18,8 @@
 //! frontiers. It exhausts all 16 choices of landing a claim before and/or after each release. Each
 //! claim must be an exact value-moving receipt/SPL delta, strict terminal-cleanup progress, or an
 //! exact no-op, and every schedule must converge to the same normalized engine state and all five
-//! external destination balances.
+//! external destination balances. Every value-moving scheduled claim is also checked against an
+//! independent quotient/remainder implementation rather than trusting the deployed payout math.
 
 use crate::support::fuzz_model::{
     assert_public_encumbrance_census, assert_public_stock_census,
@@ -226,6 +227,11 @@ fn v16_program_partial_receipt_release_and_claim_order_is_economically_invariant
         evidence.scheduled_claim_attempt_count,
     );
     assert!(evidence.scheduled_paying_claim_count != 0);
+    assert_eq!(
+        evidence.scheduled_rational_partition_check_count,
+        evidence.scheduled_paying_claim_count,
+    );
+    assert!(evidence.scheduled_nonzero_remainder_count != 0);
     assert!(evidence.scheduled_progress_only_claim_count != 0);
     assert!(evidence.terminal_paid != 0);
     assert!(evidence.terminal_paid <= evidence.receipt_face);
