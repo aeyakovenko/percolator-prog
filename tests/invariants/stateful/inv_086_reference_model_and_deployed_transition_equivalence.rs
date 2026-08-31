@@ -57,6 +57,12 @@
 //! resolution actions. The exact source-credit-dependent increase rejects from both initial seeds,
 //! Live actions cannot silently erase impaired provider attribution, and every reached world must
 //! clear the lien through a bounded value-moving terminal path.
+//! A fifth seeded frontier starts from public nonfinal payout receipts immediately before and at a
+//! backing-expiry boundary. Every rebuilt seed rejects premature portfolio dematerialization, then
+//! crosses claimant claim/close/crank, every peer close/claim/crank route, and premature slab
+//! closure in every empty, one-action, and ordered two-action word. Receipt identity must remain
+//! immutable until exact terminal payment, paid value monotonic, rejected destruction exact, and
+//! every ordering must converge to the same seed-local terminal engine and SPL outcome.
 //! A minimized generated public trace also retains simultaneous same-slot mark and account work.
 //! Empty hints reject with exact rollback, while both the indiscriminate all-asset set and a proper
 //! authenticated subset decrease rank before every funded owner exits. The independent liveness
@@ -126,7 +132,8 @@
 use super::*;
 use crate::support::fuzz_model::{
     run_bounded_active_close_reference_frontier, run_bounded_b_reference_frontier,
-    run_bounded_lien_impairment_reference_frontier, run_bounded_recovery_reference_frontier,
+    run_bounded_lien_impairment_reference_frontier,
+    run_bounded_receipt_conflict_reference_frontier, run_bounded_recovery_reference_frontier,
     run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
     verify_constructible_crank_observation_subset,
     verify_expired_backing_terminal_cleanup_compositions,
@@ -910,6 +917,79 @@ fn v16_program_lien_impairment_seeded_frontier_preserves_bounded_owner_exit() {
             && evidence.coverage.user_positions_closed != 0,
         "impaired-lien frontier did not traverse its intended public action classes: {evidence:?}"
     );
+}
+
+#[test]
+fn v16_program_receipt_conflict_seeded_frontier_is_exact_and_terminal() {
+    let evidence = run_bounded_receipt_conflict_reference_frontier()
+        .expect("INV-086 public receipt-conflict seeded frontier");
+
+    assert_eq!(
+        evidence.word_count, 366,
+        "must exhaust two expiry seeds x (13^0 + 13^1 + 13^2) receipt-conflict words"
+    );
+    assert_eq!(evidence.transition_count, 702);
+    assert_eq!(evidence.before_expiry_seed_world_count, 183);
+    assert_eq!(evidence.exact_expiry_seed_world_count, 183);
+    assert_eq!(
+        evidence.partial_receipt_seed_world_count, evidence.word_count,
+        "every word must begin from a genuine public nonfinal receipt"
+    );
+    assert_eq!(evidence.bounded_terminal_world_count, evidence.word_count);
+    assert_eq!(
+        evidence.value_moving_terminal_world_count, evidence.word_count,
+        "every receipt-conflict world must retain a funded value-moving terminal continuation"
+    );
+    assert_eq!(
+        evidence.terminal_outcome_count_by_seed,
+        [1, 1],
+        "terminal engine/SPL economics must be order-independent within each expiry seed"
+    );
+    assert!(
+        evidence.unique_node_count >= 8 && evidence.unique_edge_count >= 60,
+        "receipt-conflict frontier collapsed below its canonical exact-state/route coverage: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .action_attempts
+            .iter()
+            .all(|attempts| *attempts == 54),
+        "every receipt action must occupy every first and second position: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .second_position_attempts
+            .iter()
+            .all(|attempts| *attempts == 26),
+        "every receipt action must follow every first action in both expiry seeds: {evidence:?}"
+    );
+    assert_eq!(
+        evidence.premature_portfolio_close_rejections,
+        evidence.word_count as u64
+    );
+    assert_eq!(evidence.premature_slab_close_rejections, 54);
+    for action in [5usize, 7, 9, 12] {
+        assert_eq!(
+            evidence.action_state_changes[action], 0,
+            "already-terminal close and premature slab-close controls must be exact nonmutations: {evidence:?}"
+        );
+    }
+    assert!(
+        [0usize, 1, 2, 3, 4, 6, 8, 10, 11]
+            .into_iter()
+            .all(|action| evidence.action_state_changes[action] != 0),
+        "a live receipt/peer route never produced a real state transition: {evidence:?}"
+    );
+    assert!(
+        evidence.receipt_completion_edges != 0
+            && evidence.payout_edges.iter().any(|edges| *edges != 0)
+            && evidence.coverage.resolved_claim_mutations != 0
+            && evidence.coverage.resolved_close_mutations != 0
+            && evidence.coverage.resolved_crank_mutations != 0
+            && evidence.coverage.resolved_payout_atoms != 0,
+        "receipt-conflict frontier did not exercise paying claim/close/crank transitions: {evidence:?}"
+    );
+    assert_ne!(evidence.coverage.loaded_program_hash, [0; 32]);
 }
 
 #[test]

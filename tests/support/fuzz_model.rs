@@ -11372,6 +11372,7 @@ const BOUNDED_RECOVERY_ACTION_COUNT: usize = 13;
 const BOUNDED_B_ACTION_COUNT: usize = 13;
 const BOUNDED_ACTIVE_CLOSE_ACTION_COUNT: usize = 13;
 const BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT: usize = 13;
+const BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT: usize = 13;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedCloseProgressNode {
@@ -11721,6 +11722,29 @@ pub struct BoundedLienImpairmentFrontierEvidence {
     pub second_position_attempts: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
     pub second_position_state_changes: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
     pub impaired_lien_reducing_edges: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedReceiptConflictFrontierEvidence {
+    pub word_count: usize,
+    pub transition_count: usize,
+    pub unique_node_count: usize,
+    pub unique_edge_count: usize,
+    pub before_expiry_seed_world_count: usize,
+    pub exact_expiry_seed_world_count: usize,
+    pub partial_receipt_seed_world_count: usize,
+    pub bounded_terminal_world_count: usize,
+    pub value_moving_terminal_world_count: usize,
+    pub terminal_outcome_count_by_seed: [usize; 2],
+    pub action_attempts: [u64; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT],
+    pub action_state_changes: [u64; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT],
+    pub second_position_attempts: [u64; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT],
+    pub second_position_state_changes: [u64; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT],
+    pub payout_edges: [u64; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT],
+    pub receipt_completion_edges: u64,
+    pub premature_portfolio_close_rejections: u64,
+    pub premature_slab_close_rejections: u64,
     pub coverage: Coverage,
 }
 
@@ -12244,6 +12268,73 @@ fn bounded_lien_impairment_actions(
             force_close_delay_slots: 2,
         }),
         BoundedLienImpairmentAction::Public(Action::ResolveStalePermissionless { dt: 2 }),
+    ]
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BoundedReceiptConflictAction {
+    Terminal { actor: usize, route: TerminalRoute },
+    CloseSlab,
+}
+
+fn bounded_receipt_conflict_actions(
+) -> [BoundedReceiptConflictAction; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT] {
+    const CLAIMANT: usize = 0;
+    const JUNIOR_LOSER: usize = 1;
+    const BACKED_WINNER: usize = 2;
+    const BACKED_LOSER: usize = 3;
+    const PROVIDER: usize = 4;
+
+    [
+        BoundedReceiptConflictAction::Terminal {
+            actor: CLAIMANT,
+            route: TerminalRoute::Claim,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: CLAIMANT,
+            route: TerminalRoute::Close,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: CLAIMANT,
+            route: TerminalRoute::Crank,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: BACKED_WINNER,
+            route: TerminalRoute::Close,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: BACKED_WINNER,
+            route: TerminalRoute::Claim,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: JUNIOR_LOSER,
+            route: TerminalRoute::Close,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: JUNIOR_LOSER,
+            route: TerminalRoute::Claim,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: BACKED_LOSER,
+            route: TerminalRoute::Close,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: BACKED_LOSER,
+            route: TerminalRoute::Claim,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: PROVIDER,
+            route: TerminalRoute::Close,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: PROVIDER,
+            route: TerminalRoute::Claim,
+        },
+        BoundedReceiptConflictAction::Terminal {
+            actor: BACKED_WINNER,
+            route: TerminalRoute::Crank,
+        },
+        BoundedReceiptConflictAction::CloseSlab,
     ]
 }
 
@@ -17826,6 +17917,453 @@ pub fn run_bounded_lien_impairment_reference_frontier(
         second_position_attempts: graph.second_position_attempts,
         second_position_state_changes: graph.second_position_state_changes,
         impaired_lien_reducing_edges: graph.impaired_lien_reducing_edges,
+        coverage: graph.coverage,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundedReceiptConflictTerminalOutcome {
+    node: BoundedReferenceNode,
+    destinations: [u128; PRIMARY_ACTOR_COUNT],
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BoundedReceiptConflictActionResult {
+    mutated: bool,
+    payout: u128,
+    premature_slab_close_rejected: bool,
+}
+
+fn read_bounded_receipt_conflict_claimant(
+    runner: &ScenarioRunner,
+) -> Result<percolator::ResolvedPayoutReceiptV16, String> {
+    runner
+        .env
+        .primary_portfolio(0)
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .map_err(|error| format!("INV-068 receipt-conflict claimant decode: {error:?}"))
+}
+
+fn build_bounded_receipt_conflict_reference_seed(
+    landing: BoundedExpiryLanding,
+) -> Result<(ScenarioRunner, u128), String> {
+    let UnderfundedResolvedSeed { runner, .. } = build_underfunded_resolved_reference_seed(
+        landing,
+        false,
+        true,
+        None,
+        DEFAULT_UNDERFUNDED_BACKING_PLAN,
+    )?;
+    let receipt = read_bounded_receipt_conflict_claimant(&runner)?;
+    let group = runner.env.primary_market_state().1;
+    let nonterminal_peer_count = (1..PRIMARY_ACTOR_COUNT)
+        .map(|actor| runner.portfolio_is_economically_terminal(actor))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|terminal| !terminal)
+        .count();
+    if group.mode != MarketModeV16::Resolved
+        || !group.payout_snapshot_captured
+        || !receipt.present
+        || receipt.finalized
+        || receipt.terminal_positive_claim_face == 0
+        || receipt.paid_effective >= receipt.terminal_positive_claim_face
+        || nonterminal_peer_count == 0
+    {
+        return Err(format!(
+            "INV-086 {landing:?} receipt-conflict seed was not a live partial-receipt conflict: receipt={receipt:?}, snapshot={}, peers={nonterminal_peer_count}, mode={:?}",
+            group.payout_snapshot_captured, group.mode
+        ));
+    }
+    runner.assert_global_invariants()?;
+    Ok((runner, receipt.terminal_positive_claim_face))
+}
+
+fn require_bounded_receipt_portfolio_close_rejection(
+    runner: &mut ScenarioRunner,
+) -> Result<(), String> {
+    const CLAIMANT: usize = 0;
+
+    let receipt = read_bounded_receipt_conflict_claimant(runner)?;
+    if !receipt.present || receipt.finalized {
+        return Err(format!(
+            "INV-021 portfolio-close control lost its live-receipt precondition: {receipt:?}"
+        ));
+    }
+    let before = runner.snapshot();
+    if runner.env.close_primary_portfolio(CLAIMANT).is_ok() {
+        return Err("INV-021 dematerialized a portfolio with a nonfinal receipt".into());
+    }
+    runner.assert_snapshot_unchanged(&before)?;
+    runner.assert_global_invariants()
+}
+
+fn apply_bounded_receipt_conflict_action(
+    runner: &mut ScenarioRunner,
+    action: BoundedReceiptConflictAction,
+) -> Result<BoundedReceiptConflictActionResult, String> {
+    match action {
+        BoundedReceiptConflictAction::Terminal { actor, route } => {
+            let result = runner.execute_terminal_route(actor, route)?;
+            Ok(BoundedReceiptConflictActionResult {
+                mutated: result.mutated,
+                payout: result.payout,
+                ..BoundedReceiptConflictActionResult::default()
+            })
+        }
+        BoundedReceiptConflictAction::CloseSlab => {
+            if runner
+                .env
+                .primary_market_state()
+                .1
+                .materialized_portfolio_count
+                == 0
+            {
+                return Err(
+                    "INV-070 slab-close control lost its funded-account precondition".into(),
+                );
+            }
+            let before = runner.snapshot();
+            if runner.env.close_primary_slab().is_ok() {
+                return Err("INV-070 closed a slab with funded terminal work".into());
+            }
+            runner.assert_snapshot_unchanged(&before)?;
+            runner.assert_global_invariants()?;
+            Ok(BoundedReceiptConflictActionResult {
+                premature_slab_close_rejected: true,
+                ..BoundedReceiptConflictActionResult::default()
+            })
+        }
+    }
+}
+
+fn assert_bounded_receipt_conflict_edge(
+    label: &str,
+    expected_face: u128,
+    before: percolator::ResolvedPayoutReceiptV16,
+    after: percolator::ResolvedPayoutReceiptV16,
+    route_payout: u128,
+    claimant_terminal: bool,
+    terminal_claim_bound_unreceipted_num: u128,
+    payout_rate_num: u128,
+    payout_rate_den: u128,
+) -> Result<bool, String> {
+    if !before.present {
+        if after.present {
+            return Err(format!(
+                "{label} resurrected a completed receipt: {before:?}->{after:?}"
+            ));
+        }
+        return Ok(false);
+    }
+    if !after.present {
+        let (terminal_entitlement, _) = super::reference_math::mul_div_floor_with_remainder(
+            expected_face,
+            payout_rate_num,
+            payout_rate_den,
+        )?;
+        if !claimant_terminal
+            || terminal_claim_bound_unreceipted_num != 0
+            || before
+                .paid_effective
+                .checked_add(route_payout)
+                .ok_or_else(|| format!("{label} completion payout overflow"))?
+                != terminal_entitlement
+        {
+            return Err(format!(
+                "{label} removed a receipt without exact fully-receipted-rate payment: payout={route_payout}, entitlement={terminal_entitlement}, rate={payout_rate_num}/{payout_rate_den}, unreceipted={terminal_claim_bound_unreceipted_num}, terminal={claimant_terminal}, {before:?}->{after:?}"
+            ));
+        }
+        return Ok(true);
+    }
+    if before.prior_bound_contribution_num != after.prior_bound_contribution_num
+        || before.live_released_face_at_receipt != after.live_released_face_at_receipt
+        || before.terminal_positive_claim_face != expected_face
+        || after.terminal_positive_claim_face != expected_face
+    {
+        return Err(format!(
+            "{label} changed immutable receipt identity/economics: {before:?}->{after:?}"
+        ));
+    }
+    if after.paid_effective < before.paid_effective
+        || after.paid_effective > expected_face
+        || after.finalized != (after.paid_effective == expected_face)
+    {
+        return Err(format!(
+            "{label} violated monotonic exact-once receipt payment: {before:?}->{after:?}"
+        ));
+    }
+    Ok(false)
+}
+
+pub fn run_bounded_receipt_conflict_reference_frontier(
+) -> Result<BoundedReceiptConflictFrontierEvidence, String> {
+    type ExactEdge = (AuthenticatedGraphState, u8, AuthenticatedGraphState);
+
+    #[derive(Default)]
+    struct ReceiptAccumulator {
+        nodes: BTreeSet<AuthenticatedGraphState>,
+        edges: BTreeSet<ExactEdge>,
+        terminal_outcomes: [BTreeSet<BoundedReceiptConflictTerminalOutcome>; 2],
+        before_expiry_seed_world_count: usize,
+        exact_expiry_seed_world_count: usize,
+        partial_receipt_seed_world_count: usize,
+        bounded_terminal_world_count: usize,
+        value_moving_terminal_world_count: usize,
+        action_attempts: [u64; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT],
+        action_state_changes: [u64; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT],
+        second_position_attempts: [u64; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT],
+        second_position_state_changes: [u64; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT],
+        payout_edges: [u64; BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT],
+        receipt_completion_edges: u64,
+        premature_portfolio_close_rejections: u64,
+        premature_slab_close_rejections: u64,
+        coverage: Coverage,
+    }
+
+    impl ReceiptAccumulator {
+        fn merge(&mut self, other: Self) {
+            self.nodes.extend(other.nodes);
+            self.edges.extend(other.edges);
+            for (total, outcomes) in self
+                .terminal_outcomes
+                .iter_mut()
+                .zip(other.terminal_outcomes)
+            {
+                total.extend(outcomes);
+            }
+            self.before_expiry_seed_world_count += other.before_expiry_seed_world_count;
+            self.exact_expiry_seed_world_count += other.exact_expiry_seed_world_count;
+            self.partial_receipt_seed_world_count += other.partial_receipt_seed_world_count;
+            self.bounded_terminal_world_count += other.bounded_terminal_world_count;
+            self.value_moving_terminal_world_count += other.value_moving_terminal_world_count;
+            for (total, count) in self.action_attempts.iter_mut().zip(other.action_attempts) {
+                *total += count;
+            }
+            for (total, count) in self
+                .action_state_changes
+                .iter_mut()
+                .zip(other.action_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_attempts
+                .iter_mut()
+                .zip(other.second_position_attempts)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_state_changes
+                .iter_mut()
+                .zip(other.second_position_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self.payout_edges.iter_mut().zip(other.payout_edges) {
+                *total += count;
+            }
+            self.receipt_completion_edges += other.receipt_completion_edges;
+            self.premature_portfolio_close_rejections += other.premature_portfolio_close_rejections;
+            self.premature_slab_close_rejections += other.premature_slab_close_rejections;
+            self.coverage.merge(other.coverage);
+        }
+    }
+
+    fn replay_receipt_word(
+        landing: BoundedExpiryLanding,
+        word: &[(usize, BoundedReceiptConflictAction)],
+        graph: &mut ReceiptAccumulator,
+    ) -> Result<(), String> {
+        let (mut runner, receipt_face) = build_bounded_receipt_conflict_reference_seed(landing)?;
+        let landing_index = match landing {
+            BoundedExpiryLanding::Before => 0,
+            BoundedExpiryLanding::At => 1,
+            BoundedExpiryLanding::After => {
+                return Err("INV-086 receipt frontier received an unsupported late seed".into())
+            }
+        };
+        graph.before_expiry_seed_world_count += usize::from(landing_index == 0);
+        graph.exact_expiry_seed_world_count += usize::from(landing_index == 1);
+        graph.partial_receipt_seed_world_count += 1;
+        require_bounded_receipt_portfolio_close_rejection(&mut runner)?;
+        graph.premature_portfolio_close_rejections += 1;
+
+        let destinations_before_word: [u128; PRIMARY_ACTOR_COUNT] = std::array::from_fn(|actor| {
+            u128::from(
+                runner
+                    .env
+                    .token_amount(runner.env.actors[actor].destination_token),
+            )
+        });
+        let mut before_exact = runner.authenticated_graph_state();
+        let mut before_economic = runner.bounded_reference_node()?;
+        graph.nodes.insert(before_exact.clone());
+
+        for (position, (action_index, action)) in word.iter().enumerate() {
+            let receipt_before = read_bounded_receipt_conflict_claimant(&runner)?;
+            let result = apply_bounded_receipt_conflict_action(&mut runner, *action).map_err(
+                |error| {
+                    format!(
+                        "INV-086 {landing:?} receipt-conflict word {word:?} failed at position {position}: {error}"
+                    )
+                },
+            )?;
+            let receipt_after = read_bounded_receipt_conflict_claimant(&runner)?;
+            let after_economic = runner.bounded_reference_node()?;
+            let receipt_completed = assert_bounded_receipt_conflict_edge(
+                &format!("INV-068 {landing:?} receipt-conflict edge action={action_index}"),
+                receipt_face,
+                receipt_before,
+                receipt_after,
+                result.payout,
+                runner.portfolio_is_economically_terminal(0)?,
+                after_economic.payout_ledger.amounts[2],
+                after_economic.payout_ledger.amounts[3],
+                after_economic.payout_ledger.amounts[4],
+            )?;
+            let after_exact = runner.authenticated_graph_state();
+            bounded_source_credit_transition_evidence(
+                &format!("INV-030 {landing:?} receipt-conflict edge action={action_index}"),
+                &before_economic,
+                &after_economic,
+            )?;
+            if !result.mutated && after_exact != before_exact {
+                return Err(format!(
+                    "INV-080 {landing:?} nonmutating receipt action {action_index} changed exact state"
+                ));
+            }
+
+            graph.action_attempts[*action_index] += 1;
+            graph.action_state_changes[*action_index] += u64::from(result.mutated);
+            graph.payout_edges[*action_index] += u64::from(result.payout != 0);
+            graph.receipt_completion_edges += u64::from(receipt_completed);
+            graph.premature_slab_close_rejections +=
+                u64::from(result.premature_slab_close_rejected);
+            if position == 1 {
+                graph.second_position_attempts[*action_index] += 1;
+                graph.second_position_state_changes[*action_index] += u64::from(result.mutated);
+            }
+            graph.nodes.insert(after_exact.clone());
+            graph
+                .edges
+                .insert((before_exact, *action_index as u8, after_exact.clone()));
+            before_exact = after_exact;
+            before_economic = after_economic;
+        }
+
+        runner.run_terminal_payout_campaign().map_err(|error| {
+            format!(
+                "INV-073 {landing:?} receipt-conflict word {word:?} had no bounded terminal continuation: {error}"
+            )
+        })?;
+        runner.assert_global_invariants()?;
+        let terminal_actor_count = (0..PRIMARY_ACTOR_COUNT)
+            .map(|actor| runner.portfolio_is_economically_terminal(actor))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|terminal| *terminal)
+            .count();
+        if terminal_actor_count != PRIMARY_ACTOR_COUNT {
+            return Err(format!(
+                "INV-073 {landing:?} receipt-conflict word {word:?} stranded funded actors: {terminal_actor_count}/{PRIMARY_ACTOR_COUNT}"
+            ));
+        }
+        graph.bounded_terminal_world_count += 1;
+
+        let destinations_after: [u128; PRIMARY_ACTOR_COUNT] = std::array::from_fn(|actor| {
+            u128::from(
+                runner
+                    .env
+                    .token_amount(runner.env.actors[actor].destination_token),
+            )
+        });
+        let total_before = destinations_before_word
+            .iter()
+            .try_fold(0u128, |total, amount| total.checked_add(*amount))
+            .ok_or("INV-073 receipt-conflict pre-word destination overflow")?;
+        let total_after = destinations_after
+            .iter()
+            .try_fold(0u128, |total, amount| total.checked_add(*amount))
+            .ok_or("INV-073 receipt-conflict terminal destination overflow")?;
+        if total_after <= total_before {
+            return Err(format!(
+                "INV-073 {landing:?} receipt-conflict word {word:?} reached terminal without moving funded value: {total_before}->{total_after}"
+            ));
+        }
+        graph.value_moving_terminal_world_count += 1;
+        graph.terminal_outcomes[landing_index].insert(BoundedReceiptConflictTerminalOutcome {
+            node: runner.bounded_reference_node()?,
+            destinations: destinations_after,
+        });
+        graph.coverage.merge(runner.coverage);
+        Ok(())
+    }
+
+    let actions = bounded_receipt_conflict_actions();
+    let mut jobs = Vec::new();
+    for landing in [BoundedExpiryLanding::Before, BoundedExpiryLanding::At] {
+        jobs.push((landing, Vec::new()));
+        for (first_index, first) in actions.iter().copied().enumerate() {
+            jobs.push((landing, vec![(first_index, first)]));
+        }
+        for (first_index, first) in actions.iter().copied().enumerate() {
+            for (second_index, second) in actions.iter().copied().enumerate() {
+                jobs.push((landing, vec![(first_index, first), (second_index, second)]));
+            }
+        }
+    }
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(jobs.len().max(1));
+    let chunk_size = jobs.len().div_ceil(worker_count);
+    let graph =
+        std::thread::scope(|scope| {
+            let handles = jobs
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || -> Result<ReceiptAccumulator, String> {
+                        let mut graph = ReceiptAccumulator::default();
+                        for (landing, word) in chunk {
+                            replay_receipt_word(*landing, word, &mut graph)?;
+                        }
+                        Ok(graph)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut graph = ReceiptAccumulator::default();
+            for handle in handles {
+                graph.merge(handle.join().map_err(|_| {
+                    "INV-086 receipt-conflict frontier worker panicked".to_string()
+                })??);
+            }
+            Ok::<_, String>(graph)
+        })?;
+    let transition_count = jobs.iter().map(|(_, word)| word.len()).sum();
+
+    Ok(BoundedReceiptConflictFrontierEvidence {
+        word_count: jobs.len(),
+        transition_count,
+        unique_node_count: graph.nodes.len(),
+        unique_edge_count: graph.edges.len(),
+        before_expiry_seed_world_count: graph.before_expiry_seed_world_count,
+        exact_expiry_seed_world_count: graph.exact_expiry_seed_world_count,
+        partial_receipt_seed_world_count: graph.partial_receipt_seed_world_count,
+        bounded_terminal_world_count: graph.bounded_terminal_world_count,
+        value_moving_terminal_world_count: graph.value_moving_terminal_world_count,
+        terminal_outcome_count_by_seed: graph.terminal_outcomes.map(|outcomes| outcomes.len()),
+        action_attempts: graph.action_attempts,
+        action_state_changes: graph.action_state_changes,
+        second_position_attempts: graph.second_position_attempts,
+        second_position_state_changes: graph.second_position_state_changes,
+        payout_edges: graph.payout_edges,
+        receipt_completion_edges: graph.receipt_completion_edges,
+        premature_portfolio_close_rejections: graph.premature_portfolio_close_rejections,
+        premature_slab_close_rejections: graph.premature_slab_close_rejections,
         coverage: graph.coverage,
     })
 }
