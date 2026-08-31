@@ -17,8 +17,240 @@
 //! It proves a funded bucket blocks retirement while fresh, but an unreferenced lapsed bucket is
 //! normalized at the authenticated expiry boundary without moving custody and cannot permanently
 //! consume the asset slot merely because no portfolio carries its source domain.
+//! A source-complete composition census additionally classifies every production processor
+//! function that names backing. Each class is bound to a public expiry, lifecycle, accounting, or
+//! policy witness; adding a new direct wrapper backing consumer fails this invariant until it is
+//! classified. INV-088 independently source-locks wrapper-to-engine transition calls, so this
+//! census owns wrapper composition without duplicating engine arithmetic proofs.
 
 use super::*;
+
+struct Inv063BackingSurfaceClass {
+    disposition: &'static str,
+    witness: &'static str,
+    functions: &'static [&'static str],
+}
+
+fn inv063_production_processor_function_bodies() -> std::collections::BTreeMap<String, String> {
+    let production = include_str!("../../../src/v16_program.rs")
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production source prefix");
+    let processor = production
+        .split_once("pub mod processor {")
+        .expect("v16 processor module")
+        .1;
+
+    let mut starts = Vec::new();
+    let mut absolute = 0usize;
+    for line in processor.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if let Some(fn_offset) = trimmed.find("fn ") {
+            let prefix = &trimmed[..fn_offset];
+            if prefix.is_empty() || prefix.starts_with("pub") {
+                let rest = &trimmed[fn_offset + 3..];
+                let end = rest
+                    .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .unwrap_or(rest.len());
+                starts.push((
+                    rest[..end].to_string(),
+                    absolute + line.len() - trimmed.len() + fn_offset,
+                ));
+            }
+        }
+        absolute += line.len();
+    }
+
+    let bytes = processor.as_bytes();
+    let mut functions = std::collections::BTreeMap::new();
+    for (name, start) in starts {
+        let open = processor[start..]
+            .find('{')
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("function {name} has no body"));
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, byte) in bytes[open..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth
+                        .checked_sub(1)
+                        .unwrap_or_else(|| panic!("function {name} has malformed braces"));
+                    if depth == 0 {
+                        end = Some(open + offset + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end.unwrap_or_else(|| panic!("function {name} body is unterminated"));
+        assert!(
+            functions
+                .insert(name.clone(), processor[start..end].to_string())
+                .is_none(),
+            "duplicate production function {name}"
+        );
+    }
+    functions
+}
+
+#[test]
+fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
+    const CLASSES: &[Inv063BackingSurfaceClass] = &[
+        Inv063BackingSurfaceClass {
+            disposition: "policy/profile metadata; no principal consumption",
+            witness: "v16_program_backing_provider_exit_unfreezes_policy_change",
+            functions: &[
+                "add_backing_fee_policy_count",
+                "advance_backing_fee_sequence_view",
+                "backing_fee_policy_count_from_profile",
+                "backing_fee_policy_for_domain_view",
+                "control_sequence_mut",
+                "handle_configure_hybrid_oracle",
+                "handle_configure_managed_mark",
+                "handle_update_backing_fee_policy",
+                "preserve_backing_fee_policy",
+                "subtract_backing_fee_policy_count",
+            ],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "authority/shape gate; funded value remains conservatively locked",
+            witness: "v16_attack_update_asset_authority_rejects_zero_domain_authority",
+            functions: &[
+                "asset_authority_role_has_funded_value_view",
+                "domain_authorities_from_profile",
+                "domain_authority_fields_complete",
+                "handle_update_asset_authority",
+                "handle_update_authority",
+            ],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "trade lien admission and fee attribution; landing-time freshness gate",
+            witness: "v16_program_backing_expiry_trade_route_boundary_matrix",
+            functions: &[
+                "apply_backing_domain_fees_after_trade_view",
+                "charge_account_backing_domain_fees_view",
+                "collect_backing_domain_fees_for_account_view",
+                "ensure_new_counterparty_backed_liens_fresh_for_trade_view",
+                "handle_batch_execute_zero_copy",
+                "handle_batch_trade_cpi",
+                "handle_trade_cpi",
+                "handle_trade_nocpi",
+                "handle_trade_nocpi_zero_copy",
+                "source_counterparty_backing_snapshot_view",
+                "source_credit_has_live_amounts",
+            ],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "bounded terminal/lifecycle normalization",
+            witness: "v16_program_retire_normalizes_unreferenced_lapsed_backing",
+            functions: &[
+                "canonicalize_retired_asset_slot_view",
+                "handle_close_slab",
+                "handle_update_asset_lifecycle",
+            ],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "initialization/reactivation structural preservation",
+            witness: "v16_program_reused_slot_matches_fresh_persisted_state_after_public_history",
+            functions: &["handle_init_market", "handle_restart_asset_oracle"],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "released-PnL conversion; lapsed source rejects before mutation",
+            witness: "v16_program_backing_expiry_conversion_boundary_matrix",
+            functions: &[
+                "handle_convert_released_pnl",
+                "reject_lapsed_source_backing_for_conversion_view",
+            ],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "fresh top-up; authenticated expiry is strict",
+            witness: "v16_program_retained_backing_topup_boundary_matrix",
+            functions: &["handle_top_up_backing_bucket"],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "provider-principal release; authenticated expiry is strict",
+            witness: "v16_program_backing_principal_release_respects_authenticated_expiry",
+            functions: &[
+                "handle_withdraw_backing_bucket",
+                "verify_domain_withdrawal_preflight",
+            ],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "earned fee stock; expiry-independent exact withdrawal",
+            witness: "v16_program_backing_earnings_summary_tracks_public_accrual_and_withdrawal",
+            functions: &["handle_withdraw_backing_bucket_earnings"],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "read-only/accounting ledger projection; no economic freshness decision",
+            witness: "v16_bpf_accounting_ledger_tags_are_bounded_and_update_state",
+            functions: &[
+                "backing_domain_parts_view",
+                "backing_unavailable_principal_atoms",
+                "handle_sync_backing_domain_ledger",
+                "read_or_new_backing_domain_ledger",
+                "sync_backing_domain_ledger",
+                "write_or_init_backing_domain_ledger",
+            ],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "instruction dispatch only; handler owns expiry semantics",
+            witness: "v16_program_backing_expiry_trade_route_boundary_matrix",
+            functions: &["process_instruction"],
+        },
+    ];
+
+    let witness_sources = [
+        include_str!("../public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs"),
+        include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
+        include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs"),
+        include_str!("../stateful/inv_088_global_summaries_are_not_account_local_proofs.rs"),
+        include_str!("inv_005_authority_incarnation_binding.rs"),
+        include_str!("inv_025_exact_stock_reconciliation.rs"),
+        include_str!("inv_063_backing_expiry_normalization.rs"),
+        include_str!("inv_089_activation_reactivation_and_initialization_equivalence.rs"),
+    ];
+
+    let functions = inv063_production_processor_function_bodies();
+    let actual = functions
+        .iter()
+        .filter_map(|(name, body)| {
+            body.to_ascii_lowercase()
+                .contains("backing")
+                .then_some(name.clone())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut expected = std::collections::BTreeSet::new();
+    for class in CLASSES {
+        assert!(!class.disposition.is_empty());
+        assert!(
+            witness_sources
+                .iter()
+                .any(|source| source.contains(&format!("fn {}", class.witness))),
+            "INV-063 backing class '{}' lost executable witness {}",
+            class.disposition,
+            class.witness,
+        );
+        for function in class.functions {
+            assert!(
+                expected.insert((*function).to_string()),
+                "duplicate INV-063 backing-function classification for {function}"
+            );
+        }
+    }
+    assert_eq!(
+        actual, expected,
+        "every production processor function that names backing needs an INV-063 expiry disposition and executable witness"
+    );
+
+    let transitions = include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transitions.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
+    crate::assert_certified_engine_pin("INV-063 engine expiry-transition composition");
+}
 
 #[test]
 fn v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capitalization() {
