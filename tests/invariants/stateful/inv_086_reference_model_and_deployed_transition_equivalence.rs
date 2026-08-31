@@ -20,7 +20,10 @@
 //! liquidation, and CU ceilings.
 //!
 //! A separate bounded graph exhausts every action word through depth three over
-//! thirteen wrapper actions, including authority resolution and resolved close. Its
+//! thirteen wrapper actions, then extends every exact authenticated tracked depth-three wrapper state
+//! with all thirteen actions. The key combines byte-identical tracked account/balance state with
+//! all authenticated Clock fields. This partial-order-reduced depth-four frontier includes authority
+//! resolution and resolved close. Its
 //! normalized node includes every portfolio's PnL, escrow, close ledger, payout receipt,
 //! and account status plus the market payout snapshot, per-domain source credit,
 //! backing buckets, and insurance reservations. It replays each edge from the same
@@ -411,13 +414,23 @@ fn expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup
 fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
     let evidence = run_bounded_reference_equivalence_graph()
         .expect("INV-086 bounded deployed/reference graph");
-
     assert_eq!(
-        evidence.word_count, 2_380,
-        "must exhaust 13^0 + 13^1 + 13^2 + 13^3 words"
+        evidence.depth_three_exact_state_count, 551,
+        "the authenticated exact depth-three state frontier changed and must be reviewed"
     );
     assert_eq!(
-        evidence.transition_count, 6_942,
+        evidence.depth_four_word_count,
+        evidence.depth_three_exact_state_count * 13,
+        "every exact depth-three state must be extended by every action"
+    );
+    assert_eq!(
+        evidence.word_count,
+        2_380 + evidence.depth_four_word_count,
+        "must exhaust depth three and the authenticated-state-reduced depth-four frontier"
+    );
+    assert_eq!(
+        evidence.transition_count,
+        6_942 + evidence.depth_four_word_count * 4,
         "must replay every edge in every bounded word"
     );
     assert!(
@@ -425,16 +438,21 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
         "bounded graph collapsed to vacuous state coverage: {evidence:?}"
     );
     assert!(
-        evidence.unique_node_count > evidence.depth_two_unique_node_count
-            && evidence.unique_edge_count > evidence.depth_two_unique_edge_count,
+        evidence.depth_three_unique_node_count > evidence.depth_two_unique_node_count
+            && evidence.depth_three_unique_edge_count > evidence.depth_two_unique_edge_count,
         "third actions must discover normalized states and edges beyond depth two: {evidence:?}"
+    );
+    assert!(
+        evidence.unique_node_count > evidence.depth_three_unique_node_count
+            && evidence.unique_edge_count > evidence.depth_three_unique_edge_count,
+        "the reduced fourth frontier must discover normalized states and edges beyond depth three: {evidence:?}"
     );
     assert!(
         evidence
             .action_attempts
             .iter()
-            .all(|attempts| *attempts == 534),
-        "every action must occupy every first/second/third word position: {evidence:?}"
+            .all(|attempts| *attempts >= 534),
+        "every action must retain its exhaustive first/second/third-position coverage: {evidence:?}"
     );
     assert!(
         evidence
@@ -449,6 +467,20 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
             .iter()
             .all(|changes| *changes != 0),
         "every action class must produce a real third-position state transition: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .fourth_position_attempts
+            .iter()
+            .all(|attempts| *attempts == evidence.depth_three_exact_state_count as u64),
+        "every action must extend every exact depth-three state: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .fourth_position_state_changes
+            .iter()
+            .all(|changes| *changes != 0),
+        "every action class must produce a real fourth-position state transition: {evidence:?}"
     );
     assert_eq!(
         evidence.underfunded_terminal_world_count, 12,

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use solana_sdk::{
     instruction::AccountMeta, pubkey::Pubkey, signature::Signer, transaction::Transaction,
 };
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const MIN_LIVENESS_DRAIN_LIMIT: usize = 256;
 const MAX_LIVENESS_DRAIN_LIMIT: usize = 100_000;
@@ -2577,7 +2577,7 @@ pub fn assert_public_stock_census(label: &str, env: &V16Svm) -> Result<(), Strin
     )
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Snapshot {
     primary_market: Vec<u8>,
     foreign_market: Vec<u8>,
@@ -2587,6 +2587,16 @@ struct Snapshot {
     token_accounts: Vec<(Pubkey, Vec<u8>)>,
     matcher_contexts: Vec<Vec<u8>>,
     economic_account_lamports: Vec<(Pubkey, u64)>,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AuthenticatedGraphState {
+    authenticated_slot: u64,
+    authenticated_epoch_start_timestamp: i64,
+    authenticated_epoch: u64,
+    authenticated_leader_schedule_epoch: u64,
+    authenticated_unix_timestamp: i64,
+    snapshot: Snapshot,
 }
 
 struct RetainedTrade {
@@ -6842,6 +6852,18 @@ impl ScenarioRunner {
             token_accounts: self.env.all_token_account_data(),
             matcher_contexts: self.env.all_matcher_context_data(),
             economic_account_lamports: self.env.all_economic_account_lamports(),
+        }
+    }
+
+    fn authenticated_graph_state(&self) -> AuthenticatedGraphState {
+        let clock = self.env.svm.get_sysvar::<solana_sdk::clock::Clock>();
+        AuthenticatedGraphState {
+            authenticated_slot: clock.slot,
+            authenticated_epoch_start_timestamp: clock.epoch_start_timestamp,
+            authenticated_epoch: clock.epoch,
+            authenticated_leader_schedule_epoch: clock.leader_schedule_epoch,
+            authenticated_unix_timestamp: clock.unix_timestamp,
+            snapshot: self.snapshot(),
         }
     }
 
@@ -11258,11 +11280,17 @@ pub struct BoundedReferenceGraphEvidence {
     pub transition_count: usize,
     pub depth_two_unique_node_count: usize,
     pub depth_two_unique_edge_count: usize,
+    pub depth_three_exact_state_count: usize,
+    pub depth_three_unique_node_count: usize,
+    pub depth_three_unique_edge_count: usize,
+    pub depth_four_word_count: usize,
     pub unique_node_count: usize,
     pub unique_edge_count: usize,
     pub action_attempts: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
     pub action_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
     pub third_position_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+    pub fourth_position_attempts: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+    pub fourth_position_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
     pub underfunded_terminal_world_count: usize,
     pub underfunded_terminal_transition_count: usize,
     pub underfunded_terminal_unique_node_count: usize,
@@ -15273,6 +15301,9 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
         action_attempts: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
         action_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
         third_position_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+        fourth_position_attempts: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+        fourth_position_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+        terminal_representatives: BTreeMap<AuthenticatedGraphState, Vec<(usize, Action)>>,
         coverage: Coverage,
     }
 
@@ -15296,6 +15327,25 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
                 .zip(other.third_position_state_changes)
             {
                 *total += count;
+            }
+            for (total, count) in self
+                .fourth_position_attempts
+                .iter_mut()
+                .zip(other.fourth_position_attempts)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .fourth_position_state_changes
+                .iter_mut()
+                .zip(other.fourth_position_state_changes)
+            {
+                *total += count;
+            }
+            for (snapshot, word) in other.terminal_representatives {
+                self.terminal_representatives
+                    .entry(snapshot)
+                    .or_insert(word);
             }
             self.coverage.merge(other.coverage);
         }
@@ -15332,6 +15382,12 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
                 if position == 2 {
                     graph.third_position_state_changes[*action_index] += 1;
                 }
+                if position == 3 {
+                    graph.fourth_position_state_changes[*action_index] += 1;
+                }
+            }
+            if position == 3 {
+                graph.fourth_position_attempts[*action_index] += 1;
             }
             graph.nodes.insert(after.clone());
             graph
@@ -15339,6 +15395,10 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
                 .insert((before, *action_index as u8, after.clone()));
             before = after;
         }
+        graph
+            .terminal_representatives
+            .entry(runner.authenticated_graph_state())
+            .or_insert_with(|| word.to_vec());
         graph.coverage.merge(runner.coverage);
         Ok(())
     }
@@ -15404,10 +15464,40 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
             }
         }
     }
-    graph.merge(replay_words(&depth_three_words)?);
-    let word_count = depth_two_words.len() + depth_three_words.len();
+    let depth_three_graph = replay_words(&depth_three_words)?;
+    let depth_three_exact_state_count = depth_three_graph.terminal_representatives.len();
+    let depth_three_representatives = depth_three_graph
+        .terminal_representatives
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    graph.merge(depth_three_graph);
+    let depth_three_unique_node_count = graph.nodes.len();
+    let depth_three_unique_edge_count = graph.edges.len();
+
+    // Partial-order reduction for depth four: words that reach byte-identical
+    // tracked account/balance state at the same authenticated Clock state expose
+    // identical program inputs to the next action in this alphabet.
+    // Retain one complete public prefix for each exact state, then apply every
+    // action once. This explores the full one-step successor set of the reached
+    // depth-three state frontier without replaying equivalent permutations.
+    let mut depth_four_words =
+        Vec::with_capacity(depth_three_exact_state_count * BOUNDED_REFERENCE_ACTION_COUNT);
+    for prefix in &depth_three_representatives {
+        debug_assert_eq!(prefix.len(), 3);
+        for (action_index, action) in actions.iter().enumerate() {
+            let mut word = prefix.clone();
+            word.push((action_index, action.clone()));
+            depth_four_words.push(word);
+        }
+    }
+    let depth_four_word_count = depth_four_words.len();
+    graph.merge(replay_words(&depth_four_words)?);
+
+    let word_count = depth_two_words.len() + depth_three_words.len() + depth_four_word_count;
     let transition_count = depth_two_words.iter().map(Vec::len).sum::<usize>()
-        + depth_three_words.iter().map(Vec::len).sum::<usize>();
+        + depth_three_words.iter().map(Vec::len).sum::<usize>()
+        + depth_four_words.iter().map(Vec::len).sum::<usize>();
 
     let underfunded = run_underfunded_terminal_reference_subgraph()?;
     let claim_changing_edge_count = graph
@@ -15433,11 +15523,17 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
         transition_count,
         depth_two_unique_node_count,
         depth_two_unique_edge_count,
+        depth_three_exact_state_count,
+        depth_three_unique_node_count,
+        depth_three_unique_edge_count,
+        depth_four_word_count,
         unique_node_count: graph.nodes.len(),
         unique_edge_count: graph.edges.len(),
         action_attempts: graph.action_attempts,
         action_state_changes: graph.action_state_changes,
         third_position_state_changes: graph.third_position_state_changes,
+        fourth_position_attempts: graph.fourth_position_attempts,
+        fourth_position_state_changes: graph.fourth_position_state_changes,
         underfunded_terminal_world_count: underfunded.world_count,
         underfunded_terminal_transition_count: underfunded.transition_count,
         underfunded_terminal_unique_node_count: underfunded.unique_node_count,
