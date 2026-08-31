@@ -11983,6 +11983,7 @@ pub struct CloseToPartialReceiptEvidence {
     pub max_compute_units: u64,
     pub terminal_actor_count: usize,
     pub terminal_portfolios_closed: usize,
+    pub terminal_cleanup_slot: Option<u64>,
     pub terminal_backing_withdrawn: u128,
     pub terminal_backing_expired: u128,
     pub terminal_insurance_withdrawn: u128,
@@ -13158,6 +13159,7 @@ fn finish_close_to_partial_receipt_composition(
         max_compute_units,
         terminal_actor_count,
         terminal_portfolios_closed,
+        terminal_cleanup_slot,
         terminal_backing_withdrawn,
         terminal_backing_expired,
         terminal_insurance_withdrawn,
@@ -13372,15 +13374,26 @@ pub fn verify_insurance_liquidation_to_partial_receipt_compositions(
 
 pub fn verify_expired_backing_terminal_cleanup_compositions(
 ) -> Result<Vec<LiquidationToPartialReceiptEvidence>, String> {
-    [
-        TradeRoute::NoCpi,
-        TradeRoute::Cpi,
-        TradeRoute::BatchNoCpi,
-        TradeRoute::BatchCpi,
-    ]
-    .into_iter()
-    .map(|route| verify_one_liquidation_to_partial_receipt_composition(route, 123, Some(13)))
-    .collect()
+    [13u64, 14]
+        .into_iter()
+        .flat_map(|terminal_cleanup_slot| {
+            [
+                TradeRoute::NoCpi,
+                TradeRoute::Cpi,
+                TradeRoute::BatchNoCpi,
+                TradeRoute::BatchCpi,
+            ]
+            .into_iter()
+            .map(move |route| (terminal_cleanup_slot, route))
+        })
+        .map(|(terminal_cleanup_slot, route)| {
+            verify_one_liquidation_to_partial_receipt_composition(
+                route,
+                123,
+                Some(terminal_cleanup_slot),
+            )
+        })
+        .collect()
 }
 
 fn verify_one_unattributed_loss_liquidation(

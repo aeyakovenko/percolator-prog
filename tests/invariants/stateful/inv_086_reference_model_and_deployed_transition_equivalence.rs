@@ -227,6 +227,11 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
                 "insurance and B must partition this support-free close exactly: {evidence:?}"
             );
             assert_eq!(
+                evidence.terminal.terminal_cleanup_slot,
+                Some(12),
+                "the pre-expiry control must land one slot before backing expiry"
+            );
+            assert_eq!(
                 (
                     evidence.pre_liquidation_effective_oi,
                     evidence.post_liquidation_effective_oi,
@@ -315,19 +320,27 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
 fn expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup() {
     let discoveries = verify_expired_backing_terminal_cleanup_compositions()
         .expect("INV-063/070/086 exact-expiry terminal cleanup composition");
-    assert_eq!(discoveries.len(), 4, "every public trade route must run");
+    assert_eq!(
+        discoveries.len(),
+        8,
+        "every public trade route must run at exact and late expiry"
+    );
     assert_eq!(
         discoveries
             .iter()
-            .map(|evidence| evidence.route)
+            .map(|evidence| (evidence.terminal.terminal_cleanup_slot, evidence.route))
             .collect::<Vec<_>>(),
         vec![
-            TradeRoute::NoCpi,
-            TradeRoute::Cpi,
-            TradeRoute::BatchNoCpi,
-            TradeRoute::BatchCpi,
+            (Some(13), TradeRoute::NoCpi),
+            (Some(13), TradeRoute::Cpi),
+            (Some(13), TradeRoute::BatchNoCpi),
+            (Some(13), TradeRoute::BatchCpi),
+            (Some(14), TradeRoute::NoCpi),
+            (Some(14), TradeRoute::Cpi),
+            (Some(14), TradeRoute::BatchNoCpi),
+            (Some(14), TradeRoute::BatchCpi),
         ],
-        "the exact-expiry matrix must not duplicate an opening transport"
+        "the terminal-expiry matrix must not duplicate or omit a landing/transport cell"
     );
 
     let normalized = discoveries
@@ -390,7 +403,7 @@ fn expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup
         .collect::<Vec<_>>();
     assert!(
         normalized.windows(2).all(|pair| pair[0] == pair[1]),
-        "opening transport changed exact-expiry terminal economics: {discoveries:?}"
+        "opening transport or exact/late expiry changed terminal economics: {discoveries:?}"
     );
 }
 
