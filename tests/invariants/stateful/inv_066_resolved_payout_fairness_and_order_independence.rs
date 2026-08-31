@@ -23,7 +23,12 @@
 //! A third bounded model keeps the claim-producing positions intact while an independent asset
 //! enters Recovery. It crosses both fair scheduler request orders with claim-before/claim-after a
 //! real backing release and requires identical terminal engine and SPL economics.
+//! A fourth public model creates three concurrent unequal partial receipts. It exhausts all 3!
+//! claimant orders and all four insertion points of an expiring-backing release, independently
+//! checks the three full-width payout remainders, and requires claimant-local payouts and terminal
+//! custody to be identical in all 24 schedules.
 
+use super::inv_052_split_merge_invariance::run_three_claimant_resolved_claim_order;
 use crate::support::fuzz_model::{
     assert_public_encumbrance_census, assert_public_stock_census,
     verify_recovery_to_resolved_receipt_order_matrix,
@@ -254,6 +259,59 @@ fn v16_program_recovery_and_partial_receipt_orders_are_economically_invariant() 
     assert!(evidence.terminal_paid != 0);
     assert_eq!(evidence.terminal_actor_count, PRIMARY_ACTOR_COUNT);
     assert_eq!(evidence.final_engine_vault, evidence.final_spl_vault);
+}
+
+#[test]
+fn v16_program_three_partial_receipts_exhaust_claim_and_release_orders() {
+    const CLAIMANT_ORDERS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+
+    let mut baseline = None;
+    let mut world_count = 0usize;
+    let mut nonzero_remainder_worlds = 0usize;
+    for order in CLAIMANT_ORDERS {
+        for release_after_claims in 0..=order.len() {
+            let outcome = run_three_claimant_resolved_claim_order(order, release_after_claims)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "three-claimant order {order:?}, release after {release_after_claims}: {error}"
+                    )
+                });
+            world_count += 1;
+            nonzero_remainder_worlds += usize::from(
+                outcome
+                    .claimant_topup_remainders
+                    .iter()
+                    .any(|remainder| *remainder != 0),
+            );
+
+            assert_eq!(outcome.concurrent_receipts, 3);
+            assert_eq!(outcome.claimant_receipt_faces, vec![350, 650, 1_000]);
+            assert_eq!(outcome.claimant_topup_remainders.len(), 3);
+            assert_eq!(outcome.scheduled_pre_release_claims, release_after_claims);
+            assert_eq!(outcome.final_engine_vault, outcome.final_spl_vault);
+            assert_eq!(outcome.final_claim_bound_num, 0);
+            assert!(outcome.max_compute_units < TX_CU_LIMIT);
+
+            let economics = outcome.normalized_economics();
+            if let Some(expected) = baseline.as_ref() {
+                assert_eq!(
+                    &economics, expected,
+                    "claim/release order changed three-claimant economics: order={order:?}, release_after={release_after_claims}"
+                );
+            } else {
+                baseline = Some(economics);
+            }
+        }
+    }
+    assert_eq!(world_count, 24);
+    assert_eq!(nonzero_remainder_worlds, world_count);
 }
 
 #[test]

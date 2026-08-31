@@ -52,13 +52,16 @@
 //! execute one complete conversion and converge byte-for-byte; a final retry proves the consumed
 //! claim and lien cannot be reused.
 //! `v16_program_public_resolved_claim_split_is_conservatively_rounded` builds a second, wholly
-//! public two-domain terminal world. One expired-source claim is either held by one portfolio or
-//! split exactly across two independently funded portfolios; an unrelated fresh-backed claim
-//! supplies the same terminal residual. All 16 open/close route pairs must produce the same claim
-//! face and route-independent economics. Both schedules materialize a genuine partial receipt and
-//! move nonzero value after receipt creation; splitting cannot increase payout, and its only
-//! permitted difference is one conservative floor atom. An independent entitlement oracle also
-//! requires the separately backed winner to receive its exact principal plus exact claim face and
+//! public two-domain terminal world. One expired-source claim is held by one portfolio, split
+//! equally across two, or split unequally across three independently funded portfolios; an
+//! unrelated fresh-backed claim supplies the same terminal residual. All 16 open/close route pairs
+//! must produce the same claim face and route-independent economics. Every schedule materializes
+//! genuine partial receipts and moves nonzero value after receipt creation; splitting cannot
+//! increase payout, and its only permitted difference is at most N-1 conservative floor atoms. An
+//! adjacent 24-world matrix exhausts all three-claimant orders and all four insertion points of an
+//! exact-expiry backing release while independently reconstructing every payout remainder. An
+//! independent entitlement oracle also requires the separately backed winner to receive its exact
+//! principal plus exact claim face and
 //! its bankrupt counterparty to receive zero; the underbacked junior cohort therefore cannot
 //! consume that domain's protected value even if every compared schedule shared the same defect.
 //! Every claim is retired, engine/SPL vaults remain exact, and every instruction stays below the
@@ -119,6 +122,7 @@
 use super::*;
 use crate::support::{
     fuzz_model::{assert_public_encumbrance_census, execute_trade_route, TradeRoute},
+    reference_math,
     v16_svm::{MarketConfig, TxSuccess, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
@@ -232,15 +236,75 @@ pub(super) struct ResolvedClaimPartitionOutcome {
     loser_payout: u128,
     unrelated_payout: u128,
     total_payout: u128,
-    final_engine_vault: u128,
-    final_spl_vault: u128,
-    final_claim_bound_num: u128,
-    max_compute_units: u64,
+    pub(super) final_engine_vault: u128,
+    pub(super) final_spl_vault: u128,
+    pub(super) final_claim_bound_num: u128,
+    pub(super) max_compute_units: u64,
     public_steps: usize,
     pub(super) concurrent_receipts: usize,
     pub(super) destination_substitution_rejected: bool,
     pub(super) concurrent_receipt_framed: bool,
     pub(super) locality_claim_payout: u128,
+    claimant_payouts: Vec<u128>,
+    pub(super) claimant_receipt_faces: Vec<u128>,
+    pub(super) claimant_topup_remainders: Vec<u128>,
+    pub(super) scheduled_pre_release_claims: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ResolvedClaimPartitionEconomics {
+    claimant_payouts: Vec<u128>,
+    claimant_receipt_faces: Vec<u128>,
+    claimant_topup_remainders: Vec<u128>,
+    winner_claim_face: u128,
+    winner_receipt_face: u128,
+    winner_seeded_paid_effective: u128,
+    winner_resolved_payout: u128,
+    winner_payout: u128,
+    loser_payout: u128,
+    unrelated_payout: u128,
+    total_payout: u128,
+    final_engine_vault: u128,
+    final_spl_vault: u128,
+    final_claim_bound_num: u128,
+}
+
+impl ResolvedClaimPartitionOutcome {
+    pub(super) fn normalized_economics(&self) -> ResolvedClaimPartitionEconomics {
+        ResolvedClaimPartitionEconomics {
+            claimant_payouts: self.claimant_payouts.clone(),
+            claimant_receipt_faces: self.claimant_receipt_faces.clone(),
+            claimant_topup_remainders: self.claimant_topup_remainders.clone(),
+            winner_claim_face: self.winner_claim_face,
+            winner_receipt_face: self.winner_receipt_face,
+            winner_seeded_paid_effective: self.winner_seeded_paid_effective,
+            winner_resolved_payout: self.winner_resolved_payout,
+            winner_payout: self.winner_payout,
+            loser_payout: self.loser_payout,
+            unrelated_payout: self.unrelated_payout,
+            total_payout: self.total_payout,
+            final_engine_vault: self.final_engine_vault,
+            final_spl_vault: self.final_spl_vault,
+            final_claim_bound_num: self.final_claim_bound_num,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedClaimPartition {
+    Aggregate,
+    TwoWay,
+    ThreeWay,
+}
+
+impl ResolvedClaimPartition {
+    const fn seed_tag(self) -> u8 {
+        match self {
+            Self::Aggregate => 0,
+            Self::TwoWay => 1,
+            Self::ThreeWay => 2,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1489,6 +1553,56 @@ pub(super) fn run_resolved_claim_partition(
     open_route: TradeRoute,
     close_route: TradeRoute,
 ) -> Result<ResolvedClaimPartitionOutcome, String> {
+    run_resolved_claim_partition_schedule(
+        if split_claim {
+            ResolvedClaimPartition::TwoWay
+        } else {
+            ResolvedClaimPartition::Aggregate
+        },
+        open_route,
+        close_route,
+        None,
+        0,
+        false,
+    )
+}
+
+fn run_three_way_resolved_claim_partition(
+    open_route: TradeRoute,
+    close_route: TradeRoute,
+) -> Result<ResolvedClaimPartitionOutcome, String> {
+    run_resolved_claim_partition_schedule(
+        ResolvedClaimPartition::ThreeWay,
+        open_route,
+        close_route,
+        None,
+        0,
+        false,
+    )
+}
+
+pub(super) fn run_three_claimant_resolved_claim_order(
+    claimant_order: [usize; 3],
+    release_after_claims: usize,
+) -> Result<ResolvedClaimPartitionOutcome, String> {
+    run_resolved_claim_partition_schedule(
+        ResolvedClaimPartition::ThreeWay,
+        TradeRoute::NoCpi,
+        TradeRoute::BatchCpi,
+        Some(claimant_order.to_vec()),
+        release_after_claims,
+        true,
+    )
+}
+
+fn run_resolved_claim_partition_schedule(
+    partition: ResolvedClaimPartition,
+    open_route: TradeRoute,
+    close_route: TradeRoute,
+    claimant_order: Option<Vec<usize>>,
+    release_after_claims: usize,
+    release_at_expiry: bool,
+) -> Result<ResolvedClaimPartitionOutcome, String> {
     const SOURCE_DOMAIN: u16 = 1;
     const BACKED_DOMAIN: u16 = 3;
     const BACKED_ASSET: u16 = 1;
@@ -1497,11 +1611,9 @@ pub(super) fn run_resolved_claim_partition(
     const HALF_SIZE_Q: i128 = 20 * POS_SCALE as i128;
     const JUNIOR_BACKING_ATOMS: u128 = 1;
     const BACKED_BACKING_ATOMS: u128 = 1_500;
-    const WINNERS: [usize; 2] = [0, 1];
-    const BACKED_WINNER: usize = 4;
 
     let mut seed = [0x52; 32];
-    seed[0] ^= u8::from(split_claim);
+    seed[0] ^= partition.seed_tag();
     seed[1] ^= match open_route {
         TradeRoute::NoCpi => 0,
         TradeRoute::Cpi => 1,
@@ -1514,10 +1626,32 @@ pub(super) fn run_resolved_claim_partition(
         TradeRoute::BatchNoCpi => 2,
         TradeRoute::BatchCpi => 3,
     };
-    let actor_deposits = if split_claim {
-        [1_000, 1_000, 250, 250, 777]
-    } else {
-        [2_000, 0, 500, 0, 777]
+    let (actor_deposits, winners, losers, pairs, backed_winner_is_extra) = match partition {
+        ResolvedClaimPartition::Aggregate => (
+            [2_000, 0, 500, 0, 777],
+            vec![0usize],
+            vec![2usize],
+            vec![(0usize, 2usize, 2 * HALF_SIZE_Q)],
+            false,
+        ),
+        ResolvedClaimPartition::TwoWay => (
+            [1_000, 1_000, 250, 250, 777],
+            vec![0usize, 1],
+            vec![2usize, 3],
+            vec![(0usize, 2usize, HALF_SIZE_Q), (1usize, 3usize, HALF_SIZE_Q)],
+            false,
+        ),
+        ResolvedClaimPartition::ThreeWay => (
+            [350, 650, 1_000, 100, 150],
+            vec![0usize, 1, 2],
+            vec![3usize, 4, 5],
+            vec![
+                (0usize, 3usize, 7 * POS_SCALE as i128),
+                (1usize, 4usize, 13 * POS_SCALE as i128),
+                (2usize, 5usize, HALF_SIZE_Q),
+            ],
+            true,
+        ),
     };
     let config = MarketConfig {
         initial_price: INITIAL_PRICE,
@@ -1530,10 +1664,41 @@ pub(super) fn run_resolved_claim_partition(
         ..MarketConfig::default()
     };
     let mut env = V16Svm::new(seed, config);
-    let backed_loser = env.add_primary_actor(seed, 0, 1_000_000, 250);
-    if backed_loser != PRIMARY_ACTOR_COUNT {
+    if partition == ResolvedClaimPartition::ThreeWay {
+        let third_loser = env.add_primary_actor(seed, 0, 1_000_000, 250);
+        if third_loser != 5 {
+            return Err(format!(
+                "three-way resolved-claim loser index drifted: {third_loser}"
+            ));
+        }
+    }
+    let backed_winner = if backed_winner_is_extra {
+        env.add_primary_actor(seed, 1, 1_000_000, 777)
+    } else {
+        4
+    };
+    let backed_loser_label = if backed_winner_is_extra { 2 } else { 0 };
+    let backed_loser = env.add_primary_actor(seed, backed_loser_label, 1_000_000, 250);
+    let expected_backed_loser = if backed_winner_is_extra {
+        7
+    } else {
+        PRIMARY_ACTOR_COUNT
+    };
+    if backed_loser != expected_backed_loser {
         return Err(format!(
             "resolved-claim extra actor index drifted: {backed_loser}"
+        ));
+    }
+    let claimant_order = claimant_order.unwrap_or_else(|| winners.clone());
+    let mut normalized_order = claimant_order.clone();
+    normalized_order.sort_unstable();
+    if normalized_order != winners
+        || release_after_claims > claimant_order.len()
+        || (!release_at_expiry && release_after_claims != 0)
+    {
+        return Err(format!(
+            "invalid resolved-claim schedule: partition={partition:?}, order={claimant_order:?}, \
+             release_after={release_after_claims}"
         ));
     }
     let supply_before = env.token_supply_observed();
@@ -1554,12 +1719,7 @@ pub(super) fn run_resolved_claim_partition(
         .map_err(|error| format!("fund independent resolved-payout residual: {error}"))?;
     max_compute_units = max_compute_units.max(backed_top_up.compute_units);
 
-    let pairs: &[(usize, usize, i128)] = if split_claim {
-        &[(0, 2, HALF_SIZE_Q), (1, 3, HALF_SIZE_Q)]
-    } else {
-        &[(0, 2, 2 * HALF_SIZE_Q)]
-    };
-    for &(winner, loser, size_q) in pairs {
+    for &(winner, loser, size_q) in &pairs {
         let open = execute_trade_route(
             &mut env,
             open_route,
@@ -1576,7 +1736,7 @@ pub(super) fn run_resolved_claim_partition(
     let backed_open = execute_trade_route(
         &mut env,
         open_route,
-        BACKED_WINNER,
+        backed_winner,
         backed_loser,
         BACKED_ASSET,
         HALF_SIZE_Q,
@@ -1586,6 +1746,12 @@ pub(super) fn run_resolved_claim_partition(
     .map_err(|error| format!("open independent backed payout pair: {error}"))?;
     max_compute_units = max_compute_units.max(backed_open.compute_units);
 
+    let active_actors = winners
+        .iter()
+        .chain(&losers)
+        .copied()
+        .chain([backed_winner, backed_loser])
+        .collect::<Vec<_>>();
     for (offset, mark) in (105..=WINNING_PRICE).step_by(5).enumerate() {
         let slot = 2 + u64::try_from(offset).expect("bounded claim-partition mark sequence");
         env.warp_to_slot(slot);
@@ -1597,11 +1763,7 @@ pub(super) fn run_resolved_claim_partition(
             .push_auth_mark(BACKED_ASSET, slot, mark)
             .map_err(|error| format!("publish backed-control mark {mark}: {error}"))?;
         max_compute_units = max_compute_units.max(backed_publication.compute_units);
-        for actor in if split_claim {
-            &[0usize, 1, 2, 3, BACKED_WINNER, PRIMARY_ACTOR_COUNT][..]
-        } else {
-            &[0usize, 2, BACKED_WINNER, PRIMARY_ACTOR_COUNT][..]
-        } {
+        for actor in &active_actors {
             let crank = env
                 .crank(
                     *actor,
@@ -1622,7 +1784,7 @@ pub(super) fn run_resolved_claim_partition(
         }
     }
 
-    for &(winner, loser, size_q) in pairs {
+    for &(winner, loser, size_q) in &pairs {
         let close = execute_trade_route(
             &mut env,
             close_route,
@@ -1639,7 +1801,7 @@ pub(super) fn run_resolved_claim_partition(
     let backed_close = execute_trade_route(
         &mut env,
         close_route,
-        BACKED_WINNER,
+        backed_winner,
         backed_loser,
         BACKED_ASSET,
         -HALF_SIZE_Q,
@@ -1657,17 +1819,17 @@ pub(super) fn run_resolved_claim_partition(
             ));
         }
     }
-    let winner_claim_face = WINNERS.iter().try_fold(0u128, |sum, actor| {
+    let winner_claim_face = winners.iter().try_fold(0u128, |sum, actor| {
         sum.checked_add(env.primary_portfolio(*actor).pnl.get().max(0) as u128)
     });
     let Some(winner_claim_face) = winner_claim_face else {
         return Err("resolved-claim winner face overflow".into());
     };
-    let backed_claim_face = env.primary_portfolio(BACKED_WINNER).pnl.get().max(0) as u128;
+    let backed_claim_face = env.primary_portfolio(backed_winner).pnl.get().max(0) as u128;
     let source_face_num =
-        resolved_claim_partition_source_face(&env, &WINNERS, u32::from(SOURCE_DOMAIN));
+        resolved_claim_partition_source_face(&env, &winners, u32::from(SOURCE_DOMAIN));
     let backed_face_num =
-        resolved_claim_partition_source_face(&env, &[BACKED_WINNER], u32::from(BACKED_DOMAIN));
+        resolved_claim_partition_source_face(&env, &[backed_winner], u32::from(BACKED_DOMAIN));
     let expected_backed_face_num = backed_claim_face
         .checked_mul(BOUND_SCALE)
         .ok_or_else(|| "resolved-claim backed face overflow".to_string())?;
@@ -1690,9 +1852,10 @@ pub(super) fn run_resolved_claim_partition(
         .map_err(|error| format!("resolve claim-partition market: {error}"))?;
     max_compute_units = max_compute_units.max(resolve.compute_units);
 
-    settle_resolved_portfolios(&mut env, &[2, 3, backed_loser], &mut max_compute_units)?;
-    let claimant_winners: &[usize] = if split_claim { &WINNERS } else { &[0] };
-    for actor in claimant_winners.iter().copied() {
+    let mut terminal_blockers = losers.clone();
+    terminal_blockers.push(backed_loser);
+    settle_resolved_portfolios(&mut env, &terminal_blockers, &mut max_compute_units)?;
+    for actor in claimant_order.iter().copied() {
         let mut materialized = false;
         for step in 0..8 {
             let receipt = env
@@ -1723,20 +1886,34 @@ pub(super) fn run_resolved_claim_partition(
             ));
         }
     }
+    let claimant_receipts = winners
+        .iter()
+        .map(|actor| {
+            let receipt = env
+                .primary_portfolio(*actor)
+                .resolved_payout_receipt
+                .try_to_runtime()
+                .map_err(|error| format!("decode winner {actor} partial receipt: {error:?}"))?;
+            if !receipt.present || receipt.finalized {
+                return Err(format!(
+                    "winner {actor} did not retain a partial receipt: {receipt:?}"
+                ));
+            }
+            Ok::<_, String>(receipt)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let claimant_receipt_faces = claimant_receipts
+        .iter()
+        .map(|receipt| receipt.terminal_positive_claim_face)
+        .collect::<Vec<_>>();
+    let claimant_destinations_at_seed = winners
+        .iter()
+        .map(|actor| u128::from(env.token_amount(env.actors[*actor].destination_token)))
+        .collect::<Vec<_>>();
     let (winner_receipt_face, winner_seeded_paid_effective) =
-        claimant_winners
+        claimant_receipts
             .iter()
-            .try_fold((0u128, 0u128), |(face_sum, paid_sum), actor| {
-                let receipt = env
-                    .primary_portfolio(*actor)
-                    .resolved_payout_receipt
-                    .try_to_runtime()
-                    .map_err(|error| format!("decode winner {actor} partial receipt: {error:?}"))?;
-                if !receipt.present || receipt.finalized {
-                    return Err(format!(
-                        "winner {actor} did not retain a partial receipt: {receipt:?}"
-                    ));
-                }
+            .try_fold((0u128, 0u128), |(face_sum, paid_sum), receipt| {
                 Ok::<_, String>((
                     face_sum
                         .checked_add(receipt.terminal_positive_claim_face)
@@ -1746,7 +1923,7 @@ pub(super) fn run_resolved_claim_partition(
                         .ok_or_else(|| "resolved-claim paid-effective overflow".to_string())?,
                 ))
             })?;
-    let winner_payout_before_topup = WINNERS.iter().try_fold(0u128, |sum, actor| {
+    let winner_payout_before_topup = winners.iter().try_fold(0u128, |sum, actor| {
         let current = u128::from(env.token_amount(env.actors[*actor].destination_token));
         let delta = current
             .checked_sub(destinations_before[*actor])
@@ -1754,31 +1931,96 @@ pub(super) fn run_resolved_claim_partition(
         sum.checked_add(delta)
             .ok_or_else(|| "resolved-claim seeded payout overflow".to_string())
     })?;
-    settle_resolved_portfolios(&mut env, &[BACKED_WINNER], &mut max_compute_units)?;
+    if release_at_expiry {
+        env.warp_to_slot(13);
+    }
+    let before_release_window = env.primary_market_state().1;
+    if release_at_expiry
+        && before_release_window.source_backing_buckets[BACKED_DOMAIN as usize].status
+            != percolator::BackingBucketStatusV16::Fresh
+    {
+        return Err(format!(
+            "three-claimant schedule did not start from stored Fresh backing: {:?}",
+            before_release_window.source_backing_buckets[BACKED_DOMAIN as usize]
+        ));
+    }
+    for actor in claimant_order.iter().copied().take(release_after_claims) {
+        let destination = env.actors[actor].destination_token;
+        let destination_before = env.token_amount(destination);
+        let spl_vault_before = env.token_amount(env.vault);
+        let engine_vault_before = env.primary_market_state().1.vault;
+        let claim = env
+            .claim_resolved_payout_topup_primary(actor)
+            .map_err(|error| format!("pre-release claim for actor {actor}: {error}"))?;
+        max_compute_units = max_compute_units.max(claim.compute_units);
+        let payout = env
+            .token_amount(destination)
+            .checked_sub(destination_before)
+            .ok_or_else(|| format!("pre-release claim actor {actor} decreased destination"))?;
+        if spl_vault_before.checked_sub(env.token_amount(env.vault)) != Some(payout)
+            || engine_vault_before.checked_sub(env.primary_market_state().1.vault)
+                != Some(u128::from(payout))
+        {
+            return Err(format!(
+                "pre-release claim actor {actor} escaped exact custody: payout={payout}"
+            ));
+        }
+    }
+    settle_resolved_portfolios(&mut env, &[backed_winner], &mut max_compute_units)?;
+    let after_release_window = env.primary_market_state().1;
+    if release_at_expiry
+        && (after_release_window.source_backing_buckets[BACKED_DOMAIN as usize].status
+            == percolator::BackingBucketStatusV16::Fresh
+            || after_release_window.payout_snapshot <= before_release_window.payout_snapshot)
+    {
+        return Err(format!(
+            "three-claimant schedule did not normalize real backing or advance payout: \
+             bucket={:?}->{:?}, snapshot={}->{}",
+            before_release_window.source_backing_buckets[BACKED_DOMAIN as usize],
+            after_release_window.source_backing_buckets[BACKED_DOMAIN as usize],
+            before_release_window.payout_snapshot,
+            after_release_window.payout_snapshot,
+        ));
+    }
+    let payout_ledger = after_release_window.resolved_payout_ledger;
+    let claimant_final_partitions = claimant_receipt_faces
+        .iter()
+        .map(|face| {
+            reference_math::mul_div_floor_with_remainder(
+                *face,
+                payout_ledger.current_payout_rate_num,
+                payout_ledger.current_payout_rate_den,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let claimant_topup_remainders = claimant_final_partitions
+        .iter()
+        .map(|(_, remainder)| *remainder)
+        .collect::<Vec<_>>();
 
     let mut destination_substitution_rejected = false;
     let mut concurrent_receipt_framed = false;
     let mut locality_claim_payout = 0u128;
-    if split_claim {
-        let first_actor = WINNERS[0];
-        let other_actor = WINNERS[1];
-        let first_receipt = env
-            .primary_portfolio(first_actor)
-            .resolved_payout_receipt
-            .try_to_runtime()
-            .map_err(|error| format!("decode first concurrent receipt: {error:?}"))?;
-        let other_receipt = env
-            .primary_portfolio(other_actor)
-            .resolved_payout_receipt
-            .try_to_runtime()
-            .map_err(|error| format!("decode other concurrent receipt: {error:?}"))?;
-        if !first_receipt.present
-            || first_receipt.finalized
-            || !other_receipt.present
-            || other_receipt.finalized
+    if winners.len() > 1 && !release_at_expiry {
+        let first_actor = claimant_order[0];
+        let other_actor = claimant_order[1];
+        let live_receipts = claimant_order
+            .iter()
+            .copied()
+            .map(|actor| {
+                env.primary_portfolio(actor)
+                    .resolved_payout_receipt
+                    .try_to_runtime()
+                    .map(|receipt| (actor, receipt))
+                    .map_err(|error| format!("decode concurrent receipt {actor}: {error:?}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if live_receipts
+            .iter()
+            .any(|(_, receipt)| !receipt.present || receipt.finalized)
         {
             return Err(format!(
-                "public split claim did not retain concurrent partial receipts: first={first_receipt:?}, other={other_receipt:?}"
+                "public split claim did not retain concurrent partial receipts: {live_receipts:?}"
             ));
         }
 
@@ -1805,9 +2047,19 @@ pub(super) fn run_resolved_claim_partition(
         }
         destination_substitution_rejected = true;
 
-        let other_portfolio_before = env.primary_portfolio_data(other_actor);
-        let other_destination = env.actors[other_actor].destination_token;
-        let other_destination_before = env.token_amount(other_destination);
+        let framed_claimants = claimant_order
+            .iter()
+            .copied()
+            .skip(1)
+            .map(|actor| {
+                (
+                    actor,
+                    env.primary_portfolio_data(actor),
+                    env.token_amount(env.actors[actor].destination_token),
+                    env.primary_portfolio(actor).resolved_payout_receipt,
+                )
+            })
+            .collect::<Vec<_>>();
         let first_destination = env.actors[first_actor].destination_token;
         let first_destination_before = env.token_amount(first_destination);
         let spl_vault_before = env.token_amount(env.vault);
@@ -1832,20 +2084,26 @@ pub(super) fn run_resolved_claim_partition(
                 "canonical concurrent-receipt claim did not move exact value: payout={locality_claim_payout}"
             ));
         }
-        let other_receipt_after = env
-            .primary_portfolio(other_actor)
-            .resolved_payout_receipt
-            .try_to_runtime()
-            .map_err(|error| format!("decode framed concurrent receipt: {error:?}"))?;
-        if env.primary_portfolio_data(other_actor) != other_portfolio_before
-            || env.token_amount(other_destination) != other_destination_before
-            || other_receipt_after != other_receipt
-        {
-            return Err("canonical claim mutated the concurrent claimant's scope".into());
+        for (actor, portfolio_before, destination_before, receipt_before) in framed_claimants {
+            if env.primary_portfolio_data(actor) != portfolio_before
+                || env.token_amount(env.actors[actor].destination_token) != destination_before
+                || env.primary_portfolio(actor).resolved_payout_receipt != receipt_before
+            {
+                return Err(format!(
+                    "canonical claim mutated concurrent claimant {actor}"
+                ));
+            }
         }
         concurrent_receipt_framed = true;
     }
-    settle_resolved_portfolios(&mut env, &all_actors, &mut max_compute_units)?;
+    let mut terminal_order = claimant_order.clone();
+    terminal_order.extend(
+        all_actors
+            .iter()
+            .copied()
+            .filter(|actor| !claimant_order.contains(actor)),
+    );
+    settle_resolved_portfolios(&mut env, &terminal_order, &mut max_compute_units)?;
 
     let payouts = env
         .actors
@@ -1855,25 +2113,65 @@ pub(super) fn run_resolved_claim_partition(
             u128::from(env.token_amount(actor.destination_token)) - destinations_before[actor_index]
         })
         .collect::<Vec<_>>();
-    let winner_payout = payouts[0] + payouts[1];
+    let claimant_payouts = winners
+        .iter()
+        .map(|actor| payouts[*actor])
+        .collect::<Vec<_>>();
+    for (((actor, receipt), destination_at_seed), (expected_entitlement, remainder)) in winners
+        .iter()
+        .zip(&claimant_receipts)
+        .zip(&claimant_destinations_at_seed)
+        .zip(&claimant_final_partitions)
+    {
+        let post_seed_payout = u128::from(env.token_amount(env.actors[*actor].destination_token))
+            .checked_sub(*destination_at_seed)
+            .ok_or_else(|| format!("claimant {actor} destination decreased after receipt seed"))?;
+        let observed_entitlement = receipt
+            .paid_effective
+            .checked_add(post_seed_payout)
+            .ok_or_else(|| format!("claimant {actor} entitlement overflow"))?;
+        if observed_entitlement != *expected_entitlement
+            || *remainder >= payout_ledger.current_payout_rate_den
+        {
+            return Err(format!(
+                "claimant {actor} escaped independent final payout partition: \
+                 observed={observed_entitlement}, expected={expected_entitlement}, \
+                 remainder={remainder}, ledger={payout_ledger:?}"
+            ));
+        }
+    }
+    let winner_payout = claimant_payouts.iter().try_fold(0u128, |sum, payout| {
+        sum.checked_add(*payout)
+            .ok_or_else(|| "resolved-claim winner payout overflow".to_string())
+    })?;
     let winner_resolved_payout = winner_payout
         .checked_sub(winner_payout_before_topup)
         .ok_or_else(|| "resolved-claim post-receipt payout underflow".to_string())?;
-    let loser_payout = payouts[2] + payouts[3];
-    let backed_winner_payout = payouts[BACKED_WINNER];
+    let loser_payout = losers.iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(payouts[*actor])
+            .ok_or_else(|| "resolved-claim loser payout overflow".to_string())
+    })?;
+    let backed_winner_payout = payouts[backed_winner];
     let backed_loser_payout = payouts[backed_loser];
     let unrelated_payout = backed_winner_payout + backed_loser_payout;
-    let backed_winner_principal = u128::from(actor_deposits[BACKED_WINNER]);
+    let backed_winner_principal = if backed_winner_is_extra {
+        777
+    } else {
+        actor_deposits[backed_winner]
+    };
     let expected_backed_winner_payout = backed_winner_principal
         .checked_add(backed_claim_face)
         .ok_or_else(|| "resolved-claim backed payout overflow".to_string())?;
-    if backed_winner_payout != expected_backed_winner_payout || backed_loser_payout != 0 {
+    if (!release_at_expiry && backed_winner_payout != expected_backed_winner_payout)
+        || backed_loser_payout != 0
+    {
         return Err(format!(
             "underbacked junior settlement violated independent backed-domain seniority: winner_payout={backed_winner_payout}, expected={expected_backed_winner_payout}, principal={backed_winner_principal}, claim={backed_claim_face}, loser_payout={backed_loser_payout}"
         ));
     }
     let total_payout = payouts
-        .into_iter()
+        .iter()
+        .copied()
         .try_fold(0u128, |sum, payout| sum.checked_add(payout))
         .ok_or_else(|| "resolved-claim payout total overflow".to_string())?;
     let terminal = env.primary_market_state().1;
@@ -1890,7 +2188,8 @@ pub(super) fn run_resolved_claim_partition(
         .validate_public_execution()
         .expect("resolved claim trace must be public and rollback-exact");
     let rejected_steps = trace.steps.iter().filter(|step| !step.succeeded).count();
-    if trace.out_of_band_economic_mutations != 0 || rejected_steps != usize::from(split_claim) {
+    let expected_rejected_steps = usize::from(winners.len() > 1 && !release_at_expiry);
+    if trace.out_of_band_economic_mutations != 0 || rejected_steps != expected_rejected_steps {
         return Err(format!(
             "resolved-claim partition had unexpected public failures or out-of-band mutation: {trace:?}"
         ));
@@ -1912,10 +2211,14 @@ pub(super) fn run_resolved_claim_partition(
         final_claim_bound_num: terminal.source_claim_bound_total_num,
         max_compute_units,
         public_steps: trace.steps.len(),
-        concurrent_receipts: claimant_winners.len(),
+        concurrent_receipts: winners.len(),
         destination_substitution_rejected,
         concurrent_receipt_framed,
         locality_claim_payout,
+        claimant_payouts,
+        claimant_receipt_faces,
+        claimant_topup_remainders,
+        scheduled_pre_release_claims: release_after_claims,
     })
 }
 
@@ -3553,6 +3856,7 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
     ];
     let mut canonical_aggregate = None;
     let mut canonical_split = None;
+    let mut canonical_three_way = None;
     for open_route in ROUTES {
         for close_route in ROUTES {
             let aggregate = run_resolved_claim_partition(false, open_route, close_route)
@@ -3561,9 +3865,15 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
                 });
             let split = run_resolved_claim_partition(true, open_route, close_route)
                 .unwrap_or_else(|error| panic!("split {open_route:?}/{close_route:?}: {error}"));
+            let three_way = run_three_way_resolved_claim_partition(open_route, close_route)
+                .unwrap_or_else(|error| {
+                    panic!("three-way {open_route:?}/{close_route:?}: {error}")
+                });
 
             assert_eq!(split.winner_claim_face, aggregate.winner_claim_face);
+            assert_eq!(three_way.winner_claim_face, aggregate.winner_claim_face);
             assert_eq!(split.backed_claim_face, aggregate.backed_claim_face);
+            assert_eq!(three_way.backed_claim_face, aggregate.backed_claim_face);
             assert_eq!(
                 aggregate.unrelated_payout,
                 aggregate.backed_winner_principal + aggregate.backed_claim_face,
@@ -3574,17 +3884,28 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
                 split.backed_winner_principal + split.backed_claim_face,
                 "splitting the underbacked junior claim cannot consume independent backed principal or claim value for {open_route:?}/{close_route:?}"
             );
+            assert_eq!(
+                three_way.unrelated_payout,
+                three_way.backed_winner_principal + three_way.backed_claim_face,
+                "a three-way junior split cannot consume independent backed value for {open_route:?}/{close_route:?}"
+            );
             assert_eq!(split.winner_receipt_face, aggregate.winner_receipt_face);
+            assert_eq!(three_way.winner_receipt_face, aggregate.winner_receipt_face);
             assert_eq!(split.loser_payout, aggregate.loser_payout);
+            assert_eq!(three_way.loser_payout, aggregate.loser_payout);
             assert_eq!(split.unrelated_payout, aggregate.unrelated_payout);
+            assert_eq!(three_way.unrelated_payout, aggregate.unrelated_payout);
             assert!(
                 aggregate.winner_seeded_paid_effective < aggregate.winner_receipt_face
                     && split.winner_seeded_paid_effective < split.winner_receipt_face
                     && aggregate.winner_resolved_payout > 0
                     && aggregate.winner_resolved_payout < aggregate.winner_receipt_face
                     && split.winner_resolved_payout > 0
-                    && split.winner_resolved_payout < split.winner_receipt_face,
-                "both public schedules must exercise a genuinely partial resolved payout for {open_route:?}/{close_route:?}: aggregate={aggregate:?}, split={split:?}"
+                    && split.winner_resolved_payout < split.winner_receipt_face
+                    && three_way.winner_seeded_paid_effective < three_way.winner_receipt_face
+                    && three_way.winner_resolved_payout > 0
+                    && three_way.winner_resolved_payout < three_way.winner_receipt_face,
+                "all public schedules must exercise a genuinely partial resolved payout for {open_route:?}/{close_route:?}: aggregate={aggregate:?}, split={split:?}, three={three_way:?}"
             );
             assert!(
                 split.winner_resolved_payout <= aggregate.winner_resolved_payout,
@@ -3594,15 +3915,31 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
                 aggregate.winner_resolved_payout - split.winner_resolved_payout <= 1,
                 "two-way public claim split escaped the one-floor rounding envelope for {open_route:?}/{close_route:?}: aggregate={aggregate:?}, split={split:?}"
             );
+            assert!(
+                three_way.winner_resolved_payout <= split.winner_resolved_payout
+                    && aggregate.winner_resolved_payout - three_way.winner_resolved_payout <= 2,
+                "three-way public claim split escaped the two-floor rounding envelope for {open_route:?}/{close_route:?}: aggregate={aggregate:?}, split={split:?}, three={three_way:?}"
+            );
             assert_eq!(
                 aggregate.total_payout - split.total_payout,
                 aggregate.winner_resolved_payout - split.winner_resolved_payout,
                 "only the explicit conservative payout floor may differ for {open_route:?}/{close_route:?}"
             );
+            assert_eq!(
+                aggregate.total_payout - three_way.total_payout,
+                aggregate.winner_payout - three_way.winner_payout,
+                "only the two explicit three-way payout floors may differ for {open_route:?}/{close_route:?}"
+            );
+            assert!(
+                aggregate.winner_payout - three_way.winner_payout <= 2,
+                "three-way receipt materialization plus top-up escaped the two-floor aggregate envelope for {open_route:?}/{close_route:?}"
+            );
             assert_eq!(aggregate.final_engine_vault, aggregate.final_spl_vault);
             assert_eq!(split.final_engine_vault, split.final_spl_vault);
+            assert_eq!(three_way.final_engine_vault, three_way.final_spl_vault);
             assert_eq!(aggregate.final_claim_bound_num, 0);
             assert_eq!(split.final_claim_bound_num, 0);
+            assert_eq!(three_way.final_claim_bound_num, 0);
             assert_eq!(aggregate.concurrent_receipts, 1);
             assert!(!aggregate.destination_substitution_rejected);
             assert!(!aggregate.concurrent_receipt_framed);
@@ -3611,9 +3948,24 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
             assert!(split.destination_substitution_rejected);
             assert!(split.concurrent_receipt_framed);
             assert!(split.locality_claim_payout > 0);
-            assert!(aggregate.public_steps > 0 && split.public_steps > aggregate.public_steps);
+            assert_eq!(three_way.concurrent_receipts, 3);
+            assert!(three_way.destination_substitution_rejected);
+            assert!(three_way.concurrent_receipt_framed);
+            assert!(three_way.locality_claim_payout > 0);
+            assert_eq!(three_way.claimant_receipt_faces, vec![350, 650, 1_000]);
+            assert_eq!(three_way.claimant_topup_remainders.len(), 3);
+            assert!(three_way
+                .claimant_topup_remainders
+                .iter()
+                .any(|value| *value != 0));
+            assert!(
+                aggregate.public_steps > 0
+                    && split.public_steps > aggregate.public_steps
+                    && three_way.public_steps > split.public_steps
+            );
             assert!(aggregate.max_compute_units < TX_CU_LIMIT);
             assert!(split.max_compute_units < TX_CU_LIMIT);
+            assert!(three_way.max_compute_units < TX_CU_LIMIT);
 
             let aggregate_economics = (
                 aggregate.winner_claim_face,
@@ -3641,6 +3993,7 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
                 split.final_spl_vault,
                 split.final_claim_bound_num,
             );
+            let three_way_economics = three_way.normalized_economics();
             if let Some(canonical) = canonical_aggregate.as_ref() {
                 assert_eq!(
                     &aggregate_economics, canonical,
@@ -3656,6 +4009,14 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
                 );
             } else {
                 canonical_split = Some(split_economics);
+            }
+            if let Some(canonical) = canonical_three_way.as_ref() {
+                assert_eq!(
+                    &three_way_economics, canonical,
+                    "three-way economics changed with route pair {open_route:?}/{close_route:?}"
+                );
+            } else {
+                canonical_three_way = Some(three_way_economics);
             }
         }
     }
