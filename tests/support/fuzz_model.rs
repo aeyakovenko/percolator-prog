@@ -12000,6 +12000,10 @@ pub struct LiquidationToPartialReceiptEvidence {
     pub liquidated_abs_q: u128,
     pub liquidation_created_close: bool,
     pub liquidation_compute_units: u64,
+    pub insurance_funded: u128,
+    pub insurance_spent: u128,
+    pub b_loss_booked: u128,
+    pub aggregate_insurance_after_liquidation: u128,
     pub terminal: CloseToPartialReceiptEvidence,
 }
 
@@ -12903,6 +12907,7 @@ pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialRec
 
 fn verify_one_liquidation_to_partial_receipt_composition(
     route: TradeRoute,
+    insurance_atoms: u16,
 ) -> Result<LiquidationToPartialReceiptEvidence, String> {
     const CLOSE_LOSER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
     const BRIDGE_ASSET: usize = 2;
@@ -12916,7 +12921,23 @@ fn verify_one_liquidation_to_partial_receipt_composition(
         route,
         DEFAULT_UNDERFUNDED_BACKING_PLAN,
     )?;
+    let (bridge_loser_domain, _) = v16_domain_pair_for_asset_index(BRIDGE_ASSET)
+        .map_err(|error| format!("INV-086 bridge domain mapping: {error:?}"))?;
+    if insurance_atoms != 0 {
+        runner.run_safety_prefix(&[Action::TopUpInsurance {
+            domain: bridge_loser_domain as u8,
+            amount: insurance_atoms,
+        }])?;
+    }
     let (_, group_before) = runner.env.primary_market_state();
+    let insurance_before_liquidation = group_before.insurance;
+    let domain_spent_before_liquidation = group_before.insurance_domain_spent[bridge_loser_domain];
+    if group_before.insurance_domain_budget[bridge_loser_domain] != u128::from(insurance_atoms) {
+        return Err(format!(
+            "INV-086 liquidation bridge insurance setup drifted: budget={}, expected={insurance_atoms}",
+            group_before.insurance_domain_budget[bridge_loser_domain]
+        ));
+    }
     let pre_liquidation_effective_oi = group_before.assets[BRIDGE_ASSET].oi_eff_long_q;
     if pre_liquidation_effective_oi == 0
         || pre_liquidation_effective_oi != group_before.assets[BRIDGE_ASSET].oi_eff_short_q
@@ -12978,6 +12999,12 @@ fn verify_one_liquidation_to_partial_receipt_composition(
 
     let (_, group_after) = runner.env.primary_market_state();
     let post_liquidation_effective_oi = group_after.assets[BRIDGE_ASSET].oi_eff_long_q;
+    let insurance_spent = group_after.insurance_domain_spent[bridge_loser_domain]
+        .checked_sub(domain_spent_before_liquidation)
+        .ok_or("INV-086 liquidation bridge insurance-spent counter decreased")?;
+    let aggregate_insurance_consumed = insurance_before_liquidation
+        .checked_sub(group_after.insurance)
+        .ok_or("INV-086 liquidation bridge aggregate insurance increased during close")?;
     let close_after = runner
         .env
         .primary_portfolio(CLOSE_LOSER)
@@ -13007,10 +13034,14 @@ fn verify_one_liquidation_to_partial_receipt_composition(
         || liquidated_abs_q == 0
         || post_liquidation_effective_oi >= pre_liquidation_effective_oi
         || !liquidation_created_close
+        || close_after.domain_side != SideV16::Long
         || liquidation_compute_units == 0
+        || insurance_spent != u128::from(insurance_atoms)
+        || aggregate_insurance_consumed != insurance_spent
+        || close_after.insurance_spent != insurance_spent
     {
         return Err(format!(
-            "INV-086 permissionless liquidation did not create the value-bearing terminal bridge: pre_oi={pre_liquidation_effective_oi}, post_oi={post_liquidation_effective_oi}, steps={liquidation_steps}, liquidated={liquidated_abs_q}, liquidation_cu={liquidation_compute_units}, close={close_after:?}, positions={:?}",
+            "INV-086 permissionless liquidation did not create the value-bearing terminal bridge: pre_oi={pre_liquidation_effective_oi}, post_oi={post_liquidation_effective_oi}, steps={liquidation_steps}, liquidated={liquidated_abs_q}, liquidation_cu={liquidation_compute_units}, insurance={insurance_spent}/{insurance_atoms}, aggregate_consumed={aggregate_insurance_consumed}, close={close_after:?}, positions={:?}",
             runner.positions[CLOSE_LOSER]
         ));
     }
@@ -13029,6 +13060,10 @@ fn verify_one_liquidation_to_partial_receipt_composition(
         liquidated_abs_q,
         liquidation_created_close,
         liquidation_compute_units,
+        insurance_funded: u128::from(insurance_atoms),
+        insurance_spent,
+        b_loss_booked: close_after.b_loss_booked,
+        aggregate_insurance_after_liquidation: group_after.insurance,
         terminal,
     })
 }
@@ -13042,7 +13077,20 @@ pub fn verify_liquidation_to_partial_receipt_compositions(
         TradeRoute::BatchCpi,
     ]
     .into_iter()
-    .map(verify_one_liquidation_to_partial_receipt_composition)
+    .map(|route| verify_one_liquidation_to_partial_receipt_composition(route, 0))
+    .collect()
+}
+
+pub fn verify_insurance_liquidation_to_partial_receipt_compositions(
+) -> Result<Vec<LiquidationToPartialReceiptEvidence>, String> {
+    [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .map(|route| verify_one_liquidation_to_partial_receipt_composition(route, 123))
     .collect()
 }
 

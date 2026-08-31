@@ -45,6 +45,11 @@
 //! same close before the underfunded winner receives a genuine partial receipt, a later
 //! value-moving top-up, and a terminal exit. This composes liquidation quantity/OI accounting with
 //! close and receipt identity rather than testing those transitions in separate worlds.
+//! A paired four-route matrix funds 123 insurance atoms in the close's exact source domain before
+//! liquidation. The close must spend those atoms once, book only the remaining loss to B, and carry
+//! the resulting historical spend through resolution, a partial receipt, a later payout, and all
+//! five terminal portfolios with exact engine/SPL custody. The domain is derived through the same
+//! canonical asset-side mapper and checked against the close ledger rather than hard-coded.
 //! The ADL reduction-clamp matrix creates a scaled live leg through every trade transport, submits
 //! owner reductions at `effective - 1`, `effective`, `effective + 1`, and retained raw basis, and
 //! derives the permitted reduction from authenticated pre-state. Both side OI counters and the
@@ -76,6 +81,7 @@
 use super::*;
 use crate::support::fuzz_model::{
     run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
+    verify_insurance_liquidation_to_partial_receipt_compositions,
     verify_liquidation_to_partial_receipt_compositions,
 };
 
@@ -173,6 +179,101 @@ fn permissionless_liquidation_composes_into_partial_receipt_across_all_trade_rou
             .windows(2)
             .all(|pair| pair[0] == pair[1]),
         "opening transport changed liquidation CU: {liquidation_compute:?}"
+    );
+}
+
+#[test]
+fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_payout() {
+    let discoveries = verify_insurance_liquidation_to_partial_receipt_compositions()
+        .expect("INV-086 insurance liquidation-to-partial-receipt composition");
+    assert_eq!(discoveries.len(), 4, "every public trade route must run");
+    assert_eq!(
+        discoveries
+            .iter()
+            .map(|evidence| evidence.route)
+            .collect::<Vec<_>>(),
+        vec![
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ],
+        "the insurance matrix must not duplicate an opening transport"
+    );
+
+    let normalized = discoveries
+        .iter()
+        .map(|evidence| {
+            assert_eq!(
+                (evidence.insurance_funded, evidence.insurance_spent),
+                (123, 123),
+                "the close must consume the exact public domain top-up: {evidence:?}"
+            );
+            assert_eq!(
+                evidence.terminal.close_gross_loss,
+                evidence
+                    .insurance_spent
+                    .checked_add(evidence.b_loss_booked)
+                    .expect("bounded close partition sum"),
+                "insurance and B must partition this support-free close exactly: {evidence:?}"
+            );
+            assert_eq!(
+                (
+                    evidence.pre_liquidation_effective_oi,
+                    evidence.post_liquidation_effective_oi,
+                    evidence.liquidation_steps,
+                    evidence.liquidated_abs_q,
+                    evidence.b_loss_booked,
+                    evidence.aggregate_insurance_after_liquidation,
+                    evidence.terminal.partial_receipt_face,
+                    evidence.terminal.partial_receipt_paid,
+                    evidence.terminal.post_receipt_payout,
+                    evidence.terminal.final_engine_vault,
+                    evidence.terminal.final_spl_vault,
+                    evidence.terminal.terminal_actor_count,
+                ),
+                (
+                    70_000_000,
+                    0,
+                    1,
+                    70_000_000,
+                    2_600,
+                    0,
+                    1_125,
+                    198,
+                    176,
+                    751,
+                    751,
+                    5,
+                ),
+                "the insurance-bearing close must reach its exact partial receipt, later payout, and terminal custody: {evidence:?}"
+            );
+            assert!(
+                evidence.liquidation_compute_units <= 340_000
+                    && evidence.terminal.max_compute_units < 1_400_000,
+                "the insurance-bearing terminal graph must retain transaction headroom: {evidence:?}"
+            );
+            [
+                evidence.pre_liquidation_effective_oi,
+                evidence.post_liquidation_effective_oi,
+                u128::from(evidence.liquidation_steps),
+                evidence.liquidated_abs_q,
+                evidence.insurance_funded,
+                evidence.insurance_spent,
+                evidence.b_loss_booked,
+                evidence.aggregate_insurance_after_liquidation,
+                evidence.terminal.partial_receipt_face,
+                evidence.terminal.partial_receipt_paid,
+                evidence.terminal.post_receipt_payout,
+                evidence.terminal.final_engine_vault,
+                evidence.terminal.final_spl_vault,
+                evidence.terminal.terminal_actor_count as u128,
+            ]
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        normalized.windows(2).all(|pair| pair[0] == pair[1]),
+        "opening transport changed insurance attribution or terminal economics: {discoveries:?}"
     );
 }
 
