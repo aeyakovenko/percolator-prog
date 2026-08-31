@@ -12,8 +12,128 @@
 //! * after accounting is fully drained, final raw vault dust can be swept only
 //!   to the current authority's correct quote-token destination, with wrong
 //!   destinations rejected before the vault or market slab changes.
+//! `v16_program_recovery_force_close_reaches_zero_residue_and_close_slab` composes the final path
+//! with a publicly reached Recovery episode and permissionless force-close. It proves terminal
+//! normalization does not rely on a market that stayed Active throughout its lifetime.
 
 use super::*;
+
+#[test]
+fn v16_program_recovery_force_close_reaches_zero_residue_and_close_slab() {
+    const INITIAL_CAPITAL: u128 = 1_000_000;
+    const OPEN_Q: u128 = 2 * POS_SCALE;
+    const SHUTDOWN_SLOT: u64 = 2;
+    const FORCE_CLOSE_SLOT: u64 = 7;
+
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let cranker = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, INITIAL_CAPITAL);
+    env.deposit(&short_owner, short, INITIAL_CAPITAL);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        OPEN_Q as i128,
+        100,
+        0,
+    );
+    assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, OPEN_Q);
+    assert_eq!(env.market_state().1.assets[0].oi_eff_short_q, OPEN_Q);
+    assert_eq!(env.token_amount(env.vault), 2 * INITIAL_CAPITAL as u64);
+
+    env.svm.warp_to_slot(SHUTDOWN_SLOT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        0,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    env.svm.warp_to_slot(FORCE_CLOSE_SLOT);
+    let force_close_cu =
+        env.force_close_abandoned_asset_with_cu(&cranker, long, short, 0, FORCE_CLOSE_SLOT, OPEN_Q);
+    assert_cu_within(
+        "Recovery force-close before terminal slab",
+        force_close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let recovered = env.market_state().1;
+    assert_eq!(recovered.assets[0].oi_eff_long_q, 0);
+    assert_eq!(recovered.assets[0].oi_eff_short_q, 0);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
+    assert_eq!(recovered.vault, 2 * INITIAL_CAPITAL);
+    assert_eq!(recovered.c_tot, 2 * INITIAL_CAPITAL);
+    assert_eq!(recovered.vault as u64, env.token_amount(env.vault));
+
+    env.resolve();
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    let resolved_slot = env.market_state().1.resolved_slot;
+    let market_before_timeout = env.svm.get_account(&env.market).unwrap();
+    let long_before_timeout = env.svm.get_account(&long).unwrap();
+    let vault_before_timeout = env.svm.get_account(&env.vault).unwrap();
+    let (_, early_close) = env.try_close_resolved_with_cu(&long_owner, long);
+    assert!(
+        early_close.is_err(),
+        "unsigned CloseResolved must remain owner-gated before the configured timeout",
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_timeout
+    );
+    assert_eq!(env.svm.get_account(&long).unwrap(), long_before_timeout);
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_timeout
+    );
+
+    env.svm.warp_to_slot(resolved_slot + 5);
+    let long_destination = env.close_resolved(&long_owner, long);
+    let short_destination = env.close_resolved(&short_owner, short);
+    assert_eq!(env.token_amount(long_destination), INITIAL_CAPITAL as u64);
+    assert_eq!(env.token_amount(short_destination), INITIAL_CAPITAL as u64);
+    env.close_portfolio_with_cu(&long_owner, long);
+    env.close_portfolio_with_cu(&short_owner, short);
+
+    let (_, terminal) = env.market_state();
+    assert_eq!(terminal.materialized_portfolio_count, 0);
+    assert_eq!(terminal.vault, 0);
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.insurance, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
+
+    let admin = env.admin.insecure_clone();
+    let admin_destination = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(admin_destination, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("Recovery-normalized market must reach CloseSlab");
+    assert_cu_within("Recovery-normalized CloseSlab", close_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(admin_destination), 0);
+    assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
+}
 
 #[test]
 fn v16_program_close_slab_rejects_until_market_has_zero_terminal_residue() {
