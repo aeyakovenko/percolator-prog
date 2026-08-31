@@ -11039,6 +11039,7 @@ pub fn run_bounded_public_liveness_graph() -> Result<BoundedLivenessGraphEvidenc
 }
 
 const BOUNDED_REFERENCE_ACTION_COUNT: usize = 13;
+const BOUNDED_RECOVERY_ACTION_COUNT: usize = 13;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedCloseProgressNode {
@@ -11307,6 +11308,24 @@ pub struct BoundedReferenceGraphEvidence {
     pub source_credit_rate_decrease_count: usize,
     pub source_credit_backing_supported_increase_count: usize,
     pub source_credit_claim_reduction_increase_count: usize,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedRecoveryFrontierEvidence {
+    pub word_count: usize,
+    pub transition_count: usize,
+    pub unique_node_count: usize,
+    pub unique_edge_count: usize,
+    pub fresh_seed_world_count: usize,
+    pub exact_expiry_seed_world_count: usize,
+    pub nonflat_seed_world_count: usize,
+    pub bounded_exit_world_count: usize,
+    pub value_moving_exit_world_count: usize,
+    pub action_attempts: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
+    pub action_state_changes: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
+    pub second_position_attempts: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
+    pub second_position_state_changes: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
     pub coverage: Coverage,
 }
 
@@ -11589,6 +11608,57 @@ fn bounded_reference_actions() -> [Action; BOUNDED_REFERENCE_ACTION_COUNT] {
             force_close_delay_slots: 100,
         },
         Action::ShutdownAsset { asset: 2, dt: 1 },
+        Action::ResolveMarket,
+        Action::CloseResolved { actor: 0 },
+    ]
+}
+
+fn bounded_recovery_actions() -> [Action; BOUNDED_RECOVERY_ACTION_COUNT] {
+    [
+        Action::Crank {
+            actor: 0,
+            hints: HintMode::Complete,
+        },
+        Action::Crank {
+            actor: 1,
+            hints: HintMode::Complete,
+        },
+        Action::ForfeitRecoveryLeg {
+            actor: 0,
+            asset: 0,
+            budget_units: u8::MAX,
+        },
+        Action::ForfeitRecoveryLeg {
+            actor: 1,
+            asset: 0,
+            budget_units: u8::MAX,
+        },
+        Action::ForceCloseAbandoned {
+            cranker: 2,
+            account_a: 0,
+            account_b: 1,
+            asset: 0,
+            dt: 1,
+            units: 2,
+        },
+        Action::Deposit {
+            actor: 0,
+            amount: 7,
+        },
+        Action::WithdrawBacking {
+            domain: 0,
+            amount: 1,
+        },
+        Action::TopUpInsurance {
+            domain: 0,
+            amount: 7,
+        },
+        Action::WithdrawInsuranceAsset {
+            asset: 0,
+            amount: 1,
+        },
+        Action::RebalanceReduce { actor: 0, asset: 0 },
+        Action::RebalanceReduce { actor: 1, asset: 0 },
         Action::ResolveMarket,
         Action::CloseResolved { actor: 0 },
     ]
@@ -15553,6 +15623,318 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
             .backing_supported_increase_count,
         source_credit_claim_reduction_increase_count: source_credit_transitions
             .claim_reduction_increase_count,
+        coverage: graph.coverage,
+    })
+}
+
+fn build_bounded_recovery_reference_seed(
+    exact_expiry: bool,
+) -> Result<(ScenarioRunner, bool), String> {
+    let scenario = Scenario {
+        seed: [0x8d; 32],
+        config: SmallMarketConfig {
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            maintenance_fee_per_slot: 0,
+        },
+        actions: vec![],
+    };
+    let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
+    runner.run_safety_prefix(&[
+        Action::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: 2,
+        },
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 0,
+            maker: 1,
+            asset: 0,
+            units: 2,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: false,
+        },
+        Action::PushMark {
+            asset: 0,
+            dt: 1,
+            move_bps: 500,
+        },
+        Action::Crank {
+            actor: 0,
+            hints: HintMode::Complete,
+        },
+        Action::ShutdownAsset { asset: 0, dt: 1 },
+        Action::TopUpBacking {
+            domain: 0,
+            amount: 73,
+            expiry_delta: 4,
+        },
+        Action::TopUpInsurance {
+            domain: 0,
+            amount: 31,
+        },
+    ])?;
+
+    let mut node = runner.bounded_reference_node()?;
+    let backing = node
+        .source_backing_buckets
+        .first()
+        .ok_or("INV-086 Recovery seed has no source-backing domain")?;
+    if backing.status != BackingBucketStatusV16::Fresh as u8
+        || !backing.amounts.iter().any(|amount| *amount != 0)
+        || node.insurance < 31
+        || node.lifecycles[0] != AssetLifecycleV16::Recovery as u8
+        || node.positions[0][0] == 0
+        || node.positions[1][0] == 0
+    {
+        return Err(format!(
+            "INV-086 Recovery seed was vacuous before expiry selection: {node:?}"
+        ));
+    }
+    let nonflat = node.pnl[0] != 0 || node.pnl[1] != 0;
+    if !nonflat || node.raw_targets[0] != node.effective_prices[0] {
+        return Err(format!(
+            "INV-086 Recovery seed lacked booked nonflat value or a committed frozen mark: {node:?}"
+        ));
+    }
+
+    let expiry_slot = backing.expiry_slot;
+    if exact_expiry {
+        runner.env.warp_to_slot(expiry_slot);
+        node = runner.bounded_reference_node()?;
+        if runner.env.current_slot() != expiry_slot
+            || node.source_backing_buckets[0].status != BackingBucketStatusV16::Fresh as u8
+        {
+            return Err(format!(
+                "INV-086 exact-expiry Recovery seed normalized before a public consumer: {node:?}"
+            ));
+        }
+    } else if runner.env.current_slot() >= expiry_slot {
+        return Err(format!(
+            "INV-086 fresh Recovery seed reached backing expiry {} >= {expiry_slot}",
+            runner.env.current_slot()
+        ));
+    }
+    Ok((runner, nonflat))
+}
+
+pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFrontierEvidence, String>
+{
+    type ExactEdge = (AuthenticatedGraphState, u8, AuthenticatedGraphState);
+
+    let (fresh_control, _) = build_bounded_recovery_reference_seed(false)?;
+    let (expiry_control, _) = build_bounded_recovery_reference_seed(true)?;
+    if fresh_control.snapshot() != expiry_control.snapshot() {
+        return Err(
+            "INV-086 Recovery expiry controls did not replay to byte-identical economic state"
+                .into(),
+        );
+    }
+    if fresh_control.authenticated_graph_state() == expiry_control.authenticated_graph_state() {
+        return Err("INV-086 Recovery expiry controls did not vary authenticated Clock".into());
+    }
+
+    #[derive(Default)]
+    struct RecoveryAccumulator {
+        nodes: BTreeSet<AuthenticatedGraphState>,
+        edges: BTreeSet<ExactEdge>,
+        fresh_seed_world_count: usize,
+        exact_expiry_seed_world_count: usize,
+        nonflat_seed_world_count: usize,
+        bounded_exit_world_count: usize,
+        value_moving_exit_world_count: usize,
+        action_attempts: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
+        action_state_changes: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
+        second_position_attempts: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
+        second_position_state_changes: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
+        coverage: Coverage,
+    }
+
+    impl RecoveryAccumulator {
+        fn merge(&mut self, other: Self) {
+            self.nodes.extend(other.nodes);
+            self.edges.extend(other.edges);
+            self.fresh_seed_world_count += other.fresh_seed_world_count;
+            self.exact_expiry_seed_world_count += other.exact_expiry_seed_world_count;
+            self.nonflat_seed_world_count += other.nonflat_seed_world_count;
+            self.bounded_exit_world_count += other.bounded_exit_world_count;
+            self.value_moving_exit_world_count += other.value_moving_exit_world_count;
+            for (total, count) in self.action_attempts.iter_mut().zip(other.action_attempts) {
+                *total += count;
+            }
+            for (total, count) in self
+                .action_state_changes
+                .iter_mut()
+                .zip(other.action_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_attempts
+                .iter_mut()
+                .zip(other.second_position_attempts)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_state_changes
+                .iter_mut()
+                .zip(other.second_position_state_changes)
+            {
+                *total += count;
+            }
+            self.coverage.merge(other.coverage);
+        }
+    }
+
+    fn replay_recovery_word(
+        exact_expiry: bool,
+        word: &[(usize, Action)],
+        graph: &mut RecoveryAccumulator,
+    ) -> Result<(), String> {
+        let (mut runner, nonflat) = build_bounded_recovery_reference_seed(exact_expiry)?;
+        graph.fresh_seed_world_count += usize::from(!exact_expiry);
+        graph.exact_expiry_seed_world_count += usize::from(exact_expiry);
+        graph.nonflat_seed_world_count += usize::from(nonflat);
+
+        let mut before_exact = runner.authenticated_graph_state();
+        let mut before_economic = runner.bounded_reference_node()?;
+        graph.nodes.insert(before_exact.clone());
+        for (position, (action_index, action)) in word.iter().enumerate() {
+            runner
+                .run_safety_prefix(std::slice::from_ref(action))
+                .map_err(|error| {
+                    format!(
+                        "INV-086 Recovery word expiry={exact_expiry} {word:?} failed at position {position}: {error}"
+                    )
+                })?;
+            let after_economic = runner.bounded_reference_node()?;
+            let after_exact = runner.authenticated_graph_state();
+            bounded_source_credit_transition_evidence(
+                &format!("INV-030 Recovery edge expiry={exact_expiry} action={action_index}"),
+                &before_economic,
+                &after_economic,
+            )?;
+            graph.action_attempts[*action_index] += 1;
+            if after_economic != before_economic {
+                graph.action_state_changes[*action_index] += 1;
+                if position == 1 {
+                    graph.second_position_state_changes[*action_index] += 1;
+                }
+            }
+            if position == 1 {
+                graph.second_position_attempts[*action_index] += 1;
+            }
+            graph.nodes.insert(after_exact.clone());
+            graph
+                .edges
+                .insert((before_exact, *action_index as u8, after_exact.clone()));
+            before_exact = after_exact;
+            before_economic = after_economic;
+        }
+
+        let destination_total_before =
+            (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+                total
+                    .checked_add(u128::from(
+                        runner
+                            .env
+                            .token_amount(runner.env.actors[actor].destination_token),
+                    ))
+                    .ok_or("INV-073 Recovery pre-exit destination total overflow")
+            })?;
+        runner
+            .run_direct_user_exit_campaign()
+            .map_err(|error| {
+                format!(
+                    "INV-073 Recovery word expiry={exact_expiry} {word:?} had no bounded owner exit: {error}"
+                )
+            })?;
+        graph.bounded_exit_world_count += 1;
+        let destination_total = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+            total
+                .checked_add(u128::from(
+                    runner
+                        .env
+                        .token_amount(runner.env.actors[actor].destination_token),
+                ))
+                .ok_or("INV-073 Recovery destination total overflow")
+        })?;
+        if destination_total <= destination_total_before {
+            return Err(format!(
+                "INV-073 Recovery word expiry={exact_expiry} {word:?} exited without increasing funded user destinations: {destination_total_before}->{destination_total}"
+            ));
+        }
+        graph.value_moving_exit_world_count += 1;
+        runner.assert_global_invariants()?;
+        graph.coverage.merge(runner.coverage);
+        Ok(())
+    }
+
+    let actions = bounded_recovery_actions();
+    let mut words = vec![vec![]];
+    for (first_index, first) in actions.iter().enumerate() {
+        words.push(vec![(first_index, first.clone())]);
+    }
+    for (first_index, first) in actions.iter().enumerate() {
+        for (second_index, second) in actions.iter().enumerate() {
+            words.push(vec![
+                (first_index, first.clone()),
+                (second_index, second.clone()),
+            ]);
+        }
+    }
+    let jobs = [false, true]
+        .into_iter()
+        .flat_map(|exact_expiry| words.iter().cloned().map(move |word| (exact_expiry, word)))
+        .collect::<Vec<_>>();
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(jobs.len().max(1));
+    let chunk_size = jobs.len().div_ceil(worker_count);
+    let graph = std::thread::scope(|scope| {
+        let handles = jobs
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || -> Result<RecoveryAccumulator, String> {
+                    let mut graph = RecoveryAccumulator::default();
+                    for (exact_expiry, word) in chunk {
+                        replay_recovery_word(*exact_expiry, word, &mut graph)?;
+                    }
+                    Ok(graph)
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut graph = RecoveryAccumulator::default();
+        for handle in handles {
+            graph.merge(
+                handle
+                    .join()
+                    .map_err(|_| "INV-086 Recovery frontier worker panicked".to_string())??,
+            );
+        }
+        Ok::<_, String>(graph)
+    })?;
+    let transition_count = jobs.iter().map(|(_, word)| word.len()).sum();
+
+    Ok(BoundedRecoveryFrontierEvidence {
+        word_count: jobs.len(),
+        transition_count,
+        unique_node_count: graph.nodes.len(),
+        unique_edge_count: graph.edges.len(),
+        fresh_seed_world_count: graph.fresh_seed_world_count,
+        exact_expiry_seed_world_count: graph.exact_expiry_seed_world_count,
+        nonflat_seed_world_count: graph.nonflat_seed_world_count,
+        bounded_exit_world_count: graph.bounded_exit_world_count,
+        value_moving_exit_world_count: graph.value_moving_exit_world_count,
+        action_attempts: graph.action_attempts,
+        action_state_changes: graph.action_state_changes,
+        second_position_attempts: graph.second_position_attempts,
+        second_position_state_changes: graph.second_position_state_changes,
         coverage: graph.coverage,
     })
 }

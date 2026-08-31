@@ -29,6 +29,13 @@
 //! backing buckets, and insurance reservations. It replays each edge from the same
 //! public genesis, applies the independent state oracles after every transition,
 //! records exact rollback as a self-edge, and distinguishes normalized economic states.
+//! A Recovery-seeded frontier starts from independently rebuilt public positions with nonflat
+//! mark/funding state, funded backing and insurance, and either fresh or exact-expiry backing.
+//! It exhausts every one- and two-action word over Recovery crank, owner forfeit, abandoned-pair
+//! force-close, owner deposit, backing, insurance, resolve, and resolved-close routes, plus exact
+//! rollback controls for live-mode rebalance. Every reached state must retain a bounded
+//! value-moving owner exit under the same state, stock, custody, and rollback oracles; this is the
+//! lifecycle-prefix extension of the base Live-state graph.
 //! A second terminal subgraph starts from twelve independently replayed public prefixes
 //! that create a genuinely partial underfunded receipt. It crosses all expiry boundaries,
 //! two claimant orders, and both close/claim priorities; claim-priority paths must move
@@ -91,7 +98,8 @@
 
 use super::*;
 use crate::support::fuzz_model::{
-    run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
+    run_bounded_recovery_reference_frontier, run_bounded_reference_equivalence_graph,
+    verify_close_to_partial_receipt_composition,
     verify_expired_backing_terminal_cleanup_compositions,
     verify_insurance_liquidation_to_partial_receipt_compositions,
     verify_liquidation_to_partial_receipt_compositions,
@@ -549,6 +557,82 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
             && evidence.coverage.resolved_claim_mutations != 0
             && evidence.coverage.resolved_payout_atoms != 0,
         "bounded graph must exercise value, trade, policy, authority, lifecycle, and terminal edges: {evidence:?}"
+    );
+}
+
+#[test]
+fn v16_program_recovery_seeded_frontier_preserves_bounded_owner_exit() {
+    let evidence =
+        run_bounded_recovery_reference_frontier().expect("INV-086 public Recovery seeded frontier");
+
+    assert_eq!(
+        evidence.word_count, 366,
+        "must exhaust two expiry seeds x (13^0 + 13^1 + 13^2) Recovery words"
+    );
+    assert_eq!(
+        evidence.transition_count, 702,
+        "must replay every edge in every one- and two-action Recovery word"
+    );
+    assert_eq!(evidence.fresh_seed_world_count, 183);
+    assert_eq!(evidence.exact_expiry_seed_world_count, 183);
+    assert_eq!(
+        evidence.nonflat_seed_world_count, evidence.word_count,
+        "every Recovery word must start with booked or pending nonflat value"
+    );
+    assert_eq!(
+        evidence.bounded_exit_world_count, evidence.word_count,
+        "every reached Recovery state must have a bounded owner exit"
+    );
+    assert_eq!(
+        evidence.value_moving_exit_world_count, evidence.word_count,
+        "every exit witness must move real funded user value"
+    );
+    assert!(
+        evidence.unique_node_count >= 20 && evidence.unique_edge_count >= 50,
+        "Recovery frontier collapsed to vacuous exact-state coverage: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .action_attempts
+            .iter()
+            .all(|attempts| *attempts == 54),
+        "every Recovery action must occupy every first and second position: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .second_position_attempts
+            .iter()
+            .all(|attempts| *attempts == 26),
+        "every Recovery action must follow every first action in both expiry states: {evidence:?}"
+    );
+    for action_index in [0usize, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12] {
+        assert_ne!(
+            evidence.action_state_changes[action_index], 0,
+            "every progressing Recovery action must mutate economic state in at least one reached context: {evidence:?}"
+        );
+        assert_ne!(
+            evidence.second_position_state_changes[action_index], 0,
+            "every progressing Recovery action must have a nonvacuous ordered composition: {evidence:?}"
+        );
+    }
+    for action_index in [9usize, 10] {
+        assert_eq!(
+            evidence.action_state_changes[action_index], 0,
+            "live-mode rebalance must reject atomically throughout Recovery: {evidence:?}"
+        );
+        assert_eq!(evidence.second_position_state_changes[action_index], 0);
+    }
+    assert_ne!(evidence.coverage.loaded_program_hash, [0; 32]);
+    assert!(
+        evidence.coverage.recovery_forfeit_successes != 0
+            && evidence.coverage.force_close_successes != 0
+            && evidence.coverage.backing_topups != 0
+            && evidence.coverage.insurance_topups != 0
+            && evidence.coverage.deposits != 0
+            && evidence.coverage.rebalance_reductions == 0
+            && evidence.coverage.terminal_resolves != 0
+            && evidence.coverage.resolved_close_mutations != 0,
+        "Recovery frontier did not traverse its intended public lifecycle classes: {evidence:?}"
     );
 }
 
