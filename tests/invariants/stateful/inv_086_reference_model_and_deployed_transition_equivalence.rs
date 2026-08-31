@@ -53,6 +53,11 @@
 //! After all claims terminate, the exact 750+1 fresh backing remainder returns through the two
 //! canonical provider withdrawals, all portfolios dematerialize, and `CloseSlab` reaches the
 //! closed-market tombstone without burning provider value.
+//! A paired exact-expiry matrix withholds the 750-atom backing withdrawal until its authenticated
+//! expiry slot. The terminal transition must expire that backing, restore exactly the 123 atoms of
+//! historically spent insurance that remain provider-backed, permit that restored insurance to be
+//! withdrawn, classify the remaining 627 atoms as claim-free terminal surplus, and close the slab.
+//! The 1-atom unexpired backing domain remains independently provider-withdrawable throughout.
 //! The ADL reduction-clamp matrix creates a scaled live leg through every trade transport, submits
 //! owner reductions at `effective - 1`, `effective`, `effective + 1`, and retained raw basis, and
 //! derives the permitted reduction from authenticated pre-state. Both side OI counters and the
@@ -84,6 +89,7 @@
 use super::*;
 use crate::support::fuzz_model::{
     run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
+    verify_expired_backing_terminal_cleanup_compositions,
     verify_insurance_liquidation_to_partial_receipt_compositions,
     verify_liquidation_to_partial_receipt_compositions,
 };
@@ -260,11 +266,14 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
                 (
                     evidence.terminal.terminal_portfolios_closed,
                     evidence.terminal.terminal_backing_withdrawn,
+                    evidence.terminal.terminal_backing_expired,
+                    evidence.terminal.terminal_insurance_withdrawn,
+                    evidence.terminal.slab_progress_steps,
                     evidence.terminal.slab_custody_burned,
                     evidence.terminal.slab_closed,
                 ),
-                (5, 751, 0, true),
-                "terminal backing must return before every portfolio and the slab close: {evidence:?}"
+                (5, 751, 0, 0, 1, 0, true),
+                "the cursor must park before live backing, roll back while blocked, then close after provider withdrawal: {evidence:?}"
             );
             assert!(
                 evidence.terminal.slab_close_compute_units != 0
@@ -288,6 +297,9 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
                 evidence.terminal.terminal_actor_count as u128,
                 evidence.terminal.terminal_portfolios_closed as u128,
                 evidence.terminal.terminal_backing_withdrawn,
+                evidence.terminal.terminal_backing_expired,
+                evidence.terminal.terminal_insurance_withdrawn,
+                evidence.terminal.slab_progress_steps as u128,
                 evidence.terminal.slab_custody_burned,
                 u128::from(evidence.terminal.slab_closed),
             ]
@@ -296,6 +308,89 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
     assert!(
         normalized.windows(2).all(|pair| pair[0] == pair[1]),
         "opening transport changed insurance attribution or terminal economics: {discoveries:?}"
+    );
+}
+
+#[test]
+fn expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup() {
+    let discoveries = verify_expired_backing_terminal_cleanup_compositions()
+        .expect("INV-063/070/086 exact-expiry terminal cleanup composition");
+    assert_eq!(discoveries.len(), 4, "every public trade route must run");
+    assert_eq!(
+        discoveries
+            .iter()
+            .map(|evidence| evidence.route)
+            .collect::<Vec<_>>(),
+        vec![
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ],
+        "the exact-expiry matrix must not duplicate an opening transport"
+    );
+
+    let normalized = discoveries
+        .iter()
+        .map(|evidence| {
+            assert_eq!(
+                (
+                    evidence.insurance_funded,
+                    evidence.insurance_spent,
+                    evidence.b_loss_booked,
+                    evidence.terminal.final_engine_vault,
+                    evidence.terminal.final_spl_vault,
+                ),
+                (123, 123, 2_600, 751, 751),
+                "the public liquidation prefix must retain the exact terminal accounting world: {evidence:?}"
+            );
+            assert_eq!(
+                (
+                    evidence.terminal.terminal_portfolios_closed,
+                    evidence.terminal.terminal_backing_withdrawn,
+                    evidence.terminal.terminal_backing_expired,
+                    evidence.terminal.terminal_insurance_withdrawn,
+                    evidence.terminal.slab_progress_steps,
+                    evidence.terminal.slab_custody_burned,
+                    evidence.terminal.slab_closed,
+                ),
+                (5, 1, 750, 123, 2, 627, true),
+                "expiry, insurance restoration, and terminal surplus must partition custody exactly: {evidence:?}"
+            );
+            assert!(
+                evidence.liquidation_compute_units <= 340_000
+                    && evidence.terminal.max_compute_units < 1_400_000
+                    && evidence.terminal.slab_close_compute_units != 0
+                    && evidence.terminal.slab_close_compute_units < 1_400_000,
+                "every exact-expiry continuation must retain transaction headroom: {evidence:?}"
+            );
+            [
+                evidence.pre_liquidation_effective_oi,
+                evidence.post_liquidation_effective_oi,
+                u128::from(evidence.liquidation_steps),
+                evidence.liquidated_abs_q,
+                evidence.insurance_funded,
+                evidence.insurance_spent,
+                evidence.b_loss_booked,
+                evidence.aggregate_insurance_after_liquidation,
+                evidence.terminal.partial_receipt_face,
+                evidence.terminal.partial_receipt_paid,
+                evidence.terminal.post_receipt_payout,
+                evidence.terminal.final_engine_vault,
+                evidence.terminal.final_spl_vault,
+                evidence.terminal.terminal_portfolios_closed as u128,
+                evidence.terminal.terminal_backing_withdrawn,
+                evidence.terminal.terminal_backing_expired,
+                evidence.terminal.terminal_insurance_withdrawn,
+                evidence.terminal.slab_progress_steps as u128,
+                evidence.terminal.slab_custody_burned,
+                u128::from(evidence.terminal.slab_closed),
+            ]
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        normalized.windows(2).all(|pair| pair[0] == pair[1]),
+        "opening transport changed exact-expiry terminal economics: {discoveries:?}"
     );
 }
 

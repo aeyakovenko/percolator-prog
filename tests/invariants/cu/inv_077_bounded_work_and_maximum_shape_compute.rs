@@ -4615,6 +4615,192 @@ fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market()
     );
 }
 
+// Maximum-shape complement to the public INV-063/070/086 exact-expiry composition. That public
+// route proves a 627-atom claim-free residual is reachable after all claims, expired backing, and
+// restored insurance are settled. Here only the number of empty market slots is lifted directly:
+// CloseSlab must prove no historical insurance recredit remains, burn the same residual, and close
+// the near-10 MiB account without approaching the transaction ceiling.
+#[test]
+fn v16_bpf_terminal_claim_free_surplus_close_stays_bounded_on_10m_market() {
+    const N: usize = MAX_10M_MARKET_SLOTS;
+    const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const CLAIM_FREE_SURPLUS: u128 = 627;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(1, PRICE);
+    let (_, g0) = env.market_state();
+    let template = g0.assets[0];
+
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    let next_len = state::market_account_len_for_capacity(N + 1).unwrap();
+    assert!(
+        N > 5_000
+            && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN
+            && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
+        "test must exercise the maximal near-10 MiB market capacity"
+    );
+    {
+        let mut account = env.svm.get_account(&env.market).unwrap();
+        account.data.resize(new_len, 0u8);
+        account.lamports = account.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, account).unwrap();
+    }
+
+    let high_market_id = (HIGH_ASSET as u64) + 1;
+    env.mutate_market(|_cfg, group| {
+        group.config.max_market_slots = N as u32;
+        group.next_market_id = (N as u64) + 1;
+        let mut high = template;
+        high.market_id = high_market_id;
+        group.assets[HIGH_ASSET] = high;
+        group.source_backing_buckets[2 * HIGH_ASSET] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+        group.source_backing_buckets[2 * HIGH_ASSET + 1] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+    });
+    {
+        let mut account = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&account.data, 0).unwrap();
+        state::write_asset_oracle_profile(&mut account.data, HIGH_ASSET, &profile0).unwrap();
+        env.svm.set_account(env.market, account).unwrap();
+    }
+    env.resolve();
+
+    env.mutate_market(|_cfg, group| {
+        assert_eq!(group.mode, MarketModeV16::Resolved);
+        assert_eq!(group.vault, 0);
+        assert_eq!(group.insurance, 0);
+        group.vault = CLAIM_FREE_SURPLUS;
+    });
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        CLAIM_FREE_SURPLUS as u64,
+    );
+    {
+        let mut account = env.svm.get_account(&env.mint).unwrap();
+        let mut mint = Mint::unpack(&account.data).unwrap();
+        mint.supply = CLAIM_FREE_SURPLUS as u64;
+        Mint::pack(mint, &mut account.data).unwrap();
+        env.svm.set_account(env.mint, account).unwrap();
+    }
+
+    let invalid_vault = Pubkey::new_unique();
+    let invalid_destination = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            invalid_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            invalid_destination,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.admin.pubkey(), 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let market_before_invalid = env.svm.get_account(&env.market).unwrap();
+    let vault_before_invalid = env.svm.get_account(&env.vault).unwrap();
+    let admin = env.admin.insecure_clone();
+    let authority_epoch = env.control_sequences(0).authority_epoch;
+    let invalid_close = env.send(
+        ProgInstruction::CloseSlab { authority_epoch },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(invalid_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(invalid_destination, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.mint, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        invalid_close.is_err(),
+        "a noncanonical vault cannot advance terminal scan progress"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_invalid,
+        "invalid terminal accounts must roll back the cursor and engine state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_invalid,
+        "invalid terminal accounts cannot move canonical custody"
+    );
+
+    let expected_calls = N.div_ceil(percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL);
+    let mut close_compute = Vec::with_capacity(expected_calls);
+
+    for completed_chunks in 0..expected_calls {
+        if completed_chunks != 0 {
+            let next_slot = env.svm.get_sysvar::<Clock>().slot.checked_add(1).unwrap();
+            env.svm.warp_to_slot(next_slot);
+            env.svm.expire_blockhash();
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let close_cu = env.close_slab_with_cu();
+        close_compute.push(close_cu);
+        assert_cu_within(
+            "10MiB claim-free surplus CloseSlab chunk",
+            close_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        let market_after = env.svm.get_account(&env.market).unwrap();
+        if completed_chunks + 1 == expected_calls {
+            assert_closed_market_tombstone(&market_after);
+        } else {
+            assert_ne!(
+                market_after, market_before,
+                "successful terminal scan chunk {completed_chunks} must persist cursor progress"
+            );
+            let (cfg, group) = env.market_state();
+            let expected_next =
+                ((completed_chunks + 1) * percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL).min(N);
+            assert_eq!(
+                cfg.terminal_slab_scan_progress, expected_next as u128,
+                "nonfinal chunk {completed_chunks} must retain its cross-slot continuation"
+            );
+            assert_eq!(
+                (group.vault, env.token_amount(env.vault)),
+                (CLAIM_FREE_SURPLUS, CLAIM_FREE_SURPLUS as u64),
+                "scan chunk {completed_chunks} must not move claim-free custody"
+            );
+        }
+    }
+    println!(
+        "v16 10MiB claim-free surplus CloseSlab: assets={N}, residual={CLAIM_FREE_SURPLUS}, calls={expected_calls}, max_CU={}",
+        close_compute.iter().copied().max().unwrap_or_default()
+    );
+    let closed_vault = env.svm.get_account(&env.vault).unwrap();
+    assert!(
+        closed_vault.data.is_empty() || closed_vault.data.iter().all(|byte| *byte == 0),
+        "terminal vault must be burned and closed"
+    );
+    assert_eq!(
+        close_compute.len(),
+        expected_calls,
+        "one bounded call per chunk must finish even when every call lands in a later slot"
+    );
+}
+
 // DoS regression — the optional terminal insurance ledger used to force
 // observe-all-authority-domains even when the ledger was fresh and the terminal
 // withdrawal drained the whole insurance balance. On a sparse near-10 MiB market

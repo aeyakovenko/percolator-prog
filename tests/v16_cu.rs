@@ -41,8 +41,8 @@ const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 const MAX_10M_MARKET_SLOTS: usize = 5_782;
 const CERTIFIED_ENGINE_GIT_SOURCE: &str =
-    "git+https://github.com/aeyakovenko/percolator?rev=ce590d9bd3e8f55eaf2e0321f36ef11fbc003d26#\
-     ce590d9bd3e8f55eaf2e0321f36ef11fbc003d26";
+    "git+https://github.com/aeyakovenko/percolator?rev=6f3c5c124a68c1103a2ecd995ff4a10b3af247f8#\
+     6f3c5c124a68c1103a2ecd995ff4a10b3af247f8";
 
 fn assert_certified_engine_pin(context: &str) {
     assert!(
@@ -3172,6 +3172,7 @@ impl V16CuEnv {
                 AccountMeta::new_readonly(self.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(self.mint, false),
             ],
             &[&self.admin],
         )

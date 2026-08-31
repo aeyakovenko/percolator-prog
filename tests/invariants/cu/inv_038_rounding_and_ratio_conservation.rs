@@ -803,6 +803,12 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
             evidence: "INV-002",
         },
         RoundingOwner {
+            function: "handle_close_slab",
+            operations: 1,
+            class: "STRUCTURAL",
+            evidence: "INV-063",
+        },
+        RoundingOwner {
             function: "handle_update_backing_fee_policy",
             operations: 3,
             class: "STRUCTURAL",

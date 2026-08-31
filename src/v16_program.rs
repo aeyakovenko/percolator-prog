@@ -15,8 +15,8 @@ use percolator::{
     canonical_accrual_price_step_v16, v16_domain_count_for_market_slots, AccrualStepV16,
     AutoCrankObservationV16, AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankWorkV16,
     MarketModeV16, PermissionlessProgressOutcomeV16, RebalanceRequestV16, SideV16,
-    SourceCreditStateV16, TradeRequestV16, V16Config, V16Error, BOUND_SCALE,
-    V16_MAX_ACCRUAL_PATH_STEPS,
+    SourceCreditStateV16, TerminalSlabOutcomeV16, TradeRequestV16, V16Config, V16Error,
+    BOUND_SCALE, V16_MAX_ACCRUAL_PATH_STEPS,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -537,9 +537,11 @@ pub mod state {
         pub permissionless_resolve_stale_slots: u64,
         pub force_close_delay_slots: u64,
         pub last_good_oracle_slot: u64,
-        // Reserved wire space from the removed insurance-withdraw policy. These fields never had
-        // a public writer or complete withdrawal enforcement and must remain zero.
-        pub _reserved_insurance_withdraw_deposit_remaining: u128,
+        // Program-owned next-asset index for bounded terminal scans; zero starts a scan. The
+        // engine never advances this cursor past still-live backing, so it remains complete when
+        // authenticated time changes between transactions.
+        pub terminal_slab_scan_progress: u128,
+        // Remaining reserved wire space from the removed insurance-withdraw policy.
         pub _reserved_insurance_withdraw_max_bps: u16,
         pub liquidation_cranker_fee_share_bps: u16,
         pub maintenance_cranker_fee_share_bps: u16,
@@ -1299,13 +1301,14 @@ pub mod state {
 
     #[inline]
     fn validate_wrapper_config(config: &WrapperConfigV16) -> Result<(), ProgramError> {
+        let terminal_scan_shape_ok = config.terminal_slab_scan_progress <= u128::from(u64::MAX);
         if config.collateral_mint == [0u8; 32]
             || (config.secondary_collateral_mint != [0u8; 32]
                 && config.secondary_collateral_mint == config.collateral_mint)
         {
             return Err(ProgramError::InvalidAccountData);
         }
-        if config._reserved_insurance_withdraw_deposit_remaining != 0
+        if !terminal_scan_shape_ok
             || config._reserved_insurance_withdraw_max_bps != 0
             || config._reserved_insurance_withdraw_deposits_only != 0
             || config._reserved_insurance_withdraw_cooldown_slots != 0
@@ -7484,7 +7487,7 @@ pub mod processor {
             permissionless_resolve_stale_slots: 0,
             force_close_delay_slots: 0,
             last_good_oracle_slot: init_slot,
-            _reserved_insurance_withdraw_deposit_remaining: 0,
+            terminal_slab_scan_progress: 0,
             _reserved_insurance_withdraw_max_bps: 0,
             liquidation_cranker_fee_share_bps: 0,
             maintenance_cranker_fee_share_bps: 0,
@@ -10731,6 +10734,36 @@ pub mod processor {
     }
 
     #[inline(never)]
+    fn terminal_slab_scan_start(
+        encoded: u128,
+        configured_assets: usize,
+    ) -> Result<usize, ProgramError> {
+        if encoded == 0 {
+            return Ok(0);
+        }
+        let next_asset = usize::try_from(
+            u64::try_from(encoded).map_err(|_| PercolatorError::InvalidInstruction)?,
+        )
+        .map_err(|_| PercolatorError::InvalidInstruction)?;
+        if next_asset >= configured_assets {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        Ok(next_asset)
+    }
+
+    fn encode_terminal_slab_scan_progress(
+        next_asset_index: usize,
+        configured_assets: usize,
+    ) -> Result<u128, ProgramError> {
+        if next_asset_index >= configured_assets {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let next_asset =
+            u64::try_from(next_asset_index).map_err(|_| PercolatorError::InvalidInstruction)?;
+        Ok(u128::from(next_asset))
+    }
+
+    #[inline(never)]
     fn handle_close_slab<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
@@ -10746,15 +10779,16 @@ pub mod processor {
         expect_writable(admin_dest)?;
         expect_writable(market_ai)?;
         expect_writable(vault_token)?;
+        expect_writable(dest_token)?;
         if admin_dest.key == market_ai.key {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         expect_owner(market_ai, program_id)?;
         verify_token_program(token_program)?;
 
-        let (cfg_pre, retired_unbudgeted_insurance) = {
+        let (cfg_pre, retired_unbudgeted_insurance, bump, vault_balance, secondary_close) = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
             expect_live_authority(&cfg.marketauth, admin_dest.key)?;
             require_authority_epoch_view(&group, 0, expected_authority_epoch)?;
             if group.header.mode != 1 {
@@ -10764,57 +10798,81 @@ pub mod processor {
             {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            let retired = if group.header.insurance.get() == 0 {
-                0
+            let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+            expect_key(vault_authority_ai, &vault_authority)?;
+            let primary_mint = primary_collateral_mint(&cfg);
+            let vault_balance =
+                verify_vault_token_account(vault_token, &vault_authority, &primary_mint)?;
+            verify_user_token_account(dest_token, admin_dest.key, &primary_mint)?;
+            let secondary_close = if cfg.secondary_collateral_mint != [0u8; 32] {
+                let secondary_vault_token = account(accounts, 6)?;
+                let secondary_dest_token = account(accounts, 7)?;
+                expect_writable(secondary_vault_token)?;
+                expect_writable(secondary_dest_token)?;
+                if secondary_vault_token.key == vault_token.key
+                    || secondary_dest_token.key == dest_token.key
+                {
+                    return Err(PercolatorError::InvalidVaultAccount.into());
+                }
+                let secondary_mint = secondary_collateral_mint(&cfg)?;
+                let secondary_vault_balance = verify_vault_token_account(
+                    secondary_vault_token,
+                    &vault_authority,
+                    &secondary_mint,
+                )?;
+                verify_user_token_account(secondary_dest_token, admin_dest.key, &secondary_mint)?;
+                Some((
+                    secondary_vault_token,
+                    secondary_dest_token,
+                    secondary_vault_balance,
+                ))
             } else {
-                group
-                    .retire_terminal_unbudgeted_insurance_not_atomic()
-                    .map_err(map_v16_error)?
+                None
             };
-            if group.header.vault.get() != 0 || group.header.insurance.get() != 0 {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            (cfg, retired)
+            let authenticated_slot = authenticated_market_slot_or_fallback_view(&group);
+            let configured_assets = group.header.config.max_market_slots.get() as usize;
+            let scan_start =
+                terminal_slab_scan_start(cfg.terminal_slab_scan_progress, configured_assets)?;
+            let retired = match group
+                .advance_terminal_slab_not_atomic(authenticated_slot, scan_start)
+                .map_err(map_v16_error)?
+            {
+                TerminalSlabOutcomeV16::ScanProgress { next_asset_index } => {
+                    cfg.terminal_slab_scan_progress =
+                        encode_terminal_slab_scan_progress(next_asset_index, configured_assets)?;
+                    drop(group);
+                    state::write_wrapper_config(&mut market_data, &cfg)?;
+                    return Ok(());
+                }
+                TerminalSlabOutcomeV16::BackingExpired { domain } => {
+                    cfg.terminal_slab_scan_progress =
+                        encode_terminal_slab_scan_progress(domain / 2, configured_assets)?;
+                    drop(group);
+                    state::write_wrapper_config(&mut market_data, &cfg)?;
+                    return Ok(());
+                }
+                TerminalSlabOutcomeV16::InsuranceRecredited { asset_index, .. } => {
+                    cfg.terminal_slab_scan_progress =
+                        encode_terminal_slab_scan_progress(asset_index, configured_assets)?;
+                    drop(group);
+                    state::write_wrapper_config(&mut market_data, &cfg)?;
+                    return Ok(());
+                }
+                TerminalSlabOutcomeV16::ReadyToClose { retired } => retired,
+            };
+            cfg.terminal_slab_scan_progress = 0;
+            drop(group);
+            state::write_wrapper_config(&mut market_data, &cfg)?;
+            (cfg, retired, bump, vault_balance, secondary_close)
         };
 
-        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
-        expect_key(vault_authority_ai, &vault_authority)?;
         let primary_mint = primary_collateral_mint(&cfg_pre);
-        let vault_balance =
-            verify_vault_token_account(vault_token, &vault_authority, &primary_mint)?;
-        verify_user_token_account(dest_token, admin_dest.key, &primary_mint)?;
         let retired_u64 = amount_to_u64(retired_unbudgeted_insurance)?;
         let primary_sweep_amount = vault_balance
             .checked_sub(retired_u64)
             .ok_or(PercolatorError::InvalidTokenAccount)?;
         let bump_arr = [bump];
         let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
-        let secondary_close = if cfg_pre.secondary_collateral_mint != [0u8; 32] {
-            let secondary_vault_token = account(accounts, 6)?;
-            let secondary_dest_token = account(accounts, 7)?;
-            expect_writable(secondary_vault_token)?;
-            expect_writable(secondary_dest_token)?;
-            if secondary_vault_token.key == vault_token.key
-                || secondary_dest_token.key == dest_token.key
-            {
-                return Err(PercolatorError::InvalidVaultAccount.into());
-            }
-            let secondary_mint = secondary_collateral_mint(&cfg_pre)?;
-            let secondary_vault_balance = verify_vault_token_account(
-                secondary_vault_token,
-                &vault_authority,
-                &secondary_mint,
-            )?;
-            verify_user_token_account(secondary_dest_token, admin_dest.key, &secondary_mint)?;
-            Some((
-                secondary_vault_token,
-                secondary_dest_token,
-                secondary_vault_balance,
-            ))
-        } else {
-            None
-        };
-
         if retired_u64 != 0 {
             let primary_mint_index = if secondary_close.is_some() { 8 } else { 6 };
             let primary_mint_ai = account(accounts, primary_mint_index)?;

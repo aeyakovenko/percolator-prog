@@ -7,9 +7,11 @@
 //!
 //! Evidence in this file (I/C): public LiteSVM tests cover two high-impact
 //! controls with writer/read/enforcement behavior: permissionless resolve timing
-//! policy and asset activation cooldown. Five unwritable insurance-withdraw pseudo-controls are
-//! retained only as zero-validated reserved wire space, and a public top-up/withdrawal composition
-//! proves they are not hidden accounting state. The static rosters below also inventory every
+//! policy and asset activation cooldown. Four unwritable insurance-withdraw pseudo-controls remain
+//! zero-validated reserved wire space; the fifth former reserve is now the bounded terminal-scan
+//! cursor, and the maximum-shape CloseSlab witness proves it changes only as real scan progress.
+//! A public top-up/withdrawal composition proves the remaining reserve is not hidden accounting
+//! state. The static rosters below also inventory every
 //! field in all six wrapper-owned persisted structs and require category-specific
 //! writer/read/validation edges plus exactly one named executable mutation witness for every
 //! non-padding field. Engine-owned fields remain the engine proof boundary.
@@ -157,11 +159,12 @@ fn v16_program_wrapper_config_static_inventory_covers_every_persisted_field() {
             ],
         ),
         (
-            "_reserved_insurance_withdraw_deposit_remaining",
-            "layout-reserved",
+            "terminal_slab_scan_progress",
+            "liveness-progress",
             &[
-                "_reserved_insurance_withdraw_deposit_remaining: 0",
-                "config._reserved_insurance_withdraw_deposit_remaining != 0",
+                "terminal_slab_scan_progress: 0",
+                "encode_terminal_slab_scan_progress(",
+                "cfg.terminal_slab_scan_progress = 0",
             ],
         ),
         (
@@ -435,6 +438,7 @@ fn v16_program_wrapper_config_static_inventory_covers_every_persisted_field() {
                     | "oracle-liveness-mirror"
                     | "oracle-profile-mirror"
                     | "derived-counter"
+                    | "liveness-progress"
                     | "layout-reserved"
                     | "layout-padding"
             ),
@@ -467,7 +471,6 @@ fn v16_program_wrapper_config_static_inventory_covers_every_persisted_field() {
 }
 
 fn assert_removed_insurance_policy_reserved_zero(cfg: &state::WrapperConfigV16) {
-    assert_eq!(cfg._reserved_insurance_withdraw_deposit_remaining, 0);
     assert_eq!(cfg._reserved_insurance_withdraw_max_bps, 0);
     assert_eq!(cfg._reserved_insurance_withdraw_deposits_only, 0);
     assert_eq!(cfg._reserved_insurance_withdraw_cooldown_slots, 0);
@@ -482,21 +485,29 @@ fn v16_program_removed_insurance_policy_is_zero_reserved_and_not_hidden_state() 
     let (initial_cfg, _) = env.market_state();
     assert_removed_insurance_policy_reserved_zero(&initial_cfg);
 
+    let mut invalid_cursor = initial_cfg;
+    invalid_cursor.terminal_slab_scan_progress = u128::from(u64::MAX) + 1;
+    let mut candidate = env.svm.get_account(&env.market).unwrap().data;
+    let before = candidate.clone();
+    assert!(
+        state::write_wrapper_config(&mut candidate, &invalid_cursor).is_err(),
+        "a terminal cursor wider than the deployed index encoding must fail closed"
+    );
+    assert_eq!(candidate, before, "failed cursor write must be atomic");
+
     // Every nonzero reserved field fails before write and leaves canonical bytes unchanged.
     for (label, field) in [
-        ("deposit remaining", 0u8),
-        ("maximum bps", 1),
-        ("deposits only", 2),
-        ("cooldown", 3),
-        ("last withdrawal slot", 4),
+        ("maximum bps", 0u8),
+        ("deposits only", 1),
+        ("cooldown", 2),
+        ("last withdrawal slot", 3),
     ] {
         let mut invalid = initial_cfg;
         match field {
-            0 => invalid._reserved_insurance_withdraw_deposit_remaining = 1,
-            1 => invalid._reserved_insurance_withdraw_max_bps = 1,
-            2 => invalid._reserved_insurance_withdraw_deposits_only = 1,
-            3 => invalid._reserved_insurance_withdraw_cooldown_slots = 1,
-            4 => invalid._reserved_last_insurance_withdraw_slot = 1,
+            0 => invalid._reserved_insurance_withdraw_max_bps = 1,
+            1 => invalid._reserved_insurance_withdraw_deposits_only = 1,
+            2 => invalid._reserved_insurance_withdraw_cooldown_slots = 1,
+            3 => invalid._reserved_last_insurance_withdraw_slot = 1,
             _ => unreachable!(),
         }
         let mut candidate = env.svm.get_account(&env.market).unwrap().data;
@@ -768,7 +779,7 @@ fn v16_program_wrapper_security_control_roster_has_source_edges_and_witnesses() 
                 "cfg.collateral_mint = primary_mint;",
                 "cfg.secondary_collateral_mint = secondary_mint;",
                 "primary_collateral_mint(&cfg_pre)",
-                "secondary_collateral_mint(&cfg_pre)",
+                "secondary_collateral_mint(&cfg)",
                 "is_withdrawable_collateral_mint(cfg, &dest.mint)",
             ],
             "v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist",
@@ -896,10 +907,16 @@ fn v16_program_every_wrapper_persisted_security_field_has_a_named_mutation_witne
             "v16_program_composite_profile_shutdown_restart_clears_old_provenance",
         ),
         (
+            "terminal slab scan progress",
+            "WrapperConfigV16",
+            &["terminal_slab_scan_progress"],
+            inv_077,
+            "v16_bpf_terminal_claim_free_surplus_close_stays_bounded_on_10m_market",
+        ),
+        (
             "removed insurance-policy wire reserve",
             "WrapperConfigV16",
             &[
-                "_reserved_insurance_withdraw_deposit_remaining",
                 "_reserved_insurance_withdraw_max_bps",
                 "_reserved_insurance_withdraw_deposits_only",
                 "_reserved_insurance_withdraw_cooldown_slots",

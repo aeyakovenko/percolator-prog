@@ -11984,6 +11984,9 @@ pub struct CloseToPartialReceiptEvidence {
     pub terminal_actor_count: usize,
     pub terminal_portfolios_closed: usize,
     pub terminal_backing_withdrawn: u128,
+    pub terminal_backing_expired: u128,
+    pub terminal_insurance_withdrawn: u128,
+    pub slab_progress_steps: usize,
     pub slab_custody_burned: u128,
     pub slab_close_compute_units: u64,
     pub slab_closed: bool,
@@ -12718,7 +12721,7 @@ fn finish_close_to_partial_receipt_composition(
     mut runner: ScenarioRunner,
     expectation: CloseBridgeExpectation,
     expected_close_asset: usize,
-    close_slab_after_terminal: bool,
+    terminal_cleanup_slot: Option<u64>,
 ) -> Result<CloseToPartialReceiptEvidence, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
@@ -12883,10 +12886,14 @@ fn finish_close_to_partial_receipt_composition(
 
     let mut terminal_portfolios_closed = 0usize;
     let mut terminal_backing_withdrawn = 0u128;
+    let mut terminal_backing_expired = 0u128;
+    let mut terminal_insurance_withdrawn = 0u128;
+    let mut slab_progress_steps = 0usize;
     let mut slab_custody_burned = 0u128;
     let mut slab_close_compute_units = 0u64;
     let mut slab_closed = false;
-    if close_slab_after_terminal {
+    if let Some(terminal_cleanup_slot) = terminal_cleanup_slot {
+        runner.env.warp_to_slot(terminal_cleanup_slot);
         for actor in 0..PRIMARY_ACTOR_COUNT {
             let close = runner
                 .env
@@ -12915,6 +12922,74 @@ fn finish_close_to_partial_receipt_composition(
                 runner.env.token_amount(runner.env.vault),
             ));
         }
+        let fresh_terminal_backing = before_backing_cleanup
+            .source_backing_buckets
+            .iter()
+            .filter(|bucket| bucket.fresh_unliened_backing_num != 0)
+            .collect::<Vec<_>>();
+        if !fresh_terminal_backing.is_empty()
+            && fresh_terminal_backing
+                .iter()
+                .all(|bucket| terminal_cleanup_slot < bucket.expiry_slot)
+        {
+            let market_before_scan = runner
+                .env
+                .svm
+                .get_account(&runner.env.market)
+                .ok_or("INV-070 pre-expiry market account missing")?;
+            let vault_before_scan = runner
+                .env
+                .svm
+                .get_account(&runner.env.vault)
+                .ok_or("INV-070 pre-expiry vault account missing")?;
+            let supply_before_scan = runner.env.mint_supply();
+            let scan = runner
+                .env
+                .close_primary_slab()
+                .map_err(|error| format!("INV-070 pre-expiry terminal scan: {error}"))?;
+            max_compute_units = max_compute_units.max(scan.compute_units);
+            let market_after_scan = runner
+                .env
+                .svm
+                .get_account(&runner.env.market)
+                .ok_or("INV-070 pre-expiry market account disappeared")?;
+            let scan_cfg = {
+                let mut decoded = market_after_scan.data.clone();
+                let (cfg, _) = state::market_view_mut(&mut decoded)
+                    .map_err(|error| format!("INV-070 pre-expiry cursor decode: {error:?}"))?;
+                cfg
+            };
+            if market_after_scan == market_before_scan
+                || scan_cfg.terminal_slab_scan_progress == 0
+                || runner.env.svm.get_account(&runner.env.vault) != Some(vault_before_scan)
+                || runner.env.mint_supply() != supply_before_scan
+            {
+                return Err(format!(
+                    "INV-070 pre-expiry scan did not park before live backing without moving custody: cursor={}",
+                    scan_cfg.terminal_slab_scan_progress
+                ));
+            }
+            slab_progress_steps += 1;
+
+            let market_before_blocked = market_after_scan;
+            let vault_before_blocked = runner
+                .env
+                .svm
+                .get_account(&runner.env.vault)
+                .ok_or("INV-070 pre-expiry blocked vault account missing")?;
+            let supply_before_blocked = runner.env.mint_supply();
+            runner.env.close_primary_slab().expect_err(
+                "INV-070 cursor parked on live backing must reject, not succeed as a no-op",
+            );
+            if runner.env.svm.get_account(&runner.env.market) != Some(market_before_blocked)
+                || runner.env.svm.get_account(&runner.env.vault) != Some(vault_before_blocked)
+                || runner.env.mint_supply() != supply_before_blocked
+            {
+                return Err(
+                    "INV-070 blocked pre-expiry CloseSlab did not roll back exactly".to_string(),
+                );
+            }
+        }
         for (domain, bucket) in before_backing_cleanup
             .source_backing_buckets
             .iter()
@@ -12928,6 +13003,12 @@ fn finish_close_to_partial_receipt_composition(
             }
             let amount = bucket.fresh_unliened_backing_num / BOUND_SCALE;
             if amount == 0 {
+                continue;
+            }
+            if terminal_cleanup_slot >= bucket.expiry_slot {
+                terminal_backing_expired = terminal_backing_expired
+                    .checked_add(amount)
+                    .ok_or("INV-070 terminal expired-backing sum overflow")?;
                 continue;
             }
             let destination_before = u128::from(
@@ -12968,39 +13049,96 @@ fn finish_close_to_partial_receipt_composition(
                 &runner.env,
             )?;
         }
-        let (_, before_slab) = runner.env.primary_market_state();
-        if terminal_backing_withdrawn != final_engine_vault
-            || before_slab.vault != 0
-            || before_slab.insurance != 0
-            || before_slab.c_tot != 0
-            || u128::from(runner.env.token_amount(runner.env.vault)) != 0
-        {
+        const MAX_TERMINAL_SLAB_STEPS: usize = 16;
+        for step in 0..MAX_TERMINAL_SLAB_STEPS {
+            let (_, group) = runner.env.primary_market_state();
+            let mut withdrew_insurance = false;
+            for asset in 0..group.assets.len() {
+                let long_domain = asset * 2;
+                let available = group.insurance_domain_budget[long_domain]
+                    .checked_sub(group.insurance_domain_spent[long_domain])
+                    .and_then(|long| {
+                        group.insurance_domain_budget[long_domain + 1]
+                            .checked_sub(group.insurance_domain_spent[long_domain + 1])
+                            .and_then(|short| long.checked_add(short))
+                    })
+                    .ok_or_else(|| {
+                        format!("INV-070 invalid terminal insurance budget for asset {asset}")
+                    })?
+                    .min(group.insurance)
+                    .min(group.vault);
+                if available == 0 {
+                    continue;
+                }
+                runner.execute_insurance_withdrawal(asset, available)?;
+                terminal_insurance_withdrawn = terminal_insurance_withdrawn
+                    .checked_add(available)
+                    .ok_or("INV-070 terminal insurance-withdrawal sum overflow")?;
+                withdrew_insurance = true;
+                break;
+            }
+            if withdrew_insurance {
+                continue;
+            }
+
+            let market_before = runner
+                .env
+                .svm
+                .get_account(&runner.env.market)
+                .ok_or("INV-070 terminal market account disappeared before CloseSlab")?;
+            let supply_before_slab = runner.env.mint_supply();
+            let close = runner.env.close_primary_slab().map_err(|error| {
+                format!("INV-070 terminal CloseSlab step {step}: {error}; terminal group={group:?}")
+            })?;
+            max_compute_units = max_compute_units.max(close.compute_units);
+            let market_after = runner
+                .env
+                .svm
+                .get_account(&runner.env.market)
+                .ok_or("INV-070 terminal market account disappeared after CloseSlab")?;
+            if market_after.data.len() == percolator_prog::constants::HEADER_LEN {
+                slab_close_compute_units = close.compute_units;
+                slab_custody_burned = u128::from(
+                    supply_before_slab
+                        .checked_sub(runner.env.mint_supply())
+                        .ok_or("INV-070 CloseSlab increased SPL mint supply")?,
+                );
+                assert_closed_market_tombstone(&market_after);
+                slab_closed = true;
+                break;
+            }
+            if market_after == market_before || runner.env.mint_supply() != supply_before_slab {
+                return Err(format!(
+                    "INV-070 terminal CloseSlab step {step} was a no-op or moved SPL supply before closure"
+                ));
+            }
+            slab_progress_steps += 1;
+            assert_public_stock_census(
+                &format!("INV-070 terminal CloseSlab progress {step}"),
+                &runner.env,
+            )?;
+            assert_public_encumbrance_census(
+                &format!("INV-070 terminal CloseSlab progress {step}"),
+                &runner.env,
+            )?;
+        }
+        if !slab_closed {
             return Err(format!(
-                "INV-070 terminal backing did not explain and drain custody: withdrawn={terminal_backing_withdrawn}, original={final_engine_vault}/{final_spl_vault}, final vault={}/{}, insurance={}, capital={}",
-                before_slab.vault,
-                runner.env.token_amount(runner.env.vault),
-                before_slab.insurance,
-                before_slab.c_tot,
+                "INV-070 terminal CloseSlab did not converge in {MAX_TERMINAL_SLAB_STEPS} steps"
             ));
         }
-        let supply_before_slab = runner.env.mint_supply();
-        let close = runner.env.close_primary_slab().map_err(|error| {
-            format!("INV-070 close spent-insurance slab: {error}; terminal group={before_slab:?}")
-        })?;
-        slab_close_compute_units = close.compute_units;
-        max_compute_units = max_compute_units.max(close.compute_units);
-        slab_custody_burned = u128::from(
-            supply_before_slab
-                .checked_sub(runner.env.mint_supply())
-                .ok_or("INV-070 CloseSlab increased SPL mint supply")?,
-        );
-        let closed_market = runner
-            .env
-            .svm
-            .get_account(&runner.env.market)
-            .ok_or("INV-070 closed market account disappeared")?;
-        assert_closed_market_tombstone(&closed_market);
-        slab_closed = true;
+        let backing_total = terminal_backing_withdrawn
+            .checked_add(terminal_backing_expired)
+            .ok_or("INV-070 terminal backing partition overflow")?;
+        let custody_total = terminal_backing_withdrawn
+            .checked_add(terminal_insurance_withdrawn)
+            .and_then(|value| value.checked_add(slab_custody_burned))
+            .ok_or("INV-070 terminal custody partition overflow")?;
+        if backing_total != final_engine_vault || custody_total != final_spl_vault {
+            return Err(format!(
+                "INV-070 terminal custody partition drifted: backing={terminal_backing_withdrawn}+{terminal_backing_expired}, custody={terminal_backing_withdrawn}+{terminal_insurance_withdrawn}+{slab_custody_burned}, expected={final_engine_vault}/{final_spl_vault}"
+            ));
+        }
     }
 
     Ok(CloseToPartialReceiptEvidence {
@@ -13021,6 +13159,9 @@ fn finish_close_to_partial_receipt_composition(
         terminal_actor_count,
         terminal_portfolios_closed,
         terminal_backing_withdrawn,
+        terminal_backing_expired,
+        terminal_insurance_withdrawn,
+        slab_progress_steps,
         slab_custody_burned,
         slab_close_compute_units,
         slab_closed,
@@ -13035,12 +13176,13 @@ pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialRec
         TradeRoute::NoCpi,
         DEFAULT_UNDERFUNDED_BACKING_PLAN,
     )?;
-    finish_close_to_partial_receipt_composition(runner, CloseBridgeExpectation::Pending, 2, false)
+    finish_close_to_partial_receipt_composition(runner, CloseBridgeExpectation::Pending, 2, None)
 }
 
 fn verify_one_liquidation_to_partial_receipt_composition(
     route: TradeRoute,
     insurance_atoms: u16,
+    terminal_cleanup_slot: Option<u64>,
 ) -> Result<LiquidationToPartialReceiptEvidence, String> {
     const CLOSE_LOSER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
     const BRIDGE_ASSET: usize = 2;
@@ -13183,7 +13325,7 @@ fn verify_one_liquidation_to_partial_receipt_composition(
         runner,
         CloseBridgeExpectation::Finalized,
         BRIDGE_ASSET,
-        insurance_atoms != 0,
+        terminal_cleanup_slot,
     )?;
     Ok(LiquidationToPartialReceiptEvidence {
         route,
@@ -13211,7 +13353,7 @@ pub fn verify_liquidation_to_partial_receipt_compositions(
         TradeRoute::BatchCpi,
     ]
     .into_iter()
-    .map(|route| verify_one_liquidation_to_partial_receipt_composition(route, 0))
+    .map(|route| verify_one_liquidation_to_partial_receipt_composition(route, 0, None))
     .collect()
 }
 
@@ -13224,7 +13366,20 @@ pub fn verify_insurance_liquidation_to_partial_receipt_compositions(
         TradeRoute::BatchCpi,
     ]
     .into_iter()
-    .map(|route| verify_one_liquidation_to_partial_receipt_composition(route, 123))
+    .map(|route| verify_one_liquidation_to_partial_receipt_composition(route, 123, Some(12)))
+    .collect()
+}
+
+pub fn verify_expired_backing_terminal_cleanup_compositions(
+) -> Result<Vec<LiquidationToPartialReceiptEvidence>, String> {
+    [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .map(|route| verify_one_liquidation_to_partial_receipt_composition(route, 123, Some(13)))
     .collect()
 }
 
