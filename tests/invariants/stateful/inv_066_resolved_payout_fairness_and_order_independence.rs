@@ -27,14 +27,17 @@
 //! claimant orders and all four insertion points of an expiring-backing release, independently
 //! checks the three full-width payout remainders, and requires claimant-local payouts and terminal
 //! custody to be identical in all 24 schedules.
-//! A fifth matrix repeats those 24 schedules with a nonzero pre-existing insurance reserve. It
-//! requires identical receipt entitlements, exact reserve framing through every claimant order,
+//! A fifth model adds a fourth unequal concurrent receipt and exhausts all 4! claimant orders and
+//! all five release positions. Its 120 worlds check four independent payout remainders and the
+//! complete live-receipt frame.
+//! A sixth matrix repeats the three-receipt schedules with a nonzero pre-existing insurance
+//! reserve. It requires identical receipt entitlements, exact reserve framing through every order,
 //! atomic rejection at every portfolio-dematerialization prefix, an exact reserve drain only
 //! after the final funded account closes, and bounded expired-backing cleanup through the
 //! `CloseSlab` tombstone.
 
 use super::inv_052_split_merge_invariance::{
-    run_three_claimant_resolved_claim_order,
+    run_four_claimant_resolved_claim_order, run_three_claimant_resolved_claim_order,
     run_three_claimant_resolved_claim_order_with_prior_insurance,
 };
 use crate::support::fuzz_model::{
@@ -197,9 +200,9 @@ fn run_terminal_lifecycle(order: [usize; PRIMARY_ACTOR_COUNT]) -> Result<Termina
     })
 }
 
-fn permutations(values: &mut [usize], start: usize, out: &mut Vec<[usize; PRIMARY_ACTOR_COUNT]>) {
+fn permutations<const N: usize>(values: &mut [usize; N], start: usize, out: &mut Vec<[usize; N]>) {
     if start == values.len() {
-        out.push(values.try_into().expect("five claimant indices"));
+        out.push(*values);
         return;
     }
     for index in start..values.len() {
@@ -319,6 +322,58 @@ fn v16_program_three_partial_receipts_exhaust_claim_and_release_orders() {
         }
     }
     assert_eq!(world_count, 24);
+    assert_eq!(nonzero_remainder_worlds, world_count);
+}
+
+#[test]
+fn v16_program_four_partial_receipts_exhaust_claim_and_release_orders() {
+    let mut orders = Vec::new();
+    permutations(&mut [0, 1, 2, 3], 0, &mut orders);
+    assert_eq!(
+        orders.len(),
+        24,
+        "the bounded model must cover all 4! orders"
+    );
+
+    let mut baseline = None;
+    let mut world_count = 0usize;
+    let mut nonzero_remainder_worlds = 0usize;
+    for order in orders {
+        for release_after_claims in 0..=order.len() {
+            let outcome = run_four_claimant_resolved_claim_order(order, release_after_claims)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "four-claimant order {order:?}, release after {release_after_claims}: {error}"
+                    )
+                });
+            world_count += 1;
+            nonzero_remainder_worlds += usize::from(
+                outcome
+                    .claimant_topup_remainders
+                    .iter()
+                    .any(|remainder| *remainder != 0),
+            );
+
+            assert_eq!(outcome.concurrent_receipts, 4);
+            assert_eq!(outcome.claimant_receipt_faces, vec![150, 350, 550, 950]);
+            assert_eq!(outcome.claimant_topup_remainders.len(), 4);
+            assert_eq!(outcome.scheduled_pre_release_claims, release_after_claims);
+            assert_eq!(outcome.final_engine_vault, outcome.final_spl_vault);
+            assert_eq!(outcome.final_claim_bound_num, 0);
+            assert!(outcome.max_compute_units < TX_CU_LIMIT);
+
+            let economics = outcome.normalized_economics();
+            if let Some(expected) = baseline.as_ref() {
+                assert_eq!(
+                    &economics, expected,
+                    "claim/release order changed four-claimant economics: order={order:?}, release_after={release_after_claims}"
+                );
+            } else {
+                baseline = Some(economics);
+            }
+        }
+    }
+    assert_eq!(world_count, 120);
     assert_eq!(nonzero_remainder_worlds, world_count);
 }
 
