@@ -20,9 +20,13 @@
 //! exact no-op, and every schedule must converge to the same normalized engine state and all five
 //! external destination balances. Every value-moving scheduled claim is also checked against an
 //! independent quotient/remainder implementation rather than trusting the deployed payout math.
+//! A third bounded model keeps the claim-producing positions intact while an independent asset
+//! enters Recovery. It crosses both fair scheduler request orders with claim-before/claim-after a
+//! real backing release and requires identical terminal engine and SPL economics.
 
 use crate::support::fuzz_model::{
     assert_public_encumbrance_census, assert_public_stock_census,
+    verify_recovery_to_resolved_receipt_order_matrix,
     verify_resolved_receipt_release_claim_order_matrix,
 };
 use crate::support::v16_svm::{
@@ -235,6 +239,19 @@ fn v16_program_partial_receipt_release_and_claim_order_is_economically_invariant
     assert!(evidence.scheduled_progress_only_claim_count != 0);
     assert!(evidence.terminal_paid != 0);
     assert!(evidence.terminal_paid <= evidence.receipt_face);
+    assert_eq!(evidence.terminal_actor_count, PRIMARY_ACTOR_COUNT);
+    assert_eq!(evidence.final_engine_vault, evidence.final_spl_vault);
+}
+
+#[test]
+fn v16_program_recovery_and_partial_receipt_orders_are_economically_invariant() {
+    let evidence = verify_recovery_to_resolved_receipt_order_matrix()
+        .expect("public Recovery-to-partial-receipt order matrix");
+    assert_eq!(evidence.world_count, 4);
+    assert_eq!(evidence.partial_receipt_count, evidence.world_count);
+    assert!(evidence.scheduled_paying_claim_count != 0);
+    assert!(evidence.scheduled_progress_only_claim_count != 0);
+    assert!(evidence.terminal_paid != 0);
     assert_eq!(evidence.terminal_actor_count, PRIMARY_ACTOR_COUNT);
     assert_eq!(evidence.final_engine_vault, evidence.final_spl_vault);
 }

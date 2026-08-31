@@ -11623,6 +11623,12 @@ enum UnderfundedBridgeDisposition {
     UnattributedLossLiquidation,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnderfundedAuxiliaryExit {
+    BilateralTrade,
+    Recovery { winner_first: bool },
+}
+
 const DEFAULT_UNDERFUNDED_BACKING_PLAN: UnderfundedBackingPlan = UnderfundedBackingPlan {
     backed_atoms: 1_500,
     extra_backing: None,
@@ -11697,6 +11703,18 @@ pub struct ResolvedReceiptOrderingEvidence {
     pub scheduled_progress_only_claim_count: usize,
     pub scheduled_noop_claim_count: usize,
     pub receipt_face: u128,
+    pub terminal_paid: u128,
+    pub terminal_actor_count: usize,
+    pub final_engine_vault: u128,
+    pub final_spl_vault: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedRecoveryReceiptOrderingEvidence {
+    pub world_count: usize,
+    pub partial_receipt_count: usize,
+    pub scheduled_paying_claim_count: usize,
+    pub scheduled_progress_only_claim_count: usize,
     pub terminal_paid: u128,
     pub terminal_actor_count: usize,
     pub final_engine_vault: u128,
@@ -12176,6 +12194,98 @@ fn build_underfunded_live_reference_prefix(
     trade_route: TradeRoute,
     backing_plan: UnderfundedBackingPlan,
 ) -> Result<ScenarioRunner, String> {
+    build_underfunded_live_reference_prefix_with_auxiliary_exit(
+        seed,
+        bridge_disposition,
+        trade_route,
+        backing_plan,
+        UnderfundedAuxiliaryExit::BilateralTrade,
+    )
+}
+
+fn drive_underfunded_recovery_pair(
+    runner: &mut ScenarioRunner,
+    asset: usize,
+    order: [usize; 2],
+    label: &str,
+) -> Result<(), String> {
+    let active_before = order.map(|actor| {
+        decoded_legs(&runner.env.primary_portfolio(actor))
+            .into_iter()
+            .any(|leg| leg.active && leg.asset_index as usize == asset)
+    });
+    if active_before != [true, true] {
+        return Err(format!(
+            "{label} did not start from two publicly matched Recovery legs: {active_before:?}"
+        ));
+    }
+    let forfeit_successes_before = runner.coverage.recovery_forfeit_successes;
+    runner.run_safety_prefix(&[Action::ShutdownAsset {
+        asset: asset as u8,
+        dt: 1,
+    }])?;
+    for sweep in 0..64 {
+        let active = order.map(|actor| {
+            decoded_legs(&runner.env.primary_portfolio(actor))
+                .into_iter()
+                .any(|leg| leg.active && leg.asset_index as usize == asset)
+        });
+        if !active.into_iter().any(|present| present) {
+            break;
+        }
+        let before_sweep = runner.snapshot();
+        for actor in order {
+            if runner.positions[actor][asset] != 0 {
+                runner.execute_recovery_forfeit(actor, asset, u128::MAX)?;
+                runner.assert_global_invariants()?;
+            }
+            runner
+                .execute_crank(actor, HintMode::Complete, false)
+                .map_err(CrankFailure::into_message)?;
+            runner.assert_global_invariants()?;
+        }
+        if runner.snapshot() == before_sweep {
+            return Err(format!(
+                "{label} reached a nonterminal public fixed point at sweep {sweep}: \
+                 positions={:?}, last_rejection={:?}",
+                order.map(|actor| runner.positions[actor][asset]),
+                runner.last_trade_rejection,
+            ));
+        }
+    }
+
+    let (_, group) = runner.env.primary_market_state();
+    let retained_recovery_leg = order.into_iter().any(|actor| {
+        decoded_legs(&runner.env.primary_portfolio(actor))
+            .into_iter()
+            .any(|leg| leg.active && leg.asset_index as usize == asset)
+    });
+    if order.map(|actor| runner.positions[actor][asset]) != [0, 0]
+        || group.assets[asset].oi_eff_long_q != 0
+        || group.assets[asset].oi_eff_short_q != 0
+        || retained_recovery_leg
+        || runner.coverage.recovery_forfeit_successes == forfeit_successes_before
+    {
+        return Err(format!(
+            "{label} did not clear both Recovery legs through a real owner forfeit: \
+             positions={:?}, OI={}/{}, retained={retained_recovery_leg}, forfeits={}->{}",
+            order.map(|actor| runner.positions[actor][asset]),
+            group.assets[asset].oi_eff_long_q,
+            group.assets[asset].oi_eff_short_q,
+            forfeit_successes_before,
+            runner.coverage.recovery_forfeit_successes,
+        ));
+    }
+    Ok(())
+}
+
+fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
+    seed: [u8; 32],
+    bridge_disposition: UnderfundedBridgeDisposition,
+    trade_route: TradeRoute,
+    backing_plan: UnderfundedBackingPlan,
+    auxiliary_exit: UnderfundedAuxiliaryExit,
+) -> Result<ScenarioRunner, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
     const BACKED_WINNER: usize = 2;
@@ -12326,16 +12436,33 @@ fn build_underfunded_live_reference_prefix(
     )?;
     runner.assert_global_invariants()?;
     if backing_plan.extra_backed_trade {
-        runner.execute_trade(
-            trade_route,
-            BACKED_WINNER,
-            JUNIOR_LOSER,
-            vec![(BRIDGE_ASSET, -EXTRA_BACKED_SIZE_Q)],
-            0,
-            0,
-            true,
-        )?;
-        runner.assert_global_invariants()?;
+        match auxiliary_exit {
+            UnderfundedAuxiliaryExit::BilateralTrade => {
+                runner.execute_trade(
+                    trade_route,
+                    BACKED_WINNER,
+                    JUNIOR_LOSER,
+                    vec![(BRIDGE_ASSET, -EXTRA_BACKED_SIZE_Q)],
+                    0,
+                    0,
+                    true,
+                )?;
+                runner.assert_global_invariants()?;
+            }
+            UnderfundedAuxiliaryExit::Recovery { winner_first } => {
+                let order = if winner_first {
+                    [BACKED_WINNER, JUNIOR_LOSER]
+                } else {
+                    [JUNIOR_LOSER, BACKED_WINNER]
+                };
+                drive_underfunded_recovery_pair(
+                    &mut runner,
+                    BRIDGE_ASSET,
+                    order,
+                    &format!("INV-066 auxiliary Recovery winner_first={winner_first}"),
+                )?;
+            }
+        }
     }
     if matches!(
         bridge_disposition,
@@ -12609,6 +12736,24 @@ fn build_underfunded_resolved_reference_seed(
     authority_plan: Option<UnderfundedAuthorityPlan>,
     backing_plan: UnderfundedBackingPlan,
 ) -> Result<UnderfundedResolvedSeed, String> {
+    build_underfunded_resolved_reference_seed_with_auxiliary_exit(
+        landing,
+        reverse_tail,
+        claim_first,
+        authority_plan,
+        backing_plan,
+        UnderfundedAuxiliaryExit::BilateralTrade,
+    )
+}
+
+fn build_underfunded_resolved_reference_seed_with_auxiliary_exit(
+    landing: BoundedExpiryLanding,
+    reverse_tail: bool,
+    claim_first: bool,
+    authority_plan: Option<UnderfundedAuthorityPlan>,
+    backing_plan: UnderfundedBackingPlan,
+    auxiliary_exit: UnderfundedAuxiliaryExit,
+) -> Result<UnderfundedResolvedSeed, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
     const BACKED_LOSER: usize = 3;
@@ -12622,11 +12767,12 @@ fn build_underfunded_resolved_reference_seed(
     seed[0] ^= landing.seed_tag();
     seed[1] ^= u8::from(reverse_tail);
     seed[2] ^= u8::from(claim_first);
-    let mut runner = build_underfunded_live_reference_prefix(
+    let mut runner = build_underfunded_live_reference_prefix_with_auxiliary_exit(
         seed,
         UnderfundedBridgeDisposition::None,
         TradeRoute::NoCpi,
         backing_plan,
+        auxiliary_exit,
     )?;
 
     let before_resolution = runner.env.primary_market_state().1;
@@ -14560,6 +14706,205 @@ pub fn verify_resolved_receipt_release_claim_order_matrix(
         scheduled_noop_claim_count,
         receipt_face: receipt_face.ok_or("INV-066 order matrix ran no worlds")?,
         terminal_paid: terminal_paid.ok_or("INV-066 order matrix had no terminal receipt")?,
+        terminal_actor_count,
+        final_engine_vault,
+        final_spl_vault,
+    })
+}
+
+pub fn verify_recovery_to_resolved_receipt_order_matrix(
+) -> Result<ResolvedRecoveryReceiptOrderingEvidence, String> {
+    const CLAIMANT: usize = 0;
+    const BACKED_WINNER: usize = 2;
+    const BACKED_DOMAIN: usize = 3;
+    const RELEASE_SLOT: u64 = 13;
+    const AUXILIARY_DOMAIN: u16 = 5;
+    const AUXILIARY_RELEASE_SLOT: u64 = 14;
+
+    let recovery_backing_plan = UnderfundedBackingPlan {
+        backed_atoms: DEFAULT_UNDERFUNDED_BACKING_PLAN.backed_atoms,
+        extra_backing: Some((AUXILIARY_DOMAIN, 100, AUXILIARY_RELEASE_SLOT)),
+        extra_backed_trade: true,
+    };
+
+    let mut baseline: Option<(BoundedReferenceNode, [u128; PRIMARY_ACTOR_COUNT])> = None;
+    let mut partial_receipt_count = 0usize;
+    let mut scheduled_paying_claim_count = 0usize;
+    let mut scheduled_progress_only_claim_count = 0usize;
+    let mut terminal_paid = None;
+    let mut terminal_actor_count = 0usize;
+    let mut final_engine_vault = 0u128;
+    let mut final_spl_vault = 0u128;
+
+    for winner_first in [false, true] {
+        for claim_before_release in [false, true] {
+            let UnderfundedResolvedSeed { mut runner, .. } =
+                build_underfunded_resolved_reference_seed_with_auxiliary_exit(
+                    BoundedExpiryLanding::Before,
+                    false,
+                    true,
+                    None,
+                    recovery_backing_plan,
+                    UnderfundedAuxiliaryExit::Recovery { winner_first },
+                )?;
+            let initial_receipt = runner
+                .env
+                .primary_portfolio(CLAIMANT)
+                .resolved_payout_receipt
+                .try_to_runtime()
+                .map_err(|error| format!("INV-066 Recovery receipt decode: {error:?}"))?;
+            if !initial_receipt.present
+                || initial_receipt.finalized
+                || initial_receipt.paid_effective >= initial_receipt.terminal_positive_claim_face
+            {
+                return Err(format!(
+                    "INV-066 Recovery order winner_first={winner_first} did not create a genuine \
+                     partial receipt: {initial_receipt:?}"
+                ));
+            }
+            partial_receipt_count += 1;
+            let claimant_destination_before = u128::from(
+                runner
+                    .env
+                    .token_amount(runner.env.actors[CLAIMANT].destination_token),
+            );
+
+            runner.env.warp_to_slot(RELEASE_SLOT);
+            let before_release = runner.env.primary_market_state().1;
+            if before_release.source_backing_buckets[BACKED_DOMAIN].status
+                != BackingBucketStatusV16::Fresh
+            {
+                return Err(format!(
+                    "INV-066 Recovery order winner_first={winner_first} reached the release \
+                     boundary without fresh backing"
+                ));
+            }
+
+            let mut scheduled_claim = None;
+            if claim_before_release {
+                scheduled_claim =
+                    Some(runner.execute_terminal_route(CLAIMANT, TerminalRoute::Claim)?);
+                runner.assert_global_invariants()?;
+            }
+            let release_route =
+                runner.execute_terminal_route(BACKED_WINNER, TerminalRoute::Close)?;
+            runner.assert_global_invariants()?;
+            if !claim_before_release {
+                scheduled_claim =
+                    Some(runner.execute_terminal_route(CLAIMANT, TerminalRoute::Claim)?);
+                runner.assert_global_invariants()?;
+            }
+            let scheduled_claim =
+                scheduled_claim.ok_or("INV-066 Recovery schedule omitted claim")?;
+            if !scheduled_claim.landed || (scheduled_claim.payout != 0 && !scheduled_claim.mutated)
+            {
+                return Err(format!(
+                    "INV-066 Recovery scheduled claim was neither exact payout nor progress: \
+                     winner_first={winner_first}, claim_before={claim_before_release}, \
+                     claim={scheduled_claim:?}"
+                ));
+            }
+            scheduled_paying_claim_count += usize::from(scheduled_claim.payout != 0);
+            scheduled_progress_only_claim_count +=
+                usize::from(scheduled_claim.payout == 0 && scheduled_claim.mutated);
+
+            let after_release = runner.env.primary_market_state().1;
+            if after_release.source_backing_buckets[BACKED_DOMAIN].status
+                == BackingBucketStatusV16::Fresh
+                || after_release.payout_snapshot <= before_release.payout_snapshot
+            {
+                return Err(format!(
+                    "INV-066 Recovery schedule failed to release terminal backing: \
+                     winner_first={winner_first}, claim_before={claim_before_release}, \
+                     release={release_route:?}, snapshot={}->{}",
+                    before_release.payout_snapshot, after_release.payout_snapshot,
+                ));
+            }
+
+            runner.run_terminal_payout_campaign()?;
+            runner.assert_global_invariants()?;
+            let terminal_count = (0..PRIMARY_ACTOR_COUNT)
+                .map(|actor| runner.portfolio_is_economically_terminal(actor))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|terminal| *terminal)
+                .count();
+            if terminal_count != PRIMARY_ACTOR_COUNT {
+                return Err(format!(
+                    "INV-066 Recovery schedule stranded a claimant: winner_first={winner_first}, \
+                     claim_before={claim_before_release}, terminal={terminal_count}/{}",
+                    PRIMARY_ACTOR_COUNT,
+                ));
+            }
+
+            let claimant_destination_after = u128::from(
+                runner
+                    .env
+                    .token_amount(runner.env.actors[CLAIMANT].destination_token),
+            );
+            let total_paid = initial_receipt
+                .paid_effective
+                .checked_add(
+                    claimant_destination_after
+                        .checked_sub(claimant_destination_before)
+                        .ok_or("INV-066 Recovery claimant destination decreased")?,
+                )
+                .ok_or("INV-066 Recovery claimant payment overflow")?;
+            if total_paid == 0 || total_paid > initial_receipt.terminal_positive_claim_face {
+                return Err(format!(
+                    "INV-066 Recovery receipt payment escaped its immutable face: \
+                     paid={total_paid}, receipt={initial_receipt:?}"
+                ));
+            }
+            if terminal_paid.is_some_and(|expected| expected != total_paid) {
+                return Err(format!(
+                    "INV-066 Recovery/claim ordering changed terminal entitlement: \
+                     expected={terminal_paid:?}, actual={total_paid}"
+                ));
+            }
+
+            let node = runner.bounded_reference_node()?;
+            let destinations = std::array::from_fn(|actor| {
+                u128::from(
+                    runner
+                        .env
+                        .token_amount(runner.env.actors[actor].destination_token),
+                )
+            });
+            if let Some((expected_node, expected_destinations)) = &baseline {
+                if node != *expected_node || destinations != *expected_destinations {
+                    return Err(format!(
+                        "INV-066 Recovery/claim ordering changed terminal economics: \
+                         winner_first={winner_first}, claim_before={claim_before_release}, \
+                         vault={}->{}, destinations={expected_destinations:?}->{destinations:?}",
+                        expected_node.vault, node.vault,
+                    ));
+                }
+            } else {
+                baseline = Some((node.clone(), destinations));
+            }
+            terminal_paid = Some(total_paid);
+            terminal_actor_count = terminal_count;
+            final_engine_vault = node.vault;
+            final_spl_vault = u128::from(runner.env.token_amount(runner.env.vault));
+        }
+    }
+
+    if partial_receipt_count != 4
+        || scheduled_paying_claim_count == 0
+        || scheduled_progress_only_claim_count == 0
+    {
+        return Err(format!(
+            "INV-066 Recovery/receipt order matrix was vacuous: receipts={partial_receipt_count}, \
+             paying={scheduled_paying_claim_count}, progress={scheduled_progress_only_claim_count}"
+        ));
+    }
+    Ok(ResolvedRecoveryReceiptOrderingEvidence {
+        world_count: 4,
+        partial_receipt_count,
+        scheduled_paying_claim_count,
+        scheduled_progress_only_claim_count,
+        terminal_paid: terminal_paid.ok_or("INV-066 Recovery matrix ran no worlds")?,
         terminal_actor_count,
         final_engine_vault,
         final_spl_vault,
