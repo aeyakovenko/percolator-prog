@@ -44,6 +44,18 @@
 //! resolution.
 //! The graph counts actual B-rank reductions independently from generic state changes and requires
 //! every reached state to retain a bounded value-moving owner exit.
+//! A third seeded frontier starts from a publicly constructed active close in both position
+//! orientations at the authenticated slots immediately before, exactly at, and immediately after
+//! `max_close_slot`. It exhausts every one- and two-action ordering across complete/empty-hint
+//! close progress, an unrelated crank, exact public cure, owner deposit/withdrawal, unrelated
+//! reduction, same- and cross-asset marks, shutdown, authority resolution, policy update, and
+//! permissionless stale resolution. Actions outside close progress and cure must frame the exact
+//! close episode; every reached state must retain a bounded value-moving owner exit.
+//! A minimized generated public trace also retains simultaneous same-slot mark and account work.
+//! Empty and indiscriminate all-asset hints can reject, so the independent liveness oracle searches
+//! the bounded nonempty subsets of its three authenticated observations and requires a strict-subset
+//! crank to decrease rank before every funded owner exits. This is scheduler coverage, not a wrapper
+//! exception: each attempted transition is still the sole deployed public crank.
 //! A second terminal subgraph starts from twelve independently replayed public prefixes
 //! that create a genuinely partial underfunded receipt. It crosses all expiry boundaries,
 //! two claimant orders, and both close/claim priorities; claim-priority paths must move
@@ -106,8 +118,9 @@
 
 use super::*;
 use crate::support::fuzz_model::{
-    run_bounded_b_reference_frontier, run_bounded_recovery_reference_frontier,
-    run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
+    run_bounded_active_close_reference_frontier, run_bounded_b_reference_frontier,
+    run_bounded_recovery_reference_frontier, run_bounded_reference_equivalence_graph,
+    verify_close_to_partial_receipt_composition, verify_constructible_crank_observation_subset,
     verify_expired_backing_terminal_cleanup_compositions,
     verify_insurance_liquidation_to_partial_receipt_compositions,
     verify_liquidation_to_partial_receipt_compositions,
@@ -431,7 +444,7 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
     let evidence = run_bounded_reference_equivalence_graph()
         .expect("INV-086 bounded deployed/reference graph");
     assert_eq!(
-        evidence.depth_three_exact_state_count, 551,
+        evidence.depth_three_exact_state_count, 685,
         "the authenticated exact depth-three state frontier changed and must be reviewed"
     );
     assert_eq!(
@@ -722,6 +735,158 @@ fn v16_program_explicit_b_seeded_frontier_preserves_bounded_owner_exit() {
             && evidence.coverage.permissionless_resolves != 0
             && evidence.coverage.user_positions_closed != 0,
         "explicit-B frontier did not traverse its intended public action classes: {evidence:?}"
+    );
+}
+
+#[test]
+fn v16_program_active_close_seeded_frontier_preserves_episode_and_bounded_owner_exit() {
+    let evidence = run_bounded_active_close_reference_frontier()
+        .expect("INV-086 public active-close seeded frontier");
+
+    assert_eq!(
+        evidence.word_count, 1_098,
+        "must exhaust two sides x three expiry boundaries x (13^0 + 13^1 + 13^2) words"
+    );
+    assert_eq!(
+        evidence.transition_count, 2_106,
+        "must replay every edge in every one- and two-action active-close word"
+    );
+    assert_eq!(evidence.long_seed_world_count, 549);
+    assert_eq!(evidence.short_seed_world_count, 549);
+    assert_eq!(evidence.before_expiry_seed_world_count, 366);
+    assert_eq!(evidence.at_expiry_seed_world_count, 366);
+    assert_eq!(evidence.after_expiry_seed_world_count, 366);
+    assert_eq!(
+        evidence.active_close_seed_world_count, evidence.word_count,
+        "every word must start from a public active close with a nonzero residual"
+    );
+    assert_eq!(
+        evidence.bounded_exit_world_count, evidence.word_count,
+        "every reached active-close state must retain a bounded owner exit"
+    );
+    assert_eq!(
+        evidence.value_moving_exit_world_count, evidence.word_count,
+        "every active-close exit witness must move real funded user value"
+    );
+    assert!(
+        evidence.unique_node_count >= 40 && evidence.unique_edge_count >= 80,
+        "active-close frontier collapsed to vacuous exact-state coverage: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .action_attempts
+            .iter()
+            .all(|attempts| *attempts == 162),
+        "every active-close action must occupy every first and second position: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .second_position_attempts
+            .iter()
+            .all(|attempts| *attempts == 78),
+        "every active-close action must follow every first action in all six seeds: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .action_state_changes
+            .iter()
+            .all(|changes| *changes != 0)
+            && evidence
+                .second_position_state_changes
+                .iter()
+                .all(|changes| *changes != 0),
+        "every action must have a nonvacuous first- and second-position composition: {evidence:?}"
+    );
+    assert!(
+        evidence.close_rank_reducing_edges[0] != 0
+            && evidence.close_rank_reducing_edges[1] != 0
+            && evidence.close_rank_reducing_edges[3] != 0,
+        "both honest hint shapes and an exact cure must reduce active-close rank somewhere: {evidence:?}"
+    );
+    for action_index in [2usize, 4, 5, 6, 7, 8, 9, 10, 11, 12] {
+        assert_eq!(
+            evidence.close_frame_edges[action_index],
+            evidence.action_attempts[action_index],
+            "non-close action {action_index} must frame the exact close episode on every ordering: {evidence:?}"
+        );
+    }
+    assert!(
+        evidence.cure_success_count != 0 && evidence.cure_rejection_count != 0,
+        "the expiry/order product must cover both valid cure and exact rollback after cure becomes inadmissible: {evidence:?}"
+    );
+    assert_ne!(evidence.coverage.loaded_program_hash, [0; 32]);
+    assert!(
+        evidence.coverage.crank_progress != 0
+            && evidence.coverage.deposits != 0
+            && evidence.coverage.withdrawals != 0
+            && evidence.coverage.route_success[0] != 0
+            && evidence.coverage.mark_updates != 0
+            && evidence.coverage.extended_action_attempts[6] == 162
+            && evidence.coverage.lifecycle_updates == 0
+            && evidence.coverage.resolve_policy_updates != 0
+            && evidence.coverage.permissionless_resolves != 0
+            && evidence.coverage.terminal_resolves != 0
+            && evidence.coverage.user_positions_closed != 0,
+        "active-close frontier did not traverse its intended public action classes or admitted a forbidden shutdown: {evidence:?}"
+    );
+}
+
+#[test]
+fn v16_program_same_slot_pending_mark_has_constructible_crank_and_exit() {
+    let scenario = Scenario {
+        seed: [
+            0, 0, 0, 0, 0, 0, 0, 0, 3, 226, 99, 16, 163, 116, 29, 14, 168, 15, 164, 234, 213, 45,
+            97, 71, 127, 215, 188, 146, 248, 193, 223, 249,
+        ],
+        config: SmallMarketConfig {
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 4,
+            max_abs_funding_e9_per_slot: 10_000,
+            maintenance_fee_per_slot: 0,
+        },
+        actions: vec![
+            Action::SyncMaintenanceFee { actor: 53, dt: 2 },
+            Action::PushMark {
+                asset: 43,
+                dt: 1,
+                move_bps: 62,
+            },
+            Action::TopUpInsurance {
+                domain: 24,
+                amount: 305,
+            },
+            Action::ResolveStalePermissionless { dt: 196 },
+            Action::Crank {
+                actor: 149,
+                hints: HintMode::Complete,
+            },
+            Action::ConfigurePermissionlessResolve {
+                stale_slots: 27_345,
+                force_close_delay_slots: 28_028,
+            },
+            Action::RestartAssetOracle {
+                asset: 113,
+                dt: 79,
+                initial_price: 100,
+            },
+            Action::PushMark {
+                asset: 1,
+                dt: 3,
+                move_bps: -204,
+            },
+        ],
+    };
+
+    let coverage =
+        verify_constructible_crank_observation_subset(&scenario, 59).unwrap_or_else(|error| {
+            panic!(
+                "same-slot pending-mark progress failed: {}",
+                error.chars().take(3_000).collect::<String>()
+            )
+        });
+    assert_ne!(
+        coverage.crank_proper_observation_subset_progress, 0,
+        "the minimized public trace must require and execute a rank-decreasing proper observation subset"
     );
 }
 

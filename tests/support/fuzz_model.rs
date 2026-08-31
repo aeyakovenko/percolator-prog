@@ -1323,6 +1323,7 @@ pub struct Coverage {
     pub route_success: [u64; 4],
     pub route_reject: [u64; 4],
     pub crank_progress: u64,
+    pub crank_proper_observation_subset_progress: u64,
     pub crank_rank_component_seen: [u64; 8],
     pub crank_rank_component_reduced: [u64; 8],
     pub crank_rank_nodes: BTreeSet<u8>,
@@ -1388,6 +1389,7 @@ impl Default for Coverage {
             route_success: [0; 4],
             route_reject: [0; 4],
             crank_progress: 0,
+            crank_proper_observation_subset_progress: 0,
             crank_rank_component_seen: [0; 8],
             crank_rank_component_reduced: [0; 8],
             crank_rank_nodes: BTreeSet::new(),
@@ -1521,6 +1523,8 @@ impl Coverage {
             self.substitution_rejections[index] += other.substitution_rejections[index];
         }
         self.crank_progress += other.crank_progress;
+        self.crank_proper_observation_subset_progress +=
+            other.crank_proper_observation_subset_progress;
         for index in 0..self.crank_rank_component_seen.len() {
             self.crank_rank_component_seen[index] += other.crank_rank_component_seen[index];
             self.crank_rank_component_reduced[index] += other.crank_rank_component_reduced[index];
@@ -2726,6 +2730,9 @@ impl ScenarioRunner {
             self.run_terminal_payout_campaign()?;
         } else {
             self.drain_cranks(self.liveness_limit)?;
+            if self.env.primary_market_state().1.mode == MarketModeV16::Resolved {
+                self.run_terminal_payout_campaign()?;
+            }
         }
         self.assert_global_invariants()
     }
@@ -2748,8 +2755,23 @@ impl ScenarioRunner {
         Ok(true)
     }
 
+    fn permissionless_resolution_matured_now(&self) -> bool {
+        let (config, group) = self.env.primary_market_state();
+        group.mode == MarketModeV16::Live
+            && config.permissionless_resolve_stale_slots != 0
+            && self
+                .env
+                .current_slot()
+                .saturating_sub(config.last_good_oracle_slot)
+                >= config.permissionless_resolve_stale_slots
+    }
+
     fn run_permissionless_account_progress_campaign(&mut self) -> Result<(), String> {
         for _ in 0..self.liveness_limit {
+            if self.env.primary_market_state().1.mode == MarketModeV16::Resolved {
+                self.run_terminal_payout_campaign()?;
+                return self.assert_global_invariants();
+            }
             self.advance_liveness_clock_if_needed()?;
             let has_account_work = (0..PRIMARY_ACTOR_COUNT)
                 .map(|actor| self.progress_rank(actor))
@@ -2757,6 +2779,17 @@ impl ScenarioRunner {
                 .into_iter()
                 .any(ProgressRank::account_actionable);
             if !has_account_work {
+                let (config, group) = self.env.primary_market_state();
+                let resolution_fallback = group.mode == MarketModeV16::Live
+                    && config.permissionless_resolve_stale_slots != 0;
+                if resolution_fallback {
+                    if self.try_permissionless_resolution_exit()? {
+                        return self.assert_global_invariants();
+                    }
+                    // Resolution can require several bounded market-settlement calls before the
+                    // mode changes. Retry only while no higher-priority account work exists.
+                    continue;
+                }
                 return self.assert_global_invariants();
             }
             self.drain_one_progress_step(None)?;
@@ -2787,15 +2820,19 @@ impl ScenarioRunner {
 
         let before = self.snapshot();
         let retry = self.drain_one_progress_step(None);
-        self.assert_snapshot_unchanged(&before)?;
         let retry_error = match retry {
             Ok(()) => {
-                return Err(
-                    "candidate PR 204 blocker progressed on an identical public retry".into(),
-                )
+                return Err(format!(
+                    "candidate PR 204 blocker progressed on an identical public retry; original failure: {error}"
+                ))
             }
             Err(error) => error,
         };
+        self.assert_snapshot_unchanged(&before).map_err(|frame_error| {
+            format!(
+                "candidate PR 204 retry committed state before reporting failure: {retry_error}; {frame_error}"
+            )
+        })?;
         if !(retry_error.contains("Custom(19)")
             || retry_error.contains("custom program error: 0x13"))
         {
@@ -2808,15 +2845,26 @@ impl ScenarioRunner {
     }
 
     pub fn run_direct_user_exit_campaign(&mut self) -> Result<(), String> {
-        if self.env.primary_market_state().1.mode == MarketModeV16::Resolved {
-            self.run_terminal_payout_campaign()?;
-        } else {
+        if self.env.primary_market_state().1.mode == MarketModeV16::Live {
             'owner_exit: for user in 0..PRIMARY_ACTOR_COUNT {
                 for asset in 0..ASSET_COUNT {
                     if self.positions[user][asset] == 0 {
                         continue;
                     }
                     if !self.try_normal_exit(user, asset)? {
+                        // A configured stale-resolution route is an independent bounded terminal
+                        // witness. Try it before consuming a potentially enormous but finite K/F
+                        // backlog; dedicated rank frontiers prove those lower-level continuations
+                        // without making terminal user liveness depend on clearing them first.
+                        if self.permissionless_resolution_matured_now()
+                            && self.try_permissionless_resolution_exit().map_err(|error| {
+                                format!(
+                                    "pre-drain permissionless terminal fallback violated its frame: {error}"
+                                )
+                            })?
+                        {
+                            break 'owner_exit;
+                        }
                         self.run_permissionless_progress_campaign()
                             .map_err(|error| {
                                 format!(
@@ -2824,6 +2872,9 @@ impl ScenarioRunner {
                                  {error}"
                             )
                             })?;
+                        if self.env.primary_market_state().1.mode != MarketModeV16::Live {
+                            break 'owner_exit;
+                        }
                     }
                     if !self.try_normal_exit(user, asset)? {
                         if self.try_permissionless_resolution_exit()? {
@@ -2849,6 +2900,10 @@ impl ScenarioRunner {
                     self.coverage.user_positions_closed += 1;
                 }
             }
+        } else {
+            // Recovery is a bounded public intermediate mode. The sole crank first finalizes it to
+            // Resolved; terminal account cranks then materialize every payout or receipt.
+            self.run_permissionless_progress_campaign()?;
         }
         self.assert_global_invariants()?;
         for actor in 0..PRIMARY_ACTOR_COUNT {
@@ -2864,8 +2919,9 @@ impl ScenarioRunner {
 
         // A successful reduction can create a zero-basis pending-loss obligation. That work did
         // not exist when the pre-exit crank campaign ran, and withdrawal correctly remains stale
-        // until the permissionless crank releases it. Drain this newly created account-local work
-        // before attempting capital withdrawal.
+        // until the permissionless crank releases it. Drain current account work before using
+        // stale resolution as the terminal fallback, so resolution cannot hide a B/K/F/obligation
+        // progress witness that an honest cranker could execute first.
         if self.env.primary_market_state().1.mode == MarketModeV16::Live {
             self.run_permissionless_account_progress_campaign()
                 .map_err(|error| {
@@ -2873,6 +2929,68 @@ impl ScenarioRunner {
                         "post-reduction account work could not converge before withdrawal: {error}"
                     )
                 })?;
+        }
+        self.try_permissionless_resolution_exit()?;
+
+        // A cured flat account can retain negative PnL against otherwise sufficient capital.
+        // Withdrawal settles that loss before applying the requested amount, so requesting the
+        // pre-settlement capital is intentionally stale and rolls back. Commit the canonical
+        // one-atom public settlement first, then withdraw the recomputed capital below.
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            let account_before = self.env.primary_portfolio(actor);
+            let pnl_before = account_before.pnl.get();
+            let capital_before = account_before.capital.get();
+            if pnl_before >= 0 || capital_before <= pnl_before.unsigned_abs() {
+                continue;
+            }
+            let before = self.snapshot();
+            let vault_before = u128::from(self.env.token_amount(self.env.vault));
+            let accounted_vault_before = self.env.primary_market_state().1.vault;
+            let insurance_before = self.env.primary_market_state().1.insurance;
+            let destination_before = self
+                .env
+                .token_amount(self.env.actors[actor].destination_token);
+            let success = self.env.withdraw_primary(actor, 1).map_err(|error| {
+                format!(
+                    "actor {actor} cannot commit flat negative-PnL settlement before exit: {error}"
+                )
+            })?;
+            self.coverage.withdrawals += 1;
+            self.coverage.observe_success(None, &success);
+            self.assert_portfolio_frame(&before, &[actor])?;
+            self.assert_token_frame(
+                &before,
+                &[self.env.actors[actor].destination_token, self.env.vault],
+            )?;
+
+            let account_after = self.env.primary_portfolio(actor);
+            let capital_after = account_after.capital.get();
+            let destination_after = self
+                .env
+                .token_amount(self.env.actors[actor].destination_token);
+            let vault_after = u128::from(self.env.token_amount(self.env.vault));
+            let (_, group_after) = self.env.primary_market_state();
+            let insurance_delta = group_after
+                .insurance
+                .checked_sub(insurance_before)
+                .ok_or("negative-PnL settlement decreased insurance")?;
+            let expected_capital_debit = pnl_before
+                .unsigned_abs()
+                .checked_add(1)
+                .and_then(|value| value.checked_add(insurance_delta))
+                .ok_or("negative-PnL settlement debit overflow")?;
+            if account_after.pnl.get() != 0
+                || capital_before.checked_sub(capital_after) != Some(expected_capital_debit)
+                || destination_after.checked_sub(destination_before) != Some(1)
+                || vault_before.checked_sub(vault_after) != Some(1)
+                || accounted_vault_before.checked_sub(group_after.vault) != Some(1)
+            {
+                return Err(format!(
+                    "actor {actor} flat negative-PnL settlement did not partition exactly: pnl={pnl_before}->{}, capital={capital_before}->{capital_after}, insurance+={insurance_delta}, destination={destination_before}->{destination_after}, vault={vault_before}->{vault_after}",
+                    account_after.pnl.get()
+                ));
+            }
+            self.assert_global_invariants()?;
         }
 
         for actor in 0..PRIMARY_ACTOR_COUNT {
@@ -3372,8 +3490,13 @@ impl ScenarioRunner {
                 let actor = actor as usize % USER_COUNT;
                 let amount = amount as u128;
                 let before = self.snapshot();
-                let capital_before = self.env.primary_portfolio(actor).capital.get();
-                let insurance_before = self.env.primary_market_state().1.insurance;
+                let account_before = self.env.primary_portfolio(actor);
+                let capital_before = account_before.capital.get();
+                let pnl_before = account_before.pnl.get();
+                let (_, group_before) = self.env.primary_market_state();
+                let insurance_before = group_before.insurance;
+                let c_tot_before = group_before.c_tot;
+                let accounted_vault_before = group_before.vault;
                 let before_vault = u128::from(self.env.token_amount(self.env.vault));
                 let destination_before = self
                     .env
@@ -3382,8 +3505,11 @@ impl ScenarioRunner {
                     Ok(success) => {
                         self.coverage.observe_success(None, &success);
                         self.assert_portfolio_frame(&before, &[actor])?;
-                        let capital_after = self.env.primary_portfolio(actor).capital.get();
-                        let insurance_after = self.env.primary_market_state().1.insurance;
+                        let account_after = self.env.primary_portfolio(actor);
+                        let capital_after = account_after.capital.get();
+                        let pnl_after = account_after.pnl.get();
+                        let (_, group_after) = self.env.primary_market_state();
+                        let insurance_after = group_after.insurance;
                         let destination_after = self
                             .env
                             .token_amount(self.env.actors[actor].destination_token);
@@ -3396,23 +3522,46 @@ impl ScenarioRunner {
                         let capital_debit = capital_before
                             .checked_sub(capital_after)
                             .ok_or("withdrawal increased owner capital")?;
+                        let principal_loss = if pnl_before < 0 {
+                            if pnl_after != 0 {
+                                return Err(format!(
+                                    "successful withdrawal left negative PnL unsettled: {pnl_before}->{pnl_after}"
+                                ));
+                            }
+                            pnl_before.unsigned_abs()
+                        } else {
+                            if pnl_after != pnl_before {
+                                return Err(format!(
+                                    "withdrawal changed nonnegative PnL: {pnl_before}->{pnl_after}"
+                                ));
+                            }
+                            0
+                        };
                         let vault_after = u128::from(self.env.token_amount(self.env.vault));
+                        let expected_capital_debit = payout
+                            .checked_add(maintenance)
+                            .and_then(|value| value.checked_add(principal_loss))
+                            .ok_or("withdrawal value partition overflowed")?;
+                        let exact_internal_partition = capital_debit == expected_capital_debit
+                            && c_tot_before.checked_sub(group_after.c_tot)
+                                == Some(expected_capital_debit)
+                            && accounted_vault_before.checked_sub(group_after.vault)
+                                == Some(payout);
                         let valid_zero_withdrawal = amount == 0
                             && payout == 0
-                            && capital_debit == maintenance
+                            && principal_loss == 0
+                            && exact_internal_partition
                             && vault_after == before_vault;
                         let valid_value_withdrawal = amount != 0
                             && payout != 0
                             && payout <= amount
-                            && capital_debit
-                                == payout
-                                    .checked_add(maintenance)
-                                    .ok_or("withdrawal payout plus maintenance overflowed")?
+                            && exact_internal_partition
                             && vault_after.checked_add(payout) == Some(before_vault);
                         if !valid_zero_withdrawal && !valid_value_withdrawal {
-                            return Err(
-                                "withdrawal debit/credit did not match owner authorization".into(),
-                            );
+                            return Err(format!(
+                                "withdrawal debit/credit did not match owner authorization: amount={amount}, payout={payout}, capital={capital_before}->{capital_after}, pnl={pnl_before}->{pnl_after}, maintenance={maintenance}, c_tot={c_tot_before}->{}, accounted_vault={accounted_vault_before}->{}, spl_vault={before_vault}->{vault_after}",
+                                group_after.c_tot, group_after.vault
+                            ));
                         }
                         if payout != 0 || maintenance != 0 {
                             self.coverage.withdrawals += 1;
@@ -5268,17 +5417,6 @@ impl ScenarioRunner {
         hints: HintMode,
         require_progress: bool,
     ) -> Result<(), CrankFailure> {
-        self.last_crank_compute_units = None;
-        let account_before = self.env.primary_portfolio(actor);
-        let (_, group_before) = self.env.primary_market_state();
-        let before = self.snapshot();
-        let ranks_before = (0..PRIMARY_ACTOR_COUNT)
-            .map(|candidate| self.progress_rank(candidate))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(CrankFailure::Invariant)?;
-        let rank_before = ranks_before[actor];
-        let diagnostics_before = self.liveness_diagnostics();
-        let liquidation_authorized = self.current_liquidation_authorization(actor);
         let observations = match hints {
             HintMode::Complete => self
                 .selected_observation(actor)
@@ -5296,6 +5434,26 @@ impl ScenarioRunner {
                 },
             ],
         };
+        self.execute_crank_with_observations(actor, observations, require_progress)
+    }
+
+    fn execute_crank_with_observations(
+        &mut self,
+        actor: usize,
+        observations: Vec<CrankObservationHint>,
+        require_progress: bool,
+    ) -> Result<(), CrankFailure> {
+        self.last_crank_compute_units = None;
+        let account_before = self.env.primary_portfolio(actor);
+        let (_, group_before) = self.env.primary_market_state();
+        let before = self.snapshot();
+        let ranks_before = (0..PRIMARY_ACTOR_COUNT)
+            .map(|candidate| self.progress_rank(candidate))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(CrankFailure::Invariant)?;
+        let rank_before = ranks_before[actor];
+        let diagnostics_before = self.liveness_diagnostics();
+        let liquidation_authorized = self.current_liquidation_authorization(actor);
         match self
             .env
             .crank(actor, self.env.current_slot(), observations.clone())
@@ -5402,9 +5560,9 @@ impl ScenarioRunner {
             .insert((before_class, after_class));
     }
 
-    fn selected_observation(&self, _actor: usize) -> Result<Vec<CrankObservationHint>, String> {
+    fn selected_observation(&self, actor: usize) -> Result<Vec<CrankObservationHint>, String> {
         let (_, group) = self.env.primary_market_state();
-        Ok((0..ASSET_COUNT)
+        let mut observations = (0..ASSET_COUNT)
             .filter(|asset| {
                 let profile = self.env.primary_profile(*asset);
                 let engine_asset = &group.assets[*asset];
@@ -5425,7 +5583,28 @@ impl ScenarioRunner {
                 asset_index: asset as u16,
                 oracle_accounts: self.env.primary_profile(asset).oracle_leg_count,
             })
-            .collect())
+            .collect::<Vec<_>>();
+        // A flat account can still need a source-backing expiry refresh. The engine has no active
+        // leg from which to select an accrual asset in that state, so its documented no-active-leg
+        // fallback requires one authenticated observation. `Complete` must supply that witness even
+        // when every market is already price/funding-current; Empty remains the adversarial case.
+        let account_is_flat = decoded_legs(&self.env.primary_portfolio(actor))
+            .into_iter()
+            .all(|leg| !leg.active);
+        if observations.is_empty() && account_is_flat {
+            if let Some(asset) = (0..ASSET_COUNT).find(|asset| {
+                matches!(
+                    group.assets[*asset].lifecycle,
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                )
+            }) {
+                observations.push(CrankObservationHint {
+                    asset_index: asset as u16,
+                    oracle_accounts: self.env.primary_profile(asset).oracle_leg_count,
+                });
+            }
+        }
+        Ok(observations)
     }
 
     fn current_liquidation_authorization(&self, actor: usize) -> bool {
@@ -5900,16 +6079,42 @@ impl ScenarioRunner {
 
     fn drain_cranks(&mut self, limit: usize) -> Result<(), String> {
         for _ in 0..limit {
+            if self.env.primary_market_state().1.mode == MarketModeV16::Resolved {
+                return self.assert_global_invariants();
+            }
             self.advance_liveness_clock_if_needed()?;
-            if !(0..PRIMARY_ACTOR_COUNT)
+            let has_work = (0..PRIMARY_ACTOR_COUNT)
                 .map(|actor| self.progress_rank(actor))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
-                .any(ProgressRank::actionable)
-            {
+                .any(ProgressRank::actionable);
+            if !has_work {
+                let (config, group) = self.env.primary_market_state();
+                let resolution_fallback = group.mode == MarketModeV16::Live
+                    && config.permissionless_resolve_stale_slots != 0;
+                if resolution_fallback {
+                    if self.try_permissionless_resolution_exit()? {
+                        return self.assert_global_invariants();
+                    }
+                    continue;
+                }
                 return Ok(());
             }
-            self.drain_one_progress_step(None)?;
+            if let Err(progress_error) = self.drain_one_progress_step(None) {
+                // A stale-resolution policy can become executable only after an earlier crank
+                // consumes the last committed market/account prerequisite. Probe it from that
+                // exact post-progress state before classifying the rank as a persistent lock.
+                if self.permissionless_resolution_matured_now() {
+                    if self.try_permissionless_resolution_exit().map_err(|error| {
+                        format!(
+                            "post-progress permissionless terminal fallback violated its frame: {error}"
+                        )
+                    })? {
+                        return self.assert_global_invariants();
+                    }
+                }
+                return Err(progress_error);
+            }
         }
         Err(format!(
             "permissionless drain exceeded deterministic bound {limit}; {}",
@@ -5938,16 +6143,41 @@ impl ScenarioRunner {
             if !before.actionable() || (has_account_work && !before.account_actionable()) {
                 continue;
             }
-            let hint_modes = if before.account_actionable() {
-                &[HintMode::Empty, HintMode::Complete][..]
-            } else {
-                &[HintMode::Complete][..]
-            };
-            for hint_mode in hint_modes {
-                match self.execute_crank(actor, *hint_mode, true) {
-                    Ok(()) => return Ok(()),
+            let complete = self.selected_observation(actor)?;
+            let complete_len = complete.len();
+            let subset_count = 1usize
+                .checked_shl(complete.len() as u32)
+                .ok_or("honest crank observation subset count overflow")?;
+            let mut observation_sets =
+                Vec::with_capacity(subset_count + usize::from(before.account_actionable()));
+            if before.account_actionable() {
+                observation_sets.push(Vec::new());
+            }
+            for mask in 1..subset_count {
+                observation_sets.push(
+                    complete
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| mask & (1usize << index) != 0)
+                        .map(|(_, observation)| observation.clone())
+                        .collect(),
+                );
+            }
+            if observation_sets.is_empty() {
+                observation_sets.push(Vec::new());
+            }
+            for observations in observation_sets {
+                let is_proper_nonempty_subset =
+                    !observations.is_empty() && observations.len() < complete_len;
+                match self.execute_crank_with_observations(actor, observations.clone(), true) {
+                    Ok(()) => {
+                        if is_proper_nonempty_subset {
+                            self.coverage.crank_proper_observation_subset_progress += 1;
+                        }
+                        return Ok(());
+                    }
                     Err(CrankFailure::Rejected(error)) => failures.push(format!(
-                        "actor {actor} rank {before:?} hints {hint_mode:?}: {error}"
+                        "actor {actor} rank {before:?} observations {observations:?}: {error}"
                     )),
                     Err(CrankFailure::Invariant(error)) => {
                         return Err(format!("actor {actor} rank {before:?}: {error}"))
@@ -6344,8 +6574,24 @@ impl ScenarioRunner {
         // can remain set after every close, B, obligation, and position has reached a fixed point,
         // while account-scoped exits remain live. The concrete ranks above own those actionable
         // bankruptcy classes; counting the history bit would demand an impossible clearing crank.
-        let market_locks = u128::from(group.threshold_stress_active)
-            .checked_add(loss_work)
+        // Expired close recovery is a two-step terminal mode transition: Live -> Recovery ->
+        // Resolved. Close residuals and loss-currentness can remain byte-identical when either
+        // mode transition lands, so give that finite phase a dominating lane inside the existing
+        // market-lock component. Otherwise a real `DeclareRecovery`/`FinalizeRecovery` edge looks
+        // like a successful no-op to the independent rank.
+        let recovery_phase = match group.mode {
+            MarketModeV16::Live
+                if close_has_pending_residual && authenticated_slot > close.max_close_slot =>
+            {
+                2u128
+            }
+            MarketModeV16::Recovery => 1u128,
+            MarketModeV16::Live | MarketModeV16::Resolved => 0u128,
+        };
+        let market_locks = recovery_phase
+            .checked_mul(1u128 << 120)
+            .and_then(|value| value.checked_add(u128::from(group.threshold_stress_active)))
+            .and_then(|value| value.checked_add(loss_work))
             .and_then(|value| value.checked_add(lapsed_live_backing))
             .ok_or("market-lock progress rank overflow")?;
         Ok(ProgressRank {
@@ -6944,19 +7190,41 @@ impl ScenarioRunner {
         Ok(())
     }
 
+    #[track_caller]
     fn assert_snapshot_unchanged(&self, before: &Snapshot) -> Result<(), String> {
-        if before.primary_market != self.env.market_data(false)
-            || before.foreign_market != self.env.market_data(true)
-            || before.primary_portfolios != self.env.all_primary_portfolio_data()
-            || before.foreign_portfolio != self.env.foreign_portfolio_data()
-            || before.backing_domain_ledger != self.env.backing_domain_ledger_data()
-            || before.token_accounts != self.env.all_token_account_data()
-            || before.matcher_contexts != self.env.all_matcher_context_data()
-            || before.economic_account_lamports != self.env.all_economic_account_lamports()
-        {
-            return Err(
-                "rejected public transaction changed account bytes, tokens, or lamports".into(),
-            );
+        let mut changed = Vec::new();
+        if before.primary_market != self.env.market_data(false) {
+            changed.push("primary market");
+        }
+        if before.foreign_market != self.env.market_data(true) {
+            changed.push("foreign market");
+        }
+        if before.primary_portfolios != self.env.all_primary_portfolio_data() {
+            changed.push("primary portfolios");
+        }
+        if before.foreign_portfolio != self.env.foreign_portfolio_data() {
+            changed.push("foreign portfolio");
+        }
+        if before.backing_domain_ledger != self.env.backing_domain_ledger_data() {
+            changed.push("backing-domain ledger");
+        }
+        if before.token_accounts != self.env.all_token_account_data() {
+            changed.push("SPL token accounts");
+        }
+        if before.matcher_contexts != self.env.all_matcher_context_data() {
+            changed.push("matcher contexts");
+        }
+        if before.economic_account_lamports != self.env.all_economic_account_lamports() {
+            changed.push("economic-account lamports");
+        }
+        if !changed.is_empty() {
+            let caller = std::panic::Location::caller();
+            return Err(format!(
+                "rejected public transaction changed persistent state at {}:{}: {}",
+                caller.file(),
+                caller.line(),
+                changed.join(", "),
+            ));
         }
         Ok(())
     }
@@ -6987,6 +7255,46 @@ pub fn run_scenario(scenario: &Scenario) -> Result<Coverage, String> {
     progress_runner.coverage.merge(liquidation_coverage);
     progress_runner.coverage.assert_pull_request_non_vacuity()?;
     Ok(progress_runner.coverage)
+}
+
+pub fn verify_constructible_crank_observation_subset(
+    scenario: &Scenario,
+    actor: usize,
+) -> Result<Coverage, String> {
+    let actor = actor % PRIMARY_ACTOR_COUNT;
+    let mut runner = ScenarioRunner::new(scenario)?;
+    runner.run_safety_prefix(&scenario.actions)?;
+
+    let before = runner.snapshot();
+    match runner.execute_crank(actor, HintMode::Empty, true) {
+        Err(CrankFailure::Rejected(_)) => runner.assert_snapshot_unchanged(&before)?,
+        Err(CrankFailure::Invariant(error)) => {
+            return Err(format!(
+                "empty crank violated the liveness oracle instead of rejecting atomically: {error}"
+            ))
+        }
+        Ok(()) => return Err("empty crank unexpectedly progressed without an observation".into()),
+    }
+
+    runner.drain_one_progress_step(Some(actor))?;
+    if runner.coverage.crank_proper_observation_subset_progress == 0 {
+        return Err("no proper observation subset produced strict crank progress".into());
+    }
+    runner.run_direct_user_exit_campaign()?;
+
+    let mut all_asset_runner = ScenarioRunner::new(scenario)?;
+    all_asset_runner.run_safety_prefix(&scenario.actions)?;
+    all_asset_runner
+        .execute_crank(actor, HintMode::Reversed, true)
+        .map_err(|error| {
+            format!(
+                "all-asset crank failed to ignore irrelevant observations: {}",
+                error.into_message()
+            )
+        })?;
+    all_asset_runner.run_direct_user_exit_campaign()?;
+    runner.coverage.merge(all_asset_runner.coverage);
+    Ok(runner.coverage)
 }
 
 pub fn run_multileg_loss_stale_progress_regression() -> Result<Coverage, String> {
@@ -11062,6 +11370,7 @@ pub fn run_bounded_public_liveness_graph() -> Result<BoundedLivenessGraphEvidenc
 const BOUNDED_REFERENCE_ACTION_COUNT: usize = 13;
 const BOUNDED_RECOVERY_ACTION_COUNT: usize = 13;
 const BOUNDED_B_ACTION_COUNT: usize = 13;
+const BOUNDED_ACTIVE_CLOSE_ACTION_COUNT: usize = 13;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedCloseProgressNode {
@@ -11367,6 +11676,31 @@ pub struct BoundedBFrontierEvidence {
     pub second_position_attempts: [u64; BOUNDED_B_ACTION_COUNT],
     pub second_position_state_changes: [u64; BOUNDED_B_ACTION_COUNT],
     pub b_rank_reducing_edges: [u64; BOUNDED_B_ACTION_COUNT],
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedActiveCloseFrontierEvidence {
+    pub word_count: usize,
+    pub transition_count: usize,
+    pub unique_node_count: usize,
+    pub unique_edge_count: usize,
+    pub long_seed_world_count: usize,
+    pub short_seed_world_count: usize,
+    pub before_expiry_seed_world_count: usize,
+    pub at_expiry_seed_world_count: usize,
+    pub after_expiry_seed_world_count: usize,
+    pub active_close_seed_world_count: usize,
+    pub bounded_exit_world_count: usize,
+    pub value_moving_exit_world_count: usize,
+    pub action_attempts: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+    pub action_state_changes: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+    pub second_position_attempts: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+    pub second_position_state_changes: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+    pub close_rank_reducing_edges: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+    pub close_frame_edges: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+    pub cure_success_count: u64,
+    pub cure_rejection_count: u64,
     pub coverage: Coverage,
 }
 
@@ -11758,6 +12092,77 @@ fn bounded_b_actions() -> [Action; BOUNDED_B_ACTION_COUNT] {
             force_close_delay_slots: 2,
         },
         Action::ResolveStalePermissionless { dt: 2 },
+    ]
+}
+
+#[derive(Clone, Debug)]
+enum BoundedActiveCloseAction {
+    Public(Action),
+    CureAndCancel { actor: usize, deposit: u128 },
+}
+
+impl BoundedActiveCloseAction {
+    fn expects_close_frame(&self) -> bool {
+        !matches!(
+            self,
+            Self::Public(Action::Crank { actor: 1, .. }) | Self::CureAndCancel { .. }
+        )
+    }
+}
+
+fn bounded_active_close_actions() -> [BoundedActiveCloseAction; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT] {
+    [
+        BoundedActiveCloseAction::Public(Action::Crank {
+            actor: 1,
+            hints: HintMode::Complete,
+        }),
+        BoundedActiveCloseAction::Public(Action::Crank {
+            actor: 1,
+            hints: HintMode::Empty,
+        }),
+        BoundedActiveCloseAction::Public(Action::Crank {
+            actor: 2,
+            hints: HintMode::Complete,
+        }),
+        BoundedActiveCloseAction::CureAndCancel {
+            actor: 1,
+            deposit: 2_000_000,
+        },
+        BoundedActiveCloseAction::Public(Action::Deposit {
+            actor: 1,
+            amount: 7,
+        }),
+        BoundedActiveCloseAction::Public(Action::Withdraw {
+            actor: 1,
+            amount: 1,
+        }),
+        BoundedActiveCloseAction::Public(Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 2,
+            maker: 3,
+            asset: 1,
+            units: 1,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: true,
+        }),
+        BoundedActiveCloseAction::Public(Action::PushMark {
+            asset: 0,
+            dt: 1,
+            move_bps: 100,
+        }),
+        BoundedActiveCloseAction::Public(Action::PushMark {
+            asset: 1,
+            dt: 1,
+            move_bps: -100,
+        }),
+        BoundedActiveCloseAction::Public(Action::ShutdownAsset { asset: 0, dt: 1 }),
+        BoundedActiveCloseAction::Public(Action::ResolveMarket),
+        BoundedActiveCloseAction::Public(Action::ConfigurePermissionlessResolve {
+            stale_slots: 1,
+            force_close_delay_slots: 2,
+        }),
+        BoundedActiveCloseAction::Public(Action::ResolveStalePermissionless { dt: 2 }),
     ]
 }
 
@@ -16364,6 +16769,501 @@ pub fn run_bounded_b_reference_frontier() -> Result<BoundedBFrontierEvidence, St
         second_position_attempts: graph.second_position_attempts,
         second_position_state_changes: graph.second_position_state_changes,
         b_rank_reducing_edges: graph.b_rank_reducing_edges,
+        coverage: graph.coverage,
+    })
+}
+
+fn apply_bounded_active_close_action(
+    runner: &mut ScenarioRunner,
+    action: &BoundedActiveCloseAction,
+) -> Result<(bool, bool), String> {
+    match action {
+        BoundedActiveCloseAction::Public(action) => {
+            runner.run_safety_prefix(std::slice::from_ref(action))?;
+            Ok((false, false))
+        }
+        BoundedActiveCloseAction::CureAndCancel { actor, deposit } => {
+            let before = runner.snapshot();
+            let source = runner.env.actors[*actor].source_token;
+            let source_before = runner.env.token_amount(source);
+            let spl_vault_before = runner.env.token_amount(runner.env.vault);
+            let (_, group_before) = runner.env.primary_market_state();
+            let accounted_vault_before = group_before.vault;
+            let c_tot_before = group_before.c_tot;
+            let account_before = runner.env.primary_portfolio(*actor);
+            let capital_before = account_before.capital.get();
+            let escrow_before = account_before.cancel_deposit_escrow.get();
+            let crystallized_before = account_before.residual_crystallized_loss_atoms_total.get();
+            match runner.env.cure_and_cancel_primary_close(*actor, *deposit) {
+                Ok(success) => {
+                    runner.coverage.observe_success(None, &success);
+                    runner.assert_portfolio_frame(&before, &[*actor])?;
+                    runner.assert_token_frame(&before, &[source, runner.env.vault])?;
+
+                    let source_debit = u128::from(
+                        source_before
+                            .checked_sub(runner.env.token_amount(source))
+                            .ok_or("active-close cure increased owner source tokens")?,
+                    );
+                    let spl_vault_credit = u128::from(
+                        runner
+                            .env
+                            .token_amount(runner.env.vault)
+                            .checked_sub(spl_vault_before)
+                            .ok_or("active-close cure decreased SPL vault custody")?,
+                    );
+                    let (_, group_after) = runner.env.primary_market_state();
+                    let accounted_vault_credit = group_after
+                        .vault
+                        .checked_sub(accounted_vault_before)
+                        .ok_or("active-close cure decreased accounted vault custody")?;
+                    let account_after = runner.env.primary_portfolio(*actor);
+                    let crystallized_delta = account_after
+                        .residual_crystallized_loss_atoms_total
+                        .get()
+                        .checked_sub(crystallized_before)
+                        .ok_or("active-close cure rolled back crystallized loss")?;
+                    let capital_sources = capital_before
+                        .checked_add(escrow_before)
+                        .and_then(|value| value.checked_add(*deposit))
+                        .ok_or("active-close cure capital source overflow")?;
+                    let capital_uses = account_after
+                        .capital
+                        .get()
+                        .checked_add(crystallized_delta)
+                        .ok_or("active-close cure capital use overflow")?;
+                    let c_tot_sources = c_tot_before
+                        .checked_add(escrow_before)
+                        .and_then(|value| value.checked_add(*deposit))
+                        .ok_or("active-close cure c_tot source overflow")?;
+                    let c_tot_uses = group_after
+                        .c_tot
+                        .checked_add(crystallized_delta)
+                        .ok_or("active-close cure c_tot use overflow")?;
+                    if source_debit != *deposit
+                        || spl_vault_credit != *deposit
+                        || accounted_vault_credit != *deposit
+                        || account_after.cancel_deposit_escrow.get() != 0
+                        || capital_sources != capital_uses
+                        || c_tot_sources != c_tot_uses
+                    {
+                        return Err(format!(
+                            "active-close cure value flow disagreed with the authorized deposit {deposit}: source={source_debit}, spl={spl_vault_credit}, accounted={accounted_vault_credit}, capital={capital_before}->{}, escrow={escrow_before}->{}, crystallized+={crystallized_delta}, c_tot={c_tot_before}->{}",
+                            account_after.capital.get(),
+                            account_after.cancel_deposit_escrow.get(),
+                            group_after.c_tot
+                        ));
+                    }
+                    let close = runner
+                        .env
+                        .primary_portfolio(*actor)
+                        .close_progress
+                        .try_to_runtime()
+                        .map_err(|error| format!("active-close cure decode: {error:?}"))?;
+                    verify_close_residual_partition("active-close cured ledger", &close)?;
+                    if !close.canceled {
+                        return Err(format!(
+                            "successful active-close cure did not cancel the exact episode: {close:?}"
+                        ));
+                    }
+                    runner.assert_global_invariants()?;
+                    Ok((true, false))
+                }
+                Err(_) => {
+                    runner.assert_snapshot_unchanged(&before)?;
+                    Ok((false, true))
+                }
+            }
+        }
+    }
+}
+
+fn build_bounded_active_close_reference_seed(
+    winner_side: SideV16,
+    landing: BoundedExpiryLanding,
+) -> Result<(ScenarioRunner, u128), String> {
+    const CLOSE_WINNER: usize = 0;
+    const CLOSE_LOSER: usize = 1;
+    const UNRELATED_TAKER: usize = 2;
+    const UNRELATED_MAKER: usize = 3;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 1_000_000_000_000, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let seed_byte =
+        0xc0 ^ match winner_side {
+            SideV16::Long => 0x01,
+            SideV16::Short => 0x02,
+        } ^ landing.seed_tag().wrapping_mul(0x10);
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
+
+    if !runner.execute_trade(
+        TradeRoute::NoCpi,
+        UNRELATED_TAKER,
+        UNRELATED_MAKER,
+        vec![(1, POS_SCALE as i128 / 2)],
+        0,
+        0,
+        true,
+    )? {
+        return Err(format!(
+            "INV-086 {winner_side:?}/{landing:?} active-close unrelated cohort did not open"
+        ));
+    }
+    create_public_cancellable_close_via_route_and_side(
+        &mut runner,
+        CLOSE_WINNER as u8,
+        CLOSE_LOSER as u8,
+        0,
+        EXIT_MAKER_INDEX as u8,
+        TradeRoute::NoCpi,
+        winner_side,
+    )?;
+
+    let close = runner
+        .env
+        .primary_portfolio(CLOSE_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("INV-086 active-close seed decode: {error:?}"))?;
+    verify_close_residual_partition("INV-086 active-close seed", &close)?;
+    if !close.active || close.finalized || close.canceled || close.residual_remaining == 0 {
+        return Err(format!(
+            "INV-086 {winner_side:?}/{landing:?} seed was not a live value-bearing close: {close:?}"
+        ));
+    }
+    let landing_slot = landing.slot(close.max_close_slot);
+    if landing_slot < runner.env.current_slot() {
+        return Err(format!(
+            "INV-086 {winner_side:?}/{landing:?} close boundary {} precedes current Clock {}",
+            landing_slot,
+            runner.env.current_slot()
+        ));
+    }
+    runner.env.warp_to_slot(landing_slot);
+
+    let rank = runner.progress_rank(CLOSE_LOSER)?;
+    if rank.close_work == 0 || rank.dispatch_priority() != 0 {
+        return Err(format!(
+            "INV-086 {winner_side:?}/{landing:?} seed did not expose the active close as the highest-priority account continuation: {rank:?}"
+        ));
+    }
+    if runner.positions[UNRELATED_TAKER][1] == 0 || runner.positions[UNRELATED_MAKER][1] == 0 {
+        return Err(format!(
+            "INV-086 {winner_side:?}/{landing:?} seed lost the unrelated live cohort"
+        ));
+    }
+    runner.assert_global_invariants()?;
+    Ok((runner, close.residual_remaining))
+}
+
+pub fn run_bounded_active_close_reference_frontier(
+) -> Result<BoundedActiveCloseFrontierEvidence, String> {
+    const CLOSE_LOSER: usize = 1;
+    type ExactEdge = (AuthenticatedGraphState, u8, AuthenticatedGraphState);
+
+    #[derive(Default)]
+    struct CloseAccumulator {
+        nodes: BTreeSet<AuthenticatedGraphState>,
+        edges: BTreeSet<ExactEdge>,
+        long_seed_world_count: usize,
+        short_seed_world_count: usize,
+        before_expiry_seed_world_count: usize,
+        at_expiry_seed_world_count: usize,
+        after_expiry_seed_world_count: usize,
+        active_close_seed_world_count: usize,
+        bounded_exit_world_count: usize,
+        value_moving_exit_world_count: usize,
+        action_attempts: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+        action_state_changes: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+        second_position_attempts: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+        second_position_state_changes: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+        close_rank_reducing_edges: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+        close_frame_edges: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
+        cure_success_count: u64,
+        cure_rejection_count: u64,
+        coverage: Coverage,
+    }
+
+    impl CloseAccumulator {
+        fn merge(&mut self, other: Self) {
+            self.nodes.extend(other.nodes);
+            self.edges.extend(other.edges);
+            self.long_seed_world_count += other.long_seed_world_count;
+            self.short_seed_world_count += other.short_seed_world_count;
+            self.before_expiry_seed_world_count += other.before_expiry_seed_world_count;
+            self.at_expiry_seed_world_count += other.at_expiry_seed_world_count;
+            self.after_expiry_seed_world_count += other.after_expiry_seed_world_count;
+            self.active_close_seed_world_count += other.active_close_seed_world_count;
+            self.bounded_exit_world_count += other.bounded_exit_world_count;
+            self.value_moving_exit_world_count += other.value_moving_exit_world_count;
+            for (total, count) in self.action_attempts.iter_mut().zip(other.action_attempts) {
+                *total += count;
+            }
+            for (total, count) in self
+                .action_state_changes
+                .iter_mut()
+                .zip(other.action_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_attempts
+                .iter_mut()
+                .zip(other.second_position_attempts)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_state_changes
+                .iter_mut()
+                .zip(other.second_position_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .close_rank_reducing_edges
+                .iter_mut()
+                .zip(other.close_rank_reducing_edges)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .close_frame_edges
+                .iter_mut()
+                .zip(other.close_frame_edges)
+            {
+                *total += count;
+            }
+            self.cure_success_count += other.cure_success_count;
+            self.cure_rejection_count += other.cure_rejection_count;
+            self.coverage.merge(other.coverage);
+        }
+    }
+
+    fn replay_close_word(
+        winner_side: SideV16,
+        landing: BoundedExpiryLanding,
+        word: &[(usize, BoundedActiveCloseAction)],
+        graph: &mut CloseAccumulator,
+    ) -> Result<(), String> {
+        let (mut runner, seed_residual) =
+            build_bounded_active_close_reference_seed(winner_side, landing)?;
+        graph.long_seed_world_count += usize::from(winner_side == SideV16::Long);
+        graph.short_seed_world_count += usize::from(winner_side == SideV16::Short);
+        graph.before_expiry_seed_world_count +=
+            usize::from(landing == BoundedExpiryLanding::Before);
+        graph.at_expiry_seed_world_count += usize::from(landing == BoundedExpiryLanding::At);
+        graph.after_expiry_seed_world_count += usize::from(landing == BoundedExpiryLanding::After);
+        graph.active_close_seed_world_count += usize::from(seed_residual != 0);
+
+        let mut before_exact = runner.authenticated_graph_state();
+        let mut before_economic = runner.bounded_reference_node()?;
+        graph.nodes.insert(before_exact.clone());
+        for (position, (action_index, action)) in word.iter().enumerate() {
+            let before_rank = runner.progress_rank(CLOSE_LOSER)?;
+            let close_before = runner
+                .env
+                .primary_portfolio(CLOSE_LOSER)
+                .close_progress
+                .try_to_runtime()
+                .map_err(|error| format!("INV-086 active-close pre-edge decode: {error:?}"))?;
+            let (cure_success, cure_rejection) =
+                apply_bounded_active_close_action(&mut runner, action).map_err(|error| {
+                    format!(
+                        "INV-086 {winner_side:?}/{landing:?} active-close word {word:?} failed at position {position}: {error}"
+                    )
+                })?;
+            let after_rank = runner.progress_rank(CLOSE_LOSER)?;
+            let close_after = runner
+                .env
+                .primary_portfolio(CLOSE_LOSER)
+                .close_progress
+                .try_to_runtime()
+                .map_err(|error| format!("INV-086 active-close post-edge decode: {error:?}"))?;
+            let after_economic = runner.bounded_reference_node()?;
+            let after_exact = runner.authenticated_graph_state();
+            bounded_source_credit_transition_evidence(
+                &format!(
+                    "INV-030 {winner_side:?}/{landing:?} active-close edge action={action_index}"
+                ),
+                &before_economic,
+                &after_economic,
+            )?;
+            graph.action_attempts[*action_index] += 1;
+            if after_economic != before_economic {
+                graph.action_state_changes[*action_index] += 1;
+                if position == 1 {
+                    graph.second_position_state_changes[*action_index] += 1;
+                }
+            }
+            if after_rank.close_work < before_rank.close_work {
+                graph.close_rank_reducing_edges[*action_index] += 1;
+            }
+            if action.expects_close_frame() {
+                if close_after != close_before {
+                    return Err(format!(
+                        "INV-075 {winner_side:?}/{landing:?} action {action_index} rewrote an unrelated close episode: {close_before:?} -> {close_after:?}"
+                    ));
+                }
+                graph.close_frame_edges[*action_index] += 1;
+            }
+            graph.cure_success_count += u64::from(cure_success);
+            graph.cure_rejection_count += u64::from(cure_rejection);
+            if position == 1 {
+                graph.second_position_attempts[*action_index] += 1;
+            }
+            graph.nodes.insert(after_exact.clone());
+            graph
+                .edges
+                .insert((before_exact, *action_index as u8, after_exact.clone()));
+            before_exact = after_exact;
+            before_economic = after_economic;
+        }
+
+        let destination_total_before =
+            (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+                total
+                    .checked_add(u128::from(
+                        runner
+                            .env
+                            .token_amount(runner.env.actors[actor].destination_token),
+                    ))
+                    .ok_or("INV-073 active-close pre-exit destination total overflow")
+            })?;
+        runner.run_direct_user_exit_campaign().map_err(|error| {
+            let transaction_error = error
+                .find("FailedTransactionMetadata")
+                .map(|error_start| {
+                    let context_start = error[..error_start]
+                        .char_indices()
+                        .rev()
+                        .nth(400)
+                        .map_or(0, |(index, _)| index);
+                    error[context_start..]
+                        .chars()
+                        .take(640)
+                        .collect::<String>()
+                })
+                .unwrap_or_else(|| error.chars().take(480).collect::<String>());
+            let state_prefix = runner
+                .liveness_diagnostics()
+                .chars()
+                .take(240)
+                .collect::<String>();
+            format!(
+                "INV-073 {winner_side:?}/{landing:?} active-close word {word:?} had no bounded owner exit; transaction={transaction_error}; state={state_prefix}"
+            )
+        })?;
+        graph.bounded_exit_world_count += 1;
+        let destination_total = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+            total
+                .checked_add(u128::from(
+                    runner
+                        .env
+                        .token_amount(runner.env.actors[actor].destination_token),
+                ))
+                .ok_or("INV-073 active-close destination total overflow")
+        })?;
+        if destination_total <= destination_total_before {
+            return Err(format!(
+                "INV-073 {winner_side:?}/{landing:?} active-close word {word:?} exited without increasing funded user destinations: {destination_total_before}->{destination_total}"
+            ));
+        }
+        graph.value_moving_exit_world_count += 1;
+        runner.assert_global_invariants()?;
+        graph.coverage.merge(runner.coverage);
+        Ok(())
+    }
+
+    let actions = bounded_active_close_actions();
+    let mut words = vec![vec![]];
+    for (first_index, first) in actions.iter().enumerate() {
+        words.push(vec![(first_index, first.clone())]);
+    }
+    for (first_index, first) in actions.iter().enumerate() {
+        for (second_index, second) in actions.iter().enumerate() {
+            words.push(vec![
+                (first_index, first.clone()),
+                (second_index, second.clone()),
+            ]);
+        }
+    }
+    let jobs = [SideV16::Long, SideV16::Short]
+        .into_iter()
+        .flat_map(|winner_side| {
+            BoundedExpiryLanding::ALL.into_iter().flat_map({
+                let words = &words;
+                move |landing| {
+                    words
+                        .iter()
+                        .cloned()
+                        .map(move |word| (winner_side, landing, word))
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(jobs.len().max(1));
+    let chunk_size = jobs.len().div_ceil(worker_count);
+    let graph = std::thread::scope(|scope| {
+        let handles = jobs
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || -> Result<CloseAccumulator, String> {
+                    let mut graph = CloseAccumulator::default();
+                    for (winner_side, landing, word) in chunk {
+                        replay_close_word(*winner_side, *landing, word, &mut graph)?;
+                    }
+                    Ok(graph)
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut graph = CloseAccumulator::default();
+        for handle in handles {
+            graph.merge(
+                handle
+                    .join()
+                    .map_err(|_| "INV-086 active-close frontier worker panicked".to_string())??,
+            );
+        }
+        Ok::<_, String>(graph)
+    })?;
+    let transition_count = jobs.iter().map(|(_, _, word)| word.len()).sum();
+
+    Ok(BoundedActiveCloseFrontierEvidence {
+        word_count: jobs.len(),
+        transition_count,
+        unique_node_count: graph.nodes.len(),
+        unique_edge_count: graph.edges.len(),
+        long_seed_world_count: graph.long_seed_world_count,
+        short_seed_world_count: graph.short_seed_world_count,
+        before_expiry_seed_world_count: graph.before_expiry_seed_world_count,
+        at_expiry_seed_world_count: graph.at_expiry_seed_world_count,
+        after_expiry_seed_world_count: graph.after_expiry_seed_world_count,
+        active_close_seed_world_count: graph.active_close_seed_world_count,
+        bounded_exit_world_count: graph.bounded_exit_world_count,
+        value_moving_exit_world_count: graph.value_moving_exit_world_count,
+        action_attempts: graph.action_attempts,
+        action_state_changes: graph.action_state_changes,
+        second_position_attempts: graph.second_position_attempts,
+        second_position_state_changes: graph.second_position_state_changes,
+        close_rank_reducing_edges: graph.close_rank_reducing_edges,
+        close_frame_edges: graph.close_frame_edges,
+        cure_success_count: graph.cure_success_count,
+        cure_rejection_count: graph.cure_rejection_count,
         coverage: graph.coverage,
     })
 }

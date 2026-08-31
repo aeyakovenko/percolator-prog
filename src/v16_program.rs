@@ -13427,6 +13427,23 @@ pub mod processor {
                     max_market_slots,
                 )?;
                 expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
+                if group.header.mode == 2 {
+                    // Recovery work is entirely committed-state work. Stale Live-mode oracle hints
+                    // can land after another cranker declares Recovery; ignore them and let the
+                    // engine release one obligation or finalize Recovery in bounded work.
+                    group
+                        .permissionless_auto_crank_not_atomic(
+                            &mut portfolio,
+                            AutoCrankWorkV16 {
+                                now_slot: authenticated_now_slot,
+                                observations: &[],
+                                resolved_close_fee_rate_per_slot: 0,
+                            },
+                        )
+                        .map_err(map_v16_error)?;
+                    group.validate_shape().map_err(map_v16_error)?;
+                    return Ok(());
+                }
                 let close_ledger = portfolio
                     .header
                     .close_progress
@@ -13501,7 +13518,8 @@ pub mod processor {
                 Vec::with_capacity(percolator::V16_MAX_PORTFOLIO_ASSETS_N);
             let mut liquidation_fee_reclaimability: Vec<(usize, bool)> =
                 Vec::with_capacity(percolator::V16_MAX_PORTFOLIO_ASSETS_N);
-            let mut settlement_only_after_maturity = None;
+            let mut observed_resolve_maturity = None;
+            let mut matured_market_settlement = false;
             let mut bounded_market_catchup_only = false;
             let mut market_accrual_performed = false;
             let clock_unix_ts = Clock::get().ok().map(|c| c.unix_timestamp);
@@ -13542,12 +13560,12 @@ pub mod processor {
                     &oracle_profile,
                     authenticated_now_slot,
                 );
-                if let Some(expected) = settlement_only_after_maturity {
+                if let Some(expected) = observed_resolve_maturity {
                     if expected != resolve_matured {
                         return Err(PercolatorError::InvalidInstruction.into());
                     }
                 } else {
-                    settlement_only_after_maturity = Some(resolve_matured);
+                    observed_resolve_maturity = Some(resolve_matured);
                 }
                 if resolve_matured && oracle_account_count != 0 {
                     return Err(PercolatorError::OracleStale.into());
@@ -13571,7 +13589,7 @@ pub mod processor {
                 });
                 let (accrual_slot, crank_price, computed_funding_rate_e9, canonical_path) =
                     if resolve_matured {
-                        let (slot, price, funding_rate) =
+                        let Some((slot, price, funding_rate)) =
                             required_market_resolve_accrual_for_profile_view(
                                 &oracle_profile,
                                 &group,
@@ -13579,7 +13597,13 @@ pub mod processor {
                                 authenticated_now_slot,
                                 true,
                             )?
-                            .ok_or(PercolatorError::EngineNonProgress)?;
+                        else {
+                            // Hints are discovery only. A stale transaction may include an asset
+                            // whose terminal accrual is already complete; ignore it and let a later
+                            // relevant hint or the engine-selected account continuation run.
+                            continue;
+                        };
+                        matured_market_settlement = true;
                         (slot, price, funding_rate, None)
                     } else {
                         reject_non_base_oracle_update_after_global_resolve_matured(
@@ -13693,7 +13717,7 @@ pub mod processor {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
 
-            if settlement_only_after_maturity.unwrap_or(false) || bounded_market_catchup_only {
+            if matured_market_settlement || bounded_market_catchup_only {
                 group.validate_shape().map_err(map_v16_error)?;
                 drop(group);
                 state::write_wrapper_config(&mut market_data, &cfg)?;

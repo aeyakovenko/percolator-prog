@@ -3678,6 +3678,25 @@ impl V16Svm {
         now_slot: u64,
         observations: Vec<CrankObservationHint>,
     ) -> Result<TxSuccess, String> {
+        if self.primary_market_state().1.mode == percolator::MarketModeV16::Resolved {
+            let actor = &self.actors[actor_index];
+            return self.send_program(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations,
+                },
+                vec![
+                    AccountMeta::new_readonly(actor.signer.pubkey(), false),
+                    AccountMeta::new(self.market, false),
+                    AccountMeta::new(actor.portfolio, false),
+                    AccountMeta::new(actor.destination_token, false),
+                    AccountMeta::new(self.vault, false),
+                    AccountMeta::new_readonly(self.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            );
+        }
         self.send_program(
             ProgInstruction::PermissionlessCrank {
                 now_slot,
