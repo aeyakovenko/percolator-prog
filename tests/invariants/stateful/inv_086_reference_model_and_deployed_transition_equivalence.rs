@@ -51,11 +51,18 @@
 //! reduction, same- and cross-asset marks, shutdown, authority resolution, policy update, and
 //! permissionless stale resolution. Actions outside close progress and cure must frame the exact
 //! close episode; every reached state must retain a bounded value-moving owner exit.
+//! A fourth seeded frontier publicly creates a real counterparty-backed source lien in both source
+//! side orientations, expires it into exact `Impaired` attribution, and exhausts every empty,
+//! one-action, and ordered two-action word over thirteen progress, funding, reduction, mark, and
+//! resolution actions. The exact source-credit-dependent increase rejects from both initial seeds,
+//! Live actions cannot silently erase impaired provider attribution, and every reached world must
+//! clear the lien through a bounded value-moving terminal path.
 //! A minimized generated public trace also retains simultaneous same-slot mark and account work.
-//! Empty and indiscriminate all-asset hints can reject, so the independent liveness oracle searches
-//! the bounded nonempty subsets of its three authenticated observations and requires a strict-subset
-//! crank to decrease rank before every funded owner exits. This is scheduler coverage, not a wrapper
-//! exception: each attempted transition is still the sole deployed public crank.
+//! Empty hints reject with exact rollback, while both the indiscriminate all-asset set and a proper
+//! authenticated subset decrease rank before every funded owner exits. The independent liveness
+//! oracle searches the bounded nonempty subsets rather than relying on one observation shape. This
+//! is scheduler coverage, not a wrapper exception: each attempted transition is still the sole
+//! deployed public crank.
 //! A second terminal subgraph starts from twelve independently replayed public prefixes
 //! that create a genuinely partial underfunded receipt. It crosses all expiry boundaries,
 //! two claimant orders, and both close/claim priorities; claim-priority paths must move
@@ -119,8 +126,9 @@
 use super::*;
 use crate::support::fuzz_model::{
     run_bounded_active_close_reference_frontier, run_bounded_b_reference_frontier,
-    run_bounded_recovery_reference_frontier, run_bounded_reference_equivalence_graph,
-    verify_close_to_partial_receipt_composition, verify_constructible_crank_observation_subset,
+    run_bounded_lien_impairment_reference_frontier, run_bounded_recovery_reference_frontier,
+    run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
+    verify_constructible_crank_observation_subset,
     verify_expired_backing_terminal_cleanup_compositions,
     verify_insurance_liquidation_to_partial_receipt_compositions,
     verify_liquidation_to_partial_receipt_compositions,
@@ -828,6 +836,79 @@ fn v16_program_active_close_seeded_frontier_preserves_episode_and_bounded_owner_
             && evidence.coverage.terminal_resolves != 0
             && evidence.coverage.user_positions_closed != 0,
         "active-close frontier did not traverse its intended public action classes or admitted a forbidden shutdown: {evidence:?}"
+    );
+}
+
+#[test]
+fn v16_program_lien_impairment_seeded_frontier_preserves_bounded_owner_exit() {
+    let evidence = run_bounded_lien_impairment_reference_frontier()
+        .expect("INV-086 public lien-impairment seeded frontier");
+
+    assert_eq!(
+        evidence.word_count, 366,
+        "must exhaust two side seeds x (13^0 + 13^1 + 13^2) impaired-lien words"
+    );
+    assert_eq!(
+        evidence.transition_count, 702,
+        "must replay every edge in every one- and two-action impaired-lien word"
+    );
+    assert_eq!(evidence.long_seed_world_count, 183);
+    assert_eq!(evidence.short_seed_world_count, 183);
+    assert_eq!(
+        evidence.impaired_seed_world_count, evidence.word_count,
+        "every word must start from a public nonzero impaired counterparty lien"
+    );
+    assert_eq!(
+        evidence.bounded_exit_world_count, evidence.word_count,
+        "every reached impaired-lien state must retain a bounded owner exit"
+    );
+    assert_eq!(
+        evidence.value_moving_exit_world_count, evidence.word_count,
+        "every impaired-lien exit witness must move funded user value"
+    );
+    assert!(
+        evidence.unique_node_count >= 20 && evidence.unique_edge_count >= 40,
+        "impaired-lien frontier collapsed to vacuous exact-state coverage: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .action_attempts
+            .iter()
+            .all(|attempts| *attempts == 54),
+        "every impaired-lien action must occupy every first and second position: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .second_position_attempts
+            .iter()
+            .all(|attempts| *attempts == 26),
+        "every impaired-lien action must follow every first action in both side seeds: {evidence:?}"
+    );
+    assert_eq!(
+        evidence.action_state_changes[5],
+        evidence.second_position_state_changes[5],
+        "the exact source-credit-dependent increase must reject from both initial impaired seeds: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .impaired_lien_reducing_edges
+            .iter()
+            .all(|reductions| *reductions == 0),
+        "Live-state actions must not silently erase impaired provider attribution before terminal reconciliation: {evidence:?}"
+    );
+    assert_ne!(evidence.coverage.loaded_program_hash, [0; 32]);
+    assert!(
+        evidence.coverage.crank_progress != 0
+            && evidence.coverage.deposits != 0
+            && evidence.coverage.withdrawals != 0
+            && evidence.coverage.route_success[0] != 0
+            && evidence.coverage.route_reject[0] != 0
+            && evidence.coverage.backing_topups != 0
+            && evidence.coverage.mark_updates != 0
+            && evidence.coverage.resolve_policy_updates != 0
+            && evidence.coverage.permissionless_resolves != 0
+            && evidence.coverage.user_positions_closed != 0,
+        "impaired-lien frontier did not traverse its intended public action classes: {evidence:?}"
     );
 }
 

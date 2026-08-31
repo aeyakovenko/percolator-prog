@@ -11371,6 +11371,7 @@ const BOUNDED_REFERENCE_ACTION_COUNT: usize = 13;
 const BOUNDED_RECOVERY_ACTION_COUNT: usize = 13;
 const BOUNDED_B_ACTION_COUNT: usize = 13;
 const BOUNDED_ACTIVE_CLOSE_ACTION_COUNT: usize = 13;
+const BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT: usize = 13;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedCloseProgressNode {
@@ -11701,6 +11702,25 @@ pub struct BoundedActiveCloseFrontierEvidence {
     pub close_frame_edges: [u64; BOUNDED_ACTIVE_CLOSE_ACTION_COUNT],
     pub cure_success_count: u64,
     pub cure_rejection_count: u64,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedLienImpairmentFrontierEvidence {
+    pub word_count: usize,
+    pub transition_count: usize,
+    pub unique_node_count: usize,
+    pub unique_edge_count: usize,
+    pub long_seed_world_count: usize,
+    pub short_seed_world_count: usize,
+    pub impaired_seed_world_count: usize,
+    pub bounded_exit_world_count: usize,
+    pub value_moving_exit_world_count: usize,
+    pub action_attempts: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
+    pub action_state_changes: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
+    pub second_position_attempts: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
+    pub second_position_state_changes: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
+    pub impaired_lien_reducing_edges: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
     pub coverage: Coverage,
 }
 
@@ -12163,6 +12183,67 @@ fn bounded_active_close_actions() -> [BoundedActiveCloseAction; BOUNDED_ACTIVE_C
             force_close_delay_slots: 2,
         }),
         BoundedActiveCloseAction::Public(Action::ResolveStalePermissionless { dt: 2 }),
+    ]
+}
+
+#[derive(Clone, Debug)]
+enum BoundedLienImpairmentAction {
+    Public(Action),
+    SourceCreditRiskIncrease,
+    MatchedRiskReduction,
+}
+
+fn bounded_lien_impairment_actions(
+    winner_side: SideV16,
+    source_domain: u16,
+) -> [BoundedLienImpairmentAction; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT] {
+    let mark_move_bps = match winner_side {
+        SideV16::Long => 100,
+        SideV16::Short => -100,
+    };
+    [
+        BoundedLienImpairmentAction::Public(Action::Crank {
+            actor: 0,
+            hints: HintMode::Complete,
+        }),
+        BoundedLienImpairmentAction::Public(Action::Crank {
+            actor: 0,
+            hints: HintMode::Empty,
+        }),
+        BoundedLienImpairmentAction::Public(Action::Crank {
+            actor: 1,
+            hints: HintMode::Complete,
+        }),
+        BoundedLienImpairmentAction::Public(Action::Deposit {
+            actor: 0,
+            amount: 7,
+        }),
+        BoundedLienImpairmentAction::Public(Action::Withdraw {
+            actor: 1,
+            amount: 1,
+        }),
+        BoundedLienImpairmentAction::SourceCreditRiskIncrease,
+        BoundedLienImpairmentAction::MatchedRiskReduction,
+        BoundedLienImpairmentAction::Public(Action::RebalanceReduce { actor: 0, asset: 1 }),
+        BoundedLienImpairmentAction::Public(Action::TopUpBacking {
+            domain: source_domain as u8,
+            amount: 7,
+            expiry_delta: 3,
+        }),
+        BoundedLienImpairmentAction::Public(Action::WithdrawBacking {
+            domain: source_domain as u8,
+            amount: 1,
+        }),
+        BoundedLienImpairmentAction::Public(Action::PushMark {
+            asset: 0,
+            dt: 1,
+            move_bps: mark_move_bps,
+        }),
+        BoundedLienImpairmentAction::Public(Action::ConfigurePermissionlessResolve {
+            stale_slots: 1,
+            force_close_delay_slots: 2,
+        }),
+        BoundedLienImpairmentAction::Public(Action::ResolveStalePermissionless { dt: 2 }),
     ]
 }
 
@@ -17264,6 +17345,487 @@ pub fn run_bounded_active_close_reference_frontier(
         close_frame_edges: graph.close_frame_edges,
         cure_success_count: graph.cure_success_count,
         cure_rejection_count: graph.cure_rejection_count,
+        coverage: graph.coverage,
+    })
+}
+
+fn settle_lien_seed_actor_to_fixed_point(
+    runner: &mut ScenarioRunner,
+    actor: usize,
+    label: &str,
+) -> Result<(), String> {
+    for step in 0..16 {
+        let before = runner.snapshot();
+        runner
+            .execute_crank(actor, HintMode::Complete, false)
+            .map_err(|error| format!("{label} crank step {step}: {}", error.into_message()))?;
+        runner.assert_global_invariants()?;
+        if runner.snapshot() == before {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "{label} did not reach a public crank fixed point in 16 calls"
+    ))
+}
+
+fn build_bounded_lien_impairment_reference_seed(
+    winner_side: SideV16,
+) -> Result<(ScenarioRunner, usize, u128), String> {
+    const WINNER: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const MARKET_CRANKER: usize = 4;
+    const WINNING_ASSET: usize = 0;
+    const ADVERSE_ASSET: usize = 1;
+    const START_PRICE: u64 = 100;
+    const WINNING_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const ADVERSE_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const RISK_INCREASE_Q: i128 = 2 * POS_SCALE as i128;
+    const BACKING_ATOMS: u128 = 150;
+    const EXPIRY_SLOT: u64 = 3;
+    const WINNER_DEPOSIT: u128 = 313;
+
+    let (direction, source_domain, winning_mark, expiry_winning_mark, adverse_mark, seed_byte) =
+        match winner_side {
+            SideV16::Long => (1i128, 1usize, 105u64, 106u64, 95u64, 0xd1),
+            SideV16::Short => (-1i128, 0usize, 95u64, 94u64, 105u64, 0xd2),
+        };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config(
+        [seed_byte; 32],
+        MarketConfig {
+            initial_price: START_PRICE,
+            h_max: 4,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 0,
+            actor_deposits: [WINNER_DEPOSIT, 1_000, 1, 1, 1],
+            actor_token_balances: [1_000, 1_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    )?;
+    runner.run_safety_prefix(&[Action::ConfigurePermissionlessResolve {
+        stale_slots: 1_000,
+        force_close_delay_slots: 2,
+    }])?;
+    bounded_reference_top_up_backing(
+        &mut runner,
+        source_domain as u16,
+        BACKING_ATOMS,
+        EXPIRY_SLOT,
+        true,
+    )?;
+    if !runner.execute_trade(
+        TradeRoute::NoCpi,
+        WINNER,
+        COUNTERPARTY,
+        vec![(WINNING_ASSET, direction * WINNING_SIZE_Q)],
+        0,
+        0,
+        true,
+    )? || !runner.execute_trade(
+        TradeRoute::NoCpi,
+        WINNER,
+        COUNTERPARTY,
+        vec![(ADVERSE_ASSET, direction * ADVERSE_SIZE_Q)],
+        0,
+        0,
+        true,
+    )? {
+        return Err(format!(
+            "INV-086 {winner_side:?} lien-impairment seed did not open both matched legs"
+        ));
+    }
+
+    bounded_reference_push_mark(&mut runner, WINNING_ASSET as u16, 2, winning_mark)?;
+    bounded_reference_push_mark(&mut runner, ADVERSE_ASSET as u16, 2, adverse_mark)?;
+    for actor in [MARKET_CRANKER, COUNTERPARTY, WINNER] {
+        settle_lien_seed_actor_to_fixed_point(
+            &mut runner,
+            actor,
+            &format!("INV-086 {winner_side:?} pre-lien actor {actor}"),
+        )?;
+    }
+    let expected_claim = (WINNING_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
+        .checked_mul(u128::from(START_PRICE.abs_diff(winning_mark)))
+        .ok_or("INV-086 lien seed expected claim overflow")?;
+    let expected_loss = (ADVERSE_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
+        .checked_mul(u128::from(START_PRICE.abs_diff(adverse_mark)))
+        .ok_or("INV-086 lien seed expected loss overflow")?;
+    let winner = runner.env.primary_portfolio(WINNER);
+    if winner.pnl.get()
+        != i128::try_from(expected_claim).map_err(|_| "INV-086 lien seed claim exceeds i128")?
+        || winner.capital.get()
+            != WINNER_DEPOSIT
+                .checked_sub(expected_loss)
+                .ok_or("INV-086 lien seed expected capital underflow")?
+    {
+        return Err(format!(
+            "INV-086 {winner_side:?} lien seed did not preserve disjoint claim/loss attribution: capital={}, pnl={}",
+            winner.capital.get(),
+            winner.pnl.get()
+        ));
+    }
+    if !runner.execute_trade(
+        TradeRoute::NoCpi,
+        WINNER,
+        COUNTERPARTY,
+        vec![(ADVERSE_ASSET, direction * RISK_INCREASE_Q)],
+        0,
+        0,
+        true,
+    )? {
+        return Err(format!(
+            "INV-086 {winner_side:?} lien seed did not create backed risk"
+        ));
+    }
+    let (_, liened_group) = runner.env.primary_market_state();
+    let valid_lien = liened_group.source_credit[source_domain].valid_liened_backing_num;
+    if valid_lien == 0
+        || liened_group.source_backing_buckets[source_domain].status
+            != BackingBucketStatusV16::Fresh
+    {
+        return Err(format!(
+            "INV-086 {winner_side:?} seed did not create a live counterparty lien: source={:?}, bucket={:?}",
+            liened_group.source_credit[source_domain],
+            liened_group.source_backing_buckets[source_domain]
+        ));
+    }
+
+    bounded_reference_push_mark(
+        &mut runner,
+        WINNING_ASSET as u16,
+        EXPIRY_SLOT,
+        expiry_winning_mark,
+    )?;
+    bounded_reference_push_mark(&mut runner, ADVERSE_ASSET as u16, EXPIRY_SLOT, adverse_mark)?;
+    for step in 0..16 {
+        if runner.env.primary_market_state().1.source_backing_buckets[source_domain].status
+            == BackingBucketStatusV16::Impaired
+        {
+            break;
+        }
+        runner
+            .execute_crank(WINNER, HintMode::Complete, true)
+            .map_err(|error| {
+                format!(
+                    "INV-086 {winner_side:?} lien impairment step {step}: {}",
+                    error.into_message()
+                )
+            })?;
+    }
+    let (_, impaired_group) = runner.env.primary_market_state();
+    let source = impaired_group.source_credit[source_domain];
+    let bucket = impaired_group.source_backing_buckets[source_domain];
+    let account_lien = runner
+        .env
+        .primary_portfolio(WINNER)
+        .source_domains
+        .iter()
+        .find(|domain| domain.is_occupied() && domain.domain.get() as usize == source_domain)
+        .map(|domain| domain.source_lien_counterparty_backing_num.get())
+        .unwrap_or(0);
+    if bucket.status != BackingBucketStatusV16::Impaired
+        || source.valid_liened_backing_num != 0
+        || source.impaired_liened_backing_num != valid_lien
+        || bucket.impaired_liened_backing_num != valid_lien
+        || source.credit_rate_num != 0
+        || account_lien != valid_lien
+    {
+        return Err(format!(
+            "INV-086 {winner_side:?} seed did not reach exact public lien impairment: account={account_lien}, valid={valid_lien}, source={source:?}, bucket={bucket:?}"
+        ));
+    }
+    runner.assert_global_invariants()?;
+    Ok((runner, source_domain, valid_lien))
+}
+
+fn apply_bounded_lien_impairment_action(
+    runner: &mut ScenarioRunner,
+    winner_side: SideV16,
+    action: &BoundedLienImpairmentAction,
+) -> Result<(), String> {
+    const WINNER: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const ADVERSE_ASSET: usize = 1;
+    const SOURCE_CREDIT_RISK_Q: i128 = 2 * POS_SCALE as i128;
+
+    match action {
+        BoundedLienImpairmentAction::Public(action) => {
+            runner.run_safety_prefix(std::slice::from_ref(action))
+        }
+        BoundedLienImpairmentAction::SourceCreditRiskIncrease => {
+            let direction = match winner_side {
+                SideV16::Long => 1,
+                SideV16::Short => -1,
+            };
+            runner
+                .execute_trade(
+                    TradeRoute::NoCpi,
+                    WINNER,
+                    COUNTERPARTY,
+                    vec![(ADVERSE_ASSET, direction * SOURCE_CREDIT_RISK_Q)],
+                    0,
+                    0,
+                    false,
+                )
+                .map(|_| ())
+        }
+        BoundedLienImpairmentAction::MatchedRiskReduction => {
+            let current = runner.positions[WINNER][ADVERSE_ASSET];
+            runner
+                .execute_trade(
+                    TradeRoute::NoCpi,
+                    WINNER,
+                    COUNTERPARTY,
+                    vec![(ADVERSE_ASSET, -current)],
+                    0,
+                    0,
+                    current != 0,
+                )
+                .map(|_| ())
+        }
+    }
+}
+
+pub fn run_bounded_lien_impairment_reference_frontier(
+) -> Result<BoundedLienImpairmentFrontierEvidence, String> {
+    type ExactEdge = (AuthenticatedGraphState, u8, AuthenticatedGraphState);
+
+    #[derive(Default)]
+    struct LienAccumulator {
+        nodes: BTreeSet<AuthenticatedGraphState>,
+        edges: BTreeSet<ExactEdge>,
+        long_seed_world_count: usize,
+        short_seed_world_count: usize,
+        impaired_seed_world_count: usize,
+        bounded_exit_world_count: usize,
+        value_moving_exit_world_count: usize,
+        action_attempts: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
+        action_state_changes: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
+        second_position_attempts: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
+        second_position_state_changes: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
+        impaired_lien_reducing_edges: [u64; BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT],
+        coverage: Coverage,
+    }
+
+    impl LienAccumulator {
+        fn merge(&mut self, other: Self) {
+            self.nodes.extend(other.nodes);
+            self.edges.extend(other.edges);
+            self.long_seed_world_count += other.long_seed_world_count;
+            self.short_seed_world_count += other.short_seed_world_count;
+            self.impaired_seed_world_count += other.impaired_seed_world_count;
+            self.bounded_exit_world_count += other.bounded_exit_world_count;
+            self.value_moving_exit_world_count += other.value_moving_exit_world_count;
+            for (total, count) in self.action_attempts.iter_mut().zip(other.action_attempts) {
+                *total += count;
+            }
+            for (total, count) in self
+                .action_state_changes
+                .iter_mut()
+                .zip(other.action_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_attempts
+                .iter_mut()
+                .zip(other.second_position_attempts)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_state_changes
+                .iter_mut()
+                .zip(other.second_position_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .impaired_lien_reducing_edges
+                .iter_mut()
+                .zip(other.impaired_lien_reducing_edges)
+            {
+                *total += count;
+            }
+            self.coverage.merge(other.coverage);
+        }
+    }
+
+    fn replay_lien_word(
+        winner_side: SideV16,
+        word: &[(usize, BoundedLienImpairmentAction)],
+        graph: &mut LienAccumulator,
+    ) -> Result<(), String> {
+        let (mut runner, source_domain, seed_impaired_lien) =
+            build_bounded_lien_impairment_reference_seed(winner_side)?;
+        graph.long_seed_world_count += usize::from(winner_side == SideV16::Long);
+        graph.short_seed_world_count += usize::from(winner_side == SideV16::Short);
+        graph.impaired_seed_world_count += usize::from(seed_impaired_lien != 0);
+
+        let mut before_exact = runner.authenticated_graph_state();
+        let mut before_economic = runner.bounded_reference_node()?;
+        graph.nodes.insert(before_exact.clone());
+        for (position, (action_index, action)) in word.iter().enumerate() {
+            let impaired_before = runner.env.primary_market_state().1.source_credit[source_domain]
+                .impaired_liened_backing_num;
+            apply_bounded_lien_impairment_action(&mut runner, winner_side, action).map_err(
+                |error| {
+                    format!(
+                        "INV-086 {winner_side:?} lien-impairment word {word:?} failed at position {position}: {error}"
+                    )
+                },
+            )?;
+            let after_economic = runner.bounded_reference_node()?;
+            let after_exact = runner.authenticated_graph_state();
+            bounded_source_credit_transition_evidence(
+                &format!("INV-030 {winner_side:?} impaired-lien edge action={action_index}"),
+                &before_economic,
+                &after_economic,
+            )?;
+            let impaired_after = runner.env.primary_market_state().1.source_credit[source_domain]
+                .impaired_liened_backing_num;
+            if impaired_after > impaired_before {
+                return Err(format!(
+                    "INV-031 {winner_side:?} action {action_index} increased already-impaired lien {impaired_before}->{impaired_after}"
+                ));
+            }
+            graph.action_attempts[*action_index] += 1;
+            if after_economic != before_economic {
+                graph.action_state_changes[*action_index] += 1;
+                if position == 1 {
+                    graph.second_position_state_changes[*action_index] += 1;
+                }
+            }
+            if impaired_after < impaired_before {
+                graph.impaired_lien_reducing_edges[*action_index] += 1;
+            }
+            if position == 1 {
+                graph.second_position_attempts[*action_index] += 1;
+            }
+            graph.nodes.insert(after_exact.clone());
+            graph
+                .edges
+                .insert((before_exact, *action_index as u8, after_exact.clone()));
+            before_exact = after_exact;
+            before_economic = after_economic;
+        }
+
+        let destination_total_before =
+            (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+                total
+                    .checked_add(u128::from(
+                        runner
+                            .env
+                            .token_amount(runner.env.actors[actor].destination_token),
+                    ))
+                    .ok_or("INV-073 impaired-lien pre-exit destination total overflow")
+            })?;
+        runner.run_direct_user_exit_campaign().map_err(|error| {
+            let error_prefix = error.chars().take(700).collect::<String>();
+            format!(
+                "INV-073 {winner_side:?} impaired-lien word {word:?} had no bounded owner exit: {error_prefix}"
+            )
+        })?;
+        graph.bounded_exit_world_count += 1;
+        let destination_total = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+            total
+                .checked_add(u128::from(
+                    runner
+                        .env
+                        .token_amount(runner.env.actors[actor].destination_token),
+                ))
+                .ok_or("INV-073 impaired-lien destination total overflow")
+        })?;
+        if destination_total <= destination_total_before {
+            return Err(format!(
+                "INV-073 {winner_side:?} impaired-lien word {word:?} exited without increasing funded user destinations: {destination_total_before}->{destination_total}"
+            ));
+        }
+        graph.value_moving_exit_world_count += 1;
+        let (_, terminal_group) = runner.env.primary_market_state();
+        if terminal_group.source_credit[source_domain].valid_liened_backing_num != 0
+            || terminal_group.source_credit[source_domain].impaired_liened_backing_num != 0
+        {
+            return Err(format!(
+                "INV-067 {winner_side:?} impaired-lien word {word:?} left a terminal source lien: {:?}",
+                terminal_group.source_credit[source_domain]
+            ));
+        }
+        runner.assert_global_invariants()?;
+        graph.coverage.merge(runner.coverage);
+        Ok(())
+    }
+
+    let mut jobs = Vec::new();
+    for winner_side in [SideV16::Long, SideV16::Short] {
+        let source_domain = match winner_side {
+            SideV16::Long => 1,
+            SideV16::Short => 0,
+        };
+        let actions = bounded_lien_impairment_actions(winner_side, source_domain);
+        jobs.push((winner_side, Vec::new()));
+        for (first_index, first) in actions.iter().enumerate() {
+            jobs.push((winner_side, vec![(first_index, first.clone())]));
+        }
+        for (first_index, first) in actions.iter().enumerate() {
+            for (second_index, second) in actions.iter().enumerate() {
+                jobs.push((
+                    winner_side,
+                    vec![(first_index, first.clone()), (second_index, second.clone())],
+                ));
+            }
+        }
+    }
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(jobs.len().max(1));
+    let chunk_size = jobs.len().div_ceil(worker_count);
+    let graph =
+        std::thread::scope(|scope| {
+            let handles = jobs
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || -> Result<LienAccumulator, String> {
+                        let mut graph = LienAccumulator::default();
+                        for (winner_side, word) in chunk {
+                            replay_lien_word(*winner_side, word, &mut graph)?;
+                        }
+                        Ok(graph)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut graph = LienAccumulator::default();
+            for handle in handles {
+                graph.merge(handle.join().map_err(|_| {
+                    "INV-086 lien-impairment frontier worker panicked".to_string()
+                })??);
+            }
+            Ok::<_, String>(graph)
+        })?;
+    let transition_count = jobs.iter().map(|(_, word)| word.len()).sum();
+
+    Ok(BoundedLienImpairmentFrontierEvidence {
+        word_count: jobs.len(),
+        transition_count,
+        unique_node_count: graph.nodes.len(),
+        unique_edge_count: graph.edges.len(),
+        long_seed_world_count: graph.long_seed_world_count,
+        short_seed_world_count: graph.short_seed_world_count,
+        impaired_seed_world_count: graph.impaired_seed_world_count,
+        bounded_exit_world_count: graph.bounded_exit_world_count,
+        value_moving_exit_world_count: graph.value_moving_exit_world_count,
+        action_attempts: graph.action_attempts,
+        action_state_changes: graph.action_state_changes,
+        second_position_attempts: graph.second_position_attempts,
+        second_position_state_changes: graph.second_position_state_changes,
+        impaired_lien_reducing_edges: graph.impaired_lien_reducing_edges,
         coverage: graph.coverage,
     })
 }
