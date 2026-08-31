@@ -27,8 +27,16 @@
 //! claimant orders and all four insertion points of an expiring-backing release, independently
 //! checks the three full-width payout remainders, and requires claimant-local payouts and terminal
 //! custody to be identical in all 24 schedules.
+//! A fifth matrix repeats those 24 schedules with a nonzero pre-existing insurance reserve. It
+//! requires identical receipt entitlements, exact reserve framing through every claimant order,
+//! atomic rejection at every portfolio-dematerialization prefix, an exact reserve drain only
+//! after the final funded account closes, and bounded expired-backing cleanup through the
+//! `CloseSlab` tombstone.
 
-use super::inv_052_split_merge_invariance::run_three_claimant_resolved_claim_order;
+use super::inv_052_split_merge_invariance::{
+    run_three_claimant_resolved_claim_order,
+    run_three_claimant_resolved_claim_order_with_prior_insurance,
+};
 use crate::support::fuzz_model::{
     assert_public_encumbrance_census, assert_public_stock_census,
     verify_recovery_to_resolved_receipt_order_matrix,
@@ -312,6 +320,74 @@ fn v16_program_three_partial_receipts_exhaust_claim_and_release_orders() {
     }
     assert_eq!(world_count, 24);
     assert_eq!(nonzero_remainder_worlds, world_count);
+}
+
+#[test]
+fn v16_program_prior_insurance_frames_all_partial_receipt_orders() {
+    const PRIOR_INSURANCE_ATOMS: u128 = 37;
+    const CLAIMANT_ORDERS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+
+    let uninsured = run_three_claimant_resolved_claim_order([0, 1, 2], 0)
+        .expect("uninsured three-claimant control");
+    let mut insured_baseline = None;
+    let mut world_count = 0usize;
+    for order in CLAIMANT_ORDERS {
+        for release_after_claims in 0..=order.len() {
+            let outcome = run_three_claimant_resolved_claim_order_with_prior_insurance(
+                order,
+                release_after_claims,
+                PRIOR_INSURANCE_ATOMS,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "prior-insurance order {order:?}, release after {release_after_claims}: {error}"
+                )
+            });
+            world_count += 1;
+
+            assert_eq!(outcome.concurrent_receipts, 3);
+            assert_eq!(outcome.claimant_payouts, uninsured.claimant_payouts);
+            assert_eq!(
+                outcome.claimant_receipt_faces,
+                uninsured.claimant_receipt_faces
+            );
+            assert_eq!(
+                outcome.claimant_topup_remainders,
+                uninsured.claimant_topup_remainders
+            );
+            assert_eq!(outcome.prior_insurance_atoms, PRIOR_INSURANCE_ATOMS);
+            assert_eq!(
+                outcome.pre_insurance_drain_engine_vault,
+                uninsured.final_engine_vault + PRIOR_INSURANCE_ATOMS
+            );
+            assert_eq!(outcome.terminal_insurance_withdrawn, PRIOR_INSURANCE_ATOMS);
+            assert_eq!(outcome.final_insurance, 0);
+            assert_eq!(outcome.premature_insurance_withdrawals_rejected, 8);
+            assert!(outcome.terminal_slab_closed);
+            assert_eq!(outcome.final_engine_vault, uninsured.final_engine_vault);
+            assert_eq!(outcome.final_engine_vault, outcome.final_spl_vault);
+            assert_eq!(outcome.final_claim_bound_num, 0);
+            assert!(outcome.max_compute_units < TX_CU_LIMIT);
+
+            let economics = outcome.normalized_economics();
+            if let Some(expected) = insured_baseline.as_ref() {
+                assert_eq!(
+                    &economics, expected,
+                    "prior insurance changed order-local economics: order={order:?}, release_after={release_after_claims}"
+                );
+            } else {
+                insured_baseline = Some(economics);
+            }
+        }
+    }
+    assert_eq!(world_count, 24);
 }
 
 #[test]

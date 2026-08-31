@@ -121,9 +121,15 @@
 
 use super::*;
 use crate::support::{
-    fuzz_model::{assert_public_encumbrance_census, execute_trade_route, TradeRoute},
+    fuzz_model::{
+        assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
+        TradeRoute,
+    },
     reference_math,
-    v16_svm::{MarketConfig, TxSuccess, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
+    v16_svm::{
+        assert_closed_market_tombstone, MarketConfig, TxSuccess, V16Svm, PRIMARY_ACTOR_COUNT,
+        TX_CU_LIMIT,
+    },
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
@@ -245,10 +251,16 @@ pub(super) struct ResolvedClaimPartitionOutcome {
     pub(super) destination_substitution_rejected: bool,
     pub(super) concurrent_receipt_framed: bool,
     pub(super) locality_claim_payout: u128,
-    claimant_payouts: Vec<u128>,
+    pub(super) claimant_payouts: Vec<u128>,
     pub(super) claimant_receipt_faces: Vec<u128>,
     pub(super) claimant_topup_remainders: Vec<u128>,
     pub(super) scheduled_pre_release_claims: usize,
+    pub(super) final_insurance: u128,
+    pub(super) prior_insurance_atoms: u128,
+    pub(super) pre_insurance_drain_engine_vault: u128,
+    pub(super) terminal_insurance_withdrawn: u128,
+    pub(super) premature_insurance_withdrawals_rejected: usize,
+    pub(super) terminal_slab_closed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -267,6 +279,12 @@ pub(super) struct ResolvedClaimPartitionEconomics {
     final_engine_vault: u128,
     final_spl_vault: u128,
     final_claim_bound_num: u128,
+    final_insurance: u128,
+    prior_insurance_atoms: u128,
+    pre_insurance_drain_engine_vault: u128,
+    terminal_insurance_withdrawn: u128,
+    premature_insurance_withdrawals_rejected: usize,
+    terminal_slab_closed: bool,
 }
 
 impl ResolvedClaimPartitionOutcome {
@@ -286,6 +304,12 @@ impl ResolvedClaimPartitionOutcome {
             final_engine_vault: self.final_engine_vault,
             final_spl_vault: self.final_spl_vault,
             final_claim_bound_num: self.final_claim_bound_num,
+            final_insurance: self.final_insurance,
+            prior_insurance_atoms: self.prior_insurance_atoms,
+            pre_insurance_drain_engine_vault: self.pre_insurance_drain_engine_vault,
+            terminal_insurance_withdrawn: self.terminal_insurance_withdrawn,
+            premature_insurance_withdrawals_rejected: self.premature_insurance_withdrawals_rejected,
+            terminal_slab_closed: self.terminal_slab_closed,
         }
     }
 }
@@ -1564,6 +1588,7 @@ pub(super) fn run_resolved_claim_partition(
         None,
         0,
         false,
+        0,
     )
 }
 
@@ -1578,6 +1603,7 @@ fn run_three_way_resolved_claim_partition(
         None,
         0,
         false,
+        0,
     )
 }
 
@@ -1592,6 +1618,26 @@ pub(super) fn run_three_claimant_resolved_claim_order(
         Some(claimant_order.to_vec()),
         release_after_claims,
         true,
+        0,
+    )
+}
+
+pub(super) fn run_three_claimant_resolved_claim_order_with_prior_insurance(
+    claimant_order: [usize; 3],
+    release_after_claims: usize,
+    prior_insurance_atoms: u128,
+) -> Result<ResolvedClaimPartitionOutcome, String> {
+    if prior_insurance_atoms == 0 {
+        return Err("prior-insurance composition requires a nonzero reserve".to_string());
+    }
+    run_resolved_claim_partition_schedule(
+        ResolvedClaimPartition::ThreeWay,
+        TradeRoute::NoCpi,
+        TradeRoute::BatchCpi,
+        Some(claimant_order.to_vec()),
+        release_after_claims,
+        true,
+        prior_insurance_atoms,
     )
 }
 
@@ -1602,6 +1648,7 @@ fn run_resolved_claim_partition_schedule(
     claimant_order: Option<Vec<usize>>,
     release_after_claims: usize,
     release_at_expiry: bool,
+    prior_insurance_atoms: u128,
 ) -> Result<ResolvedClaimPartitionOutcome, String> {
     const SOURCE_DOMAIN: u16 = 1;
     const BACKED_DOMAIN: u16 = 3;
@@ -1707,9 +1754,16 @@ fn run_resolved_claim_partition_schedule(
         .iter()
         .map(|actor| u128::from(env.token_amount(actor.destination_token)))
         .collect::<Vec<_>>();
+    let provider_destination_before = u128::from(env.token_amount(env.provider_destination_token));
     let mut max_compute_units = 0u64;
     env.begin_public_trace();
 
+    if prior_insurance_atoms != 0 {
+        let insurance = env
+            .top_up_insurance(prior_insurance_atoms)
+            .map_err(|error| format!("fund prior terminal insurance: {error}"))?;
+        max_compute_units = max_compute_units.max(insurance.compute_units);
+    }
     let top_up = env
         .top_up_backing_bucket(SOURCE_DOMAIN, JUNIOR_BACKING_ATOMS, 12)
         .map_err(|error| format!("fund resolved-claim rounding control: {error}"))?;
@@ -2174,21 +2228,110 @@ fn run_resolved_claim_partition_schedule(
         .copied()
         .try_fold(0u128, |sum, payout| sum.checked_add(payout))
         .ok_or_else(|| "resolved-claim payout total overflow".to_string())?;
+    let pre_insurance_drain_engine_vault = env.primary_market_state().1.vault;
+    let mut terminal_insurance_withdrawn = 0u128;
+    let mut premature_insurance_withdrawals_rejected = 0usize;
+    if prior_insurance_atoms != 0 {
+        let before_dematerialization = env.primary_market_state().1;
+        if before_dematerialization.insurance != prior_insurance_atoms {
+            return Err(format!(
+                "prior insurance changed while claimants settled: expected={prior_insurance_atoms}, actual={}",
+                before_dematerialization.insurance
+            ));
+        }
+        for actor in terminal_order.iter().copied() {
+            let frame_before = resolved_claim_locality_snapshot(&env);
+            if env
+                .withdraw_terminal_insurance_as_admin(prior_insurance_atoms)
+                .is_ok()
+                || resolved_claim_locality_snapshot(&env) != frame_before
+            {
+                return Err(format!(
+                    "prior insurance drained or mutated state before portfolio {actor} dematerialized"
+                ));
+            }
+            premature_insurance_withdrawals_rejected += 1;
+            let close = env
+                .close_primary_portfolio(actor)
+                .map_err(|error| format!("close prior-insurance portfolio {actor}: {error}"))?;
+            max_compute_units = max_compute_units.max(close.compute_units);
+        }
+
+        let ready = env.primary_market_state().1;
+        if ready.c_tot != 0
+            || ready.materialized_portfolio_count != 0
+            || ready.insurance != prior_insurance_atoms
+        {
+            return Err(format!(
+                "prior-insurance world did not reach the exact terminal withdrawal gate: {ready:?}"
+            ));
+        }
+        let spl_vault_before = env.token_amount(env.vault);
+        let provider_before = env.token_amount(env.provider_destination_token);
+        let withdraw = env
+            .withdraw_terminal_insurance_as_admin(prior_insurance_atoms)
+            .map_err(|error| format!("drain terminal prior insurance: {error}"))?;
+        max_compute_units = max_compute_units.max(withdraw.compute_units);
+        let amount_u64 = u64::try_from(prior_insurance_atoms)
+            .map_err(|_| "prior insurance does not fit SPL amount".to_string())?;
+        let drained = env.primary_market_state().1;
+        if ready.insurance.checked_sub(drained.insurance) != Some(prior_insurance_atoms)
+            || ready.vault.checked_sub(drained.vault) != Some(prior_insurance_atoms)
+            || spl_vault_before.checked_sub(env.token_amount(env.vault)) != Some(amount_u64)
+            || env
+                .token_amount(env.provider_destination_token)
+                .checked_sub(provider_before)
+                != Some(amount_u64)
+            || u128::from(env.token_amount(env.provider_destination_token))
+                != provider_destination_before + prior_insurance_atoms
+        {
+            return Err(format!(
+                "terminal prior-insurance drain escaped exact custody: before={ready:?}, after={drained:?}"
+            ));
+        }
+        terminal_insurance_withdrawn = prior_insurance_atoms;
+        assert_public_stock_census("INV-066 after composed prior-insurance drain", &env)?;
+        assert_public_encumbrance_census("INV-066 after composed prior-insurance drain", &env)?;
+    }
     let terminal = env.primary_market_state().1;
+    let final_spl_vault = u128::from(env.token_amount(env.vault));
     if env.token_supply_observed() != supply_before
-        || terminal.vault != u128::from(env.token_amount(env.vault))
+        || terminal.vault != final_spl_vault
         || max_compute_units >= TX_CU_LIMIT
     {
         return Err(format!(
             "resolved-claim partition escaped custody/CU frame: terminal={terminal:?}, CU={max_compute_units}"
         ));
     }
+    let mut terminal_slab_closed = false;
+    if prior_insurance_atoms != 0 {
+        const MAX_TERMINAL_SLAB_STEPS: usize = 16;
+        for step in 0..MAX_TERMINAL_SLAB_STEPS {
+            let close = env
+                .close_primary_slab()
+                .map_err(|error| format!("terminal prior-insurance slab step {step}: {error}"))?;
+            max_compute_units = max_compute_units.max(close.compute_units);
+            let market = env
+                .svm
+                .get_account(&env.market)
+                .ok_or_else(|| format!("terminal slab market missing at step {step}"))?;
+            if market.data.len() == percolator_prog::constants::HEADER_LEN {
+                assert_closed_market_tombstone(&market);
+                terminal_slab_closed = true;
+                break;
+            }
+        }
+        if !terminal_slab_closed {
+            return Err("prior-insurance world did not reach CloseSlab in 16 steps".to_string());
+        }
+    }
     let trace = env.finish_public_trace();
     trace
         .validate_public_execution()
         .expect("resolved claim trace must be public and rollback-exact");
     let rejected_steps = trace.steps.iter().filter(|step| !step.succeeded).count();
-    let expected_rejected_steps = usize::from(winners.len() > 1 && !release_at_expiry);
+    let expected_rejected_steps = usize::from(winners.len() > 1 && !release_at_expiry)
+        + premature_insurance_withdrawals_rejected;
     if trace.out_of_band_economic_mutations != 0 || rejected_steps != expected_rejected_steps {
         return Err(format!(
             "resolved-claim partition had unexpected public failures or out-of-band mutation: {trace:?}"
@@ -2207,7 +2350,7 @@ fn run_resolved_claim_partition_schedule(
         unrelated_payout,
         total_payout,
         final_engine_vault: terminal.vault,
-        final_spl_vault: u128::from(env.token_amount(env.vault)),
+        final_spl_vault,
         final_claim_bound_num: terminal.source_claim_bound_total_num,
         max_compute_units,
         public_steps: trace.steps.len(),
@@ -2219,6 +2362,12 @@ fn run_resolved_claim_partition_schedule(
         claimant_receipt_faces,
         claimant_topup_remainders,
         scheduled_pre_release_claims: release_after_claims,
+        final_insurance: terminal.insurance,
+        prior_insurance_atoms,
+        pre_insurance_drain_engine_vault,
+        terminal_insurance_withdrawn,
+        premature_insurance_withdrawals_rejected,
+        terminal_slab_closed,
     })
 }
 
