@@ -2730,6 +2730,24 @@ impl ScenarioRunner {
         self.assert_global_invariants()
     }
 
+    fn try_permissionless_resolution_exit(&mut self) -> Result<bool, String> {
+        let (config, group) = self.env.primary_market_state();
+        if group.mode != MarketModeV16::Live || config.permissionless_resolve_stale_slots == 0 {
+            return Ok(false);
+        }
+        let maturity_slot = config
+            .last_good_oracle_slot
+            .checked_add(config.permissionless_resolve_stale_slots)
+            .ok_or("permissionless exit-resolution maturity overflow")?;
+        let resolve_slot = self.env.current_slot().max(maturity_slot);
+        self.execute_permissionless_stale_resolution(resolve_slot)?;
+        if self.env.primary_market_state().1.mode != MarketModeV16::Resolved {
+            return Ok(false);
+        }
+        self.run_terminal_payout_campaign()?;
+        Ok(true)
+    }
+
     fn run_permissionless_account_progress_campaign(&mut self) -> Result<(), String> {
         for _ in 0..self.liveness_limit {
             self.advance_liveness_clock_if_needed()?;
@@ -2793,7 +2811,7 @@ impl ScenarioRunner {
         if self.env.primary_market_state().1.mode == MarketModeV16::Resolved {
             self.run_terminal_payout_campaign()?;
         } else {
-            for user in 0..PRIMARY_ACTOR_COUNT {
+            'owner_exit: for user in 0..PRIMARY_ACTOR_COUNT {
                 for asset in 0..ASSET_COUNT {
                     if self.positions[user][asset] == 0 {
                         continue;
@@ -2808,6 +2826,9 @@ impl ScenarioRunner {
                             })?;
                     }
                     if !self.try_normal_exit(user, asset)? {
+                        if self.try_permissionless_resolution_exit()? {
+                            break 'owner_exit;
+                        }
                         let size = self.positions[user][asset];
                         let legs = vec![(asset, -size)];
                         let diagnostics = self
@@ -5381,22 +5402,23 @@ impl ScenarioRunner {
             .insert((before_class, after_class));
     }
 
-    fn selected_observation(&self, actor: usize) -> Result<Vec<CrankObservationHint>, String> {
+    fn selected_observation(&self, _actor: usize) -> Result<Vec<CrankObservationHint>, String> {
         let (_, group) = self.env.primary_market_state();
-        let rank = self.progress_rank(actor)?;
-        if rank.close_work != 0 || rank.obligation_work != 0 || rank.b_work != 0 {
-            return Ok(vec![]);
-        }
         Ok((0..ASSET_COUNT)
             .filter(|asset| {
                 let profile = self.env.primary_profile(*asset);
                 let engine_asset = &group.assets[*asset];
+                let accrual_allowed = matches!(
+                    engine_asset.lifecycle,
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                );
                 let has_price_delta = engine_asset.raw_oracle_target_price
                     != engine_asset.effective_price
                     || profile.mark_ewma_e6 != engine_asset.effective_price;
                 let has_loss_currentness_lag = asset_contributes_to_loss_stale(engine_asset)
                     && self.env.current_slot() > engine_asset.slot_last;
-                (has_price_delta || has_loss_currentness_lag)
+                accrual_allowed
+                    && (has_price_delta || has_loss_currentness_lag)
                     && self.env.current_slot() > engine_asset.slot_last
             })
             .map(|asset| CrankObservationHint {
@@ -5916,13 +5938,20 @@ impl ScenarioRunner {
             if !before.actionable() || (has_account_work && !before.account_actionable()) {
                 continue;
             }
-            match self.execute_crank(actor, HintMode::Complete, true) {
-                Ok(()) => return Ok(()),
-                Err(CrankFailure::Rejected(error)) => {
-                    failures.push(format!("actor {actor} rank {before:?}: {error}"))
-                }
-                Err(CrankFailure::Invariant(error)) => {
-                    return Err(format!("actor {actor} rank {before:?}: {error}"))
+            let hint_modes = if before.account_actionable() {
+                &[HintMode::Empty, HintMode::Complete][..]
+            } else {
+                &[HintMode::Complete][..]
+            };
+            for hint_mode in hint_modes {
+                match self.execute_crank(actor, *hint_mode, true) {
+                    Ok(()) => return Ok(()),
+                    Err(CrankFailure::Rejected(error)) => failures.push(format!(
+                        "actor {actor} rank {before:?} hints {hint_mode:?}: {error}"
+                    )),
+                    Err(CrankFailure::Invariant(error)) => {
+                        return Err(format!("actor {actor} rank {before:?}: {error}"))
+                    }
                 }
             }
         }
@@ -6061,14 +6090,6 @@ impl ScenarioRunner {
     }
 
     fn advance_liveness_clock_if_needed(&mut self) -> Result<(), String> {
-        let has_account_work = (0..PRIMARY_ACTOR_COUNT)
-            .map(|actor| self.progress_rank(actor))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .any(ProgressRank::account_actionable);
-        if has_account_work {
-            return Ok(());
-        }
         let (_, group) = self.env.primary_market_state();
         let needs_time = group.assets.iter().take(ASSET_COUNT).any(|asset| {
             asset.raw_oracle_target_price != asset.effective_price
@@ -11040,6 +11061,7 @@ pub fn run_bounded_public_liveness_graph() -> Result<BoundedLivenessGraphEvidenc
 
 const BOUNDED_REFERENCE_ACTION_COUNT: usize = 13;
 const BOUNDED_RECOVERY_ACTION_COUNT: usize = 13;
+const BOUNDED_B_ACTION_COUNT: usize = 13;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedCloseProgressNode {
@@ -11326,6 +11348,25 @@ pub struct BoundedRecoveryFrontierEvidence {
     pub action_state_changes: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
     pub second_position_attempts: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
     pub second_position_state_changes: [u64; BOUNDED_RECOVERY_ACTION_COUNT],
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedBFrontierEvidence {
+    pub word_count: usize,
+    pub transition_count: usize,
+    pub unique_node_count: usize,
+    pub unique_edge_count: usize,
+    pub long_seed_world_count: usize,
+    pub short_seed_world_count: usize,
+    pub explicit_b_seed_world_count: usize,
+    pub bounded_exit_world_count: usize,
+    pub value_moving_exit_world_count: usize,
+    pub action_attempts: [u64; BOUNDED_B_ACTION_COUNT],
+    pub action_state_changes: [u64; BOUNDED_B_ACTION_COUNT],
+    pub second_position_attempts: [u64; BOUNDED_B_ACTION_COUNT],
+    pub second_position_state_changes: [u64; BOUNDED_B_ACTION_COUNT],
+    pub b_rank_reducing_edges: [u64; BOUNDED_B_ACTION_COUNT],
     pub coverage: Coverage,
 }
 
@@ -11661,6 +11702,62 @@ fn bounded_recovery_actions() -> [Action; BOUNDED_RECOVERY_ACTION_COUNT] {
         Action::RebalanceReduce { actor: 1, asset: 0 },
         Action::ResolveMarket,
         Action::CloseResolved { actor: 0 },
+    ]
+}
+
+fn bounded_b_actions() -> [Action; BOUNDED_B_ACTION_COUNT] {
+    [
+        Action::Crank {
+            actor: 2,
+            hints: HintMode::Complete,
+        },
+        Action::Crank {
+            actor: 2,
+            hints: HintMode::Empty,
+        },
+        Action::Crank {
+            actor: 1,
+            hints: HintMode::Complete,
+        },
+        Action::Crank {
+            actor: EXIT_MAKER_INDEX as u8,
+            hints: HintMode::Complete,
+        },
+        Action::Deposit {
+            actor: 2,
+            amount: 7,
+        },
+        Action::Withdraw {
+            actor: 2,
+            amount: 1,
+        },
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 2,
+            maker: 3,
+            asset: 0,
+            units: 1,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: true,
+        },
+        Action::SetMatcherConfig {
+            actor: 3,
+            enabled: false,
+            trade_fee_cap_bps: 0,
+        },
+        Action::RebalanceReduce { actor: 2, asset: 0 },
+        Action::PushMark {
+            asset: 0,
+            dt: 1,
+            move_bps: 100,
+        },
+        Action::ShutdownAsset { asset: 0, dt: 1 },
+        Action::ConfigurePermissionlessResolve {
+            stale_slots: 1,
+            force_close_delay_slots: 2,
+        },
+        Action::ResolveStalePermissionless { dt: 2 },
     ]
 }
 
@@ -15935,6 +16032,338 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
         action_state_changes: graph.action_state_changes,
         second_position_attempts: graph.second_position_attempts,
         second_position_state_changes: graph.second_position_state_changes,
+        coverage: graph.coverage,
+    })
+}
+
+fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunner, u128), String> {
+    const CLOSE_WINNER: usize = 0;
+    const CLOSE_LOSER: usize = 1;
+    const B_OWNER: usize = 2;
+    const B_PEER: usize = 3;
+    const ASSET: usize = 0;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 161_600, 2_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let seed_byte = match winner_side {
+        SideV16::Long => 0xb1,
+        SideV16::Short => 0xb2,
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
+
+    let independent_q = match winner_side {
+        SideV16::Long => POS_SCALE as i128 / 2,
+        SideV16::Short => -(POS_SCALE as i128 / 2),
+    };
+    if !runner.execute_trade(
+        TradeRoute::NoCpi,
+        B_OWNER,
+        B_PEER,
+        vec![(ASSET, independent_q)],
+        0,
+        0,
+        true,
+    )? {
+        return Err(format!(
+            "INV-086 {winner_side:?} B seed independent cohort trade did not land"
+        ));
+    }
+    create_public_cancellable_close_via_route_and_side(
+        &mut runner,
+        CLOSE_WINNER as u8,
+        CLOSE_LOSER as u8,
+        ASSET as u8,
+        EXIT_MAKER_INDEX as u8,
+        TradeRoute::NoCpi,
+        winner_side,
+    )?;
+
+    for step in 0..32 {
+        let close = runner
+            .env
+            .primary_portfolio(CLOSE_LOSER)
+            .close_progress
+            .try_to_runtime()
+            .map_err(|error| {
+                format!("INV-086 {winner_side:?} B seed close decode at step {step}: {error:?}")
+            })?;
+        if !close.active || close.finalized || close.residual_remaining == 0 {
+            break;
+        }
+        runner
+            .execute_crank(CLOSE_LOSER, HintMode::Complete, true)
+            .map_err(|error| {
+                format!(
+                    "INV-086 {winner_side:?} B seed close continuation {step}: {}",
+                    error.into_message()
+                )
+            })?;
+    }
+    let close_rank = runner.progress_rank(CLOSE_LOSER)?;
+    if close_rank.close_work != 0 {
+        return Err(format!(
+            "INV-086 {winner_side:?} B seed retained higher-priority close work: {close_rank:?}"
+        ));
+    }
+
+    let before_account = runner.env.primary_portfolio(B_OWNER);
+    let before_leg = decoded_legs(&before_account)
+        .into_iter()
+        .find(|leg| leg.active && leg.asset_index as usize == ASSET)
+        .ok_or_else(|| format!("INV-086 {winner_side:?} B seed lost independent cohort leg"))?;
+    if before_leg.side != winner_side {
+        return Err(format!(
+            "INV-086 {winner_side:?} B seed cohort changed side: {before_leg:?}"
+        ));
+    }
+    let (_, group_before) = runner.env.primary_market_state();
+    let target_before = match winner_side {
+        SideV16::Long => group_before.assets[ASSET].b_long_num,
+        SideV16::Short => group_before.assets[ASSET].b_short_num,
+    };
+    if target_before <= before_leg.b_snap {
+        return Err(format!(
+            "INV-086 {winner_side:?} public close did not book B against the independent cohort: {} <= {}",
+            target_before, before_leg.b_snap
+        ));
+    }
+
+    let rank = runner.progress_rank(B_OWNER)?;
+    if rank.b_work == 0 || rank.dispatch_priority() != 1 {
+        return Err(format!(
+            "INV-086 {winner_side:?} B seed did not expose B as the account's highest-priority continuation: target={target_before}, leg={before_leg:?}, rank={rank:?}"
+        ));
+    }
+    runner.assert_global_invariants()?;
+    Ok((runner, target_before - before_leg.b_snap))
+}
+
+pub fn run_bounded_b_reference_frontier() -> Result<BoundedBFrontierEvidence, String> {
+    const B_OWNER: usize = 2;
+    type ExactEdge = (AuthenticatedGraphState, u8, AuthenticatedGraphState);
+
+    #[derive(Default)]
+    struct BAccumulator {
+        nodes: BTreeSet<AuthenticatedGraphState>,
+        edges: BTreeSet<ExactEdge>,
+        long_seed_world_count: usize,
+        short_seed_world_count: usize,
+        explicit_b_seed_world_count: usize,
+        bounded_exit_world_count: usize,
+        value_moving_exit_world_count: usize,
+        action_attempts: [u64; BOUNDED_B_ACTION_COUNT],
+        action_state_changes: [u64; BOUNDED_B_ACTION_COUNT],
+        second_position_attempts: [u64; BOUNDED_B_ACTION_COUNT],
+        second_position_state_changes: [u64; BOUNDED_B_ACTION_COUNT],
+        b_rank_reducing_edges: [u64; BOUNDED_B_ACTION_COUNT],
+        coverage: Coverage,
+    }
+
+    impl BAccumulator {
+        fn merge(&mut self, other: Self) {
+            self.nodes.extend(other.nodes);
+            self.edges.extend(other.edges);
+            self.long_seed_world_count += other.long_seed_world_count;
+            self.short_seed_world_count += other.short_seed_world_count;
+            self.explicit_b_seed_world_count += other.explicit_b_seed_world_count;
+            self.bounded_exit_world_count += other.bounded_exit_world_count;
+            self.value_moving_exit_world_count += other.value_moving_exit_world_count;
+            for (total, count) in self.action_attempts.iter_mut().zip(other.action_attempts) {
+                *total += count;
+            }
+            for (total, count) in self
+                .action_state_changes
+                .iter_mut()
+                .zip(other.action_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_attempts
+                .iter_mut()
+                .zip(other.second_position_attempts)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_state_changes
+                .iter_mut()
+                .zip(other.second_position_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .b_rank_reducing_edges
+                .iter_mut()
+                .zip(other.b_rank_reducing_edges)
+            {
+                *total += count;
+            }
+            self.coverage.merge(other.coverage);
+        }
+    }
+
+    fn replay_b_word(
+        winner_side: SideV16,
+        word: &[(usize, Action)],
+        graph: &mut BAccumulator,
+    ) -> Result<(), String> {
+        let (mut runner, seed_b_gap) = build_bounded_b_reference_seed(winner_side)?;
+        graph.long_seed_world_count += usize::from(winner_side == SideV16::Long);
+        graph.short_seed_world_count += usize::from(winner_side == SideV16::Short);
+        graph.explicit_b_seed_world_count += usize::from(seed_b_gap != 0);
+
+        let mut before_exact = runner.authenticated_graph_state();
+        let mut before_economic = runner.bounded_reference_node()?;
+        graph.nodes.insert(before_exact.clone());
+        for (position, (action_index, action)) in word.iter().enumerate() {
+            let before_rank = runner.progress_rank(B_OWNER)?;
+            runner
+                .run_safety_prefix(std::slice::from_ref(action))
+                .map_err(|error| {
+                    format!(
+                        "INV-086 {winner_side:?} B word {word:?} failed at position {position}: {error}"
+                    )
+                })?;
+            let after_rank = runner.progress_rank(B_OWNER)?;
+            let after_economic = runner.bounded_reference_node()?;
+            let after_exact = runner.authenticated_graph_state();
+            bounded_source_credit_transition_evidence(
+                &format!("INV-030 {winner_side:?} B edge action={action_index}"),
+                &before_economic,
+                &after_economic,
+            )?;
+            graph.action_attempts[*action_index] += 1;
+            if after_economic != before_economic {
+                graph.action_state_changes[*action_index] += 1;
+                if position == 1 {
+                    graph.second_position_state_changes[*action_index] += 1;
+                }
+            }
+            if after_rank.b_work < before_rank.b_work {
+                graph.b_rank_reducing_edges[*action_index] += 1;
+            }
+            if position == 1 {
+                graph.second_position_attempts[*action_index] += 1;
+            }
+            graph.nodes.insert(after_exact.clone());
+            graph
+                .edges
+                .insert((before_exact, *action_index as u8, after_exact.clone()));
+            before_exact = after_exact;
+            before_economic = after_economic;
+        }
+
+        let destination_total_before =
+            (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+                total
+                    .checked_add(u128::from(
+                        runner
+                            .env
+                            .token_amount(runner.env.actors[actor].destination_token),
+                    ))
+                    .ok_or("INV-073 B frontier pre-exit destination total overflow")
+            })?;
+        runner.run_direct_user_exit_campaign().map_err(|error| {
+            let error_prefix = error.chars().take(600).collect::<String>();
+            format!(
+                "INV-073 {winner_side:?} B word {word:?} had no bounded owner exit: {error_prefix}"
+            )
+        })?;
+        graph.bounded_exit_world_count += 1;
+        let destination_total = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+            total
+                .checked_add(u128::from(
+                    runner
+                        .env
+                        .token_amount(runner.env.actors[actor].destination_token),
+                ))
+                .ok_or("INV-073 B frontier destination total overflow")
+        })?;
+        if destination_total <= destination_total_before {
+            return Err(format!(
+                "INV-073 {winner_side:?} B word {word:?} exited without increasing funded user destinations: {destination_total_before}->{destination_total}"
+            ));
+        }
+        graph.value_moving_exit_world_count += 1;
+        runner.assert_global_invariants()?;
+        graph.coverage.merge(runner.coverage);
+        Ok(())
+    }
+
+    let actions = bounded_b_actions();
+    let mut words = vec![vec![]];
+    for (first_index, first) in actions.iter().enumerate() {
+        words.push(vec![(first_index, first.clone())]);
+    }
+    for (first_index, first) in actions.iter().enumerate() {
+        for (second_index, second) in actions.iter().enumerate() {
+            words.push(vec![
+                (first_index, first.clone()),
+                (second_index, second.clone()),
+            ]);
+        }
+    }
+    let jobs = [SideV16::Long, SideV16::Short]
+        .into_iter()
+        .flat_map(|winner_side| words.iter().cloned().map(move |word| (winner_side, word)))
+        .collect::<Vec<_>>();
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(jobs.len().max(1));
+    let chunk_size = jobs.len().div_ceil(worker_count);
+    let graph = std::thread::scope(|scope| {
+        let handles = jobs
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || -> Result<BAccumulator, String> {
+                    let mut graph = BAccumulator::default();
+                    for (winner_side, word) in chunk {
+                        replay_b_word(*winner_side, word, &mut graph)?;
+                    }
+                    Ok(graph)
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut graph = BAccumulator::default();
+        for handle in handles {
+            graph.merge(
+                handle
+                    .join()
+                    .map_err(|_| "INV-086 B frontier worker panicked".to_string())??,
+            );
+        }
+        Ok::<_, String>(graph)
+    })?;
+    let transition_count = jobs.iter().map(|(_, word)| word.len()).sum();
+
+    Ok(BoundedBFrontierEvidence {
+        word_count: jobs.len(),
+        transition_count,
+        unique_node_count: graph.nodes.len(),
+        unique_edge_count: graph.edges.len(),
+        long_seed_world_count: graph.long_seed_world_count,
+        short_seed_world_count: graph.short_seed_world_count,
+        explicit_b_seed_world_count: graph.explicit_b_seed_world_count,
+        bounded_exit_world_count: graph.bounded_exit_world_count,
+        value_moving_exit_world_count: graph.value_moving_exit_world_count,
+        action_attempts: graph.action_attempts,
+        action_state_changes: graph.action_state_changes,
+        second_position_attempts: graph.second_position_attempts,
+        second_position_state_changes: graph.second_position_state_changes,
+        b_rank_reducing_edges: graph.b_rank_reducing_edges,
         coverage: graph.coverage,
     })
 }

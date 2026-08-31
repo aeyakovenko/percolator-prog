@@ -36,6 +36,14 @@
 //! rollback controls for live-mode rebalance. Every reached state must retain a bounded
 //! value-moving owner exit under the same state, stock, custody, and rollback oracles; this is the
 //! lifecycle-prefix extension of the base Live-state graph.
+//! A second seeded frontier starts from two independently rebuilt public bankruptcy schedules, one
+//! for each side. An unrelated live cohort receives a real side-local B loss and retains an exact
+//! `target_b > b_snap` continuation after the higher-priority close completes. Every empty,
+//! one-action, and ordered two-action word crosses complete/empty-hint B cranks, unrelated cranks,
+//! owner deposit/withdraw/reduction, matcher disable, mark movement, shutdown, and permissionless
+//! resolution.
+//! The graph counts actual B-rank reductions independently from generic state changes and requires
+//! every reached state to retain a bounded value-moving owner exit.
 //! A second terminal subgraph starts from twelve independently replayed public prefixes
 //! that create a genuinely partial underfunded receipt. It crosses all expiry boundaries,
 //! two claimant orders, and both close/claim priorities; claim-priority paths must move
@@ -98,8 +106,8 @@
 
 use super::*;
 use crate::support::fuzz_model::{
-    run_bounded_recovery_reference_frontier, run_bounded_reference_equivalence_graph,
-    verify_close_to_partial_receipt_composition,
+    run_bounded_b_reference_frontier, run_bounded_recovery_reference_frontier,
+    run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
     verify_expired_backing_terminal_cleanup_compositions,
     verify_insurance_liquidation_to_partial_receipt_compositions,
     verify_liquidation_to_partial_receipt_compositions,
@@ -633,6 +641,87 @@ fn v16_program_recovery_seeded_frontier_preserves_bounded_owner_exit() {
             && evidence.coverage.terminal_resolves != 0
             && evidence.coverage.resolved_close_mutations != 0,
         "Recovery frontier did not traverse its intended public lifecycle classes: {evidence:?}"
+    );
+}
+
+#[test]
+fn v16_program_explicit_b_seeded_frontier_preserves_bounded_owner_exit() {
+    let evidence =
+        run_bounded_b_reference_frontier().expect("INV-086 public explicit-B seeded frontier");
+
+    assert_eq!(
+        evidence.word_count, 366,
+        "must exhaust two side seeds x (13^0 + 13^1 + 13^2) explicit-B words"
+    );
+    assert_eq!(
+        evidence.transition_count, 702,
+        "must replay every edge in every one- and two-action explicit-B word"
+    );
+    assert_eq!(evidence.long_seed_world_count, 183);
+    assert_eq!(evidence.short_seed_world_count, 183);
+    assert_eq!(
+        evidence.explicit_b_seed_world_count, evidence.word_count,
+        "every word must start from a nonzero side-local B target/snapshot gap"
+    );
+    assert_eq!(
+        evidence.bounded_exit_world_count, evidence.word_count,
+        "every reached B state must retain a bounded owner exit"
+    );
+    assert_eq!(
+        evidence.value_moving_exit_world_count, evidence.word_count,
+        "every B exit witness must move real funded user value"
+    );
+    assert!(
+        evidence.unique_node_count >= 20 && evidence.unique_edge_count >= 40,
+        "explicit-B frontier collapsed to vacuous exact-state coverage: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .action_attempts
+            .iter()
+            .all(|attempts| *attempts == 54),
+        "every explicit-B action must occupy every first and second position: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .second_position_attempts
+            .iter()
+            .all(|attempts| *attempts == 26),
+        "every explicit-B action must follow every first action in both side states: {evidence:?}"
+    );
+    for action_index in [0usize, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12] {
+        assert_ne!(
+            evidence.action_state_changes[action_index], 0,
+            "each economic/lifecycle action must mutate in at least one B context: {evidence:?}"
+        );
+        assert_ne!(
+            evidence.second_position_state_changes[action_index], 0,
+            "each economic/lifecycle action must have a nonvacuous ordered B composition: {evidence:?}"
+        );
+    }
+    assert_eq!(
+        evidence.action_state_changes[10], 0,
+        "authority shutdown must roll back exactly while the booked B/obligation episode remains live: {evidence:?}"
+    );
+    assert_eq!(evidence.second_position_state_changes[10], 0);
+    assert!(
+        evidence.b_rank_reducing_edges[0] != 0 && evidence.b_rank_reducing_edges[1] != 0,
+        "complete and empty discovery hints must each dispatch real B-rank progress: {evidence:?}"
+    );
+    assert_ne!(evidence.coverage.loaded_program_hash, [0; 32]);
+    assert!(
+        evidence.coverage.crank_progress != 0
+            && evidence.coverage.deposits != 0
+            && evidence.coverage.withdrawals != 0
+            && evidence.coverage.route_success[0] != 0
+            && evidence.coverage.matcher_config_updates != 0
+            && evidence.coverage.rebalance_reductions != 0
+            && evidence.coverage.mark_updates != 0
+            && evidence.coverage.lifecycle_updates == 0
+            && evidence.coverage.resolve_policy_updates != 0
+            && evidence.coverage.permissionless_resolves != 0
+            && evidence.coverage.user_positions_closed != 0,
+        "explicit-B frontier did not traverse its intended public action classes: {evidence:?}"
     );
 }
 
