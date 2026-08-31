@@ -11688,6 +11688,20 @@ pub struct ResolvedReceiptSplitTopupEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedReceiptOrderingEvidence {
+    pub world_count: usize,
+    pub scheduled_claim_attempt_count: usize,
+    pub scheduled_paying_claim_count: usize,
+    pub scheduled_progress_only_claim_count: usize,
+    pub scheduled_noop_claim_count: usize,
+    pub receipt_face: u128,
+    pub terminal_paid: u128,
+    pub terminal_actor_count: usize,
+    pub final_engine_vault: u128,
+    pub final_spl_vault: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorityResolvedClaimEvidence {
     pub world_count: usize,
     pub stale_resolve_rejection_count: usize,
@@ -14220,6 +14234,257 @@ pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopu
         terminal_actor_count,
         final_engine_vault: final_group.vault,
         final_spl_vault: u128::from(runner.env.token_amount(runner.env.vault)),
+    })
+}
+
+pub fn verify_resolved_receipt_release_claim_order_matrix(
+) -> Result<ResolvedReceiptOrderingEvidence, String> {
+    const CLAIMANT: usize = 0;
+    const BACKED_WINNER: usize = 2;
+    const FIRST_DOMAIN: usize = 3;
+    const SECOND_DOMAIN: usize = 5;
+    const FIRST_RELEASE_SLOT: u64 = 13;
+    const SECOND_RELEASE_SLOT: u64 = 14;
+    const RELEASE_ATOMS: u128 = 100;
+
+    let backing_plan = UnderfundedBackingPlan {
+        backed_atoms: RELEASE_ATOMS,
+        extra_backing: Some((
+            u16::try_from(SECOND_DOMAIN).map_err(|_| "extra domain exceeds u16")?,
+            RELEASE_ATOMS,
+            SECOND_RELEASE_SLOT,
+        )),
+        extra_backed_trade: true,
+    };
+    let mut baseline: Option<(BoundedReferenceNode, [u128; PRIMARY_ACTOR_COUNT])> = None;
+    let mut scheduled_claim_attempt_count = 0usize;
+    let mut scheduled_paying_claim_count = 0usize;
+    let mut scheduled_progress_only_claim_count = 0usize;
+    let mut scheduled_noop_claim_count = 0usize;
+    let mut receipt_face = None;
+    let mut terminal_paid = None;
+    let mut terminal_actor_count = 0usize;
+    let mut final_engine_vault = 0u128;
+    let mut final_spl_vault = 0u128;
+
+    for schedule in 0u8..16 {
+        let UnderfundedResolvedSeed { mut runner, .. } = build_underfunded_resolved_reference_seed(
+            BoundedExpiryLanding::Before,
+            false,
+            true,
+            None,
+            backing_plan,
+        )?;
+        let initial_receipt = runner
+            .env
+            .primary_portfolio(CLAIMANT)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("INV-066 initial receipt decode: {error:?}"))?;
+        if !initial_receipt.present
+            || initial_receipt.finalized
+            || initial_receipt.paid_effective >= initial_receipt.terminal_positive_claim_face
+        {
+            return Err(format!(
+                "INV-066 schedule {schedule:#06b} lacks a genuine partial receipt: {initial_receipt:?}"
+            ));
+        }
+        if receipt_face
+            .replace(initial_receipt.terminal_positive_claim_face)
+            .is_some_and(|face| face != initial_receipt.terminal_positive_claim_face)
+        {
+            return Err("INV-066 schedule changed the initial receipt face".into());
+        }
+        let claimant_destination_before = u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[CLAIMANT].destination_token),
+        );
+
+        let execute_scheduled_claim = |runner: &mut ScenarioRunner,
+                                       label: &str,
+                                       attempts: &mut usize,
+                                       paying: &mut usize,
+                                       progress_only: &mut usize,
+                                       noops: &mut usize|
+         -> Result<(), String> {
+            *attempts += 1;
+            let result = runner.execute_terminal_route(CLAIMANT, TerminalRoute::Claim)?;
+            if !result.landed || (result.payout != 0 && !result.mutated) {
+                return Err(format!(
+                    "{label} was not an exact payout, progress-only transition, or no-op: {result:?}"
+                ));
+            }
+            if result.payout != 0 {
+                *paying += 1;
+            } else if result.mutated {
+                *progress_only += 1;
+            } else {
+                *noops += 1;
+            }
+            runner.assert_global_invariants()
+        };
+
+        runner.env.warp_to_slot(FIRST_RELEASE_SLOT);
+        let before_first = runner.env.primary_market_state().1;
+        if schedule & 0b0001 != 0 {
+            execute_scheduled_claim(
+                &mut runner,
+                "INV-066 claim before first release",
+                &mut scheduled_claim_attempt_count,
+                &mut scheduled_paying_claim_count,
+                &mut scheduled_progress_only_claim_count,
+                &mut scheduled_noop_claim_count,
+            )?;
+        }
+        let first_close = runner.execute_terminal_route(BACKED_WINNER, TerminalRoute::Close)?;
+        runner.assert_global_invariants()?;
+        if schedule & 0b0010 != 0 {
+            execute_scheduled_claim(
+                &mut runner,
+                "INV-066 claim after first release",
+                &mut scheduled_claim_attempt_count,
+                &mut scheduled_paying_claim_count,
+                &mut scheduled_progress_only_claim_count,
+                &mut scheduled_noop_claim_count,
+            )?;
+        }
+        let after_first = runner.env.primary_market_state().1;
+        if before_first.source_backing_buckets[FIRST_DOMAIN].status != BackingBucketStatusV16::Fresh
+            || after_first.source_backing_buckets[FIRST_DOMAIN].status
+                == BackingBucketStatusV16::Fresh
+            || after_first.payout_snapshot <= before_first.payout_snapshot
+        {
+            return Err(format!(
+                "INV-066 schedule {schedule:#06b} did not release the first backing frontier exactly: close={first_close:?}"
+            ));
+        }
+        runner.assert_global_invariants()?;
+
+        runner.env.warp_to_slot(SECOND_RELEASE_SLOT);
+        let before_second = runner.env.primary_market_state().1;
+        if schedule & 0b0100 != 0 {
+            execute_scheduled_claim(
+                &mut runner,
+                "INV-066 claim before second release",
+                &mut scheduled_claim_attempt_count,
+                &mut scheduled_paying_claim_count,
+                &mut scheduled_progress_only_claim_count,
+                &mut scheduled_noop_claim_count,
+            )?;
+        }
+        let second_close = runner.execute_terminal_route(BACKED_WINNER, TerminalRoute::Close)?;
+        runner.assert_global_invariants()?;
+        if schedule & 0b1000 != 0 {
+            execute_scheduled_claim(
+                &mut runner,
+                "INV-066 claim after second release",
+                &mut scheduled_claim_attempt_count,
+                &mut scheduled_paying_claim_count,
+                &mut scheduled_progress_only_claim_count,
+                &mut scheduled_noop_claim_count,
+            )?;
+        }
+        let after_second = runner.env.primary_market_state().1;
+        if before_second.source_backing_buckets[SECOND_DOMAIN].status
+            != BackingBucketStatusV16::Fresh
+            || after_second.source_backing_buckets[SECOND_DOMAIN].status
+                == BackingBucketStatusV16::Fresh
+            || after_second.payout_snapshot <= before_second.payout_snapshot
+        {
+            return Err(format!(
+                "INV-066 schedule {schedule:#06b} did not release the second backing frontier exactly: close={second_close:?}"
+            ));
+        }
+        runner.assert_global_invariants()?;
+
+        runner.run_terminal_payout_campaign()?;
+        runner.assert_global_invariants()?;
+        let terminal_count = (0..PRIMARY_ACTOR_COUNT)
+            .map(|actor| runner.portfolio_is_economically_terminal(actor))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|terminal| *terminal)
+            .count();
+        if terminal_count != PRIMARY_ACTOR_COUNT {
+            return Err(format!(
+                "INV-066 schedule {schedule:#06b} stranded a terminal claimant: {terminal_count}/{PRIMARY_ACTOR_COUNT}"
+            ));
+        }
+        let final_receipt = runner
+            .env
+            .primary_portfolio(CLAIMANT)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("INV-066 terminal receipt decode: {error:?}"))?;
+        let claimant_destination_after = u128::from(
+            runner
+                .env
+                .token_amount(runner.env.actors[CLAIMANT].destination_token),
+        );
+        let paid_after_seed = claimant_destination_after
+            .checked_sub(claimant_destination_before)
+            .ok_or("INV-066 claimant destination decreased")?;
+        let total_paid = initial_receipt
+            .paid_effective
+            .checked_add(paid_after_seed)
+            .ok_or("INV-066 claimant paid amount overflow")?;
+        if total_paid > initial_receipt.terminal_positive_claim_face
+            || (final_receipt.present
+                && (!final_receipt.finalized
+                    || final_receipt.terminal_positive_claim_face
+                        != initial_receipt.terminal_positive_claim_face
+                    || final_receipt.paid_effective != final_receipt.terminal_positive_claim_face))
+        {
+            return Err(format!(
+                "INV-066 schedule {schedule:#06b} did not settle the immutable receipt exactly once: initial={initial_receipt:?}, final={final_receipt:?}, paid_after_seed={paid_after_seed}"
+            ));
+        }
+        if terminal_paid.is_some_and(|expected| expected != total_paid) {
+            return Err(format!(
+                "INV-066 schedule {schedule:#06b} changed terminal receipt entitlement: expected={terminal_paid:?}, actual={total_paid}"
+            ));
+        }
+
+        let node = runner.bounded_reference_node()?;
+        let destinations = std::array::from_fn(|actor| {
+            u128::from(
+                runner
+                    .env
+                    .token_amount(runner.env.actors[actor].destination_token),
+            )
+        });
+        if let Some((expected_node, expected_destinations)) = &baseline {
+            if node != *expected_node || destinations != *expected_destinations {
+                return Err(format!(
+                    "INV-066 schedule {schedule:#06b} changed terminal engine or SPL economics"
+                ));
+            }
+        } else {
+            baseline = Some((node.clone(), destinations));
+        }
+        terminal_paid = Some(total_paid);
+        terminal_actor_count = terminal_count;
+        final_engine_vault = node.vault;
+        final_spl_vault = u128::from(runner.env.token_amount(runner.env.vault));
+    }
+
+    if scheduled_paying_claim_count == 0 || scheduled_progress_only_claim_count == 0 {
+        return Err(format!(
+            "INV-066 order matrix was vacuous: paying={scheduled_paying_claim_count}, progress-only={scheduled_progress_only_claim_count}, no-op={scheduled_noop_claim_count}"
+        ));
+    }
+    Ok(ResolvedReceiptOrderingEvidence {
+        world_count: 16,
+        scheduled_claim_attempt_count,
+        scheduled_paying_claim_count,
+        scheduled_progress_only_claim_count,
+        scheduled_noop_claim_count,
+        receipt_face: receipt_face.ok_or("INV-066 order matrix ran no worlds")?,
+        terminal_paid: terminal_paid.ok_or("INV-066 order matrix had no terminal receipt")?,
+        terminal_actor_count,
+        final_engine_vault,
+        final_spl_vault,
     })
 }
 

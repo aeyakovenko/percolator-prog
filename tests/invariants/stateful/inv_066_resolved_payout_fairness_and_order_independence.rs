@@ -14,8 +14,16 @@
 //! claimant transition, an independent census recomputes stock and encumbrance
 //! totals from all portfolios, decoded state, the raw zero-copy header, and SPL
 //! custody.
+//! A second bounded model creates a genuine underfunded receipt and two independent backing-release
+//! frontiers. It exhausts all 16 choices of landing a claim before and/or after each release. Each
+//! claim must be an exact value-moving receipt/SPL delta, strict terminal-cleanup progress, or an
+//! exact no-op, and every schedule must converge to the same normalized engine state and all five
+//! external destination balances.
 
-use crate::support::fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census};
+use crate::support::fuzz_model::{
+    assert_public_encumbrance_census, assert_public_stock_census,
+    verify_resolved_receipt_release_claim_order_matrix,
+};
 use crate::support::v16_svm::{
     assert_closed_market_tombstone, MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT,
 };
@@ -203,6 +211,26 @@ fn v16_program_full_terminal_lifecycle_is_claimant_order_independent() {
             "claimant order changed an economic payout: {order:?}"
         );
     }
+}
+
+#[test]
+fn v16_program_partial_receipt_release_and_claim_order_is_economically_invariant() {
+    let evidence = verify_resolved_receipt_release_claim_order_matrix()
+        .expect("public partial-receipt release/claim order matrix");
+    assert_eq!(evidence.world_count, 16);
+    assert_eq!(evidence.scheduled_claim_attempt_count, 32);
+    assert_eq!(
+        evidence.scheduled_paying_claim_count
+            + evidence.scheduled_progress_only_claim_count
+            + evidence.scheduled_noop_claim_count,
+        evidence.scheduled_claim_attempt_count,
+    );
+    assert!(evidence.scheduled_paying_claim_count != 0);
+    assert!(evidence.scheduled_progress_only_claim_count != 0);
+    assert!(evidence.terminal_paid != 0);
+    assert!(evidence.terminal_paid <= evidence.receipt_face);
+    assert_eq!(evidence.terminal_actor_count, PRIMARY_ACTOR_COUNT);
+    assert_eq!(evidence.final_engine_vault, evidence.final_spl_vault);
 }
 
 #[test]
