@@ -50,6 +50,9 @@
 //! the resulting historical spend through resolution, a partial receipt, a later payout, and all
 //! five terminal portfolios with exact engine/SPL custody. The domain is derived through the same
 //! canonical asset-side mapper and checked against the close ledger rather than hard-coded.
+//! After all claims terminate, the exact 750+1 fresh backing remainder returns through the two
+//! canonical provider withdrawals, all portfolios dematerialize, and `CloseSlab` reaches the
+//! closed-market tombstone without burning provider value.
 //! The ADL reduction-clamp matrix creates a scaled live leg through every trade transport, submits
 //! owner reductions at `effective - 1`, `effective`, `effective + 1`, and retained raw basis, and
 //! derives the permitted reduction from authenticated pre-state. Both side OI counters and the
@@ -253,6 +256,21 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
                     && evidence.terminal.max_compute_units < 1_400_000,
                 "the insurance-bearing terminal graph must retain transaction headroom: {evidence:?}"
             );
+            assert_eq!(
+                (
+                    evidence.terminal.terminal_portfolios_closed,
+                    evidence.terminal.terminal_backing_withdrawn,
+                    evidence.terminal.slab_custody_burned,
+                    evidence.terminal.slab_closed,
+                ),
+                (5, 751, 0, true),
+                "terminal backing must return before every portfolio and the slab close: {evidence:?}"
+            );
+            assert!(
+                evidence.terminal.slab_close_compute_units != 0
+                    && evidence.terminal.slab_close_compute_units < 1_400_000,
+                "CloseSlab must execute with bounded compute: {evidence:?}"
+            );
             [
                 evidence.pre_liquidation_effective_oi,
                 evidence.post_liquidation_effective_oi,
@@ -268,6 +286,10 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
                 evidence.terminal.final_engine_vault,
                 evidence.terminal.final_spl_vault,
                 evidence.terminal.terminal_actor_count as u128,
+                evidence.terminal.terminal_portfolios_closed as u128,
+                evidence.terminal.terminal_backing_withdrawn,
+                evidence.terminal.slab_custody_burned,
+                u128::from(evidence.terminal.slab_closed),
             ]
         })
         .collect::<Vec<_>>();
