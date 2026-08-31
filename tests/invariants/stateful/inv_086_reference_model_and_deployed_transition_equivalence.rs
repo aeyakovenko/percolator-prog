@@ -63,6 +63,13 @@
 //! closure in every empty, one-action, and ordered two-action word. Receipt identity must remain
 //! immutable until exact terminal payment, paid value monotonic, rejected destruction exact, and
 //! every ordering must converge to the same seed-local terminal engine and SPL outcome.
+//! A sixth seeded frontier starts from funded Hybrid positions after the final authenticated feed
+//! accounts become unavailable. It crosses the authenticated slots immediately before and exactly
+//! at stale-resolution maturity with oracle-free and empty-hint cranks, declared-missing,
+//! wrong-owner, stale, and newly recovered feed tails, all four risk-reducing trade transports,
+//! permissionless resolution, and resolved close in every empty, one-action, and ordered two-action
+//! word. Invalid feed edges must roll back exactly, a newly valid feed must restore Live progress,
+//! and every ordering must retain an oracle-free, value-moving terminal continuation.
 //! A minimized generated public trace also retains simultaneous same-slot mark and account work.
 //! Empty hints reject with exact rollback, while both the indiscriminate all-asset set and a proper
 //! authenticated subset decrease rank before every funded owner exits. The independent liveness
@@ -132,7 +139,7 @@
 use super::*;
 use crate::support::fuzz_model::{
     run_bounded_active_close_reference_frontier, run_bounded_b_reference_frontier,
-    run_bounded_lien_impairment_reference_frontier,
+    run_bounded_lien_impairment_reference_frontier, run_bounded_oracle_failure_reference_frontier,
     run_bounded_receipt_conflict_reference_frontier, run_bounded_recovery_reference_frontier,
     run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
     verify_constructible_crank_observation_subset,
@@ -988,6 +995,77 @@ fn v16_program_receipt_conflict_seeded_frontier_is_exact_and_terminal() {
             && evidence.coverage.resolved_crank_mutations != 0
             && evidence.coverage.resolved_payout_atoms != 0,
         "receipt-conflict frontier did not exercise paying claim/close/crank transitions: {evidence:?}"
+    );
+    assert_ne!(evidence.coverage.loaded_program_hash, [0; 32]);
+}
+
+#[test]
+fn v16_program_oracle_failure_seeded_frontier_is_exact_and_terminal() {
+    let evidence = run_bounded_oracle_failure_reference_frontier()
+        .expect("INV-086 public oracle-failure seeded frontier");
+
+    assert_eq!(
+        evidence.word_count, 366,
+        "must exhaust two stale-boundary seeds x (13^0 + 13^1 + 13^2) oracle-failure words"
+    );
+    assert_eq!(evidence.transition_count, 702);
+    assert_eq!(evidence.before_maturity_seed_world_count, 183);
+    assert_eq!(evidence.exact_maturity_seed_world_count, 183);
+    assert_eq!(
+        evidence.unavailable_feed_seed_world_count, evidence.word_count,
+        "every word must begin after all configured external feed accounts are unavailable"
+    );
+    assert_eq!(evidence.bounded_terminal_world_count, evidence.word_count);
+    assert_eq!(
+        evidence.value_moving_terminal_world_count, evidence.word_count,
+        "every unavailable-feed ordering must retain a funded value-moving terminal path"
+    );
+    assert!(
+        evidence.unique_node_count > 2 && evidence.unique_edge_count > 20,
+        "oracle-failure frontier collapsed below substantive exact-state coverage: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .action_attempts
+            .iter()
+            .all(|attempts| *attempts == 54),
+        "every oracle-failure action must occupy every first and second position: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .second_position_attempts
+            .iter()
+            .all(|attempts| *attempts == 26),
+        "every oracle-failure action must follow every first action in both boundary seeds: {evidence:?}"
+    );
+    assert!(
+        evidence.fallback_progress_edges != 0 && evidence.fresh_feed_recovery_edges != 0,
+        "the frontier must exercise both oracle-free settlement and authenticated feed recovery: {evidence:?}"
+    );
+    for malformed_action in [3usize, 4] {
+        assert!(
+            evidence.action_rejections[malformed_action] != 0
+                && evidence.action_state_changes[malformed_action] == 0,
+            "missing and wrong-owner oracle tails must reject exactly: {evidence:?}"
+        );
+    }
+    assert!(
+        evidence.action_rejections[5] != 0 || evidence.action_state_changes[5] != 0,
+        "stale tails must either reject exactly or take a safe retained-mark fallback edge: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .coverage
+            .route_success
+            .iter()
+            .all(|successes| *successes != 0),
+        "all four signed risk-reducing transports must work before stale terminal maturity: {evidence:?}"
+    );
+    assert!(
+        evidence.coverage.permissionless_resolves != 0
+            && evidence.coverage.resolved_crank_mutations != 0
+            && evidence.coverage.resolved_payout_atoms != 0,
+        "the unavailable-feed graph did not compose through public resolution and funded custody: {evidence:?}"
     );
     assert_ne!(evidence.coverage.loaded_program_hash, [0; 32]);
 }

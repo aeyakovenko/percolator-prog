@@ -11,7 +11,7 @@ use percolator::{
 use percolator_prog::{
     constants::{
         MARKET_GROUP_OFF, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
-        ORACLE_MODE_EWMA_MARK, ORACLE_MODE_MANUAL,
+        ORACLE_MODE_EWMA_MARK, ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL,
     },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     state::{self, MarketGroupV16, PortfolioAccountV16},
@@ -11373,6 +11373,7 @@ const BOUNDED_B_ACTION_COUNT: usize = 13;
 const BOUNDED_ACTIVE_CLOSE_ACTION_COUNT: usize = 13;
 const BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT: usize = 13;
 const BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT: usize = 13;
+const BOUNDED_ORACLE_FAILURE_ACTION_COUNT: usize = 13;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedCloseProgressNode {
@@ -11745,6 +11746,27 @@ pub struct BoundedReceiptConflictFrontierEvidence {
     pub receipt_completion_edges: u64,
     pub premature_portfolio_close_rejections: u64,
     pub premature_slab_close_rejections: u64,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedOracleFailureFrontierEvidence {
+    pub word_count: usize,
+    pub transition_count: usize,
+    pub unique_node_count: usize,
+    pub unique_edge_count: usize,
+    pub before_maturity_seed_world_count: usize,
+    pub exact_maturity_seed_world_count: usize,
+    pub unavailable_feed_seed_world_count: usize,
+    pub bounded_terminal_world_count: usize,
+    pub value_moving_terminal_world_count: usize,
+    pub action_attempts: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
+    pub action_state_changes: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
+    pub action_rejections: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
+    pub second_position_attempts: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
+    pub second_position_state_changes: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
+    pub fallback_progress_edges: u64,
+    pub fresh_feed_recovery_edges: u64,
     pub coverage: Coverage,
 }
 
@@ -12275,6 +12297,46 @@ fn bounded_lien_impairment_actions(
 enum BoundedReceiptConflictAction {
     Terminal { actor: usize, route: TerminalRoute },
     CloseSlab,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BoundedOracleFailureAction {
+    FallbackCrank { actor: usize },
+    EmptyHintCrank { actor: usize },
+    DeclaredMissingTail,
+    MalformedTail,
+    StaleTail,
+    FreshTail,
+    Reduce { route: TradeRoute },
+    ResolveStale,
+    CloseResolved { actor: usize },
+}
+
+fn bounded_oracle_failure_actions(
+) -> [BoundedOracleFailureAction; BOUNDED_ORACLE_FAILURE_ACTION_COUNT] {
+    [
+        BoundedOracleFailureAction::FallbackCrank { actor: 0 },
+        BoundedOracleFailureAction::FallbackCrank { actor: 1 },
+        BoundedOracleFailureAction::EmptyHintCrank { actor: 0 },
+        BoundedOracleFailureAction::DeclaredMissingTail,
+        BoundedOracleFailureAction::MalformedTail,
+        BoundedOracleFailureAction::StaleTail,
+        BoundedOracleFailureAction::FreshTail,
+        BoundedOracleFailureAction::Reduce {
+            route: TradeRoute::NoCpi,
+        },
+        BoundedOracleFailureAction::Reduce {
+            route: TradeRoute::Cpi,
+        },
+        BoundedOracleFailureAction::Reduce {
+            route: TradeRoute::BatchNoCpi,
+        },
+        BoundedOracleFailureAction::Reduce {
+            route: TradeRoute::BatchCpi,
+        },
+        BoundedOracleFailureAction::ResolveStale,
+        BoundedOracleFailureAction::CloseResolved { actor: 0 },
+    ]
 }
 
 fn bounded_receipt_conflict_actions(
@@ -18364,6 +18426,807 @@ pub fn run_bounded_receipt_conflict_reference_frontier(
         receipt_completion_edges: graph.receipt_completion_edges,
         premature_portfolio_close_rejections: graph.premature_portfolio_close_rejections,
         premature_slab_close_rejections: graph.premature_slab_close_rejections,
+        coverage: graph.coverage,
+    })
+}
+
+#[derive(Clone, Debug, Default)]
+struct BoundedOracleFailureActionResult {
+    mutated: bool,
+    rejected: bool,
+    rejection: Option<String>,
+    fallback_progress: bool,
+    fresh_feed_recovery: bool,
+}
+
+struct BoundedOracleFailureSeed {
+    runner: ScenarioRunner,
+    feed: [u8; 32],
+    unavailable_oracle: Pubkey,
+    stale_oracle: Pubkey,
+    maturity_slot: u64,
+}
+
+fn execute_bounded_oracle_failure_crank(
+    runner: &mut ScenarioRunner,
+    actor: usize,
+    observations: Vec<CrankObservationHint>,
+    oracle_accounts: &[Pubkey],
+) -> Result<BoundedOracleFailureActionResult, String> {
+    let account_before = runner.env.primary_portfolio(actor);
+    let (_, group_before) = runner.env.primary_market_state();
+    let before = runner.snapshot();
+    let liquidation_authorized = runner.current_liquidation_authorization(actor);
+    let result = runner.env.crank_with_oracles(
+        actor,
+        runner.env.current_slot(),
+        observations,
+        oracle_accounts,
+    );
+    let Ok(success) = result else {
+        let error = result.unwrap_err();
+        runner.assert_snapshot_unchanged(&before)?;
+        runner.assert_global_invariants()?;
+        return Ok(BoundedOracleFailureActionResult {
+            rejected: true,
+            rejection: Some(error),
+            ..BoundedOracleFailureActionResult::default()
+        });
+    };
+
+    runner.coverage.observe_success(None, &success);
+    runner.assert_portfolio_frame(&before, &[actor])?;
+    runner.assert_no_token_side_effects(&before)?;
+    runner.reconcile_account_position_changes(
+        actor,
+        &account_before,
+        &group_before,
+        [0; ASSET_COUNT],
+        liquidation_authorized,
+        "oracle-failure permissionless crank",
+    )?;
+    let (_, group_after) = runner.env.primary_market_state();
+    assert_source_credit_rate_transition(
+        "oracle-failure permissionless crank",
+        &group_before,
+        &group_after,
+    )?;
+    let mutated = runner.snapshot() != before;
+    if !mutated {
+        return Err("INV-071 unavailable-feed crank landed without persistent progress".into());
+    }
+    runner.assert_global_invariants()?;
+    Ok(BoundedOracleFailureActionResult {
+        mutated,
+        ..BoundedOracleFailureActionResult::default()
+    })
+}
+
+fn execute_bounded_oracle_failure_resolution(
+    runner: &mut ScenarioRunner,
+) -> Result<(bool, Option<String>), String> {
+    runner.coverage.permissionless_resolve_attempts += 1;
+    let before = runner.snapshot();
+    let slot = runner.env.current_slot();
+    match runner.env.resolve_stale_permissionless(slot) {
+        Ok(success) => {
+            runner.coverage.permissionless_resolves += 1;
+            runner.coverage.observe_success(None, &success);
+            runner.assert_portfolio_frame(&before, &[])?;
+            runner.assert_no_token_side_effects(&before)?;
+            let (_, group) = runner.env.primary_market_state();
+            if group.mode != MarketModeV16::Resolved || group.resolved_slot != slot {
+                return Err(format!(
+                    "INV-078 stale resolution did not bind authenticated slot {slot}: mode={:?}, resolved_slot={}",
+                    group.mode, group.resolved_slot
+                ));
+            }
+            runner.assert_global_invariants()?;
+            Ok((true, None))
+        }
+        Err(error) => {
+            runner.assert_snapshot_unchanged(&before)?;
+            runner.assert_global_invariants()?;
+            Ok((false, Some(error)))
+        }
+    }
+}
+
+fn build_bounded_oracle_failure_reference_seed(
+    exact_maturity: bool,
+) -> Result<BoundedOracleFailureSeed, String> {
+    const MARK: u64 = 1_000_000;
+    const TARGET: u64 = 1_100_000;
+    const OPEN_SLOT: u64 = 1;
+    const OBSERVATION_SLOT: u64 = 2;
+    const AFTER_HOURS_SLOT: u64 = 4;
+    const STALE_SLOTS: u64 = 4;
+
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config(
+        [0x9b; 32],
+        MarketConfig {
+            initial_price: MARK,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 1,
+            ..MarketConfig::default()
+        },
+    )?;
+    runner.env.set_clock(OPEN_SLOT, 100);
+    let feed = [0x9c; 32];
+    let initial_oracle = runner.env.set_pyth_price(&feed, MARK as i64, -6, 0, 100);
+    let before_config = runner.snapshot();
+    let configured = runner
+        .env
+        .configure_hybrid_oracle(
+            0,
+            OPEN_SLOT,
+            100,
+            0,
+            [feed, [0; 32], [0; 32]],
+            &[initial_oracle],
+            1,
+            0,
+        )
+        .map_err(|error| format!("INV-086 configure unavailable-feed Hybrid seed: {error}"))?;
+    runner.coverage.oracle_reconfigs += 1;
+    runner.coverage.observe_success(None, &configured);
+    runner.assert_portfolio_frame(&before_config, &[])?;
+    runner.assert_no_token_side_effects(&before_config)?;
+    runner.run_safety_prefix(&[Action::ConfigurePermissionlessResolve {
+        stale_slots: STALE_SLOTS as u16,
+        force_close_delay_slots: 1,
+    }])?;
+    runner.execute_trade(
+        TradeRoute::NoCpi,
+        0,
+        1,
+        vec![(0, POS_SCALE as i128)],
+        0,
+        0,
+        true,
+    )?;
+
+    runner.env.set_clock(OBSERVATION_SLOT, 101);
+    let observed_oracle = runner.env.set_pyth_price(&feed, TARGET as i64, -6, 0, 101);
+    let observed = execute_bounded_oracle_failure_crank(
+        &mut runner,
+        0,
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 1,
+        }],
+        &[observed_oracle],
+    )?;
+    if observed.rejected || !observed.mutated {
+        return Err(
+            "INV-086 unavailable-feed seed did not ingest its last live observation".into(),
+        );
+    }
+
+    runner.env.set_clock(AFTER_HOURS_SLOT, 103);
+    runner.execute_trade(
+        TradeRoute::NoCpi,
+        0,
+        1,
+        vec![(0, -(POS_SCALE as i128 / 4))],
+        0,
+        500,
+        true,
+    )?;
+    runner.run_safety_prefix(&[Action::SetMatcherConfig {
+        actor: 1,
+        enabled: true,
+        trade_fee_cap_bps: 10_000,
+    }])?;
+    let before_failure_group = runner.env.primary_market_state().1;
+    let before_failure_profile = runner.env.primary_profile(0);
+    if before_failure_profile.mark_ewma_e6 <= before_failure_group.assets[0].effective_price {
+        return Err(format!(
+            "INV-086 unavailable-feed seed lacks fallback settlement work: mark={}, effective={}",
+            before_failure_profile.mark_ewma_e6, before_failure_group.assets[0].effective_price
+        ));
+    }
+
+    for oracle in [initial_oracle, observed_oracle] {
+        let mut unavailable = runner
+            .env
+            .svm
+            .get_account(&oracle)
+            .ok_or("INV-086 unavailable-feed fixture account disappeared")?;
+        unavailable.owner = solana_sdk::system_program::ID;
+        unavailable.data.clear();
+        runner
+            .env
+            .svm
+            .set_account(oracle, unavailable)
+            .map_err(|error| format!("INV-086 remove external oracle account: {error}"))?;
+    }
+    let stale_oracle = runner.env.set_pyth_price(&feed, 9_000_000, -6, 0, 0);
+
+    let (config, group) = runner.env.primary_market_state();
+    let maturity_slot = config
+        .last_good_oracle_slot
+        .checked_add(config.permissionless_resolve_stale_slots)
+        .ok_or("INV-086 unavailable-feed maturity overflow")?;
+    if config.last_good_oracle_slot != OBSERVATION_SLOT
+        || config.permissionless_resolve_stale_slots != STALE_SLOTS
+        || group.mode != MarketModeV16::Live
+        || runner.env.primary_profile(0).oracle_mode != ORACLE_MODE_HYBRID_AFTER_HOURS
+        || runner.positions[0][0] == 0
+        || runner.positions[1][0] == 0
+    {
+        return Err(format!(
+            "INV-086 unavailable-feed seed was vacuous: last_good={}, stale={}, mode={:?}, profile={:?}, positions={:?}",
+            config.last_good_oracle_slot,
+            config.permissionless_resolve_stale_slots,
+            group.mode,
+            runner.env.primary_profile(0),
+            runner.positions
+        ));
+    }
+
+    let landing_slot = if exact_maturity {
+        maturity_slot
+    } else {
+        maturity_slot
+            .checked_sub(1)
+            .ok_or("INV-086 unavailable-feed pre-maturity underflow")?
+    };
+    runner
+        .env
+        .set_clock(landing_slot, 200 + i64::from(exact_maturity));
+    runner.assert_global_invariants()?;
+    Ok(BoundedOracleFailureSeed {
+        runner,
+        feed,
+        unavailable_oracle: observed_oracle,
+        stale_oracle,
+        maturity_slot,
+    })
+}
+
+fn apply_bounded_oracle_failure_action(
+    seed: &mut BoundedOracleFailureSeed,
+    action: BoundedOracleFailureAction,
+) -> Result<BoundedOracleFailureActionResult, String> {
+    let runner = &mut seed.runner;
+    let hint = || CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: 0,
+    };
+    match action {
+        BoundedOracleFailureAction::FallbackCrank { actor } => {
+            let before = runner.bounded_reference_node()?;
+            let mut result =
+                execute_bounded_oracle_failure_crank(runner, actor, vec![hint()], &[])?;
+            let after = runner.bounded_reference_node()?;
+            result.fallback_progress = result.mutated
+                && (before.effective_prices != after.effective_prices
+                    || before.raw_targets != after.raw_targets
+                    || before.wrapper_marks != after.wrapper_marks
+                    || before.epochs != after.epochs);
+            Ok(result)
+        }
+        BoundedOracleFailureAction::EmptyHintCrank { actor } => {
+            execute_bounded_oracle_failure_crank(runner, actor, vec![], &[])
+        }
+        BoundedOracleFailureAction::DeclaredMissingTail => {
+            let result = execute_bounded_oracle_failure_crank(
+                runner,
+                0,
+                vec![CrankObservationHint {
+                    oracle_accounts: 1,
+                    ..hint()
+                }],
+                &[],
+            )?;
+            if runner.env.primary_market_state().1.mode == MarketModeV16::Live && !result.rejected {
+                return Err(
+                    "INV-019 declared missing oracle tail was accepted in Live mode".into(),
+                );
+            }
+            Ok(result)
+        }
+        BoundedOracleFailureAction::MalformedTail => {
+            let result = execute_bounded_oracle_failure_crank(
+                runner,
+                0,
+                vec![CrankObservationHint {
+                    oracle_accounts: 1,
+                    ..hint()
+                }],
+                &[seed.unavailable_oracle],
+            )?;
+            if runner.env.primary_market_state().1.mode == MarketModeV16::Live && !result.rejected {
+                return Err("INV-019 wrong-owner oracle tail was accepted in Live mode".into());
+            }
+            Ok(result)
+        }
+        BoundedOracleFailureAction::StaleTail => {
+            let (config_before, _) = runner.env.primary_market_state();
+            let before = runner.bounded_reference_node()?;
+            let mut result = execute_bounded_oracle_failure_crank(
+                runner,
+                0,
+                vec![CrankObservationHint {
+                    oracle_accounts: 1,
+                    ..hint()
+                }],
+                &[seed.stale_oracle],
+            )?;
+            let (config_after, _) = runner.env.primary_market_state();
+            let after = runner.bounded_reference_node()?;
+            if config_after.last_good_oracle_slot != config_before.last_good_oracle_slot
+                || after.raw_targets[0] == 9_000_000
+            {
+                return Err(format!(
+                    "INV-020 stale oracle tail refreshed provenance or installed its price: last_good {}->{}, target {}->{}",
+                    config_before.last_good_oracle_slot,
+                    config_after.last_good_oracle_slot,
+                    before.raw_targets[0],
+                    after.raw_targets[0]
+                ));
+            }
+            result.fallback_progress = result.mutated
+                && (before.effective_prices != after.effective_prices
+                    || before.raw_targets != after.raw_targets
+                    || before.wrapper_marks != after.wrapper_marks
+                    || before.epochs != after.epochs);
+            Ok(result)
+        }
+        BoundedOracleFailureAction::FreshTail => {
+            let (config_before, group_before) = runner.env.primary_market_state();
+            let current_slot = runner.env.current_slot();
+            let current_timestamp = runner
+                .env
+                .svm
+                .get_sysvar::<solana_sdk::clock::Clock>()
+                .unix_timestamp;
+            let fresh_oracle =
+                runner
+                    .env
+                    .set_pyth_price(&seed.feed, 1_125_000, -6, 0, current_timestamp);
+            let mut result = execute_bounded_oracle_failure_crank(
+                runner,
+                0,
+                vec![CrankObservationHint {
+                    oracle_accounts: 1,
+                    ..hint()
+                }],
+                &[fresh_oracle],
+            )?;
+            let (config_after, _) = runner.env.primary_market_state();
+            result.fresh_feed_recovery = result.mutated
+                && group_before.mode == MarketModeV16::Live
+                && config_after.last_good_oracle_slot == current_slot
+                && config_after.last_good_oracle_slot > config_before.last_good_oracle_slot;
+            let maturity = config_before
+                .last_good_oracle_slot
+                .checked_add(config_before.permissionless_resolve_stale_slots)
+                .ok_or("INV-020 fresh-feed maturity overflow")?;
+            if group_before.mode == MarketModeV16::Live
+                && current_slot < maturity
+                && config_before.last_good_oracle_slot < current_slot
+                && !result.fresh_feed_recovery
+            {
+                return Err(format!(
+                    "INV-020 fresh oracle could not restore a Live unavailable-feed world: before={}, after={}, slot={current_slot}, rejected={}",
+                    config_before.last_good_oracle_slot,
+                    config_after.last_good_oracle_slot,
+                    result.rejected
+                ));
+            }
+            Ok(result)
+        }
+        BoundedOracleFailureAction::Reduce { route } => {
+            let before = runner.snapshot();
+            let (config, group) = runner.env.primary_market_state();
+            let maturity = config
+                .last_good_oracle_slot
+                .checked_add(config.permissionless_resolve_stale_slots)
+                .ok_or("INV-057 dynamic stale maturity overflow")?;
+            let close_q = runner.positions[0][0]
+                .unsigned_abs()
+                .min(runner.positions[1][0].unsigned_abs())
+                .min(POS_SCALE / 4);
+            if close_q == 0 {
+                return Err("INV-057 oracle-failure reduction lost its matched exposure".into());
+            }
+            let matcher_current = !matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi)
+                || state::read_portfolio_matcher_config(&runner.env.primary_portfolio_data(1))
+                    .map_err(|error| format!("INV-012 decode oracle-failure matcher: {error:?}"))?
+                    .enabled()
+                    != 0;
+            let landed = runner.execute_trade(
+                route,
+                0,
+                1,
+                vec![(
+                    0,
+                    -i128::try_from(close_q).map_err(|_| "reduction does not fit i128")?,
+                )],
+                0,
+                500,
+                group.mode == MarketModeV16::Live
+                    && runner.env.current_slot() < maturity
+                    && matcher_current,
+            )?;
+            let mutated = runner.snapshot() != before;
+            if landed != mutated {
+                return Err(format!(
+                    "INV-047 {route:?} unavailable-feed reduction landed={landed} but mutated={mutated}"
+                ));
+            }
+            Ok(BoundedOracleFailureActionResult {
+                mutated,
+                rejected: !landed,
+                ..BoundedOracleFailureActionResult::default()
+            })
+        }
+        BoundedOracleFailureAction::ResolveStale => {
+            let (config_before, group_before) = runner.env.primary_market_state();
+            let (mutated, rejection) = execute_bounded_oracle_failure_resolution(runner)?;
+            let maturity = config_before
+                .last_good_oracle_slot
+                .checked_add(config_before.permissionless_resolve_stale_slots)
+                .ok_or("INV-078 stale resolution maturity overflow")?;
+            if group_before.mode == MarketModeV16::Live
+                && runner.env.current_slot() < maturity
+                && mutated
+            {
+                return Err(
+                    "INV-020 permissionless resolution accepted before authenticated maturity"
+                        .into(),
+                );
+            }
+            Ok(BoundedOracleFailureActionResult {
+                mutated,
+                rejected: !mutated,
+                rejection,
+                ..BoundedOracleFailureActionResult::default()
+            })
+        }
+        BoundedOracleFailureAction::CloseResolved { actor } => {
+            let result = runner.execute_terminal_route(actor, TerminalRoute::Close)?;
+            if result.landed && !result.mutated {
+                return Err("INV-071 resolved close landed without persistent progress".into());
+            }
+            Ok(BoundedOracleFailureActionResult {
+                mutated: result.mutated,
+                rejected: !result.landed,
+                ..BoundedOracleFailureActionResult::default()
+            })
+        }
+    }
+}
+
+fn finish_bounded_oracle_failure_terminal_campaign(
+    seed: &mut BoundedOracleFailureSeed,
+) -> Result<(), String> {
+    let runner = &mut seed.runner;
+    if runner.env.primary_market_state().1.mode == MarketModeV16::Live {
+        let (config, _) = runner.env.primary_market_state();
+        let maturity = config
+            .last_good_oracle_slot
+            .checked_add(config.permissionless_resolve_stale_slots)
+            .ok_or("INV-073 oracle-failure terminal maturity overflow")?;
+        if runner.env.current_slot() < maturity {
+            let clock = runner.env.svm.get_sysvar::<solana_sdk::clock::Clock>();
+            let elapsed = maturity - clock.slot;
+            let terminal_time = clock
+                .unix_timestamp
+                .checked_add(i64::try_from(elapsed).map_err(|_| "terminal time does not fit i64")?)
+                .ok_or("INV-073 oracle-failure terminal time overflow")?;
+            runner.env.set_clock(maturity, terminal_time);
+        }
+
+        let first_terminal_slot = runner.env.current_slot();
+        let mut consecutive_rejections = 0usize;
+        let mut last_crank_rejection = None;
+        let mut last_resolve_rejection = None;
+        for step in 0..32 {
+            if runner.env.primary_market_state().1.mode == MarketModeV16::Resolved {
+                break;
+            }
+            let actor = step % 2;
+            let crank = execute_bounded_oracle_failure_crank(
+                runner,
+                actor,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+                &[],
+            )?;
+            last_crank_rejection = crank.rejection.clone();
+            let (_, resolve_rejection) = execute_bounded_oracle_failure_resolution(runner)?;
+            last_resolve_rejection = resolve_rejection;
+            if runner.env.primary_market_state().1.mode == MarketModeV16::Resolved {
+                break;
+            }
+            consecutive_rejections = if crank.rejected {
+                consecutive_rejections + 1
+            } else {
+                0
+            };
+            if consecutive_rejections == 2 {
+                let clock = runner.env.svm.get_sysvar::<solana_sdk::clock::Clock>();
+                let next_slot = clock
+                    .slot
+                    .checked_add(1)
+                    .ok_or("INV-073 oracle-failure liveness slot overflow")?;
+                let next_time = clock
+                    .unix_timestamp
+                    .checked_add(1)
+                    .ok_or("INV-073 oracle-failure liveness time overflow")?;
+                runner.env.set_clock(next_slot, next_time);
+                consecutive_rejections = 0;
+            }
+        }
+        if runner.env.current_slot() > first_terminal_slot + 4 {
+            return Err(format!(
+                "INV-073 oracle-free terminal path exceeded its four-slot liveness envelope: {first_terminal_slot}->{}, crank={last_crank_rejection:?}, resolve={last_resolve_rejection:?}, config={:?}, profile={:?}, asset={:?}",
+                runner.env.current_slot(),
+                runner.env.primary_market_state().0,
+                runner.env.primary_profile(0),
+                runner.env.primary_market_state().1.assets[0],
+            ));
+        }
+    }
+    if runner.env.primary_market_state().1.mode != MarketModeV16::Resolved {
+        return Err(format!(
+            "INV-078 unavailable-feed world did not reach Resolved: mode={:?}, diagnostics={}",
+            runner.env.primary_market_state().1.mode,
+            runner.liveness_diagnostics()
+        ));
+    }
+    runner.run_terminal_payout_campaign()?;
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        if !runner.portfolio_is_economically_terminal(actor)? {
+            return Err(format!(
+                "INV-073 unavailable-feed terminal campaign stranded actor {actor}"
+            ));
+        }
+    }
+    runner.assert_global_invariants()
+}
+
+pub fn run_bounded_oracle_failure_reference_frontier(
+) -> Result<BoundedOracleFailureFrontierEvidence, String> {
+    type ExactEdge = (AuthenticatedGraphState, u8, AuthenticatedGraphState);
+
+    let before_control = build_bounded_oracle_failure_reference_seed(false)?;
+    let exact_control = build_bounded_oracle_failure_reference_seed(true)?;
+    if before_control.runner.snapshot() != exact_control.runner.snapshot() {
+        return Err(
+            "INV-086 oracle-failure maturity controls did not replay to byte-identical economic state"
+                .into(),
+        );
+    }
+    if before_control.runner.authenticated_graph_state()
+        == exact_control.runner.authenticated_graph_state()
+    {
+        return Err("INV-086 oracle-failure controls did not vary authenticated Clock".into());
+    }
+    if before_control.runner.env.current_slot() + 1 != before_control.maturity_slot
+        || exact_control.runner.env.current_slot() != exact_control.maturity_slot
+    {
+        return Err("INV-083 oracle-failure controls missed the exact stale boundary".into());
+    }
+
+    #[derive(Default)]
+    struct OracleFailureAccumulator {
+        nodes: BTreeSet<AuthenticatedGraphState>,
+        edges: BTreeSet<ExactEdge>,
+        before_maturity_seed_world_count: usize,
+        exact_maturity_seed_world_count: usize,
+        unavailable_feed_seed_world_count: usize,
+        bounded_terminal_world_count: usize,
+        value_moving_terminal_world_count: usize,
+        action_attempts: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
+        action_state_changes: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
+        action_rejections: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
+        second_position_attempts: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
+        second_position_state_changes: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
+        fallback_progress_edges: u64,
+        fresh_feed_recovery_edges: u64,
+        coverage: Coverage,
+    }
+
+    impl OracleFailureAccumulator {
+        fn merge(&mut self, other: Self) {
+            self.nodes.extend(other.nodes);
+            self.edges.extend(other.edges);
+            self.before_maturity_seed_world_count += other.before_maturity_seed_world_count;
+            self.exact_maturity_seed_world_count += other.exact_maturity_seed_world_count;
+            self.unavailable_feed_seed_world_count += other.unavailable_feed_seed_world_count;
+            self.bounded_terminal_world_count += other.bounded_terminal_world_count;
+            self.value_moving_terminal_world_count += other.value_moving_terminal_world_count;
+            for (total, count) in self.action_attempts.iter_mut().zip(other.action_attempts) {
+                *total += count;
+            }
+            for (total, count) in self
+                .action_state_changes
+                .iter_mut()
+                .zip(other.action_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .action_rejections
+                .iter_mut()
+                .zip(other.action_rejections)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_attempts
+                .iter_mut()
+                .zip(other.second_position_attempts)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_state_changes
+                .iter_mut()
+                .zip(other.second_position_state_changes)
+            {
+                *total += count;
+            }
+            self.fallback_progress_edges += other.fallback_progress_edges;
+            self.fresh_feed_recovery_edges += other.fresh_feed_recovery_edges;
+            self.coverage.merge(other.coverage);
+        }
+    }
+
+    fn replay_oracle_failure_word(
+        exact_maturity: bool,
+        word: &[(usize, BoundedOracleFailureAction)],
+        graph: &mut OracleFailureAccumulator,
+    ) -> Result<(), String> {
+        let mut seed = build_bounded_oracle_failure_reference_seed(exact_maturity)?;
+        graph.before_maturity_seed_world_count += usize::from(!exact_maturity);
+        graph.exact_maturity_seed_world_count += usize::from(exact_maturity);
+        graph.unavailable_feed_seed_world_count += 1;
+
+        let destinations_before_word =
+            (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+                total
+                    .checked_add(u128::from(
+                        seed.runner
+                            .env
+                            .token_amount(seed.runner.env.actors[actor].destination_token),
+                    ))
+                    .ok_or("INV-073 oracle-failure pre-word destination overflow")
+            })?;
+        let mut before_exact = seed.runner.authenticated_graph_state();
+        let mut before_economic = seed.runner.bounded_reference_node()?;
+        graph.nodes.insert(before_exact.clone());
+        for (position, (action_index, action)) in word.iter().enumerate() {
+            let result = apply_bounded_oracle_failure_action(&mut seed, *action).map_err(|error| {
+                format!(
+                    "INV-086 oracle-failure exact={exact_maturity} word {word:?} failed at position {position}: {error}"
+                )
+            })?;
+            let after_economic = seed.runner.bounded_reference_node()?;
+            let after_exact = seed.runner.authenticated_graph_state();
+            bounded_source_credit_transition_evidence(
+                &format!("INV-030 oracle-failure exact={exact_maturity} action={action_index}"),
+                &before_economic,
+                &after_economic,
+            )?;
+            if !result.mutated && after_exact != before_exact {
+                return Err(format!(
+                    "INV-080 nonmutating oracle-failure action {action_index} changed exact state"
+                ));
+            }
+            graph.action_attempts[*action_index] += 1;
+            graph.action_state_changes[*action_index] += u64::from(result.mutated);
+            graph.action_rejections[*action_index] += u64::from(result.rejected);
+            graph.fallback_progress_edges += u64::from(result.fallback_progress);
+            graph.fresh_feed_recovery_edges += u64::from(result.fresh_feed_recovery);
+            if position == 1 {
+                graph.second_position_attempts[*action_index] += 1;
+                graph.second_position_state_changes[*action_index] += u64::from(result.mutated);
+            }
+            graph.nodes.insert(after_exact.clone());
+            graph
+                .edges
+                .insert((before_exact, *action_index as u8, after_exact.clone()));
+            before_exact = after_exact;
+            before_economic = after_economic;
+        }
+
+        finish_bounded_oracle_failure_terminal_campaign(&mut seed).map_err(|error| {
+            format!(
+                "INV-073 oracle-failure exact={exact_maturity} word {word:?} lacked a bounded terminal path: {error}"
+            )
+        })?;
+        graph.bounded_terminal_world_count += 1;
+        let destinations_after = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+            total
+                .checked_add(u128::from(
+                    seed.runner
+                        .env
+                        .token_amount(seed.runner.env.actors[actor].destination_token),
+                ))
+                .ok_or("INV-073 oracle-failure terminal destination overflow")
+        })?;
+        if destinations_after <= destinations_before_word {
+            return Err(format!(
+                "INV-073 oracle-failure exact={exact_maturity} word {word:?} terminated without moving funded value: {destinations_before_word}->{destinations_after}"
+            ));
+        }
+        graph.value_moving_terminal_world_count += 1;
+        graph.coverage.merge(seed.runner.coverage);
+        Ok(())
+    }
+
+    let actions = bounded_oracle_failure_actions();
+    let mut jobs = Vec::new();
+    for exact_maturity in [false, true] {
+        jobs.push((exact_maturity, Vec::new()));
+        for (first_index, first) in actions.iter().copied().enumerate() {
+            jobs.push((exact_maturity, vec![(first_index, first)]));
+        }
+        for (first_index, first) in actions.iter().copied().enumerate() {
+            for (second_index, second) in actions.iter().copied().enumerate() {
+                jobs.push((
+                    exact_maturity,
+                    vec![(first_index, first), (second_index, second)],
+                ));
+            }
+        }
+    }
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(jobs.len().max(1));
+    let chunk_size = jobs.len().div_ceil(worker_count);
+    let graph =
+        std::thread::scope(|scope| {
+            let handles = jobs
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || -> Result<OracleFailureAccumulator, String> {
+                        let mut graph = OracleFailureAccumulator::default();
+                        for (exact_maturity, word) in chunk {
+                            replay_oracle_failure_word(*exact_maturity, word, &mut graph)?;
+                        }
+                        Ok(graph)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut graph = OracleFailureAccumulator::default();
+            for handle in handles {
+                graph.merge(handle.join().map_err(|_| {
+                    "INV-086 oracle-failure frontier worker panicked".to_string()
+                })??);
+            }
+            Ok::<_, String>(graph)
+        })?;
+    let transition_count = jobs.iter().map(|(_, word)| word.len()).sum();
+
+    Ok(BoundedOracleFailureFrontierEvidence {
+        word_count: jobs.len(),
+        transition_count,
+        unique_node_count: graph.nodes.len(),
+        unique_edge_count: graph.edges.len(),
+        before_maturity_seed_world_count: graph.before_maturity_seed_world_count,
+        exact_maturity_seed_world_count: graph.exact_maturity_seed_world_count,
+        unavailable_feed_seed_world_count: graph.unavailable_feed_seed_world_count,
+        bounded_terminal_world_count: graph.bounded_terminal_world_count,
+        value_moving_terminal_world_count: graph.value_moving_terminal_world_count,
+        action_attempts: graph.action_attempts,
+        action_state_changes: graph.action_state_changes,
+        action_rejections: graph.action_rejections,
+        second_position_attempts: graph.second_position_attempts,
+        second_position_state_changes: graph.second_position_state_changes,
+        fallback_progress_edges: graph.fallback_progress_edges,
+        fresh_feed_recovery_edges: graph.fresh_feed_recovery_edges,
         coverage: graph.coverage,
     })
 }

@@ -390,61 +390,71 @@ struct Inv040FeeIngress {
     method: &'static str,
     count: usize,
     fee_class: &'static str,
-    witness: &'static str,
+    witnesses: &'static [&'static str],
 }
 
 #[test]
 fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
-    const ENGINE_PIN: &str = "6f3c5c124a68c1103a2ecd995ff4a10b3af247f8";
+    const ENGINE_PIN: &str = "b4b975f35f6fc021350eaa8ab8917be49bd239c5";
     const ROWS: &[Inv040FeeIngress] = &[
         Inv040FeeIngress {
             owner: "collect_maintenance_fee_to_slot_before_value_debit_view",
             method: "sync_account_fee_to_slot_not_atomic",
             count: 1,
             fee_class: "maintenance-before-value-debit",
-            witness: "v16_program_issue408_unsigned_matcher_cannot_spend_aged_maintenance_collateral",
+            witnesses: &[
+                "v16_program_issue408_unsigned_matcher_cannot_spend_aged_maintenance_collateral",
+            ],
         },
         Inv040FeeIngress {
             owner: "handle_trade_nocpi_zero_copy",
             method: "execute_trade_with_fee_loss_stale_scoped_not_atomic",
             count: 2,
             fee_class: "single-cpi-and-no-cpi-trade",
-            witness: "v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value",
+            witnesses: &[
+                "v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value",
+            ],
         },
         Inv040FeeIngress {
             owner: "handle_batch_execute_zero_copy",
             method: "execute_batch_with_fee_loss_stale_scoped_not_atomic",
             count: 1,
             fee_class: "batch-cpi-and-no-cpi-trade",
-            witness: "v16_program_mixed_direction_fee_allocation_matches_independent_side_ledger",
+            witnesses: &[
+                "v16_program_mixed_direction_fee_allocation_matches_independent_side_ledger",
+            ],
         },
         Inv040FeeIngress {
             owner: "handle_sync_maintenance_fee",
             method: "sync_account_fee_to_slot_not_atomic",
             count: 3,
             fee_class: "explicit-maintenance-and-reward",
-            witness: "v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded",
+            witnesses: &["v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded"],
         },
         Inv040FeeIngress {
             owner: "handle_close_resolved",
             method: "permissionless_auto_crank_not_atomic",
             count: 1,
             fee_class: "resolved-maintenance",
-            witness: "v16_audit_resolved_maintenance_fee_insurance_stays_recoverable",
+            witnesses: &["v16_audit_resolved_maintenance_fee_insurance_stays_recoverable"],
         },
         Inv040FeeIngress {
             owner: "handle_permissionless_crank_zero_copy",
             method: "permissionless_auto_crank_not_atomic",
-            count: 2,
-            fee_class: "liquidation-and-maintenance",
-            witness: "v16_program_issue408_liquidation_reward_cannot_preempt_aged_maintenance_collateral",
+            count: 3,
+            fee_class: "close-progress-liquidation-and-maintenance",
+            witnesses: &[
+                "v16_program_issue408_liquidation_reward_cannot_preempt_aged_maintenance_collateral",
+                "v16_program_active_close_seeded_frontier_preserves_episode_and_bounded_owner_exit",
+                "v16_program_oracle_failure_seeded_frontier_is_exact_and_terminal",
+            ],
         },
         Inv040FeeIngress {
             owner: "charge_account_backing_domain_fees_view",
             method: "charge_account_backing_fee_not_atomic",
             count: 1,
             fee_class: "source-backing-provider-and-insurance",
-            witness: "v16_program_pr223_cpi_backing_fee_consent_fuzz",
+            witnesses: &["v16_program_pr223_cpi_backing_fee_consent_fuzz"],
         },
     ];
     const FEE_METHODS: &[&str] = &[
@@ -533,19 +543,22 @@ fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
         include_str!("inv_089_activation_reactivation_and_initialization_equivalence.rs"),
         include_str!("../public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs"),
         include_str!("../stateful/inv_036_fee_destination_and_policy_version_integrity.rs"),
+        include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs"),
     ];
     let mut expected = std::collections::BTreeMap::new();
     for row in ROWS {
         assert!(!row.fee_class.is_empty());
-        assert!(
-            witness_sources
-                .iter()
-                .any(|source| source.contains(&format!("fn {}", row.witness))),
-            "{}.{} lacks executable public witness {}",
-            row.owner,
-            row.method,
-            row.witness,
-        );
+        assert!(!row.witnesses.is_empty());
+        for witness in row.witnesses {
+            assert!(
+                witness_sources
+                    .iter()
+                    .any(|source| source.contains(&format!("fn {witness}"))),
+                "{}.{} lacks executable public witness {witness}",
+                row.owner,
+                row.method,
+            );
+        }
         assert!(
             expected
                 .insert((row.owner.to_string(), row.method.to_string()), row.count)

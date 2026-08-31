@@ -13553,6 +13553,7 @@ pub mod processor {
                     continue;
                 }
                 let mut oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+                let oracle_profile_before = oracle_profile;
                 let asset_slot_before = group.markets[asset_index].engine.asset.slot_last.get();
                 advance_funding_mark_checkpoint_view(&mut oracle_profile, asset_slot_before);
                 let resolve_matured = global_or_profile_resolve_matured_at_slot(
@@ -13598,6 +13599,21 @@ pub mod processor {
                                 true,
                             )?
                         else {
+                            if oracle_profile != oracle_profile_before {
+                                if asset_index == 0 {
+                                    mirror_oracle_profile_to_base_config(
+                                        &mut cfg,
+                                        &oracle_profile,
+                                        true,
+                                    );
+                                }
+                                write_oracle_profile_to_view(
+                                    &mut group,
+                                    asset_index,
+                                    &oracle_profile,
+                                )?;
+                                market_accrual_performed = true;
+                            }
                             // Hints are discovery only. A stale transaction may include an asset
                             // whose terminal accrual is already complete; ignore it and let a later
                             // relevant hint or the engine-selected account continuation run.
