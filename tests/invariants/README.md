@@ -46,7 +46,7 @@ Completion requires all of the following:
 
 Updated 2026-08-31. The current engine pin is
 `6f3c5c124a68c1103a2ecd995ff4a10b3af247f8` on engine branch
-`codex/terminal-expiry-close-progress-20260831`. The newest finding-blind INV-063/070/077/086
+`codex/terminal-expiry-close-progress-20260831` ([engine PR194](https://github.com/aeyakovenko/percolator/pull/194)). The newest finding-blind INV-063/070/077/086
 composition extends the public underfunded-liquidation graph past backing expiry. On the parent,
 five economically terminal and dematerialized portfolios left 751 custody atoms: 750 atoms of
 expired backing, 123 atoms of historical insurance spend that could no longer be recredited, and a
