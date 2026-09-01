@@ -10,9 +10,197 @@
 //! larger than the SPL-token `u64` transport can represent, owner reduction
 //! over the current exposure clamping to flat rather than opening opposite-side
 //! risk, and batch/CPI active-leg caps rejecting atomically before partial
-//! state mutation or hostile matcher CPI.
+//! state mutation or hostile matcher CPI. The cumulative position/OI matrix
+//! exhausts all sixteen first-fill/final-fill transport pairs, reaches the
+//! shared account/side-OI cap by splitting `max - 1` and one atom, rejects one
+//! more atom through every transport with a complete economic snapshot, and
+//! then closes the exact-maximum position through a public route.
+//!
+//! Guarantee boundary: `MAX_TRADE_SIZE_Q`, `MAX_POSITION_ABS_Q`, and
+//! `MAX_OI_SIDE_Q` are currently one shared bound, while the exact maximum
+//! position/price product is `MAX_ACCOUNT_NOTIONAL`. Assertions below make a
+//! future divergence reopen this matrix. INV-050 owns cross-zero and scalar
+//! max/max+1 route boundaries, INV-009/011/052/059 own cumulative signed
+//! quantity/fee partitions, INV-045 owns elapsed price/funding-rate limits,
+//! INV-083 owns every public configuration boundary, and INV-085 owns the
+//! deployed full-width notional arithmetic. There is no public position
+//! transfer route; INV-049 source-locks the complete position-writer surface.
 
 use super::*;
+use support::{
+    fuzz_model::{
+        assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
+        TradeRoute,
+    },
+    v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
+};
+
+const INV_058_TRADE_ROUTES: [TradeRoute; 4] = [
+    TradeRoute::NoCpi,
+    TradeRoute::Cpi,
+    TradeRoute::BatchNoCpi,
+    TradeRoute::BatchCpi,
+];
+
+#[derive(Debug, PartialEq, Eq)]
+struct Inv058EconomicSnapshot {
+    market: Vec<u8>,
+    foreign_market: Vec<u8>,
+    portfolios: Vec<Vec<u8>>,
+    foreign_portfolio: Vec<u8>,
+    backing_ledger: Vec<u8>,
+    token_accounts: Vec<(Pubkey, Vec<u8>)>,
+    matcher_contexts: Vec<Vec<u8>>,
+    economic_lamports: Vec<(Pubkey, u64)>,
+    token_supply: u128,
+}
+
+fn inv_058_economic_snapshot(env: &V16Svm) -> Inv058EconomicSnapshot {
+    Inv058EconomicSnapshot {
+        market: env.market_data(false),
+        foreign_market: env.market_data(true),
+        portfolios: env.all_primary_portfolio_data(),
+        foreign_portfolio: env.foreign_portfolio_data(),
+        backing_ledger: env.backing_domain_ledger_data(),
+        token_accounts: env.all_token_account_data(),
+        matcher_contexts: env.all_matcher_context_data(),
+        economic_lamports: env.all_economic_account_lamports(),
+        token_supply: env.token_supply_observed(),
+    }
+}
+
+fn inv_058_max_position_config() -> MarketConfig {
+    const CAPITAL: u128 = 20_000_000_000;
+    const TOKEN_BALANCE: u64 = CAPITAL as u64;
+    MarketConfig {
+        initial_price: 100,
+        actor_deposits: [CAPITAL; PRIMARY_ACTOR_COUNT],
+        actor_token_balances: [TOKEN_BALANCE; PRIMARY_ACTOR_COUNT],
+        ..MarketConfig::default()
+    }
+}
+
+#[test]
+fn v16_program_split_fills_cannot_cross_position_or_side_oi_cap_on_any_route_pair() {
+    const TAKER: usize = 0;
+    const MAKER: usize = 1;
+    const ASSET: u16 = 0;
+    const PRICE: u64 = 100;
+
+    assert_eq!(
+        percolator::MAX_TRADE_SIZE_Q,
+        percolator::MAX_POSITION_ABS_Q,
+        "the scalar and cumulative account-position ceilings changed; expand this matrix"
+    );
+    assert_eq!(
+        percolator::MAX_POSITION_ABS_Q,
+        percolator::MAX_OI_SIDE_Q,
+        "the account and side-OI ceilings changed; add the newly distinct partition"
+    );
+    let maximum_leg_notional = percolator::MAX_POSITION_ABS_Q
+        .checked_mul(u128::from(percolator::MAX_ORACLE_PRICE))
+        .expect("published maximum quantity/price product fits u128")
+        / POS_SCALE;
+    assert_eq!(
+        maximum_leg_notional,
+        percolator::MAX_ACCOUNT_NOTIONAL,
+        "the liquidation/config notional domain changed; add a distinct public boundary"
+    );
+
+    let max_q = i128::try_from(percolator::MAX_POSITION_ABS_Q).expect("position cap fits i128");
+    for (first_index, first_route) in INV_058_TRADE_ROUTES.into_iter().enumerate() {
+        for (final_index, final_route) in INV_058_TRADE_ROUTES.into_iter().enumerate() {
+            let mut seed = [0x58; 32];
+            seed[0] = first_index as u8;
+            seed[1] = final_index as u8;
+            let mut env = V16Svm::new(seed, inv_058_max_position_config());
+
+            let first = execute_trade_route(
+                &mut env,
+                first_route,
+                TAKER,
+                MAKER,
+                ASSET,
+                max_q - 1,
+                PRICE,
+                0,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{first_route:?}->{final_route:?} max-1 fill failed: {error}")
+            });
+            assert!(first.compute_units < TX_CU_LIMIT);
+
+            let final_fill =
+                execute_trade_route(&mut env, final_route, TAKER, MAKER, ASSET, 1, PRICE, 0)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{first_route:?}->{final_route:?} final one-atom fill failed: {error}"
+                        )
+                    });
+            assert!(final_fill.compute_units < TX_CU_LIMIT);
+
+            let (_, capped_group) = env.primary_market_state();
+            assert_eq!(
+                capped_group.assets[ASSET as usize].oi_eff_long_q,
+                percolator::MAX_OI_SIDE_Q
+            );
+            assert_eq!(
+                capped_group.assets[ASSET as usize].oi_eff_short_q,
+                percolator::MAX_OI_SIDE_Q
+            );
+            assert_eq!(
+                active_leg_for_asset(&env.primary_portfolio(TAKER), ASSET as usize).basis_pos_q,
+                max_q
+            );
+            assert_eq!(
+                active_leg_for_asset(&env.primary_portfolio(MAKER), ASSET as usize).basis_pos_q,
+                -max_q
+            );
+
+            for reject_route in INV_058_TRADE_ROUTES {
+                if matches!(reject_route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+                    env.ensure_primary_matcher_enabled(MAKER)
+                        .expect("prepare public CPI capability before rollback snapshot");
+                }
+                let before = inv_058_economic_snapshot(&env);
+                let error =
+                    execute_trade_route(&mut env, reject_route, TAKER, MAKER, ASSET, 1, PRICE, 0)
+                        .expect_err("one atom beyond the cumulative position/OI cap must reject");
+                assert!(
+                    error.contains("Custom(18)") || error.contains("custom program error: 0x12"),
+                    "{first_route:?}->{final_route:?} over-cap {reject_route:?} returned {error}"
+                );
+                assert_eq!(
+                    inv_058_economic_snapshot(&env),
+                    before,
+                    "{first_route:?}->{final_route:?} over-cap {reject_route:?} did not roll back exactly"
+                );
+            }
+
+            let close =
+                execute_trade_route(&mut env, final_route, TAKER, MAKER, ASSET, -max_q, PRICE, 0)
+                    .unwrap_or_else(|error| {
+                        panic!("{first_route:?}->{final_route:?} exact-max exit failed: {error}")
+                    });
+            assert!(close.compute_units < TX_CU_LIMIT);
+            let (_, terminal_group) = env.primary_market_state();
+            assert_eq!(terminal_group.assets[ASSET as usize].oi_eff_long_q, 0);
+            assert_eq!(terminal_group.assets[ASSET as usize].oi_eff_short_q, 0);
+            assert!(!has_active_leg_for_asset(
+                &env.primary_portfolio(TAKER),
+                ASSET as usize
+            ));
+            assert!(!has_active_leg_for_asset(
+                &env.primary_portfolio(MAKER),
+                ASSET as usize
+            ));
+            assert_public_stock_census("INV-058 split-cap terminal", &env)
+                .expect("split-cap route preserves independent stock reconciliation");
+            assert_public_encumbrance_census("INV-058 split-cap terminal", &env)
+                .expect("split-cap route preserves independent encumbrance reconciliation");
+        }
+    }
+}
 
 #[test]
 fn v16_program_cumulative_tvl_cap_enforced_and_withdrawable() {
