@@ -8,9 +8,11 @@
 //!
 //! Covered states are market `Live` with asset `Active`, `DrainOnly`, and
 //! `Recovery`, plus market `Resolved`. Covered operations are a fresh matched
-//! open, a bilateral exact reduction, deposit, withdraw, and `CloseResolved`.
-//! Reset-side, retirement/reactivation, and the remaining public instruction
-//! classes remain outside this bounded matrix.
+//! open, a bilateral exact reduction, unilateral `RebalanceReduce`, Recovery
+//! `ForfeitRecoveryLeg`, deposit, withdraw, and `CloseResolved`. The owner-exit
+//! cells require strict exposure reduction with no SPL movement, so they cannot
+//! pass as accepted no-ops. Reset-side, retirement/reactivation, and the
+//! remaining public instruction classes remain outside this bounded matrix.
 
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{AssetLifecycleV16, MarketModeV16, POS_SCALE};
@@ -37,15 +39,19 @@ impl LifecycleState {
 enum UserOperation {
     Open,
     Reduce,
+    RebalanceReduce,
+    ForfeitRecovery,
     Deposit,
     Withdraw,
     CloseResolved,
 }
 
 impl UserOperation {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 7] = [
         Self::Open,
         Self::Reduce,
+        Self::RebalanceReduce,
+        Self::ForfeitRecovery,
         Self::Deposit,
         Self::Withdraw,
         Self::CloseResolved,
@@ -55,6 +61,10 @@ impl UserOperation {
         match self {
             Self::Open => state == LifecycleState::Active,
             Self::Reduce => state != LifecycleState::Resolved,
+            Self::RebalanceReduce => {
+                matches!(state, LifecycleState::Active | LifecycleState::DrainOnly)
+            }
+            Self::ForfeitRecovery => state == LifecycleState::Recovery,
             Self::Deposit | Self::Withdraw => state != LifecycleState::Resolved,
             Self::CloseResolved => state == LifecycleState::Resolved,
         }
@@ -88,7 +98,10 @@ fn prepare_world(
 ) -> Result<(V16Svm, MarketConfig), String> {
     let config = MarketConfig::default();
     let mut env = V16Svm::new([state as u8; 32], config);
-    if operation == UserOperation::Reduce {
+    if matches!(
+        operation,
+        UserOperation::Reduce | UserOperation::RebalanceReduce | UserOperation::ForfeitRecovery
+    ) {
         env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, config.initial_price, 0)
             .map_err(|error| format!("prepare matched position: {error}"))?;
     }
@@ -143,6 +156,15 @@ fn prepare_world(
     Ok((env, config))
 }
 
+fn actor_asset_exposure(env: &V16Svm, actor: usize, asset_index: u32) -> u128 {
+    env.primary_portfolio(actor)
+        .legs
+        .iter()
+        .filter(|leg| leg.active != 0 && leg.asset_index.get() == asset_index)
+        .map(|leg| leg.basis_pos_q.get().unsigned_abs())
+        .sum()
+}
+
 fn exercise_cell(state: LifecycleState, operation: UserOperation) -> Result<(), String> {
     let (mut env, config) = prepare_world(state, operation)?;
     let before = snapshot(&env);
@@ -151,6 +173,9 @@ fn exercise_cell(state: LifecycleState, operation: UserOperation) -> Result<(), 
     let source_before = env.token_amount(env.actors[2].source_token);
     let vault_before = env.token_amount(env.vault);
     let oi_before = env.primary_market_state().1.assets[0].oi_eff_long_q;
+    let exit_exposure_before = actor_asset_exposure(&env, 0, 0);
+    let exit_capital_before = env.primary_portfolio(0).capital.get();
+    let exit_pnl_before = env.primary_portfolio(0).pnl.get();
 
     let result = match operation {
         UserOperation::Open => {
@@ -159,6 +184,8 @@ fn exercise_cell(state: LifecycleState, operation: UserOperation) -> Result<(), 
         UserOperation::Reduce => {
             env.trade_no_cpi(0, 1, 0, -(POS_SCALE as i128), config.initial_price, 0)
         }
+        UserOperation::RebalanceReduce => env.rebalance_reduce(0, 0, POS_SCALE),
+        UserOperation::ForfeitRecovery => env.forfeit_recovery_leg(0, 0, u128::MAX),
         UserOperation::Deposit => env.deposit_primary(2, 1),
         UserOperation::Withdraw => env.withdraw_primary(2, 1),
         UserOperation::CloseResolved => env.close_resolved_primary(2),
@@ -192,6 +219,30 @@ fn exercise_cell(state: LifecycleState, operation: UserOperation) -> Result<(), 
                 return Err(format!(
                     "{state:?} reduction produced wrong OI: {oi_before}->{}",
                     group.assets[0].oi_eff_long_q
+                ));
+            }
+        }
+        UserOperation::RebalanceReduce | UserOperation::ForfeitRecovery => {
+            let exit_exposure_after = actor_asset_exposure(&env, 0, 0);
+            if exit_exposure_before != POS_SCALE || exit_exposure_after >= exit_exposure_before {
+                return Err(format!(
+                    "{state:?}/{operation:?} did not strictly reduce exposure: \
+                     {exit_exposure_before}->{exit_exposure_after}"
+                ));
+            }
+            let asset = env.primary_market_state().1.assets[0];
+            if asset.oi_eff_long_q > oi_before || asset.oi_eff_short_q > oi_before {
+                return Err(format!(
+                    "{state:?}/{operation:?} increased matched OI: long={}, short={}, before={oi_before}",
+                    asset.oi_eff_long_q, asset.oi_eff_short_q
+                ));
+            }
+            if env.primary_portfolio(0).capital.get() != exit_capital_before
+                || env.primary_portfolio(0).pnl.get() != exit_pnl_before
+                || env.all_token_account_data() != before.tokens
+            {
+                return Err(format!(
+                    "{state:?}/{operation:?} moved value in a zero-PnL owner-exit cell"
                 ));
             }
         }
