@@ -8,9 +8,12 @@
 //! `v16_program_resolved_adl_close_order_matrix_preserves_funded_exits` opens an ordinary
 //! matched position, moves an authenticated mark, and uses permissionless cranks to create a winner
 //! whose stored basis exceeds effective long OI. It drives both owner-signed automatic-crank
-//! landing orders until both users are terminal. Every accepted call must
-//! mutate, each user receives exactly its funded value, SPL and internal custody reconcile to zero,
-//! token supply is conserved, and both portfolio accounts close.
+//! landing orders until both users are terminal. Before resolution and after every accepted close,
+//! an independent active-leg census recomputes each side's ADL-effective OI from raw basis and A
+//! snapshots and must equal the deployed market counters; each accepted close must mutate and make
+//! both OI lanes nonincreasing until they are exactly zero. Each user receives exactly its funded
+//! value, SPL and internal custody reconcile to zero, token supply is conserved, and both portfolio
+//! accounts close.
 //! `v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete` builds a larger
 //! three-user topology with two equal-risk target legs. Public first-wave liquidations make each
 //! target leg ADL-scaled, then an authenticated account fee makes the combined portfolio

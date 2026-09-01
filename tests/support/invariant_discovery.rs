@@ -1204,6 +1204,8 @@ pub struct ResolvedAdlCloseDiscovery {
     pub canonical_vault_liquidity: u128,
     pub close_steps: u8,
     pub every_close_step_mutated: bool,
+    pub oi_census_steps: u8,
+    pub every_close_step_oi_nonincreasing: bool,
     pub nonprogress_rejections: u8,
     pub exact_rejection_rollback: bool,
     pub users_terminal: bool,
@@ -1211,6 +1213,8 @@ pub struct ResolvedAdlCloseDiscovery {
     pub winner_external_payout: u64,
     pub loser_external_payout: u64,
     pub canonical_vault_after: u128,
+    pub terminal_long_oi_q: u128,
+    pub terminal_short_oi_q: u128,
     pub token_supply_conserved: bool,
 }
 
@@ -1533,12 +1537,16 @@ impl ResolvedAdlCloseDiscovery {
             && self.close_steps != 0
             && self.close_steps <= 16
             && self.every_close_step_mutated
+            && self.oi_census_steps == self.close_steps.checked_add(1).unwrap_or(u8::MAX)
+            && self.every_close_step_oi_nonincreasing
             && self.exact_rejection_rollback
             && self.users_terminal
             && self.portfolios_closed
             && u128::from(self.winner_external_payout) == self.winner_funded_value
             && u128::from(self.loser_external_payout) == self.loser_funded_value
             && self.canonical_vault_after == 0
+            && self.terminal_long_oi_q == 0
+            && self.terminal_short_oi_q == 0
             && self.token_supply_conserved
     }
 }
@@ -16771,6 +16779,73 @@ pub fn discover_cross_domain_backing_single_use(
     })
 }
 
+fn independently_observed_resolved_adl_oi(env: &V16Svm) -> Result<(u128, u128), String> {
+    let (_, group) = env.primary_market_state();
+    let asset = group
+        .assets
+        .first()
+        .ok_or_else(|| "resolved-ADL OI oracle has no asset zero".to_string())?;
+    let mut observed_long = 0u128;
+    let mut observed_short = 0u128;
+
+    for actor in [0usize, 1] {
+        let portfolio = env.primary_portfolio(actor);
+        for leg in portfolio
+            .legs
+            .iter()
+            .filter_map(|leg| leg.try_to_runtime().ok())
+            .filter(|leg| leg.active && leg.asset_index == 0 && leg.basis_pos_q != 0)
+        {
+            let (current_a, current_epoch, side_mode) = match leg.side {
+                SideV16::Long => (asset.a_long, asset.epoch_long, asset.mode_long),
+                SideV16::Short => (asset.a_short, asset.epoch_short, asset.mode_short),
+            };
+            let effective_q = if leg.epoch_snap == current_epoch {
+                if leg.a_basis == 0 || current_a == 0 || current_a > leg.a_basis {
+                    return Err(format!(
+                        "resolved-ADL OI oracle found invalid {:?} A state: current={current_a}, basis={}",
+                        leg.side, leg.a_basis
+                    ));
+                }
+                super::reference_math::mul_div_ceil(
+                    leg.basis_pos_q.unsigned_abs(),
+                    current_a,
+                    leg.a_basis,
+                )?
+            } else if side_mode == SideModeV16::ResetPending
+                && leg.epoch_snap.checked_add(1) == Some(current_epoch)
+            {
+                0
+            } else {
+                return Err(format!(
+                    "resolved-ADL OI oracle found invalid {:?} epoch: leg={}, current={current_epoch}, mode={side_mode:?}",
+                    leg.side, leg.epoch_snap
+                ));
+            };
+            match leg.side {
+                SideV16::Long => {
+                    observed_long = observed_long
+                        .checked_add(effective_q)
+                        .ok_or_else(|| "resolved-ADL observed long OI overflow".to_string())?;
+                }
+                SideV16::Short => {
+                    observed_short = observed_short
+                        .checked_add(effective_q)
+                        .ok_or_else(|| "resolved-ADL observed short OI overflow".to_string())?;
+                }
+            }
+        }
+    }
+    let deployed = (asset.oi_eff_long_q, asset.oi_eff_short_q);
+    let observed = (observed_long, observed_short);
+    if deployed != observed {
+        return Err(format!(
+            "resolved-ADL deployed OI {deployed:?} diverged from independent active-leg census {observed:?}"
+        ));
+    }
+    Ok(observed)
+}
+
 fn verify_one_resolved_adl_close_order(
     mut seed: [u8; 32],
     order: ResolvedAdlCloseOrder,
@@ -16829,6 +16904,15 @@ fn verify_one_resolved_adl_close_order(
             after_adl.assets[0].a_long
         ));
     }
+    let observed_before_resolve = independently_observed_resolved_adl_oi(&env)?;
+    if observed_before_resolve
+        != (
+            after_adl.assets[0].oi_eff_long_q,
+            after_adl.assets[0].oi_eff_short_q,
+        )
+    {
+        return Err("resolved-ADL pre-resolve OI census changed during observation".into());
+    }
 
     env.resolve_market()
         .map_err(|error| format!("resolve ADL market: {error}"))?;
@@ -16859,6 +16943,9 @@ fn verify_one_resolved_adl_close_order(
     };
     let mut close_steps = 0u8;
     let mut every_close_step_mutated = true;
+    let mut oi_census_steps = 1u8;
+    let mut every_close_step_oi_nonincreasing = true;
+    let mut previous_oi = independently_observed_resolved_adl_oi(&env)?;
     let mut nonprogress_rejections = 0u8;
     let mut exact_rejection_rollback = true;
     for round in 0..ATTEMPTS {
@@ -16874,6 +16961,13 @@ fn verify_one_resolved_adl_close_order(
                         .checked_add(1)
                         .ok_or_else(|| "resolved-ADL close-step overflow".to_string())?;
                     every_close_step_mutated &= fingerprint(&env) != before;
+                    let next_oi = independently_observed_resolved_adl_oi(&env)?;
+                    oi_census_steps = oi_census_steps
+                        .checked_add(1)
+                        .ok_or_else(|| "resolved-ADL OI-census count overflow".to_string())?;
+                    every_close_step_oi_nonincreasing &=
+                        next_oi.0 <= previous_oi.0 && next_oi.1 <= previous_oi.1;
+                    previous_oi = next_oi;
                 }
                 Err(error) if error.contains("Custom(22)") => {
                     nonprogress_rejections = nonprogress_rejections
@@ -16919,6 +17013,9 @@ fn verify_one_resolved_adl_close_order(
     }
     let portfolios_closed =
         env.close_primary_portfolio(WINNER).is_ok() && env.close_primary_portfolio(LOSER).is_ok();
+    let (_, terminal_group) = env.primary_market_state();
+    let terminal_long_oi_q = terminal_group.assets[0].oi_eff_long_q;
+    let terminal_short_oi_q = terminal_group.assets[0].oi_eff_short_q;
     let token_supply_conserved = env.token_supply_observed() == supply_before;
 
     Ok(ResolvedAdlCloseDiscovery {
@@ -16930,6 +17027,8 @@ fn verify_one_resolved_adl_close_order(
         canonical_vault_liquidity,
         close_steps,
         every_close_step_mutated,
+        oi_census_steps,
+        every_close_step_oi_nonincreasing,
         nonprogress_rejections,
         exact_rejection_rollback,
         users_terminal,
@@ -16937,6 +17036,8 @@ fn verify_one_resolved_adl_close_order(
         winner_external_payout,
         loser_external_payout,
         canonical_vault_after,
+        terminal_long_oi_q,
+        terminal_short_oi_q,
         token_supply_conserved,
     })
 }
