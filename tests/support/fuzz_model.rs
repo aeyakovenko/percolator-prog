@@ -1,6 +1,6 @@
 use super::v16_svm::{
-    assert_closed_market_tombstone, MarketConfig, TxSuccess, V16Svm, ASSET_COUNT, EXIT_MAKER_INDEX,
-    INITIAL_PRICE, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT, USER_COUNT,
+    assert_closed_market_tombstone, snapshot_engine_full_refresh, MarketConfig, TxSuccess, V16Svm,
+    ASSET_COUNT, EXIT_MAKER_INDEX, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT, USER_COUNT,
 };
 use percolator::{
     active_bitmap_is_empty, v16_domain_pair_for_asset_index, AssetLifecycleV16, AssetStateV16,
@@ -21,7 +21,10 @@ use serde::{Deserialize, Serialize};
 use solana_sdk::{
     instruction::AccountMeta, pubkey::Pubkey, signature::Signer, transaction::Transaction,
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+};
 
 const MIN_LIVENESS_DRAIN_LIMIT: usize = 256;
 const MAX_LIVENESS_DRAIN_LIMIT: usize = 100_000;
@@ -1379,6 +1382,7 @@ pub struct Coverage {
     pub liquidated_abs_q: u128,
     pub known_blocker_hits: [u64; KnownBlocker::COUNT],
     pub known_blocker_exit_locks: [u64; KnownBlocker::COUNT],
+    pub current_certificate_full_refresh_checks: u64,
     pub max_cu: u64,
 }
 
@@ -1445,6 +1449,7 @@ impl Default for Coverage {
             liquidated_abs_q: 0,
             known_blocker_hits: [0; KnownBlocker::COUNT],
             known_blocker_exit_locks: [0; KnownBlocker::COUNT],
+            current_certificate_full_refresh_checks: 0,
             max_cu: 0,
         }
     }
@@ -1486,6 +1491,11 @@ impl Coverage {
         if self.liquidation_steps == 0 || self.liquidated_abs_q == 0 {
             return Err(
                 "public crank never reduced a currently certified liquidatable position".into(),
+            );
+        }
+        if self.current_certificate_full_refresh_checks == 0 {
+            return Err(
+                "stateful routes never compared a current certificate with full refresh".into(),
             );
         }
         if self.max_cu > TX_CU_LIMIT {
@@ -1583,6 +1593,8 @@ impl Coverage {
         self.user_positions_closed += other.user_positions_closed;
         self.liquidation_steps += other.liquidation_steps;
         self.liquidated_abs_q += other.liquidated_abs_q;
+        self.current_certificate_full_refresh_checks +=
+            other.current_certificate_full_refresh_checks;
         for (target, value) in self
             .known_blocker_hits
             .iter_mut()
@@ -2637,6 +2649,82 @@ impl CrankFailure {
     }
 }
 
+fn assert_current_certificate_matches_snapshot_full_refresh(
+    label: &str,
+    market_data: &[u8],
+    portfolio_data: &[u8],
+) -> Result<bool, String> {
+    let (_, group) = state::read_market(market_data)
+        .map_err(|error| format!("{label}: decode market for certificate oracle: {error:?}"))?;
+    let account = state::read_portfolio(portfolio_data)
+        .map_err(|error| format!("{label}: decode portfolio for certificate oracle: {error:?}"))?;
+    let certificate = account.health_cert.try_to_runtime().map_err(|error| {
+        format!("{label}: decode deployed health certificate for oracle: {error:?}")
+    })?;
+    let current = certificate.valid
+        && certificate.cert_oracle_epoch == group.oracle_epoch
+        && certificate.cert_funding_epoch == group.funding_epoch
+        && certificate.cert_risk_epoch == group.risk_epoch
+        && certificate.cert_asset_set_epoch == group.asset_set_epoch
+        && certificate.active_bitmap_at_cert == account.active_bitmap.map(|word| word.get());
+    if !current {
+        return Ok(false);
+    }
+
+    let (full_refresh, refreshed_market, refreshed_portfolio) =
+        snapshot_engine_full_refresh(market_data, portfolio_data).map_err(|error| {
+            format!("{label}: current certificate cannot full-refresh: {error}")
+        })?;
+    if certificate != full_refresh {
+        return Err(format!(
+            "{label}: current certificate diverged from snapshot full refresh: deployed={certificate:?}, full={full_refresh:?}"
+        ));
+    }
+    // Full refresh rewrites this intentionally asset-local observation cache to the last leg it
+    // visits. It is not part of the certificate; every safety consumer independently checks the
+    // selected asset/account or scans configured assets. Keep every other market byte in-frame.
+    let loss_stale_active_offset = MARKET_GROUP_OFF
+        + core::mem::offset_of!(percolator::MarketGroupV16HeaderAccount, loss_stale_active);
+    let mut normalized_refreshed_market = refreshed_market.clone();
+    if normalized_refreshed_market.len() != market_data.len() {
+        return Err(format!(
+            "{label}: snapshot full refresh changed market length from {} to {}",
+            market_data.len(),
+            normalized_refreshed_market.len(),
+        ));
+    }
+    normalized_refreshed_market[loss_stale_active_offset] = market_data[loss_stale_active_offset];
+    if normalized_refreshed_market != market_data {
+        let byte_deltas = market_data
+            .iter()
+            .zip(&refreshed_market)
+            .enumerate()
+            .filter_map(|(offset, (before, after))| {
+                (before != after).then_some((offset, *before, *after))
+            })
+            .take(16)
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "{label}: current certificate concealed market work during snapshot full refresh; first byte deltas={byte_deltas:?}"
+        ));
+    }
+    if refreshed_portfolio != portfolio_data {
+        let byte_deltas = portfolio_data
+            .iter()
+            .zip(&refreshed_portfolio)
+            .enumerate()
+            .filter_map(|(offset, (before, after))| {
+                (before != after).then_some((offset, *before, *after))
+            })
+            .take(16)
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "{label}: current certificate concealed portfolio work during snapshot full refresh; first byte deltas={byte_deltas:?}"
+        ));
+    }
+    Ok(true)
+}
+
 pub struct ScenarioRunner {
     env: V16Svm,
     positions: [[i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
@@ -2646,6 +2734,7 @@ pub struct ScenarioRunner {
     retained: VecDeque<RetainedTrade>,
     last_trade_rejection: Option<String>,
     last_crank_compute_units: Option<u64>,
+    current_certificate_full_refresh_checks: Cell<u64>,
     pub coverage: Coverage,
 }
 
@@ -2692,6 +2781,7 @@ impl ScenarioRunner {
             retained: VecDeque::new(),
             last_trade_rejection: None,
             last_crank_compute_units: None,
+            current_certificate_full_refresh_checks: Cell::new(0),
             coverage: Coverage {
                 loaded_program_hash,
                 ..Coverage::default()
@@ -6673,6 +6763,27 @@ impl ScenarioRunner {
         assert_source_claim_bound_attribution("foreign", &foreign, &foreign_portfolios)?;
         assert_public_stock_census("stateful post-transition", &self.env)?;
         assert_public_encumbrance_census("stateful post-transition", &self.env)?;
+        let primary_market_data = self.env.market_data(false);
+        let mut certificate_checks = 0u64;
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            certificate_checks +=
+                u64::from(assert_current_certificate_matches_snapshot_full_refresh(
+                    &format!("primary actor {actor}"),
+                    &primary_market_data,
+                    &self.env.primary_portfolio_data(actor),
+                )?);
+        }
+        certificate_checks += u64::from(assert_current_certificate_matches_snapshot_full_refresh(
+            "foreign actor",
+            &self.env.market_data(true),
+            &self.env.foreign_portfolio_data(),
+        )?);
+        self.current_certificate_full_refresh_checks.set(
+            self.current_certificate_full_refresh_checks
+                .get()
+                .checked_add(certificate_checks)
+                .ok_or("current-certificate oracle count overflow")?,
+        );
         self.assert_positions_match()
     }
 
@@ -7249,6 +7360,13 @@ pub fn run_scenario(scenario: &Scenario) -> Result<Coverage, String> {
         exit_runner.coverage.known_blocker_exit_locks
             [KnownBlocker::LiveLapsedSourceBacking.index()] += 1;
     }
+    progress_runner
+        .coverage
+        .current_certificate_full_refresh_checks = progress_runner
+        .current_certificate_full_refresh_checks
+        .get();
+    exit_runner.coverage.current_certificate_full_refresh_checks =
+        exit_runner.current_certificate_full_refresh_checks.get();
     progress_runner.coverage.merge(exit_runner.coverage);
 
     let liquidation_coverage = run_liquidation_exit_probe(scenario.seed)?;

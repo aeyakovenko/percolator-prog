@@ -1,5 +1,5 @@
 use litesvm::LiteSVM;
-use percolator::POS_SCALE;
+use percolator::{HealthCertV16, POS_SCALE};
 use percolator_prog::{
     constants::{HEADER_LEN, KIND_CLOSED_MARKET, MAGIC, VERSION},
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
@@ -39,6 +39,28 @@ pub const EXIT_MAKER_TOKEN_BALANCE: u64 = 2_500_000_000;
 const FOREIGN_TOKEN_BALANCE: u64 = 200_000_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 const CURRENT_AUTHORITY_EPOCH: u64 = u64::MAX;
+
+pub fn snapshot_engine_full_refresh(
+    market_data: &[u8],
+    portfolio_data: &[u8],
+) -> Result<(HealthCertV16, Vec<u8>, Vec<u8>), String> {
+    let mut refreshed_market = market_data.to_vec();
+    let mut refreshed_portfolio = portfolio_data.to_vec();
+    let max_market_slots = state::read_market_config_mode_and_capacity(&refreshed_market)
+        .map_err(|error| format!("decode snapshot market shape: {error:?}"))?
+        .2;
+    let cert = {
+        let (_, mut market) = state::market_view_mut(&mut refreshed_market)
+            .map_err(|error| format!("decode snapshot market view: {error:?}"))?;
+        let mut portfolio =
+            state::portfolio_view_mut_for_market_slots(&mut refreshed_portfolio, max_market_slots)
+                .map_err(|error| format!("decode snapshot portfolio view: {error:?}"))?;
+        market
+            .full_account_refresh_not_atomic(&mut portfolio)
+            .map_err(|error| format!("snapshot full refresh: {error:?}"))?
+    };
+    Ok((cert, refreshed_market, refreshed_portfolio))
+}
 
 pub fn closed_market_tombstone_data() -> [u8; HEADER_LEN] {
     let mut data = [0u8; HEADER_LEN];

@@ -28,20 +28,22 @@
 //! A final 20-world matrix retains nonzero target/effective lag and a real maintenance debit on one
 //! leg while every structural delta changes another leg through every public transport; the
 //! incremental certificate must still equal full refresh on the exact committed snapshot.
+//! The shared stateful runner now applies that same pinned-engine differential after every public
+//! transition to every current primary and foreign certificate. The cloned full refresh must leave
+//! the portfolio and all market state byte-exact except for the engine's typed touched-asset
+//! `loss_stale_active` observation cache; its safety consumers own independent complete scans.
 //!
 //! Guarantee boundary: this is bounded generated public-route evidence over four trade routes and
-//! both active-leg orders. It does not replace a proof over every reachable portfolio state.
+//! both active-leg orders plus every checkpoint reached by the stateful generator. It does not
+//! replace a proof over every reachable portfolio state.
 
 use super::*;
-use crate::support::v16_svm::{MarketConfig, V16Svm};
+use crate::support::v16_svm::{snapshot_engine_full_refresh, MarketConfig, V16Svm};
 use percolator::{
     AssetLifecycleV16, BackingBucketStatusV16, HealthCertV16, PortfolioAccountV16Account,
     PortfolioLegV16, SideV16, POS_SCALE,
 };
-use percolator_prog::{
-    ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
-    state,
-};
+use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint};
 
 #[derive(Clone, Copy, Debug)]
 enum TradeDeltaShape {
@@ -220,20 +222,10 @@ fn invalidate_and_publicly_full_refresh(
     cert
 }
 
-fn snapshot_engine_full_refresh(env: &V16Svm, actor: usize) -> HealthCertV16 {
-    let mut market_data = env.market_data(false);
-    let mut portfolio_data = env.primary_portfolio_data(actor);
-    let max_market_slots = state::read_market_config_mode_and_capacity(&market_data)
-        .expect("decode snapshot market shape")
-        .2;
-    let (_, mut market) =
-        state::market_view_mut(&mut market_data).expect("decode snapshot market view");
-    let mut account =
-        state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)
-            .expect("decode snapshot portfolio view");
-    market
-        .full_account_refresh_not_atomic(&mut account)
+fn snapshot_portfolio_full_refresh(env: &V16Svm, actor: usize) -> HealthCertV16 {
+    snapshot_engine_full_refresh(&env.market_data(false), &env.primary_portfolio_data(actor))
         .expect("pinned engine full refresh must accept the committed public state")
+        .0
 }
 
 #[test]
@@ -1135,7 +1127,7 @@ fn v16_program_pending_obligation_certificates_match_snapshot_full_refresh() {
                 .expect("pending close must commit a valid certificate");
             assert_eq!(
                 health_lanes(pending_incremental),
-                health_lanes(snapshot_engine_full_refresh(&env, LOSER)),
+                health_lanes(snapshot_portfolio_full_refresh(&env, LOSER)),
                 "{route:?}/winner_long={winner_long} pending-close certificate diverged from full refresh"
             );
 
@@ -1315,7 +1307,7 @@ fn v16_program_combined_fee_and_lag_certificates_match_snapshot_full_refresh() {
                 .expect("combined-penalty delta must leave a valid certificate");
             assert_eq!(
                 health_lanes(incremental),
-                health_lanes(snapshot_engine_full_refresh(&env, TARGET)),
+                health_lanes(snapshot_portfolio_full_refresh(&env, TARGET)),
                 "{route:?}/{shape:?} combined fee/lag certificate diverged from full refresh"
             );
 
