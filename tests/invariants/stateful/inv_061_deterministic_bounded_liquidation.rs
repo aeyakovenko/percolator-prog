@@ -32,8 +32,9 @@
 //! Guarantee boundary: these finite matrices cover two-user terminal landing orders, three-asset
 //! unequal-loss selection, and liquidation-to-partial-receipt composition. Close size is not
 //! caller-controlled on the sole public crank, and INV-059 source-locks that surface.
-//! Larger account partitions, repeated authenticated liquidation episodes, transfer, retirement,
-//! and remaining maximum-shape cross-products remain in the audit ledger.
+//! Larger account partitions, multi-asset repeated liquidation episodes, transfer, retirement, and
+//! remaining maximum-shape cross-products remain in the audit ledger. INV-059 separately owns two
+//! authenticated fee-bearing episodes across every opening transport and preserves owner reduction.
 
 use super::*;
 

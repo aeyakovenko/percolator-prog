@@ -8,8 +8,10 @@
 //! inadmissible sub-minimum chunk becomes one full-close fee, while the second charges a real fee
 //! on an engine-selected partial close and proves repeated public submissions against the same
 //! healthy state cannot charge again or change custody. A second public campaign separates two
-//! fee-bearing liquidations with a new authenticated mark and a fresh certified deficit, proving
-//! that retries cannot manufacture episodes while genuine risk deterioration can.
+//! fee-bearing liquidations with a new authenticated mark and a fresh certified deficit across
+//! single/batch CPI/no-CPI setup routes. It proves retries and malformed discovery cannot
+//! manufacture episodes while genuine risk deterioration can, all route outcomes are identical,
+//! and a fresh owner reduction remains live after the second episode.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -35,6 +37,125 @@ fn liquidation_fee_oracle(
         .unwrap()
         / 10_000;
     proportional.max(min_fee).min(fee_cap)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RepeatedLiquidationRoute {
+    TradeNoCpi,
+    TradeCpi,
+    BatchTradeNoCpi,
+    BatchTradeCpi,
+}
+
+impl RepeatedLiquidationRoute {
+    const ALL: [Self; 4] = [
+        Self::TradeNoCpi,
+        Self::TradeCpi,
+        Self::BatchTradeNoCpi,
+        Self::BatchTradeCpi,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RepeatedLiquidationOutcome {
+    first_closed_q: u128,
+    first_fee: u128,
+    second_closed_q: u128,
+    second_fee: u128,
+    owner_reduction_q: u128,
+    remaining_long_oi_q: u128,
+    remaining_short_oi_q: u128,
+    long_capital: u128,
+    short_capital: u128,
+    insurance: u128,
+    vault: u128,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_repeated_liquidation_trade(
+    env: &mut V16CuEnv,
+    route: RepeatedLiquidationRoute,
+    long_owner: &Keypair,
+    long: Pubkey,
+    short_owner: &Keypair,
+    short: Pubkey,
+    size_q: i128,
+    price: u64,
+) {
+    env.svm.expire_blockhash();
+    match route {
+        RepeatedLiquidationRoute::TradeNoCpi => {
+            env.trade_asset_with_cu(0, long_owner, long, short_owner, short, size_q, price, 0);
+        }
+        RepeatedLiquidationRoute::TradeCpi => {
+            let (matcher_program, context, delegate) =
+                auth_matcher_for_lp_via_system_create(env, short_owner, short);
+            env.trade_cpi_with_cu_on_asset(
+                long_owner,
+                long,
+                short_owner,
+                short,
+                matcher_program,
+                context,
+                delegate,
+                0,
+                size_q,
+                0,
+            );
+        }
+        RepeatedLiquidationRoute::BatchTradeNoCpi => {
+            env.send(
+                env.batch_trade_no_cpi_ix(
+                    long,
+                    short,
+                    vec![BatchTradeLeg {
+                        asset_index: 0,
+                        market_id: env.asset_market_id(0),
+                        size_q,
+                        exec_price: price,
+                        fee_bps: 0,
+                    }],
+                ),
+                vec![
+                    AccountMeta::new(long_owner.pubkey(), true),
+                    AccountMeta::new(short_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                    AccountMeta::new(short, false),
+                ],
+                &[long_owner, short_owner],
+            )
+            .expect("repeated-liquidation BatchTradeNoCpi");
+        }
+        RepeatedLiquidationRoute::BatchTradeCpi => {
+            let (matcher_program, context, delegate) =
+                auth_matcher_for_lp_via_system_create(env, short_owner, short);
+            env.send(
+                env.batch_trade_cpi_ix(
+                    long,
+                    short,
+                    vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        market_id: env.asset_market_id(0),
+                        size_q,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                ),
+                vec![
+                    AccountMeta::new(long_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                    AccountMeta::new(short, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(context, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[long_owner],
+            )
+            .expect("repeated-liquidation BatchTradeCpi");
+        }
+    }
 }
 
 #[test]
@@ -198,8 +319,7 @@ fn v16_program_healthy_partial_liquidation_retries_cannot_multiply_fees() {
     }
 }
 
-#[test]
-fn v16_program_new_liquidation_fee_episode_requires_new_authenticated_deficit() {
+fn run_new_liquidation_fee_episode(route: RepeatedLiquidationRoute) -> RepeatedLiquidationOutcome {
     const PRICE: u64 = 100;
     const LIQUIDATION_FEE_BPS: u64 = 100;
     const FEE_CAP: u128 = 10;
@@ -222,15 +342,20 @@ fn v16_program_new_liquidation_fee_episode_requires_new_authenticated_deficit() 
     let short = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long, 10_000);
     env.deposit(&short_owner, short, 3_000);
-    env.trade_with_cu(
+    execute_repeated_liquidation_trade(
+        &mut env,
+        route,
         &long_owner,
         long,
         &short_owner,
         short,
         (10 * POS_SCALE) as i128,
         PRICE,
-        0,
     );
+    let supply_before = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+        .unwrap()
+        .supply;
+    let spl_vault_before = env.token_amount(env.vault);
 
     env.svm.warp_to_slot(2);
     env.push_auth_mark_with_cu(2, PRICE * 3);
@@ -411,6 +536,77 @@ fn v16_program_new_liquidation_fee_episode_requires_new_authenticated_deficit() 
         "only the two independently certified deficit episodes may charge fees"
     );
     assert_eq!(second_group_after.vault as u64, env.token_amount(env.vault));
+
+    let owner_reduction_q = POS_SCALE as u128;
+    assert!(
+        second_position_after > owner_reduction_q,
+        "{route:?}: repeated liquidation must leave a nontrivial owner-reduction control"
+    );
+    execute_repeated_liquidation_trade(
+        &mut env,
+        route,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -(owner_reduction_q as i128),
+        second_group_after.assets[0].effective_price,
+    );
+    let final_group = env.market_state().1;
+    let final_short = env.portfolio_state(short);
+    assert!(
+        active_leg_for_asset(&final_short, 0)
+            .basis_pos_q
+            .unsigned_abs()
+            < second_position_after,
+        "{route:?}: fresh owner risk reduction must strictly reduce retained basis after episode two"
+    );
+    assert_eq!(
+        final_group.assets[0].oi_eff_long_q,
+        second_group_after.assets[0].oi_eff_long_q - owner_reduction_q,
+        "{route:?}: long OI must follow the owner reduction"
+    );
+    assert_eq!(
+        final_group.assets[0].oi_eff_short_q,
+        second_group_after.assets[0].oi_eff_short_q - owner_reduction_q,
+        "{route:?}: short OI must follow the owner reduction"
+    );
+    assert_eq!(env.token_amount(env.vault), spl_vault_before);
+    assert_eq!(
+        Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+            .unwrap()
+            .supply,
+        supply_before
+    );
+
+    RepeatedLiquidationOutcome {
+        first_closed_q,
+        first_fee,
+        second_closed_q,
+        second_fee,
+        owner_reduction_q,
+        remaining_long_oi_q: final_group.assets[0].oi_eff_long_q,
+        remaining_short_oi_q: final_group.assets[0].oi_eff_short_q,
+        long_capital: env.portfolio_state(long).capital.get(),
+        short_capital: final_short.capital.get(),
+        insurance: final_group.insurance,
+        vault: final_group.vault,
+    }
+}
+
+#[test]
+fn v16_program_new_liquidation_fee_episode_requires_new_authenticated_deficit() {
+    let mut outcomes = Vec::new();
+    for route in RepeatedLiquidationRoute::ALL {
+        outcomes.push((route, run_new_liquidation_fee_episode(route)));
+    }
+    let expected = outcomes[0].1;
+    for (route, outcome) in outcomes {
+        assert_eq!(
+            outcome, expected,
+            "{route:?}: transport choice changed repeated-liquidation economics"
+        );
+    }
 }
 
 #[test]

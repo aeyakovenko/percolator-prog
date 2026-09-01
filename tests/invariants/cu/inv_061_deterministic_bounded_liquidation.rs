@@ -17,9 +17,11 @@
 //! finalizers, and retirement preserve SPL custody. The shared INV-077 four-world maximum-shape
 //! matrix additionally composes fourteen equally adverse legs with all twenty-eight historical
 //! source domains under both persisted leg orders and both observation orders, then requires
-//! complete senior and terminal-claim exit. Repeated authenticated liquidation episodes, larger
-//! actor partitions, the 28-source plus 42-feed product, arbitrary close partitions, and complete
-//! loss attribution remain.
+//! complete senior and terminal-claim exit. INV-059 additionally crosses two authenticated
+//! liquidation episodes through all four opening transports, exact same-state/malformed rollback,
+//! and a post-episode owner reduction. Larger actor partitions, multi-asset repeated episodes,
+//! arbitrary close partitions, and complete loss attribution remain; the 28-source plus 42-feed
+//! product is owned by INV-077.
 
 use super::*;
 
