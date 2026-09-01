@@ -10197,6 +10197,436 @@ pub fn run_close_recovery_overlap_probe() -> Result<CloseResetOverlapEvidence, S
     run_close_reset_overlap_probe_for_lifecycle(true)
 }
 
+fn build_bounded_reset_pending_reference_seed(
+    reset_reducer_long: bool,
+) -> Result<ScenarioRunner, String> {
+    const RESET_REDUCER: usize = 2;
+    const RESET_COUNTERPARTY: usize = 3;
+    const RESET_ASSET: usize = 1;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 1_000_000, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 1_000_000, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let seed_byte = if reset_reducer_long { 0xe1 } else { 0xe2 };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
+    let reset_q = if reset_reducer_long {
+        POS_SCALE as i128
+    } else {
+        -(POS_SCALE as i128)
+    };
+    if !runner.execute_trade(
+        TradeRoute::NoCpi,
+        RESET_REDUCER,
+        RESET_COUNTERPARTY,
+        vec![(RESET_ASSET, reset_q)],
+        0,
+        0,
+        true,
+    )? {
+        return Err("INV-086 ResetPending seed did not open its matched public position".into());
+    }
+    enter_public_reset_pending(
+        &mut runner,
+        RESET_REDUCER,
+        RESET_ASSET,
+        "INV-086 ResetPending frontier seed",
+    )?;
+
+    let (_, group) = runner.env.primary_market_state();
+    let reset_asset = group.assets[RESET_ASSET];
+    let reset_mode = if reset_reducer_long {
+        reset_asset.mode_short
+    } else {
+        reset_asset.mode_long
+    };
+    let counterparty = runner.env.primary_portfolio(RESET_COUNTERPARTY);
+    let counterparty_leg = decoded_legs(&counterparty).into_iter().find(|leg| {
+        leg.active
+            && leg.asset_index as usize == RESET_ASSET
+            && leg.side
+                == if reset_reducer_long {
+                    SideV16::Short
+                } else {
+                    SideV16::Long
+                }
+    });
+    if reset_mode != SideModeV16::ResetPending
+        || runner.positions[RESET_REDUCER][RESET_ASSET] != 0
+        || runner.positions[RESET_COUNTERPARTY][RESET_ASSET] == 0
+        || counterparty_leg.is_none()
+        || !runner
+            .progress_rank(RESET_COUNTERPARTY)?
+            .account_actionable()
+    {
+        return Err(format!(
+            "INV-086 ResetPending seed was vacuous: reducer_long={reset_reducer_long}, asset={reset_asset:?}, positions={:?}, counterparty={counterparty:?}",
+            runner.positions
+        ));
+    }
+    runner.assert_global_invariants()?;
+    Ok(runner)
+}
+
+fn reset_pending_frontier_rank(runner: &ScenarioRunner) -> Result<(usize, u128), String> {
+    let (_, group) = runner.env.primary_market_state();
+    if group.mode == MarketModeV16::Resolved {
+        return Ok((0, 0));
+    }
+    let side_count = reset_pending_side_count(&group);
+    let account_work = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+        total
+            .checked_add(reset_pending_work_for_account(
+                &group,
+                &runner.env.primary_portfolio(actor),
+            )?)
+            .ok_or_else(|| "INV-086 ResetPending aggregate rank overflow".to_string())
+    })?;
+    Ok((side_count, account_work))
+}
+
+fn apply_bounded_reset_pending_action(
+    runner: &mut ScenarioRunner,
+    reset_reducer_long: bool,
+    action: &BoundedResetPendingAction,
+) -> Result<Option<(usize, bool, bool)>, String> {
+    const RESET_ASSET: usize = 1;
+    match action {
+        BoundedResetPendingAction::Public(action) => {
+            runner.run_safety_prefix(std::slice::from_ref(action))?;
+            Ok(None)
+        }
+        BoundedResetPendingAction::Crank { actor, hints } => {
+            if runner.env.primary_market_state().1.mode == MarketModeV16::Resolved {
+                runner.execute_terminal_route(*actor, TerminalRoute::Crank)?;
+            } else {
+                runner
+                    .execute_crank(*actor, *hints, false)
+                    .map_err(CrankFailure::into_message)?;
+            }
+            runner.assert_global_invariants()?;
+            Ok(None)
+        }
+        BoundedResetPendingAction::FinalizeResetSide => {
+            let reset_side = u8::from(reset_reducer_long);
+            let before = runner.snapshot();
+            match runner
+                .env
+                .finalize_reset_side(RESET_ASSET as u16, reset_side)
+            {
+                Ok(success) => {
+                    runner.coverage.observe_success(None, &success);
+                    runner.assert_portfolio_frame(&before, &[])?;
+                    runner.assert_no_token_side_effects(&before)?;
+                }
+                Err(_) => runner.assert_snapshot_unchanged(&before)?,
+            }
+            runner.assert_global_invariants()?;
+            Ok(None)
+        }
+        BoundedResetPendingAction::FreshRisk { route } => {
+            let (_, group_before) = runner.env.primary_market_state();
+            let asset_before = group_before.assets[RESET_ASSET];
+            let reset_mode_before = if reset_reducer_long {
+                asset_before.mode_short
+            } else {
+                asset_before.mode_long
+            };
+            let pending_before = reset_mode_before == SideModeV16::ResetPending;
+            let landed = runner.execute_trade(
+                *route,
+                0,
+                1,
+                vec![(RESET_ASSET, POS_SCALE as i128 / 4)],
+                0,
+                0,
+                false,
+            )?;
+            if pending_before && landed {
+                return Err(format!(
+                    "INV-055/065 {route:?} admitted fresh risk into a ResetPending side"
+                ));
+            }
+            runner.assert_global_invariants()?;
+            Ok(Some((route.index(), pending_before, !landed)))
+        }
+    }
+}
+
+pub fn run_bounded_reset_pending_reference_frontier(
+) -> Result<BoundedResetPendingFrontierEvidence, String> {
+    type ExactEdge = (AuthenticatedGraphState, u8, AuthenticatedGraphState);
+
+    #[derive(Default)]
+    struct ResetAccumulator {
+        nodes: BTreeSet<AuthenticatedGraphState>,
+        edges: BTreeSet<ExactEdge>,
+        long_reset_seed_world_count: usize,
+        short_reset_seed_world_count: usize,
+        actionable_seed_world_count: usize,
+        bounded_exit_world_count: usize,
+        value_moving_exit_world_count: usize,
+        action_attempts: [u64; BOUNDED_RESET_PENDING_ACTION_COUNT],
+        action_state_changes: [u64; BOUNDED_RESET_PENDING_ACTION_COUNT],
+        second_position_attempts: [u64; BOUNDED_RESET_PENDING_ACTION_COUNT],
+        second_position_state_changes: [u64; BOUNDED_RESET_PENDING_ACTION_COUNT],
+        reset_rank_reducing_edges: [u64; BOUNDED_RESET_PENDING_ACTION_COUNT],
+        pending_fresh_risk_attempts: [u64; 4],
+        pending_fresh_risk_rejections: [u64; 4],
+        coverage: Coverage,
+    }
+
+    impl ResetAccumulator {
+        fn merge(&mut self, other: Self) {
+            self.nodes.extend(other.nodes);
+            self.edges.extend(other.edges);
+            self.long_reset_seed_world_count += other.long_reset_seed_world_count;
+            self.short_reset_seed_world_count += other.short_reset_seed_world_count;
+            self.actionable_seed_world_count += other.actionable_seed_world_count;
+            self.bounded_exit_world_count += other.bounded_exit_world_count;
+            self.value_moving_exit_world_count += other.value_moving_exit_world_count;
+            for (total, count) in self.action_attempts.iter_mut().zip(other.action_attempts) {
+                *total += count;
+            }
+            for (total, count) in self
+                .action_state_changes
+                .iter_mut()
+                .zip(other.action_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_attempts
+                .iter_mut()
+                .zip(other.second_position_attempts)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .second_position_state_changes
+                .iter_mut()
+                .zip(other.second_position_state_changes)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .reset_rank_reducing_edges
+                .iter_mut()
+                .zip(other.reset_rank_reducing_edges)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .pending_fresh_risk_attempts
+                .iter_mut()
+                .zip(other.pending_fresh_risk_attempts)
+            {
+                *total += count;
+            }
+            for (total, count) in self
+                .pending_fresh_risk_rejections
+                .iter_mut()
+                .zip(other.pending_fresh_risk_rejections)
+            {
+                *total += count;
+            }
+            self.coverage.merge(other.coverage);
+        }
+    }
+
+    fn replay_reset_word(
+        reset_reducer_long: bool,
+        word: &[(usize, BoundedResetPendingAction)],
+        graph: &mut ResetAccumulator,
+    ) -> Result<(), String> {
+        let mut runner = build_bounded_reset_pending_reference_seed(reset_reducer_long)?;
+        graph.long_reset_seed_world_count += usize::from(!reset_reducer_long);
+        graph.short_reset_seed_world_count += usize::from(reset_reducer_long);
+        graph.actionable_seed_world_count +=
+            usize::from(reset_pending_frontier_rank(&runner)? != (0, 0));
+
+        let mut before_exact = runner.authenticated_graph_state();
+        let mut before_economic = runner.bounded_reference_node()?;
+        graph.nodes.insert(before_exact.clone());
+        for (position, (action_index, action)) in word.iter().enumerate() {
+            let rank_before = reset_pending_frontier_rank(&runner)?;
+            let outcome = apply_bounded_reset_pending_action(
+                &mut runner,
+                reset_reducer_long,
+                action,
+            )
+            .map_err(|error| {
+                format!(
+                    "INV-086 ResetPending word reducer_long={reset_reducer_long} {word:?} failed at position {position}: {error}"
+                )
+            })?;
+            let rank_after = reset_pending_frontier_rank(&runner)?;
+            let after_economic = runner.bounded_reference_node()?;
+            let after_exact = runner.authenticated_graph_state();
+            bounded_source_credit_transition_evidence(
+                &format!(
+                    "INV-030 ResetPending edge reducer_long={reset_reducer_long} action={action_index}"
+                ),
+                &before_economic,
+                &after_economic,
+            )?;
+            graph.action_attempts[*action_index] += 1;
+            if after_economic != before_economic {
+                graph.action_state_changes[*action_index] += 1;
+                if position == 1 {
+                    graph.second_position_state_changes[*action_index] += 1;
+                }
+            }
+            if rank_after < rank_before {
+                graph.reset_rank_reducing_edges[*action_index] += 1;
+            }
+            if let Some((route_index, pending_before, rejected)) = outcome {
+                if pending_before {
+                    graph.pending_fresh_risk_attempts[route_index] += 1;
+                    graph.pending_fresh_risk_rejections[route_index] += u64::from(rejected);
+                }
+            }
+            if position == 1 {
+                graph.second_position_attempts[*action_index] += 1;
+            }
+            graph.nodes.insert(after_exact.clone());
+            graph
+                .edges
+                .insert((before_exact, *action_index as u8, after_exact.clone()));
+            before_exact = after_exact;
+            before_economic = after_economic;
+        }
+
+        let destination_total_before =
+            (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+                total
+                    .checked_add(u128::from(
+                        runner
+                            .env
+                            .token_amount(runner.env.actors[actor].destination_token),
+                    ))
+                    .ok_or("INV-073 ResetPending pre-exit destination total overflow")
+            })?;
+        runner
+            .run_permissionless_progress_campaign()
+            .map_err(|error| {
+                format!(
+                    "INV-071/082 ResetPending word reducer_long={reset_reducer_long} {word:?} had no bounded rank-decreasing schedule: {error}"
+                )
+            })?;
+        runner.run_direct_user_exit_campaign().map_err(|error| {
+            format!(
+                "INV-057/073 ResetPending word reducer_long={reset_reducer_long} {word:?} had no bounded owner exit: {error}"
+            )
+        })?;
+        graph.bounded_exit_world_count += 1;
+        let destination_total = (0..PRIMARY_ACTOR_COUNT).try_fold(0u128, |total, actor| {
+            total
+                .checked_add(u128::from(
+                    runner
+                        .env
+                        .token_amount(runner.env.actors[actor].destination_token),
+                ))
+                .ok_or("INV-073 ResetPending destination total overflow")
+        })?;
+        if destination_total <= destination_total_before {
+            return Err(format!(
+                "INV-073 ResetPending word reducer_long={reset_reducer_long} {word:?} exited without increasing funded user destinations: {destination_total_before}->{destination_total}"
+            ));
+        }
+        graph.value_moving_exit_world_count += 1;
+        if reset_pending_frontier_rank(&runner)? != (0, 0) {
+            return Err(format!(
+                "INV-065 ResetPending word reducer_long={reset_reducer_long} {word:?} retained reset work after terminal exit"
+            ));
+        }
+        runner.assert_global_invariants()?;
+        graph.coverage.merge(runner.coverage);
+        Ok(())
+    }
+
+    let actions = bounded_reset_pending_actions();
+    let mut words = vec![vec![]];
+    for (first_index, first) in actions.iter().enumerate() {
+        words.push(vec![(first_index, first.clone())]);
+    }
+    for (first_index, first) in actions.iter().enumerate() {
+        for (second_index, second) in actions.iter().enumerate() {
+            words.push(vec![
+                (first_index, first.clone()),
+                (second_index, second.clone()),
+            ]);
+        }
+    }
+    let jobs = [false, true]
+        .into_iter()
+        .flat_map(|reset_reducer_long| {
+            words
+                .iter()
+                .cloned()
+                .map(move |word| (reset_reducer_long, word))
+        })
+        .collect::<Vec<_>>();
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(jobs.len().max(1));
+    let chunk_size = jobs.len().div_ceil(worker_count);
+    let graph = std::thread::scope(|scope| {
+        let handles = jobs
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || -> Result<ResetAccumulator, String> {
+                    let mut graph = ResetAccumulator::default();
+                    for (reset_reducer_long, word) in chunk {
+                        replay_reset_word(*reset_reducer_long, word, &mut graph)?;
+                    }
+                    Ok(graph)
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut graph = ResetAccumulator::default();
+        for handle in handles {
+            graph.merge(
+                handle
+                    .join()
+                    .map_err(|_| "INV-086 ResetPending frontier worker panicked".to_string())??,
+            );
+        }
+        Ok::<_, String>(graph)
+    })?;
+    let transition_count = jobs.iter().map(|(_, word)| word.len()).sum();
+
+    Ok(BoundedResetPendingFrontierEvidence {
+        word_count: jobs.len(),
+        transition_count,
+        unique_node_count: graph.nodes.len(),
+        unique_edge_count: graph.edges.len(),
+        long_reset_seed_world_count: graph.long_reset_seed_world_count,
+        short_reset_seed_world_count: graph.short_reset_seed_world_count,
+        actionable_seed_world_count: graph.actionable_seed_world_count,
+        bounded_exit_world_count: graph.bounded_exit_world_count,
+        value_moving_exit_world_count: graph.value_moving_exit_world_count,
+        action_attempts: graph.action_attempts,
+        action_state_changes: graph.action_state_changes,
+        second_position_attempts: graph.second_position_attempts,
+        second_position_state_changes: graph.second_position_state_changes,
+        reset_rank_reducing_edges: graph.reset_rank_reducing_edges,
+        pending_fresh_risk_attempts: graph.pending_fresh_risk_attempts,
+        pending_fresh_risk_rejections: graph.pending_fresh_risk_rejections,
+        coverage: graph.coverage,
+    })
+}
+
 fn cure_primary_close_with_bounded_deposit(
     runner: &mut ScenarioRunner,
     actor: usize,
@@ -11374,6 +11804,7 @@ const BOUNDED_ACTIVE_CLOSE_ACTION_COUNT: usize = 13;
 const BOUNDED_LIEN_IMPAIRMENT_ACTION_COUNT: usize = 13;
 const BOUNDED_RECEIPT_CONFLICT_ACTION_COUNT: usize = 13;
 const BOUNDED_ORACLE_FAILURE_ACTION_COUNT: usize = 13;
+const BOUNDED_RESET_PENDING_ACTION_COUNT: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedCloseProgressNode {
@@ -11767,6 +12198,27 @@ pub struct BoundedOracleFailureFrontierEvidence {
     pub second_position_state_changes: [u64; BOUNDED_ORACLE_FAILURE_ACTION_COUNT],
     pub fallback_progress_edges: u64,
     pub fresh_feed_recovery_edges: u64,
+    pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedResetPendingFrontierEvidence {
+    pub word_count: usize,
+    pub transition_count: usize,
+    pub unique_node_count: usize,
+    pub unique_edge_count: usize,
+    pub long_reset_seed_world_count: usize,
+    pub short_reset_seed_world_count: usize,
+    pub actionable_seed_world_count: usize,
+    pub bounded_exit_world_count: usize,
+    pub value_moving_exit_world_count: usize,
+    pub action_attempts: [u64; BOUNDED_RESET_PENDING_ACTION_COUNT],
+    pub action_state_changes: [u64; BOUNDED_RESET_PENDING_ACTION_COUNT],
+    pub second_position_attempts: [u64; BOUNDED_RESET_PENDING_ACTION_COUNT],
+    pub second_position_state_changes: [u64; BOUNDED_RESET_PENDING_ACTION_COUNT],
+    pub reset_rank_reducing_edges: [u64; BOUNDED_RESET_PENDING_ACTION_COUNT],
+    pub pending_fresh_risk_attempts: [u64; 4],
+    pub pending_fresh_risk_rejections: [u64; 4],
     pub coverage: Coverage,
 }
 
@@ -12310,6 +12762,70 @@ enum BoundedOracleFailureAction {
     Reduce { route: TradeRoute },
     ResolveStale,
     CloseResolved { actor: usize },
+}
+
+#[derive(Clone, Debug)]
+enum BoundedResetPendingAction {
+    Public(Action),
+    Crank { actor: usize, hints: HintMode },
+    FinalizeResetSide,
+    FreshRisk { route: TradeRoute },
+}
+
+fn bounded_reset_pending_actions() -> [BoundedResetPendingAction; BOUNDED_RESET_PENDING_ACTION_COUNT]
+{
+    [
+        BoundedResetPendingAction::Crank {
+            actor: 2,
+            hints: HintMode::Complete,
+        },
+        BoundedResetPendingAction::Crank {
+            actor: 2,
+            hints: HintMode::Empty,
+        },
+        BoundedResetPendingAction::Crank {
+            actor: 3,
+            hints: HintMode::Complete,
+        },
+        BoundedResetPendingAction::Crank {
+            actor: 3,
+            hints: HintMode::Empty,
+        },
+        BoundedResetPendingAction::FinalizeResetSide,
+        BoundedResetPendingAction::Public(Action::RebalanceReduce { actor: 3, asset: 1 }),
+        BoundedResetPendingAction::Public(Action::Deposit {
+            actor: 2,
+            amount: 7,
+        }),
+        BoundedResetPendingAction::Public(Action::Withdraw {
+            actor: 2,
+            amount: 1,
+        }),
+        BoundedResetPendingAction::Public(Action::PushMark {
+            asset: 1,
+            dt: 1,
+            move_bps: 100,
+        }),
+        BoundedResetPendingAction::Public(Action::SetMatcherConfig {
+            actor: 3,
+            enabled: false,
+            trade_fee_cap_bps: 0,
+        }),
+        BoundedResetPendingAction::FreshRisk {
+            route: TradeRoute::NoCpi,
+        },
+        BoundedResetPendingAction::FreshRisk {
+            route: TradeRoute::Cpi,
+        },
+        BoundedResetPendingAction::FreshRisk {
+            route: TradeRoute::BatchNoCpi,
+        },
+        BoundedResetPendingAction::FreshRisk {
+            route: TradeRoute::BatchCpi,
+        },
+        BoundedResetPendingAction::Public(Action::ShutdownAsset { asset: 1, dt: 1 }),
+        BoundedResetPendingAction::Public(Action::ResolveMarket),
+    ]
 }
 
 fn bounded_oracle_failure_actions(

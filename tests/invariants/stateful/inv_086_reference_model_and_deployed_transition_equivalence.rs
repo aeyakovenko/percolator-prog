@@ -70,6 +70,14 @@
 //! permissionless resolution, and resolved close in every empty, one-action, and ordered two-action
 //! word. Invalid feed edges must roll back exactly, a newly valid feed must restore Live progress,
 //! and every ordering must retain an oracle-free, value-moving terminal continuation.
+//! A seventh seeded frontier starts from a prior-epoch `ResetPending` leg created by an owner
+//! reduction, in both side orientations. It exhausts complete/empty crank shapes, both owner
+//! progress and explicit side finalization, owner value actions, mark movement, matcher revocation,
+//! all four fresh-risk transports, asset shutdown, and market resolution in every empty,
+//! one-action, and ordered two-action word. Early finalization and stale account cranks must reject
+//! exactly, explicit finalization must lower reset rank after prior-epoch account work clears, and
+//! fresh risk must reject while the reset episode remains active. Every ordering must retain a
+//! bounded, value-moving terminal exit.
 //! A minimized generated public trace also retains simultaneous same-slot mark and account work.
 //! Empty hints reject with exact rollback, while both the indiscriminate all-asset set and a proper
 //! authenticated subset decrease rank before every funded owner exits. The independent liveness
@@ -141,12 +149,63 @@ use crate::support::fuzz_model::{
     run_bounded_active_close_reference_frontier, run_bounded_b_reference_frontier,
     run_bounded_lien_impairment_reference_frontier, run_bounded_oracle_failure_reference_frontier,
     run_bounded_receipt_conflict_reference_frontier, run_bounded_recovery_reference_frontier,
-    run_bounded_reference_equivalence_graph, verify_close_to_partial_receipt_composition,
-    verify_constructible_crank_observation_subset,
+    run_bounded_reference_equivalence_graph, run_bounded_reset_pending_reference_frontier,
+    verify_close_to_partial_receipt_composition, verify_constructible_crank_observation_subset,
     verify_expired_backing_terminal_cleanup_compositions,
     verify_insurance_liquidation_to_partial_receipt_compositions,
     verify_liquidation_to_partial_receipt_compositions,
 };
+
+#[test]
+fn v16_program_reset_pending_seeded_frontier_is_exact_and_terminal() {
+    let evidence = run_bounded_reset_pending_reference_frontier()
+        .expect("INV-055/057/065/071/072/073/078/082/086 ResetPending public frontier");
+
+    assert_eq!(evidence.word_count, 546, "{evidence:?}");
+    assert_eq!(evidence.transition_count, 1_056, "{evidence:?}");
+    assert_eq!(evidence.long_reset_seed_world_count, 273, "{evidence:?}");
+    assert_eq!(evidence.short_reset_seed_world_count, 273, "{evidence:?}");
+    assert_eq!(evidence.actionable_seed_world_count, 546, "{evidence:?}");
+    assert_eq!(evidence.bounded_exit_world_count, 546, "{evidence:?}");
+    assert_eq!(evidence.value_moving_exit_world_count, 546, "{evidence:?}");
+    assert_eq!(evidence.unique_node_count, 72, "{evidence:?}");
+    assert_eq!(evidence.unique_edge_count, 224, "{evidence:?}");
+    assert!(
+        evidence.action_attempts.iter().all(|count| *count == 66),
+        "every action must occupy every one/two-action position: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .second_position_attempts
+            .iter()
+            .all(|count| *count == 32),
+        "every action must land second after every possible first action: {evidence:?}"
+    );
+    assert!(
+        evidence.reset_rank_reducing_edges.iter().sum::<u64>() != 0,
+        "the frontier must contain strict reset-rank progress: {evidence:?}"
+    );
+    assert_ne!(
+        evidence.reset_rank_reducing_edges[4], 0,
+        "FinalizeResetSide must lower reset work after an earlier crank clears the prior-epoch leg: {evidence:?}"
+    );
+    for route in 0..4 {
+        assert_ne!(
+            evidence.pending_fresh_risk_attempts[route], 0,
+            "route {route} never probed active ResetPending admission: {evidence:?}"
+        );
+        assert_eq!(
+            evidence.pending_fresh_risk_rejections[route],
+            evidence.pending_fresh_risk_attempts[route],
+            "route {route} admitted fresh risk before reset completion: {evidence:?}"
+        );
+    }
+    assert!(
+        evidence.coverage.max_cu != 0
+            && evidence.coverage.max_cu < crate::support::v16_svm::TX_CU_LIMIT,
+        "every public edge and terminal campaign must remain bounded: {evidence:?}"
+    );
+}
 
 #[test]
 fn active_close_composes_through_resolution_into_partial_receipt() {
