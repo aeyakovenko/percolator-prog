@@ -27,7 +27,10 @@
 //! order. Selection follows persisted state only; every accepted crank mutates, eleven liquidation
 //! steps restore health below 1.156M CU, and the remaining owner reductions, reset cleanup,
 //! finalization, senior withdrawals, permissionless resolution, claims, and account closes reach
-//! exact terminal custody. The all-at-once 28-source plus 42-external-feed product remains open.
+//! exact terminal custody. A separate Hybrid composition builds the same fourteen legs and twenty-
+//! eight source domains before crossing all 42 authenticated feed references. Both a 13+1 split and
+//! the all-at-once schedule remain bounded; repeated complete-tail calls consume prior source work,
+//! reach a strict liquidation at no more than 1.201M CU, and then restore current health.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -1636,6 +1639,284 @@ fn v16_attack_public_14_leg_28_source_equal_risk_liquidation_stays_bounded() {
         assert_eq!(outcome.resolved_payout, control.resolved_payout);
         assert_eq!(outcome.terminal_vault, control.terminal_vault);
     }
+}
+
+#[test]
+fn v16_attack_public_14_leg_28_source_42_feed_refresh_stays_bounded() {
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const MOVED_MARK: u64 = 200;
+
+    let feeds = [[0xb1u8; 32], [0xb2u8; 32], [0xb3u8; 32]];
+    let all_assets = (0..ACTIVE_CAP).collect::<Vec<_>>();
+    let send_observations = |env: &mut V16CuEnv,
+                             portfolio: Pubkey,
+                             now_slot: u64,
+                             observed_assets: &[u16],
+                             oracles: &[Pubkey; 3]| {
+        let observations = observed_assets
+            .iter()
+            .copied()
+            .map(|asset_index| CrankObservationHint {
+                asset_index,
+                oracle_accounts: 3,
+            })
+            .collect();
+        let mut accounts = vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ];
+        for _ in observed_assets {
+            accounts.extend(
+                oracles
+                    .iter()
+                    .copied()
+                    .map(|key| AccountMeta::new_readonly(key, false)),
+            );
+        }
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations,
+            },
+            accounts,
+            &[],
+        )
+    };
+    let certificate_is_current = |env: &V16CuEnv, portfolio: Pubkey| {
+        let group = env.market_state().1;
+        let state = env.portfolio_state(portfolio);
+        let cert = health_cert(&state);
+        cert.valid
+            && cert.cert_oracle_epoch == group.oracle_epoch
+            && cert.cert_funding_epoch == group.funding_epoch
+            && cert.cert_risk_epoch == group.risk_epoch
+            && cert.cert_asset_set_epoch == group.asset_set_epoch
+            && cert.active_bitmap_at_cert == active_bitmap(&state)
+    };
+    let finish_account_progress = |env: &mut V16CuEnv, portfolio: Pubkey, now_slot: u64| {
+        let mut steps = 0usize;
+        let mut max_cu = 0u64;
+        for _ in 0..(usize::from(ACTIVE_CAP) * 2 + 4) {
+            let cert = health_cert(&env.portfolio_state(portfolio));
+            if certificate_is_current(env, portfolio) && cert.certified_liq_deficit == 0 {
+                return (steps, max_cu);
+            }
+            let cu = env
+                .crank_if_actionable(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot,
+                        observations: vec![],
+                    },
+                )
+                .expect("a stale or liquidatable combined-shape account must have a continuation");
+            assert_cu_within("combined-shape account continuation", cu, 1_375_000);
+            steps += 1;
+            max_cu = max_cu.max(cu);
+        }
+        panic!("combined-shape account did not reach a healthy current certificate");
+    };
+
+    let (mut split_env, _, _, _, split_lp, split_slot) =
+        setup_max_source_live_pair_with_hybrid_oracles(feeds);
+    let split_before = split_env.portfolio_state(split_lp);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&split_before)),
+        u32::from(ACTIVE_CAP)
+    );
+    assert_eq!(
+        split_before
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+    );
+    let split_moved_slot = split_slot.checked_add(1).unwrap();
+    let split_moved_time = 100 + split_moved_slot as i64;
+    set_test_clock(&mut split_env, split_moved_slot, split_moved_time);
+    let split_moved_oracles = [
+        split_env.set_pyth_price(&feeds[0], 6_000_000, -6, split_moved_time),
+        split_env.set_pyth_price(&feeds[1], 150_000_000, -6, split_moved_time),
+        split_env.set_pyth_price(&feeds[2], 200_000_000, -6, split_moved_time),
+    ];
+    let split_vault_before = split_env.token_amount(split_env.vault);
+    let split_short_oi_before = split_env.market_state().1.assets[..usize::from(ACTIVE_CAP)]
+        .iter()
+        .map(|asset| asset.oi_eff_short_q)
+        .sum::<u128>();
+    let partial_cu = send_observations(
+        &mut split_env,
+        split_lp,
+        split_moved_slot,
+        &all_assets[..all_assets.len() - 1],
+        &split_moved_oracles,
+    )
+    .expect("thirteen Hybrid observations must make bounded market progress");
+    assert_cu_within(
+        "14-leg/28-source first thirteen Hybrid observations",
+        partial_cu,
+        1_375_000,
+    );
+    let partial_group = split_env.market_state().1;
+    assert!(partial_group.assets[..all_assets.len() - 1]
+        .iter()
+        .all(|asset| asset.effective_price == MOVED_MARK));
+    assert_eq!(
+        partial_group.assets[all_assets.len() - 1].effective_price,
+        100,
+        "the omitted Hybrid leg must remain available for a later bounded call"
+    );
+    let finish_cu = send_observations(
+        &mut split_env,
+        split_lp,
+        split_moved_slot,
+        &all_assets[all_assets.len() - 1..],
+        &split_moved_oracles,
+    )
+    .expect("the omitted Hybrid observation must remain a bounded continuation");
+    assert_cu_within(
+        "14-leg/28-source final Hybrid observation",
+        finish_cu,
+        1_375_000,
+    );
+    let split_group_after = split_env.market_state().1;
+    assert!(split_group_after.assets[..usize::from(ACTIVE_CAP)]
+        .iter()
+        .all(|asset| asset.effective_price == MOVED_MARK));
+    let (split_progress_steps, split_progress_max_cu) =
+        finish_account_progress(&mut split_env, split_lp, split_moved_slot);
+    let split_group_after = split_env.market_state().1;
+    let split_short_oi_after = split_group_after.assets[..usize::from(ACTIVE_CAP)]
+        .iter()
+        .map(|asset| asset.oi_eff_short_q)
+        .sum::<u128>();
+    assert!(split_short_oi_after <= split_short_oi_before);
+    let split_cert = health_cert(&split_env.portfolio_state(split_lp));
+    assert!(certificate_is_current(&split_env, split_lp));
+    assert_eq!(split_cert.certified_liq_deficit, 0);
+    assert_eq!(split_env.token_amount(split_env.vault), split_vault_before);
+    assert_eq!(split_group_after.vault as u64, split_vault_before);
+
+    let (mut env, _, _, _, lp, slot) = setup_max_source_live_pair_with_hybrid_oracles(feeds);
+    let moved_slot = slot.checked_add(1).unwrap();
+    let moved_time = 100 + moved_slot as i64;
+    set_test_clock(&mut env, moved_slot, moved_time);
+    let moved_oracles = [
+        env.set_pyth_price(&feeds[0], 6_000_000, -6, moved_time),
+        env.set_pyth_price(&feeds[1], 150_000_000, -6, moved_time),
+        env.set_pyth_price(&feeds[2], 200_000_000, -6, moved_time),
+    ];
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&lp).unwrap();
+    let vault_before = env.token_amount(env.vault);
+    let short_oi_before = env.market_state().1.assets[..usize::from(ACTIVE_CAP)]
+        .iter()
+        .map(|asset| asset.oi_eff_short_q)
+        .sum::<u128>();
+    let complete_cu = send_observations(&mut env, lp, moved_slot, &all_assets, &moved_oracles)
+        .expect("all required combined-shape observations must fit in one progress call");
+    assert_cu_within(
+        "adverse 14-leg/28-source/42-feed refresh",
+        complete_cu,
+        1_375_000,
+    );
+    assert!(
+        env.svm.get_account(&env.market).unwrap() != market_before
+            || env.svm.get_account(&lp).unwrap() != portfolio_before,
+        "accepted complete-observation crank must mutate economic state"
+    );
+    let group_after = env.market_state().1;
+    assert!(group_after.assets[..usize::from(ACTIVE_CAP)]
+        .iter()
+        .all(|asset| asset.effective_price == MOVED_MARK));
+    let mut recert_steps = 0usize;
+    let mut recert_max_cu = 0u64;
+    while !certificate_is_current(&env, lp) {
+        let cu = env
+            .crank_if_actionable(
+                lp,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: moved_slot,
+                    observations: vec![],
+                },
+            )
+            .expect("the fully observed account must have a bounded recertification step");
+        assert_cu_within("combined-shape recertification", cu, 1_375_000);
+        recert_steps += 1;
+        recert_max_cu = recert_max_cu.max(cu);
+        assert!(recert_steps <= usize::from(ACTIVE_CAP) + 2);
+    }
+    assert_ne!(
+        health_cert(&env.portfolio_state(lp)).certified_liq_deficit,
+        0,
+        "the exact product must stage a genuine liquidation rather than only parse oracle tails"
+    );
+    let short_oi_before_combined_liquidation = env.market_state().1.assets
+        [..usize::from(ACTIVE_CAP)]
+        .iter()
+        .map(|asset| asset.oi_eff_short_q)
+        .sum::<u128>();
+    let mut combined_liquidation_steps = 0usize;
+    let mut combined_liquidation_max_cu = 0u64;
+    loop {
+        let market_step_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_step_before = env.svm.get_account(&lp).unwrap();
+        let cu = send_observations(&mut env, lp, moved_slot, &all_assets, &moved_oracles)
+            .expect("42 authenticated references plus 28 source domains must progress in bounds");
+        assert_cu_within("14-leg/28-source/42-feed progress", cu, 1_375_000);
+        combined_liquidation_steps += 1;
+        combined_liquidation_max_cu = combined_liquidation_max_cu.max(cu);
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_step_before
+                || env.svm.get_account(&lp).unwrap() != portfolio_step_before,
+            "every accepted all-at-once combined-shape call must mutate"
+        );
+        let current_short_oi = env.market_state().1.assets[..usize::from(ACTIVE_CAP)]
+            .iter()
+            .map(|asset| asset.oi_eff_short_q)
+            .sum::<u128>();
+        if current_short_oi < short_oi_before_combined_liquidation {
+            break;
+        }
+        assert!(
+            combined_liquidation_steps
+                <= percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+                    + usize::from(ACTIVE_CAP)
+                    + 4,
+            "the complete authenticated work set must reach liquidation in bounded selector steps"
+        );
+    }
+    let short_oi_after_combined_liquidation = env.market_state().1.assets
+        [..usize::from(ACTIVE_CAP)]
+        .iter()
+        .map(|asset| asset.oi_eff_short_q)
+        .sum::<u128>();
+    assert!(
+        short_oi_after_combined_liquidation < short_oi_before_combined_liquidation,
+        "the all-at-once call must execute a strict liquidation, not merely accept the tail"
+    );
+    let (full_progress_steps, full_progress_max_cu) =
+        finish_account_progress(&mut env, lp, moved_slot);
+    let after = env.portfolio_state(lp);
+    let group_after = env.market_state().1;
+    let short_oi_after = group_after.assets[..usize::from(ACTIVE_CAP)]
+        .iter()
+        .map(|asset| asset.oi_eff_short_q)
+        .sum::<u128>();
+    assert!(
+        short_oi_after <= short_oi_before,
+        "combined observation and continuation must never increase short OI"
+    );
+    assert!(certificate_is_current(&env, lp));
+    assert_eq!(health_cert(&after).certified_liq_deficit, 0);
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(group_after.vault as u64, vault_before);
+    println!(
+        "INV-077 14-leg/28-source/42-feed CU: split={partial_cu}+{finish_cu}+{split_progress_steps}/{split_progress_max_cu}, all-at-once-refresh={complete_cu}, recert={recert_steps}/{recert_max_cu}, all-at-once-liquidation={combined_liquidation_steps}/{combined_liquidation_max_cu}, remaining={full_progress_steps}/{full_progress_max_cu}"
+    );
 }
 
 fn run_dense_zero_delta_resolution_shape(asset_count: u16) {

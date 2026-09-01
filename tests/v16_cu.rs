@@ -8288,6 +8288,19 @@ fn setup_max_source_live_pair(
         retained_active_assets,
         MAX_SOURCE_LIVE_ASSETS,
         false,
+        None,
+    )
+}
+
+fn setup_max_source_live_pair_with_hybrid_oracles(
+    feeds: [[u8; 32]; 3],
+) -> (V16CuEnv, Keypair, Keypair, Pubkey, Pubkey, u64) {
+    setup_max_source_live_pair_with_configured_assets(
+        0,
+        MAX_SOURCE_LIVE_ASSETS,
+        MAX_SOURCE_LIVE_ASSETS,
+        false,
+        Some(feeds),
     )
 }
 
@@ -8300,6 +8313,7 @@ fn setup_max_source_live_pair_with_spare_auth_mark_asset(
         retained_active_assets,
         MAX_SOURCE_LIVE_ASSETS + 1,
         false,
+        None,
     )
 }
 
@@ -8310,6 +8324,7 @@ fn setup_max_source_live_pair_with_seeded_lien() -> (V16CuEnv, Keypair, Keypair,
         MAX_SOURCE_LIVE_ASSETS,
         MAX_SOURCE_LIVE_ASSETS,
         true,
+        None,
     )
 }
 
@@ -8318,10 +8333,12 @@ fn setup_max_source_live_pair_with_configured_assets(
     retained_active_assets: u16,
     configured_auth_mark_assets: u16,
     seed_source_lien: bool,
+    hybrid_feeds: Option<[[u8; 32]; 3]>,
 ) -> (V16CuEnv, Keypair, Keypair, Pubkey, Pubkey, u64) {
     const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
     const PRICE_LOW: u64 = 100;
     const PRICE_HIGH: u64 = 101;
+    const HYBRID_PRICE_HIGH: u64 = 110;
     assert!(
         retained_active_assets > 0 && retained_active_assets <= ACTIVE_CAP,
         "fixture must retain between one and the public active-leg cap"
@@ -8346,9 +8363,37 @@ fn setup_max_source_live_pair_with_configured_assets(
         env.activate_asset(asset_index, activation_slot, PRICE_LOW);
     }
     let mut slot = u64::from(configured_auth_mark_assets - ACTIVE_CAP);
-    env.svm.warp_to_slot(slot);
-    for asset_index in 0..configured_auth_mark_assets {
-        env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+    if let Some(feeds) = hybrid_feeds {
+        slot = slot.max(1);
+        set_test_clock(&mut env, slot, 100 + slot as i64);
+        let initial_oracles = [
+            env.set_pyth_price(&feeds[0], 3_000_000, -6, 100 + slot as i64),
+            env.set_pyth_price(&feeds[1], 150_000_000, -6, 100 + slot as i64),
+            env.set_pyth_price(&feeds[2], 200_000_000, -6, 100 + slot as i64),
+        ];
+        for asset_index in 0..configured_auth_mark_assets {
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                asset_index,
+                3,
+                ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+                feeds,
+                &initial_oracles,
+                slot,
+                100 + slot as i64,
+                0,
+                0,
+                3,
+                500,
+            )
+            .unwrap_or_else(|error| {
+                panic!("configure max-source Hybrid asset {asset_index}: {error}")
+            });
+        }
+    } else {
+        env.svm.warp_to_slot(slot);
+        for asset_index in 0..configured_auth_mark_assets {
+            env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+        }
     }
 
     let matcher_program = Pubkey::new_unique();
@@ -8385,18 +8430,18 @@ fn setup_max_source_live_pair_with_configured_assets(
         )
         .unwrap_or_else(|err| panic!("unsigned-LP asset {asset_index} fill failed: {err}"));
     };
+    let cert_current = |env: &V16CuEnv, portfolio: Pubkey| {
+        let group = env.market_state().1;
+        let state = env.portfolio_state(portfolio);
+        let cert = health_cert(&state);
+        cert.valid
+            && cert.cert_oracle_epoch == group.oracle_epoch
+            && cert.cert_funding_epoch == group.funding_epoch
+            && cert.cert_risk_epoch == group.risk_epoch
+            && cert.cert_asset_set_epoch == group.asset_set_epoch
+            && cert.active_bitmap_at_cert == active_bitmap(&state)
+    };
     let drive_both_current = |env: &mut V16CuEnv, now_slot: u64| {
-        let cert_current = |env: &V16CuEnv, portfolio: Pubkey| {
-            let group = env.market_state().1;
-            let state = env.portfolio_state(portfolio);
-            let cert = health_cert(&state);
-            cert.valid
-                && cert.cert_oracle_epoch == group.oracle_epoch
-                && cert.cert_funding_epoch == group.funding_epoch
-                && cert.cert_risk_epoch == group.risk_epoch
-                && cert.cert_asset_set_epoch == group.asset_set_epoch
-                && cert.active_bitmap_at_cert == active_bitmap(&state)
-        };
         for _ in 0..8 {
             for portfolio in [taker, lp] {
                 if !cert_current(env, portfolio) {
@@ -8415,36 +8460,81 @@ fn setup_max_source_live_pair_with_configured_assets(
         }
         panic!("public cranks did not reach a two-account certificate fixed point");
     };
-    let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
-        for account in [taker, lp] {
-            env.svm.expire_blockhash();
-            env.crank(
-                account,
-                ProgInstruction::PermissionlessCrank {
-                    now_slot,
-                    observations: crank_observations(asset_index),
-                },
-            );
-        }
-        drive_both_current(env, now_slot);
-    };
+    let settle_both =
+        |env: &mut V16CuEnv, asset_index: u16, now_slot: u64, oracle_accounts: &[Pubkey]| {
+            if oracle_accounts.is_empty() {
+                for account in [taker, lp] {
+                    env.svm.expire_blockhash();
+                    env.crank(
+                        account,
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot,
+                            observations: crank_observations(asset_index),
+                        },
+                    );
+                }
+                drive_both_current(env, now_slot);
+            } else {
+                env.crank_with_oracle_tail(
+                    taker,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot,
+                        observations: crank_observations(asset_index),
+                    },
+                    oracle_accounts,
+                );
+                drive_both_current(env, now_slot);
+            }
+        };
 
     for asset_index in 0..MAX_SOURCE_LIVE_ASSETS {
         cpi_fill(&mut env, asset_index, -MAX_SOURCE_LIVE_SIZE_Q);
         slot += 1;
-        env.svm.warp_to_slot(slot);
-        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_HIGH);
-        settle_both(&mut env, asset_index, slot);
+        let high_oracles = if let Some(feeds) = hybrid_feeds {
+            let publish_time = 100 + slot as i64;
+            set_test_clock(&mut env, slot, publish_time);
+            vec![
+                env.set_pyth_price(&feeds[0], 3_300_000, -6, publish_time),
+                env.set_pyth_price(&feeds[1], 150_000_000, -6, publish_time),
+                env.set_pyth_price(&feeds[2], 200_000_000, -6, publish_time),
+            ]
+        } else {
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_HIGH);
+            vec![]
+        };
+        settle_both(&mut env, asset_index, slot, &high_oracles);
+        if hybrid_feeds.is_some() {
+            let asset = &env.market_state().1.assets[asset_index as usize];
+            assert_eq!(asset.raw_oracle_target_price, HYBRID_PRICE_HIGH);
+            assert_eq!(asset.effective_price, HYBRID_PRICE_HIGH);
+        }
         cpi_fill(&mut env, asset_index, MAX_SOURCE_LIVE_SIZE_Q);
 
         cpi_fill(&mut env, asset_index, MAX_SOURCE_LIVE_SIZE_Q);
         slot += 1;
-        env.svm.warp_to_slot(slot);
-        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
-        settle_both(&mut env, asset_index, slot);
+        let low_oracles = if let Some(feeds) = hybrid_feeds {
+            let publish_time = 100 + slot as i64;
+            set_test_clock(&mut env, slot, publish_time);
+            vec![
+                env.set_pyth_price(&feeds[0], 3_000_000, -6, publish_time),
+                env.set_pyth_price(&feeds[1], 150_000_000, -6, publish_time),
+                env.set_pyth_price(&feeds[2], 200_000_000, -6, publish_time),
+            ]
+        } else {
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+            vec![]
+        };
+        settle_both(&mut env, asset_index, slot, &low_oracles);
+        if hybrid_feeds.is_some() {
+            let asset = &env.market_state().1.assets[asset_index as usize];
+            assert_eq!(asset.raw_oracle_target_price, PRICE_LOW);
+            assert_eq!(asset.effective_price, PRICE_LOW);
+        }
         if asset_index < MAX_SOURCE_LIVE_ASSETS - retained_active_assets {
             cpi_fill(&mut env, asset_index, -MAX_SOURCE_LIVE_SIZE_Q);
-        } else {
+        } else if hybrid_feeds.is_none() {
             for active_asset in (MAX_SOURCE_LIVE_ASSETS - retained_active_assets)..=asset_index {
                 env.crank_if_actionable(
                     taker,
@@ -8455,6 +8545,8 @@ fn setup_max_source_live_pair_with_configured_assets(
                 );
             }
             drive_both_current(&mut env, slot);
+        } else {
+            assert!(cert_current(&env, taker) && cert_current(&env, lp));
         }
         if seed_source_lien && asset_index == 0 {
             const SEEDED_LIEN_Q: i128 = 20 * POS_SCALE as i128;
