@@ -18,6 +18,10 @@
 //! An adjacent eight-world matrix publicly creates a nonunit ADL leg, then proves every admitted
 //! unrelated strict-reduction and clear route produces the same certificate as full recomputation.
 //! Risk-increasing deltas are intentionally excluded because the loss-stale ADL gate rejects them.
+//! A 16-world source-credit matrix creates a live counterparty-backing lien from each source side
+//! through every trade transport, then branches before and after exact-expiry impairment. Nonzero
+//! account and market lien ledgers witness the relevant fast recertifier domain; both live-lien
+//! creation and impaired-lien strict reduction must equal a subsequent public full refresh.
 //!
 //! Guarantee boundary: this is bounded generated public-route evidence over four trade routes and
 //! both active-leg orders. It does not replace a proof over every reachable portfolio state.
@@ -25,8 +29,8 @@
 use super::*;
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{
-    AssetLifecycleV16, HealthCertV16, PortfolioAccountV16Account, PortfolioLegV16, SideV16,
-    POS_SCALE,
+    AssetLifecycleV16, BackingBucketStatusV16, HealthCertV16, PortfolioAccountV16Account,
+    PortfolioLegV16, SideV16, POS_SCALE,
 };
 use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint};
 
@@ -147,24 +151,27 @@ fn execute_trade_delta_route(
     }
 }
 
-fn crank_asset_to_fixed_point(env: &mut V16Svm, actor: usize, slot: u64, asset_index: u16) {
-    let observations = vec![CrankObservationHint {
-        asset_index,
-        oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
-    }];
+fn crank_assets_to_fixed_point(env: &mut V16Svm, actor: usize, slot: u64, assets: &[u16]) {
+    let observations: Vec<CrankObservationHint> = assets
+        .iter()
+        .map(|asset_index| CrankObservationHint {
+            asset_index: *asset_index,
+            oracle_accounts: env.primary_profile(*asset_index as usize).oracle_leg_count,
+        })
+        .collect();
     let mut progressed = false;
     for _ in 0..24 {
         match env.crank(actor, slot, observations.clone()) {
             Ok(_) => progressed = true,
             Err(error) if progressed && error.contains("Custom(22)") => return,
             Err(error) => panic!(
-                "actor {actor} asset {asset_index} failed before reaching a public fixed point: {error}"
+                "actor {actor} assets {assets:?} failed before reaching a public fixed point: {error}"
             ),
         }
     }
     assert!(
         progressed,
-        "actor {actor} asset {asset_index} made no public progress"
+        "actor {actor} assets {assets:?} made no public progress"
     );
 }
 
@@ -666,8 +673,8 @@ fn v16_program_incremental_trade_certificate_matches_full_refresh_with_nonunit_a
             env.warp_to_slot(6);
             env.push_auth_mark(ADL_ASSET, 6, BANKRUPTCY_MARK)
                 .expect("publish bankruptcy mark");
-            crank_asset_to_fixed_point(&mut env, BANKRUPT_COUNTERPARTY, 6, ADL_ASSET);
-            crank_asset_to_fixed_point(&mut env, TARGET, 6, ADL_ASSET);
+            crank_assets_to_fixed_point(&mut env, BANKRUPT_COUNTERPARTY, 6, &[ADL_ASSET]);
+            crank_assets_to_fixed_point(&mut env, TARGET, 6, &[ADL_ASSET]);
 
             let (_, adl_market) = env.primary_market_state();
             let adl_leg = leg_for_asset(env.primary_portfolio(TARGET), u32::from(ADL_ASSET))
@@ -747,6 +754,239 @@ fn v16_program_incremental_trade_certificate_matches_full_refresh_with_nonunit_a
             assert_eq!(trace.out_of_band_economic_mutations, 0);
             assert_eq!(trace.steps.len(), 3);
             assert!(trace.steps.iter().all(|step| step.succeeded));
+        }
+    }
+}
+
+#[test]
+fn v16_program_source_lien_fast_certificate_matches_public_full_refresh() {
+    const WINNER: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const MARKET_CRANKER: usize = 4;
+    const WINNING_ASSET: u16 = 0;
+    const ADVERSE_ASSET: u16 = 1;
+    const INVALIDATION_ASSET: u16 = 2;
+    const START_PRICE: u64 = 100;
+    const WINNING_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const ADVERSE_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const RISK_INCREASE_Q: i128 = 2 * POS_SCALE as i128;
+
+    for route in DiscoveryTradeRoute::ALL {
+        for winner_long in [false, true] {
+            for impaired_case in [false, true] {
+                let direction = if winner_long { 1 } else { -1 };
+                let winning_mark = if winner_long { 105 } else { 95 };
+                let adverse_mark = if winner_long { 95 } else { 105 };
+                let expiry_winning_mark = if winner_long { 106 } else { 94 };
+                let source_domain = if winner_long { 1usize } else { 0usize };
+                let mut seed = [0x9c; 32];
+                seed[0] ^= match route {
+                    DiscoveryTradeRoute::NoCpi => 0,
+                    DiscoveryTradeRoute::BatchNoCpi => 1,
+                    DiscoveryTradeRoute::Cpi => 2,
+                    DiscoveryTradeRoute::BatchCpi => 3,
+                };
+                seed[1] ^= u8::from(winner_long);
+                seed[2] ^= u8::from(impaired_case);
+                let mut env = V16Svm::new(
+                    seed,
+                    MarketConfig {
+                        initial_price: START_PRICE,
+                        h_max: 4,
+                        maintenance_margin_bps: 1_000,
+                        initial_margin_bps: 1_000,
+                        max_price_move_bps_per_slot: 500,
+                        max_accrual_dt_slots: 1,
+                        max_abs_funding_e9_per_slot: 0,
+                        min_funding_lifetime_slots: 1,
+                        maintenance_fee_per_slot: 0,
+                        actor_deposits: [313, 1_000, 1, 1, 1],
+                        actor_token_balances: [313, 1_000, 1, 1, 1],
+                        ..MarketConfig::default()
+                    },
+                );
+                env.top_up_backing_bucket(source_domain as u16, 150, 3)
+                    .expect("fund the source domain before creating a lien");
+                execute_trade_delta_route(
+                    &mut env,
+                    route,
+                    WINNING_ASSET,
+                    WINNER,
+                    COUNTERPARTY,
+                    direction * WINNING_SIZE_Q,
+                    START_PRICE,
+                )
+                .expect("open the source-claim leg");
+                execute_trade_delta_route(
+                    &mut env,
+                    route,
+                    ADVERSE_ASSET,
+                    WINNER,
+                    COUNTERPARTY,
+                    direction * ADVERSE_SIZE_Q,
+                    START_PRICE,
+                )
+                .expect("open the margin-consuming leg");
+
+                env.warp_to_slot(2);
+                env.push_auth_mark(WINNING_ASSET, 2, winning_mark)
+                    .expect("publish the source-claim mark");
+                env.push_auth_mark(ADVERSE_ASSET, 2, adverse_mark)
+                    .expect("publish the adverse mark");
+                for actor in [MARKET_CRANKER, COUNTERPARTY, WINNER] {
+                    crank_assets_to_fixed_point(
+                        &mut env,
+                        actor,
+                        2,
+                        &[WINNING_ASSET, ADVERSE_ASSET],
+                    );
+                }
+                assert!(
+                    env.primary_portfolio(WINNER).pnl.get() > 0,
+                    "fixture must retain a positive attributed source claim"
+                );
+
+                if matches!(
+                    route,
+                    DiscoveryTradeRoute::Cpi | DiscoveryTradeRoute::BatchCpi
+                ) {
+                    env.ensure_primary_matcher_enabled(COUNTERPARTY)
+                        .expect("enable matcher before tracing the liened trade");
+                }
+                if !impaired_case {
+                    env.begin_public_trace();
+                }
+                execute_trade_delta_route(
+                    &mut env,
+                    route,
+                    ADVERSE_ASSET,
+                    WINNER,
+                    COUNTERPARTY,
+                    direction * RISK_INCREASE_Q,
+                    adverse_mark,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{route:?}/winner_long={winner_long} liened trade failed: {error}")
+                });
+
+                let (_, liened_market) = env.primary_market_state();
+                let liened_account = env.primary_portfolio(WINNER);
+                let account_source = liened_account
+                    .source_domains
+                    .iter()
+                    .find(|source| {
+                        source.is_occupied() && source.domain.get() as usize == source_domain
+                    })
+                    .expect("winner must retain the source-domain attribution");
+                assert!(account_source.source_claim_liened_num.get() > 0);
+                assert!(account_source.source_lien_counterparty_backing_num.get() > 0);
+                assert_eq!(
+                    account_source.source_lien_counterparty_backing_num.get(),
+                    liened_market.source_credit[source_domain].valid_liened_backing_num
+                );
+                assert_eq!(
+                    liened_market.source_credit[source_domain].impaired_liened_backing_num,
+                    0
+                );
+                assert_eq!(
+                    liened_market.source_backing_buckets[source_domain].status,
+                    BackingBucketStatusV16::Fresh
+                );
+                let (incremental, refresh_slot) = if impaired_case {
+                    env.warp_to_slot(3);
+                    env.push_auth_mark(WINNING_ASSET, 3, expiry_winning_mark)
+                        .expect("publish the exact-expiry source mark");
+                    env.push_auth_mark(ADVERSE_ASSET, 3, adverse_mark)
+                        .expect("publish the exact-expiry adverse mark");
+                    crank_assets_to_fixed_point(
+                        &mut env,
+                        WINNER,
+                        3,
+                        &[WINNING_ASSET, ADVERSE_ASSET],
+                    );
+                    let (_, impaired_market) = env.primary_market_state();
+                    assert_eq!(
+                        impaired_market.source_backing_buckets[source_domain].status,
+                        BackingBucketStatusV16::Impaired
+                    );
+                    assert_eq!(
+                        impaired_market.source_credit[source_domain].valid_liened_backing_num,
+                        0
+                    );
+                    assert!(
+                        impaired_market.source_credit[source_domain].impaired_liened_backing_num
+                            > 0
+                    );
+
+                    if matches!(
+                        route,
+                        DiscoveryTradeRoute::Cpi | DiscoveryTradeRoute::BatchCpi
+                    ) {
+                        env.ensure_primary_matcher_enabled(COUNTERPARTY)
+                            .expect("enable matcher before tracing the impaired-lien reduction");
+                    }
+                    env.begin_public_trace();
+                    let reduction = execute_trade_delta_route(
+                        &mut env,
+                        route,
+                        ADVERSE_ASSET,
+                        WINNER,
+                        COUNTERPARTY,
+                        -direction * RISK_INCREASE_Q,
+                        adverse_mark,
+                    );
+                    reduction.unwrap_or_else(|error| {
+                        panic!(
+                            "{route:?}/winner_long={winner_long} impaired-lien reduction failed: {error}"
+                        )
+                    });
+                    let (_, after_reduction_market) = env.primary_market_state();
+                    assert!(
+                        after_reduction_market.source_credit[source_domain]
+                            .impaired_liened_backing_num
+                            > 0,
+                        "strict reduction must retain the still-attributed impaired lien"
+                    );
+                    (
+                        env.primary_portfolio(WINNER)
+                            .health_cert
+                            .try_to_runtime()
+                            .expect(
+                                "impaired-lien reduction must leave an incremental certificate",
+                            ),
+                        3,
+                    )
+                } else {
+                    (
+                        liened_account
+                            .health_cert
+                            .try_to_runtime()
+                            .expect("source-lien creation must leave a valid fast certificate"),
+                        2,
+                    )
+                };
+
+                let full = invalidate_and_publicly_full_refresh(
+                    &mut env,
+                    WINNER,
+                    INVALIDATION_ASSET,
+                    refresh_slot,
+                );
+                let full_lanes = health_lanes(full);
+                let incremental_lanes = health_lanes(incremental);
+                assert_eq!(
+                    full_lanes,
+                    incremental_lanes,
+                    "{route:?}/winner_long={winner_long}/impaired={impaired_case} source-lien fast certificate diverged from full recomputation"
+                );
+                let trace = env.finish_public_trace();
+                trace.validate_public_execution().expect(
+                    "source-lien certificate differential must use public exact transitions",
+                );
+                assert_eq!(trace.out_of_band_economic_mutations, 0);
+                assert_eq!(trace.steps.len(), 3);
+                assert!(trace.steps.iter().all(|step| step.succeeded));
+            }
         }
     }
 }
