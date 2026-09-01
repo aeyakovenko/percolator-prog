@@ -4,9 +4,9 @@ use super::v16_svm::{
 };
 use percolator::{
     active_bitmap_is_empty, v16_domain_pair_for_asset_index, AssetLifecycleV16, AssetStateV16,
-    BackingBucketStatusV16, CloseProgressLedgerV16, MarketModeV16, PortfolioLegV16,
+    BackingBucketStatusV16, CloseProgressLedgerV16, HealthCertV16, MarketModeV16, PortfolioLegV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16, BOUND_SCALE,
-    CREDIT_RATE_SCALE, PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
+    CREDIT_RATE_SCALE, MAX_MARGIN_BPS, PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -2671,6 +2671,8 @@ fn assert_current_certificate_matches_snapshot_full_refresh(
         return Ok(false);
     }
 
+    assert_current_certificate_matches_independent(label, &group, &account)?;
+
     let (full_refresh, refreshed_market, refreshed_portfolio) =
         snapshot_engine_full_refresh(market_data, portfolio_data).map_err(|error| {
             format!("{label}: current certificate cannot full-refresh: {error}")
@@ -2720,6 +2722,267 @@ fn assert_current_certificate_matches_snapshot_full_refresh(
             .collect::<Vec<_>>();
         return Err(format!(
             "{label}: current certificate concealed portfolio work during snapshot full refresh; first byte deltas={byte_deltas:?}"
+        ));
+    }
+    Ok(true)
+}
+
+fn independent_effective_abs_quantity(
+    label: &str,
+    group: &MarketGroupV16,
+    leg: PortfolioLegV16,
+) -> Result<u128, String> {
+    let asset_index = leg.asset_index as usize;
+    let asset = group
+        .assets
+        .get(asset_index)
+        .ok_or_else(|| format!("{label}: active leg names missing asset {asset_index}"))?;
+    let (current_a, current_epoch, side_mode) = match leg.side {
+        SideV16::Long => (asset.a_long, asset.epoch_long, asset.mode_long),
+        SideV16::Short => (asset.a_short, asset.epoch_short, asset.mode_short),
+    };
+    if leg.epoch_snap == current_epoch {
+        if leg.a_basis == 0 || current_a == 0 || current_a > leg.a_basis {
+            return Err(format!(
+                "{label}: active leg has invalid A state: current={current_a}, basis={}",
+                leg.a_basis
+            ));
+        }
+        return super::reference_math::mul_div_ceil(
+            leg.basis_pos_q.unsigned_abs(),
+            current_a,
+            leg.a_basis,
+        );
+    }
+    if side_mode == SideModeV16::ResetPending
+        && leg.epoch_snap.checked_add(1) == Some(current_epoch)
+    {
+        return Ok(0);
+    }
+    Err(format!(
+        "{label}: active leg epoch {} is neither current {current_epoch} nor a prior-reset obligation",
+        leg.epoch_snap
+    ))
+}
+
+fn independent_margin_requirement(notional: u128, bps: u64, floor: u128) -> Result<u128, String> {
+    if notional == 0 {
+        return Ok(0);
+    }
+    Ok(
+        super::reference_math::mul_div_ceil(notional, u128::from(bps), u128::from(MAX_MARGIN_BPS))?
+            .max(floor),
+    )
+}
+
+fn independent_account_source_support(
+    label: &str,
+    group: &MarketGroupV16,
+    account: &PortfolioAccountV16,
+    face: u128,
+) -> Result<u128, String> {
+    let mut remaining_num = face
+        .checked_mul(BOUND_SCALE)
+        .ok_or_else(|| format!("{label}: positive-PnL face scaling overflow"))?;
+    let mut support = 0u128;
+
+    for (slot, source) in account.source_domains.iter().copied().enumerate() {
+        if !source.is_occupied() {
+            continue;
+        }
+        let domain = source.domain.get() as usize;
+        let source_credit =
+            group.source_credit.get(domain).copied().ok_or_else(|| {
+                format!("{label}: source slot {slot} names missing domain {domain}")
+            })?;
+        let locked_num = source
+            .source_claim_liened_num
+            .get()
+            .checked_add(source.source_claim_impaired_num.get())
+            .ok_or_else(|| format!("{label}: source slot {slot} locked-face overflow"))?;
+        let claim_bound_num = source.source_claim_bound_num.get();
+        if locked_num > claim_bound_num {
+            return Err(format!(
+                "{label}: source slot {slot} locks {locked_num} above claim {claim_bound_num}"
+            ));
+        }
+
+        let valid_lien_effective = source
+            .source_lien_effective_reserved
+            .get()
+            .min(remaining_num / BOUND_SCALE);
+        support = support
+            .checked_add(valid_lien_effective)
+            .ok_or_else(|| format!("{label}: valid-lien support overflow"))?;
+        remaining_num = remaining_num
+            .checked_sub(
+                valid_lien_effective
+                    .checked_mul(BOUND_SCALE)
+                    .ok_or_else(|| format!("{label}: valid-lien scaling overflow"))?,
+            )
+            .ok_or_else(|| format!("{label}: valid-lien support exceeds remaining face"))?;
+
+        let claim_num = claim_bound_num
+            .checked_sub(locked_num)
+            .ok_or_else(|| format!("{label}: source claim partition underflow"))?
+            .min(remaining_num);
+        if claim_num != 0 {
+            let credited_num = super::reference_math::mul_div_floor(
+                claim_num,
+                source_credit.credit_rate_num,
+                CREDIT_RATE_SCALE,
+            )?;
+            let credited = (credited_num / BOUND_SCALE)
+                .min(source_available_backing_num(label, domain, source_credit)? / BOUND_SCALE);
+            support = support
+                .checked_add(credited)
+                .ok_or_else(|| format!("{label}: source-credit support overflow"))?;
+            remaining_num -= claim_num;
+        }
+        if remaining_num == 0 {
+            break;
+        }
+    }
+    Ok(support)
+}
+
+pub(crate) fn independent_health_certificate(
+    label: &str,
+    group: &MarketGroupV16,
+    account: &PortfolioAccountV16,
+) -> Result<HealthCertV16, String> {
+    let mut initial_req = 0u128;
+    let mut maintenance_req = 0u128;
+    let mut worst_case_loss = 0u128;
+    for (slot, encoded_leg) in account.legs.iter().enumerate() {
+        let leg = encoded_leg
+            .try_to_runtime()
+            .map_err(|error| format!("{label}: decode leg {slot}: {error:?}"))?;
+        if !leg.active {
+            continue;
+        }
+        let effective_abs_q = independent_effective_abs_quantity(label, group, leg)?;
+        let asset = &group.assets[leg.asset_index as usize];
+        let risk_notional = super::reference_math::mul_div_ceil(
+            effective_abs_q,
+            u128::from(asset.effective_price),
+            POS_SCALE,
+        )?;
+        let adverse_delta = match leg.side {
+            SideV16::Long if asset.raw_oracle_target_price < asset.effective_price => {
+                asset.effective_price - asset.raw_oracle_target_price
+            }
+            SideV16::Short if asset.raw_oracle_target_price > asset.effective_price => {
+                asset.raw_oracle_target_price - asset.effective_price
+            }
+            SideV16::Long | SideV16::Short => 0,
+        };
+        let target_lag_penalty = super::reference_math::mul_div_ceil(
+            effective_abs_q,
+            u128::from(adverse_delta),
+            POS_SCALE,
+        )?;
+        let leg_initial = independent_margin_requirement(
+            risk_notional,
+            group.config.initial_margin_bps,
+            group.config.min_nonzero_im_req,
+        )?
+        .checked_add(target_lag_penalty)
+        .ok_or_else(|| format!("{label}: initial requirement overflow"))?;
+        let leg_maintenance = independent_margin_requirement(
+            risk_notional,
+            group.config.maintenance_margin_bps,
+            group.config.min_nonzero_mm_req,
+        )?
+        .checked_add(target_lag_penalty)
+        .ok_or_else(|| format!("{label}: maintenance requirement overflow"))?;
+        let leg_worst_case = risk_notional
+            .checked_add(target_lag_penalty)
+            .ok_or_else(|| format!("{label}: worst-case loss overflow"))?;
+        initial_req = initial_req
+            .checked_add(leg_initial)
+            .ok_or_else(|| format!("{label}: aggregate initial requirement overflow"))?;
+        maintenance_req = maintenance_req
+            .checked_add(leg_maintenance)
+            .ok_or_else(|| format!("{label}: aggregate maintenance requirement overflow"))?;
+        worst_case_loss = worst_case_loss
+            .checked_add(leg_worst_case)
+            .ok_or_else(|| format!("{label}: aggregate worst-case loss overflow"))?;
+    }
+
+    let capital = i128::try_from(account.capital.get())
+        .map_err(|_| format!("{label}: capital exceeds signed equity range"))?;
+    let pnl = account.pnl.get();
+    let fee_debt = i128::try_from(account.fee_credits.get().unsigned_abs())
+        .map_err(|_| format!("{label}: fee debt exceeds signed equity range"))?;
+    let has_source_claims = account
+        .source_domains
+        .iter()
+        .any(|source| source.source_claim_bound_num.get() != 0);
+    // `reserved_pnl` is a terminal payout encumbrance and `close_progress` is a progress ledger.
+    // Their economic loss is already represented by PnL/source attribution; subtracting either
+    // again here would double count it in health.
+    let equity = if pnl <= 0 {
+        capital
+            .checked_add(pnl)
+            .and_then(|value| value.checked_sub(fee_debt))
+            .ok_or_else(|| format!("{label}: nonpositive-PnL equity overflow"))?
+    } else {
+        let support = if has_source_claims {
+            independent_account_source_support(label, group, account, pnl as u128)?
+        } else {
+            0
+        };
+        capital
+            .checked_add(
+                i128::try_from(support)
+                    .map_err(|_| format!("{label}: source support exceeds signed range"))?,
+            )
+            .and_then(|value| value.checked_sub(fee_debt))
+            .ok_or_else(|| format!("{label}: positive-PnL equity overflow"))?
+    };
+
+    Ok(HealthCertV16 {
+        certified_equity: equity,
+        certified_initial_req: initial_req,
+        certified_maintenance_req: maintenance_req,
+        certified_liq_deficit: if equity < 0 {
+            equity.unsigned_abs()
+        } else {
+            maintenance_req.saturating_sub(equity as u128)
+        },
+        certified_worst_case_loss: worst_case_loss,
+        cert_oracle_epoch: group.oracle_epoch,
+        cert_funding_epoch: group.funding_epoch,
+        cert_risk_epoch: group.risk_epoch,
+        cert_asset_set_epoch: group.asset_set_epoch,
+        active_bitmap_at_cert: account.active_bitmap.map(|word| word.get()),
+        valid: true,
+    })
+}
+
+pub(crate) fn assert_current_certificate_matches_independent(
+    label: &str,
+    group: &MarketGroupV16,
+    account: &PortfolioAccountV16,
+) -> Result<bool, String> {
+    let certificate = account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("{label}: decode deployed health certificate: {error:?}"))?;
+    let current = certificate.valid
+        && certificate.cert_oracle_epoch == group.oracle_epoch
+        && certificate.cert_funding_epoch == group.funding_epoch
+        && certificate.cert_risk_epoch == group.risk_epoch
+        && certificate.cert_asset_set_epoch == group.asset_set_epoch
+        && certificate.active_bitmap_at_cert == account.active_bitmap.map(|word| word.get());
+    if !current {
+        return Ok(false);
+    }
+    let independent = independent_health_certificate(label, group, account)?;
+    if certificate != independent {
+        return Err(format!(
+            "{label}: deployed current certificate diverged from independent raw-state model: deployed={certificate:?}, independent={independent:?}"
         ));
     }
     Ok(true)

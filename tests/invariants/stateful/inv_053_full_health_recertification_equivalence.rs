@@ -349,6 +349,16 @@ fn v16_program_stale_refresh_scans_past_recovery_leg_for_pending_mark() {
         after_market.assets[1].effective_price > before_market.assets[1].effective_price,
         "later live asset must make bounded mark progress"
     );
+    let after_account = env.primary_portfolio(0);
+    assert!(
+        crate::support::fuzz_model::assert_current_certificate_matches_independent(
+            "mixed Recovery/Live full-health certificate",
+            &after_market,
+            &after_account,
+        )
+        .expect("mixed Recovery/Live certificate must match the independent lane model"),
+        "successful mixed-lifecycle refresh must leave a current certificate"
+    );
 }
 
 #[test]
@@ -985,6 +995,20 @@ fn v16_program_source_lien_fast_certificate_matches_public_full_refresh() {
                     )
                 };
 
+                let (_, independent_market) = env.primary_market_state();
+                let independent_account = env.primary_portfolio(WINNER);
+                assert!(
+                    crate::support::fuzz_model::assert_current_certificate_matches_independent(
+                        &format!(
+                            "{route:?}/winner_long={winner_long}/impaired={impaired_case} source-lien certificate"
+                        ),
+                        &independent_market,
+                        &independent_account,
+                    )
+                    .expect("source-lien certificate must match the independent lane model"),
+                    "source-lien fast certificate must be current"
+                );
+
                 let full = invalidate_and_publicly_full_refresh(
                     &mut env,
                     WINNER,
@@ -1127,6 +1151,15 @@ fn v16_program_pending_obligation_certificates_match_snapshot_full_refresh() {
                 .health_cert
                 .try_to_runtime()
                 .expect("pending close must commit a valid certificate");
+            assert!(
+                crate::support::fuzz_model::assert_current_certificate_matches_independent(
+                    &format!("{route:?}/winner_long={winner_long} pending-obligation certificate"),
+                    &pending_market,
+                    &pending_account,
+                )
+                .expect("pending-obligation certificate must match the independent lane model"),
+                "pending-obligation certificate must be current"
+            );
             assert_eq!(
                 health_lanes(pending_incremental),
                 health_lanes(snapshot_portfolio_full_refresh(&env, LOSER)),

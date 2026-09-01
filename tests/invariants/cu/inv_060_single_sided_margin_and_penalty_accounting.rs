@@ -6,10 +6,21 @@
 //! not releasing insurance/backing while exposed target/effective lag is still
 //! protecting users.
 //!
-//! Evidence in this file (I/C): public LiteSVM tests cover the IM/MM gap zone
-//! and both live insurance and backing withdrawal gates under target/effective
-//! lag. Full decomposition of every certificate lane remains a proof/model
-//! follow-up, but these regressions hit the high-risk public routes.
+//! Evidence in this file (I/C): public LiteSVM tests cover the IM/MM gap zone,
+//! both live insurance and backing withdrawal gates under target/effective lag,
+//! and a four-world exact lane decomposition for maintenance fee plus lag.
+//!
+//! Shared independent evidence (F/I/M): `support::fuzz_model` recomputes every
+//! current certificate from raw wrapper state without invoking the engine refresh
+//! implementation. It independently derives ADL-effective quantity, ceil notional,
+//! IM/MM floors, target lag, source realizability, fee debt, equity, and liquidation
+//! deficit after every generated public transition. The directed INV-053 public
+//! matrices apply that oracle to valid and exact-expiry impaired liens, both sides
+//! of a final-leg pending bankruptcy, and a mixed Recovery/Live portfolio. Those
+//! states prove close residuals and impaired claims affect equity once through PnL
+//! or source support and do not reappear in requirement lanes. `reserved_pnl` is a
+//! terminal payout encumbrance owned by INV-067/068, not a second margin penalty;
+//! `cancel_deposit_escrow` has no public writer and is owned by INV-026/087.
 
 use super::*;
 
