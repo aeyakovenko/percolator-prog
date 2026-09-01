@@ -32,6 +32,8 @@
 //! transition to every current primary and foreign certificate. The cloned full refresh must leave
 //! the portfolio and all market state byte-exact except for the engine's typed touched-asset
 //! `loss_stale_active` observation cache; its safety consumers own independent complete scans.
+//! INV-088's production-derived 50-class/62-call wrapper-to-engine roster separately assigns every
+//! callsite a global-epoch, touched-account, health-independent, or terminal certificate duty.
 //!
 //! Guarantee boundary: this is bounded generated public-route evidence over four trade routes and
 //! both active-leg orders plus every checkpoint reached by the stateful generator. It does not

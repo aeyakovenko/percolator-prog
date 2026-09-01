@@ -997,6 +997,45 @@ struct Inv088EngineCallsite {
     witness: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Inv088CertificateDisposition {
+    GlobalEpochInvalidation,
+    TouchedAccountInvalidateOrRecertify,
+    HealthIndependent,
+    TerminalOnly,
+}
+
+impl Inv088EngineCallsite {
+    fn certificate_disposition(self) -> Inv088CertificateDisposition {
+        match self.summary_family {
+            "layout-capacity" | "asset-certificate" | "asset-generation" | "asset-lifecycle"
+            | "asset-oracle" | "fresh-backing" | "position-side" => {
+                Inv088CertificateDisposition::GlobalEpochInvalidation
+            }
+            "account-asset-progress"
+            | "capital"
+            | "capital-backing-earnings"
+            | "capital-insurance"
+            | "capital-pnl"
+            | "capital-pnl-close"
+            | "capital-pnl-source"
+            | "position-pnl-certificate" => {
+                Inv088CertificateDisposition::TouchedAccountInvalidateOrRecertify
+            }
+            "backing-earnings"
+            | "insurance-budget"
+            | "insurance-stock"
+            | "materialized-portfolios" => Inv088CertificateDisposition::HealthIndependent,
+            "capital-pnl-payout"
+            | "payout-snapshot"
+            | "resolved-time"
+            | "terminal-account"
+            | "terminal-scan-stock" => Inv088CertificateDisposition::TerminalOnly,
+            family => panic!("unclassified wrapper certificate family {family}"),
+        }
+    }
+}
+
 #[test]
 fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness() {
     const ROWS: &[Inv088EngineCallsite] = &[
@@ -1121,8 +1160,16 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
             "public auto-crank route lacks executable witness {witness}",
         );
     }
+    let mut certificate_disposition_classes = [0usize; 4];
     for row in ROWS {
         assert!(!row.summary_family.is_empty());
+        let certificate_disposition_index = match row.certificate_disposition() {
+            Inv088CertificateDisposition::GlobalEpochInvalidation => 0,
+            Inv088CertificateDisposition::TouchedAccountInvalidateOrRecertify => 1,
+            Inv088CertificateDisposition::HealthIndependent => 2,
+            Inv088CertificateDisposition::TerminalOnly => 3,
+        };
+        certificate_disposition_classes[certificate_disposition_index] += 1;
         assert!(
             witness_sources
                 .iter()
@@ -1141,6 +1188,11 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
             row.method,
         );
     }
+    assert_eq!(
+        certificate_disposition_classes,
+        [18, 16, 11, 5],
+        "all 50 wrapper-to-engine callsite classes need an explicit, nonvacuous certificate disposition",
+    );
     assert_eq!(
         actual, expected,
         "every production wrapper-to-engine transition callsite needs an INV-088 summary disposition and executable public witness",
