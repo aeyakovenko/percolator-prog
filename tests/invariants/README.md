@@ -67,6 +67,16 @@ and both users withdraw all senior capital with exact engine/SPL custody. The en
 transition/spec tests and 50 library tests pass. `audit-scan` remains at the parent's existing
 125/132 fixture baseline with the same seven failures; no stronger audit-mode claim is made.
 
+The next finding-blind maximum-shape product crosses the same fourteen active legs and twenty-eight
+source domains with equal adverse risk on every leg. Four public worlds cover both persisted leg
+orders and both observation orders. Observation order changes nothing; persisted order selects
+asset 0 or 13 deterministically. Every world takes eleven strict liquidation steps at no more than
+1,155,033 CU, four bounded owner reductions, fourteen opposite-side cleanups and finalizers, exact
+senior withdrawals, and fifteen bounded resolved continuations before both portfolio accounts
+close. The live-mode rejection of an unbacked junior source claim rolls back exactly; authenticated
+permissionless resolution settles that claim instead. The 28-source plus 42-external-feed
+all-at-once product remains open.
+
 The preceding finding-blind
 INV-019/020/045/046/047/057/071/072/073/078/080/082/086 frontier exhausts 366 public worlds and
 702 transitions from two funded Hybrid-market seeds immediately before and exactly at hard-stale
@@ -2759,6 +2769,7 @@ Verification at this checkpoint:
 | Focused INV-053 complete active-leg observation matrix | 14/14 single omissions reject exactly; 1/1 complete set succeeds | maximum-shape 14-leg AuthMark refresh measured at 794,956 CU |
 | Focused INV-056/071/077 public B-settlement atom-budget trace | 1/1 | previous pin advanced `b_snap` only `2 / 100000000000000000`; fixed pin clears the second loss atom in one bounded authenticated-tail crank after exact duplicate-hint rollback |
 | Focused INV-057/065/071/073/077/082/086 combined-maxima rebalance lifecycle | 1/1 public parent-red/head-green world plus 182/182 focused engine tests | a publicly built 14-leg/28-source owner account exhausts 1,400,000 CU on the parent unilateral reduction; engine `495a5590` plus the wrapper's engine-owned post-state boundary lands at 1,330,193 CU, clears ResetPending in bounded calls, refreshes both certificates, closes every remaining leg below 768,436 CU, reuses the slot, and returns both owners' complete senior capital. The exact parent and head share the same pre-existing 125/132 `audit-scan` fixture baseline; this row does not claim that gate is clean. |
+| Focused INV-061/071/073/077/082/086 combined-maxima equal-risk liquidation | 4/4 public persisted-leg/observation-order worlds | all fourteen active legs and twenty-eight source domains become equally adverse; observation order is inert, persisted order selects asset 0 or 13, eleven strict liquidations restore health below 1,155,033 CU, and four owner reductions plus fourteen cleanup/finalization steps lead to exact senior withdrawal. Live unbacked junior conversion rejects with exact rollback; fifteen bounded resolved continuations settle the retained claims and both portfolios close with exact custody. |
 | Focused INV-056/077 external-tail liquidation composition | 1/1 | a current 14-leg liquidatable account rejects duplicate hints and permuted three-feed tails with exact rollback, then the canonical tail strictly reduces OI and restores health at 1,201,753 CU |
 | Focused INV-059 liquidation-fee retry fixed point | 1/1 plus 16 harmless retries | a real engine-selected partial close charges the independently recomputed fee once, restores health, and repeated same-state keeper submissions preserve market, portfolio, vault, and insurance exactly |
 | Focused INV-045 mark staging, fee isolation, liquidation, exit, and terminal-retirement matrix | 7/7 public, 20/20 stateful, 21/21 CU, and 4/4 wrapper Kani | the 80-cell boundary matrix, 64-case generated interior campaign, 64-world route-order composition, 16-world/four-step repeated-movement campaign, 32-world clock-first schedule matrix, and 16-world pending-target replacement matrix cover all modes/routes, varied anchors, up/down targets, caps, nonterminal elapsed slots, ordered partial-reduction route pairs, immutable funding boundaries, and 64 catch-up boundaries; 32 stale no-CPI-to-CPI transitions and 16 missing-observation terminal refreshes reject exactly before public refresh/retry, clock-first and trade-first schedules converge economically, same-slot movement cannot compound, valid movement is fee-supported, pending marks catch up in order, invalid prices roll back exactly, complete withdrawals remain live, paid movement cannot be reclaimed by the controlling coalition, and the 14-asset paid-EWMA/no-CPI/DrainOnly, stale-Hybrid/batch-CPI/Resolved, and stale-Hybrid/batch-CPI-to-no-CPI/Recovery compositions remain below the SVM compute ceiling with exact terminal custody |

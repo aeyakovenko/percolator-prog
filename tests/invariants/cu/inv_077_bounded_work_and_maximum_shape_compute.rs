@@ -22,6 +22,12 @@
 //! complete senior-capital withdrawal. The parent artifact exhausts 1.4M CU on the unilateral
 //! reduction; the fixed engine removes redundant validation scans and the wrapper consumes that
 //! engine post-state contract once, keeping the required exit below the transaction ceiling.
+//! A four-world equal-risk liquidation matrix composes the same fourteen active legs and twenty-
+//! eight source domains across forward/reverse persisted leg order and forward/reverse observation
+//! order. Selection follows persisted state only; every accepted crank mutates, eleven liquidation
+//! steps restore health below 1.156M CU, and the remaining owner reductions, reset cleanup,
+//! finalization, senior withdrawals, permissionless resolution, claims, and account closes reach
+//! exact terminal custody. The all-at-once 28-source plus 42-external-feed product remains open.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -1195,6 +1201,440 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
 fn v16_program_max_source_liquidation_asset_matrix_has_bounded_public_exits() {
     for adverse_asset in [0, 13] {
         run_max_source_liquidation_asset(adverse_asset);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CombinedMaxEqualRiskOutcome {
+    reverse_leg_order: bool,
+    reverse_observation_order: bool,
+    first_selected_asset: usize,
+    liquidation_steps: usize,
+    owner_reduce_steps: usize,
+    cleanup_steps: usize,
+    finalize_steps: usize,
+    withdrawn: [u128; 2],
+    resolved_payout: [u128; 2],
+    terminal_vault: u64,
+}
+
+fn run_public_14_leg_28_source_equal_risk_liquidation(
+    reverse_leg_order: bool,
+    reverse_observation_order: bool,
+) -> CombinedMaxEqualRiskOutcome {
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const ADVERSE_PRICE: u64 = 200;
+
+    let (mut env, taker_owner, lp_owner, taker, lp, slot) =
+        setup_max_source_live_pair(0, ACTIVE_CAP);
+    if reverse_leg_order {
+        for asset_index in 0..ACTIVE_CAP {
+            env.svm.expire_blockhash();
+            let cu = env
+                .try_trade_asset_with_cu(
+                    asset_index,
+                    &taker_owner,
+                    taker,
+                    &lp_owner,
+                    lp,
+                    -MAX_SOURCE_LIVE_SIZE_Q,
+                    100,
+                    0,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("reverse-order flatten asset {asset_index} failed: {error}")
+                });
+            assert_cu_within("combined-shape reverse-order flatten", cu, 1_375_000);
+        }
+        for asset_index in (0..ACTIVE_CAP).rev() {
+            env.svm.expire_blockhash();
+            let cu = env
+                .try_trade_asset_with_cu(
+                    asset_index,
+                    &taker_owner,
+                    taker,
+                    &lp_owner,
+                    lp,
+                    MAX_SOURCE_LIVE_SIZE_Q,
+                    100,
+                    0,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("reverse-order reopen asset {asset_index} failed: {error}")
+                });
+            assert_cu_within("combined-shape reverse-order reopen", cu, 1_375_000);
+        }
+    }
+    let lp_before = env.portfolio_state(lp);
+    let first_persisted_asset = lp_before
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active)
+        .expect("maximum-shape account has an active leg")
+        .asset_index as usize;
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&lp_before)),
+        u32::from(ACTIVE_CAP)
+    );
+    assert_eq!(
+        lp_before
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+    );
+    assert!(lp_before
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| leg.active)
+        .all(|leg| leg.basis_pos_q < 0));
+
+    let adverse_slot = slot.checked_add(1).unwrap();
+    env.svm.warp_to_slot(adverse_slot);
+    for asset_index in 0..ACTIVE_CAP {
+        env.push_auth_mark_for_asset_as_admin(asset_index, adverse_slot, ADVERSE_PRICE);
+    }
+    let mut observation_assets = (0..ACTIVE_CAP).collect::<Vec<_>>();
+    if reverse_observation_order {
+        observation_assets.reverse();
+    }
+    let all_observations = observation_assets
+        .into_iter()
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let accrual_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: adverse_slot,
+                observations: all_observations,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+            ],
+            &[],
+        )
+        .expect("combined-shape authenticated market accrual must fit");
+    assert_cu_within(
+        "14-leg/28-source equal-risk market accrual",
+        accrual_cu,
+        1_375_000,
+    );
+
+    let vault_before = env.token_amount(env.vault);
+    let aggregate_long_oi = |env: &V16CuEnv| {
+        env.market_state().1.assets[..usize::from(ACTIVE_CAP)]
+            .iter()
+            .map(|asset| asset.oi_eff_long_q)
+            .sum::<u128>()
+    };
+    let oi_before = aggregate_long_oi(&env);
+    let mut first_selected_asset = None;
+    let mut liquidation_steps = 0usize;
+    let mut non_liquidation_progress_steps = 0usize;
+    let mut max_crank_cu = 0;
+    for step in 0..(usize::from(ACTIVE_CAP) * 2 + 4) {
+        let before_group = env.market_state().1;
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let account_before = env.svm.get_account(&lp).unwrap();
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: adverse_slot,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(lp, false),
+                ],
+                &[],
+            )
+            .unwrap_or_else(|error| {
+                panic!("combined-shape liquidation step {step} failed: {error}")
+            });
+        assert_cu_within(
+            "14-leg/28-source equal-risk liquidation continuation",
+            cu,
+            1_375_000,
+        );
+        max_crank_cu = max_crank_cu.max(cu);
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&lp).unwrap() != account_before,
+            "every successful combined-shape crank must mutate economic state"
+        );
+        let after_group = env.market_state().1;
+        let changed_assets = (0..usize::from(ACTIVE_CAP))
+            .filter(|asset_index| {
+                after_group.assets[*asset_index].oi_eff_short_q
+                    < before_group.assets[*asset_index].oi_eff_short_q
+            })
+            .collect::<Vec<_>>();
+        if !changed_assets.is_empty() {
+            assert_eq!(
+                changed_assets.len(),
+                1,
+                "one bounded liquidation continuation may reduce only one equal-risk leg"
+            );
+            liquidation_steps += 1;
+            first_selected_asset.get_or_insert(changed_assets[0]);
+        } else {
+            non_liquidation_progress_steps += 1;
+        }
+        if health_cert(&env.portfolio_state(lp)).certified_liq_deficit == 0 {
+            break;
+        }
+    }
+    let selected_asset =
+        first_selected_asset.expect("a bounded crank must reduce equal-risk exposure");
+    assert_eq!(
+        selected_asset, first_persisted_asset,
+        "equal-risk selection must be deterministic from persisted leg order"
+    );
+    assert_eq!(
+        health_cert(&env.portfolio_state(lp)).certified_liq_deficit,
+        0,
+        "the finite combined-shape crank schedule must restore maintenance health"
+    );
+    assert!(liquidation_steps <= usize::from(ACTIVE_CAP));
+    assert!(non_liquidation_progress_steps <= usize::from(ACTIVE_CAP) + 2);
+    assert!(aggregate_long_oi(&env) < oi_before);
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(env.market_state().1.vault as u64, vault_before);
+
+    let mut owner_reduce_steps = 0usize;
+    let mut max_owner_reduce_cu = 0u64;
+    loop {
+        let state = env.portfolio_state(lp);
+        let Some(leg) = state
+            .legs
+            .iter()
+            .filter_map(|leg| leg.try_to_runtime().ok())
+            .find(|leg| leg.active)
+        else {
+            break;
+        };
+        owner_reduce_steps += 1;
+        assert!(owner_reduce_steps <= usize::from(ACTIVE_CAP));
+        env.svm.expire_blockhash();
+        let cu = env.rebalance_reduce_with_cu(
+            &lp_owner,
+            lp,
+            leg.asset_index as u16,
+            leg.basis_pos_q.unsigned_abs(),
+        );
+        assert_cu_within(
+            "post-liquidation combined-shape owner reduction",
+            cu,
+            1_375_000,
+        );
+        max_owner_reduce_cu = max_owner_reduce_cu.max(cu);
+    }
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(lp)
+    )));
+
+    let mut cleanup_steps = 0usize;
+    let mut max_cleanup_cu = 0u64;
+    while !percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(taker))) {
+        cleanup_steps += 1;
+        assert!(cleanup_steps <= usize::from(ACTIVE_CAP) * 2);
+        let cu = env
+            .crank_if_actionable(
+                taker,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: adverse_slot,
+                    observations: vec![],
+                },
+            )
+            .expect("the opposite prior-epoch leg must have bounded committed-state cleanup");
+        assert_cu_within(
+            "post-liquidation combined-shape opposite cleanup",
+            cu,
+            1_375_000,
+        );
+        max_cleanup_cu = max_cleanup_cu.max(cu);
+    }
+
+    let mut finalize_steps = 0usize;
+    for asset_index in 0..ACTIVE_CAP {
+        let asset = env.market_state().1.assets[usize::from(asset_index)];
+        for (side, mode) in [(0, asset.mode_long), (1, asset.mode_short)] {
+            if mode == SideModeV16::ResetPending {
+                env.svm.expire_blockhash();
+                let cu = env.finalize_reset_side_with_cu(asset_index, side);
+                assert_cu_within(
+                    "post-liquidation combined-shape side finalization",
+                    cu,
+                    CUSTODY_CU_LIMIT,
+                );
+                finalize_steps += 1;
+            }
+        }
+    }
+
+    let mut max_flat_progress_cu = 0u64;
+    for portfolio in [taker, lp] {
+        let mut reached_fixed_point = false;
+        for _ in 0..(usize::from(ACTIVE_CAP) * 4 + 4) {
+            let Some(cu) = env.crank_if_actionable(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: adverse_slot,
+                    observations: vec![],
+                },
+            ) else {
+                reached_fixed_point = true;
+                break;
+            };
+            assert_cu_within("flat combined-shape terminal prerequisite", cu, 1_375_000);
+            max_flat_progress_cu = max_flat_progress_cu.max(cu);
+        }
+        assert!(
+            reached_fixed_point,
+            "flat combined-shape prerequisite schedule must reach EngineNonProgress"
+        );
+    }
+
+    let mut withdrawn = [0u128; 2];
+    for (owner_index, (owner, portfolio)) in [(&taker_owner, taker), (&lp_owner, lp)]
+        .into_iter()
+        .enumerate()
+    {
+        let state = env.portfolio_state(portfolio);
+        let pnl = state.pnl.get();
+        if pnl > 0 {
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+            env.svm.expire_blockhash();
+            let error = env
+                .send(
+                    env.convert_released_pnl_ix(portfolio, pnl as u128),
+                    vec![
+                        AccountMeta::new(owner.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio, false),
+                    ],
+                    &[owner],
+                )
+                .expect_err("unbacked junior source claim must not convert in Live mode");
+            assert!(
+                error.contains("Custom(19)") || error.contains("custom program error: 0x13"),
+                "live junior conversion reached the wrong gate: {error}"
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+        }
+        let capital = env.portfolio_state(portfolio).capital.get();
+        assert!(
+            capital > 0,
+            "each funded owner must retain withdrawable value"
+        );
+        env.svm.expire_blockhash();
+        let (destination, cu) = env.withdraw_with_cu(owner, portfolio, capital);
+        assert_cu_within("flat combined-shape owner withdrawal", cu, CUSTODY_CU_LIMIT);
+        assert_eq!(env.token_amount(destination), capital as u64);
+        withdrawn[owner_index] = capital;
+    }
+    assert_eq!(env.market_state().1.c_tot, 0);
+
+    env.configure_permissionless_resolve_with_cu(1, 1);
+    let resolve_slot = adverse_slot.checked_add(2).unwrap();
+    let resolve_cu = env.resolve_stale_permissionless_with_cu(resolve_slot);
+    assert_cu_within(
+        "combined-shape permissionless market resolution",
+        resolve_cu,
+        1_375_000,
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    env.svm.warp_to_slot(resolve_slot + 1);
+    let mut resolved_payout = [0u128; 2];
+    let mut resolved_calls = 0usize;
+    let mut max_resolved_cu = 0u64;
+    for (owner_index, (owner, portfolio)) in [(&taker_owner, taker), (&lp_owner, lp)]
+        .into_iter()
+        .enumerate()
+    {
+        let (paid, cu, calls, terminal) = crank_max_shape_resolved_until_terminal(
+            &mut env,
+            owner.pubkey(),
+            portfolio,
+            resolve_slot + 1,
+            false,
+        );
+        assert!(
+            terminal,
+            "flat funded claimant must terminate permissionlessly"
+        );
+        resolved_payout[owner_index] = u128::from(paid);
+        resolved_calls += calls;
+        max_resolved_cu = max_resolved_cu.max(cu);
+        env.svm.expire_blockhash();
+        let close_cu = env.close_portfolio_with_cu(owner, portfolio);
+        assert_cu_within(
+            "terminal combined-shape portfolio close",
+            close_cu,
+            CUSTODY_CU_LIMIT,
+        );
+    }
+    let terminal_vault = env.token_amount(env.vault);
+    assert_eq!(
+        withdrawn.into_iter().sum::<u128>()
+            + resolved_payout.into_iter().sum::<u128>()
+            + u128::from(terminal_vault),
+        u128::from(vault_before),
+        "senior withdrawals, terminal claims, and retained protocol stock conserve exact custody"
+    );
+    assert_eq!(env.market_state().1.vault as u64, terminal_vault);
+    println!(
+        "INV-061/077 combined equal-risk CU: reverse_legs={reverse_leg_order}, reverse_observations={reverse_observation_order}, accrual={accrual_cu}, max_crank={max_crank_cu}, liquidations={liquidation_steps}, other_progress={non_liquidation_progress_steps}, selected_asset={selected_asset}, owner_reductions={owner_reduce_steps}/{max_owner_reduce_cu}, cleanups={cleanup_steps}/{max_cleanup_cu}, finalizers={finalize_steps}, flat_progress={max_flat_progress_cu}, resolve={resolve_cu}, resolved={resolved_calls}/{max_resolved_cu}"
+    );
+    CombinedMaxEqualRiskOutcome {
+        reverse_leg_order,
+        reverse_observation_order,
+        first_selected_asset: selected_asset,
+        liquidation_steps,
+        owner_reduce_steps,
+        cleanup_steps,
+        finalize_steps,
+        withdrawn,
+        resolved_payout,
+        terminal_vault,
+    }
+}
+
+#[test]
+fn v16_attack_public_14_leg_28_source_equal_risk_liquidation_stays_bounded() {
+    let outcomes = [
+        run_public_14_leg_28_source_equal_risk_liquidation(false, false),
+        run_public_14_leg_28_source_equal_risk_liquidation(false, true),
+        run_public_14_leg_28_source_equal_risk_liquidation(true, false),
+        run_public_14_leg_28_source_equal_risk_liquidation(true, true),
+    ];
+    let control = outcomes[0];
+    for outcome in outcomes {
+        assert_eq!(
+            outcome.first_selected_asset,
+            if outcome.reverse_leg_order { 13 } else { 0 },
+            "equal-risk selection must follow persisted state, not observation order"
+        );
+        assert_eq!(outcome.liquidation_steps, control.liquidation_steps);
+        assert_eq!(outcome.owner_reduce_steps, control.owner_reduce_steps);
+        assert_eq!(outcome.cleanup_steps, control.cleanup_steps);
+        assert_eq!(outcome.finalize_steps, control.finalize_steps);
+        assert_eq!(outcome.withdrawn, control.withdrawn);
+        assert_eq!(outcome.resolved_payout, control.resolved_payout);
+        assert_eq!(outcome.terminal_vault, control.terminal_vault);
     }
 }
 

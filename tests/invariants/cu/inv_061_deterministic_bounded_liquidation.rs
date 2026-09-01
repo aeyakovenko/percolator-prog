@@ -14,8 +14,12 @@
 //! unhealthy account below the CU ceiling and normalize the carry. The remaining funded owners
 //! then submit stale raw-basis work budgets; each public reduction is independently checked to
 //! consume only effective OI, after which bounded cleanup, provider-receivable refill, both side
-//! finalizers, and retirement preserve SPL custody. Equal-risk liquidation permutations,
-//! arbitrary close partitions, and complete loss attribution remain.
+//! finalizers, and retirement preserve SPL custody. The shared INV-077 four-world maximum-shape
+//! matrix additionally composes fourteen equally adverse legs with all twenty-eight historical
+//! source domains under both persisted leg orders and both observation orders, then requires
+//! complete senior and terminal-claim exit. Repeated authenticated liquidation episodes, larger
+//! actor partitions, the 28-source plus 42-feed product, arbitrary close partitions, and complete
+//! loss attribution remain.
 
 use super::*;
 
