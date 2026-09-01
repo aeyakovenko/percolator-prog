@@ -11013,6 +11013,7 @@ pub mod processor {
             true,
             None,
             Some((expected_portfolio_id, expected_position_epoch)),
+            true,
             |group, portfolio, cfg| {
                 if group.header.mode != 0 {
                     return Err(V16Error::LockActive);
@@ -11134,6 +11135,7 @@ pub mod processor {
             true,
             None,
             Some((expected_portfolio_id, expected_position_epoch)),
+            true,
             |group, portfolio, cfg| {
                 if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
                     return Err(V16Error::LockActive);
@@ -11173,6 +11175,9 @@ pub mod processor {
             true,
             None,
             Some((expected_portfolio_id, expected_position_epoch)),
+            // The engine transition owns this post-state contract. Repeating the full market and
+            // portfolio audits here makes this required exit exceed max-shape SVM CU.
+            false,
             |group, portfolio, cfg| {
                 if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
                     return Err(V16Error::LockActive);
@@ -14397,6 +14402,7 @@ pub mod processor {
         owner_must_sign: bool,
         portfolio_binding: Option<u64>,
         position_binding: Option<(u64, u64)>,
+        wrapper_post_validate: bool,
         f: F,
     ) -> ProgramResult
     where
@@ -14443,10 +14449,12 @@ pub mod processor {
             expect_portfolio_view_owner(&portfolio, owner.key)?;
         }
         f(&mut group, &mut portfolio, &cfg).map_err(map_v16_error)?;
-        group.validate_shape().map_err(map_v16_error)?;
-        portfolio
-            .validate_with_market(&group.as_view())
-            .map_err(map_v16_error)?;
+        if wrapper_post_validate {
+            group.validate_shape().map_err(map_v16_error)?;
+            portfolio
+                .validate_with_market(&group.as_view())
+                .map_err(map_v16_error)?;
+        }
         if position_binding.is_some() {
             drop(portfolio);
             state::bump_portfolio_position_epoch(&mut portfolio_data)?;

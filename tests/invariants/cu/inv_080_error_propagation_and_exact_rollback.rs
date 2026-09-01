@@ -65,7 +65,9 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
     );
     assert_eq!(
         production.matches("map_err(map_v16_error)").count(),
-        133,
+        // The Recovery committed-state selector added one propagated engine result and one
+        // propagated post-state validation to the prior 133-call census.
+        135,
         "engine-result mapping drift requires an INV-080 disposition review"
     );
     let recovery_handler = production

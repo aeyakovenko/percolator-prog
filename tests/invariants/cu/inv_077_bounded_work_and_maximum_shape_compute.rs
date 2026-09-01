@@ -16,6 +16,12 @@
 //! state without accruing the frozen asset or exceeding the CU ceiling. A separate flat-account
 //! route fills all 28 historical source slots, requires the automatic crank to release every
 //! obsolete source lien without an oracle tail, and then converts and withdraws the complete claim.
+//! The combined-shape owner-exit route reaches fourteen active legs and all twenty-eight source
+//! domains through public trades, then executes `RebalanceReduce`, ResetPending cleanup, explicit
+//! side finalization, certificate refresh, every remaining matched exit, fresh slot reuse, and
+//! complete senior-capital withdrawal. The parent artifact exhausts 1.4M CU on the unilateral
+//! reduction; the fixed engine removes redundant validation scans and the wrapper consumes that
+//! engine post-state contract once, keeping the required exit below the transaction ceiling.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -2712,32 +2718,56 @@ fn v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded() {
 
 #[test]
 fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
-    let (mut env, _taker_owner, lp_owner, _taker, lp, _slot) = setup_max_source_live_pair(0, 1);
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    let (mut env, taker_owner, lp_owner, taker, lp, slot) =
+        setup_max_source_live_pair(0, ACTIVE_CAP);
+    let active_asset = MAX_SOURCE_LIVE_ASSETS - 1;
     let before = env.portfolio_state(lp);
+    let taker_before = env.portfolio_state(taker);
     let group_before = env.market_state().1;
-    let oi_before = group_before.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_short_q;
+    let oi_before = group_before.assets[usize::from(active_asset)].oi_eff_short_q;
     let pnl_before = before.pnl.get();
     let custody_before = env.token_amount(env.vault);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&before)),
+        u32::from(ACTIVE_CAP),
+        "reducer must begin at the full active-leg shape"
+    );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&taker_before)),
+        u32::from(ACTIVE_CAP),
+        "counterparty must begin at the full active-leg shape"
+    );
 
     env.svm.expire_blockhash();
     let cu = env.rebalance_reduce_with_cu(
         &lp_owner,
         lp,
-        MAX_SOURCE_LIVE_ASSETS - 1,
+        active_asset,
         MAX_SOURCE_LIVE_SIZE_Q.unsigned_abs(),
     );
-    println!("v16 28-source-domain RebalanceReduce CU: {cu}");
-    assert_cu_within("28-source-domain RebalanceReduce", cu, 1_375_000);
+    println!("v16 14-leg/28-source-domain RebalanceReduce CU: {cu}");
+    assert_cu_within("14-leg/28-source-domain RebalanceReduce", cu, 1_375_000);
     let after = env.portfolio_state(lp);
     let group_after = env.market_state().1;
-    assert!(!has_active_leg_for_asset(
-        &after,
-        usize::from(MAX_SOURCE_LIVE_ASSETS - 1)
-    ));
+    assert!(!has_active_leg_for_asset(&after, usize::from(active_asset)));
     assert_eq!(
-        group_after.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_short_q,
+        group_after.assets[usize::from(active_asset)].oi_eff_short_q,
         oi_before - MAX_SOURCE_LIVE_SIZE_Q.unsigned_abs()
     );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&after)),
+        u32::from(ACTIVE_CAP - 1)
+    );
+    assert_eq!(
+        group_after.assets[usize::from(active_asset)].mode_long,
+        SideModeV16::ResetPending,
+        "unilateral short removal must leave the opposite long in ResetPending"
+    );
+    assert!(has_active_leg_for_asset(
+        &env.portfolio_state(taker),
+        usize::from(active_asset)
+    ));
     assert_eq!(after.pnl.get(), pnl_before);
     assert_eq!(
         after
@@ -2749,6 +2779,183 @@ fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
     );
     assert_eq!(env.token_amount(env.vault), custody_before);
     assert_eq!(group_after.vault as u64, custody_before);
+
+    let mut cleanup_steps = 0usize;
+    let mut max_cleanup_cu = 0u64;
+    while has_active_leg_for_asset(&env.portfolio_state(taker), usize::from(active_asset)) {
+        cleanup_steps += 1;
+        assert!(
+            cleanup_steps <= 16,
+            "max-shape prior-epoch leg did not clear in bounded account work"
+        );
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_data_before = env.svm.get_account(&taker).unwrap();
+        env.svm.expire_blockhash();
+        let cleanup_cu = env.crank(
+            taker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: vec![],
+            },
+        );
+        max_cleanup_cu = max_cleanup_cu.max(cleanup_cu);
+        assert_cu_within(
+            "14-leg/28-source-domain ResetPending account cleanup",
+            cleanup_cu,
+            1_375_000,
+        );
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&taker).unwrap() != taker_data_before,
+            "successful max-shape cleanup crank must mutate economic state"
+        );
+    }
+    assert_ne!(cleanup_steps, 0, "ResetPending cleanup path was vacuous");
+    println!(
+        "v16 14-leg/28-source ResetPending cleanup steps={cleanup_steps} max CU={max_cleanup_cu}"
+    );
+
+    let cleaned_group = env.market_state().1;
+    let cleaned_asset = cleaned_group.assets[usize::from(active_asset)];
+    assert_eq!(cleaned_asset.oi_eff_long_q, 0);
+    assert_eq!(cleaned_asset.oi_eff_short_q, 0);
+    assert_eq!(cleaned_asset.mode_long, SideModeV16::ResetPending);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(taker))),
+        u32::from(ACTIVE_CAP - 1)
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+
+    env.svm.expire_blockhash();
+    let finalize_cu = env.finalize_reset_side_with_cu(active_asset, 0);
+    assert_cu_within(
+        "14-leg/28-source-domain FinalizeResetSide",
+        finalize_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    println!("v16 14-leg/28-source FinalizeResetSide CU={finalize_cu}");
+    let finalized_group = env.market_state().1;
+    assert_eq!(
+        finalized_group.assets[usize::from(active_asset)].mode_long,
+        SideModeV16::Normal
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+
+    for portfolio in [taker, lp] {
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+        env.svm.expire_blockhash();
+        let refresh_cu = env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: vec![],
+            },
+        );
+        assert_cu_within(
+            "14-leg/28-source-domain post-finalize certificate refresh",
+            refresh_cu,
+            1_375_000,
+        );
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&portfolio).unwrap() != portfolio_before,
+            "post-finalize certificate refresh must mutate state"
+        );
+    }
+
+    let mut max_exit_cu = 0u64;
+    for asset_index in (0..active_asset).rev() {
+        env.svm.expire_blockhash();
+        let exit_cu = env
+            .try_trade_asset_with_cu(
+                asset_index,
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                -MAX_SOURCE_LIVE_SIZE_Q,
+                100,
+                0,
+            )
+            .unwrap_or_else(|error| {
+                panic!("post-reset full-shape asset {asset_index} exit failed: {error}")
+            });
+        max_exit_cu = max_exit_cu.max(exit_cu);
+        assert_cu_within(
+            "post-reset 14-leg/28-source-domain TradeNoCpi exit",
+            exit_cu,
+            1_375_000,
+        );
+    }
+    println!("v16 post-reset 14-leg/28-source exit max CU={max_exit_cu}");
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(taker)
+    )));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(lp)
+    )));
+
+    for size_q in [POS_SCALE as i128, -(POS_SCALE as i128)] {
+        env.svm.expire_blockhash();
+        let trade_cu = env
+            .try_trade_asset_with_cu(
+                active_asset,
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                size_q,
+                100,
+                0,
+            )
+            .unwrap_or_else(|error| {
+                panic!("fresh post-reset max-source trade {size_q} failed: {error}")
+            });
+        assert_cu_within(
+            "flat/28-source-domain post-reset TradeNoCpi",
+            trade_cu,
+            1_375_000,
+        );
+    }
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(taker),
+        usize::from(active_asset)
+    ));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(lp),
+        usize::from(active_asset)
+    ));
+
+    let taker_capital = env.portfolio_state(taker).capital.get();
+    let lp_capital = env.portfolio_state(lp).capital.get();
+    assert!(taker_capital != 0 && lp_capital != 0);
+    let custody_before_withdraw = env.token_amount(env.vault);
+    env.svm.expire_blockhash();
+    let (_, taker_withdraw_cu) = env.withdraw_with_cu(&taker_owner, taker, taker_capital);
+    assert_cu_within(
+        "flat post-reset 28-source taker Withdraw",
+        taker_withdraw_cu,
+        500_000,
+    );
+    env.svm.expire_blockhash();
+    let (_, lp_withdraw_cu) = env.withdraw_with_cu(&lp_owner, lp, lp_capital);
+    assert_cu_within(
+        "flat post-reset 28-source LP Withdraw",
+        lp_withdraw_cu,
+        500_000,
+    );
+    assert_eq!(env.portfolio_state(taker).capital.get(), 0);
+    assert_eq!(env.portfolio_state(lp).capital.get(), 0);
+    assert_eq!(
+        custody_before_withdraw - env.token_amount(env.vault),
+        u64::try_from(taker_capital + lp_capital).unwrap(),
+        "both owners must recover all senior capital after max-shape ResetPending"
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
 }
 
 #[test]

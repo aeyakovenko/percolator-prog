@@ -1516,7 +1516,7 @@ fn inv036_struct_fields(
 
 #[test]
 fn v16_program_fee_policy_and_destination_census_is_source_complete() {
-    const ENGINE_PIN: &str = "b4b975f35f6fc021350eaa8ab8917be49bd239c5";
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
     const FEE_CLASSES: &[Inv036FeeClass] = &[
         Inv036FeeClass {
             name: "trade-base",

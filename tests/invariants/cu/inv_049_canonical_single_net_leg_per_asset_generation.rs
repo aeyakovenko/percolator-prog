@@ -329,7 +329,9 @@ fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
         Inv049LegWriterCallsite {
             owner: "handle_permissionless_crank_zero_copy",
             method: "permissionless_auto_crank_not_atomic",
-            count: 2,
+            // Recovery committed-state work, expired-close recovery declaration, and the
+            // ordinary selector path each dispatch through the sole public engine crank.
+            count: 3,
         },
     ];
 

@@ -44,9 +44,30 @@ Completion requires all of the following:
 
 ## Current checkpoint
 
-Updated 2026-08-31. The current engine pin is
-`b4b975f35f6fc021350eaa8ab8917be49bd239c5` on engine branch
-`codex/oracle-checkpoint-after-global-clock-20260831`. The latest finding-blind
+Updated 2026-09-01. The current engine pin is
+`495a5590c97055bd71c6f94d849ff0298f243145` on engine branch
+`codex/rebalance-max-shape-cu-20260901` ([engine PR195](https://github.com/aeyakovenko/percolator/pull/195)).
+The latest finding-blind INV-057/065/071/073/077/082/086 composition combines the two independently
+supported portfolio maxima: fourteen active legs and all twenty-eight historical source-domain
+records. It reaches the shape entirely through public trades and then invokes the owner-signed
+unilateral `RebalanceReduce` exit. The parent engine/SBF consumed all 1,400,000 transaction CU and
+aborted before mutation, so a funded owner without matching liquidity had no bounded unilateral
+risk-reduction route.
+
+The engine now reuses the principal-settlement core after an already validated composition instead
+of repeating two complete source-domain/leg scans. The wrapper consumes that engine post-state
+contract for `RebalanceReduce` rather than running a fourth full audit; the other two users of the
+shared wrapper adapter retain wrapper post-validation. Both removals are necessary: restoring
+either one independently reproduces the 1.4M-CU abort. The immutable-pin SBF is 1,256,144 bytes with
+SHA-256 `b89ec70e7cf41bcf9498924dbb713e3416bb476fe317a937517577ad5740638d`.
+The fixed unilateral exit lands at 1,330,193 CU, then one 541,437-CU automatic crank clears the
+prior-epoch leg, explicit side finalization uses 3,084 CU, both post-finalize certificates refresh,
+all thirteen remaining matched exits land at no more than 768,436 CU, the reset asset is reused,
+and both users withdraw all senior capital with exact engine/SPL custody. The engine's 132
+transition/spec tests and 50 library tests pass. `audit-scan` remains at the parent's existing
+125/132 fixture baseline with the same seven failures; no stronger audit-mode claim is made.
+
+The preceding finding-blind
 INV-019/020/045/046/047/057/071/072/073/078/080/082/086 frontier exhausts 366 public worlds and
 702 transitions from two funded Hybrid-market seeds immediately before and exactly at hard-stale
 maturity while every configured external feed is unavailable. It independently found two
@@ -369,7 +390,7 @@ account cleanup from permissionless side finalization. No production source or p
 changed. This closes the seeded single-episode ResetPending ordering product, not deeper
 multi-episode or maximum-shape lifecycle reachability.
 
-The current engine-`b4b975f3` SBF is 1,256,456 bytes with SHA-256
+The preceding engine-`b4b975f3` SBF was 1,256,456 bytes with SHA-256
 `42a653c12a1100a37b1582160b8af2763bedf882b5da52333fde276eccf8a69a`. Its focused engine
 asset-local-checkpoint regression passes. The 239th stateful/model test exhausts the oracle-failure
 frontier in 32.7 seconds with the other 238 tests filtered, and the 240th exhausts the ResetPending
@@ -2737,6 +2758,7 @@ Verification at this checkpoint:
 | Focused INV-052 canonical crank/ADL/insurance/claim/lien partition matrix | 11/11 CU plus 13/13 stateful, 5 prior engine Kani plus 1 focused margin Kani, and 1/1 wrapper carry Kani | generated live, resolved, shutdown/Recovery, owner-reduction, live asset-insurance, terminal market-wide insurance, atomic backed-claim conversion, resolved-claim, proportional-liquidation, and source-lien expiry partitions plus exact post-ADL zero-sum settlement rerun on engine `ba7a84b7` |
 | Focused INV-053 complete active-leg observation matrix | 14/14 single omissions reject exactly; 1/1 complete set succeeds | maximum-shape 14-leg AuthMark refresh measured at 794,956 CU |
 | Focused INV-056/071/077 public B-settlement atom-budget trace | 1/1 | previous pin advanced `b_snap` only `2 / 100000000000000000`; fixed pin clears the second loss atom in one bounded authenticated-tail crank after exact duplicate-hint rollback |
+| Focused INV-057/065/071/073/077/082/086 combined-maxima rebalance lifecycle | 1/1 public parent-red/head-green world plus 182/182 focused engine tests | a publicly built 14-leg/28-source owner account exhausts 1,400,000 CU on the parent unilateral reduction; engine `495a5590` plus the wrapper's engine-owned post-state boundary lands at 1,330,193 CU, clears ResetPending in bounded calls, refreshes both certificates, closes every remaining leg below 768,436 CU, reuses the slot, and returns both owners' complete senior capital. The exact parent and head share the same pre-existing 125/132 `audit-scan` fixture baseline; this row does not claim that gate is clean. |
 | Focused INV-056/077 external-tail liquidation composition | 1/1 | a current 14-leg liquidatable account rejects duplicate hints and permuted three-feed tails with exact rollback, then the canonical tail strictly reduces OI and restores health at 1,201,753 CU |
 | Focused INV-059 liquidation-fee retry fixed point | 1/1 plus 16 harmless retries | a real engine-selected partial close charges the independently recomputed fee once, restores health, and repeated same-state keeper submissions preserve market, portfolio, vault, and insurance exactly |
 | Focused INV-045 mark staging, fee isolation, liquidation, exit, and terminal-retirement matrix | 7/7 public, 20/20 stateful, 21/21 CU, and 4/4 wrapper Kani | the 80-cell boundary matrix, 64-case generated interior campaign, 64-world route-order composition, 16-world/four-step repeated-movement campaign, 32-world clock-first schedule matrix, and 16-world pending-target replacement matrix cover all modes/routes, varied anchors, up/down targets, caps, nonterminal elapsed slots, ordered partial-reduction route pairs, immutable funding boundaries, and 64 catch-up boundaries; 32 stale no-CPI-to-CPI transitions and 16 missing-observation terminal refreshes reject exactly before public refresh/retry, clock-first and trade-first schedules converge economically, same-slot movement cannot compound, valid movement is fee-supported, pending marks catch up in order, invalid prices roll back exactly, complete withdrawals remain live, paid movement cannot be reclaimed by the controlling coalition, and the 14-asset paid-EWMA/no-CPI/DrainOnly, stale-Hybrid/batch-CPI/Resolved, and stale-Hybrid/batch-CPI-to-no-CPI/Recovery compositions remain below the SVM compute ceiling with exact terminal custody |

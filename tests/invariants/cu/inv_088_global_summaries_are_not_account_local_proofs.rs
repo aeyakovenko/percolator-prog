@@ -1026,7 +1026,7 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
         Inv088EngineCallsite { owner: "handle_convert_released_pnl", method: "convert_released_pnl_to_capital_not_atomic", count: 1, summary_family: "capital-pnl-source", witness: "v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks" },
         Inv088EngineCallsite { owner: "handle_cure_and_cancel_close", method: "cure_and_cancel_close_not_atomic", count: 1, summary_family: "capital-pnl-close", witness: "v16_program_pending_obligation_summaries_match_the_complete_portfolio_census" },
         Inv088EngineCallsite { owner: "handle_forfeit_recovery_leg", method: "forfeit_recovery_leg_not_atomic", count: 1, summary_family: "position-pnl-certificate", witness: "v16_program_reset_pending_rejects_fresh_counterparty_and_completes_recovery" },
-        Inv088EngineCallsite { owner: "handle_rebalance_reduce", method: "rebalance_reduce_position_not_atomic", count: 1, summary_family: "position-pnl-certificate", witness: "v16_bpf_recovery_and_reset_tags_are_bounded_and_update_state" },
+        Inv088EngineCallsite { owner: "handle_rebalance_reduce", method: "rebalance_reduce_position_not_atomic", count: 1, summary_family: "position-pnl-certificate", witness: "v16_attack_max_source_owner_rebalance_reduce_stays_bounded" },
         Inv088EngineCallsite { owner: "handle_sync_maintenance_fee", method: "sync_account_fee_to_slot_not_atomic", count: 3, summary_family: "capital-pnl", witness: "v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded" },
         Inv088EngineCallsite { owner: "handle_sync_maintenance_fee", method: "credit_account_from_insurance_not_atomic", count: 2, summary_family: "capital-insurance", witness: "v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded" },
         Inv088EngineCallsite { owner: "handle_sync_maintenance_fee", method: "deregister_empty_materialized_portfolio_not_atomic", count: 1, summary_family: "materialized-portfolios", witness: "v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded" },
@@ -1042,7 +1042,7 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
         Inv088EngineCallsite { owner: "handle_close_resolved", method: "permissionless_auto_crank_not_atomic", count: 1, summary_family: "terminal-account", witness: "v16_program_permissionless_crank_closes_capital_only_resolved_account" },
         Inv088EngineCallsite { owner: "handle_claim_resolved_payout_topup", method: "advance_resolved_slot_not_atomic", count: 1, summary_family: "resolved-time", witness: "v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value" },
         Inv088EngineCallsite { owner: "handle_claim_resolved_payout_topup", method: "claim_resolved_payout_topup_not_atomic", count: 1, summary_family: "capital-pnl-payout", witness: "v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value" },
-        Inv088EngineCallsite { owner: "handle_permissionless_crank_zero_copy", method: "permissionless_auto_crank_not_atomic", count: 2, summary_family: "account-asset-progress", witness: "v16_program_auto_crank_current_solvent_partial_liquidation_makes_progress" },
+        Inv088EngineCallsite { owner: "handle_permissionless_crank_zero_copy", method: "permissionless_auto_crank_not_atomic", count: 3, summary_family: "account-asset-progress", witness: "v16_program_auto_crank_current_solvent_partial_liquidation_makes_progress" },
         Inv088EngineCallsite { owner: "handle_permissionless_crank_zero_copy", method: "set_asset_raw_oracle_target_not_atomic", count: 1, summary_family: "asset-oracle", witness: "v16_program_ewma_crank_commits_once_then_rejects_same_slot_fixed_point" },
         Inv088EngineCallsite { owner: "handle_permissionless_crank_zero_copy", method: "accrue_asset_path_to_not_atomic", count: 1, summary_family: "asset-certificate", witness: "v16_program_per_asset_crank_isolation" },
         Inv088EngineCallsite { owner: "handle_permissionless_crank_zero_copy", method: "accrue_asset_to_not_atomic", count: 1, summary_family: "asset-certificate", witness: "v16_program_per_asset_crank_isolation" },
@@ -1106,6 +1106,21 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
         include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs"),
         include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs"),
     ];
+    // The three calls in the public crank handler are distinct routes: committed Recovery work,
+    // expired-close Recovery declaration, and ordinary live-account selection. Keep an executable
+    // public witness for each route instead of allowing the aggregate call count to hide one.
+    for witness in [
+        "v16_program_recovery_seeded_frontier_preserves_bounded_owner_exit",
+        "v16_program_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_slot",
+        "v16_program_auto_crank_current_solvent_partial_liquidation_makes_progress",
+    ] {
+        assert!(
+            witness_sources
+                .iter()
+                .any(|source| source.contains(&format!("fn {witness}"))),
+            "public auto-crank route lacks executable witness {witness}",
+        );
+    }
     for row in ROWS {
         assert!(!row.summary_family.is_empty());
         assert!(
