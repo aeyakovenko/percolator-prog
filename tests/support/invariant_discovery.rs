@@ -514,6 +514,16 @@ impl EqualRiskAssetOrder {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FollowupLiquidationSelection {
+    SameAsset,
+    NextAsset,
+}
+
+impl FollowupLiquidationSelection {
+    pub const ALL: [Self; 2] = [Self::SameAsset, Self::NextAsset];
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ThreeAssetLegOrder {
     ZeroOneTwo,
     ZeroTwoOne,
@@ -1355,6 +1365,15 @@ pub struct MultiAssetAdlLiquidationDiscovery {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FollowupLiquidationDiscovery {
+    pub selection: FollowupLiquidationSelection,
+    pub prior_selected_asset: u16,
+    pub preparation_close_q: u128,
+    pub preparation_observed_oi_reduce_q: [[u128; 2]; 2],
+    pub preparation_old_leg_absent: bool,
+    pub preparation_nonselected_asset_framed: bool,
+    pub preparation_target_value_framed: bool,
+    pub preparation_counterparties_framed: bool,
+    pub preparation_moved_no_tokens: bool,
     pub authenticated_slot: u64,
     pub selected_asset: u16,
     pub pre_certified_liq_deficit: u128,
@@ -1657,6 +1676,18 @@ impl MultiAssetAdlLiquidationDiscovery {
     pub fn satisfies_invariant(&self) -> bool {
         let selected = usize::from(self.selected_asset);
         let nonselected = selected ^ 1;
+        let followup_slot_gap = self
+            .followup
+            .authenticated_slot
+            .checked_sub(self.first_liquidation_slot);
+        let followup_slot_is_bounded = match self.followup.selection {
+            FollowupLiquidationSelection::SameAsset => {
+                matches!(followup_slot_gap, Some(1..=16))
+            }
+            FollowupLiquidationSelection::NextAsset => {
+                matches!(followup_slot_gap, Some(200..=215))
+            }
+        };
         let selected_domains = [selected * 2, selected * 2 + 1];
         let selected_budget_delta = selected_domains
             .into_iter()
@@ -1673,7 +1704,8 @@ impl MultiAssetAdlLiquidationDiscovery {
         self.first_active_asset == self.leg_order.assets()[0]
             && self.selected_asset == self.first_active_asset
             && self.followup.authenticated_slot > self.first_liquidation_slot
-            && self.followup.selected_asset == self.selected_asset
+            && followup_slot_is_bounded
+            && self.followup.prior_selected_asset == self.selected_asset
             && selected < 2
             && self.pre_certificate_valid
             && self.pre_certified_liq_deficit != 0
@@ -1722,8 +1754,9 @@ impl MultiAssetAdlLiquidationDiscovery {
 
 impl FollowupLiquidationDiscovery {
     pub fn satisfies_invariant(&self) -> bool {
+        let prior_selected = usize::from(self.prior_selected_asset);
         let selected = usize::from(self.selected_asset);
-        if selected >= 2 {
+        if prior_selected >= 2 || selected >= 2 {
             return false;
         }
         let nonselected = selected ^ 1;
@@ -1740,7 +1773,29 @@ impl FollowupLiquidationDiscovery {
             .map(|(_, delta)| *delta)
             .sum::<u128>();
 
-        self.authenticated_slot != 0
+        let preparation_valid = match self.selection {
+            FollowupLiquidationSelection::SameAsset => {
+                selected == prior_selected
+                    && self.preparation_close_q == 0
+                    && self.preparation_observed_oi_reduce_q == [[0; 2]; 2]
+                    && !self.preparation_old_leg_absent
+            }
+            FollowupLiquidationSelection::NextAsset => {
+                selected == (prior_selected ^ 1)
+                    && self.preparation_close_q != 0
+                    && self.preparation_observed_oi_reduce_q[prior_selected]
+                        == [self.preparation_close_q; 2]
+                    && self.preparation_observed_oi_reduce_q[prior_selected ^ 1] == [0; 2]
+                    && self.preparation_old_leg_absent
+            }
+        };
+
+        preparation_valid
+            && self.preparation_nonselected_asset_framed
+            && self.preparation_target_value_framed
+            && self.preparation_counterparties_framed
+            && self.preparation_moved_no_tokens
+            && self.authenticated_slot != 0
             && self.pre_certified_liq_deficit != 0
             && self.expected_close_q != 0
             && self.expected_close_q <= self.pre_effective_q[selected]
@@ -17901,12 +17956,85 @@ fn execute_followup_multi_asset_liquidation(
     counterparties: [usize; 2],
     helper: usize,
     accrual_order: EqualRiskAssetOrder,
+    prior_selected_asset: u16,
+    selection: FollowupLiquidationSelection,
     first_liquidation_slot: u64,
     mark: u64,
     max_compute_units: &mut u64,
 ) -> Result<FollowupLiquidationDiscovery, String> {
+    let mut preparation_close_q = 0;
+    let mut preparation_observed_oi_reduce_q = [[0u128; 2]; 2];
+    let mut preparation_old_leg_absent = false;
+    let mut preparation_nonselected_asset_framed = true;
+    let mut preparation_target_value_framed = true;
+    let mut preparation_counterparties_framed = true;
+    let mut preparation_moved_no_tokens = true;
+
+    if selection == FollowupLiquidationSelection::NextAsset {
+        let prior_selected = usize::from(prior_selected_asset);
+        if prior_selected >= 2 {
+            return Err(format!(
+                "follow-up preparation selected unsupported asset {prior_selected_asset}"
+            ));
+        }
+        let (_, before_group) = env.primary_market_state();
+        let before_account = env.primary_portfolio(target);
+        let selected_leg = discovery_leg_for_asset(&before_account, prior_selected_asset)?
+            .ok_or_else(|| "follow-up preparation selected leg disappeared".to_string())?;
+        preparation_close_q =
+            discovery_effective_leg_q(before_group.assets[prior_selected], selected_leg)?;
+        if preparation_close_q == 0 {
+            return Err("follow-up preparation selected a zero-effective residual".into());
+        }
+        let counterparties_before = counterparties.map(|actor| env.primary_portfolio_data(actor));
+        let token_state_before = env.all_token_account_data();
+        let reduction = env
+            .rebalance_reduce(target, prior_selected_asset, preparation_close_q)
+            .map_err(|error| format!("advance follow-up liquidation asset: {error}"))?;
+        *max_compute_units = (*max_compute_units).max(reduction.compute_units);
+
+        let (_, after_group) = env.primary_market_state();
+        let after_account = env.primary_portfolio(target);
+        for asset_index in [0usize, 1] {
+            preparation_observed_oi_reduce_q[asset_index] = [
+                before_group.assets[asset_index]
+                    .oi_eff_long_q
+                    .checked_sub(after_group.assets[asset_index].oi_eff_long_q)
+                    .ok_or_else(|| {
+                        format!("follow-up preparation asset {asset_index} long OI increased")
+                    })?,
+                before_group.assets[asset_index]
+                    .oi_eff_short_q
+                    .checked_sub(after_group.assets[asset_index].oi_eff_short_q)
+                    .ok_or_else(|| {
+                        format!("follow-up preparation asset {asset_index} short OI increased")
+                    })?,
+            ];
+        }
+        preparation_old_leg_absent =
+            discovery_leg_for_asset(&after_account, prior_selected_asset)?.is_none();
+        preparation_nonselected_asset_framed =
+            after_group.assets[prior_selected ^ 1] == before_group.assets[prior_selected ^ 1];
+        preparation_target_value_framed = after_account.capital == before_account.capital
+            && after_account.pnl == before_account.pnl;
+        preparation_counterparties_framed = counterparties
+            .iter()
+            .zip(&counterparties_before)
+            .all(|(&actor, before)| env.primary_portfolio_data(actor) == *before);
+        preparation_moved_no_tokens = env.all_token_account_data() == token_state_before;
+    }
+
     let mut authenticated_slot = None;
-    for slot in (first_liquidation_slot + 1)..=(first_liquidation_slot + 16) {
+    let followup_start_slot = first_liquidation_slot
+        .checked_add(match selection {
+            FollowupLiquidationSelection::SameAsset => 1,
+            FollowupLiquidationSelection::NextAsset => 200,
+        })
+        .ok_or_else(|| "follow-up liquidation start slot overflow".to_string())?;
+    let followup_end_slot = followup_start_slot
+        .checked_add(15)
+        .ok_or_else(|| "follow-up liquidation end slot overflow".to_string())?;
+    for slot in followup_start_slot..=followup_end_slot {
         env.warp_to_slot(slot);
         for asset_index in accrual_order.assets() {
             let success = env
@@ -17955,7 +18083,16 @@ fn execute_followup_multi_asset_liquidation(
         }
     }
     let authenticated_slot = authenticated_slot.ok_or_else(|| {
-        "multi-asset target stayed healthy through 16 follow-up authenticated fee steps".to_string()
+        let (_, group) = env.primary_market_state();
+        let account = env.primary_portfolio(target);
+        let cert = account.health_cert.try_to_runtime();
+        format!(
+            "multi-asset target stayed healthy through 16 follow-up authenticated fee steps: \
+             capital={}, pnl={}, current={}, cert={cert:?}",
+            account.capital.get(),
+            account.pnl.get(),
+            discovery_certificate_is_current(&group, &account).unwrap_or(false),
+        )
     })?;
 
     let (_, before_group) = env.primary_market_state();
@@ -18085,6 +18222,15 @@ fn execute_followup_multi_asset_liquidation(
         .all(|(actor, before)| env.primary_portfolio_data(actor) == before);
 
     Ok(FollowupLiquidationDiscovery {
+        selection,
+        prior_selected_asset,
+        preparation_close_q,
+        preparation_observed_oi_reduce_q,
+        preparation_old_leg_absent,
+        preparation_nonselected_asset_framed,
+        preparation_target_value_framed,
+        preparation_counterparties_framed,
+        preparation_moved_no_tokens,
         authenticated_slot,
         selected_asset,
         pre_certified_liq_deficit: cert.certified_liq_deficit,
@@ -18108,6 +18254,7 @@ fn verify_one_multi_asset_adl_liquidation(
     route: DiscoveryTradeRoute,
     leg_order: EqualRiskAssetOrder,
     accrual_order: EqualRiskAssetOrder,
+    followup_selection: FollowupLiquidationSelection,
 ) -> Result<MultiAssetAdlLiquidationDiscovery, String> {
     const TARGET: usize = 0;
     const ASSET_ZERO_COUNTERPARTY: usize = 1;
@@ -18134,8 +18281,8 @@ fn verify_one_multi_asset_adl_liquidation(
             liquidation_fee_bps: LIQUIDATION_FEE_BPS,
             liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
             max_price_move_bps_per_slot: 1,
-            max_accrual_dt_slots: 1,
-            min_funding_lifetime_slots: 1,
+            max_accrual_dt_slots: 256,
+            min_funding_lifetime_slots: 256,
             maintenance_fee_per_slot: 1,
             actor_deposits: [
                 TARGET_DEPOSIT,
@@ -18415,6 +18562,8 @@ fn verify_one_multi_asset_adl_liquidation(
         [ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY],
         HELPER,
         accrual_order,
+        selected_asset,
+        followup_selection,
         liquidation_slot,
         MARK,
         &mut max_compute_units,
@@ -18579,14 +18728,17 @@ pub fn verify_multi_asset_adl_liquidation_permutations(
 ) -> Result<Vec<MultiAssetAdlLiquidationDiscovery>, String> {
     let mut discoveries = Vec::new();
     for route in DiscoveryTradeRoute::ALL {
-        for leg_order in EqualRiskAssetOrder::ALL {
-            for accrual_order in EqualRiskAssetOrder::ALL {
-                discoveries.push(verify_one_multi_asset_adl_liquidation(
-                    seed,
-                    route,
-                    leg_order,
-                    accrual_order,
-                )?);
+        for followup_selection in FollowupLiquidationSelection::ALL {
+            for leg_order in EqualRiskAssetOrder::ALL {
+                for accrual_order in EqualRiskAssetOrder::ALL {
+                    discoveries.push(verify_one_multi_asset_adl_liquidation(
+                        seed,
+                        route,
+                        leg_order,
+                        accrual_order,
+                        followup_selection,
+                    )?);
+                }
             }
         }
     }

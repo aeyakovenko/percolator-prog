@@ -20,9 +20,10 @@
 //! complete senior and terminal-claim exit. INV-059 additionally crosses two authenticated
 //! liquidation episodes through all four opening transports, exact same-state/malformed rollback,
 //! and a post-episode owner reduction. The stateful two-asset ADL matrix repeats that authenticated
-//! deficit on a multi-leg account. Larger actor partitions, repeated episodes that advance to a
-//! different selected asset, arbitrary close partitions, and complete loss attribution remain;
-//! the 28-source plus 42-feed product is owned by INV-077.
+//! deficit on a multi-leg account both before and after canonically removing the first selected
+//! residual; the latter branch must select the other asset after a bounded authenticated time gap.
+//! Larger actor partitions, three-plus liquidation episodes, arbitrary close partitions, and
+//! complete loss attribution remain; the 28-source plus 42-feed product is owned by INV-077.
 
 use super::*;
 

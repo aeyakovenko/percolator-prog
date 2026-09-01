@@ -79,11 +79,12 @@ use support::invariant_discovery::{
     BackingProviderConsentOrder, CompositeRoundingScale, CrossDomainRoundingOrder,
     DiscoveryTradeRoute, EqualRiskAssetOrder, ExpiredBackingConsumerDiscovery,
     ExpiredBackingConsumerKind, ExpiredBackingTradeRouteDiscovery, FeeConsentKind,
-    FlatSourceLienEscapeRoute, FundedRoleKind, MarketIntentKind, PendingMarkSource,
-    PortfolioIntentKind, PositionEpisodeKind, ProspectiveAccrualRoute, RecoveryForfeitBudget,
-    ResolvedAdlCloseOrder, RetainedMaturityDiscovery, RetainedMaturityKind, RetryIntentKind,
-    SourceFeeConsentKind, SourceFeeConsentRole, SourceLienReversalExitRoute, StaleCohortRoute,
-    SupersededIntentKind, SupersessionPayloadOrder, TerminalGenerationKind, TradeDrivenMarkMode,
+    FlatSourceLienEscapeRoute, FollowupLiquidationSelection, FundedRoleKind, MarketIntentKind,
+    PendingMarkSource, PortfolioIntentKind, PositionEpisodeKind, ProspectiveAccrualRoute,
+    RecoveryForfeitBudget, ResolvedAdlCloseOrder, RetainedMaturityDiscovery, RetainedMaturityKind,
+    RetryIntentKind, SourceFeeConsentKind, SourceFeeConsentRole, SourceLienReversalExitRoute,
+    StaleCohortRoute, SupersededIntentKind, SupersessionPayloadOrder, TerminalGenerationKind,
+    TradeDrivenMarkMode,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {

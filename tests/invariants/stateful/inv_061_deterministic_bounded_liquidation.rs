@@ -22,8 +22,11 @@
 //! mutate only that asset's OI and insurance domains, frame both counterparties and every SPL
 //! account, and restore health below the CU ceiling. A later authenticated fee episode must create
 //! a second real deficit and satisfy the same independent quantity, OI, fee, attribution, and frame
-//! oracle before all three owners clear their remaining effective or reset-obligation legs,
-//! withdraw the exact non-fee value, and close while the market remains Live.
+//! oracle. The matrix crosses both leaving the first selected leg live and canonically reducing its
+//! residual first; in the latter case the second episode must select the other asset, while the
+//! intervening owner reduction exactly removes both OI lanes and frames value, the other asset,
+//! counterparties, and SPL custody. All three owners then clear their remaining effective or
+//! reset-obligation legs, withdraw the exact non-fee value, and close while the market remains Live.
 //!
 //! The shared INV-035 matrix extends selection to three unequal-loss assets and all six persisted
 //! leg orders. The shared INV-086 bridge then takes a public 70,000,000-quantity liquidation across
@@ -33,9 +36,9 @@
 //! Guarantee boundary: these finite matrices cover two-user terminal landing orders, three-asset
 //! unequal-loss selection, and liquidation-to-partial-receipt composition. Close size is not
 //! caller-controlled on the sole public crank, and INV-059 source-locks that surface.
-//! Larger account partitions, repeated episodes that advance to another selected asset, transfer,
-//! retirement, and remaining maximum-shape cross-products remain in the audit ledger. This matrix
-//! now owns two authenticated fee-bearing episodes on the selected leg of a two-asset ADL account;
+//! Larger account partitions, three-plus liquidation episodes, transfer, retirement, and remaining
+//! maximum-shape cross-products remain in the audit ledger. This matrix owns two authenticated
+//! fee-bearing episodes on either the same or successive selected legs of a two-asset ADL account;
 //! INV-059 separately owns the single-asset episode boundary and post-episode owner reduction.
 
 use super::*;
@@ -76,9 +79,10 @@ fn v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete() {
     assert_eq!(
         discoveries.len(),
         DiscoveryTradeRoute::ALL.len()
+            * FollowupLiquidationSelection::ALL.len()
             * EqualRiskAssetOrder::ALL.len()
             * EqualRiskAssetOrder::ALL.len(),
-        "must cross every opening transport, persisted leg order, and accrual order"
+        "must cross every opening transport, follow-up selection, persisted leg order, and accrual order"
     );
     for discovery in &discoveries {
         assert!(
@@ -87,61 +91,62 @@ fn v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete() {
         );
     }
 
-    for route_worlds in
-        discoveries.chunks_exact(EqualRiskAssetOrder::ALL.len() * EqualRiskAssetOrder::ALL.len())
-    {
-        let control = route_worlds[0];
-        for candidate in route_worlds.iter().copied() {
-            assert_eq!(
-                (
-                    candidate.pre_long_a,
-                    candidate.pre_short_a,
-                    candidate.pre_raw_basis_q,
-                    candidate.pre_effective_q,
-                    candidate.pre_oi_q,
-                    candidate.pre_certified_liq_deficit,
-                    candidate.expected_close_q,
-                    candidate.liquidation_fee,
-                    candidate.followup.pre_certified_liq_deficit,
-                    candidate.followup.expected_close_q,
-                    candidate.followup.liquidation_fee,
-                ),
-                (
-                    control.pre_long_a,
-                    control.pre_short_a,
-                    control.pre_raw_basis_q,
-                    control.pre_effective_q,
-                    control.pre_oi_q,
-                    control.pre_certified_liq_deficit,
-                    control.expected_close_q,
-                    control.liquidation_fee,
-                    control.followup.pre_certified_liq_deficit,
-                    control.followup.expected_close_q,
-                    control.followup.liquidation_fee,
-                ),
-                "leg/accrual order changed equal-risk topology: control={control:?}, candidate={candidate:?}"
-            );
-            assert_eq!(
-                (
-                    candidate.expected_liquidation_fee,
-                    candidate.participant_payout,
-                    candidate.final_insurance,
-                    candidate.final_c_tot,
-                    candidate.final_vault,
-                ),
-                (
-                    control.expected_liquidation_fee,
-                    control.participant_payout,
-                    control.final_insurance,
-                    control.final_c_tot,
-                    control.final_vault,
-                ),
-                "leg/accrual order changed terminal equal-risk economics: control={control:?}, candidate={candidate:?}"
-            );
+    let permutation_stride = EqualRiskAssetOrder::ALL.len() * EqualRiskAssetOrder::ALL.len();
+    let route_stride = FollowupLiquidationSelection::ALL.len() * permutation_stride;
+    for route_worlds in discoveries.chunks_exact(route_stride) {
+        for selection_worlds in route_worlds.chunks_exact(permutation_stride) {
+            let control = selection_worlds[0];
+            for candidate in selection_worlds.iter().copied() {
+                assert_eq!(
+                    (
+                        candidate.pre_long_a,
+                        candidate.pre_short_a,
+                        candidate.pre_raw_basis_q,
+                        candidate.pre_effective_q,
+                        candidate.pre_oi_q,
+                        candidate.pre_certified_liq_deficit,
+                        candidate.expected_close_q,
+                        candidate.liquidation_fee,
+                        candidate.followup.pre_certified_liq_deficit,
+                        candidate.followup.expected_close_q,
+                        candidate.followup.liquidation_fee,
+                    ),
+                    (
+                        control.pre_long_a,
+                        control.pre_short_a,
+                        control.pre_raw_basis_q,
+                        control.pre_effective_q,
+                        control.pre_oi_q,
+                        control.pre_certified_liq_deficit,
+                        control.expected_close_q,
+                        control.liquidation_fee,
+                        control.followup.pre_certified_liq_deficit,
+                        control.followup.expected_close_q,
+                        control.followup.liquidation_fee,
+                    ),
+                    "leg/accrual order changed equal-risk topology: control={control:?}, candidate={candidate:?}"
+                );
+                assert_eq!(
+                    (
+                        candidate.expected_liquidation_fee,
+                        candidate.participant_payout,
+                        candidate.final_insurance,
+                        candidate.final_c_tot,
+                        candidate.final_vault,
+                    ),
+                    (
+                        control.expected_liquidation_fee,
+                        control.participant_payout,
+                        control.final_insurance,
+                        control.final_c_tot,
+                        control.final_vault,
+                    ),
+                    "leg/accrual order changed terminal equal-risk economics: control={control:?}, candidate={candidate:?}"
+                );
+            }
         }
     }
 
-    let route_stride = EqualRiskAssetOrder::ALL.len() * EqualRiskAssetOrder::ALL.len();
     for permutation in 0..route_stride {
         let control = discoveries[permutation];
         for route_index in 1..DiscoveryTradeRoute::ALL.len() {
