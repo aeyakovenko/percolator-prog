@@ -22,6 +22,9 @@
 //! through every trade transport, then branches before and after exact-expiry impairment. Nonzero
 //! account and market lien ledgers witness the relevant fast recertifier domain; both live-lien
 //! creation and impaired-lien strict reduction must equal a subsequent public full refresh.
+//! An eight-world pending-obligation matrix creates a real final-leg bankruptcy close through
+//! public trades and compares the committed certificate with the pinned engine's full refresh over
+//! cloned on-chain bytes. It also proves fresh risk cannot create a later incremental-cert domain.
 //!
 //! Guarantee boundary: this is bounded generated public-route evidence over four trade routes and
 //! both active-leg orders. It does not replace a proof over every reachable portfolio state.
@@ -32,7 +35,10 @@ use percolator::{
     AssetLifecycleV16, BackingBucketStatusV16, HealthCertV16, PortfolioAccountV16Account,
     PortfolioLegV16, SideV16, POS_SCALE,
 };
-use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint};
+use percolator_prog::{
+    ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
+    state,
+};
 
 #[derive(Clone, Copy, Debug)]
 enum TradeDeltaShape {
@@ -209,6 +215,22 @@ fn invalidate_and_publicly_full_refresh(
     assert_eq!(cert.cert_risk_epoch, market.risk_epoch);
     assert_eq!(cert.cert_asset_set_epoch, market.asset_set_epoch);
     cert
+}
+
+fn snapshot_engine_full_refresh(env: &V16Svm, actor: usize) -> HealthCertV16 {
+    let mut market_data = env.market_data(false);
+    let mut portfolio_data = env.primary_portfolio_data(actor);
+    let max_market_slots = state::read_market_config_mode_and_capacity(&market_data)
+        .expect("decode snapshot market shape")
+        .2;
+    let (_, mut market) =
+        state::market_view_mut(&mut market_data).expect("decode snapshot market view");
+    let mut account =
+        state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)
+            .expect("decode snapshot portfolio view");
+    market
+        .full_account_refresh_not_atomic(&mut account)
+        .expect("pinned engine full refresh must accept the committed public state")
 }
 
 #[test]
@@ -987,6 +1009,162 @@ fn v16_program_source_lien_fast_certificate_matches_public_full_refresh() {
                 assert_eq!(trace.steps.len(), 3);
                 assert!(trace.steps.iter().all(|step| step.succeeded));
             }
+        }
+    }
+}
+
+#[test]
+fn v16_program_pending_obligation_certificates_match_snapshot_full_refresh() {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const FRESH_RISK_COUNTERPARTY: usize = 2;
+    const MARKET_CRANKER: usize = 4;
+    const BANKRUPTCY_ASSET: u16 = 0;
+    const FRESH_RISK_ASSET: u16 = 1;
+    const OPEN_PRICE: u64 = 100;
+    const BANKRUPTCY_Q: i128 = 10 * POS_SCALE as i128;
+
+    for route in DiscoveryTradeRoute::ALL {
+        for winner_long in [false, true] {
+            let direction = if winner_long { 1 } else { -1 };
+            let bankruptcy_price = if winner_long { 150 } else { 50 };
+            let mut seed = [0x6d; 32];
+            seed[0] ^= match route {
+                DiscoveryTradeRoute::NoCpi => 0,
+                DiscoveryTradeRoute::BatchNoCpi => 1,
+                DiscoveryTradeRoute::Cpi => 2,
+                DiscoveryTradeRoute::BatchCpi => 3,
+            };
+            seed[1] ^= u8::from(winner_long);
+            let mut env = V16Svm::new(
+                seed,
+                MarketConfig {
+                    initial_price: OPEN_PRICE,
+                    maintenance_margin_bps: 1_000,
+                    initial_margin_bps: 1_000,
+                    max_price_move_bps_per_slot: 500,
+                    max_accrual_dt_slots: 1,
+                    max_abs_funding_e9_per_slot: 0,
+                    min_funding_lifetime_slots: 1,
+                    maintenance_fee_per_slot: 0,
+                    actor_deposits: [1_000, 250, 1_000, 1, 1],
+                    actor_token_balances: [1_000, 250, 1_000, 1, 1],
+                    ..MarketConfig::default()
+                },
+            );
+            execute_trade_delta_route(
+                &mut env,
+                route,
+                BANKRUPTCY_ASSET,
+                WINNER,
+                LOSER,
+                direction * BANKRUPTCY_Q,
+                OPEN_PRICE,
+            )
+            .expect("open the future bankruptcy pair");
+
+            for step in 1..=10u64 {
+                let final_slot = 1 + step;
+                let move_amount = 5 * step;
+                let mark = if winner_long {
+                    OPEN_PRICE + move_amount
+                } else {
+                    OPEN_PRICE - move_amount
+                };
+                env.warp_to_slot(final_slot);
+                env.push_auth_mark(BANKRUPTCY_ASSET, final_slot, mark)
+                    .expect("publish bounded bankruptcy mark step");
+                crank_assets_to_fixed_point(
+                    &mut env,
+                    MARKET_CRANKER,
+                    final_slot,
+                    &[BANKRUPTCY_ASSET],
+                );
+            }
+
+            if matches!(
+                route,
+                DiscoveryTradeRoute::Cpi | DiscoveryTradeRoute::BatchCpi
+            ) {
+                env.ensure_primary_matcher_enabled(LOSER)
+                    .expect("enable bankruptcy matcher before tracing");
+                env.ensure_primary_matcher_enabled(FRESH_RISK_COUNTERPARTY)
+                    .expect("enable rejected-risk matcher before tracing");
+            }
+            env.begin_public_trace();
+            execute_trade_delta_route(
+                &mut env,
+                route,
+                BANKRUPTCY_ASSET,
+                WINNER,
+                LOSER,
+                -direction * BANKRUPTCY_Q,
+                bankruptcy_price,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{route:?}/winner_long={winner_long} bankruptcy close failed: {error}")
+            });
+
+            let pending_account = env.primary_portfolio(LOSER);
+            let pending = pending_account
+                .close_progress
+                .try_to_runtime()
+                .expect("decode public pending close");
+            assert!(pending.active && !pending.finalized && pending.residual_remaining > 0);
+            assert!(
+                pending_account
+                    .legs
+                    .iter()
+                    .filter_map(|leg| leg.try_to_runtime().ok())
+                    .all(|leg| !leg.active),
+                "terminal residual begins only as the sole final leg is cleared"
+            );
+            let (_, pending_market) = env.primary_market_state();
+            assert_eq!(
+                pending_market.assets[BANKRUPTCY_ASSET as usize].pending_obligation_count_long
+                    + pending_market.assets[BANKRUPTCY_ASSET as usize]
+                        .pending_obligation_count_short,
+                1
+            );
+            let pending_incremental = pending_account
+                .health_cert
+                .try_to_runtime()
+                .expect("pending close must commit a valid certificate");
+            assert_eq!(
+                health_lanes(pending_incremental),
+                health_lanes(snapshot_engine_full_refresh(&env, LOSER)),
+                "{route:?}/winner_long={winner_long} pending-close certificate diverged from full refresh"
+            );
+
+            let market_before_reject = env.market_data(false);
+            let portfolios_before_reject = env.all_primary_portfolio_data();
+            let tokens_before_reject = env.all_token_account_data();
+            let rejected = execute_trade_delta_route(
+                &mut env,
+                route,
+                FRESH_RISK_ASSET,
+                LOSER,
+                FRESH_RISK_COUNTERPARTY,
+                POS_SCALE as i128,
+                OPEN_PRICE,
+            );
+            assert!(
+                rejected.is_err(),
+                "a pending final-leg residual must not admit a new incremental-certification domain"
+            );
+            assert_eq!(env.market_data(false), market_before_reject);
+            assert_eq!(env.all_primary_portfolio_data(), portfolios_before_reject);
+            assert_eq!(env.all_token_account_data(), tokens_before_reject);
+
+            let trace = env.finish_public_trace();
+            trace
+                .validate_public_execution()
+                .expect("pending-obligation certificate trace must be public and exact");
+            assert_eq!(trace.out_of_band_economic_mutations, 0);
+            assert_eq!(trace.steps.len(), 2);
+            assert!(trace.steps[0].succeeded);
+            assert!(!trace.steps[1].succeeded);
+            assert_eq!(trace.steps[1].rejected_exact_writable_rollback, Some(true));
         }
     }
 }
