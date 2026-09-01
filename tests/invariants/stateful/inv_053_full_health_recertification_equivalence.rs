@@ -15,6 +15,9 @@
 //! Finally, a 20-world differential compares the incremental certificate written by every public
 //! trade route across attach, resize, reduce, cross-zero, and clear against a subsequent public full
 //! refresh after an unrelated stale leg has been settled and the certificate epochs invalidated.
+//! An adjacent eight-world matrix publicly creates a nonunit ADL leg, then proves every admitted
+//! unrelated strict-reduction and clear route produces the same certificate as full recomputation.
+//! Risk-increasing deltas are intentionally excluded because the loss-stale ADL gate rejects them.
 //!
 //! Guarantee boundary: this is bounded generated public-route evidence over four trade routes and
 //! both active-leg orders. It does not replace a proof over every reachable portfolio state.
@@ -95,44 +98,45 @@ fn leg_for_asset(account: PortfolioAccountV16Account, asset_index: u32) -> Optio
 fn execute_trade_delta_route(
     env: &mut V16Svm,
     route: DiscoveryTradeRoute,
+    asset_index: u16,
+    taker: usize,
+    maker: usize,
     size_q: i128,
+    price: u64,
 ) -> Result<(), String> {
-    const ASSET: u16 = 0;
-    const PRICE: u64 = 100;
-    const TAKER: usize = 0;
-    const MAKER: usize = 1;
-
-    let market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let market_id = env.primary_market_state().1.assets[asset_index as usize].market_id;
     if matches!(
         route,
         DiscoveryTradeRoute::Cpi | DiscoveryTradeRoute::BatchCpi
     ) {
-        env.ensure_primary_matcher_enabled(MAKER)?;
+        env.ensure_primary_matcher_enabled(maker)?;
     }
     match route {
         DiscoveryTradeRoute::NoCpi => env
-            .trade_no_cpi(TAKER, MAKER, ASSET, size_q, PRICE, 0)
+            .trade_no_cpi(taker, maker, asset_index, size_q, price, 0)
             .map(|_| ()),
         DiscoveryTradeRoute::BatchNoCpi => env
             .batch_trade_no_cpi(
-                TAKER,
-                MAKER,
+                taker,
+                maker,
                 vec![BatchTradeLeg {
-                    asset_index: ASSET,
+                    asset_index,
                     market_id,
                     size_q,
-                    exec_price: PRICE,
+                    exec_price: price,
                     fee_bps: 0,
                 }],
             )
             .map(|_| ()),
-        DiscoveryTradeRoute::Cpi => env.trade_cpi(TAKER, MAKER, ASSET, size_q, 0, 0).map(|_| ()),
+        DiscoveryTradeRoute::Cpi => env
+            .trade_cpi(taker, maker, asset_index, size_q, 0, 0)
+            .map(|_| ()),
         DiscoveryTradeRoute::BatchCpi => env
             .batch_trade_cpi(
-                TAKER,
-                MAKER,
+                taker,
+                maker,
                 vec![BatchTradeCpiLeg {
-                    asset_index: ASSET,
+                    asset_index,
                     market_id,
                     size_q,
                     fee_bps: 0,
@@ -141,6 +145,63 @@ fn execute_trade_delta_route(
             )
             .map(|_| ()),
     }
+}
+
+fn crank_asset_to_fixed_point(env: &mut V16Svm, actor: usize, slot: u64, asset_index: u16) {
+    let observations = vec![CrankObservationHint {
+        asset_index,
+        oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
+    }];
+    let mut progressed = false;
+    for _ in 0..24 {
+        match env.crank(actor, slot, observations.clone()) {
+            Ok(_) => progressed = true,
+            Err(error) if progressed && error.contains("Custom(22)") => return,
+            Err(error) => panic!(
+                "actor {actor} asset {asset_index} failed before reaching a public fixed point: {error}"
+            ),
+        }
+    }
+    assert!(
+        progressed,
+        "actor {actor} asset {asset_index} made no public progress"
+    );
+}
+
+fn invalidate_and_publicly_full_refresh(
+    env: &mut V16Svm,
+    actor: usize,
+    lifecycle_asset: u16,
+    slot: u64,
+) -> HealthCertV16 {
+    env.drain_only_asset(lifecycle_asset, 0)
+        .unwrap_or_else(|error| {
+            panic!("drain-only asset {lifecycle_asset} must invalidate certificate epochs: {error}")
+        });
+    let before = env.primary_portfolio(actor);
+    let refreshed = env
+        .crank_if_actionable(actor, slot, vec![])
+        .unwrap_or_else(|error| panic!("public full refresh failed for actor {actor}: {error}"));
+    assert!(
+        refreshed.is_some(),
+        "lifecycle epoch invalidation must select a public refresh"
+    );
+    let (_, market) = env.primary_market_state();
+    let after = env.primary_portfolio(actor);
+    assert_eq!(
+        without_health_cert(after),
+        without_health_cert(before),
+        "full refresh must frame non-certificate account state"
+    );
+    let cert = after
+        .health_cert
+        .try_to_runtime()
+        .expect("public full refresh must write a valid certificate");
+    assert_eq!(cert.cert_oracle_epoch, market.oracle_epoch);
+    assert_eq!(cert.cert_funding_epoch, market.funding_epoch);
+    assert_eq!(cert.cert_risk_epoch, market.risk_epoch);
+    assert_eq!(cert.cert_asset_set_epoch, market.asset_set_epoch);
+    cert
 }
 
 #[test]
@@ -454,8 +515,16 @@ fn v16_program_incremental_trade_certificate_equals_public_full_refresh() {
             }
 
             env.begin_public_trace();
-            execute_trade_delta_route(&mut env, route, delta_q)
-                .unwrap_or_else(|error| panic!("{route:?}/{shape:?} target trade failed: {error}"));
+            execute_trade_delta_route(
+                &mut env,
+                route,
+                0,
+                TARGET,
+                TARGET_COUNTERPARTY,
+                delta_q,
+                PRICE,
+            )
+            .unwrap_or_else(|error| panic!("{route:?}/{shape:?} target trade failed: {error}"));
             let (_, after_trade_market) = env.primary_market_state();
             let after_trade = env.primary_portfolio(TARGET);
             let final_q = leg_for_asset(after_trade, 0).map_or(0, |leg| leg.basis_pos_q);
@@ -532,6 +601,149 @@ fn v16_program_incremental_trade_certificate_equals_public_full_refresh() {
             trace
                 .validate_public_execution()
                 .expect("incremental/full certificate trace must be public and rollback-exact");
+            assert_eq!(trace.out_of_band_economic_mutations, 0);
+            assert_eq!(trace.steps.len(), 3);
+            assert!(trace.steps.iter().all(|step| step.succeeded));
+        }
+    }
+}
+
+#[test]
+fn v16_program_incremental_trade_certificate_matches_full_refresh_with_nonunit_adl() {
+    const PRICE: u64 = 100;
+    const BANKRUPTCY_MARK: u64 = 500;
+    const TARGET: usize = 0;
+    const BANKRUPT_COUNTERPARTY: usize = 1;
+    const TRADE_COUNTERPARTY: usize = 2;
+    const ADL_ASSET: u16 = 0;
+    const TRADE_ASSET: u16 = 1;
+
+    for route in DiscoveryTradeRoute::ALL {
+        for shape in [TradeDeltaShape::Reduce, TradeDeltaShape::Clear] {
+            let mut seed = [0xa5; 32];
+            seed[0] ^= match route {
+                DiscoveryTradeRoute::NoCpi => 0,
+                DiscoveryTradeRoute::BatchNoCpi => 1,
+                DiscoveryTradeRoute::Cpi => 2,
+                DiscoveryTradeRoute::BatchCpi => 3,
+            };
+            seed[1] ^= match shape {
+                TradeDeltaShape::Attach => 0,
+                TradeDeltaShape::Resize => 1,
+                TradeDeltaShape::Reduce => 2,
+                TradeDeltaShape::CrossZero => 3,
+                TradeDeltaShape::Clear => 4,
+            };
+            let mut env = V16Svm::new(
+                seed,
+                MarketConfig {
+                    initial_price: PRICE,
+                    maintenance_margin_bps: 10_000,
+                    initial_margin_bps: 10_000,
+                    max_price_move_bps_per_slot: 10_000,
+                    max_accrual_dt_slots: 1,
+                    min_funding_lifetime_slots: 1,
+                    max_abs_funding_e9_per_slot: 0,
+                    maintenance_fee_per_slot: 0,
+                    actor_deposits: [1_000_000, 900, 1_000_000, 1_000_000, 1_000_000],
+                    ..MarketConfig::default()
+                },
+            );
+            let (pre_q, delta_q) = shape.pre_and_delta_q();
+            env.trade_no_cpi(TARGET, TRADE_COUNTERPARTY, TRADE_ASSET, pre_q, PRICE, 0)
+                .expect("install target position before the loss-stale ADL episode");
+            env.trade_no_cpi(3, 4, TRADE_ASSET, POS_SCALE as i128, PRICE, 0)
+                .expect("keep traded-asset OI nonzero across clear");
+            env.trade_no_cpi(
+                TARGET,
+                BANKRUPT_COUNTERPARTY,
+                ADL_ASSET,
+                2 * POS_SCALE as i128,
+                PRICE,
+                0,
+            )
+            .expect("open public ADL pair");
+            env.warp_to_slot(6);
+            env.push_auth_mark(ADL_ASSET, 6, BANKRUPTCY_MARK)
+                .expect("publish bankruptcy mark");
+            crank_asset_to_fixed_point(&mut env, BANKRUPT_COUNTERPARTY, 6, ADL_ASSET);
+            crank_asset_to_fixed_point(&mut env, TARGET, 6, ADL_ASSET);
+
+            let (_, adl_market) = env.primary_market_state();
+            let adl_leg = leg_for_asset(env.primary_portfolio(TARGET), u32::from(ADL_ASSET))
+                .expect("winner must retain the publicly ADL-scaled leg");
+            assert_eq!(adl_leg.side, SideV16::Long);
+            assert!(
+                adl_market.assets[ADL_ASSET as usize].a_long < percolator::ADL_ONE,
+                "fixture must reach a nonunit long A index"
+            );
+            let effective_num = adl_leg
+                .basis_pos_q
+                .unsigned_abs()
+                .checked_mul(adl_market.assets[ADL_ASSET as usize].a_long)
+                .expect("bounded ADL quantity product");
+            let effective_q =
+                effective_num / adl_leg.a_basis + u128::from(effective_num % adl_leg.a_basis != 0);
+            assert!(
+                effective_q > 0 && effective_q < adl_leg.basis_pos_q.unsigned_abs(),
+                "fixture must retain raw basis above canonical ADL-effective quantity"
+            );
+
+            let baseline = invalidate_and_publicly_full_refresh(&mut env, TARGET, 2, 6);
+            assert!(
+                baseline.certified_worst_case_loss > 0,
+                "nonunit-ADL baseline must retain nonzero risk"
+            );
+            let adl_leg_before_trade =
+                leg_for_asset(env.primary_portfolio(TARGET), u32::from(ADL_ASSET))
+                    .expect("ADL leg must survive the baseline refresh");
+
+            if matches!(
+                route,
+                DiscoveryTradeRoute::Cpi | DiscoveryTradeRoute::BatchCpi
+            ) {
+                env.ensure_primary_matcher_enabled(TRADE_COUNTERPARTY)
+                    .expect("enable matcher before measuring the post-ADL route");
+            }
+            env.begin_public_trace();
+            execute_trade_delta_route(
+                &mut env,
+                route,
+                TRADE_ASSET,
+                TARGET,
+                TRADE_COUNTERPARTY,
+                delta_q,
+                PRICE,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{route:?}/{shape:?} post-ADL target trade failed: {error}")
+            });
+            let after_trade = env.primary_portfolio(TARGET);
+            assert_eq!(
+                leg_for_asset(after_trade, u32::from(TRADE_ASSET)).map_or(0, |leg| leg.basis_pos_q),
+                pre_q + delta_q,
+                "{route:?}/{shape:?} did not land the post-ADL position delta"
+            );
+            assert_eq!(
+                leg_for_asset(after_trade, u32::from(ADL_ASSET)),
+                Some(adl_leg_before_trade),
+                "{route:?}/{shape:?} unrelated trade rewrote the current ADL leg"
+            );
+            let incremental = after_trade
+                .health_cert
+                .try_to_runtime()
+                .expect("post-ADL trade must write an incremental certificate");
+            let full = invalidate_and_publicly_full_refresh(&mut env, TARGET, TRADE_ASSET, 6);
+            assert_eq!(
+                health_lanes(full),
+                health_lanes(incremental),
+                "{route:?}/{shape:?} post-ADL incremental certificate diverged from full recomputation"
+            );
+
+            let trace = env.finish_public_trace();
+            trace
+                .validate_public_execution()
+                .expect("post-ADL certificate trace must be public and rollback-exact");
             assert_eq!(trace.out_of_band_economic_mutations, 0);
             assert_eq!(trace.steps.len(), 3);
             assert!(trace.steps.iter().all(|step| step.succeeded));
