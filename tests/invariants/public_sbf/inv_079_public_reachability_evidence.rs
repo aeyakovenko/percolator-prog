@@ -5,6 +5,7 @@
 //! Evidence in this file (I plus invariant-specific F/M assertions):
 //! `v16_public_trace_schema_detects_out_of_band_economic_mutation`,
 //! `v16_public_trace_terminal_classifier_requires_complete_economic_evidence`,
+//! `v16_public_terminal_classifier_exhausts_normalized_outcome_space`,
 //! `v16_every_public_trace_consumer_validates_reachability_evidence`,
 //! `v16_finding_blind_violation_oracle_evidence_roster_is_source_complete`,
 //! `v16_program_fixed_blockers_remain_progressing`,
@@ -190,6 +191,117 @@ fn v16_public_trace_terminal_classifier_requires_complete_economic_evidence() {
             unresolved_obligation: 1,
         }
     );
+}
+
+#[test]
+fn v16_public_terminal_classifier_exhausts_normalized_outcome_space() {
+    fn expected_classification(
+        any_success: bool,
+        observation: PublicTerminalObservation,
+    ) -> Option<PublicTerminalClassification> {
+        if observation.victim_loss_atoms != 0 || observation.unauthorized_gain_atoms != 0 {
+            return (!observation.authorized_forfeit && any_success).then_some(
+                PublicTerminalClassification::LossOfFunds {
+                    victim_loss_atoms: observation.victim_loss_atoms,
+                    unauthorized_gain_atoms: observation.unauthorized_gain_atoms,
+                },
+            );
+        }
+
+        let complete_exit_coverage = observation.required_exit_routes != 0
+            && observation.attempted_exit_routes & observation.required_exit_routes
+                == observation.required_exit_routes;
+        let no_required_route_progress =
+            observation.progressing_exit_routes & observation.required_exit_routes == 0;
+        if complete_exit_coverage && no_required_route_progress {
+            return (observation.funded_value_remaining != 0
+                && observation.unresolved_obligation != 0
+                && !observation.bounded_exit_succeeded
+                && !observation.terminal_receipt_created
+                && !observation.authorized_forfeit)
+                .then_some(PublicTerminalClassification::PersistentFundedLock {
+                    funded_value_remaining: observation.funded_value_remaining,
+                    unresolved_obligation: observation.unresolved_obligation,
+                });
+        }
+
+        if observation.bounded_exit_succeeded
+            || observation.terminal_receipt_created
+            || observation.authorized_forfeit
+        {
+            return (observation.funded_value_remaining == 0
+                && observation.unresolved_obligation == 0
+                && any_success)
+                .then_some(PublicTerminalClassification::BoundedExit);
+        }
+
+        if !any_success {
+            return (observation.funded_value_remaining == 0
+                && observation.unresolved_obligation == 0)
+                .then_some(PublicTerminalClassification::AtomicRejection);
+        }
+
+        Some(PublicTerminalClassification::Progressing)
+    }
+
+    let mut env = V16Svm::new([0x7b; 32], MarketConfig::default());
+    env.begin_public_trace();
+    env.withdraw_primary(0, 1)
+        .expect("successful wrapper trace fixture");
+    let successful_trace = env.finish_public_trace();
+    successful_trace
+        .validate_public_execution()
+        .expect("successful trace is valid public evidence");
+
+    env.begin_public_trace();
+    env.withdraw_primary(0, u128::MAX)
+        .expect_err("rejected wrapper trace fixture");
+    let rejected_trace = env.finish_public_trace();
+    rejected_trace
+        .validate_public_execution()
+        .expect("rejected trace is valid public evidence");
+
+    let representative_amounts = [0, 1, u128::MAX];
+    let mut cases = 0usize;
+    for victim_loss_atoms in representative_amounts {
+        for unauthorized_gain_atoms in representative_amounts {
+            for funded_value_remaining in representative_amounts {
+                for unresolved_obligation in representative_amounts {
+                    for terminal_flags in 0..8u8 {
+                        for required_exit_routes in 0..8u64 {
+                            for attempted_exit_routes in 0..8u64 {
+                                for progressing_exit_routes in 0..8u64 {
+                                    let observation = PublicTerminalObservation {
+                                        victim_loss_atoms,
+                                        unauthorized_gain_atoms,
+                                        funded_value_remaining,
+                                        unresolved_obligation,
+                                        bounded_exit_succeeded: terminal_flags & 1 != 0,
+                                        terminal_receipt_created: terminal_flags & 2 != 0,
+                                        authorized_forfeit: terminal_flags & 4 != 0,
+                                        required_exit_routes,
+                                        attempted_exit_routes,
+                                        progressing_exit_routes,
+                                    };
+                                    for (any_success, trace) in
+                                        [(true, &successful_trace), (false, &rejected_trace)]
+                                    {
+                                        assert_eq!(
+                                            trace.classify_terminal(observation).ok(),
+                                            expected_classification(any_success, observation),
+                                            "normalized terminal classification diverged for success={any_success}, observation={observation:?}"
+                                        );
+                                        cases += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 663_552, "normalized classifier census changed");
 }
 
 #[test]
@@ -1353,21 +1465,12 @@ fn validate_public_instruction_coverage_cell(cell: &str, column: &str, variant: 
         let source = std::fs::read_to_string(&full_path)
             .unwrap_or_else(|error| panic!("read evidence source {path}: {error}"));
         assert!(
-            source_defines_function(&source, function),
-            "{variant} {column} evidence {path} does not define fn {function}"
+            source_defines_test(&source, function),
+            "{variant} {column} evidence {path} does not define #[test] fn {function}"
         );
     }
 
     false
-}
-
-fn source_defines_function(source: &str, function: &str) -> bool {
-    let expected = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim_start()
-            .strip_prefix(&expected)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1505,8 +1608,8 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
                 let source = std::fs::read_to_string(&full_path)
                     .unwrap_or_else(|error| panic!("read method evidence {path}: {error}"));
                 assert!(
-                    source_defines_function(&source, function),
-                    "row {} evidence {path} does not define fn {function}",
+                    source_defines_test(&source, function),
+                    "row {} evidence {path} does not define #[test] fn {function}",
                     line_index + 1
                 );
                 if status == "CLOSED" {
