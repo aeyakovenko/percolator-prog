@@ -3,12 +3,14 @@
 //! Normative obligation: Junior value and fees cannot outrank protected principal or pending senior obligations.
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions):
-//! `v16_bpf_public_crystallized_loss_budget_credits_only_fresh_lp_principal` and the issue-408
-//! standing-matcher/liquidation matrices. The latter age a real maintenance obligation through
-//! authenticated public cranks, then prove an unsigned matcher fill or permissionless liquidation
-//! cannot transfer the same collateral before collection. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token, rollback,
-//! liveness, or compute outcomes appropriate to the invariant.
+//! `v16_bpf_public_crystallized_loss_budget_credits_only_fresh_lp_principal`, the issue-408
+//! standing-matcher/liquidation matrices, and
+//! `v16_program_loss_stale_reserve_matrix_preserves_senior_stocks_and_flat_exit`. The latter
+//! generates real provider earnings and live insurance, makes their asset locally loss-stale by
+//! advancing another asset, and proves backing principal, provider earnings, and insurance all
+//! reject with exact rollback while an unrelated flat user retains a complete public exit. The
+//! source-complete census composes this matrix with the trade, conversion, reduction, crank, and
+//! terminal witnesses and fails when the pinned wrapper adds an unclassified ingress.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -902,4 +904,433 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
         (health_cert(&lw).certified_equity as u128) <= lw.capital.get() + residual + 1,
         "winner realizable bounded by capital+residual (bad debt not realizable)"
     );
+}
+
+fn inv027_try_withdraw_backing(
+    env: &mut V16CuEnv,
+    domain: u16,
+    ledger: Option<Pubkey>,
+    amount: u128,
+) -> (Pubkey, Result<u64, String>) {
+    let authority = env.admin.insecure_clone();
+    let destination = env.token_account(authority.pubkey(), 0);
+    let market_id = env.asset_market_id(domain / 2);
+    let authority_epoch =
+        env.withdrawal_authority_epoch(authority.pubkey(), domain as usize / 2, false);
+    let instruction = if ledger.is_some() {
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain,
+            market_id,
+            authority_epoch,
+            amount,
+        }
+    } else {
+        ProgInstruction::WithdrawBackingBucket {
+            domain,
+            market_id,
+            authority_epoch,
+            amount,
+        }
+    };
+    let mut accounts = vec![
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new(env.market, false),
+    ];
+    if let Some(ledger) = ledger {
+        accounts.push(AccountMeta::new(ledger, false));
+    }
+    accounts.extend([
+        AccountMeta::new(destination, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ]);
+    let result = env.send(instruction, accounts, &[&authority]);
+    (destination, result)
+}
+
+fn inv027_try_withdraw_insurance(
+    env: &mut V16CuEnv,
+    asset_index: u16,
+    amount: u128,
+) -> (Pubkey, Result<u64, String>) {
+    let authority = env.admin.insecure_clone();
+    let destination = env.token_account(authority.pubkey(), 0);
+    let market_id = env.asset_market_id(asset_index);
+    let authority_epoch =
+        env.withdrawal_authority_epoch(authority.pubkey(), asset_index as usize, true);
+    let result = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index,
+            market_id,
+            authority_epoch,
+            amount,
+        },
+        vec![
+            AccountMeta::new(authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&authority],
+    );
+    (destination, result)
+}
+
+#[test]
+fn v16_program_loss_stale_reserve_matrix_preserves_senior_stocks_and_flat_exit() {
+    const WITHDRAW_AMOUNT: u128 = 1;
+
+    // This fixture earns provider fees through real deposits, matched trades, authenticated marks,
+    // and a signed backing-fee cap. No program-owned byte is injected by this test.
+    let fixture = public_backing_earnings_fixture();
+    let mut env = fixture.env;
+    let domain = fixture.domain;
+    let asset_index = domain / 2;
+    let ledger = fixture.ledger;
+    assert!(fixture.earnings >= WITHDRAW_AMOUNT);
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, asset_index * 2, 100);
+
+    let before_stale = env.market_state().1;
+    assert!(
+        before_stale.source_backing_buckets[domain as usize].fresh_unliened_backing_num
+            >= WITHDRAW_AMOUNT,
+        "the stale withdrawal probe needs real unencumbered provider principal"
+    );
+    assert!(
+        before_stale.source_backing_buckets[domain as usize].utilization_fee_earnings
+            >= WITHDRAW_AMOUNT,
+        "the stale withdrawal probe needs publicly earned provider fees"
+    );
+    assert!(
+        before_stale.insurance_domain_budget[(asset_index as usize) * 2] >= WITHDRAW_AMOUNT,
+        "the stale withdrawal probe needs publicly deposited insurance"
+    );
+
+    // Advance asset 1 only. Asset 0 remains locally loss-stale with live exposure, so reserve
+    // withdrawals from asset 0 must remain locked even if the market's last-touched cache changes.
+    let cranker_owner = Keypair::new();
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.svm.warp_to_slot(3);
+    env.crank(
+        cranker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(1),
+        },
+    );
+    let stale = env.market_state().1;
+    assert_eq!(stale.current_slot, 3);
+    assert!(stale.assets[asset_index as usize].slot_last < stale.current_slot);
+    assert!(
+        stale.assets[asset_index as usize].oi_eff_long_q != 0
+            || stale.assets[asset_index as usize].oi_eff_short_q != 0,
+        "asset-local stale state must protect a live economic obligation"
+    );
+
+    let assert_rejected_without_stock_mutation =
+        |env: &V16CuEnv, market_before: &Account, vault_before: &Account, label: &str| {
+            assert_eq!(
+                env.svm.get_account(&env.market).as_ref(),
+                Some(market_before),
+                "{label}: rejected withdrawal changed market state"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).as_ref(),
+                Some(vault_before),
+                "{label}: rejected withdrawal changed SPL custody"
+            );
+        };
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (principal_destination, principal_result) =
+        inv027_try_withdraw_backing(&mut env, domain, None, WITHDRAW_AMOUNT);
+    assert!(
+        principal_result.is_err(),
+        "loss-stale backing principal escaped"
+    );
+    assert_rejected_without_stock_mutation(
+        &env,
+        &market_before,
+        &vault_before,
+        "backing principal",
+    );
+    assert_eq!(env.token_amount(principal_destination), 0);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let (earnings_destination, earnings_result) =
+        inv027_try_withdraw_backing(&mut env, domain, Some(ledger), WITHDRAW_AMOUNT);
+    assert!(
+        earnings_result.is_err(),
+        "loss-stale provider earnings escaped"
+    );
+    assert_rejected_without_stock_mutation(
+        &env,
+        &market_before,
+        &vault_before,
+        "provider earnings",
+    );
+    assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+    assert_eq!(env.token_amount(earnings_destination), 0);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (insurance_destination, insurance_result) =
+        inv027_try_withdraw_insurance(&mut env, asset_index, WITHDRAW_AMOUNT);
+    assert!(insurance_result.is_err(), "loss-stale insurance escaped");
+    assert_rejected_without_stock_mutation(&env, &market_before, &vault_before, "insurance");
+    assert_eq!(env.token_amount(insurance_destination), 0);
+
+    // The reserve gate must not become a market-wide user lock. A new flat user can enter, pay the
+    // authenticated maintenance debt dictated by this fixture, and withdraw every remaining atom.
+    let flat_owner = Keypair::new();
+    let flat = env.create_portfolio(&flat_owner);
+    env.deposit(&flat_owner, flat, 10_000);
+    env.sync_maintenance_fee_with_cu(flat, None, 3);
+    let withdrawable = env.portfolio_state(flat).capital.get();
+    assert!(
+        withdrawable > 0,
+        "maintenance settlement must leave a nonvacuous exit"
+    );
+    let destination = env.withdraw(&flat_owner, flat, withdrawable);
+    assert_eq!(
+        u128::from(env.token_amount(destination)),
+        withdrawable,
+        "unrelated flat senior capital must remain fully withdrawable after its fee"
+    );
+    assert_eq!(env.portfolio_state(flat).capital.get(), 0);
+    let final_group = env.market_state().1;
+    assert!(final_group.assets[asset_index as usize].slot_last < final_group.current_slot);
+    assert_eq!(final_group.vault as u64, env.token_amount(env.vault));
+    assert!(final_group.vault >= final_group.c_tot + final_group.insurance);
+}
+
+#[derive(Clone, Copy)]
+struct Inv027LossStaleRoute {
+    owner: &'static str,
+    marker: &'static str,
+    count: usize,
+    disposition: &'static str,
+    witnesses: &'static [&'static str],
+}
+
+#[test]
+fn v16_program_loss_stale_economic_routes_have_a_complete_seniority_disposition() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const ROWS: &[Inv027LossStaleRoute] = &[
+        Inv027LossStaleRoute {
+            owner: "handle_deposit",
+            marker: ".deposit_not_atomic(",
+            count: 1,
+            disposition: "external-value-in remains available",
+            witnesses: &[
+                "v16_program_loss_stale_reserve_matrix_preserves_senior_stocks_and_flat_exit",
+            ],
+        },
+        Inv027LossStaleRoute {
+            owner: "handle_withdraw",
+            marker: ".withdraw_not_atomic(",
+            count: 1,
+            disposition: "flat senior-capital exit remains available",
+            witnesses: &[
+                "v16_program_loss_stale_reserve_matrix_preserves_senior_stocks_and_flat_exit",
+            ],
+        },
+        Inv027LossStaleRoute {
+            owner: "handle_trade_nocpi_zero_copy",
+            marker: ".execute_trade_with_fee_loss_stale_scoped_not_atomic(",
+            count: 2,
+            disposition: "affected risk increase rejects; canonical reduction remains live",
+            witnesses: &[
+                "v16_program_stale_cohort_route_matrix_preserves_historical_principal",
+                "v16_bpf_stale_asset_does_not_block_current_unrelated_trade",
+            ],
+        },
+        Inv027LossStaleRoute {
+            owner: "handle_batch_execute_zero_copy",
+            marker: ".execute_batch_with_fee_loss_stale_scoped_not_atomic(",
+            count: 1,
+            disposition: "batch applies the same affected-versus-unrelated scope rule",
+            witnesses: &["v16_program_stale_cohort_route_matrix_preserves_historical_principal"],
+        },
+        Inv027LossStaleRoute {
+            owner: "handle_convert_released_pnl",
+            marker: ".convert_released_pnl_to_capital_not_atomic(",
+            count: 1,
+            disposition: "junior-to-senior conversion requires current complete certification",
+            witnesses: &[
+                "v16_attack_convert_released_pnl_requires_current_cert_and_public_refresh",
+            ],
+        },
+        Inv027LossStaleRoute {
+            owner: "handle_rebalance_reduce",
+            marker: ".rebalance_reduce_position_not_atomic(",
+            count: 1,
+            disposition: "owner risk reduction settles stale obligations before detaching exposure",
+            witnesses: &["v16_program_stale_cohort_route_matrix_preserves_historical_principal"],
+        },
+        Inv027LossStaleRoute {
+            owner: "handle_withdraw_backing_bucket",
+            marker: ".withdraw_fresh_counterparty_backing_not_atomic(",
+            count: 1,
+            disposition: "live loss state locks provider principal",
+            witnesses: &[
+                "v16_program_loss_stale_reserve_matrix_preserves_senior_stocks_and_flat_exit",
+            ],
+        },
+        Inv027LossStaleRoute {
+            owner: "handle_withdraw_backing_bucket_earnings",
+            marker: ".withdraw_backing_provider_earnings_not_atomic(",
+            count: 1,
+            disposition: "live loss state locks provider earnings",
+            witnesses: &[
+                "v16_program_loss_stale_reserve_matrix_preserves_senior_stocks_and_flat_exit",
+            ],
+        },
+        Inv027LossStaleRoute {
+            owner: "debit_market_insurance_budget_view",
+            marker: ".withdraw_domain_insurance_not_atomic(",
+            count: 2,
+            disposition: "live loss state locks both side-local insurance budgets",
+            witnesses: &[
+                "v16_program_loss_stale_reserve_matrix_preserves_senior_stocks_and_flat_exit",
+                "v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_close",
+            ],
+        },
+        Inv027LossStaleRoute {
+            owner: "handle_close_resolved",
+            marker: ".permissionless_auto_crank_not_atomic(",
+            count: 1,
+            disposition: "terminal settlement pays through the canonical priority selector",
+            witnesses: &[
+                "v16_program_flat_negative_final_leg_route_matrix_reaches_terminal_payout",
+            ],
+        },
+        Inv027LossStaleRoute {
+            owner: "handle_permissionless_crank_zero_copy",
+            marker: ".permissionless_auto_crank_not_atomic(",
+            count: 3,
+            disposition: "permissionless bounded work settles stale obligations",
+            witnesses: &["v16_program_multileg_loss_stale_account_has_permissionless_progress"],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-027 route composition must be reviewed on every engine pin change",
+    );
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    let markers: std::collections::BTreeSet<_> = ROWS.iter().map(|row| row.marker).collect();
+    let mut current_function = "<module>";
+    let mut actual = std::collections::BTreeMap::<(String, String), usize>::new();
+    for line in production.lines() {
+        let trimmed = line.trim_start();
+        if let Some(fn_offset) = trimmed.find("fn ") {
+            let prefix = &trimmed[..fn_offset];
+            if prefix.is_empty() || prefix.starts_with("pub") {
+                let rest = &trimmed[fn_offset + 3..];
+                let end = rest
+                    .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .unwrap_or(rest.len());
+                current_function = &rest[..end];
+            }
+        }
+        for marker in &markers {
+            let count = line.matches(marker).count();
+            if count != 0 {
+                *actual
+                    .entry((current_function.to_string(), (*marker).to_string()))
+                    .or_default() += count;
+            }
+        }
+    }
+
+    let witness_sources = [
+        include_str!("inv_027_protected_principal_seniority.rs"),
+        include_str!("inv_054_certificate_epoch_completeness.rs"),
+        include_str!("inv_064_insurance_withdrawal_policy_equivalence.rs"),
+        include_str!("inv_074_scope_locality.rs"),
+        include_str!("../stateful/inv_027_protected_principal_seniority.rs"),
+        include_str!("../stateful/inv_071_crank_progress.rs"),
+        include_str!("../stateful/inv_082_state_indexed_liveness_theorem.rs"),
+    ];
+    let mut expected = std::collections::BTreeMap::new();
+    for row in ROWS {
+        assert!(!row.disposition.is_empty());
+        assert!(!row.witnesses.is_empty());
+        for witness in row.witnesses {
+            assert!(
+                witness_sources
+                    .iter()
+                    .any(|source| source.contains(&format!("fn {witness}"))),
+                "{}.{} lacks executable seniority witness {witness}",
+                row.owner,
+                row.marker,
+            );
+        }
+        assert!(
+            expected
+                .insert((row.owner.to_string(), row.marker.to_string()), row.count)
+                .is_none(),
+            "duplicate INV-027 route classification for {}.{}",
+            row.owner,
+            row.marker,
+        );
+    }
+    assert_eq!(
+        actual, expected,
+        "every current loss-stale economic ingress needs an explicit seniority disposition",
+    );
+
+    let mut gate_calls = std::collections::BTreeMap::<String, usize>::new();
+    current_function = "<module>";
+    for line in production.lines() {
+        let trimmed = line.trim_start();
+        if let Some(fn_offset) = trimmed.find("fn ") {
+            let prefix = &trimmed[..fn_offset];
+            if prefix.is_empty() || prefix.starts_with("pub") {
+                let rest = &trimmed[fn_offset + 3..];
+                let end = rest
+                    .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .unwrap_or(rest.len());
+                current_function = &rest[..end];
+            }
+        }
+        if current_function != "live_domain_withdraw_health_or_shutdown_view" {
+            let count = line
+                .matches("live_domain_withdraw_health_or_shutdown_view(")
+                .count();
+            if count != 0 {
+                *gate_calls.entry(current_function.to_string()).or_default() += count;
+            }
+        }
+    }
+    assert_eq!(
+        gate_calls,
+        std::collections::BTreeMap::from([
+            ("handle_withdraw_backing_bucket".to_string(), 1),
+            ("handle_withdraw_backing_bucket_earnings".to_string(), 1),
+            ("handle_withdraw_insurance_asset".to_string(), 1),
+        ]),
+        "all live reserve withdrawals must share the exact stale-loss gate",
+    );
+
+    let transition_census =
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transition_census.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
 }

@@ -58,8 +58,10 @@
 //!
 //! Guarantee boundary: this certifies the stale K/F cohort, half-backed, pending-close,
 //! pending-domain-barrier, zero-effective-OI/stored-position, resolved-payout, certificate-stale,
-//! and insurance-withdrawal rows on the fixed engine pin. Other loss-stale rows still need one
-//! normalized public route-by-state matrix before INV-027 can be promoted beyond partial coverage.
+//! and insurance-withdrawal rows on the fixed engine pin. The INV-027 CU owner supplies the
+//! normalized current-surface route census and public backing-principal/provider-earnings/
+//! insurance stale-state matrix. A new engine pin, wrapper transition, favorable route, or stale
+//! state class reopens the census rather than inheriting this closure implicitly.
 //!
 //! `v16_program_fully_backed_pnl_route_matrix_preserves_unrelated_principal` closes the Current
 //! fully funded control row. It realizes the same directional profit through every trade family,
