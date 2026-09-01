@@ -35,6 +35,10 @@
 //! eight source domains before crossing all 42 authenticated feed references. Both a 13+1 split and
 //! the all-at-once schedule remain bounded; repeated complete-tail calls consume prior source work,
 //! reach a strict liquidation at no more than 1.201M CU, and then restore current health.
+//! Finally, a fully public maximum-market construction appends all 5,782 configured assets after
+//! both funded portfolios already hold fourteen legs and twenty-eight source records. Thirty
+//! bounded automatic cranks refresh both accounts, unilateral reduction lands below 1.179M CU,
+//! and ResetPending cleanup plus every remaining owner exit completes without state injection.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -3441,11 +3445,84 @@ fn v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded() {
     ));
 }
 
-#[test]
-fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
+fn run_max_source_owner_rebalance_reduce_stays_bounded(
+    market_capacity: usize,
+    configured_market_slots: usize,
+) {
     const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
     let (mut env, taker_owner, lp_owner, taker, lp, slot) =
-        setup_max_source_live_pair(0, ACTIVE_CAP);
+        setup_max_source_live_pair_with_configured_assets_and_capacity(
+            0,
+            ACTIVE_CAP,
+            MAX_SOURCE_LIVE_ASSETS,
+            false,
+            None,
+            market_capacity,
+        );
+    assert!(
+        configured_market_slots >= usize::from(MAX_SOURCE_LIVE_ASSETS)
+            && configured_market_slots <= market_capacity
+    );
+    let mut max_activation_cu = 0u64;
+    for asset_slot in usize::from(MAX_SOURCE_LIVE_ASSETS)..configured_market_slots {
+        let activation_slot = slot
+            .checked_add((asset_slot - usize::from(MAX_SOURCE_LIVE_ASSETS) + 1) as u64)
+            .unwrap();
+        let cu = env.activate_asset(asset_slot as u16, activation_slot, 100);
+        assert_cu_within("funded-market public asset append", cu, 1_375_000);
+        max_activation_cu = max_activation_cu.max(cu);
+    }
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data.len(),
+        state::market_account_len_for_capacity(market_capacity).unwrap(),
+        "public InitMarket must retain the requested market-account capacity"
+    );
+    assert_eq!(
+        env.market_state().1.config.max_market_slots,
+        configured_market_slots as u32,
+        "every configured market slot must come from a public append"
+    );
+    let authenticated_slot = env.svm.get_sysvar::<Clock>().slot;
+    let mut growth_refresh_calls = 0usize;
+    let mut growth_refresh_max_cu = 0u64;
+    for portfolio in [taker, lp] {
+        loop {
+            let group = env.market_state().1;
+            let state = env.portfolio_state(portfolio);
+            let cert = health_cert(&state);
+            if cert.valid
+                && cert.cert_oracle_epoch == group.oracle_epoch
+                && cert.cert_funding_epoch == group.funding_epoch
+                && cert.cert_risk_epoch == group.risk_epoch
+                && cert.cert_asset_set_epoch == group.asset_set_epoch
+                && cert.active_bitmap_at_cert == active_bitmap(&state)
+            {
+                break;
+            }
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+            env.svm.expire_blockhash();
+            let cu = env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: authenticated_slot,
+                    observations: vec![],
+                },
+            );
+            assert_cu_within("post-growth account refresh", cu, 1_375_000);
+            growth_refresh_calls += 1;
+            growth_refresh_max_cu = growth_refresh_max_cu.max(cu);
+            assert!(
+                env.svm.get_account(&env.market).unwrap() != market_before
+                    || env.svm.get_account(&portfolio).unwrap() != portfolio_before,
+                "every accepted post-growth refresh must mutate state"
+            );
+            assert!(
+                growth_refresh_calls <= 2 * usize::from(ACTIVE_CAP) + 4,
+                "market growth must not create an unbounded certificate refresh"
+            );
+        }
+    }
     let active_asset = MAX_SOURCE_LIVE_ASSETS - 1;
     let before = env.portfolio_state(lp);
     let taker_before = env.portfolio_state(taker);
@@ -3471,7 +3548,9 @@ fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
         active_asset,
         MAX_SOURCE_LIVE_SIZE_Q.unsigned_abs(),
     );
-    println!("v16 14-leg/28-source-domain RebalanceReduce CU: {cu}");
+    println!(
+        "v16 {configured_market_slots}-asset 14-leg/28-source-domain RebalanceReduce CU: {cu}; max append CU={max_activation_cu}; refresh={growth_refresh_calls}/{growth_refresh_max_cu}"
+    );
     assert_cu_within("14-leg/28-source-domain RebalanceReduce", cu, 1_375_000);
     let after = env.portfolio_state(lp);
     let group_after = env.market_state().1;
@@ -3681,6 +3760,16 @@ fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
         env.market_state().1.vault as u64,
         env.token_amount(env.vault)
     );
+}
+
+#[test]
+fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
+    run_max_source_owner_rebalance_reduce_stays_bounded(70, MAX_SOURCE_LIVE_ASSETS as usize);
+}
+
+#[test]
+fn v16_attack_public_10m_market_max_source_owner_exit_stays_bounded() {
+    run_max_source_owner_rebalance_reduce_stays_bounded(MAX_10M_MARKET_SLOTS, MAX_10M_MARKET_SLOTS);
 }
 
 #[test]

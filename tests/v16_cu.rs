@@ -8335,6 +8335,24 @@ fn setup_max_source_live_pair_with_configured_assets(
     seed_source_lien: bool,
     hybrid_feeds: Option<[[u8; 32]; 3]>,
 ) -> (V16CuEnv, Keypair, Keypair, Pubkey, Pubkey, u64) {
+    setup_max_source_live_pair_with_configured_assets_and_capacity(
+        maintenance_fee_per_slot,
+        retained_active_assets,
+        configured_auth_mark_assets,
+        seed_source_lien,
+        hybrid_feeds,
+        70,
+    )
+}
+
+fn setup_max_source_live_pair_with_configured_assets_and_capacity(
+    maintenance_fee_per_slot: u128,
+    retained_active_assets: u16,
+    configured_auth_mark_assets: u16,
+    seed_source_lien: bool,
+    hybrid_feeds: Option<[[u8; 32]; 3]>,
+    market_capacity: usize,
+) -> (V16CuEnv, Keypair, Keypair, Pubkey, Pubkey, u64) {
     const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
     const PRICE_LOW: u64 = 100;
     const PRICE_HIGH: u64 = 101;
@@ -8356,7 +8374,7 @@ fn setup_max_source_live_pair_with_configured_assets(
             maintenance_fee_per_slot,
             ..V16CuMarketParams::default()
         },
-        70,
+        market_capacity,
     );
     for asset_index in ACTIVE_CAP..configured_auth_mark_assets {
         let activation_slot = u64::from(asset_index - ACTIVE_CAP + 1);
