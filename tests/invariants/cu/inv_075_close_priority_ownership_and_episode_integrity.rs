@@ -8,10 +8,13 @@
 //! CureAndCancelClose rejection with exact rollback plus successful owner cure,
 //! double-cure replay rejection, and both landing orders of two publicly
 //! created equal-domain close contenders through permissionless expiry,
-//! terminal finalization, and exit of the rejected contender. The pinned
-//! engine implements first-landed exclusive domain ownership, not the charter's
-//! strict ClosePriority preemption order; resolving that specification/
-//! implementation divergence remains broader model and design work.
+//! terminal finalization, and exact terminal settlement of all six economically
+//! involved portfolios, including an unrelated live-asset pair. The two landing orders must produce identical per-role
+//! payouts, internal/SPL custody, insurance, aggregate capital, OI, and claim
+//! counts. The pinned engine implements first-landed exclusive domain
+//! ownership, not the charter's strict ClosePriority preemption order;
+//! resolving that specification/implementation divergence remains broader
+//! model and design work.
 
 use super::*;
 
@@ -29,7 +32,86 @@ fn inv075_close_episode_key(
     )
 }
 
-fn inv075_competing_public_closes_fixture() -> (V16CuEnv, Vec<Keypair>, Vec<Pubkey>) {
+struct Inv075CompetingCloseFixture {
+    env: V16CuEnv,
+    base_owners: Vec<Keypair>,
+    base_portfolios: Vec<Pubkey>,
+    winner_owners: Vec<Keypair>,
+    winners: Vec<Pubkey>,
+    loss_owners: Vec<Keypair>,
+    losses: Vec<Pubkey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Inv075CloseOrderTerminalOutcome {
+    payouts: [u128; 6],
+    receipts: [(bool, u128, u128, u128, u128, bool); 6],
+    engine_vault: u128,
+    spl_vault: u64,
+    insurance: u128,
+    aggregate_capital: u128,
+    oi: [(u128, u128); 2],
+    negative_pnl_accounts: u64,
+}
+
+fn inv075_settle_resolved_to_fixed_point(
+    env: &mut V16CuEnv,
+    actors: &[(&Keypair, Pubkey); 6],
+) -> [u128; 6] {
+    let mut payouts = [0u128; 6];
+    for round in 0..64 {
+        let mut progressed = false;
+        for (index, (owner, portfolio)) in actors.iter().enumerate() {
+            if resolved_portfolio_is_terminal(env, *portfolio) {
+                continue;
+            }
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before = env.svm.get_account(portfolio).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let (destination, result) = env.try_close_resolved_with_cu(owner, *portfolio);
+            match result {
+                Ok(cu) => {
+                    assert_cu_within(
+                        "INV-041/075 competing-close terminal settlement",
+                        cu,
+                        CUSTODY_CU_LIMIT,
+                    );
+                    let paid = u128::from(env.token_amount(destination));
+                    payouts[index] = payouts[index]
+                        .checked_add(paid)
+                        .expect("competing-close payout overflow");
+                    assert!(
+                        env.svm.get_account(&env.market).unwrap() != market_before
+                            || env.svm.get_account(portfolio).unwrap() != portfolio_before
+                            || env.svm.get_account(&env.vault).unwrap() != vault_before
+                            || paid != 0,
+                        "accepted resolved settlement was a no-op in round {round}"
+                    );
+                    progressed = true;
+                }
+                Err(error) if is_engine_non_progress_error(&error) => {
+                    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                    assert_eq!(env.svm.get_account(portfolio).unwrap(), portfolio_before);
+                    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+                    assert_eq!(env.token_amount(destination), 0);
+                }
+                Err(error) => {
+                    panic!("INV-041/075 competing-close terminal settlement failed: {error}")
+                }
+            }
+        }
+        if !progressed
+            || actors
+                .iter()
+                .all(|(_, portfolio)| resolved_portfolio_is_terminal(env, *portfolio))
+        {
+            return payouts;
+        }
+    }
+    panic!("competing-close cohort did not reach a bounded resolved fixed point")
+}
+
+fn inv075_competing_public_closes_fixture() -> Inv075CompetingCloseFixture {
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         max_bankrupt_close_lifetime_slots: 2,
         public_b_chunk_atoms: 1,
@@ -72,6 +154,7 @@ fn inv075_competing_public_closes_fixture() -> (V16CuEnv, Vec<Keypair>, Vec<Pubk
     );
     env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
 
+    let mut winner_owners = Vec::new();
     let mut winners = Vec::new();
     let mut loss_owners = Vec::new();
     let mut losses = Vec::new();
@@ -92,6 +175,7 @@ fn inv075_competing_public_closes_fixture() -> (V16CuEnv, Vec<Keypair>, Vec<Pubk
             100,
             0,
         );
+        winner_owners.push(winner_owner);
         winners.push(winner);
         loss_owners.push(loss_owner);
         losses.push(loss);
@@ -123,7 +207,15 @@ fn inv075_competing_public_closes_fixture() -> (V16CuEnv, Vec<Keypair>, Vec<Pubk
     env.svm.warp_to_slot(4);
     env.try_shutdown_asset_with_authority(&creator, 1, 4)
         .expect("asset creator shuts down asset 1");
-    (env, loss_owners, losses)
+    Inv075CompetingCloseFixture {
+        env,
+        base_owners: vec![base_long_owner, base_short_owner],
+        base_portfolios: vec![base_long, base_short],
+        winner_owners,
+        winners,
+        loss_owners,
+        losses,
+    }
 }
 
 fn inv075_try_forfeit(
@@ -412,43 +504,46 @@ fn v16_program_public_close_episode_competing_actions_preserve_priority_and_iden
 // configured delays without a signature from the first owner.
 #[test]
 fn v16_program_competing_close_starts_exhaust_both_landing_orders() {
+    let mut outcomes = Vec::new();
     for first in [0usize, 1usize] {
         let second = 1 - first;
-        let (mut env, owners, portfolios) = inv075_competing_public_closes_fixture();
+        let Inv075CompetingCloseFixture {
+            mut env,
+            base_owners,
+            base_portfolios,
+            winner_owners,
+            winners,
+            loss_owners,
+            losses,
+        } = inv075_competing_public_closes_fixture();
 
-        inv075_try_forfeit(&mut env, &owners[first], portfolios[first])
+        inv075_try_forfeit(&mut env, &loss_owners[first], losses[first])
             .expect("first landed close takes the domain barrier");
-        let accepted_before = close_progress(&env.portfolio_state(portfolios[first]));
+        let accepted_before = close_progress(&env.portfolio_state(losses[first]));
         assert!(accepted_before.active && accepted_before.residual_remaining > 0);
         let accepted_episode = inv075_close_episode_key(accepted_before);
 
         let market_before = env.svm.get_account(&env.market).unwrap();
-        let first_before = env.svm.get_account(&portfolios[first]).unwrap();
-        let second_before = env.svm.get_account(&portfolios[second]).unwrap();
+        let first_before = env.svm.get_account(&losses[first]).unwrap();
+        let second_before = env.svm.get_account(&losses[second]).unwrap();
         let vault_before = env.svm.get_account(&env.vault).unwrap();
-        let rejected = inv075_try_forfeit(&mut env, &owners[second], portfolios[second])
+        let rejected = inv075_try_forfeit(&mut env, &loss_owners[second], losses[second])
             .expect_err("second close in the occupied domain must reject");
         assert!(
             rejected.contains("Custom(21)"),
             "occupied-domain contender must reject LockActive: {rejected}"
         );
         assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-        assert_eq!(
-            env.svm.get_account(&portfolios[first]).unwrap(),
-            first_before
-        );
-        assert_eq!(
-            env.svm.get_account(&portfolios[second]).unwrap(),
-            second_before
-        );
+        assert_eq!(env.svm.get_account(&losses[first]).unwrap(), first_before);
+        assert_eq!(env.svm.get_account(&losses[second]).unwrap(), second_before);
         assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
         assert_eq!(
-            inv075_close_episode_key(close_progress(&env.portfolio_state(portfolios[first]))),
+            inv075_close_episode_key(close_progress(&env.portfolio_state(losses[first]))),
             accepted_episode
         );
-        assert!(!close_progress(&env.portfolio_state(portfolios[second])).active);
+        assert!(!close_progress(&env.portfolio_state(losses[second])).active);
         assert!(has_active_leg_for_asset(
-            &env.portfolio_state(portfolios[second]),
+            &env.portfolio_state(losses[second]),
             1
         ));
 
@@ -462,7 +557,7 @@ fn v16_program_competing_close_starts_exhaust_both_landing_orders() {
             vec![
                 AccountMeta::new_readonly(env.payer.pubkey(), false),
                 AccountMeta::new(env.market, false),
-                AccountMeta::new(portfolios[first], false),
+                AccountMeta::new(losses[first], false),
             ],
             &[],
         )
@@ -473,7 +568,7 @@ fn v16_program_competing_close_starts_exhaust_both_landing_orders() {
         ));
         env.svm.warp_to_slot(accepted_before.max_close_slot + 10);
         for _ in 0..16 {
-            let close = close_progress(&env.portfolio_state(portfolios[first]));
+            let close = close_progress(&env.portfolio_state(losses[first]));
             if close.finalized && close.residual_remaining == 0 {
                 break;
             }
@@ -493,15 +588,15 @@ fn v16_program_competing_close_starts_exhaust_both_landing_orders() {
                     observations: vec![],
                 },
                 vec![
-                    AccountMeta::new_readonly(owners[first].pubkey(), false),
+                    AccountMeta::new_readonly(loss_owners[first].pubkey(), false),
                     AccountMeta::new(env.market, false),
-                    AccountMeta::new(portfolios[first], false),
+                    AccountMeta::new(losses[first], false),
                 ],
                 &[],
             )
             .expect("accepted close retains a permissionless terminal continuation");
         }
-        let accepted_after = close_progress(&env.portfolio_state(portfolios[first]));
+        let accepted_after = close_progress(&env.portfolio_state(losses[first]));
         assert!(
             accepted_after.finalized && accepted_after.residual_remaining == 0,
             "permissionless terminal continuation must finalize the accepted close: {accepted_after:?}"
@@ -510,21 +605,79 @@ fn v16_program_competing_close_starts_exhaust_both_landing_orders() {
             env.resolve_stale_permissionless_with_cu(200);
         }
         assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
-        for _ in 0..16 {
-            if !has_active_leg_for_asset(&env.portfolio_state(portfolios[second]), 1) {
-                break;
-            }
-            env.close_resolved(&owners[second], portfolios[second]);
-        }
-        assert!(!has_active_leg_for_asset(
-            &env.portfolio_state(portfolios[first]),
-            1
-        ));
-        assert!(!has_active_leg_for_asset(
-            &env.portfolio_state(portfolios[second]),
-            1
-        ));
+
+        let spl_vault_before = env.token_amount(env.vault) as u128;
+        let actors = [
+            (&base_owners[0], base_portfolios[0]),
+            (&base_owners[1], base_portfolios[1]),
+            (&winner_owners[0], winners[0]),
+            (&winner_owners[1], winners[1]),
+            (&loss_owners[0], losses[0]),
+            (&loss_owners[1], losses[1]),
+        ];
+        let payouts = inv075_settle_resolved_to_fixed_point(&mut env, &actors);
+        let receipts = std::array::from_fn(|index| {
+            let account = env.portfolio_state(actors[index].1);
+            let receipt = resolved_receipt(&account);
+            assert_eq!(account.capital.get(), 0);
+            assert_eq!(account.pnl.get(), 0);
+            assert_eq!(account.reserved_pnl.get(), 0);
+            assert_eq!(account.fee_credits.get(), 0);
+            assert_eq!(account.cancel_deposit_escrow.get(), 0);
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+            assert!(account
+                .source_domains
+                .iter()
+                .all(|source| !source.is_occupied()));
+            assert!(
+                resolved_portfolio_is_terminal(&env, actors[index].1) || receipt.present,
+                "a fixed-point account must be empty or retain an explicit payout receipt"
+            );
+            (
+                receipt.present,
+                receipt.prior_bound_contribution_num,
+                receipt.live_released_face_at_receipt,
+                receipt.terminal_positive_claim_face,
+                receipt.paid_effective,
+                receipt.finalized,
+            )
+        });
+        assert_eq!(
+            payouts.iter().sum::<u128>() + u128::from(env.token_amount(env.vault)),
+            spl_vault_before,
+            "resolved settlement must account for every pre-settlement SPL atom"
+        );
+        let (_, terminal) = env.market_state();
+        assert_eq!(terminal.assets[0].oi_eff_long_q, 0);
+        assert_eq!(terminal.assets[0].oi_eff_short_q, 0);
+        assert_eq!(terminal.assets[1].oi_eff_long_q, 0);
+        assert_eq!(terminal.assets[1].oi_eff_short_q, 0);
+        assert_eq!(terminal.negative_pnl_account_count, 0);
+        assert_eq!(terminal.vault, u128::from(env.token_amount(env.vault)));
+        outcomes.push(Inv075CloseOrderTerminalOutcome {
+            payouts,
+            receipts,
+            engine_vault: terminal.vault,
+            spl_vault: env.token_amount(env.vault),
+            insurance: terminal.insurance,
+            aggregate_capital: terminal.c_tot,
+            oi: [
+                (
+                    terminal.assets[0].oi_eff_long_q,
+                    terminal.assets[0].oi_eff_short_q,
+                ),
+                (
+                    terminal.assets[1].oi_eff_long_q,
+                    terminal.assets[1].oi_eff_short_q,
+                ),
+            ],
+            negative_pnl_accounts: terminal.negative_pnl_account_count,
+        });
     }
+    assert_eq!(
+        outcomes[0], outcomes[1],
+        "same-domain close-start landing order changed terminal user value or market custody"
+    );
 }
 
 // security.md sweep — withdraw blocked during active close (#22/#48): an account with an active/in-

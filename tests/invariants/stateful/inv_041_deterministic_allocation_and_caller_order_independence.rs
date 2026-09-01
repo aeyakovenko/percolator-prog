@@ -23,9 +23,14 @@
 //! canonicalizes the bounded persisted source-domain set, with native and Kani
 //! field-preservation coverage. Both pre-fix outcomes remained inside signed fee
 //! bounds, so this is deterministic-allocation correctness rather than a public
-//! LoF or persistent DoS finding. Other liquidation, engine-only insurance-lien
-//! reservation, and close-preemption order spaces remain outside this bounded
-//! topology.
+//! LoF or persistent DoS finding. INV-052 separately exhausts public
+//! liquidation split/order and three-/four-claimant payout orders, while
+//! INV-075 settles all six affected portfolios after both same-domain
+//! close-start landing orders and requires exact terminal economic equality.
+//! INV-033 source-locks insurance-lien reservation as engine-only. Together
+//! these products close the current wrapper order surface; a new allocation
+//! route, wrapper insurance-reservation ingress, or implemented close-preemption
+//! policy reopens it.
 
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{BOUND_SCALE, POS_SCALE};
