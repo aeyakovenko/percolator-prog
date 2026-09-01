@@ -1596,6 +1596,25 @@ fn v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves() {
             recovered.recovery_reason,
             Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
         );
+        let mut expected_recovered = group_before.clone();
+        expected_recovered.mode = MarketModeV16::Recovery;
+        expected_recovered.recovery_reason =
+            Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress);
+        expected_recovered.current_slot = recovered.current_slot;
+        expected_recovered.slot_last = recovered.slot_last;
+        for (expected_asset, recovered_asset) in expected_recovered
+            .assets
+            .iter_mut()
+            .zip(recovered.assets.iter())
+        {
+            expected_asset.slot_last = recovered_asset.slot_last;
+        }
+        assert_eq!(
+            recovered, expected_recovered,
+            "after normalizing the authenticated accrual clock, the liquidation-to-Recovery \
+             boundary may commit only the terminal mode and reason; OI, basis-derived asset \
+             state, accounting stocks, barriers, and epochs must remain atomic"
+        );
         assert_ne!(env.svm.get_account(&env.market).unwrap(), market_before);
         assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
         assert_eq!(recovered.vault, group_before.vault);

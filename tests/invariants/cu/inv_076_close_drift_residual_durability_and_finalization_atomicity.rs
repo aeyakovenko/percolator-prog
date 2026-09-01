@@ -12,6 +12,13 @@
 //! slot through unrelated authenticated accrual while the close asset remains
 //! frozen, then proves the local residual still books without global Recovery,
 //! custody movement, foreign-account mutation, or loss of unrelated user exits.
+//! The public bankruptcy-escalation matrix in INV-071 additionally reaches the
+//! open-risk liquidation-to-Recovery boundary and, after normalizing the same
+//! call's authenticated accrual clock, requires the complete decoded market to
+//! change only in terminal mode/reason while the target portfolio stays
+//! byte-identical. That frames OI, basis, counters, barriers, insurance, and
+//! custody across the engine's commit-on-Recovery disposition without duplicating
+//! the engine transition in this wrapper-owned file.
 
 use super::*;
 
