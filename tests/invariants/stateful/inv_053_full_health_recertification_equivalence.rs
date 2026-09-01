@@ -25,6 +25,9 @@
 //! An eight-world pending-obligation matrix creates a real final-leg bankruptcy close through
 //! public trades and compares the committed certificate with the pinned engine's full refresh over
 //! cloned on-chain bytes. It also proves fresh risk cannot create a later incremental-cert domain.
+//! A final 20-world matrix retains nonzero target/effective lag and a real maintenance debit on one
+//! leg while every structural delta changes another leg through every public transport; the
+//! incremental certificate must still equal full refresh on the exact committed snapshot.
 //!
 //! Guarantee boundary: this is bounded generated public-route evidence over four trade routes and
 //! both active-leg orders. It does not replace a proof over every reachable portfolio state.
@@ -1165,6 +1168,164 @@ fn v16_program_pending_obligation_certificates_match_snapshot_full_refresh() {
             assert!(trace.steps[0].succeeded);
             assert!(!trace.steps[1].succeeded);
             assert_eq!(trace.steps[1].rejected_exact_writable_rollback, Some(true));
+        }
+    }
+}
+
+#[test]
+fn v16_program_combined_fee_and_lag_certificates_match_snapshot_full_refresh() {
+    const TARGET: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const LAG_ASSET: u16 = 0;
+    const TRADE_ASSET: u16 = 1;
+    const START_PRICE: u64 = 100_000;
+    const RAW_TARGET_PRICE: u64 = 90_000;
+    const LAG_POSITION_Q: i128 = 10 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 10_000_000;
+    const MAINTENANCE_FEE_PER_SLOT: u128 = 37;
+
+    for route in DiscoveryTradeRoute::ALL {
+        for shape in TradeDeltaShape::ALL {
+            let mut seed = [0x3e; 32];
+            seed[0] ^= match route {
+                DiscoveryTradeRoute::NoCpi => 0,
+                DiscoveryTradeRoute::BatchNoCpi => 1,
+                DiscoveryTradeRoute::Cpi => 2,
+                DiscoveryTradeRoute::BatchCpi => 3,
+            };
+            seed[1] ^= match shape {
+                TradeDeltaShape::Attach => 0,
+                TradeDeltaShape::Resize => 1,
+                TradeDeltaShape::Reduce => 2,
+                TradeDeltaShape::CrossZero => 3,
+                TradeDeltaShape::Clear => 4,
+            };
+            let mut env = V16Svm::new(
+                seed,
+                MarketConfig {
+                    initial_price: START_PRICE,
+                    maintenance_margin_bps: 5_000,
+                    initial_margin_bps: 10_000,
+                    max_price_move_bps_per_slot: 24,
+                    max_accrual_dt_slots: 1,
+                    max_abs_funding_e9_per_slot: 0,
+                    min_funding_lifetime_slots: 1,
+                    maintenance_fee_per_slot: MAINTENANCE_FEE_PER_SLOT,
+                    actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+                    actor_token_balances: [DEPOSIT as u64, DEPOSIT as u64, 1, 1, 1],
+                    ..MarketConfig::default()
+                },
+            );
+            let (pre_q, delta_q) = shape.pre_and_delta_q();
+            execute_trade_delta_route(
+                &mut env,
+                route,
+                LAG_ASSET,
+                TARGET,
+                COUNTERPARTY,
+                LAG_POSITION_Q,
+                START_PRICE,
+            )
+            .expect("open the leg that will retain target/effective lag");
+            if pre_q != 0 {
+                execute_trade_delta_route(
+                    &mut env,
+                    route,
+                    TRADE_ASSET,
+                    TARGET,
+                    COUNTERPARTY,
+                    pre_q,
+                    START_PRICE,
+                )
+                .expect("install the pre-delta unrelated leg");
+            }
+
+            env.warp_to_slot(2);
+            crank_assets_to_fixed_point(&mut env, 2, 2, &[LAG_ASSET, TRADE_ASSET]);
+            let capital_before_fee = env.primary_portfolio(TARGET).capital.get();
+            env.sync_maintenance_fee(TARGET, 2)
+                .expect("public fee synchronization must collect the combined penalty");
+            let fee_charged = env.primary_portfolio(TARGET);
+            assert_eq!(
+                capital_before_fee - fee_charged.capital.get(),
+                MAINTENANCE_FEE_PER_SLOT,
+                "dedicated public synchronization must collect one exact maintenance debit"
+            );
+
+            env.push_auth_mark(LAG_ASSET, 2, RAW_TARGET_PRICE)
+                .expect("publish the same-slot lagging raw target");
+            crank_assets_to_fixed_point(&mut env, TARGET, 2, &[LAG_ASSET]);
+            crank_assets_to_fixed_point(&mut env, COUNTERPARTY, 2, &[LAG_ASSET]);
+            let (_, lagged_market) = env.primary_market_state();
+            let lagged_asset = lagged_market.assets[LAG_ASSET as usize];
+            assert_eq!(lagged_asset.raw_oracle_target_price, RAW_TARGET_PRICE);
+            assert!(
+                lagged_asset.effective_price > RAW_TARGET_PRICE
+                    && lagged_asset.effective_price <= START_PRICE,
+                "fixture must retain a nonzero authenticated target/effective lag"
+            );
+            let penalized = env.primary_portfolio(TARGET);
+            assert_eq!(penalized.capital.get(), fee_charged.capital.get());
+            let penalized_cert = penalized
+                .health_cert
+                .try_to_runtime()
+                .expect("penalty setup must leave a valid certificate");
+            let lag_notional_floor = 10u128
+                .checked_mul(u128::from(lagged_asset.effective_price))
+                .expect("bounded lag notional");
+            assert!(
+                penalized_cert.certified_worst_case_loss > lag_notional_floor,
+                "raw-target lag must contribute a nonzero requirement penalty"
+            );
+
+            if matches!(
+                route,
+                DiscoveryTradeRoute::Cpi | DiscoveryTradeRoute::BatchCpi
+            ) {
+                env.ensure_primary_matcher_enabled(COUNTERPARTY)
+                    .expect("enable matcher before tracing the combined-penalty delta");
+            }
+            env.begin_public_trace();
+            execute_trade_delta_route(
+                &mut env,
+                route,
+                TRADE_ASSET,
+                TARGET,
+                COUNTERPARTY,
+                delta_q,
+                START_PRICE,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{route:?}/{shape:?} combined-penalty delta failed: {error}")
+            });
+            let after = env.primary_portfolio(TARGET);
+            assert_eq!(
+                after.capital.get(),
+                penalized.capital.get(),
+                "same-slot zero-fee delta must not hide another maintenance debit"
+            );
+            assert_eq!(
+                leg_for_asset(after, u32::from(TRADE_ASSET)).map_or(0, |leg| leg.basis_pos_q),
+                pre_q + delta_q,
+                "combined-penalty route did not land the requested structural delta"
+            );
+            let incremental = after
+                .health_cert
+                .try_to_runtime()
+                .expect("combined-penalty delta must leave a valid certificate");
+            assert_eq!(
+                health_lanes(incremental),
+                health_lanes(snapshot_engine_full_refresh(&env, TARGET)),
+                "{route:?}/{shape:?} combined fee/lag certificate diverged from full refresh"
+            );
+
+            let trace = env.finish_public_trace();
+            trace
+                .validate_public_execution()
+                .expect("combined-penalty certificate trace must be public and exact");
+            assert_eq!(trace.out_of_band_economic_mutations, 0);
+            assert_eq!(trace.steps.len(), 1);
+            assert!(trace.steps[0].succeeded);
         }
     }
 }
