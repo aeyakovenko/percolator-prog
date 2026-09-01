@@ -20,9 +20,10 @@
 //! liquidatable. Four opening transports, both persisted leg orders, and both market-accrual
 //! orders must select exactly the first live leg, match an independent close-size/fee oracle,
 //! mutate only that asset's OI and insurance domains, frame both counterparties and every SPL
-//! account, and restore health below the CU ceiling. All three owners must then clear their
-//! remaining effective or reset-obligation legs, withdraw the exact non-fee value, and close while
-//! the market remains Live.
+//! account, and restore health below the CU ceiling. A later authenticated fee episode must create
+//! a second real deficit and satisfy the same independent quantity, OI, fee, attribution, and frame
+//! oracle before all three owners clear their remaining effective or reset-obligation legs,
+//! withdraw the exact non-fee value, and close while the market remains Live.
 //!
 //! The shared INV-035 matrix extends selection to three unequal-loss assets and all six persisted
 //! leg orders. The shared INV-086 bridge then takes a public 70,000,000-quantity liquidation across
@@ -32,9 +33,10 @@
 //! Guarantee boundary: these finite matrices cover two-user terminal landing orders, three-asset
 //! unequal-loss selection, and liquidation-to-partial-receipt composition. Close size is not
 //! caller-controlled on the sole public crank, and INV-059 source-locks that surface.
-//! Larger account partitions, multi-asset repeated liquidation episodes, transfer, retirement, and
-//! remaining maximum-shape cross-products remain in the audit ledger. INV-059 separately owns two
-//! authenticated fee-bearing episodes across every opening transport and preserves owner reduction.
+//! Larger account partitions, repeated episodes that advance to another selected asset, transfer,
+//! retirement, and remaining maximum-shape cross-products remain in the audit ledger. This matrix
+//! now owns two authenticated fee-bearing episodes on the selected leg of a two-asset ADL account;
+//! INV-059 separately owns the single-asset episode boundary and post-episode owner reduction.
 
 use super::*;
 
@@ -100,6 +102,9 @@ fn v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete() {
                     candidate.pre_certified_liq_deficit,
                     candidate.expected_close_q,
                     candidate.liquidation_fee,
+                    candidate.followup.pre_certified_liq_deficit,
+                    candidate.followup.expected_close_q,
+                    candidate.followup.liquidation_fee,
                 ),
                 (
                     control.pre_long_a,
@@ -110,6 +115,9 @@ fn v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete() {
                     control.pre_certified_liq_deficit,
                     control.expected_close_q,
                     control.liquidation_fee,
+                    control.followup.pre_certified_liq_deficit,
+                    control.followup.expected_close_q,
+                    control.followup.liquidation_fee,
                 ),
                 "leg/accrual order changed equal-risk topology: control={control:?}, candidate={candidate:?}"
             );
@@ -168,6 +176,10 @@ fn v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete() {
                     control.post_effective_q,
                 ),
                 "opening transport changed selected liquidation state: control={control:?}, candidate={candidate:?}"
+            );
+            assert_eq!(
+                candidate.followup, control.followup,
+                "opening transport changed follow-up liquidation state: control={control:?}, candidate={candidate:?}"
             );
             assert_eq!(
                 (

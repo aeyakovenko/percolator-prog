@@ -1319,6 +1319,7 @@ pub struct MultiAssetAdlLiquidationDiscovery {
     pub accrual_order: EqualRiskAssetOrder,
     pub first_active_asset: u16,
     pub selected_asset: u16,
+    pub first_liquidation_slot: u64,
     pub pre_certificate_valid: bool,
     pub pre_certified_liq_deficit: u128,
     pub pre_liquidation_lock: bool,
@@ -1337,6 +1338,7 @@ pub struct MultiAssetAdlLiquidationDiscovery {
     pub nonselected_asset_framed: bool,
     pub counterparties_framed: bool,
     pub liquidation_moved_no_tokens: bool,
+    pub followup: FollowupLiquidationDiscovery,
     pub max_compute_units: u64,
     pub owner_exit_steps: u8,
     pub users_exited_while_live: bool,
@@ -1349,6 +1351,25 @@ pub struct MultiAssetAdlLiquidationDiscovery {
     pub final_spl_vault: u128,
     pub token_supply_conserved: bool,
     pub public_trace_valid: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FollowupLiquidationDiscovery {
+    pub authenticated_slot: u64,
+    pub selected_asset: u16,
+    pub pre_certified_liq_deficit: u128,
+    pub pre_effective_q: [u128; 2],
+    pub pre_oi_q: [[u128; 2]; 2],
+    pub expected_close_q: u128,
+    pub observed_oi_reduce_q: [[u128; 2]; 2],
+    pub post_effective_q: [u128; 2],
+    pub post_certified_liq_deficit: u128,
+    pub liquidation_fee: u128,
+    pub expected_liquidation_fee: u128,
+    pub insurance_domain_budget_delta: [u128; ASSET_COUNT * 2],
+    pub nonselected_asset_framed: bool,
+    pub counterparties_framed: bool,
+    pub liquidation_moved_no_tokens: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1651,6 +1672,8 @@ impl MultiAssetAdlLiquidationDiscovery {
 
         self.first_active_asset == self.leg_order.assets()[0]
             && self.selected_asset == self.first_active_asset
+            && self.followup.authenticated_slot > self.first_liquidation_slot
+            && self.followup.selected_asset == self.selected_asset
             && selected < 2
             && self.pre_certificate_valid
             && self.pre_certified_liq_deficit != 0
@@ -1680,6 +1703,7 @@ impl MultiAssetAdlLiquidationDiscovery {
             && self.nonselected_asset_framed
             && self.counterparties_framed
             && self.liquidation_moved_no_tokens
+            && self.followup.satisfies_invariant()
             && self.max_compute_units != 0
             && self.max_compute_units < super::v16_svm::TX_CU_LIMIT
             && self.owner_exit_steps != 0
@@ -1693,6 +1717,46 @@ impl MultiAssetAdlLiquidationDiscovery {
             && self.final_spl_vault == self.final_vault
             && self.token_supply_conserved
             && self.public_trace_valid
+    }
+}
+
+impl FollowupLiquidationDiscovery {
+    pub fn satisfies_invariant(&self) -> bool {
+        let selected = usize::from(self.selected_asset);
+        if selected >= 2 {
+            return false;
+        }
+        let nonselected = selected ^ 1;
+        let selected_domains = [selected * 2, selected * 2 + 1];
+        let selected_budget_delta = selected_domains
+            .into_iter()
+            .map(|domain| self.insurance_domain_budget_delta[domain])
+            .sum::<u128>();
+        let unselected_budget_delta = self
+            .insurance_domain_budget_delta
+            .iter()
+            .enumerate()
+            .filter(|(domain, _)| !selected_domains.contains(domain))
+            .map(|(_, delta)| *delta)
+            .sum::<u128>();
+
+        self.authenticated_slot != 0
+            && self.pre_certified_liq_deficit != 0
+            && self.expected_close_q != 0
+            && self.expected_close_q <= self.pre_effective_q[selected]
+            && self.observed_oi_reduce_q[selected] == [self.expected_close_q; 2]
+            && self.observed_oi_reduce_q[nonselected] == [0, 0]
+            && self.post_effective_q[selected]
+                == self.pre_effective_q[selected] - self.expected_close_q
+            && self.post_effective_q[nonselected] == self.pre_effective_q[nonselected]
+            && self.post_certified_liq_deficit == 0
+            && self.liquidation_fee != 0
+            && self.liquidation_fee == self.expected_liquidation_fee
+            && selected_budget_delta == self.liquidation_fee
+            && unselected_budget_delta == 0
+            && self.nonselected_asset_framed
+            && self.counterparties_framed
+            && self.liquidation_moved_no_tokens
     }
 }
 
@@ -17830,6 +17894,215 @@ fn discovery_observations_for_order(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_followup_multi_asset_liquidation(
+    env: &mut V16Svm,
+    target: usize,
+    counterparties: [usize; 2],
+    helper: usize,
+    accrual_order: EqualRiskAssetOrder,
+    first_liquidation_slot: u64,
+    mark: u64,
+    max_compute_units: &mut u64,
+) -> Result<FollowupLiquidationDiscovery, String> {
+    let mut authenticated_slot = None;
+    for slot in (first_liquidation_slot + 1)..=(first_liquidation_slot + 16) {
+        env.warp_to_slot(slot);
+        for asset_index in accrual_order.assets() {
+            let success = env
+                .push_auth_mark(asset_index, slot, mark)
+                .map_err(|error| {
+                    format!("stage follow-up liquidation slot {slot} asset {asset_index}: {error}")
+                })?;
+            *max_compute_units = (*max_compute_units).max(success.compute_units);
+        }
+        let observations = discovery_observations_for_order(env, accrual_order);
+        let accrual = env.crank(helper, slot, observations).map_err(|error| {
+            format!("commit follow-up liquidation slot {slot} order {accrual_order:?}: {error}")
+        })?;
+        *max_compute_units = (*max_compute_units).max(accrual.compute_units);
+        let fee_sync = env
+            .sync_maintenance_fee(target, slot)
+            .map_err(|error| format!("charge follow-up liquidation maintenance: {error}"))?;
+        *max_compute_units = (*max_compute_units).max(fee_sync.compute_units);
+
+        let (_, after_fee_group) = env.primary_market_state();
+        let after_fee_account = env.primary_portfolio(target);
+        let after_fee_cert = after_fee_account
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("decode follow-up post-fee certificate: {error:?}"))?;
+        if discovery_certificate_is_current(&after_fee_group, &after_fee_account)?
+            && after_fee_cert.certified_liq_deficit != 0
+        {
+            authenticated_slot = Some(slot);
+            break;
+        }
+
+        let refresh = env
+            .crank(target, slot, Vec::new())
+            .map_err(|error| format!("certify follow-up liquidation target: {error}"))?;
+        *max_compute_units = (*max_compute_units).max(refresh.compute_units);
+        let (_, group) = env.primary_market_state();
+        let account = env.primary_portfolio(target);
+        let cert = account
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("decode follow-up liquidation certificate: {error:?}"))?;
+        if discovery_certificate_is_current(&group, &account)? && cert.certified_liq_deficit != 0 {
+            authenticated_slot = Some(slot);
+            break;
+        }
+    }
+    let authenticated_slot = authenticated_slot.ok_or_else(|| {
+        "multi-asset target stayed healthy through 16 follow-up authenticated fee steps".to_string()
+    })?;
+
+    let (_, before_group) = env.primary_market_state();
+    let before_account = env.primary_portfolio(target);
+    let cert = before_account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode follow-up liquidation pre-certificate: {error:?}"))?;
+    if !discovery_certificate_is_current(&before_group, &before_account)?
+        || cert.certified_liq_deficit == 0
+    {
+        return Err(format!(
+            "follow-up liquidation did not start from a current deficit: {cert:?}"
+        ));
+    }
+    let selected_asset = before_account
+        .legs
+        .iter()
+        .map(|encoded| encoded.try_to_runtime())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("decode follow-up target leg order: {error:?}"))?
+        .into_iter()
+        .find(|leg| leg.active)
+        .map(|leg| leg.asset_index as u16)
+        .ok_or_else(|| "follow-up liquidation target has no active leg".to_string())?;
+    if selected_asset > 1 {
+        return Err(format!(
+            "follow-up liquidation selected unsupported asset {selected_asset}"
+        ));
+    }
+
+    let mut pre_effective_q = [0u128; 2];
+    let mut pre_oi_q = [[0u128; 2]; 2];
+    for asset_index in [0u16, 1] {
+        let index = asset_index as usize;
+        let asset = before_group.assets[index];
+        pre_oi_q[index] = [asset.oi_eff_long_q, asset.oi_eff_short_q];
+        pre_effective_q[index] = discovery_leg_for_asset(&before_account, asset_index)?
+            .map(|leg| discovery_effective_leg_q(asset, leg))
+            .transpose()?
+            .unwrap_or(0);
+    }
+    let selected_index = selected_asset as usize;
+    let selected_leg = discovery_leg_for_asset(&before_account, selected_asset)?
+        .ok_or_else(|| "follow-up selected leg disappeared".to_string())?;
+    let selected_state = before_group.assets[selected_index];
+    let close_request_q = reference_liquidation_close_request_q(
+        before_group.config,
+        cert,
+        before_account.capital.get(),
+        before_account.pnl.get(),
+        selected_leg.side,
+        pre_effective_q[selected_index],
+        selected_state.effective_price,
+        selected_state.raw_oracle_target_price,
+    )?;
+    let expected_close_q = close_request_q
+        .min(pre_effective_q[selected_index])
+        .min(selected_state.oi_eff_long_q)
+        .min(selected_state.oi_eff_short_q);
+    let expected_liquidation_fee = reference_liquidation_fee(
+        before_group.config,
+        expected_close_q,
+        selected_state.effective_price,
+        expected_close_q == pre_effective_q[selected_index],
+    )?
+    .ok_or_else(|| "follow-up independent model selected a fee-free close".to_string())?;
+
+    let counterparties_before = counterparties.map(|actor| env.primary_portfolio_data(actor));
+    let token_state_before = env.all_token_account_data();
+    let liquidation = env
+        .crank(target, authenticated_slot, Vec::new())
+        .map_err(|error| format!("execute follow-up selected liquidation: {error}"))?;
+    *max_compute_units = (*max_compute_units).max(liquidation.compute_units);
+    let (_, after_group) = env.primary_market_state();
+    let after_account = env.primary_portfolio(target);
+    let after_cert = after_account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode follow-up post-liquidation certificate: {error:?}"))?;
+    let mut observed_oi_reduce_q = [[0u128; 2]; 2];
+    let mut post_effective_q = [0u128; 2];
+    for asset_index in [0u16, 1] {
+        let index = asset_index as usize;
+        observed_oi_reduce_q[index] = [
+            pre_oi_q[index][0]
+                .checked_sub(after_group.assets[index].oi_eff_long_q)
+                .ok_or_else(|| format!("follow-up asset {asset_index} long OI increased"))?,
+            pre_oi_q[index][1]
+                .checked_sub(after_group.assets[index].oi_eff_short_q)
+                .ok_or_else(|| format!("follow-up asset {asset_index} short OI increased"))?,
+        ];
+        post_effective_q[index] = discovery_leg_for_asset(&after_account, asset_index)?
+            .map(|leg| discovery_effective_leg_q(after_group.assets[index], leg))
+            .transpose()?
+            .unwrap_or(0);
+    }
+    let liquidation_fee = after_group
+        .insurance
+        .checked_sub(before_group.insurance)
+        .ok_or_else(|| "follow-up liquidation reduced insurance".to_string())?;
+    let mut insurance_domain_budget_delta = [0u128; ASSET_COUNT * 2];
+    for (domain, delta) in insurance_domain_budget_delta.iter_mut().enumerate() {
+        *delta = after_group.insurance_domain_budget[domain]
+            .checked_sub(before_group.insurance_domain_budget[domain])
+            .ok_or_else(|| format!("follow-up liquidation reduced domain {domain} budget"))?;
+    }
+    if after_group.vault != before_group.vault
+        || after_group.c_tot.checked_add(after_group.insurance)
+            != before_group.c_tot.checked_add(before_group.insurance)
+        || before_account.pnl.get() != 0
+        || after_account.pnl.get() != 0
+        || before_account
+            .capital
+            .get()
+            .checked_sub(after_account.capital.get())
+            != Some(liquidation_fee)
+    {
+        return Err("follow-up liquidation violated its exact internal value partition".into());
+    }
+    let nonselected_index = selected_index ^ 1;
+    let nonselected_asset_framed =
+        after_group.assets[nonselected_index] == before_group.assets[nonselected_index];
+    let counterparties_framed = counterparties
+        .into_iter()
+        .zip(counterparties_before)
+        .all(|(actor, before)| env.primary_portfolio_data(actor) == before);
+
+    Ok(FollowupLiquidationDiscovery {
+        authenticated_slot,
+        selected_asset,
+        pre_certified_liq_deficit: cert.certified_liq_deficit,
+        pre_effective_q,
+        pre_oi_q,
+        expected_close_q,
+        observed_oi_reduce_q,
+        post_effective_q,
+        post_certified_liq_deficit: after_cert.certified_liq_deficit,
+        liquidation_fee,
+        expected_liquidation_fee,
+        insurance_domain_budget_delta,
+        nonselected_asset_framed,
+        counterparties_framed,
+        liquidation_moved_no_tokens: env.all_token_account_data() == token_state_before,
+    })
+}
+
 fn verify_one_multi_asset_adl_liquidation(
     mut seed: [u8; 32],
     route: DiscoveryTradeRoute,
@@ -18136,6 +18409,17 @@ fn verify_one_multi_asset_adl_liquidation(
     let liquidation_moved_no_tokens =
         env.all_token_account_data() == token_state_before_liquidation;
 
+    let followup = execute_followup_multi_asset_liquidation(
+        &mut env,
+        TARGET,
+        [ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY],
+        HELPER,
+        accrual_order,
+        liquidation_slot,
+        MARK,
+        &mut max_compute_units,
+    )?;
+
     let mut owner_exit_steps = 0u8;
     for actor in [TARGET, ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY] {
         for _ in 0..16 {
@@ -18255,6 +18539,7 @@ fn verify_one_multi_asset_adl_liquidation(
         accrual_order,
         first_active_asset,
         selected_asset,
+        first_liquidation_slot: liquidation_slot,
         pre_certificate_valid: cert.valid,
         pre_certified_liq_deficit: cert.certified_liq_deficit,
         pre_liquidation_lock: before_account.liquidation_lock != 0,
@@ -18273,6 +18558,7 @@ fn verify_one_multi_asset_adl_liquidation(
         nonselected_asset_framed,
         counterparties_framed,
         liquidation_moved_no_tokens,
+        followup,
         max_compute_units,
         owner_exit_steps,
         users_exited_while_live,
