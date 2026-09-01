@@ -6,7 +6,11 @@
 //! state or use a proven-equivalent exact certificate.
 //!
 //! Evidence in this file (I/C plus invariant-specific route assertions): a source-complete caller
-//! input roster guard proves only PermissionlessCrank exposes discovery hints. Matched forward and
+//! input roster guard proves only PermissionlessCrank exposes discovery hints. A second gate
+//! classifies all 49 canonical public instructions and requires executable public witnesses for
+//! every current-certificate/full-refresh route, flat-only value exit, immutable terminal payout,
+//! refreshing cure, and stale-safe risk reduction; a new instruction cannot silently inherit a
+//! favorable-action exemption. Matched forward and
 //! reverse two-asset Pyth hint/account-tail orders normalize identically; mismatched tails reject
 //! with exact rollback and a live canonical retry. BatchTradeNoCpi and BatchTradeCpi open a new
 //! asset-0 leg for an account that already has a stale active asset-1 leg, and must discover and
@@ -63,6 +67,245 @@ fn v16_program_discovery_hint_surface_is_permissionless_crank_only() {
         hint_fields, expected,
         "a new caller-controlled discovery hint requires an INV-056 public omission/order matrix"
     );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Inv056PublicRouteDisposition {
+    DiscoveryHint,
+    CurrentCertificateOrFullRefresh,
+    FlatOnlyValueExit,
+    ImmutableTerminalPayout,
+    RefreshingCure,
+    StaleSafeRiskReduction,
+    InboundValueOnly,
+    ScopedNonPortfolioValue,
+    ControlOrBookkeeping,
+}
+
+#[derive(Clone, Copy)]
+struct Inv056RouteEvidence {
+    disposition: Inv056PublicRouteDisposition,
+    witness_path: Option<&'static str>,
+    witness_test: Option<&'static str>,
+}
+
+fn inv056_evidence(
+    disposition: Inv056PublicRouteDisposition,
+    witness: Option<(&'static str, &'static str)>,
+) -> Inv056RouteEvidence {
+    Inv056RouteEvidence {
+        disposition,
+        witness_path: witness.map(|(path, _)| path),
+        witness_test: witness.map(|(_, test)| test),
+    }
+}
+
+fn inv056_public_route_evidence(variant: &str) -> Option<Inv056RouteEvidence> {
+    use Inv056PublicRouteDisposition::*;
+
+    let evidence = match variant {
+        "PermissionlessCrank" => inv056_evidence(
+            DiscoveryHint,
+            Some((
+                "tests/invariants/cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs",
+                "v16_program_external_oracle_hint_and_account_order_is_normalized_or_atomic",
+            )),
+        ),
+        "TradeNoCpi" => inv056_evidence(
+            CurrentCertificateOrFullRefresh,
+            Some((
+                "tests/invariants/cu/inv_053_full_health_recertification_equivalence.rs",
+                "v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand",
+            )),
+        ),
+        "TradeCpi" => inv056_evidence(
+            CurrentCertificateOrFullRefresh,
+            Some((
+                "tests/invariants/cu/inv_053_full_health_recertification_equivalence.rs",
+                "v16_bpf_tradecpi_refreshes_stale_traded_portfolio_leg_on_demand",
+            )),
+        ),
+        "BatchTradeNoCpi" | "BatchTradeCpi" => inv056_evidence(
+            CurrentCertificateOrFullRefresh,
+            Some((
+                "tests/invariants/cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs",
+                "v16_program_batch_routes_refresh_stale_related_legs_before_favorable_trade",
+            )),
+        ),
+        "ConvertReleasedPnl" => inv056_evidence(
+            CurrentCertificateOrFullRefresh,
+            Some((
+                "tests/invariants/cu/inv_054_certificate_epoch_completeness.rs",
+                "v16_attack_convert_released_pnl_requires_current_cert_and_public_refresh",
+            )),
+        ),
+        "Withdraw" => inv056_evidence(
+            FlatOnlyValueExit,
+            Some((
+                "tests/invariants/cu/inv_055_state_indexed_admission.rs",
+                "v16_attack_withdraw_requires_flat_regardless_of_size",
+            )),
+        ),
+        "CloseResolved" | "ClaimResolvedPayoutTopup" => inv056_evidence(
+            ImmutableTerminalPayout,
+            Some((
+                "tests/invariants/cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs",
+                "v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail",
+            )),
+        ),
+        "CureAndCancelClose" => inv056_evidence(
+            RefreshingCure,
+            Some((
+                "tests/invariants/stateful/inv_037_exact_residual_partition.rs",
+                "inv037_public_cure_preserves_exact_partition_across_routes_and_sides",
+            )),
+        ),
+        "RebalanceReduce" => inv056_evidence(
+            StaleSafeRiskReduction,
+            Some((
+                "tests/invariants/cu/inv_057_risk_reduction_availability.rs",
+                "v16_attack_non_base_local_stale_owner_reduce_remains_live",
+            )),
+        ),
+        "ForfeitRecoveryLeg" => inv056_evidence(
+            StaleSafeRiskReduction,
+            Some((
+                "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs",
+                "v16_program_owner_recovery_forfeit_strictly_reduces_each_position_episode",
+            )),
+        ),
+        "ForceCloseAbandonedAsset" => inv056_evidence(
+            StaleSafeRiskReduction,
+            Some((
+                "tests/invariants/cu/inv_078_permissionless_recovery_coverage.rs",
+                "v16_attack_locally_stale_permissionless_asset_can_shutdown_and_force_close",
+            )),
+        ),
+        "Deposit" | "TopUpInsurance" | "TopUpBackingBucket" | "TopUpInsuranceDomain" => {
+            inv056_evidence(InboundValueOnly, None)
+        }
+        "WithdrawBackingBucket"
+        | "WithdrawBackingBucketEarnings"
+        | "WithdrawInsuranceAsset"
+        | "SwapSecondaryForPrimary" => inv056_evidence(ScopedNonPortfolioValue, None),
+        "InitMarket"
+        | "InitPortfolio"
+        | "ClosePortfolio"
+        | "CloseSlab"
+        | "ResolveMarket"
+        | "UpdateAuthority"
+        | "ConfigureHybridOracle"
+        | "ConfigureEwmaMark"
+        | "PushEwmaMark"
+        | "UpdateLiquidationFeePolicy"
+        | "ConfigurePermissionlessResolve"
+        | "ResolveStalePermissionless"
+        | "UpdateAssetLifecycle"
+        | "FinalizeResetSide"
+        | "SyncMaintenanceFee"
+        | "UpdateMaintenanceFeePolicy"
+        | "UpdateBackingFeePolicy"
+        | "SyncBackingDomainLedger"
+        | "SyncInsuranceLedger"
+        | "UpdateTradeFeePolicy"
+        | "UpdateFeeRedirectPolicy"
+        | "UpdateMarketInitFeePolicy"
+        | "UpdateBaseUnitMints"
+        | "ConfigureAuthMark"
+        | "PushAuthMark"
+        | "UpdateAssetAuthority"
+        | "SetMatcherConfig"
+        | "RestartAssetOracle" => inv056_evidence(ControlOrBookkeeping, None),
+        _ => return None,
+    };
+    Some(evidence)
+}
+
+fn inv056_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with('#') {
+            test_attribute = false;
+        }
+    }
+    false
+}
+
+#[test]
+fn v16_program_no_hint_favorable_route_roster_is_source_complete() {
+    const REGISTRY: &str = include_str!("../public_instruction_coverage.tsv");
+    use Inv056PublicRouteDisposition::*;
+
+    let mut variants = std::collections::BTreeSet::new();
+    let mut dispositions = std::collections::BTreeMap::<_, usize>::new();
+    let mut witnessed = 0usize;
+
+    for line in REGISTRY.lines() {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("tag\t") {
+            continue;
+        }
+        let columns = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 5, "malformed public-route row: {line}");
+        let variant = columns[1];
+        assert!(
+            variants.insert(variant),
+            "duplicate public variant {variant}"
+        );
+        let evidence = inv056_public_route_evidence(variant).unwrap_or_else(|| {
+            panic!(
+                "public instruction {variant} lacks an INV-056 stale-state/favorable-route disposition"
+            )
+        });
+        *dispositions.entry(evidence.disposition).or_default() += 1;
+
+        match (evidence.witness_path, evidence.witness_test) {
+            (Some(path), Some(test)) => {
+                let source = std::fs::read_to_string(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path),
+                )
+                .unwrap_or_else(|error| panic!("read INV-056 witness {path}: {error}"));
+                assert!(
+                    inv056_source_defines_test(&source, test),
+                    "{variant} points to missing executable witness {path}#{test}"
+                );
+                witnessed += 1;
+            }
+            (None, None) => assert!(
+                matches!(
+                    evidence.disposition,
+                    InboundValueOnly | ScopedNonPortfolioValue | ControlOrBookkeeping
+                ),
+                "{variant} has a security-relevant disposition without executable evidence"
+            ),
+            _ => panic!("{variant} has an incomplete INV-056 witness"),
+        }
+    }
+
+    assert_eq!(
+        variants.len(),
+        49,
+        "the canonical public route count changed"
+    );
+    assert_eq!(dispositions.get(&DiscoveryHint), Some(&1));
+    assert_eq!(dispositions.get(&CurrentCertificateOrFullRefresh), Some(&5));
+    assert_eq!(dispositions.get(&FlatOnlyValueExit), Some(&1));
+    assert_eq!(dispositions.get(&ImmutableTerminalPayout), Some(&2));
+    assert_eq!(dispositions.get(&RefreshingCure), Some(&1));
+    assert_eq!(dispositions.get(&StaleSafeRiskReduction), Some(&3));
+    assert_eq!(witnessed, 13);
 }
 
 const INV056_EXTERNAL_SLOT: u64 = 2;
