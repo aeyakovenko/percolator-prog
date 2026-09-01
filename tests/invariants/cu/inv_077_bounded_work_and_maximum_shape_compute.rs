@@ -13,8 +13,12 @@
 //! ceiling, a bounded successful progress path, or atomic rejection before an attacker-controlled
 //! shape can strand a required exit route. A dedicated 14-leg/28-source Recovery test leaves one
 //! K/F cohort unsettled, freezes its asset, and proves the sole public crank settles committed
-//! state without accruing the frozen asset or exceeding the CU ceiling. A separate flat-account
-//! route fills all 28 historical source slots, requires the automatic crank to release every
+//! state without accruing the frozen asset or exceeding the CU ceiling. The corresponding Hybrid
+//! product carries all 42 authenticated feed references into the frozen Recovery state: stale
+//! tails remain discovery-only, every accepted call mutates, and committed K/F progress occurs in
+//! 28 calls at no more than 1.147M CU while the frozen asset, oracle profile, custody, and feeds are
+//! framed exactly. A separate flat-account route fills all 28 historical source slots, requires
+//! the automatic crank to release every
 //! obsolete source lien without an oracle tail, and then converts and withdraws the complete claim.
 //! The combined-shape owner-exit route reaches fourteen active legs and all twenty-eight source
 //! domains through public trades, then executes `RebalanceReduce`, ResetPending cleanup, explicit
@@ -3970,6 +3974,219 @@ fn v16_program_recovery_kf_refresh_at_14_leg_28_source_shape_is_bounded() {
     assert_eq!(env.token_amount(env.vault), custody_before);
     assert_eq!(recovery_after.vault, recovery_before.vault);
     eprintln!("14-leg/28-source Recovery K/F refresh CU: {refresh_cu}");
+}
+
+#[test]
+fn v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape() {
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const MOVED_PRICE: u64 = 110;
+
+    let feeds = [[0xd1u8; 32], [0xd2u8; 32], [0xd3u8; 32]];
+    let (mut env, _taker_owner, _lp_owner, taker, lp, mut slot) =
+        setup_max_source_live_pair_with_hybrid_oracles(feeds);
+    let asset_index = ACTIVE_CAP - 1;
+    let asset_slot = usize::from(asset_index);
+    let custody_before = env.token_amount(env.vault);
+    env.configure_permissionless_resolve_with_cu(1_000, 5);
+
+    slot = slot.checked_add(1).unwrap();
+    let publish_time = 100 + slot as i64;
+    set_test_clock(&mut env, slot, publish_time);
+    let moved_oracles = [
+        env.set_pyth_price(&feeds[0], 3_300_000, -6, publish_time),
+        env.set_pyth_price(&feeds[1], 150_000_000, -6, publish_time),
+        env.set_pyth_price(&feeds[2], 200_000_000, -6, publish_time),
+    ];
+    env.crank_with_oracle_tail(
+        taker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations(asset_index),
+        },
+        &moved_oracles,
+    );
+
+    let live_group = env.market_state().1;
+    let stale_lp = env.portfolio_state(lp);
+    let stale_leg = active_leg_for_asset(&stale_lp, asset_slot);
+    assert_eq!(live_group.assets[asset_slot].effective_price, MOVED_PRICE);
+    assert_eq!(stale_leg.side, SideV16::Short);
+    assert!(stale_leg.kf_epoch_snap < live_group.assets[asset_slot].kf_epoch_short);
+
+    slot = slot.checked_add(1).unwrap();
+    set_test_clock(&mut env, slot, publish_time + 1);
+    let mut checkpoint_calls = 0usize;
+    let mut checkpoint_max_cu = 0u64;
+    loop {
+        let profile = {
+            let account = env.svm.get_account(&env.market).unwrap();
+            state::read_asset_oracle_profile(&account.data, asset_slot).unwrap()
+        };
+        if profile.funding_mark_pending_e6 == 0 {
+            break;
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&taker).unwrap();
+        let cu = env.crank_with_oracle_tail(
+            taker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(asset_index),
+            },
+            &moved_oracles,
+        );
+        assert_cu_within("Hybrid funding-checkpoint catch-up", cu, 1_375_000);
+        checkpoint_calls += 1;
+        checkpoint_max_cu = checkpoint_max_cu.max(cu);
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&taker).unwrap() != portfolio_before,
+            "every accepted Hybrid checkpoint call must mutate economic state"
+        );
+        assert!(
+            checkpoint_calls <= 2 * usize::from(ACTIVE_CAP) + 8,
+            "bounded public cranks must consume every retained Hybrid funding checkpoint"
+        );
+    }
+    assert!(
+        active_leg_for_asset(&env.portfolio_state(lp), asset_slot).kf_epoch_snap
+            < env.market_state().1.assets[asset_slot].kf_epoch_short,
+        "funding-checkpoint catch-up must preserve the LP's committed K/F cohort"
+    );
+
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            asset_index,
+            market_id: env.asset_market_id(asset_index),
+            authority_epoch: env.control_sequences(0).authority_epoch,
+            now_slot: slot,
+            initial_price: 0,
+            max_init_fee: u128::MAX,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    )
+    .expect("public Hybrid shutdown must accept the committed funding checkpoint");
+    let recovery_before = env.market_state().1;
+    let frozen_asset = recovery_before.assets[asset_slot];
+    assert_eq!(frozen_asset.lifecycle, AssetLifecycleV16::Recovery);
+    let stale_count_before = frozen_asset.stale_account_count_short;
+    assert!(stale_count_before > 0);
+    let profile_before = {
+        let account = env.svm.get_account(&env.market).unwrap();
+        state::read_asset_oracle_profile(&account.data, asset_slot).unwrap()
+    };
+    let feeds_before = moved_oracles.map(|key| env.svm.get_account(&key).unwrap());
+    let active_bitmap_before = active_bitmap(&stale_lp);
+
+    let observations = (0..ACTIVE_CAP)
+        .map(|observed_asset| CrankObservationHint {
+            asset_index: observed_asset,
+            oracle_accounts: 3,
+        })
+        .collect::<Vec<_>>();
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(lp, false),
+    ];
+    for _ in 0..ACTIVE_CAP {
+        accounts.extend(
+            moved_oracles
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+    }
+
+    let max_steps = percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+        + usize::from(ACTIVE_CAP)
+        + 4;
+    let mut calls = 0usize;
+    let mut max_cu = 0u64;
+    loop {
+        let market_step_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_step_before = env.svm.get_account(&lp).unwrap();
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: observations.clone(),
+                },
+                accounts.clone(),
+                &[],
+            )
+            .expect("stale complete-tail transaction must retain bounded Recovery progress");
+        assert_cu_within(
+            "Recovery max-shape stale complete-tail crank",
+            cu,
+            1_375_000,
+        );
+        calls += 1;
+        max_cu = max_cu.max(cu);
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_step_before
+                || env.svm.get_account(&lp).unwrap() != portfolio_step_before,
+            "every accepted stale-tail Recovery call must mutate economic state"
+        );
+        if env.market_state().1.assets[asset_slot].stale_account_count_short < stale_count_before {
+            break;
+        }
+        assert!(
+            calls <= max_steps,
+            "stale complete-tail schedule must reach committed K/F progress within its finite rank"
+        );
+    }
+
+    let recovery_after = env.market_state().1;
+    let refreshed_asset = recovery_after.assets[asset_slot];
+    let lp_after = env.portfolio_state(lp);
+    let refreshed_leg = active_leg_for_asset(&lp_after, asset_slot);
+    let profile_after = {
+        let account = env.svm.get_account(&env.market).unwrap();
+        state::read_asset_oracle_profile(&account.data, asset_slot).unwrap()
+    };
+    assert_eq!(refreshed_asset.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(
+        refreshed_asset.raw_oracle_target_price,
+        frozen_asset.raw_oracle_target_price
+    );
+    assert_eq!(
+        refreshed_asset.effective_price,
+        frozen_asset.effective_price
+    );
+    assert_eq!(refreshed_asset.slot_last, frozen_asset.slot_last);
+    assert_eq!(refreshed_asset.k_long, frozen_asset.k_long);
+    assert_eq!(refreshed_asset.k_short, frozen_asset.k_short);
+    assert_eq!(refreshed_asset.f_long_num, frozen_asset.f_long_num);
+    assert_eq!(refreshed_asset.f_short_num, frozen_asset.f_short_num);
+    assert_eq!(
+        refreshed_asset.stale_account_count_short,
+        stale_count_before - 1
+    );
+    assert_eq!(refreshed_leg.kf_epoch_snap, refreshed_asset.kf_epoch_short);
+    assert_eq!(active_bitmap(&lp_after), active_bitmap_before);
+    assert_eq!(profile_after, profile_before);
+    assert_eq!(
+        moved_oracles.map(|key| env.svm.get_account(&key).unwrap()),
+        feeds_before
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+    assert_eq!(recovery_after.vault as u64, custody_before);
+    println!(
+        "INV-071/072/077 Recovery 14-leg/28-source/42-feed K/F progress: checkpoint={checkpoint_calls}/{checkpoint_max_cu}, recovery={calls}/{max_cu}"
+    );
 }
 
 #[test]
