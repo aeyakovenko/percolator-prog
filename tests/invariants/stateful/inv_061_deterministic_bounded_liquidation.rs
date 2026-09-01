@@ -20,12 +20,14 @@
 //! liquidatable. Four opening transports, both persisted leg orders, and both market-accrual
 //! orders must select exactly the first live leg, match an independent close-size/fee oracle,
 //! mutate only that asset's OI and insurance domains, frame both counterparties and every SPL
-//! account, and restore health below the CU ceiling. A later authenticated fee episode must create
-//! a second real deficit and satisfy the same independent quantity, OI, fee, attribution, and frame
+//! account, and restore health below the CU ceiling. Two later authenticated fee episodes must each
+//! create a real deficit and satisfy the same independent quantity, OI, fee, attribution, and frame
 //! oracle. The matrix crosses both leaving the first selected leg live and canonically reducing its
 //! residual first; in the latter case the second episode must select the other asset, while the
 //! intervening owner reduction exactly removes both OI lanes and frames value, the other asset,
-//! counterparties, and SPL custody. All three owners then clear their remaining effective or
+//! counterparties, and SPL custody. The third episode repeats on whichever leg the second selected,
+//! under a fresh authenticated slot, and independently rechecks exact selected-only OI reduction,
+//! fee attribution, frames, and CU. All three owners then clear their remaining effective or
 //! reset-obligation legs, withdraw the exact non-fee value, and close while the market remains Live.
 //!
 //! The shared INV-035 matrix extends selection to three unequal-loss assets and all six persisted
@@ -36,9 +38,10 @@
 //! Guarantee boundary: these finite matrices cover two-user terminal landing orders, three-asset
 //! unequal-loss selection, and liquidation-to-partial-receipt composition. Close size is not
 //! caller-controlled on the sole public crank, and INV-059 source-locks that surface.
-//! Larger account partitions, three-plus liquidation episodes, transfer, retirement, and remaining
+//! Larger account partitions, four-plus liquidation episodes, transfer, retirement, and remaining
 //! maximum-shape cross-products remain in the audit ledger. This matrix owns two authenticated
-//! fee-bearing episodes on either the same or successive selected legs of a two-asset ADL account;
+//! follow-up fee-bearing episodes after the first liquidation, on either the same or successive
+//! selected legs of a two-asset ADL account;
 //! INV-059 separately owns the single-asset episode boundary and post-episode owner reduction.
 
 use super::*;
@@ -128,6 +131,19 @@ fn v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete() {
                 );
                 assert_eq!(
                     (
+                        candidate.third.pre_certified_liq_deficit,
+                        candidate.third.expected_close_q,
+                        candidate.third.liquidation_fee,
+                    ),
+                    (
+                        control.third.pre_certified_liq_deficit,
+                        control.third.expected_close_q,
+                        control.third.liquidation_fee,
+                    ),
+                    "leg/accrual order changed third liquidation topology: control={control:?}, candidate={candidate:?}"
+                );
+                assert_eq!(
+                    (
                         candidate.expected_liquidation_fee,
                         candidate.participant_payout,
                         candidate.final_insurance,
@@ -185,6 +201,10 @@ fn v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete() {
             assert_eq!(
                 candidate.followup, control.followup,
                 "opening transport changed follow-up liquidation state: control={control:?}, candidate={candidate:?}"
+            );
+            assert_eq!(
+                candidate.third, control.third,
+                "opening transport changed third liquidation state: control={control:?}, candidate={candidate:?}"
             );
             assert_eq!(
                 (

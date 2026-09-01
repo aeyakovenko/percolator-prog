@@ -1349,6 +1349,7 @@ pub struct MultiAssetAdlLiquidationDiscovery {
     pub counterparties_framed: bool,
     pub liquidation_moved_no_tokens: bool,
     pub followup: FollowupLiquidationDiscovery,
+    pub third: FollowupLiquidationDiscovery,
     pub max_compute_units: u64,
     pub owner_exit_steps: u8,
     pub users_exited_while_live: bool,
@@ -1688,6 +1689,12 @@ impl MultiAssetAdlLiquidationDiscovery {
                 matches!(followup_slot_gap, Some(200..=215))
             }
         };
+        let third_slot_is_bounded = matches!(
+            self.third
+                .authenticated_slot
+                .checked_sub(self.followup.authenticated_slot),
+            Some(1..=16)
+        );
         let selected_domains = [selected * 2, selected * 2 + 1];
         let selected_budget_delta = selected_domains
             .into_iter()
@@ -1706,6 +1713,11 @@ impl MultiAssetAdlLiquidationDiscovery {
             && self.followup.authenticated_slot > self.first_liquidation_slot
             && followup_slot_is_bounded
             && self.followup.prior_selected_asset == self.selected_asset
+            && self.third.selection == FollowupLiquidationSelection::SameAsset
+            && self.third.authenticated_slot > self.followup.authenticated_slot
+            && third_slot_is_bounded
+            && self.third.prior_selected_asset == self.followup.selected_asset
+            && self.third.selected_asset == self.followup.selected_asset
             && selected < 2
             && self.pre_certificate_valid
             && self.pre_certified_liq_deficit != 0
@@ -1736,6 +1748,7 @@ impl MultiAssetAdlLiquidationDiscovery {
             && self.counterparties_framed
             && self.liquidation_moved_no_tokens
             && self.followup.satisfies_invariant()
+            && self.third.satisfies_invariant()
             && self.max_compute_units != 0
             && self.max_compute_units < super::v16_svm::TX_CU_LIMIT
             && self.owner_exit_steps != 0
@@ -18568,6 +18581,18 @@ fn verify_one_multi_asset_adl_liquidation(
         MARK,
         &mut max_compute_units,
     )?;
+    let third = execute_followup_multi_asset_liquidation(
+        &mut env,
+        TARGET,
+        [ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY],
+        HELPER,
+        accrual_order,
+        followup.selected_asset,
+        FollowupLiquidationSelection::SameAsset,
+        followup.authenticated_slot,
+        MARK,
+        &mut max_compute_units,
+    )?;
 
     let mut owner_exit_steps = 0u8;
     for actor in [TARGET, ASSET_ZERO_COUNTERPARTY, ASSET_ONE_COUNTERPARTY] {
@@ -18708,6 +18733,7 @@ fn verify_one_multi_asset_adl_liquidation(
         counterparties_framed,
         liquidation_moved_no_tokens,
         followup,
+        third,
         max_compute_units,
         owner_exit_steps,
         users_exited_while_live,
