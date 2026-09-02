@@ -41,6 +41,38 @@ Completion requires all of the following:
    invariant suite certifies the fix without weakening its oracle or assumptions.
 5. Maximum supported shapes keep every required exit and recovery route below the SVM compute
    ceiling, and the complete runtime, Kani, stateful, regression, and CU gates pass together.
+6. A history-derived, per-portfolio-episode entitlement model independently accounts for external
+   principal, realized PnL, attributed losses, disclosed fees, recovery/receipt value, and junior
+   haircuts. Every value-bearing public transition must update that model, and every withdrawal,
+   conversion, fee, liquidation payment, or terminal payout must be no greater than the actor's
+   modeled claim. Aggregate conservation alone does not satisfy this requirement.
+7. Matched-book integrity is proven under one canonical representation: every unit of effective
+   exposure has equal opposite effective exposure or one explicit, uniquely attributed protocol
+   obligation such as pending loss, B, close residual, or Recovery state. Aggregate equality may
+   not conceal a missing leg, wrong owner, raw/effective-unit mismatch, or unattributed exposure.
+8. Liveness distinguishes permissionless economic progress from signer-gated account deletion.
+   From every publicly reachable funded state, a bounded permissionless sequence must reach a
+   terminal economic disposition or a state with only an owner's mechanical close remaining.
+   Asset and market retirement must have an explicit finite rank and authority assumption; a claim
+   of fully permissionless `Closed`/`Retired` is forbidden while `ClosePortfolio` or `CloseSlab`
+   requires a signer with privileged authority.
+9. Path independence is checked over histories, not only individual calls. For every applicable
+   economic intent, splitting, merging, batching, route switching, retries, interleavings, and
+   relevant landing-order permutations must not improve any actor or coalition beyond signed and
+   protocol-defined bounds. State-dependent operations that do not commute must have an explicit
+   equivalence relation and independently checked outcome envelope.
+10. Authority containment uses an explicit adversarial-role matrix. For each market authority,
+    asset admin, oracle, insurance operator, backing operator, matcher, delegate, and keeper, the
+    suite must distinguish authentication from economic trust and prove the maximum effect of a
+    correctly signed malicious action on unrelated user principal and claims. Signer, scope,
+    epoch, and replay proofs alone do not establish containment.
+
+The existing 87 `CLOSED` / 2 `N/A` audit ledger records closure of the original INV-001 through
+INV-089 charter. It is a baseline, not completion of requirements 6-10. Those requirements remain
+open until they are expressed as normative invariants, connected to a source-complete roster of
+public transitions, and discharged with executable whole-route evidence. Individual ADV/SUG
+regressions demonstrate required counterexamples but cannot substitute for the generic history
+properties above.
 
 ## Current checkpoint
 
