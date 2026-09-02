@@ -14,6 +14,10 @@
 //! CPI into either terminal resolution or Recovery. The Recovery branch refreshes both complete
 //! certificates permissionlessly, closes all legs atomically at raw price one, and returns every
 //! non-fee atom, so the maximum-shape guarantee is not specific to no-CPI/DrainOnly or Resolved.
+//! `v16_program_mark_writer_and_trade_exit_composition_is_source_complete` closes the finite
+//! current wrapper surface by inventorying every mark writer, proving all four trade variants use
+//! one of two shared normalization chains, and binding arithmetic, fee, sequencing, lifecycle,
+//! oracle-failure, and maximum-shape evidence to those chains.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -1871,4 +1875,259 @@ fn v16_program_max_shape_paid_hybrid_recovery_allows_atomic_owner_exit() {
     ] {
         assert!(cu < 1_400_000, "{label} consumed {cu} CU");
     }
+}
+
+#[derive(Clone, Copy)]
+struct Inv045MarkClass {
+    class: &'static str,
+    witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv045_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+fn inv045_function_body<'a>(production: &'a str, function: &str) -> &'a str {
+    let start = production
+        .find(&format!("fn {function}"))
+        .unwrap_or_else(|| panic!("missing production function {function}"));
+    let tail = &production[start..];
+    let end = tail[1..]
+        .find("\n    fn ")
+        .or_else(|| tail[1..].find("\n    #["))
+        .map_or(tail.len(), |offset| offset + 1);
+    &tail[..end]
+}
+
+#[test]
+fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv045MarkClass] = &[
+        Inv045MarkClass {
+            class: "full-width mark and fee arithmetic",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs",
+                    "v16_program_policy_arithmetic_matches_independent_full_width_corpus",
+                ),
+                (
+                    "tests/invariants/cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs",
+                    "v16_program_dynamic_externality_fee_matches_exhaustive_search_on_generated_inputs",
+                ),
+                (
+                    "tests/invariants/kani/inv_045_no_free_mark_movement.rs",
+                    "kani_v16_fee_supported_mark_clamp_is_directional_and_zero_support_is_noop",
+                ),
+            ],
+        },
+        Inv045MarkClass {
+            class: "all trade routes and mark regimes",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_045_no_free_mark_movement.rs",
+                    "v16_program_accepted_mark_boundary_matrix_is_paid_atomic_and_exit_live",
+                ),
+                (
+                    "tests/invariants/stateful/inv_045_no_free_mark_movement.rs",
+                    "v16_program_trade_driven_mark_route_orders_converge_economically",
+                ),
+            ],
+        },
+        Inv045MarkClass {
+            class: "fee support and coalition non-reclaimability",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_045_no_free_mark_movement.rs",
+                    "v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades",
+                ),
+                (
+                    "tests/invariants/public_sbf/inv_045_no_free_mark_movement.rs",
+                    "v16_program_pr225_mark_movement_fee_is_nonwithdrawable_and_terminally_burned",
+                ),
+                (
+                    "tests/invariants/public_sbf/inv_045_no_free_mark_movement.rs",
+                    "v16_program_pr280_trade_driven_liquidation_penalty_is_not_reclaimable",
+                ),
+            ],
+        },
+        Inv045MarkClass {
+            class: "clock, same-slot, and pending-target sequencing",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_045_no_free_mark_movement.rs",
+                    "v16_program_low_price_ewma_discovery_is_not_pinned_by_clock_first_cranks",
+                ),
+                (
+                    "tests/invariants/stateful/inv_045_no_free_mark_movement.rs",
+                    "v16_program_pending_trade_mark_replacement_preserves_funding_fee_and_exit",
+                ),
+                (
+                    "tests/invariants/stateful/inv_045_no_free_mark_movement.rs",
+                    "v16_program_repeated_trade_driven_mark_steps_are_paid_and_exit_live",
+                ),
+            ],
+        },
+        Inv045MarkClass {
+            class: "unsafe-price lifecycle exit availability",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_046_trade_availability_without_unsafe_mark_admission.rs",
+                    "v16_program_extreme_price_route_lifecycle_matrix_preserves_exit_or_terminal_fallback",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_oracle_failure_seeded_frontier_is_exact_and_terminal",
+                ),
+            ],
+        },
+        Inv045MarkClass {
+            class: "activation, Recovery freeze, and restart identity",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_089_activation_reactivation_and_initialization_equivalence.rs",
+                    "v16_program_reused_slot_matches_fresh_persisted_state_after_public_history",
+                ),
+                (
+                    "tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs",
+                    "v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit",
+                ),
+            ],
+        },
+        Inv045MarkClass {
+            class: "maximum supported account and oracle shapes",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_045_no_free_mark_movement.rs",
+                    "v16_program_max_shape_ewma_movement_is_paid_and_drain_only_exit_stays_bounded",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_no_free_mark_movement.rs",
+                    "v16_program_max_shape_hybrid_cpi_movement_resolves_with_exact_terminal_value",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_no_free_mark_movement.rs",
+                    "v16_program_max_shape_paid_hybrid_recovery_allows_atomic_owner_exit",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-045/046 composition must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the mark-certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut classes = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate mark class");
+        assert!(!row.witnesses.is_empty());
+        for (path, witness) in row.witnesses {
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv045_source_defines_function(source, witness),
+                "mark class '{}' lacks executable witness {path}#{witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 7, "mark/availability class roster drift");
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+
+    // Four public trade variants must collapse into exactly two common implementations.
+    for variant in [
+        "Instruction::TradeNoCpi",
+        "Instruction::TradeCpi",
+        "Instruction::BatchTradeNoCpi",
+        "Instruction::BatchTradeCpi",
+    ] {
+        assert!(
+            production.contains(variant),
+            "missing public route {variant}"
+        );
+    }
+    assert_eq!(
+        production.matches("handle_trade_nocpi_zero_copy(").count(),
+        2
+    );
+    assert_eq!(
+        production
+            .matches("handle_batch_execute_zero_copy(")
+            .count(),
+        2
+    );
+
+    let single = inv045_function_body(production, "handle_trade_nocpi_zero_copy");
+    let batch = inv045_function_body(production, "handle_batch_execute_zero_copy");
+    for body in [single, batch] {
+        let accepted = body.find("accepted_reported_trade_price_view").unwrap();
+        let quoted = body.find("hybrid_trade_fee_quote_view").unwrap();
+        let collected = body.find("collected_fee_supported_mark_view").unwrap();
+        let updated = body.find("update_hybrid_mark_after_trade_view").unwrap();
+        assert!(accepted < quoted && quoted < collected && collected < updated);
+        assert!(body.contains("exec_price: fee_basis_price"));
+    }
+    assert!(single.contains("execute_trade_with_fee_loss_stale_scoped_not_atomic"));
+    assert!(single.contains("stage_trade_driven_mark_target_view"));
+    assert!(batch.contains("execute_batch_with_fee_loss_stale_scoped_not_atomic"));
+    assert!(batch.contains("set_asset_raw_oracle_targets_not_atomic"));
+
+    let accepted = inv045_function_body(production, "accepted_reported_trade_price_view");
+    assert!(accepted.contains("ensure_valid_reported_trade_price(reported_exec_price)?"));
+    assert!(accepted.contains("return Ok(effective_price)"));
+    assert!(accepted.contains("clamp_toward_engine_dt"));
+    assert!(
+        !accepted.contains("abs_diff"),
+        "off-mark distance must not become an availability gate",
+    );
+
+    let quote = inv045_function_body(production, "hybrid_trade_fee_quote_view");
+    assert!(quote.contains(".min(max_trading_fee_bps)"));
+    assert!(quote.contains(".min(fee_supported_move_bps)"));
+    assert!(quote.contains("mark_externality_notional"));
+    assert!(quote.contains("fee_bps_for_two_sided_fee_paid"));
+
+    // This exact production census includes four authoritative profile writes, two simulation
+    // writes, and four compatibility mirrors. Initialization and retirement literals are pinned.
+    assert_eq!(
+        production.matches(".mark_ewma_e6 = ").count(),
+        10,
+        "a new mark writer requires an invariant disposition",
+    );
+    for writer in [
+        "profile.mark_ewma_e6 = frozen_mark",
+        "profile.mark_ewma_e6 = price",
+        "profile.mark_ewma_e6 = next_mark",
+        "profile.mark_ewma_e6 = post_trade_mark_e6",
+        "simulated_profile.mark_ewma_e6 = next_price",
+        "simulated_profile.mark_ewma_e6 = effective_price",
+    ] {
+        assert!(
+            production.contains(writer),
+            "missing classified writer {writer}"
+        );
+    }
+    assert_eq!(production.matches("mark_ewma_e6: initial_price").count(), 2);
+    assert_eq!(production.matches("mark_ewma_e6: 0").count(), 1);
 }
