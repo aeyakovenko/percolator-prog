@@ -67,6 +67,9 @@ mod inv_025_exact_stock_reconciliation;
 #[path = "../tests/invariants/kani/inv_029_positive_claim_bounds_never_understate.rs"]
 mod inv_029_positive_claim_bounds_never_understate;
 
+#[path = "../tests/invariants/kani/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs"]
+mod inv_030_credit_rate_determinism_and_fail_closed_behavior;
+
 #[path = "../tests/invariants/kani/inv_036_fee_destination_and_policy_version_integrity.rs"]
 mod inv_036_fee_destination_and_policy_version_integrity;
 

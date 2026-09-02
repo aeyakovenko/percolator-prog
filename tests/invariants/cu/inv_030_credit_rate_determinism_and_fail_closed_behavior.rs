@@ -25,9 +25,11 @@
 //! exclusively inside the pinned engine; INV-088 separately inventories every wrapper-to-engine
 //! transition callsite, so this wrapper suite does not duplicate the engine's arithmetic proof.
 //!
-//! Guarantee boundary: full-width arithmetic remains covered by engine/Kani and INV-085
-//! arithmetic-differential tests. Unbounded whole-production-state induction is not claimed by the
-//! finite deployed graph.
+//! The wrapper induction proof closes the sequence-length boundary under the exact pinned engine
+//! rate contract. It proves the deployed source-credit codec at full width, then lifts arbitrary
+//! successful engine frame/recompute/reincarnation steps through the wrapper commit. Full-width
+//! rate arithmetic remains engine-owned and conditional on the named arithmetic axiom plus
+//! INV-085 differential evidence.
 
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{SourceCreditStateV16, BOUND_SCALE, CREDIT_RATE_SCALE};
@@ -248,6 +250,36 @@ fn v16_program_credit_rate_transition_composition_is_source_complete() {
     assert!(transitions.contains(
         "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
+
+    let induction =
+        include_str!("../kani/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs");
+    for required in [
+        "fn kani_inv030_source_credit_account_codec_preserves_every_engine_field(",
+        "wire.credit_rate_num.get(), source.credit_rate_num",
+        "wire.credit_epoch.get(), source.credit_epoch",
+        "fn kani_inv030_wrapper_commit_preserves_engine_rate_induction_step(",
+        "same_incarnation && !same_inputs",
+        "committed.credit_rate_num, expected_after",
+    ] {
+        assert!(
+            induction.contains(required),
+            "INV-030 wrapper induction decomposition lost {required}",
+        );
+    }
+
+    // These exact-pin engine obligations own the arithmetic and source-state postcondition. The
+    // wrapper proof deliberately consumes them instead of restating the U256 circuit.
+    let engine_obligations = [
+        "contract_check_available_backing_num_for_source_credit_state",
+        "proof_v16_source_credit_rate_never_exceeds_available_backing_ratio",
+        "prepare_source_credit_domain_recompute_for_epoch_steps",
+        "validate_source_credit_state_static",
+    ];
+    assert_eq!(
+        engine_obligations.len(),
+        4,
+        "INV-030 exact-pin engine rate-contract roster drift",
+    );
 }
 
 #[test]
