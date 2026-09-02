@@ -3,7 +3,10 @@
 //! Partitioning an authorized operation must not produce a more favorable final
 //! economic state than the aggregate operation. These public LiteSVM checks compare
 //! normalized market and portfolio economics for one aggregate route versus split
-//! execution of the same total trade or withdrawal.
+//! execution of the same total trade or withdrawal. The source-complete composition
+//! gate at the end of this file owns the current partition-sensitive surface without
+//! duplicating the dedicated oracle, liquidation, rate, policy, and maximum-shape
+//! scenarios that discharge those dimensions.
 
 use super::*;
 
@@ -861,4 +864,279 @@ fn v16_program_full_14_leg_maximum_accrual_prefix_stays_bounded() {
         second_cu < 1_400_000,
         "second full-shape prefix used {second_cu} CU"
     );
+}
+
+#[derive(Clone, Copy)]
+struct Inv052PartitionClass {
+    class: &'static str,
+    witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv052_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+#[test]
+fn v16_program_split_merge_operation_family_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv052PartitionClass] = &[
+        Inv052PartitionClass {
+            class: "trade withdrawal and owner-reduction partitions",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_052_split_merge_invariance.rs",
+                    "v16_program_split_trade_matches_aggregate_trade_economics",
+                ),
+                (
+                    "tests/invariants/cu/inv_052_split_merge_invariance.rs",
+                    "v16_program_split_fee_trade_cannot_reduce_collected_fees",
+                ),
+                (
+                    "tests/invariants/cu/inv_052_split_merge_invariance.rs",
+                    "v16_program_split_withdraw_matches_aggregate_withdraw_economics",
+                ),
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_owner_rebalance_reduction_is_split_merge_invariant",
+                ),
+            ],
+        },
+        Inv052PartitionClass {
+            class: "claim insurance backing and source-lien partitions",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_public_resolved_claim_split_is_conservatively_rounded",
+                ),
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_public_mixed_fresh_expired_source_liens_are_split_merge_invariant",
+                ),
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_backing_fee_partitions_are_conservative_and_value_exact",
+                ),
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_backed_claim_conversion_is_atomic_under_split_caps",
+                ),
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_live_insurance_withdrawal_is_split_merge_invariant",
+                ),
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_terminal_insurance_withdrawal_is_split_merge_invariant",
+                ),
+            ],
+        },
+        Inv052PartitionClass {
+            class: "mixed-oracle history and canonical accrual partitions",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_net_funding_is_partition_invariant_but_paid_only_rewards_are_not",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_no_free_mark_movement.rs",
+                    "v16_program_mark_writer_and_trade_exit_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_052_split_merge_invariance.rs",
+                    "v16_program_full_14_leg_maximum_accrual_prefix_stays_bounded",
+                ),
+            ],
+        },
+        Inv052PartitionClass {
+            class: "engine-selected liquidation partitions and maximum shape",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_public_liquidation_split_and_order_are_conservative",
+                ),
+                (
+                    "tests/invariants/cu/inv_061_deterministic_bounded_liquidation.rs",
+                    "v16_program_liquidation_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_attack_public_14_leg_28_source_equal_risk_liquidation_stays_bounded",
+                ),
+            ],
+        },
+        Inv052PartitionClass {
+            class: "credit-rate cooldown and cumulative-policy partitions",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs",
+                    "v16_program_credit_rate_transition_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_064_insurance_withdrawal_policy_equivalence.rs",
+                    "v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget",
+                ),
+                (
+                    "tests/invariants/cu/inv_087_no_phantom_controls_or_dead_security_fields.rs",
+                    "v16_program_asset_activation_cooldown_is_enforced_and_then_reopens",
+                ),
+                (
+                    "tests/invariants/cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",
+                    "v16_program_split_fills_cannot_cross_position_or_side_oi_cap_on_any_route_pair",
+                ),
+                (
+                    "tests/invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs",
+                    "v16_control_sequences_accept_gaps_reject_replays_and_keep_lanes_independent",
+                ),
+            ],
+        },
+        Inv052PartitionClass {
+            class: "inbound custody provider and bounded-work amount partitions",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_025_exact_stock_reconciliation.rs",
+                    "v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks",
+                ),
+                (
+                    "tests/invariants/cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",
+                    "v16_program_topups_cannot_bypass_cumulative_tvl_cap",
+                ),
+                (
+                    "tests/invariants/cu/inv_024_attributed_quote_value_conservation.rs",
+                    "v16_attack_cure_deposit_exact_and_atomic",
+                ),
+                (
+                    "tests/invariants/cu/inv_017_signer_writable_role_and_account_alias_safety.rs",
+                    "v16_attack_swap_secondary_unauthorized_and_bounded",
+                ),
+                (
+                    "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs",
+                    "v16_program_value_withdrawal_routes_preserve_exact_whole_route_deltas",
+                ),
+                (
+                    "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+                    "v16_program_backing_earnings_global_summary_is_order_independent_across_domains",
+                ),
+                (
+                    "tests/invariants/cu/inv_041_deterministic_allocation_and_caller_order_independence.rs",
+                    "v16_attack_force_close_dust_chunking_is_value_path_independent",
+                ),
+                (
+                    "tests/invariants/cu/inv_023_caller_input_confinement_for_derived_safety_state.rs",
+                    "v16_program_recovery_b_budget_changes_work_partition_not_economic_truth",
+                ),
+                (
+                    "tests/invariants/cu/inv_089_activation_reactivation_and_initialization_equivalence.rs",
+                    "v16_attack_permissionless_reuse_respects_activation_cooldown_and_fee_atomicity",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-052 composition must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the split/merge-certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut classes = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate partition class");
+        assert!(!row.witnesses.is_empty());
+        for (path, witness) in row.witnesses {
+            assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv052_source_defines_function(source, witness),
+                "partition class '{}' lacks executable witness {path}#{witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 6, "partition class roster drift");
+    assert_eq!(witnesses.len(), 30, "partition witness roster drift");
+
+    // This is the complete INV-023 SIGNED_ECONOMIC/BOUNDED_WORK surface, including inbound and
+    // provider operations. A new economic field must receive a split/merge disposition here.
+    let caller_roster = include_str!("../inv_023_caller_input_roster.tsv");
+    for row in [
+        "Deposit\tamount\tSIGNED_ECONOMIC\t",
+        "Withdraw\tamount\tSIGNED_ECONOMIC\t",
+        "TradeNoCpi\tsize_q,exec_price,fee_bps,backing_fee_cap_bps\tSIGNED_ECONOMIC\t",
+        "TradeCpi\tsize_q,fee_bps,limit_price,backing_fee_cap_bps\tSIGNED_ECONOMIC\t",
+        "BatchTradeNoCpi\tlegs\tSIGNED_ECONOMIC\t",
+        "BatchTradeCpi\tlegs\tSIGNED_ECONOMIC\t",
+        "TopUpInsurance\tamount\tSIGNED_ECONOMIC\t",
+        "TopUpInsuranceDomain\tamount\tSIGNED_ECONOMIC\t",
+        "TopUpBackingBucket\tamount,expiry_slot\tSIGNED_ECONOMIC\t",
+        "TopUpBackingBucket\tbacking_fee_bps,insurance_share_bps\tSIGNED_ECONOMIC\t",
+        "WithdrawBackingBucket\tamount\tSIGNED_ECONOMIC\t",
+        "ConvertReleasedPnl\tamount\tSIGNED_ECONOMIC\t",
+        "WithdrawBackingBucketEarnings\tamount\tSIGNED_ECONOMIC\t",
+        "ForceCloseAbandonedAsset\tclose_q\tBOUNDED_WORK\t",
+        "UpdateAssetLifecycle\tmax_init_fee\tSIGNED_ECONOMIC\t",
+        "WithdrawInsuranceAsset\tamount\tSIGNED_ECONOMIC\t",
+        "CureAndCancelClose\toptional_deposit\tSIGNED_ECONOMIC\t",
+        "ForfeitRecoveryLeg\tb_delta_budget\tBOUNDED_WORK\t",
+        "RebalanceReduce\treduce_q\tSIGNED_ECONOMIC\t",
+        "SwapSecondaryForPrimary\tamount\tSIGNED_ECONOMIC\t",
+        "BatchTradeLeg\tsize_q,exec_price,fee_bps\tSIGNED_ECONOMIC\t",
+        "BatchTradeCpiLeg\tsize_q,fee_bps,limit_price\tSIGNED_ECONOMIC\t",
+    ] {
+        assert!(
+            caller_roster.contains(row),
+            "missing partition field row {row}"
+        );
+    }
+    let classified_count = caller_roster
+        .lines()
+        .filter(|line| {
+            let mut fields = line.split('\t');
+            let _owner = fields.next();
+            let _inputs = fields.next();
+            matches!(fields.next(), Some("SIGNED_ECONOMIC" | "BOUNDED_WORK"))
+        })
+        .count();
+    assert_eq!(
+        classified_count, 22,
+        "new signed-economic or bounded-work input requires an INV-052 disposition",
+    );
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    assert_eq!(
+        production.matches("AutoCrankPlanV16::Liquidate").count(),
+        3,
+        "a changed liquidation ingress reopens split/merge closure",
+    );
+    for forbidden_variant in ["Liquidate {", "LiquidatePosition", "LiquidateAccount"] {
+        assert!(
+            !production.contains(&format!("Self::{forbidden_variant}")),
+            "caller-sized liquidation route {forbidden_variant} reopens INV-052",
+        );
+    }
+
+    let transitions = include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transitions.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
 }
