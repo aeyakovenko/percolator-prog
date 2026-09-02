@@ -8760,6 +8760,9 @@ mod inv_033_insurance_backed_lien_single_classification;
 #[path = "invariants/cu/inv_034_domain_and_instance_isolation.rs"]
 mod inv_034_domain_and_instance_isolation;
 
+#[path = "invariants/cu/inv_035_no_global_b_pool_residuals_remain_local.rs"]
+mod inv_035_no_global_b_pool_residuals_remain_local;
+
 #[path = "invariants/cu/inv_036_fee_destination_and_policy_version_integrity.rs"]
 mod inv_036_fee_destination_and_policy_version_integrity;
 
