@@ -22,9 +22,11 @@
 //! and a post-episode owner reduction. The stateful two-asset ADL matrix creates two later
 //! authenticated deficits on a multi-leg account: the second either retains the first selected
 //! residual or canonically removes it and selects the other asset, while the third repeats that
-//! second selection at a fresh bounded slot. Larger actor partitions, four-plus liquidation
-//! episodes, arbitrary close partitions, and
-//! complete loss attribution remain; the 28-source plus 42-feed product is owned by INV-077.
+//! second selection at a fresh bounded slot. `v16_program_liquidation_composition_is_source_complete`
+//! closes the current account-local liquidation surface by binding the exact engine pin, selector,
+//! sizing, fee, OI, residual, Recovery, and dispatch proofs to the sole public crank plus the
+//! maximum-shape CU witnesses. Caller-sized close partitions are source-excluded. A new engine pin,
+//! liquidation ingress, selector branch, supported shape, or witness reopens the invariant.
 
 use super::*;
 
@@ -1803,4 +1805,208 @@ fn v16_engine_selected_liquidation_fee_is_bounded_by_closed_position() {
         "accounting == real vault"
     );
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
+
+#[derive(Clone, Copy)]
+struct Inv061LiquidationClass {
+    class: &'static str,
+    engine_proofs: &'static [&'static str],
+    public_witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv061_source_defines_test(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+#[test]
+fn v16_program_liquidation_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv061LiquidationClass] = &[
+        Inv061LiquidationClass {
+            class: "sole public ingress and deterministic dispatch",
+            engine_proofs: &[
+                "contract_check_first_actionable_slot",
+                "contract_check_select_auto_crank_plan",
+                "contract_check_select_progress_witness",
+            ],
+            public_witnesses: &[(
+                "tests/invariants/cu/inv_059_fee_fragmentation_bound.rs",
+                "v16_program_liquidation_fee_surface_is_single_route_and_engine_selected",
+            )],
+        },
+        Inv061LiquidationClass {
+            class: "minimum health-restoring close selection",
+            engine_proofs: &[
+                "proof_v16_liquidation_projection_identifies_minimum_no_fee_close",
+                "proof_v16_liquidation_projection_includes_fee_equity_debit",
+                "proof_v16_liquidation_selector_is_healthy_locally_minimal_or_full_close",
+            ],
+            public_witnesses: &[(
+                "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                "v16_program_scaled_liquidation_matches_independent_selector_model",
+            )],
+        },
+        Inv061LiquidationClass {
+            class: "risk reduction and effective OI coherence",
+            engine_proofs: &[
+                "proof_v16_trade_reductions_are_funded_only_by_preexisting_side_oi",
+                "proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk",
+                "contract_check_kernel_resize_leg_same_side",
+                "contract_check_kernel_clear_leg",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_061_deterministic_bounded_liquidation.rs",
+                    "v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_048_matched_trade_and_open_interest_coherence.rs",
+                    "v16_program_position_mutation_composition_is_source_complete",
+                ),
+            ],
+        },
+        Inv061LiquidationClass {
+            class: "fee and reward partition",
+            engine_proofs: &[
+                "proof_v16_liquidation_fee_rejects_subminimum_partial_chunks",
+                "proof_v16_liquidation_fee_allows_subminimum_full_close",
+                "proof_v16_liquidation_partial_fee_acceptance_implies_no_min_floor_extraction",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_059_fee_fragmentation_bound.rs",
+                    "v16_program_new_liquidation_fee_episode_requires_new_authenticated_deficit",
+                ),
+                (
+                    "tests/invariants/cu/inv_061_deterministic_bounded_liquidation.rs",
+                    "v16_program_liquidation_cranker_reward_bounded_by_fee",
+                ),
+            ],
+        },
+        Inv061LiquidationClass {
+            class: "durable residual or declared Recovery fallback",
+            engine_proofs: &[
+                "proof_v16_liquidation_preflight_accepts_only_fully_durable_residual",
+                "proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_recovery",
+                "proof_v16_liquidation_error_commits_only_fully_declared_recovery",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_061_deterministic_bounded_liquidation.rs",
+                    "v16_program_reset_carry_liquidation_matrix_preserves_progress",
+                ),
+                (
+                    "tests/invariants/stateful/inv_071_crank_progress.rs",
+                    "v16_program_unattributed_multi_asset_loss_reaches_liquidation_and_terminal_payout",
+                ),
+            ],
+        },
+        Inv061LiquidationClass {
+            class: "terminal order and funded exit",
+            engine_proofs: &["proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation"],
+            public_witnesses: &[(
+                "tests/invariants/stateful/inv_061_deterministic_bounded_liquidation.rs",
+                "v16_program_resolved_adl_close_order_matrix_preserves_funded_exits",
+            )],
+        },
+        Inv061LiquidationClass {
+            class: "maximum account, source, and oracle shape",
+            engine_proofs: &["proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work"],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_attack_public_14_leg_28_source_equal_risk_liquidation_stays_bounded",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_attack_public_14_leg_28_source_42_feed_refresh_stays_bounded",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_program_max_source_liquidation_asset_matrix_has_bounded_public_exits",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-061 proof composition must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the liquidation-certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut classes = std::collections::BTreeSet::new();
+    let mut proofs = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate liquidation class");
+        assert!(!row.engine_proofs.is_empty());
+        assert!(!row.public_witnesses.is_empty());
+        for proof in row.engine_proofs {
+            assert!(proofs.insert(*proof), "duplicate engine proof {proof}");
+            assert!(
+                proof.starts_with("contract_check_") || proof.starts_with("proof_v16_"),
+                "unclassified liquidation proof {proof}",
+            );
+        }
+        for (path, witness) in row.public_witnesses {
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv061_source_defines_test(source, witness),
+                "liquidation class '{}' lacks executable witness {path}#{witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 7, "liquidation class roster drift");
+    assert_eq!(proofs.len(), 18, "liquidation proof roster drift");
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    assert_eq!(
+        production.matches("AutoCrankPlanV16::Liquidate").count(),
+        3,
+        "a new liquidation dispatch requires selector, frame, and CU evidence",
+    );
+    assert_eq!(
+        production.matches("LiquidationRequestV16").count(),
+        0,
+        "the wrapper must not construct a caller-sized liquidation request",
+    );
+    for forbidden_variant in ["Liquidate {", "LiquidatePosition", "LiquidateAccount"] {
+        assert!(
+            !production.contains(&format!("Self::{forbidden_variant}")),
+            "a direct liquidation instruction reopens INV-061",
+        );
+    }
+
+    let caller_roster = include_str!("../inv_023_caller_input_roster.tsv");
+    assert!(caller_roster.contains("PermissionlessCrank\tobservations\tDISCOVERY_HINT\t"));
+    assert!(caller_roster
+        .contains("CrankObservationHint\tasset_index,oracle_accounts\tDISCOVERY_HINT\t"));
+    assert!(!caller_roster.contains("PermissionlessCrank.close"));
+
+    let transition_census =
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transition_census.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
 }
