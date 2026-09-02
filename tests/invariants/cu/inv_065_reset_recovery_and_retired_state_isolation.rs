@@ -3,6 +3,8 @@
 //! Once a side enters `ResetPending`, it must not admit fresh counterparty risk
 //! until the side is actually empty and finalized. The same public sequence must
 //! preserve cleanup progress and the innocent counterparty's withdrawable funds.
+//! The source-complete gate below composes the public lifecycle products with the
+//! exact pinned engine contracts and the complete wrapper admission census.
 
 use super::*;
 
@@ -540,4 +542,297 @@ fn v16_bpf_recovery_and_reset_tags_are_bounded_and_update_state() {
     assert_cu_within("FinalizeResetSide", reset_cu, CUSTODY_CU_LIMIT);
     let (_, group) = reset_env.market_state();
     assert_eq!(group.assets[0].mode_long, SideModeV16::Normal);
+}
+
+#[derive(Clone, Copy)]
+struct Inv065LifecycleClass {
+    class: &'static str,
+    engine_proofs: &'static [&'static str],
+    public_witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv065_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+fn inv065_braced_body_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing production marker {marker}"));
+    let open = start
+        + source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("missing body after {marker}"));
+    let mut depth = 0i32;
+    for (offset, character) in source[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[(open + 1)..(open + offset)];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated body after {marker}");
+}
+
+#[test]
+fn v16_program_lifecycle_isolation_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv065LifecycleClass] = &[
+        Inv065LifecycleClass {
+            class: "complete public state admission",
+            engine_proofs: &[
+                "proof_v16_persisted_risk_gate_is_complete_for_all_lifecycles_and_side_modes",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_055_state_indexed_admission.rs",
+                    "v16_program_every_public_instruction_has_a_state_admission_owner",
+                ),
+                (
+                    "tests/invariants/cu/inv_055_state_indexed_admission.rs",
+                    "v16_program_reset_pending_admission_matrix_rejects_risk_then_restores_trade",
+                ),
+            ],
+        },
+        Inv065LifecycleClass {
+            class: "ResetPending entry cleanup and finalization",
+            engine_proofs: &[
+                "proof_v16_public_finalize_side_reset_success_is_value_neutral",
+                "proof_v16_public_finalize_side_reset_rejects_each_blocker_without_mutation",
+                "proof_v16_zero_oi_residue_reset_is_complete_independent_and_value_neutral",
+                "proof_v16_frame_side_reset_touches_only_declared_state",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs",
+                    "v16_program_unilateral_zero_oi_reset_route_side_matrix_finalizes_permissionlessly",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_reset_pending_seeded_frontier_is_exact_and_terminal",
+                ),
+            ],
+        },
+        Inv065LifecycleClass {
+            class: "Recovery transition and owner or permissionless exit",
+            engine_proofs: &[
+                "proof_v16_asset_recovery_transition_freezes_price_and_bumps_once",
+                "proof_v16_asset_recovery_transition_is_idempotent_after_recovery",
+                "proof_v16_permissionless_recovery_crank_is_accounting_neutral",
+                "contract_check_kernel_forfeit_residual_step",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs",
+                    "v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit",
+                ),
+                (
+                    "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs",
+                    "v16_program_owner_recovery_forfeit_strictly_reduces_each_position_episode",
+                ),
+                (
+                    "tests/invariants/cu/inv_078_permissionless_recovery_coverage.rs",
+                    "v16_attack_locally_stale_permissionless_asset_can_shutdown_and_force_close",
+                ),
+            ],
+        },
+        Inv065LifecycleClass {
+            class: "overlapping reset shutdown close and retained operation orders",
+            engine_proofs: &[
+                "proof_v16_auto_crank_refresh_target_includes_recovery_reset_obligation",
+                "proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation",
+                "proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs",
+                    "v16_program_shutdown_during_reset_pending_retains_permissionless_progress",
+                ),
+                (
+                    "tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs",
+                    "v16_program_shutdown_after_reset_cleanup_is_order_safe",
+                ),
+                (
+                    "tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs",
+                    "v16_program_retained_reduction_landing_after_shutdown_has_a_bounded_recovery_fallback",
+                ),
+                (
+                    "tests/invariants/stateful/inv_074_scope_locality.rs",
+                    "v16_program_active_close_shutdown_order_preserves_all_funded_exits",
+                ),
+            ],
+        },
+        Inv065LifecycleClass {
+            class: "multi-asset and shared-portfolio scope isolation",
+            engine_proofs: &[
+                "proof_v16_public_restart_asset_zero_preserves_only_selected_slot_in_two_slot_view",
+                "proof_v16_public_restart_nonzero_asset_preserves_only_selected_slot_in_two_slot_view",
+                "contract_check_asset_restart_next_counters",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs",
+                    "v16_program_two_asset_reset_recovery_orders_progress_without_crossing_scope",
+                ),
+                (
+                    "tests/invariants/stateful/inv_074_scope_locality.rs",
+                    "v16_program_shared_portfolio_reset_prerequisite_has_bounded_exit_schedule",
+                ),
+            ],
+        },
+        Inv065LifecycleClass {
+            class: "retirement restart and fresh-generation admission",
+            engine_proofs: &[
+                "proof_v16_restart_empty_asset_core_preserves_budgets_and_assigns_fresh_market",
+                "proof_v16_public_restart_empty_asset_zero_preserves_budgets_and_senior_value",
+                "proof_v16_retire_nonempty_asset_rejects",
+                "proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped",
+                "proof_v16_retirement_backing_normalization_never_erases_obligations",
+                "proof_v16_canonical_retired_asset_slot_preserves_identity_and_clears_local_ledgers",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs",
+                    "v16_program_drain_only_allows_reduction_then_empty_asset_retires",
+                ),
+                (
+                    "tests/invariants/cu/inv_069_terminal_normalization_and_retirement.rs",
+                    "v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper_cleanup",
+                ),
+                (
+                    "tests/invariants/cu/inv_089_activation_reactivation_and_initialization_equivalence.rs",
+                    "v16_program_reused_slot_matches_fresh_persisted_state_after_public_history",
+                ),
+            ],
+        },
+        Inv065LifecycleClass {
+            class: "maximum supported Recovery account source and oracle shape",
+            engine_proofs: &[
+                "proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_attack_public_14_leg_28_source_recovery_forfeit_stays_bounded",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_program_recovery_kf_refresh_at_14_leg_28_source_shape_is_bounded",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-065 lifecycle composition must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the lifecycle-certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut classes = std::collections::BTreeSet::new();
+    let mut proofs = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate lifecycle class");
+        assert!(!row.engine_proofs.is_empty());
+        assert!(!row.public_witnesses.is_empty());
+        for proof in row.engine_proofs {
+            assert!(proofs.insert(*proof), "duplicate engine proof {proof}");
+            assert!(
+                proof.starts_with("proof_v16_") || proof.starts_with("contract_check_"),
+                "unclassified lifecycle proof {proof}",
+            );
+        }
+        for (path, witness) in row.public_witnesses {
+            assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv065_source_defines_function(source, witness),
+                "lifecycle class '{}' lacks executable witness {path}#{witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 7, "lifecycle class roster drift");
+    assert_eq!(proofs.len(), 22, "lifecycle proof roster drift");
+    assert_eq!(witnesses.len(), 19, "lifecycle witness roster drift");
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    for constant in [
+        "pub const ASSET_ACTION_ACTIVATE: u8 = 0;",
+        "pub const ASSET_ACTION_DRAIN_ONLY: u8 = 1;",
+        "pub const ASSET_ACTION_RETIRE: u8 = 2;",
+        "pub const ASSET_ACTION_SHUTDOWN: u8 = 3;",
+    ] {
+        assert_eq!(
+            production.matches(constant).count(),
+            1,
+            "asset lifecycle action roster drifted at {constant}",
+        );
+    }
+
+    let lifecycle = inv065_braced_body_after(production, "fn handle_update_asset_lifecycle");
+    for transition in [
+        "force_asset_recovery_not_atomic",
+        "activate_empty_market_slot_not_atomic",
+        "mark_asset_drain_only_not_atomic",
+        "retire_empty_asset_not_atomic",
+    ] {
+        assert!(
+            lifecycle.contains(transition),
+            "lifecycle handler lost canonical transition {transition}",
+        );
+    }
+    for (handler, transition) in [
+        (
+            "fn handle_restart_asset_oracle",
+            "restart_empty_asset_preserving_insurance_budget_not_atomic",
+        ),
+        (
+            "fn handle_finalize_reset_side",
+            "finalize_side_reset_not_atomic",
+        ),
+        (
+            "fn handle_force_close_abandoned_asset",
+            "force_close_recovery_pair_not_atomic",
+        ),
+        (
+            "fn handle_forfeit_recovery_leg",
+            "forfeit_recovery_leg_not_atomic",
+        ),
+    ] {
+        assert!(
+            inv065_braced_body_after(production, handler).contains(transition),
+            "{handler} lost lifecycle transition {transition}",
+        );
+    }
 }
