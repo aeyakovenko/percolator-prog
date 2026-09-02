@@ -14,8 +14,10 @@
 //! policy then begins terminal settlement. The bounded terminal matrix varies the winner/loser
 //! claimant order, whether `CloseResolved` or `ClaimResolvedPayoutTopup` is attempted first, and the
 //! original trade route. Every complete sweep must make progress, every rejected call must roll
-//! back exactly, receipts must be monotonic, and all funded portfolios must dematerialize before
-//! `CloseSlab` empties the real SPL vault. Per-owner payouts are invariant across every order.
+//! back exactly, receipts must be monotonic, and all funded portfolios must reach economic
+//! disposition before the separately signer-gated dematerialization and `CloseSlab` phases. The
+//! final administrative calls are not represented as permissionless user progress. Per-owner
+//! payouts are invariant across every order.
 //! A second focused route drives the shared stateful rank oracle through the same public
 //! `AdvanceClose` class and requires the residual itself to be a lexicographically decreasing rank
 //! component; aggregate market lock bits alone are not a sufficient progress measure.

@@ -4,7 +4,10 @@
 //! wrapper composition executes the pinned engine's real selector over arbitrary class magnitudes
 //! and proves that applying the named per-class postcondition strictly lowers one finite
 //! lexicographic rank. A second proof exhausts every overlap of the eight actionable-summary flags
-//! and proves that at most seven class-completion steps reach `NoAction`.
+//! and proves that at most seven class-completion steps reach `NoAction`. A third proof keeps
+//! economic disposition separate from physical retirement: under its named signer-fairness
+//! assumptions, each owner/provider/operator/market-authority cleanup step strictly lowers a
+//! finite administrative rank, but none is mislabeled as permissionless economic progress.
 //!
 //! This is not a duplicate model of engine state. INV-071 source-locks the classifier, selector,
 //! dispatch, and rank contracts to all wrapper callsites and public witnesses; INV-077 owns the
@@ -26,6 +29,83 @@ struct AccountLivenessRank {
     liquidation: u128,
     source_lien: u128,
     refresh: u128,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct TerminalAdministrationRank {
+    economic_work: u128,
+    materialized_portfolios: u128,
+    provider_cleanup: u128,
+    insurance_cleanup: u128,
+    asset_cleanup: u128,
+    terminal_scan_work: u128,
+    market_account_open: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalAdministrationStep {
+    PermissionlessEconomicProgress,
+    PortfolioMechanicalClose,
+    ProviderCleanup,
+    InsuranceCleanup,
+    AssetRetire,
+    TerminalSlabProgress,
+    CloseSlab,
+    Done,
+}
+
+fn inv082_select_terminal_administration_step(
+    rank: TerminalAdministrationRank,
+) -> TerminalAdministrationStep {
+    if rank.economic_work != 0 {
+        TerminalAdministrationStep::PermissionlessEconomicProgress
+    } else if rank.materialized_portfolios != 0 {
+        TerminalAdministrationStep::PortfolioMechanicalClose
+    } else if rank.provider_cleanup != 0 {
+        TerminalAdministrationStep::ProviderCleanup
+    } else if rank.insurance_cleanup != 0 {
+        TerminalAdministrationStep::InsuranceCleanup
+    } else if rank.asset_cleanup != 0 {
+        TerminalAdministrationStep::AssetRetire
+    } else if rank.terminal_scan_work != 0 {
+        TerminalAdministrationStep::TerminalSlabProgress
+    } else if rank.market_account_open != 0 {
+        TerminalAdministrationStep::CloseSlab
+    } else {
+        TerminalAdministrationStep::Done
+    }
+}
+
+fn inv082_terminal_step_requires_signer(step: TerminalAdministrationStep) -> bool {
+    matches!(
+        step,
+        TerminalAdministrationStep::PortfolioMechanicalClose
+            | TerminalAdministrationStep::ProviderCleanup
+            | TerminalAdministrationStep::InsuranceCleanup
+            | TerminalAdministrationStep::AssetRetire
+            | TerminalAdministrationStep::TerminalSlabProgress
+            | TerminalAdministrationStep::CloseSlab
+    )
+}
+
+fn inv082_apply_terminal_administration_contract(
+    mut rank: TerminalAdministrationRank,
+    selected: TerminalAdministrationStep,
+) -> TerminalAdministrationRank {
+    let lane = match selected {
+        TerminalAdministrationStep::PermissionlessEconomicProgress => &mut rank.economic_work,
+        TerminalAdministrationStep::PortfolioMechanicalClose => &mut rank.materialized_portfolios,
+        TerminalAdministrationStep::ProviderCleanup => &mut rank.provider_cleanup,
+        TerminalAdministrationStep::InsuranceCleanup => &mut rank.insurance_cleanup,
+        TerminalAdministrationStep::AssetRetire => &mut rank.asset_cleanup,
+        TerminalAdministrationStep::TerminalSlabProgress => &mut rank.terminal_scan_work,
+        TerminalAdministrationStep::CloseSlab => &mut rank.market_account_open,
+        TerminalAdministrationStep::Done => return rank,
+    };
+    *lane = lane
+        .checked_sub(1)
+        .expect("selected terminal phase must have outstanding work");
+    rank
 }
 
 fn inv082_summary_for_rank(
@@ -232,4 +312,76 @@ fn kani_inv082_every_actionable_summary_overlap_reaches_fixed_point() {
         inv082_select(inv082_summary_for_rank(rank, 1), Some(0)),
         AutoCrankPlanV16::NoAction
     ));
+}
+
+#[kani::proof]
+fn kani_inv082_terminal_administration_is_finite_and_not_permissionless() {
+    let before = TerminalAdministrationRank {
+        economic_work: kani::any(),
+        materialized_portfolios: kani::any(),
+        provider_cleanup: kani::any(),
+        insurance_cleanup: kani::any(),
+        asset_cleanup: kani::any(),
+        terminal_scan_work: kani::any(),
+        market_account_open: kani::any(),
+    };
+    let selected = inv082_select_terminal_administration_step(before);
+    let after = inv082_apply_terminal_administration_contract(before, selected);
+
+    kani::cover!(
+        matches!(
+            selected,
+            TerminalAdministrationStep::PermissionlessEconomicProgress
+        ),
+        "permissionless economic phase selected"
+    );
+    kani::cover!(
+        matches!(
+            selected,
+            TerminalAdministrationStep::PortfolioMechanicalClose
+        ),
+        "portfolio mechanical-close phase selected"
+    );
+    kani::cover!(
+        matches!(selected, TerminalAdministrationStep::ProviderCleanup),
+        "provider cleanup phase selected"
+    );
+    kani::cover!(
+        matches!(selected, TerminalAdministrationStep::InsuranceCleanup),
+        "insurance cleanup phase selected"
+    );
+    kani::cover!(
+        matches!(selected, TerminalAdministrationStep::AssetRetire),
+        "asset retirement phase selected"
+    );
+    kani::cover!(
+        matches!(selected, TerminalAdministrationStep::TerminalSlabProgress),
+        "terminal slab scan phase selected"
+    );
+    kani::cover!(
+        matches!(selected, TerminalAdministrationStep::CloseSlab),
+        "market close phase selected"
+    );
+    kani::cover!(
+        matches!(selected, TerminalAdministrationStep::Done),
+        "terminal administrative fixed point selected"
+    );
+
+    assert_eq!(
+        matches!(selected, TerminalAdministrationStep::Done),
+        before == TerminalAdministrationRank::default()
+    );
+    assert!(before == TerminalAdministrationRank::default() || after < before);
+    assert_eq!(
+        matches!(
+            selected,
+            TerminalAdministrationStep::PermissionlessEconomicProgress
+        ),
+        before.economic_work != 0
+    );
+    assert_eq!(
+        inv082_terminal_step_requires_signer(selected),
+        before.economic_work == 0 && before != TerminalAdministrationRank::default()
+    );
+    assert_eq!(after.economic_work, before.economic_work.saturating_sub(1));
 }

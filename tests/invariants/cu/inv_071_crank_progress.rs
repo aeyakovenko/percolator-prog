@@ -2722,6 +2722,7 @@ fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
     for theorem in [
         "kani_inv082_actual_engine_selector_composes_to_strict_rank_decrease",
         "kani_inv082_every_actionable_summary_overlap_reaches_fixed_point",
+        "kani_inv082_terminal_administration_is_finite_and_not_permissionless",
     ] {
         assert!(
             inv071_source_defines_function(&rank_composition, theorem),

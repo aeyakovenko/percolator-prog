@@ -4996,3 +4996,284 @@ fn v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
     assert_eq!(group.mode, percolator::MarketModeV16::Resolved);
     assert_eq!(group.resolved_slot, 5);
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Inv073TerminalAuthority {
+    PermissionlessEconomic,
+    PermissionlessMechanical,
+    OwnerOrResolvedMarketAuthority,
+    BackingAuthorityOrShutdownMarketAuthority,
+    InsuranceAuthorityOrShutdownMarketAuthority,
+    MarketAuthority,
+}
+
+#[derive(Clone, Copy)]
+struct Inv073TerminalPhase {
+    rank_lane: &'static str,
+    handler: &'static str,
+    transition: &'static str,
+    authority: Inv073TerminalAuthority,
+    witness_path: &'static str,
+    witness: &'static str,
+}
+
+fn inv073_braced_body_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing production marker {marker}"));
+    let open = start
+        + source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("missing body after {marker}"));
+    let mut depth = 0i32;
+    for (offset, character) in source[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[(open + 1)..(open + offset)];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated body after {marker}");
+}
+
+fn inv073_source_defines_test(source: &str, function: &str) -> bool {
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&format!("fn {function}"))
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+#[test]
+fn v16_program_terminal_disposition_and_administrative_retirement_are_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const PHASES: &[Inv073TerminalPhase] = &[
+        Inv073TerminalPhase {
+            rank_lane: "economic-work",
+            handler: "fn handle_permissionless_crank_zero_copy<'a>(",
+            transition: ".permissionless_auto_crank_not_atomic(",
+            authority: Inv073TerminalAuthority::PermissionlessEconomic,
+            witness_path: "tests/invariants/stateful/inv_082_state_indexed_liveness_theorem.rs",
+            witness: "v16_program_bounded_public_crank_graph_reaches_terminal_rank",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "economic-work",
+            handler: "fn handle_resolve_stale_permissionless<'a>(",
+            transition: "resolve_market_view(&cfg, &mut group, authenticated_slot, true)",
+            authority: Inv073TerminalAuthority::PermissionlessEconomic,
+            witness_path: "tests/invariants/cu/inv_073_no_permanent_user_lock.rs",
+            witness: "v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "economic-work",
+            handler: "fn handle_close_resolved<'a>(",
+            transition: ".permissionless_auto_crank_not_atomic(",
+            authority: Inv073TerminalAuthority::PermissionlessEconomic,
+            witness_path: "tests/invariants/cu/inv_071_crank_progress.rs",
+            witness: "v16_program_permissionless_crank_closes_capital_only_resolved_account",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "economic-work",
+            handler: "fn handle_claim_resolved_payout_topup<'a>(",
+            transition: ".claim_resolved_payout_topup_not_atomic(",
+            authority: Inv073TerminalAuthority::PermissionlessEconomic,
+            witness_path:
+                "tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs",
+            witness: "v16_program_full_terminal_lifecycle_is_claimant_order_independent",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "materialized-portfolios",
+            handler: "fn handle_close_portfolio<'a>(",
+            transition: ".deregister_empty_materialized_portfolio_not_atomic(",
+            authority: Inv073TerminalAuthority::OwnerOrResolvedMarketAuthority,
+            witness_path:
+                "tests/invariants/cu/inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs",
+            witness: "v16_attack_sync_maintenance_cannot_close_empty_live_victim_portfolio",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "materialized-portfolios",
+            handler: "fn handle_sync_maintenance_fee<'a>(",
+            transition: ".deregister_empty_materialized_portfolio_not_atomic(",
+            authority: Inv073TerminalAuthority::PermissionlessMechanical,
+            witness_path:
+                "tests/invariants/cu/inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs",
+            witness: "v16_attack_sync_maintenance_cannot_close_empty_live_victim_portfolio",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "provider-cleanup",
+            handler: "fn handle_withdraw_backing_bucket<'a>(",
+            transition: ".withdraw_fresh_counterparty_backing_not_atomic(",
+            authority: Inv073TerminalAuthority::BackingAuthorityOrShutdownMarketAuthority,
+            witness_path:
+                "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+            witness: "expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "insurance-cleanup",
+            handler: "fn handle_withdraw_insurance_asset<'a>(",
+            transition: "debit_market_insurance_budget_view(",
+            authority: Inv073TerminalAuthority::InsuranceAuthorityOrShutdownMarketAuthority,
+            witness_path:
+                "tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs",
+            witness: "v16_program_prior_insurance_frames_all_partial_receipt_orders",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "asset-cleanup",
+            handler: "fn handle_update_asset_lifecycle<'a>(",
+            transition: ".retire_empty_asset_not_atomic(",
+            authority: Inv073TerminalAuthority::MarketAuthority,
+            witness_path:
+                "tests/invariants/stateful/inv_069_terminal_normalization_and_retirement.rs",
+            witness: "v16_program_retirement_obligation_lattice_is_order_independent",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "terminal-scan-work",
+            handler: "fn handle_close_slab<'a>(",
+            transition: ".advance_terminal_slab_not_atomic(",
+            authority: Inv073TerminalAuthority::MarketAuthority,
+            witness_path:
+                "tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs",
+            witness: "v16_program_recovery_force_close_reaches_zero_residue_and_close_slab",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "market-account-open",
+            handler: "fn handle_close_slab<'a>(",
+            transition: "state::write_closed_market_tombstone",
+            authority: Inv073TerminalAuthority::MarketAuthority,
+            witness_path:
+                "tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs",
+            witness: "v16_program_recovery_force_close_reaches_zero_residue_and_close_slab",
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(), 2);
+    assert!(lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")));
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    let mut rank_lanes = std::collections::BTreeSet::new();
+    let mut authorities = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for phase in PHASES {
+        rank_lanes.insert(phase.rank_lane);
+        authorities.insert(format!("{:?}", phase.authority));
+        witnesses.insert((phase.witness_path, phase.witness));
+        let body = inv073_braced_body_after(production, phase.handler);
+        assert!(
+            body.contains(phase.transition),
+            "terminal phase '{}' lost transition {}",
+            phase.rank_lane,
+            phase.transition,
+        );
+        let witness_source = source_cache.entry(phase.witness_path).or_insert_with(|| {
+            std::fs::read_to_string(root.join(phase.witness_path))
+                .unwrap_or_else(|error| panic!("read {}: {error}", phase.witness_path))
+        });
+        assert!(
+            inv073_source_defines_test(witness_source, phase.witness),
+            "terminal phase '{}' lost public witness {}#{}",
+            phase.rank_lane,
+            phase.witness_path,
+            phase.witness,
+        );
+    }
+    assert_eq!(
+        rank_lanes.len(),
+        7,
+        "terminal administrative rank lane drift"
+    );
+    assert_eq!(authorities.len(), 6, "terminal authority-class drift");
+    assert_eq!(witnesses.len(), 9, "terminal public-witness drift");
+
+    assert_eq!(
+        production
+            .matches(".permissionless_auto_crank_not_atomic(")
+            .count(),
+        4,
+        "every wrapper auto-crank callsite must remain classified",
+    );
+    assert_eq!(
+        production
+            .matches(".deregister_empty_materialized_portfolio_not_atomic(")
+            .count(),
+        2,
+        "owner/authority close and permissionless fee cleanup are the complete dematerialization surface",
+    );
+    assert_eq!(
+        production
+            .matches(".retire_empty_asset_not_atomic(")
+            .count(),
+        2,
+        "initial and idempotent retirement branches must both remain classified",
+    );
+    assert_eq!(
+        production
+            .matches(".advance_terminal_slab_not_atomic(")
+            .count(),
+        1,
+        "CloseSlab must retain one canonical bounded scanner",
+    );
+
+    let resolved = inv073_braced_body_after(production, "fn handle_close_resolved<'a>(");
+    assert!(resolved.contains("expect_portfolio_view_owner(&portfolio, owner.key)?"));
+    assert!(resolved.contains("< cfg.force_close_delay_slots"));
+    assert!(resolved.contains("expect_signer(owner)?;"));
+    assert!(resolved.contains("AutoCrankPlanV16::CloseResolved"));
+
+    let close_portfolio = inv073_braced_body_after(production, "fn handle_close_portfolio<'a>(");
+    for guard in [
+        "expect_signer(closer)?;",
+        "let owner_signed = portfolio.header.owner == closer.key.to_bytes();",
+        "let terminal_marketauth_cleanup =",
+        "if !owner_signed && !terminal_marketauth_cleanup",
+        ".deregister_empty_materialized_portfolio_not_atomic(&portfolio.as_view())",
+        "close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?;",
+    ] {
+        assert!(
+            close_portfolio.contains(guard),
+            "ClosePortfolio lost {guard}"
+        );
+    }
+
+    let maintenance = inv073_braced_body_after(production, "fn handle_sync_maintenance_fee<'a>(");
+    assert!(!maintenance.contains("expect_signer("));
+    assert!(maintenance.contains("let close_after_sync = if charged_total == 0"));
+    assert!(
+        maintenance.contains("close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?")
+    );
+
+    let lifecycle = inv073_braced_body_after(production, "fn handle_update_asset_lifecycle<'a>(");
+    assert!(lifecycle.contains("expect_signer(authority)?;"));
+    assert!(lifecycle.contains("if !live_authority_matches(&cfg_pre.marketauth, authority.key)"));
+    assert!(lifecycle.contains("ASSET_ACTION_RETIRE =>"));
+
+    let close_slab = inv073_braced_body_after(production, "fn handle_close_slab<'a>(");
+    for guard in [
+        "expect_signer(admin_dest)?;",
+        "expect_live_authority(&cfg.marketauth, admin_dest.key)?;",
+        "group.header.c_tot.get() != 0",
+        "group.header.materialized_portfolio_count.get() != 0",
+        ".advance_terminal_slab_not_atomic(authenticated_slot, scan_start)",
+        "state::write_closed_market_tombstone",
+    ] {
+        assert!(close_slab.contains(guard), "CloseSlab lost {guard}");
+    }
+
+    let rank_proof = include_str!("../kani/inv_082_state_indexed_liveness_theorem.rs");
+    assert!(rank_proof
+        .contains("fn kani_inv082_terminal_administration_is_finite_and_not_permissionless()"));
+    assert!(rank_proof.contains("struct TerminalAdministrationRank"));
+    assert!(rank_proof.contains("fn inv082_terminal_step_requires_signer"));
+}
