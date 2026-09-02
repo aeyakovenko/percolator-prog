@@ -7,6 +7,7 @@
 //! pending selected marks.
 
 use super::*;
+use percolator::AutoCrankPlanV16;
 
 #[derive(Debug, PartialEq, Eq)]
 struct CrankProgressSnapshot {
@@ -866,5 +867,418 @@ fn v16_program_pending_selected_mark_requires_observation() {
     assert_eq!(
         observed_group.assets[0].effective_price, NEXT_MARK0,
         "selected asset observation applies the pending mark"
+    );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Inv072DrainOnlyCompositeSnapshot {
+    current_slot: u64,
+    oracle_epoch: u64,
+    funding_epoch: u64,
+    risk_epoch: u64,
+    effective_prices: [u64; 2],
+    raw_targets: [u64; 2],
+    asset_slots: [u64; 2],
+    profile_prices: [[u64; 3]; 2],
+    profile_publish_times: [[i64; 3]; 2],
+    cert_oracle_epoch: u64,
+    cert_funding_epoch: u64,
+    cert_risk_epoch: u64,
+    basis_positions: [i128; 2],
+    vault: u128,
+    c_tot: u128,
+    insurance: u128,
+    spl_vault: u64,
+}
+
+fn inv072_drain_only_three_feed_order(order: [usize; 2]) -> Inv072DrainOnlyCompositeSnapshot {
+    const INITIAL_SLOT: u64 = 1;
+    const CRANK_SLOT: u64 = 2;
+    const INITIAL_TIME: i64 = 100;
+    const CRANK_TIME: i64 = 101;
+    const INITIAL_MARK: u64 = 100;
+    const MOVED_MARK: u64 = 95;
+    const FEEDS: [[[u8; 32]; 3]; 2] = [
+        [[0xa1; 32], [0xa2; 32], [0xa3; 32]],
+        [[0xb1; 32], [0xb2; 32], [0xb3; 32]],
+    ];
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 500);
+    set_test_clock(&mut env, INITIAL_SLOT, INITIAL_TIME);
+    for (asset_index, feeds) in FEEDS.iter().enumerate() {
+        let initial = [
+            env.set_pyth_price(&feeds[0], 3_000_000, -6, INITIAL_TIME),
+            env.set_pyth_price(&feeds[1], 150_000_000, -6, INITIAL_TIME),
+            env.set_pyth_price(&feeds[2], 200_000_000, -6, INITIAL_TIME),
+        ];
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            asset_index as u16,
+            3,
+            ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            *feeds,
+            &initial,
+            INITIAL_SLOT,
+            INITIAL_TIME,
+            0,
+            0,
+            3,
+            500,
+        )
+        .unwrap_or_else(|error| panic!("configure DrainOnly asset {asset_index}: {error}"));
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    for asset_index in 0..2 {
+        env.trade_asset_with_cu(
+            asset_index,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            INITIAL_MARK,
+            0,
+        );
+    }
+    for asset_index in 0..2 {
+        env.update_asset_lifecycle_as_admin_with_cu(
+            processor::ASSET_ACTION_DRAIN_ONLY,
+            asset_index,
+            0,
+            0,
+        );
+    }
+    let (_, drain_group) = env.market_state();
+    assert!(
+        drain_group.assets[..2]
+            .iter()
+            .all(|asset| asset.lifecycle == AssetLifecycleV16::DrainOnly),
+        "both publicly exposed assets must enter DrainOnly",
+    );
+
+    set_test_clock(&mut env, CRANK_SLOT, CRANK_TIME);
+    let mut moved = [[Pubkey::default(); 3]; 2];
+    for (asset_index, feeds) in FEEDS.iter().enumerate() {
+        moved[asset_index] = [
+            env.set_pyth_price(&feeds[0], 2_850_000, -6, CRANK_TIME),
+            env.set_pyth_price(&feeds[1], 150_000_000, -6, CRANK_TIME),
+            env.set_pyth_price(&feeds[2], 200_000_000, -6, CRANK_TIME),
+        ];
+    }
+    let observations = order
+        .iter()
+        .map(|asset_index| CrankObservationHint {
+            asset_index: *asset_index as u16,
+            oracle_accounts: 3,
+        })
+        .collect();
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(long, false),
+    ];
+    for asset_index in order {
+        accounts.extend(
+            moved[asset_index]
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+    }
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations,
+            },
+            accounts,
+            &[],
+        )
+        .expect("DrainOnly composite hint order must accrue and refresh");
+    assert_cu_within("INV-072 DrainOnly six-feed refresh", cu, 600_000);
+
+    let market = env.svm.get_account(&env.market).unwrap();
+    let (_, group) = env.market_state();
+    let portfolio = env.portfolio_state(long);
+    let cert = health_cert(&portfolio);
+    let profiles = [
+        state::read_asset_oracle_profile(&market.data, 0).unwrap(),
+        state::read_asset_oracle_profile(&market.data, 1).unwrap(),
+    ];
+    assert_eq!(
+        [
+            group.assets[0].effective_price,
+            group.assets[1].effective_price
+        ],
+        [MOVED_MARK; 2],
+    );
+    assert_eq!(cert.cert_oracle_epoch, group.oracle_epoch);
+    assert_eq!(cert.cert_funding_epoch, group.funding_epoch);
+    assert_eq!(cert.cert_risk_epoch, group.risk_epoch);
+    assert_eq!(
+        [
+            active_leg_for_asset(&portfolio, 0).basis_pos_q,
+            active_leg_for_asset(&portfolio, 1).basis_pos_q,
+        ],
+        [POS_SCALE as i128; 2],
+        "hint ordering must not resize either DrainOnly leg",
+    );
+
+    Inv072DrainOnlyCompositeSnapshot {
+        current_slot: group.current_slot,
+        oracle_epoch: group.oracle_epoch,
+        funding_epoch: group.funding_epoch,
+        risk_epoch: group.risk_epoch,
+        effective_prices: [
+            group.assets[0].effective_price,
+            group.assets[1].effective_price,
+        ],
+        raw_targets: [
+            group.assets[0].raw_oracle_target_price,
+            group.assets[1].raw_oracle_target_price,
+        ],
+        asset_slots: [group.assets[0].slot_last, group.assets[1].slot_last],
+        profile_prices: [
+            profiles[0].oracle_leg_prices_e6,
+            profiles[1].oracle_leg_prices_e6,
+        ],
+        profile_publish_times: [
+            profiles[0].oracle_leg_publish_times,
+            profiles[1].oracle_leg_publish_times,
+        ],
+        cert_oracle_epoch: cert.cert_oracle_epoch,
+        cert_funding_epoch: cert.cert_funding_epoch,
+        cert_risk_epoch: cert.cert_risk_epoch,
+        basis_positions: [
+            active_leg_for_asset(&portfolio, 0).basis_pos_q,
+            active_leg_for_asset(&portfolio, 1).basis_pos_q,
+        ],
+        vault: group.vault,
+        c_tot: group.c_tot,
+        insurance: group.insurance,
+        spl_vault: env.token_amount(env.vault),
+    }
+}
+
+#[test]
+fn v16_program_drain_only_three_feed_hint_order_is_economically_normalized() {
+    assert_eq!(
+        inv072_drain_only_three_feed_order([0, 1]),
+        inv072_drain_only_three_feed_order([1, 0]),
+        "matching six-account tails must normalize identically in DrainOnly",
+    );
+}
+
+#[derive(Clone, Copy)]
+struct Inv072PlanEvidence {
+    plan: &'static str,
+    witness: &'static str,
+}
+
+fn inv072_plan_evidence(plan: AutoCrankPlanV16) -> Inv072PlanEvidence {
+    match plan {
+        AutoCrankPlanV16::NoAction => Inv072PlanEvidence {
+            plan: "NoAction",
+            witness: "v16_regression_crank_idempotent_at_settlement_fixed_point",
+        },
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(_),
+        } => Inv072PlanEvidence {
+            plan: "RefreshAccount(Some)",
+            witness: "v16_program_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle",
+        },
+        AutoCrankPlanV16::RefreshAccount { asset_index: None } => Inv072PlanEvidence {
+            plan: "RefreshAccount(None)",
+            witness: "v16_program_repeated_trade_driven_mark_steps_are_paid_and_exit_live",
+        },
+        AutoCrankPlanV16::SettleBChunk { .. } => Inv072PlanEvidence {
+            plan: "SettleBChunk",
+            witness: "v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded",
+        },
+        AutoCrankPlanV16::Liquidate { .. } => Inv072PlanEvidence {
+            plan: "Liquidate",
+            witness: "v16_program_auto_crank_current_solvent_partial_liquidation_makes_progress",
+        },
+        AutoCrankPlanV16::ReleaseSourceLiens => Inv072PlanEvidence {
+            plan: "ReleaseSourceLiens",
+            witness: "v16_program_max_source_flat_lien_release_and_owner_exit_are_bounded",
+        },
+        AutoCrankPlanV16::AdvanceClose => Inv072PlanEvidence {
+            plan: "AdvanceClose",
+            witness:
+                "v16_program_pending_close_bad_hints_roll_back_then_canonical_crank_progresses",
+        },
+        AutoCrankPlanV16::DeclareRecovery { .. } => Inv072PlanEvidence {
+            plan: "DeclareRecovery",
+            witness: "v16_program_bad_hints_cannot_block_public_expired_close_recovery",
+        },
+        AutoCrankPlanV16::FinalizeRecovery => Inv072PlanEvidence {
+            plan: "FinalizeRecovery",
+            witness: "v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only",
+        },
+        AutoCrankPlanV16::CloseResolved => Inv072PlanEvidence {
+            plan: "CloseResolved",
+            witness: "v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only",
+        },
+    }
+}
+
+#[test]
+fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence() {
+    assert_certified_engine_pin("INV-072 crank-plan roster");
+
+    let plans = [
+        AutoCrankPlanV16::NoAction,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(0),
+        },
+        AutoCrankPlanV16::RefreshAccount { asset_index: None },
+        AutoCrankPlanV16::SettleBChunk { asset_index: 0 },
+        AutoCrankPlanV16::Liquidate { asset_index: 0 },
+        AutoCrankPlanV16::ReleaseSourceLiens,
+        AutoCrankPlanV16::AdvanceClose,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        },
+        AutoCrankPlanV16::FinalizeRecovery,
+        AutoCrankPlanV16::CloseResolved,
+    ];
+    let witness_sources = [
+        include_str!("inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs"),
+        include_str!("inv_071_crank_progress.rs"),
+        include_str!("inv_072_order_robust_crankability.rs"),
+        include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
+        include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
+    ];
+    let mut plan_names = std::collections::BTreeSet::new();
+    for plan in plans {
+        let evidence = inv072_plan_evidence(plan);
+        assert!(
+            plan_names.insert(evidence.plan),
+            "duplicate auto-crank plan evidence for {}",
+            evidence.plan,
+        );
+        assert!(
+            witness_sources
+                .iter()
+                .any(|source| source.contains(&format!("fn {}", evidence.witness))),
+            "auto-crank plan {} lost public witness {}",
+            evidence.plan,
+            evidence.witness,
+        );
+    }
+    assert_eq!(
+        plan_names.len(),
+        10,
+        "NoAction, both RefreshAccount shapes, and all seven other plans need evidence",
+    );
+
+    let parser_witnesses = [
+        "v16_program_crank_hint_matrix_preserves_or_discovers_canonical_progress",
+        "v16_program_external_oracle_hint_and_account_order_is_normalized_or_atomic",
+        "v16_program_drain_only_three_feed_hint_order_is_economically_normalized",
+        "v16_program_crank_authenticated_oracle_account_roles_are_exhaustive",
+        "v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded",
+        "v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape",
+        "v16_program_recovery_reset_crank_tail_matrix_is_order_robust",
+    ];
+    let parser_sources = [
+        include_str!("inv_017_signer_writable_role_and_account_alias_safety.rs"),
+        include_str!("inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs"),
+        include_str!("inv_072_order_robust_crankability.rs"),
+        include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
+        include_str!("../stateful/inv_072_order_robust_crankability.rs"),
+    ];
+    for witness in parser_witnesses {
+        assert!(
+            parser_sources
+                .iter()
+                .any(|source| source.contains(&format!("fn {witness}"))),
+            "hint-parser stratum lost public witness {witness}",
+        );
+    }
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    assert_eq!(
+        production
+            .matches(".permissionless_crank_not_atomic(")
+            .count(),
+        0,
+        "the wrapper must not bypass the sole public auto-crank selector",
+    );
+    assert_eq!(
+        production
+            .matches(".permissionless_auto_crank_not_atomic(")
+            .count(),
+        4,
+        "one resolved route plus three zero-copy dispatch strata are expected",
+    );
+
+    let zero_copy = production
+        .split_once("fn handle_permissionless_crank_zero_copy")
+        .map(|(_, tail)| tail)
+        .and_then(|tail| tail.split_once("fn handle_permissionless_crank<'a>"))
+        .map(|(body, _)| body)
+        .expect("zero-copy crank handler exists");
+    for guard in [
+        "observation_hints.len() > percolator::V16_MAX_PORTFOLIO_ASSETS_N",
+        "group.header.mode == 2",
+        "if summary.expired_close",
+        "asset_index >= group.header.config.max_market_slots.get() as usize",
+        "observations.iter().any(|o| o.asset_index == asset_index)",
+        "AssetLifecycleV16::Active",
+        "AssetLifecycleV16::DrainOnly",
+        "oracle_tail.len() < oracle_account_count",
+        "oracle_account_count != oracle_profile.oracle_leg_count as usize",
+        "if !oracle_tail.is_empty()",
+        "reject_missing_pending_liquidation_observations_view",
+    ] {
+        assert!(
+            zero_copy.contains(guard),
+            "permissionless crank lost hint-parser guard: {guard}",
+        );
+    }
+    let recovery = zero_copy
+        .find("group.header.mode == 2")
+        .expect("Recovery bypass guard");
+    let expired = zero_copy
+        .find("if summary.expired_close")
+        .expect("expired-close bypass guard");
+    let parser = zero_copy
+        .find("for hint in observation_hints.iter()")
+        .expect("live hint parser");
+    let live_dispatch = zero_copy
+        .rfind("permissionless_auto_crank_not_atomic(")
+        .expect("live auto-crank dispatch");
+    assert!(
+        recovery < parser && expired < parser && parser < live_dispatch,
+        "Recovery/expired-close committed-state dispatch must precede the shared Live parser, which must precede Live selection",
+    );
+
+    let public_handler = production
+        .split_once("fn handle_permissionless_crank<'a>")
+        .map(|(_, tail)| tail)
+        .and_then(|tail| tail.split_once("fn account<'a>"))
+        .map(|(body, _)| body)
+        .expect("public crank handler exists");
+    let resolved_dispatch = public_handler
+        .find("mode == MarketModeV16::Resolved")
+        .expect("Resolved mode dispatch");
+    let zero_copy_dispatch = public_handler
+        .find("handle_permissionless_crank_zero_copy(")
+        .expect("Live zero-copy dispatch");
+    assert!(
+        resolved_dispatch < zero_copy_dispatch,
+        "Resolved mode must bypass the Live hint parser through the same engine selector",
     );
 }
