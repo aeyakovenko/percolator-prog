@@ -142,6 +142,12 @@
 //! account order. Stale overshoot and raw-basis requests are work budgets: they must land the
 //! independently derived effective quantity instead of rejecting because the caller observed an
 //! earlier state.
+//! The source-complete composition gate closes the remaining current-surface dimension question:
+//! it binds the generated transition runner's per-step independent oracles to the production-derived
+//! public instruction and wrapper-to-engine callsite censuses, then requires executable owners for
+//! identity, value, source/insurance, position/OI, route/partition, lifecycle/terminal, seeded
+//! frontier, and maximum-shape dimensions. A new public route, engine callsite, supported shape,
+//! engine pin, or missing owner reopens the gate.
 //! This is finite reachability evidence, not equivalence over unbounded sequences.
 
 use super::*;
@@ -1543,6 +1549,379 @@ fn v16_program_dual_adl_force_close_clamps_stale_and_raw_work() {
             "only effective-minus-one must retain one live quantity atom: {discovery:?}"
         );
     }
+}
+
+#[derive(Clone, Copy)]
+struct Inv086ModelDimension {
+    dimension: &'static str,
+    witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv086_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+fn inv086_source_section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start_offset = source
+        .find(start)
+        .unwrap_or_else(|| panic!("missing source section start {start}"));
+    let tail = &source[start_offset..];
+    let end_offset = tail
+        .find(end)
+        .unwrap_or_else(|| panic!("missing source section end {end}"));
+    &tail[..end_offset]
+}
+
+#[test]
+fn v16_program_reference_model_dimension_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const DIMENSIONS: &[Inv086ModelDimension] = &[
+        Inv086ModelDimension {
+            dimension: "public transition census and per-step independent oracle",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_bounded_reference_graph_exhausts_public_action_words",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_reference_model_matches_deployed_public_sequence",
+                ),
+                (
+                    "tests/invariants/public_sbf/inv_079_public_reachability_evidence.rs",
+                    "v16_public_instruction_coverage_registry_matches_production_roster",
+                ),
+                (
+                    "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+                    "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
+                ),
+                (
+                    "tests/invariants/cu/inv_080_error_propagation_and_exact_rollback.rs",
+                    "v16_program_dispatch_and_entrypoints_preserve_every_handler_error",
+                ),
+            ],
+        },
+        Inv086ModelDimension {
+            dimension: "identity incarnation replay and authority epoch",
+            witnesses: &[
+                (
+                    "tests/invariants/public_sbf/inv_001_market_incarnation_binding.rs",
+                    "v16_program_closed_market_incarnation_cannot_be_recreated",
+                ),
+                (
+                    "tests/invariants/cu/inv_002_asset_generation_binding.rs",
+                    "v16_program_asset_generation_field_and_guard_roster_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_003_portfolio_incarnation_binding.rs",
+                    "v16_program_retained_portfolio_binding_roster_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_004_position_episode_binding.rs",
+                    "v16_program_retained_position_binding_and_writer_rosters_are_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_005_authority_incarnation_binding.rs",
+                    "v16_program_authority_epoch_matrix_is_source_complete",
+                ),
+                (
+                    "tests/invariants/public_sbf/inv_006_program_chain_message_type_and_version_binding.rs",
+                    "retained_transaction_binds_program_market_kind_schema_and_blockhash",
+                ),
+                (
+                    "tests/invariants/public_sbf/inv_007_no_aba_reuse.rs",
+                    "v16_program_whole_market_recreate_aba_matrix_is_public_and_nonvacuous",
+                ),
+            ],
+        },
+        Inv086ModelDimension {
+            dimension: "attributed value stock and encumbrance reconciliation",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_024_attributed_quote_value_conservation.rs",
+                    "v16_program_public_trace_enforces_authority_attributed_quote_flow",
+                ),
+                (
+                    "tests/invariants/stateful/inv_025_exact_stock_reconciliation.rs",
+                    "v16_program_public_value_lifecycle_reconciles_every_materialized_stock_census",
+                ),
+                (
+                    "tests/invariants/stateful/inv_026_reservation_and_encumbrance_conservation.rs",
+                    "v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes",
+                ),
+                (
+                    "tests/invariants/cu/inv_025_exact_stock_reconciliation.rs",
+                    "v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks",
+                ),
+            ],
+        },
+        Inv086ModelDimension {
+            dimension: "source credit insurance impairment and single use",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_lien_impairment_seeded_frontier_preserves_bounded_owner_exit",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_payout",
+                ),
+                (
+                    "tests/invariants/cu/inv_033_insurance_backed_lien_single_classification.rs",
+                    "v16_program_public_source_lien_classification_never_double_counts_insurance",
+                ),
+                (
+                    "tests/invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs",
+                    "v16_program_two_accounts_cannot_reserve_the_same_source_backing_atoms",
+                ),
+                (
+                    "tests/invariants/cu/inv_064_insurance_withdrawal_policy_equivalence.rs",
+                    "v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget",
+                ),
+            ],
+        },
+        Inv086ModelDimension {
+            dimension: "position OI ADL and repeated liquidation",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_048_matched_trade_and_open_interest_coherence.rs",
+                    "v16_program_position_mutation_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_061_deterministic_bounded_liquidation.rs",
+                    "v16_program_liquidation_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_061_deterministic_bounded_liquidation.rs",
+                    "v16_program_repeated_partial_liquidation_stops_charging_after_health_restored",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_scaled_liquidation_matches_independent_selector_model",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_dual_adl_force_close_clamps_stale_and_raw_work",
+                ),
+            ],
+        },
+        Inv086ModelDimension {
+            dimension: "equivalent route partition and order products",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_047_equivalent_route_semantics.rs",
+                    "v16_program_equivalent_route_family_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_052_split_merge_invariance.rs",
+                    "v16_program_split_merge_operation_family_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/stateful/inv_041_deterministic_allocation_and_caller_order_independence.rs",
+                    "v16_program_public_source_lien_allocation_is_domain_order_canonical",
+                ),
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_public_liquidation_split_and_order_are_conservative",
+                ),
+                (
+                    "tests/invariants/stateful/inv_024_attributed_quote_value_conservation.rs",
+                    "v16_program_all_trade_route_pairs_preserve_realized_pnl_owner_attribution",
+                ),
+            ],
+        },
+        Inv086ModelDimension {
+            dimension: "lifecycle close terminal and reactivation composition",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_065_reset_recovery_and_retired_state_isolation.rs",
+                    "v16_program_lifecycle_isolation_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_069_terminal_normalization_and_retirement.rs",
+                    "v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper_cleanup",
+                ),
+                (
+                    "tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs",
+                    "v16_program_terminal_stock_and_close_slab_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_071_crank_progress.rs",
+                    "v16_program_crank_progress_and_recovery_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs",
+                    "v16_program_close_finalization_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_089_activation_reactivation_and_initialization_equivalence.rs",
+                    "v16_program_reused_slot_rejects_fifteenth_leg_then_admits_replacement_at_cap",
+                ),
+            ],
+        },
+        Inv086ModelDimension {
+            dimension: "independent seeded reachability frontiers",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_recovery_seeded_frontier_preserves_bounded_owner_exit",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_explicit_b_seeded_frontier_preserves_bounded_owner_exit",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_active_close_seeded_frontier_preserves_episode_and_bounded_owner_exit",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_receipt_conflict_seeded_frontier_is_exact_and_terminal",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_oracle_failure_seeded_frontier_is_exact_and_terminal",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_reset_pending_seeded_frontier_is_exact_and_terminal",
+                ),
+            ],
+        },
+        Inv086ModelDimension {
+            dimension: "supported maximum shape and field boundaries",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_attack_public_14_leg_28_source_equal_risk_liquidation_stays_bounded",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_attack_public_10m_market_max_source_owner_exit_stays_bounded",
+                ),
+                (
+                    "tests/invariants/cu/inv_083_boundary_completeness.rs",
+                    "v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness",
+                ),
+                (
+                    "tests/invariants/cu/inv_083_boundary_completeness.rs",
+                    "v16_program_boundary_roster_maps_required_classes_to_owned_tests",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-086 composition must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the transition-certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut dimensions = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in DIMENSIONS {
+        assert!(
+            dimensions.insert(row.dimension),
+            "duplicate model dimension"
+        );
+        assert!(!row.witnesses.is_empty());
+        for (path, witness) in row.witnesses {
+            assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv086_source_defines_function(source, witness),
+                "model dimension '{}' lacks executable witness {path}#{witness}",
+                row.dimension,
+            );
+        }
+    }
+    assert_eq!(dimensions.len(), 9, "model dimension roster drift");
+    assert_eq!(witnesses.len(), 47, "model witness roster drift");
+
+    let model = include_str!("../../support/fuzz_model.rs");
+    let safety_prefix = inv086_source_section(
+        model,
+        "pub fn run_safety_prefix",
+        "pub fn run_permissionless_progress_campaign",
+    );
+    for required in [
+        "self.apply_action(action)",
+        "assert_source_credit_rate_transition(",
+        "self.assert_global_invariants()",
+    ] {
+        assert!(
+            safety_prefix.contains(required),
+            "every generated action must retain per-step oracle {required}",
+        );
+    }
+
+    let global = inv086_source_section(
+        model,
+        "fn assert_global_invariants",
+        "fn assert_positions_match",
+    );
+    for required in [
+        "token_supply_observed()",
+        "primary.vault != self.env.token_amount(self.env.vault)",
+        "primary_capital != primary.c_tot",
+        "primary.vault < primary_senior",
+        "assert_source_credit_rates(",
+        "assert_source_claim_bound_attribution(",
+        "assert_public_stock_census(",
+        "assert_public_encumbrance_census(",
+        "assert_current_certificate_matches_snapshot_full_refresh(",
+        "self.assert_positions_match()",
+    ] {
+        assert!(
+            global.contains(required),
+            "global deployed-transition oracle lost {required}",
+        );
+    }
+
+    let replay = inv086_source_section(model, "fn replay_word", "fn replay_words");
+    for required in [
+        "run_safety_prefix(std::slice::from_ref(action))",
+        "bounded_reference_node()",
+        "authenticated_graph_state()",
+    ] {
+        assert!(
+            replay.contains(required),
+            "bounded graph no longer composes through {required}",
+        );
+    }
+
+    let callsite_roster =
+        include_str!("../cu/inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert_eq!(
+        callsite_roster
+            .matches("Inv088EngineCallsite { owner:")
+            .count(),
+        50,
+        "wrapper-to-engine transition class count drift",
+    );
+    assert!(callsite_roster.contains("certificate_disposition_classes,\n        [18, 16, 11, 5]"));
+    assert!(callsite_roster.contains("actual, expected,"));
+
+    let instruction_roster = include_str!("../public_sbf/inv_079_public_reachability_evidence.rs");
+    assert!(instruction_roster.contains(
+        "registry_roster, production_roster,\n        \"public instruction coverage registry must have exactly one row per production"
+    ));
 }
 
 proptest! {
