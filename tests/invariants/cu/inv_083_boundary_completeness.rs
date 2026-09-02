@@ -472,6 +472,7 @@ fn v16_program_batch_decode_oversized_vectors_reject_before_allocation() {
             account_a_position_epoch: 0,
             account_b_portfolio_id: env.portfolio_id(maker_account),
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: env.portfolio_matcher_sequence(maker_account),
             legs: cpi_legs,
         },
         vec![],

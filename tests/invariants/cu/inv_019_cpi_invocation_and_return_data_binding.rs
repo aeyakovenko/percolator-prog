@@ -1232,6 +1232,7 @@ fn v16_program_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() 
     let taker_key = taker.pubkey();
     let taker_portfolio_id = env.portfolio_id(taker_account);
     let lp_portfolio_id = env.portfolio_id(lp_account);
+    let lp_matcher_sequence = env.portfolio_matcher_sequence(lp_account);
     let batch_ix = || Instruction {
         program_id,
         accounts: vec![
@@ -1248,6 +1249,7 @@ fn v16_program_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() 
             account_a_position_epoch: 0,
             account_b_portfolio_id: lp_portfolio_id,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: lp_matcher_sequence,
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
@@ -1301,6 +1303,7 @@ fn v16_program_hostile_matcher_no_write_cannot_replay_stale_single_context() {
     let taker_key = taker.pubkey();
     let taker_portfolio_id = env.portfolio_id(taker_account);
     let lp_portfolio_id = env.portfolio_id(lp_account);
+    let lp_matcher_sequence = env.portfolio_matcher_sequence(lp_account);
     let single_ix = || Instruction {
         program_id,
         accounts: vec![
@@ -1317,6 +1320,7 @@ fn v16_program_hostile_matcher_no_write_cannot_replay_stale_single_context() {
             account_a_position_epoch: 0,
             account_b_portfolio_id: lp_portfolio_id,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: lp_matcher_sequence,
             asset_index: 0,
             market_id: first_generation_market_id(0),
             size_q,
@@ -1835,11 +1839,13 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     };
     let t_portfolio_id = env.portfolio_id(t);
     let m_portfolio_id = env.portfolio_id(m);
+    let m_matcher_sequence = env.portfolio_matcher_sequence(m);
     let ix = |asset_index, size_q| ProgInstruction::TradeCpi {
         account_a_portfolio_id: t_portfolio_id,
         account_a_position_epoch: 0,
         account_b_portfolio_id: m_portfolio_id,
         account_b_position_epoch: 0,
+        account_b_matcher_sequence: m_matcher_sequence,
         asset_index,
         market_id: first_generation_market_id((asset_index) as u16),
         size_q,

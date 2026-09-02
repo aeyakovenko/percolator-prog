@@ -102,6 +102,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: 3,
             asset_index: 0,
             market_id: 1,
             size_q: 1,
@@ -121,6 +122,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: 3,
             legs: vec![batch_cpi_leg(0)],
         },
         ProgInstruction::SetMatcherConfig {
@@ -514,6 +516,22 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
     let mut legacy_trade_cpi = vec![0u8; 35];
     legacy_trade_cpi[0] = 10;
 
+    let mut sequence_less_trade_cpi = ProgInstruction::TradeCpi {
+        account_a_portfolio_id: 1,
+        account_a_position_epoch: 2,
+        account_b_portfolio_id: 3,
+        account_b_position_epoch: 4,
+        account_b_matcher_sequence: 5,
+        asset_index: 6,
+        market_id: 7,
+        size_q: 8,
+        fee_bps: 9,
+        limit_price: 10,
+        backing_fee_cap_bps: 11,
+    }
+    .encode();
+    sequence_less_trade_cpi.drain(33..41);
+
     let mut legacy_batch_nocpi = vec![0u8; 36];
     legacy_batch_nocpi[0] = 66;
     legacy_batch_nocpi[1] = 1;
@@ -521,6 +539,17 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
     let mut legacy_batch_cpi = vec![0u8; 28];
     legacy_batch_cpi[0] = 67;
     legacy_batch_cpi[1] = 1;
+
+    let mut sequence_less_batch_cpi = ProgInstruction::BatchTradeCpi {
+        account_a_portfolio_id: 1,
+        account_a_position_epoch: 2,
+        account_b_portfolio_id: 3,
+        account_b_position_epoch: 4,
+        account_b_matcher_sequence: 5,
+        legs: vec![batch_cpi_leg(0)],
+    }
+    .encode();
+    sequence_less_batch_cpi.truncate(sequence_less_batch_cpi.len() - 8);
 
     let mut legacy_crank_with_close_size = vec![0u8; 26];
     legacy_crank_with_close_size[0] = 5;
@@ -583,12 +612,20 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
             legacy_trade_cpi,
         ),
         (
+            "prior TradeCpi without matcher-config sequence",
+            sequence_less_trade_cpi,
+        ),
+        (
             "legacy BatchTradeNoCpi leg without market generation",
             legacy_batch_nocpi,
         ),
         (
             "legacy BatchTradeCpi leg without market generation",
             legacy_batch_cpi,
+        ),
+        (
+            "prior BatchTradeCpi without matcher-config sequence",
+            sequence_less_batch_cpi,
         ),
         (
             "legacy PermissionlessCrank close-size payload",
@@ -673,6 +710,7 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
             account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: 3,
             legs: vec![],
         },
     );
@@ -693,6 +731,7 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
             account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: 3,
             legs: (0..MAX_BATCH_LEGS).map(batch_cpi_leg).collect(),
         },
     );
@@ -738,6 +777,7 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
         account_a_position_epoch: 0,
         account_b_portfolio_id: 2,
         account_b_position_epoch: 0,
+        account_b_matcher_sequence: 3,
         legs: (0..MAX_BATCH_LEGS).map(batch_cpi_leg).collect(),
     }
     .encode();

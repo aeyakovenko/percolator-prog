@@ -2009,6 +2009,7 @@ impl V16CuEnv {
             account_a_position_epoch: self.portfolio_position_epoch(account_a),
             account_b_portfolio_id: self.portfolio_id(account_b),
             account_b_position_epoch: self.portfolio_position_epoch(account_b),
+            account_b_matcher_sequence: self.portfolio_matcher_sequence(account_b),
             asset_index,
             market_id: self.asset_market_id(asset_index),
             size_q,
@@ -2044,6 +2045,7 @@ impl V16CuEnv {
             account_a_position_epoch: self.portfolio_position_epoch(account_a),
             account_b_portfolio_id: self.portfolio_id(account_b),
             account_b_position_epoch: self.portfolio_position_epoch(account_b),
+            account_b_matcher_sequence: self.portfolio_matcher_sequence(account_b),
             legs,
         }
     }
@@ -3027,6 +3029,7 @@ impl V16CuEnv {
                 account_a_position_epoch: self.portfolio_position_epoch(account_a),
                 account_b_portfolio_id: self.portfolio_id(account_b),
                 account_b_position_epoch: self.portfolio_position_epoch(account_b),
+                account_b_matcher_sequence: self.portfolio_matcher_sequence(account_b),
                 asset_index,
                 market_id,
                 size_q,
@@ -5640,6 +5643,7 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
         let old_market_id = env.asset_market_id(ASSET);
         let account_a_portfolio_id = env.portfolio_id(account_a);
         let account_b_portfolio_id = env.portfolio_id(account_b);
+        let account_b_matcher_sequence = env.portfolio_matcher_sequence(account_b);
         let stale_instruction = match path {
             AssetGenerationTradePath::TradeNoCpi => ProgInstruction::TradeNoCpi {
                 account_a_portfolio_id,
@@ -5671,6 +5675,7 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
                 account_a_position_epoch: 0,
                 account_b_portfolio_id,
                 account_b_position_epoch: 0,
+                account_b_matcher_sequence,
                 asset_index: ASSET,
                 market_id: old_market_id,
                 size_q: POS_SCALE as i128,
@@ -5683,6 +5688,7 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
                 account_a_position_epoch: 0,
                 account_b_portfolio_id,
                 account_b_position_epoch: 0,
+                account_b_matcher_sequence,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: ASSET,
                     market_id: old_market_id,
@@ -5815,6 +5821,7 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
                 account_a_position_epoch: 0,
                 account_b_portfolio_id,
                 account_b_position_epoch: 0,
+                account_b_matcher_sequence,
                 asset_index: ASSET,
                 market_id: new_market_id,
                 size_q: POS_SCALE as i128,
@@ -5827,6 +5834,7 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
                 account_a_position_epoch: 0,
                 account_b_portfolio_id,
                 account_b_position_epoch: 0,
+                account_b_matcher_sequence,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: ASSET,
                     market_id: new_market_id,

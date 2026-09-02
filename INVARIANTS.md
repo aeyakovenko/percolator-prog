@@ -262,9 +262,9 @@ one signed bound; the sequence must reject or stop exactly at the remaining allo
 ### INV-012 - Capability and delegate scope
 
 **Statement.** Matcher and delegate authorization binds the program domain, market generation,
-portfolio incarnation, matcher program/context/slab, delegate key, authority epoch, allowed assets
-and operations, limits, enabled state, and expiry. A capability valid for one scope has no authority
-in another.
+portfolio incarnation, matcher program/context/slab, delegate key, matcher-config incarnation or
+authority epoch, allowed assets and operations, limits, enabled state, and expiry. A capability
+valid for one scope or incarnation has no authority in another.
 
 **Required tests.** Substitute one field at a time, including matcher context and asset generation.
 Disable and re-enable the same delegate and prove old capabilities remain invalid.
@@ -573,7 +573,6 @@ gross_loss_at_close_start
 + b_loss_booked
 + explicit_loss_assigned
 + pending_obligation_credits
-+ consumed_counterparty_credit_lien_backing
 + remaining_residual
 ```
 
@@ -581,9 +580,11 @@ No atom appears in two categories and no category is silently dropped.
 
 For the deployed v16.9.1 ledger, `drift_consumed` is the reserved adverse-drift term and
 `support_consumed` is the realizable value payment. `junior_face_burned` is claim-face metadata,
-not an additional payment, and must not be added to the value partition. Any abstract category
-folded into a deployed field must have one documented, disjoint mapping; an absent category is not
-implicitly proven nonzero or independently attributable.
+not an additional payment, and must not be added to the value partition. Consumed counterparty-
+credit lien backing is included exactly once in `support_consumed`; listing it as a second
+subtrahend is forbidden double counting. Any abstract category folded into a deployed field must
+have one documented, disjoint mapping; an absent category is not implicitly proven nonzero or
+independently attributable.
 
 **Required tests.** Independently recompute the equality after every continuation, competing-close
 rejection, cancel attempt, recovery, and finalization.

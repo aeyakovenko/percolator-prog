@@ -2948,6 +2948,7 @@ pub mod ix {
             account_a_position_epoch: u64,
             account_b_portfolio_id: u64,
             account_b_position_epoch: u64,
+            account_b_matcher_sequence: u64,
             asset_index: u16,
             market_id: u64,
             size_q: i128,
@@ -2971,6 +2972,7 @@ pub mod ix {
             account_a_position_epoch: u64,
             account_b_portfolio_id: u64,
             account_b_position_epoch: u64,
+            account_b_matcher_sequence: u64,
             legs: Vec<BatchTradeCpiLeg>,
         },
         SetMatcherConfig {
@@ -3239,6 +3241,7 @@ pub mod ix {
                 account_a_position_epoch: read_u64(rest)?,
                 account_b_portfolio_id: read_u64(rest)?,
                 account_b_position_epoch: read_u64(rest)?,
+                account_b_matcher_sequence: read_u64(rest)?,
                 asset_index: read_u16(rest)?,
                 market_id: read_u64(rest)?,
                 size_q: read_i128(rest)?,
@@ -3292,6 +3295,7 @@ pub mod ix {
                 account_a_position_epoch: read_u64(rest)?,
                 account_b_portfolio_id: read_u64(rest)?,
                 account_b_position_epoch: read_u64(rest)?,
+                account_b_matcher_sequence: read_u64(rest)?,
                 legs,
             })
         }
@@ -3773,6 +3777,7 @@ pub mod ix {
                     account_a_position_epoch,
                     account_b_portfolio_id,
                     account_b_position_epoch,
+                    account_b_matcher_sequence,
                     asset_index,
                     market_id,
                     size_q,
@@ -3785,6 +3790,7 @@ pub mod ix {
                     push_u64(&mut out, account_a_position_epoch);
                     push_u64(&mut out, account_b_portfolio_id);
                     push_u64(&mut out, account_b_position_epoch);
+                    push_u64(&mut out, account_b_matcher_sequence);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, market_id);
                     push_i128(&mut out, size_q);
@@ -3818,6 +3824,7 @@ pub mod ix {
                     account_a_position_epoch,
                     account_b_portfolio_id,
                     account_b_position_epoch,
+                    account_b_matcher_sequence,
                     ref legs,
                 } => {
                     out.push(67);
@@ -3833,6 +3840,7 @@ pub mod ix {
                     push_u64(&mut out, account_a_position_epoch);
                     push_u64(&mut out, account_b_portfolio_id);
                     push_u64(&mut out, account_b_position_epoch);
+                    push_u64(&mut out, account_b_matcher_sequence);
                 }
                 Self::SetMatcherConfig {
                     portfolio_id,
@@ -6878,6 +6886,7 @@ pub mod processor {
                 account_a_position_epoch,
                 account_b_portfolio_id,
                 account_b_position_epoch,
+                account_b_matcher_sequence,
                 asset_index,
                 market_id,
                 size_q,
@@ -6891,6 +6900,7 @@ pub mod processor {
                 account_a_position_epoch,
                 account_b_portfolio_id,
                 account_b_position_epoch,
+                account_b_matcher_sequence,
                 asset_index,
                 market_id,
                 size_q,
@@ -6918,6 +6928,7 @@ pub mod processor {
                 account_a_position_epoch,
                 account_b_portfolio_id,
                 account_b_position_epoch,
+                account_b_matcher_sequence,
                 legs,
             } => handle_batch_trade_cpi(
                 program_id,
@@ -6926,6 +6937,7 @@ pub mod processor {
                 account_a_position_epoch,
                 account_b_portfolio_id,
                 account_b_position_epoch,
+                account_b_matcher_sequence,
                 &legs,
             ),
             Instruction::SetMatcherConfig {
@@ -8904,11 +8916,16 @@ pub mod processor {
 
     fn matcher_tail_start_or_verify_lp_config<'a>(
         account_b_ai: &AccountInfo<'a>,
+        expected_matcher_sequence: u64,
         matcher_prog_key: &Pubkey,
         matcher_ctx_key: &Pubkey,
         matcher_delegate_key: &Pubkey,
     ) -> Result<(usize, u16), ProgramError> {
-        let cfg = state::read_portfolio_matcher_config(&account_b_ai.try_borrow_data()?)?;
+        let account_b_data = account_b_ai.try_borrow_data()?;
+        if state::read_portfolio_matcher_sequence(&account_b_data)? != expected_matcher_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        let cfg = state::read_portfolio_matcher_config(&account_b_data)?;
         if !cfg.authorizes_matcher_tuple(
             &matcher_prog_key.to_bytes(),
             &matcher_ctx_key.to_bytes(),
@@ -8959,6 +8976,7 @@ pub mod processor {
         account_a_position_epoch: u64,
         account_b_portfolio_id: u64,
         account_b_position_epoch: u64,
+        account_b_matcher_sequence: u64,
         asset_index: u16,
         expected_market_id: u64,
         size_q: i128,
@@ -9063,6 +9081,7 @@ pub mod processor {
         expect_key(matcher_delegate, &delegate)?;
         let (tail_start, lp_trade_fee_cap_bps) = matcher_tail_start_or_verify_lp_config(
             account_b_ai,
+            account_b_matcher_sequence,
             matcher_prog.key,
             matcher_ctx.key,
             matcher_delegate.key,
@@ -9333,6 +9352,7 @@ pub mod processor {
         account_a_position_epoch: u64,
         account_b_portfolio_id: u64,
         account_b_position_epoch: u64,
+        account_b_matcher_sequence: u64,
         legs: &[ix::BatchTradeCpiLeg],
     ) -> ProgramResult {
         if legs.is_empty() || legs.len() > MATCHER_BATCH_MAX_LEGS {
@@ -9483,6 +9503,7 @@ pub mod processor {
         expect_key(matcher_delegate, &delegate)?;
         let (tail_start, lp_trade_fee_cap_bps) = matcher_tail_start_or_verify_lp_config(
             account_b_ai,
+            account_b_matcher_sequence,
             matcher_prog.key,
             matcher_ctx.key,
             matcher_delegate.key,

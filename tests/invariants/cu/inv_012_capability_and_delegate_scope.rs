@@ -19,8 +19,8 @@
 //! The capability authorizes only CPI trade matching, so a separate operation set is structurally
 //! inapplicable; per-leg asset scope is carried by the generation-bound trade request.
 //!
-//! Guarantee boundary: the deployed capability has no expiry or matcher-config incarnation bound
-//! into a retained CPI request. Those are schema requirements and remain explicit in AUDIT-012.
+//! Guarantee boundary: both retained CPI routes bind the persisted matcher-config incarnation.
+//! The deployed capability still has no expiry, which remains explicit in AUDIT-012.
 
 use super::*;
 
@@ -57,6 +57,11 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
         "fn handle_set_matcher_config<'a>(",
         "fn invoke_matcher_batch<'a>(",
     );
+    let matcher_guard = inv012_function_body(
+        source,
+        "fn matcher_tail_start_or_verify_lp_config<'a>(",
+        "fn validate_matcher_tail<'a>(",
+    );
 
     for (route, body) in [("TradeCpi", single), ("BatchTradeCpi", batch)] {
         assert_eq!(
@@ -66,6 +71,7 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
         );
         assert!(body.contains("derive_matcher_delegate("));
         assert!(body.contains("matcher_tail_start_or_verify_lp_config("));
+        assert!(body.contains("account_b_matcher_sequence,"));
         assert!(body.contains("account_a_header.portfolio_account_id"));
         assert!(body.contains("account_b_header.portfolio_account_id"));
     }
@@ -75,6 +81,10 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
     assert!(config.contains("portfolio_id != current_portfolio_id"));
     assert!(config.contains("expected_sequence != current_sequence"));
     assert!(config.contains("derive_matcher_delegate("));
+    assert!(matcher_guard.contains("read_portfolio_matcher_sequence(&account_b_data)?"));
+    assert!(matcher_guard.contains("!= expected_matcher_sequence"));
+    assert!(matcher_guard.contains("PercolatorError::EngineStale"));
+    assert!(matcher_guard.contains("read_portfolio_matcher_config(&account_b_data)?"));
 
     assert_eq!(
         source

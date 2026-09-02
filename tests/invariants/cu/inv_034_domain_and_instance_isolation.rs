@@ -3423,6 +3423,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
     {
         let pa_portfolio_id = env.portfolio_id(pa);
         let pb_portfolio_id = env.portfolio_id(pb);
+        let pb_matcher_sequence = env.portfolio_matcher_sequence(pb);
         let mut reject_atomically =
             |label: &str, ix: ProgInstruction, accounts: Vec<AccountMeta>, signers: &[&Keypair]| {
                 let market_a_before = env.svm.get_account(&env.market).unwrap();
@@ -3530,6 +3531,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 account_a_position_epoch: 0,
                 account_b_portfolio_id: pb_portfolio_id,
                 account_b_position_epoch: 0,
+                account_b_matcher_sequence: pb_matcher_sequence,
                 asset_index: 0,
                 market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
@@ -3555,6 +3557,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 account_a_position_epoch: 0,
                 account_b_portfolio_id: pb_portfolio_id,
                 account_b_position_epoch: 0,
+                account_b_matcher_sequence: pb_matcher_sequence,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
                     market_id: first_generation_market_id((0) as u16),
@@ -3667,6 +3670,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
     .expect("set market-B LP matcher config");
     let cpi_taker_portfolio_id = env.portfolio_id(p_cpi_taker);
     let cpi_lp_account_portfolio_id = env.portfolio_id(p_cpi_lp);
+    let cpi_lp_matcher_sequence = env.portfolio_matcher_sequence(p_cpi_lp);
     let mut reject_foreign_matcher_tuple = |label: &str, instruction: ProgInstruction| {
         let market_a_before = env.svm.get_account(&market_a).unwrap();
         let market_b_before = env.svm.get_account(&market_b).unwrap();
@@ -3711,6 +3715,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             account_a_position_epoch: 0,
             account_b_portfolio_id: cpi_lp_account_portfolio_id,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: cpi_lp_matcher_sequence,
             asset_index: 0,
             market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
@@ -3726,6 +3731,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             account_a_position_epoch: 0,
             account_b_portfolio_id: cpi_lp_account_portfolio_id,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: cpi_lp_matcher_sequence,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 market_id: first_generation_market_id((0) as u16),
@@ -3746,6 +3752,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             account_a_position_epoch: 0,
             account_b_portfolio_id: cpi_lp_account_portfolio_id,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: cpi_lp_matcher_sequence,
             asset_index: 0,
             market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
@@ -3781,6 +3788,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             account_a_position_epoch: cpi_taker_position_epoch,
             account_b_portfolio_id: cpi_lp_account_portfolio_id,
             account_b_position_epoch: cpi_lp_position_epoch,
+            account_b_matcher_sequence: cpi_lp_matcher_sequence,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 market_id: first_generation_market_id((0) as u16),

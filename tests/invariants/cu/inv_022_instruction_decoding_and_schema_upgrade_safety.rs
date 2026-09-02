@@ -235,6 +235,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: 3,
             asset_index: 0,
             market_id: 1,
             size_q: 1,
@@ -464,6 +465,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
             account_b_position_epoch: 0,
+            account_b_matcher_sequence: 3,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 market_id: 1,

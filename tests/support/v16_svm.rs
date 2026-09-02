@@ -1953,6 +1953,7 @@ impl V16Svm {
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
         let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let account_b_position_epoch = self.primary_portfolio_position_epoch(maker);
+        let account_b_matcher_sequence = self.primary_portfolio_matcher_sequence(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.send_program(
@@ -1961,6 +1962,7 @@ impl V16Svm {
                 account_a_position_epoch,
                 account_b_portfolio_id,
                 account_b_position_epoch,
+                account_b_matcher_sequence,
                 asset_index,
                 market_id,
                 size_q,
@@ -1991,6 +1993,7 @@ impl V16Svm {
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
         let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let account_b_position_epoch = self.primary_portfolio_position_epoch(maker);
+        let account_b_matcher_sequence = self.primary_portfolio_matcher_sequence(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.send_program(
@@ -1999,6 +2002,7 @@ impl V16Svm {
                 account_a_position_epoch,
                 account_b_portfolio_id,
                 account_b_position_epoch,
+                account_b_matcher_sequence,
                 legs,
             },
             vec![
@@ -4013,6 +4017,7 @@ impl V16Svm {
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
         let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let account_b_position_epoch = self.primary_portfolio_position_epoch(maker);
+        let account_b_matcher_sequence = self.primary_portfolio_matcher_sequence(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_portfolio = self.actors[maker].portfolio;
         let binding = &self.actors[substituted_binding];
@@ -4022,6 +4027,7 @@ impl V16Svm {
                 account_a_position_epoch,
                 account_b_portfolio_id,
                 account_b_position_epoch,
+                account_b_matcher_sequence,
                 asset_index: 0,
                 market_id,
                 size_q: POS_SCALE as i128 / 4,
@@ -4412,6 +4418,7 @@ impl V16Svm {
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
         let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let account_b_position_epoch = self.primary_portfolio_position_epoch(maker);
+        let account_b_matcher_sequence = self.primary_portfolio_matcher_sequence(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.build_program_transaction(
@@ -4420,6 +4427,7 @@ impl V16Svm {
                 account_a_position_epoch,
                 account_b_portfolio_id,
                 account_b_position_epoch,
+                account_b_matcher_sequence,
                 asset_index,
                 market_id,
                 size_q,
@@ -4512,6 +4520,7 @@ impl V16Svm {
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
         let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let account_b_position_epoch = self.primary_portfolio_position_epoch(maker);
+        let account_b_matcher_sequence = self.primary_portfolio_matcher_sequence(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.build_program_transaction(
@@ -4520,6 +4529,7 @@ impl V16Svm {
                 account_a_position_epoch,
                 account_b_portfolio_id,
                 account_b_position_epoch,
+                account_b_matcher_sequence,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index,
                     market_id,
