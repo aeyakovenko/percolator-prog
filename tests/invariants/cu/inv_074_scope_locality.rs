@@ -1150,3 +1150,269 @@ fn v16_bpf_stale_asset_does_not_block_current_unrelated_trade() {
     assert!(!has_active_leg_for_asset(&long, 1));
     assert!(!has_active_leg_for_asset(&short, 1));
 }
+
+#[derive(Clone, Copy)]
+struct Inv074ScopeClass {
+    class: &'static str,
+    engine_proofs: &'static [&'static str],
+    public_witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv074_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+#[test]
+fn v16_program_scope_locality_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv074ScopeClass] = &[
+        Inv074ScopeClass {
+            class: "market and portfolio quote-value frames",
+            engine_proofs: &[
+                "proof_v16_frame_deposit_touches_only_declared_state",
+                "proof_v16_frame_withdraw_touches_only_declared_state",
+                "proof_v16_frame_overwithdraw_err_leaves_state_unchanged",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+                    "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
+                ),
+                (
+                    "tests/invariants/cu/inv_025_exact_stock_reconciliation.rs",
+                    "v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks",
+                ),
+            ],
+        },
+        Inv074ScopeClass {
+            class: "asset oracle funding and side-local state",
+            engine_proofs: &[
+                "proof_v16_frame_oracle_target_update_touches_only_declared_state",
+                "proof_v16_frame_mark_drain_only_touches_only_declared_state",
+                "proof_v16_frame_side_reset_touches_only_declared_state",
+                "proof_v16_loss_stale_trade_scope_allows_only_unrelated_current_assets",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_074_scope_locality.rs",
+                    "v16_attack_per_asset_funding_isolation",
+                ),
+                (
+                    "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+                    "v16_program_per_asset_crank_isolation",
+                ),
+                (
+                    "tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs",
+                    "v16_program_two_asset_reset_recovery_orders_progress_without_crossing_scope",
+                ),
+            ],
+        },
+        Inv074ScopeClass {
+            class: "account certificate fee and close-owner state",
+            engine_proofs: &[
+                "proof_v16_frame_fee_charge_touches_only_declared_state",
+                "proof_v16_frame_crank_touches_only_clock_and_cert_state",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_074_scope_locality.rs",
+                    "v16_program_active_close_preserves_unrelated_same_asset_reduction",
+                ),
+                (
+                    "tests/invariants/stateful/inv_074_scope_locality.rs",
+                    "v16_program_active_close_rejects_cross_asset_risk_without_blocking_exit",
+                ),
+            ],
+        },
+        Inv074ScopeClass {
+            class: "source claim backing lien and provider domains",
+            engine_proofs: &[
+                "proof_v16_frame_backing_deposit_touches_only_declared_state",
+                "proof_v16_frame_backing_withdraw_touches_only_declared_state",
+                "proof_v16_frame_earnings_withdraw_touches_only_declared_state",
+                "proof_v16_public_backing_fee_charges_only_selected_domain",
+                "proof_v16_source_claim_burn_partition_is_domain_first_conservative_and_isolated",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+                    "v16_program_fresh_backing_global_summary_is_exact_in_every_four_domain_touch_order",
+                ),
+                (
+                    "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+                    "v16_program_backing_earnings_global_summary_is_order_independent_across_domains",
+                ),
+                (
+                    "tests/invariants/cu/inv_032_exact_counterparty_lien_lifecycle.rs",
+                    "v16_program_counterparty_lien_lifecycle_composition_is_source_complete",
+                ),
+            ],
+        },
+        Inv074ScopeClass {
+            class: "insurance budget reservation and payout domains",
+            engine_proofs: &[
+                "proof_v16_frame_domain_insurance_deposit_touches_only_declared_state",
+                "proof_v16_frame_domain_insurance_withdraw_touches_only_declared_state",
+                "proof_v16_frame_budget_credit_touches_only_declared_state",
+                "proof_v16_frame_insurance_account_credit_touches_only_declared_state",
+                "proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conserving",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+                    "v16_program_insurance_budget_global_summary_is_exact_in_every_four_domain_touch_order",
+                ),
+                (
+                    "tests/invariants/cu/inv_034_domain_and_instance_isolation.rs",
+                    "v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance",
+                ),
+            ],
+        },
+        Inv074ScopeClass {
+            class: "bankruptcy close episode and drift anchor",
+            engine_proofs: &[
+                "contract_check_kernel_open_close_snapshot_is_stale",
+                "proof_v16_close_progress_ledger_residual_equation_is_enforced",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_074_scope_locality.rs",
+                    "v16_program_two_asset_closes_advance_without_crossing_scope",
+                ),
+                (
+                    "tests/invariants/stateful/inv_074_scope_locality.rs",
+                    "v16_program_active_close_shutdown_order_preserves_all_funded_exits",
+                ),
+            ],
+        },
+        Inv074ScopeClass {
+            class: "resolved receipt claimant and paired-domain state",
+            engine_proofs: &[
+                "proof_v16_public_post_snapshot_expiry_improves_haircut_and_frames_receipts",
+                "proof_v16_terminal_claim_free_overlap_recredit_updates_only_paired_insurance_domain",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_074_scope_locality.rs",
+                    "v16_program_concurrent_partial_receipts_are_claimant_local",
+                ),
+                (
+                    "tests/invariants/cu/inv_066_resolved_payout_fairness_and_order_independence.rs",
+                    "v16_program_resolved_payout_induction_composition_is_source_complete",
+                ),
+            ],
+        },
+        Inv074ScopeClass {
+            class: "retirement restart and maximum portfolio shape",
+            engine_proofs: &[
+                "proof_v16_public_restart_asset_zero_preserves_only_selected_slot_in_two_slot_view",
+                "proof_v16_public_restart_nonzero_asset_preserves_only_selected_slot_in_two_slot_view",
+                "proof_v16_public_terminal_insurance_retirement_is_exact_and_fully_framed",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_065_reset_recovery_and_retired_state_isolation.rs",
+                    "v16_program_lifecycle_isolation_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_089_activation_reactivation_and_initialization_equivalence.rs",
+                    "v16_program_reused_slot_rejects_fifteenth_leg_then_admits_replacement_at_cap",
+                ),
+            ],
+        },
+        Inv074ScopeClass {
+            class: "market-instance and historical-global-summary confinement",
+            engine_proofs: &[
+                "proof_v16_frame_resolve_market_touches_only_declared_state",
+                "proof_v16_historical_bankruptcy_hlock_does_not_override_account_scope",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_034_domain_and_instance_isolation.rs",
+                    "v16_program_cross_instance_role_roster_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_074_scope_locality.rs",
+                    "v16_program_stale_permissionless_asset_cannot_global_resolve_market",
+                ),
+                (
+                    "tests/invariants/cu/inv_074_scope_locality.rs",
+                    "v16_program_unrelated_bankruptcy_preserves_backed_claim_and_owner_exit",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-074 scope composition must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the scope-certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut classes = std::collections::BTreeSet::new();
+    let mut proofs = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate scope class");
+        assert!(!row.engine_proofs.is_empty());
+        assert!(!row.public_witnesses.is_empty());
+        for proof in row.engine_proofs {
+            assert!(proofs.insert(*proof), "duplicate engine proof {proof}");
+            assert!(
+                proof.starts_with("proof_v16_") || proof.starts_with("contract_check_"),
+                "unclassified scope proof {proof}",
+            );
+        }
+        for (path, witness) in row.public_witnesses {
+            assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv074_source_defines_function(source, witness),
+                "scope class '{}' lacks executable witness {path}#{witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 9, "scope class roster drift");
+    assert_eq!(proofs.len(), 28, "scope proof roster drift");
+    assert_eq!(witnesses.len(), 21, "scope witness roster drift");
+
+    // INV-088 independently derives this roster from every production `_not_atomic`
+    // callsite. Pin its current cardinality and certificate dispositions here so a
+    // new transition cannot inherit scope-locality merely from an old witness set.
+    let transition_roster = std::fs::read_to_string(
+        root.join("tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs"),
+    )
+    .expect("read INV-088 transition roster");
+    assert_eq!(
+        transition_roster
+            .matches("Inv088EngineCallsite { owner:")
+            .count(),
+        50,
+        "wrapper-to-engine transition surface drift",
+    );
+    assert!(
+        transition_roster.contains("certificate_disposition_classes,\n        [18, 16, 11, 5]"),
+        "all transition classes must retain an explicit certificate/scope disposition",
+    );
+    assert!(
+        transition_roster.contains("actual, expected"),
+        "transition roster must remain source-derived rather than documentation-only",
+    );
+}
