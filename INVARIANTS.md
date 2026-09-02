@@ -185,11 +185,18 @@ resolved-claim episodes.
 
 **Statement.** Retained authority requests cannot regain power after authority rotates away and
 later returns. Every retained admin, oracle, insurance, backing, matcher, operator, or delegate
-request binds a monotonic epoch for its exact authority scope.
+request binds a monotonic epoch for its exact authority scope. Authentication is not economic
+containment: for every correctly signed authority route, the protocol also defines and enforces the
+maximum effect that a malicious current holder can have on unrelated principal, claims, exposure,
+and terminal progress. A valid signature cannot authorize effects outside that route's configured
+scope and economic envelope.
 
 **Required tests.** Exercise `A -> B -> A` and `A -> zero/disabled -> A`. A request signed by the
 first incarnation of A must remain invalid after A returns. Epochs must change atomically with
-authority updates.
+authority updates. Maintain a source-complete adversarial-role matrix for the market authority,
+asset admin, oracle, insurance operator, backing operator, matcher, delegate, and keeper. For each
+role, execute a valid current-authority action at every economic boundary and measure the resulting
+effect on unrelated users rather than substituting only an unauthorized signer.
 **Verification:** P, F, I
 
 ### INV-006 - Program, chain, message-type, and version binding
@@ -265,7 +272,10 @@ persistent residual ledger accepts only exact fills.
 **Statement.** For every landing order of otherwise valid retained requests, each request either
 rejects atomically or produces an outcome within every affected signer's original authorization.
 Reordering cannot install worse price, fee, collateral use, position, claim treatment, or
-destructive state.
+destructive state. This is a history property: retries, route switches, interleavings, and all
+relevant landing-order permutations are compared under one signed-intent and coalition outcome
+envelope. Operations that intentionally do not commute must name the allowed state-dependent
+equivalence rather than require byte equality.
 
 **Required tests.** Permute trade, deposit, withdraw, reduce, authority rotation, policy update,
 resolve, and claim instructions. Compare every successful outcome against each message's signed
@@ -318,7 +328,8 @@ authorization.
 
 **Required tests.** Sign before a policy change, execute after the change, and test both stricter and
 looser policies. The outcome must be bounded by the signed request, not merely by current
-configuration.
+configuration. Tests must use both an unauthorized caller and a malicious correctly authorized
+current holder; signer and epoch checks alone do not establish the economic bound.
 **Verification:** P, F, I, M
 
 ---
@@ -431,7 +442,24 @@ not economic truth or safety decisions.
 
 **Statement.** For every successful instruction, every quote atom has one debit and one credit in
 the `TokenValueFlowProof`. Value attributable to account or domain A cannot become withdrawable by
-B without explicit signed transfer or a deterministic protocol rule already binding A.
+B without explicit signed transfer or a deterministic protocol rule already binding A. Aggregate
+conservation is necessary but strictly weaker than entitlement. For each portfolio and economic
+episode, an independently maintained history ledger defines:
+
+```text
+claim = external_principal_in
+      + realized_attributed_pnl
+      + protocol_support_assigned_to_this_episode
+      - attributed_losses
+      - disclosed_fees
+      - prior_external_payouts
+      - authorized_forfeits
+```
+
+Junior claims are additionally capped pro rata by the true residual. Every withdrawal,
+conversion, liquidation reward, fee transfer, recovery payment, and terminal payout is bounded by
+the recipient's history-derived claim. A globally balanced transfer to the wrong account violates
+this invariant even when every vault and aggregate counter reconciles.
 
 ```text
 sum(quote_debits) = sum(quote_credits)
@@ -439,7 +467,11 @@ sum(quote_debits) = sum(quote_credits)
 
 **Required tests.** Assert the equality after every successful public transition and exact zero
 external/internal quote delta on failure. Track ownership attribution, not only aggregate vault
-balance.
+balance. Maintain a source-complete value-effect disposition for every public instruction. Exercise
+multi-episode histories with changing winners, fees, partial/reordered routes, recovery, and
+resolved haircuts; independently derive each episode's claim and exact SPL payout. Include a
+mutation witness that preserves aggregate conservation while swapping ownership and prove the
+entitlement oracle rejects it.
 **Verification:** P, F, I
 
 ### INV-025 - Exact stock reconciliation
@@ -663,7 +695,9 @@ obligations and attempt all fee-charging routes.
 **Statement.** Liquidation order, support allocation, insurance allocation, lien consumption,
 residual attribution, and payout calculation are deterministic from state and signed inputs.
 Caller-supplied ordering cannot improve the caller's economic result or change which domain bears
-loss.
+loss. For all value-bearing histories, the normalized outcome also obeys a coalition bound: no
+partition, retry, route switch, interleaving, or relevant landing order can make the participating
+coalition better off than its signed and protocol-defined aggregate envelope.
 
 **Required tests.** Permute equal-priority legs, hints, claim order, and continuation order; compare
 normalized outcomes.
@@ -775,9 +809,17 @@ Pending-loss obligations are reconciled by their own ledgers and must not be sil
 repair an OI mismatch unless the canonical specification explicitly defines an OI-carrying
 obligation class. In normal live state, effective long and short OI match.
 
+Every difference between raw user basis and effective OI must be uniquely typed as an ADL haircut,
+pending-loss obligation, B obligation, close residual, or Recovery obligation owned by an exact
+asset, side, portfolio/close episode, and generation. An untyped balancing ghost value is not
+evidence of matched-book integrity. No obligation may be counted both as effective exposure and as
+a protocol residual.
+
 **Required tests.** Recompute the logical aggregate from all portfolios in the bounded test universe
 after trade, liquidation, rebalance, reset, resolved close, and recovery, and compare it with the
-maintained O(1) counters.
+maintained O(1) counters. Independently classify every non-user balancing delta into one disjoint
+protocol-obligation kind and prove each kind has a public writer, a bounded progress route, and an
+exact terminal sink.
 **Verification:** P, F, M
 
 ### INV-049 - Canonical single net leg per asset generation
@@ -818,7 +860,9 @@ and side reset.
 **Statement.** Splitting or merging a trade, liquidation, reduction, withdrawal, lien consumption,
 insurance withdrawal, or claim cannot bypass cumulative position, OI, health, backing, fee,
 cooldown, rate, or policy limits. Apart from explicitly bounded conservative rounding, partitioned
-execution is not more favorable than aggregate execution.
+execution is not more favorable than aggregate execution. The comparison covers complete
+histories, including retries, interleavings, route changes, and relevant order permutations, and
+measures every actor and coalition rather than only aggregate market stock.
 
 **Required tests.** Generate arbitrary partitions and permutations; compare cumulative results with
 one aggregate operation.
@@ -1061,10 +1105,13 @@ remain discoverable.
 **Statement.** From every publicly reachable funded state, under explicit assumptions about
 authenticated time and oracle/recovery availability, a finite public sequence returns senior
 capital, settles the account into a terminal receipt, or applies an explicitly authorized
-junior-value forfeit.
+junior-value forfeit. The sequence through terminal economic disposition is permissionless.
+Signer-gated deletion of an already economically empty portfolio is a separate mechanical step and
+must not be described as permissionless progress.
 
 **Required tests.** Exhaustive small-state reachability plus long stateful fuzz sequences; every
-nonterminal funded state must have a path to terminal disposition.
+nonterminal funded state must have a bounded permissionless path to terminal economic disposition.
+Then separately prove the exact signer and preconditions for mechanical portfolio deletion.
 **Verification:** F, I, R
 
 ### INV-074 - Scope locality
@@ -1119,6 +1166,11 @@ reject unsupported shapes before activation.
 **Statement.** Every state where ordinary bounded progress cannot continue has a permissionless
 terminal recovery, dead-leg forfeit, exact receipt, or other senior-preserving terminal path. No
 privileged actor is required to release user capital.
+
+Asset and market retirement are separate administrative lifecycle conclusions. They require an
+explicit finite rank and named fairness/authority assumption when the final `CloseSlab` or
+retirement instruction is privileged; they are not evidence against user-fund liveness once all
+economic claims are terminal.
 
 **Required tests.** Trigger each documented failure class: stale/unavailable oracle, B exhaustion,
 backing failure, lien impairment, close expiry, domain lock, insurance exhaustion, payout conflict,

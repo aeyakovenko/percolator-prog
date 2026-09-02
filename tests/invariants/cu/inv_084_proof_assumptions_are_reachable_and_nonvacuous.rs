@@ -416,9 +416,9 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
 fn v16_program_every_mounted_kani_harness_has_a_nonvacuity_disposition() {
     use std::collections::{BTreeMap, BTreeSet};
 
-    const EXPECTED_DIRECT_HARNESSES: usize = 173;
+    const EXPECTED_DIRECT_HARNESSES: usize = 174;
     const EXPECTED_GENERATED_HARNESSES: usize = 38;
-    const EXPECTED_TOTAL_HARNESSES: usize = 211;
+    const EXPECTED_TOTAL_HARNESSES: usize = 212;
     const CONCRETE_PUBLIC_EVIDENCE: [(&str, &str); 3] = [
         (
             "tests/invariants/kani/inv_020_authenticated_clock_slot_and_oracle_provenance.rs",
@@ -560,7 +560,7 @@ fn v16_program_every_mounted_kani_harness_has_a_nonvacuity_disposition() {
     category_counts.insert("GENERATED_SYMBOLIC_TOTAL", generated_harnesses.len());
 
     let expected_categories = BTreeMap::from([
-        ("BRANCH_WITNESSED", 31usize),
+        ("BRANCH_WITNESSED", 32usize),
         ("CONCRETE_EXACT", 29),
         ("EXPLICIT_ASSUMPTION", 10),
         ("GENERATED_SYMBOLIC_TOTAL", 38),

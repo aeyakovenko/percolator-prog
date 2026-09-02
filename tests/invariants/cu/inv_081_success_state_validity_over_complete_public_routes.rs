@@ -172,6 +172,11 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
             test: "v16_primary_quote_routes_match_actual_spl_and_internal_accounting_deltas",
         },
         Inv081CompositionOwner {
+            layer: "per-episode entitlement and public value-effect dispositions",
+            path: "tests/invariants/cu/inv_024_attributed_quote_value_conservation.rs",
+            test: "v16_program_entitlement_effect_roster_is_source_complete",
+        },
+        Inv081CompositionOwner {
             layer: "independent transition model dimensions",
             path: "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
             test: "v16_program_reference_model_dimension_composition_is_source_complete",
@@ -186,6 +191,10 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
         (
             "tests/invariants/kani/inv_024_attributed_quote_value_conservation.rs",
             "kani_inv024_engine_flow_validator_equals_wrapper_value_equation",
+        ),
+        (
+            "tests/invariants/kani/inv_024_attributed_quote_value_conservation.rs",
+            "kani_inv024_per_episode_entitlement_is_stronger_than_aggregate_conservation",
         ),
         (
             "tests/invariants/kani/inv_025_exact_stock_reconciliation.rs",
@@ -215,7 +224,7 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
             owner.test,
         );
     }
-    assert_eq!(layers.len(), 19, "INV-081 composition layer drift");
+    assert_eq!(layers.len(), 20, "INV-081 composition layer drift");
 
     for (path, theorem) in KANI_OWNERS {
         let source = std::fs::read_to_string(root.join(path))

@@ -9,6 +9,121 @@
 
 use super::*;
 
+#[test]
+fn v16_program_entitlement_effect_roster_is_source_complete() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let public_rows = include_str!("../public_instruction_coverage.tsv")
+        .lines()
+        .filter(|line| {
+            !line.is_empty() && !line.starts_with('#') && !line.starts_with("tag\tvariant\t")
+        })
+        .map(|line| {
+            let columns = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(columns.len(), 5, "malformed public-route row: {line}");
+            (columns[0].to_owned(), columns[1].to_owned())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let allowed_effects = [
+        "GenesisStock",
+        "EpisodeGenesis",
+        "PrincipalIn",
+        "PrincipalOut",
+        "AccrualLiquidationOrTerminalProgress",
+        "MatchedTradeAndFee",
+        "EpisodeTerminalization",
+        "InsuranceIn",
+        "TerminalSurplusOut",
+        "ClaimSnapshot",
+        "BackingPrincipalIn",
+        "ClaimToPrincipal",
+        "TerminalPayout",
+        "FutureAuthorityPolicy",
+        "FuturePricePolicy",
+        "AuthenticatedObservation",
+        "FutureFeePolicy",
+        "FutureLifecyclePolicy",
+        "LifecycleValueTransition",
+        "PrincipalInAndResidualCure",
+        "AuthorizedJuniorForfeit",
+        "ExposureAndObligationTransfer",
+        "ProtocolObligationTransition",
+        "DisclosedAccountFee",
+        "BackingPrincipalOut",
+        "BackingEarningsOut",
+        "StockSynchronization",
+        "InsuranceOut",
+        "FutureCustodyPolicy",
+        "ReserveSwap",
+        "RecoveryClose",
+        "FutureMatcherPolicy",
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    let mut entitlement_rows = std::collections::BTreeSet::new();
+    let mut observed_effects = std::collections::BTreeSet::new();
+    let mut trade_routes = std::collections::BTreeSet::new();
+    for line in include_str!("../inv_024_entitlement_route_dispositions.tsv")
+        .lines()
+        .filter(|line| {
+            !line.is_empty() && !line.starts_with('#') && !line.starts_with("tag\tvariant\t")
+        })
+    {
+        let columns = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 5, "malformed entitlement row: {line}");
+        assert!(
+            allowed_effects.contains(columns[2]),
+            "unknown INV-024 effect class in {line}"
+        );
+        assert!(!columns[3].is_empty(), "claim scope is mandatory: {line}");
+        let (owner_path, owner_test) = columns[4]
+            .split_once('#')
+            .unwrap_or_else(|| panic!("entitlement owner must be path#function: {line}"));
+        let source = std::fs::read_to_string(root.join(owner_path))
+            .unwrap_or_else(|error| panic!("read entitlement owner {owner_path}: {error}"));
+        assert!(
+            source.contains(&format!("fn {owner_test}(")),
+            "missing executable entitlement owner {owner_path}#{owner_test}"
+        );
+        assert!(
+            entitlement_rows.insert((columns[0].to_owned(), columns[1].to_owned())),
+            "duplicate entitlement route: {}/{}",
+            columns[0],
+            columns[1]
+        );
+        observed_effects.insert(columns[2]);
+        if columns[2] == "MatchedTradeAndFee" {
+            trade_routes.insert(columns[1]);
+            assert_eq!(
+                owner_test,
+                "v16_program_multi_episode_history_enforces_each_owners_exact_entitlement",
+                "every trade transport must enter the history-derived owner oracle"
+            );
+        }
+    }
+    assert_eq!(
+        entitlement_rows, public_rows,
+        "every public instruction needs exactly one owner-level entitlement disposition"
+    );
+    assert_eq!(entitlement_rows.len(), 49);
+    assert_eq!(
+        observed_effects, allowed_effects,
+        "unused effect class drift"
+    );
+    assert_eq!(
+        trade_routes,
+        ["TradeNoCpi", "TradeCpi", "BatchTradeNoCpi", "BatchTradeCpi"]
+            .into_iter()
+            .collect(),
+        "all four value-bearing trade transports must share the per-owner history oracle"
+    );
+
+    let proof = include_str!("../kani/inv_024_attributed_quote_value_conservation.rs");
+    assert!(proof.contains(
+        "fn kani_inv024_per_episode_entitlement_is_stronger_than_aggregate_conservation()"
+    ));
+    assert!(proof.contains("wrong_owner_payout"));
+}
+
 // security.md sweep — cross-margin (#22/#32): one portfolio holds positions on TWO assets.
 // Probe aggregate conservation and per-asset OI balance under shared-capital cross-margin.
 #[test]

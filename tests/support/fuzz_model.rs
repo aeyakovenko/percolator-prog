@@ -32726,6 +32726,298 @@ pub fn verify_attributed_pnl_roundtrip(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Inv024EpisodeEntitlement {
+    principal_in: u128,
+    realized_pnl: i128,
+    disclosed_fees: u128,
+    external_payouts: u128,
+}
+
+impl Inv024EpisodeEntitlement {
+    fn claim(self) -> Result<u128, String> {
+        let principal = i128::try_from(self.principal_in)
+            .map_err(|_| "INV-024 principal does not fit signed entitlement model")?;
+        let fees = i128::try_from(self.disclosed_fees)
+            .map_err(|_| "INV-024 fees do not fit signed entitlement model")?;
+        let payouts = i128::try_from(self.external_payouts)
+            .map_err(|_| "INV-024 payouts do not fit signed entitlement model")?;
+        let claim = principal
+            .checked_add(self.realized_pnl)
+            .and_then(|value| value.checked_sub(fees))
+            .and_then(|value| value.checked_sub(payouts))
+            .ok_or("INV-024 entitlement arithmetic overflow")?;
+        u128::try_from(claim).map_err(|_| "INV-024 history produced a negative claim".into())
+    }
+}
+
+fn inv024_exact_trade_fee(
+    route: TradeRoute,
+    price: u64,
+    caller_fee_bps: u64,
+) -> Result<u128, String> {
+    // In this fixture the configured market base fee and matcher spread are zero. The fee field on
+    // CPI instructions is the taker's cap; it is not an unsigned LP fee authorization and the
+    // wrapper correctly forwards only the zero market base fee. No-CPI peers both sign the exact
+    // caller fee.
+    let charged_fee_bps = match route {
+        TradeRoute::NoCpi | TradeRoute::BatchNoCpi => caller_fee_bps,
+        TradeRoute::Cpi | TradeRoute::BatchCpi => 0,
+    };
+    super::reference_math::mul_div_ceil(
+        u128::from(price),
+        u128::from(charged_fee_bps),
+        u128::from(MAX_MARGIN_BPS),
+    )
+}
+
+/// Runs two opposing realized-PnL episodes through all four public trade transports. Unlike the
+/// aggregate stock census, the shadow ledger is updated only from deposits, independently computed
+/// price/quantity PnL, disclosed fee terms, and observed external payouts. It therefore rejects a
+/// conserved transfer credited to the wrong portfolio.
+#[allow(dead_code)]
+pub fn verify_multi_episode_entitlement_history(
+    seed: [u8; 32],
+    routes: [TradeRoute; 4],
+) -> Result<(), String> {
+    const ACCOUNT_A: usize = 0;
+    const ACCOUNT_B: usize = 1;
+    const MARKET_CRANKER: usize = 4;
+    const ASSET: u16 = 0;
+    const PRICE_0: u64 = 1_000_000;
+    const PRICE_1: u64 = 1_100_000;
+    const PRICE_2: u64 = 1_200_000;
+    const DEPOSIT: u128 = 2_000_000;
+    const EPISODE_PNL: i128 = 100_000;
+    const FEE_BPS_0: u64 = 7;
+    const FEE_BPS_1: u64 = 13;
+    const UNRELATED_DEPOSIT: u128 = 1;
+
+    fn assert_episode_claims(
+        label: &str,
+        env: &V16Svm,
+        ledgers: &[Inv024EpisodeEntitlement; 2],
+    ) -> Result<(), String> {
+        for (actor, ledger) in ledgers.iter().enumerate() {
+            let account = env.primary_portfolio(actor);
+            let capital = i128::try_from(account.capital.get())
+                .map_err(|_| format!("{label}: actor {actor} capital does not fit i128"))?;
+            let actual = capital
+                .checked_add(account.pnl.get())
+                .ok_or_else(|| format!("{label}: actor {actor} account claim overflow"))?;
+            let expected = i128::try_from(ledger.claim()?)
+                .map_err(|_| format!("{label}: actor {actor} expected claim does not fit i128"))?;
+            if actual != expected {
+                return Err(format!(
+                    "{label}: actor {actor} deployed capital+pnl {actual} != independent history claim {expected}; ledger={ledger:?}, capital={}, pnl={}",
+                    account.capital.get(),
+                    account.pnl.get(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_fee(
+        ledgers: &mut [Inv024EpisodeEntitlement; 2],
+        route: TradeRoute,
+        price: u64,
+        fee_bps: u64,
+    ) -> Result<u128, String> {
+        let fee = inv024_exact_trade_fee(route, price, fee_bps)?;
+        for ledger in ledgers {
+            ledger.disclosed_fees = ledger
+                .disclosed_fees
+                .checked_add(fee)
+                .ok_or("INV-024 disclosed fee overflow")?;
+        }
+        Ok(fee)
+    }
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE_0,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 0,
+            actor_deposits: [
+                DEPOSIT,
+                DEPOSIT,
+                UNRELATED_DEPOSIT,
+                UNRELATED_DEPOSIT,
+                UNRELATED_DEPOSIT,
+            ],
+            actor_token_balances: [
+                DEPOSIT as u64,
+                DEPOSIT as u64,
+                UNRELATED_DEPOSIT as u64,
+                UNRELATED_DEPOSIT as u64,
+                UNRELATED_DEPOSIT as u64,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let initial_supply = env.token_supply_observed();
+    let unrelated_before = [2usize, 3usize].map(|actor| env.primary_portfolio_data(actor));
+    let mut ledgers = [
+        Inv024EpisodeEntitlement {
+            principal_in: DEPOSIT,
+            realized_pnl: 0,
+            disclosed_fees: 0,
+            external_payouts: 0,
+        },
+        Inv024EpisodeEntitlement {
+            principal_in: DEPOSIT,
+            realized_pnl: 0,
+            disclosed_fees: 0,
+            external_payouts: 0,
+        },
+    ];
+    assert_episode_claims("INV-024 initialized", &env, &ledgers)?;
+
+    // Episode one: A is long and earns exactly 100,000 atoms.
+    execute_trade_route(
+        &mut env,
+        routes[0],
+        ACCOUNT_A,
+        ACCOUNT_B,
+        ASSET,
+        POS_SCALE as i128,
+        PRICE_0,
+        FEE_BPS_0,
+    )
+    .map_err(|error| format!("INV-024 episode-one open {:?}: {error}", routes[0]))?;
+    apply_fee(&mut ledgers, routes[0], PRICE_0, FEE_BPS_0)?;
+    assert_episode_claims("INV-024 episode-one open", &env, &ledgers)?;
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(ASSET, 2, PRICE_1)
+        .map_err(|error| format!("INV-024 episode-one mark: {error}"))?;
+    crank_market_then_accounts_once(
+        &mut env,
+        MARKET_CRANKER,
+        &[ACCOUNT_B, ACCOUNT_A],
+        2,
+        ASSET,
+        8,
+    )?;
+    ledgers[ACCOUNT_A].realized_pnl += EPISODE_PNL;
+    ledgers[ACCOUNT_B].realized_pnl -= EPISODE_PNL;
+    assert_episode_claims("INV-024 episode-one settlement", &env, &ledgers)?;
+
+    execute_trade_route(
+        &mut env,
+        routes[1],
+        ACCOUNT_A,
+        ACCOUNT_B,
+        ASSET,
+        -(POS_SCALE as i128),
+        PRICE_1,
+        FEE_BPS_0,
+    )
+    .map_err(|error| format!("INV-024 episode-one close {:?}: {error}", routes[1]))?;
+    apply_fee(&mut ledgers, routes[1], PRICE_1, FEE_BPS_0)?;
+    assert_episode_claims("INV-024 episode-one close", &env, &ledgers)?;
+    env.convert_released_pnl(ACCOUNT_A, EPISODE_PNL as u128)
+        .map_err(|error| format!("INV-024 episode-one conversion: {error}"))?;
+    assert_episode_claims("INV-024 episode-one conversion", &env, &ledgers)?;
+
+    // Episode two reverses A's side and the winner, so aggregate cancellation cannot hide a
+    // per-owner attribution error from either episode.
+    execute_trade_route(
+        &mut env,
+        routes[2],
+        ACCOUNT_A,
+        ACCOUNT_B,
+        ASSET,
+        -(POS_SCALE as i128),
+        PRICE_1,
+        FEE_BPS_1,
+    )
+    .map_err(|error| format!("INV-024 episode-two open {:?}: {error}", routes[2]))?;
+    apply_fee(&mut ledgers, routes[2], PRICE_1, FEE_BPS_1)?;
+    assert_episode_claims("INV-024 episode-two open", &env, &ledgers)?;
+
+    env.warp_to_slot(3);
+    env.push_auth_mark(ASSET, 3, PRICE_2)
+        .map_err(|error| format!("INV-024 episode-two mark: {error}"))?;
+    crank_market_then_accounts_once(
+        &mut env,
+        MARKET_CRANKER,
+        &[ACCOUNT_A, ACCOUNT_B],
+        3,
+        ASSET,
+        8,
+    )?;
+    ledgers[ACCOUNT_A].realized_pnl -= EPISODE_PNL;
+    ledgers[ACCOUNT_B].realized_pnl += EPISODE_PNL;
+    assert_episode_claims("INV-024 episode-two settlement", &env, &ledgers)?;
+
+    execute_trade_route(
+        &mut env,
+        routes[3],
+        ACCOUNT_A,
+        ACCOUNT_B,
+        ASSET,
+        POS_SCALE as i128,
+        PRICE_2,
+        FEE_BPS_1,
+    )
+    .map_err(|error| format!("INV-024 episode-two close {:?}: {error}", routes[3]))?;
+    apply_fee(&mut ledgers, routes[3], PRICE_2, FEE_BPS_1)?;
+    assert_episode_claims("INV-024 episode-two close", &env, &ledgers)?;
+    env.convert_released_pnl(ACCOUNT_B, EPISODE_PNL as u128)
+        .map_err(|error| format!("INV-024 episode-two conversion: {error}"))?;
+    assert_episode_claims("INV-024 episode-two conversion", &env, &ledgers)?;
+
+    for actor in [ACCOUNT_A, ACCOUNT_B] {
+        let claim = ledgers[actor].claim()?;
+        env.withdraw_primary(actor, claim)
+            .map_err(|error| format!("INV-024 actor {actor} terminal withdrawal: {error}"))?;
+        ledgers[actor].external_payouts = ledgers[actor]
+            .external_payouts
+            .checked_add(claim)
+            .ok_or("INV-024 external payout overflow")?;
+        if u128::from(env.token_amount(env.actors[actor].destination_token)) != claim {
+            return Err(format!(
+                "INV-024 actor {actor} SPL payout does not equal history-derived claim {claim}"
+            ));
+        }
+    }
+    assert_episode_claims("INV-024 terminal withdrawals", &env, &ledgers)?;
+
+    let (_, terminal) = env.primary_market_state();
+    let expected_fees = ledgers[0]
+        .disclosed_fees
+        .checked_add(ledgers[1].disclosed_fees)
+        .ok_or("INV-024 aggregate fee overflow")?;
+    if terminal.insurance != expected_fees
+        || terminal.vault != expected_fees + UNRELATED_DEPOSIT * 3
+        || u128::from(env.token_amount(env.vault)) != terminal.vault
+        || terminal.c_tot != UNRELATED_DEPOSIT * 3
+        || env.token_supply_observed() != initial_supply
+    {
+        return Err(format!(
+            "INV-024 terminal stock mismatch: insurance={}, vault={}/{}, c_tot={}, fees={expected_fees}",
+            terminal.insurance,
+            terminal.vault,
+            env.token_amount(env.vault),
+            terminal.c_tot,
+        ));
+    }
+    let unrelated_after = [2usize, 3usize].map(|actor| env.primary_portfolio_data(actor));
+    if unrelated_after != unrelated_before {
+        return Err("INV-024 multi-episode history mutated an unrelated portfolio".into());
+    }
+    if ledgers.iter().any(|ledger| ledger.claim().ok() != Some(0)) {
+        return Err("INV-024 terminal history left a nonzero owner claim".into());
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub fn verify_exact_stock_reconciliation_lifecycle(seed: [u8; 32]) -> Result<(), String> {
     const LONG: usize = 0;

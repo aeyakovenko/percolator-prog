@@ -42,6 +42,30 @@ fn v16_program_all_trade_route_pairs_preserve_realized_pnl_owner_attribution() {
 }
 
 #[test]
+fn v16_program_multi_episode_history_enforces_each_owners_exact_entitlement() {
+    let route_orders = [
+        [
+            TradeRoute::NoCpi,
+            TradeRoute::BatchCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+        ],
+        [
+            TradeRoute::BatchNoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchCpi,
+            TradeRoute::NoCpi,
+        ],
+    ];
+    for (index, routes) in route_orders.into_iter().enumerate() {
+        let mut seed = [0x24; 32];
+        seed[0] ^= index as u8;
+        verify_multi_episode_entitlement_history(seed, routes)
+            .unwrap_or_else(|error| panic!("INV-024 history {index}: {error}"));
+    }
+}
+
+#[test]
 fn v16_program_public_trace_enforces_authority_attributed_quote_flow() {
     let mut env =
         support::v16_svm::V16Svm::new([0x42; 32], support::v16_svm::MarketConfig::default());
