@@ -76,6 +76,9 @@ mod inv_052_split_merge_invariance;
 #[path = "../tests/invariants/kani/inv_063_backing_expiry_normalization.rs"]
 mod inv_063_backing_expiry_normalization;
 
+#[path = "../tests/invariants/kani/inv_066_resolved_payout_fairness_and_exact_once.rs"]
+mod inv_066_resolved_payout_fairness_and_exact_once;
+
 #[path = "../tests/invariants/kani/inv_074_scope_locality.rs"]
 mod inv_074_scope_locality;
 

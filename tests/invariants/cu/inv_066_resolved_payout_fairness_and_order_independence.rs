@@ -5,6 +5,11 @@
 //! Evidence in this file (I/C plus invariant-specific M assertions): `v16_attack_resolved_close_order_preserves_scarce_source_backing`, `v16_bpf_force_close_pair_order_preserves_terminal_user_payouts`, `v16_attack_resolved_two_public_winners_are_close_order_independent`, `v16_bpf_force_close_pair_order_preserves_unequal_partial_payouts`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! `v16_program_resolved_payout_induction_composition_is_source_complete` joins those public
+//! routes to the exact-pin engine receipt contracts and a full-`u128`, claimant-count-independent
+//! induction proof. The induction is conditional on `RESOLVED_RATE_SUM_AXIOM`; deployed arithmetic
+//! differential tests discharge that named axiom empirically without reintroducing the
+//! solver-intractable wide multiply/divide circuit into Kani.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -868,5 +873,186 @@ fn v16_regression_resolve_before_settlement_uses_official_price() {
     assert!(
         resolved_receipt(&a).finalized || !resolved_receipt(&a).present,
         "receipt closable"
+    );
+}
+
+#[derive(Clone, Copy)]
+struct Inv066PayoutClass {
+    class: &'static str,
+    engine_proofs: &'static [&'static str],
+    public_witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv066_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+fn inv066_handler_body<'a>(production: &'a str, function: &str) -> &'a str {
+    let start = production
+        .find(&format!("fn {function}"))
+        .unwrap_or_else(|| panic!("missing production handler {function}"));
+    let tail = &production[start..];
+    let end = tail[1..]
+        .find("\n    #[inline(never)]")
+        .map_or(tail.len(), |offset| offset + 1);
+    &tail[..end]
+}
+
+#[test]
+fn v16_program_resolved_payout_induction_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv066PayoutClass] = &[
+        Inv066PayoutClass {
+            class: "snapshot-bound receipt materialization",
+            engine_proofs: &["proof_v16_resolved_receipt_bound_migration_is_exact_or_fails_closed"],
+            public_witnesses: &[(
+                "tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs",
+                "v16_program_full_terminal_lifecycle_is_claimant_order_independent",
+            )],
+        },
+        Inv066PayoutClass {
+            class: "rate-derived entitlement and claimant ordering",
+            engine_proofs: &[
+                "proof_v16_resolved_receipt_claimable_is_rate_monotone_and_overpaid_fails_closed",
+                "proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs",
+                    "v16_program_four_partial_receipts_exhaust_claim_and_release_orders",
+                ),
+                (
+                    "tests/invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs",
+                    "v16_attack_haircut_rounding_many_winners_no_mint",
+                ),
+            ],
+        },
+        Inv066PayoutClass {
+            class: "bounded payout step and attributed custody",
+            engine_proofs: &[
+                "contract_check_kernel_resolved_payout_step",
+                "proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault",
+                "proof_v16_resolved_external_payout_requires_exact_capital_plus_claim_sources",
+            ],
+            public_witnesses: &[(
+                "tests/invariants/stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs",
+                "v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries",
+            )],
+        },
+        Inv066PayoutClass {
+            class: "exact-once terminal receipt disposition",
+            engine_proofs: &[
+                "proof_v16_resolved_receipt_payment_cannot_exceed_terminal_claim",
+                "proof_v16_terminal_resolved_receipt_core_restores_dematerialization",
+                "proof_v16_insolvent_resolved_receipt_clears_at_terminal_rate",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs",
+                    "v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail",
+                ),
+                (
+                    "tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs",
+                    "v16_program_terminal_stock_and_close_slab_composition_is_source_complete",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-066/067 proof composition must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the payout-certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut classes = std::collections::BTreeSet::new();
+    let mut proofs = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate payout class");
+        assert!(!row.engine_proofs.is_empty());
+        assert!(!row.public_witnesses.is_empty());
+        for proof in row.engine_proofs {
+            assert!(proofs.insert(*proof), "duplicate engine proof {proof}");
+            assert!(
+                proof.starts_with("contract_check_") || proof.starts_with("proof_v16_"),
+                "unclassified payout proof {proof}",
+            );
+        }
+        for (path, witness) in row.public_witnesses {
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv066_source_defines_function(source, witness),
+                "payout class '{}' lacks executable witness {path}#{witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 4, "payout class roster drift");
+    assert_eq!(proofs.len(), 9, "payout engine-proof roster drift");
+
+    let induction = include_str!("../kani/inv_066_resolved_payout_fairness_and_exact_once.rs");
+    assert!(induction.contains("RESOLVED_RATE_SUM_AXIOM"));
+    assert!(inv066_source_defines_function(
+        induction,
+        "kani_inv066_inv067_funded_receipt_induction_is_order_independent_and_exact_once",
+    ));
+    for consequence in [
+        "assert_eq!(first_paid_a, first_due)",
+        "assert_eq!(first_paid_b, first_due)",
+        "assert_eq!(second_paid_a, second_due)",
+        "assert_eq!(second_paid_b, second_due)",
+        "assert_eq!(vault_after_a, vault_after_b)",
+        "assert_eq!(first_paid_after, first_face)",
+    ] {
+        assert!(
+            induction.contains(consequence),
+            "claimant induction lost consequence {consequence}",
+        );
+    }
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    let close = inv066_handler_body(production, "handle_close_resolved");
+    let topup = inv066_handler_body(production, "handle_claim_resolved_payout_topup");
+    for (handler, engine_call) in [
+        (close, "permissionless_auto_crank_not_atomic"),
+        (topup, "claim_resolved_payout_topup_not_atomic"),
+    ] {
+        let owner_gate = handler.find("expect_portfolio_view_owner").unwrap();
+        let engine = handler.find(engine_call).unwrap();
+        let custody = handler.find("verify_withdrawable_token_accounts").unwrap();
+        let transfer = handler.find("transfer_tokens_signed").unwrap();
+        assert!(
+            owner_gate < engine && engine < custody && custody < transfer,
+            "resolved payout route must retain owner binding -> engine -> custody -> SPL ordering",
+        );
+    }
+    assert!(close.contains("AutoCrankPlanV16::CloseResolved"));
+    assert!(close.contains("AutoCrankOutcomeV16::ResolvedClose"));
+    assert_eq!(
+        production
+            .matches("claim_resolved_payout_topup_not_atomic")
+            .count(),
+        1,
+        "a new direct top-up route requires composition evidence",
     );
 }
