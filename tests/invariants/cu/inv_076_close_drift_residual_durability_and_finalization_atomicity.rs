@@ -18,7 +18,10 @@
 //! change only in terminal mode/reason while the target portfolio stays
 //! byte-identical. That frames OI, basis, counters, barriers, insurance, and
 //! custody across the engine's commit-on-Recovery disposition without duplicating
-//! the engine transition in this wrapper-owned file.
+//! the engine transition in this wrapper-owned file. The source-complete
+//! composition gate at the end of this file closes the remaining fallible-phase
+//! question by combining the exact-pin engine success contracts with INV-080's
+//! complete wrapper error propagation and the SVM rollback boundary.
 
 use super::*;
 
@@ -294,4 +297,247 @@ fn v16_program_unrelated_asset_slot_drift_preserves_local_close_progress_and_liv
     assert_eq!(exited.mode, MarketModeV16::Live);
     assert_eq!(exited.assets[0].oi_eff_long_q, 0);
     assert_eq!(exited.assets[0].oi_eff_short_q, 0);
+}
+
+#[derive(Clone, Copy)]
+struct Inv076CloseClass {
+    class: &'static str,
+    engine_proofs: &'static [&'static str],
+    public_witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv076_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+#[test]
+fn v16_program_close_finalization_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv076CloseClass] = &[
+        Inv076CloseClass {
+            class: "close creation identity exclusion and exit barrier",
+            engine_proofs: &[
+                "proof_v16_close_begin_takes_barrier_and_stamps_immutable_identity",
+                "proof_v16_close_begin_rejects_occupied_domain_before_mutation",
+                "proof_v16_close_begin_rejects_account_with_active_close",
+                "proof_v16_withdraw_rejects_while_close_active",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_074_scope_locality.rs",
+                    "v16_program_two_asset_closes_advance_without_crossing_scope",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_active_close_seeded_frontier_preserves_episode_and_bounded_owner_exit",
+                ),
+            ],
+        },
+        Inv076CloseClass {
+            class: "immutable drift anchor asset freshness and expiry",
+            engine_proofs: &[
+                "contract_check_kernel_open_close_snapshot_is_stale",
+                "proof_v16_expired_close_progress_declares_recovery_without_value_mutation",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs",
+                    "v16_program_same_asset_price_and_funding_drift_preserves_close_and_owner_exit",
+                ),
+                (
+                    "tests/invariants/cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs",
+                    "v16_program_unrelated_asset_slot_drift_preserves_local_close_progress_and_live_scope",
+                ),
+            ],
+        },
+        Inv076CloseClass {
+            class: "principal support insurance and senior-stock attribution",
+            engine_proofs: &[
+                "proof_v16_negative_pnl_settlement_consumes_principal_before_residual",
+                "contract_check_flow_insurance_to_close_insurance_spent",
+                "contract_check_flow_insurance_to_close_rejects_vault_movement",
+                "proof_v16_residual_excludes_senior_backing_provider_earnings",
+                "proof_v16_residual_excludes_recoverable_counterparty_backing_principal",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_037_exact_residual_partition.rs",
+                    "v16_program_insurance_covered_liquidation_close_ledger_partitions_exactly",
+                ),
+                (
+                    "tests/invariants/cu/inv_027_protected_principal_seniority.rs",
+                    "v16_attack_leveraged_bad_debt_socialized_not_printed",
+                ),
+            ],
+        },
+        Inv076CloseClass {
+            class: "B booking residual partition and strict ledger advance",
+            engine_proofs: &[
+                "closure_kernel_advance_close_ledger_rank_witness",
+                "contract_check_bresidual_chunk_conservation",
+                "contract_check_kernel_bresidual_step",
+                "closure_close_ledger_absorbs_booking_outcome",
+                "proof_v16_close_progress_ledger_residual_equation_is_enforced",
+                "proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact",
+                "proof_v16_resolved_residual_booking_without_loss_bearing_side_is_explicit_only",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_071_crank_progress.rs",
+                    "v16_program_public_pending_close_preempts_b_stale_then_exposes_b_progress",
+                ),
+                (
+                    "tests/invariants/stateful/inv_071_crank_progress.rs",
+                    "v16_program_pending_close_residual_is_part_of_the_public_crank_rank",
+                ),
+            ],
+        },
+        Inv076CloseClass {
+            class: "effective exposure retention and obligation release",
+            engine_proofs: &[
+                "contract_check_kernel_retain_leg_as_pending_obligation",
+                "contract_check_kernel_recovery_pending_obligation_release_allowed",
+                "proof_v16_unilateral_close_capacity_is_safe_effective_progress",
+                "proof_v16_close_cancel_shape_rejects_dropped_residual",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_071_crank_progress.rs",
+                    "v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves",
+                ),
+                (
+                    "tests/invariants/cu/inv_061_deterministic_bounded_liquidation.rs",
+                    "v16_program_liquidation_composition_is_source_complete",
+                ),
+            ],
+        },
+        Inv076CloseClass {
+            class: "cure cancellation and finalized-ledger inertness",
+            engine_proofs: &[
+                "contract_check_flow_close_cure_to_account_capital",
+                "proof_v16_cure_and_cancel_close_rejects_without_active_close",
+                "proof_v16_withdraw_allowed_after_canceled_close",
+                "proof_v16_finalized_zero_residual_close_is_inert_for_dematerialization",
+                "proof_v16_finalized_zero_residual_close_is_inert_for_flat_withdraw",
+                "proof_v16_finalized_zero_residual_close_is_inert_for_next_begin",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs",
+                    "v16_program_cure_and_cancel_close_rejects_when_resolve_matured_atomically",
+                ),
+                (
+                    "tests/invariants/cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs",
+                    "v16_program_public_close_zero_cure_rejects_atomically_and_terminal_progress_remains",
+                ),
+            ],
+        },
+        Inv076CloseClass {
+            class: "durability preflight and explicit terminal Recovery",
+            engine_proofs: &[
+                "proof_v16_liquidation_preflight_accepts_only_fully_durable_residual",
+                "proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_recovery",
+                "proof_v16_liquidation_error_commits_only_fully_declared_recovery",
+                "contract_check_kernel_forfeit_residual_step",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_071_crank_progress.rs",
+                    "v16_program_unattributed_multi_asset_loss_reaches_liquidation_and_terminal_payout",
+                ),
+                (
+                    "tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs",
+                    "v16_program_recovery_force_close_reaches_zero_residue_and_close_slab",
+                ),
+            ],
+        },
+        Inv076CloseClass {
+            class: "bounded selector dispatch error propagation and SVM rollback",
+            engine_proofs: &[
+                "proof_v16_auto_crank_pending_close_priority_is_total",
+                "proof_v16_seq_double_crank_is_monotone_and_value_flat",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_071_crank_progress.rs",
+                    "v16_program_crank_progress_and_recovery_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_program_max_shape_resolved_close_order_matrix_is_bounded_and_fair",
+                ),
+                (
+                    "tests/invariants/cu/inv_080_error_propagation_and_exact_rollback.rs",
+                    "v16_program_explicit_engine_error_dispositions_are_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_080_error_propagation_and_exact_rollback.rs",
+                    "v16_program_dispatch_and_entrypoints_preserve_every_handler_error",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-076 composition must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the close-certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut classes = std::collections::BTreeSet::new();
+    let mut proofs = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate close class");
+        assert!(!row.engine_proofs.is_empty());
+        assert!(!row.public_witnesses.is_empty());
+        for proof in row.engine_proofs {
+            assert!(proofs.insert(*proof), "duplicate engine proof {proof}");
+            assert!(
+                proof.starts_with("proof_v16_")
+                    || proof.starts_with("contract_check_")
+                    || proof.starts_with("closure_"),
+                "unclassified close proof {proof}",
+            );
+        }
+        for (path, witness) in row.public_witnesses {
+            assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv076_source_defines_function(source, witness),
+                "close class '{}' lacks executable witness {path}#{witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 8, "close composition class roster drift");
+    assert_eq!(proofs.len(), 34, "close engine-proof roster drift");
+    assert_eq!(witnesses.len(), 18, "close public-witness roster drift");
+
+    // The engine is intentionally `_not_atomic`: wrapper propagation plus SVM
+    // transaction rollback is the atomicity boundary. Lock both close ingresses
+    // directly so this composition cannot silently inherit INV-080 after a
+    // handler starts swallowing or translating a close failure into success.
+    let production = include_str!("../../../src/v16_program.rs");
+    assert!(production.contains(
+        ".cure_and_cancel_close_not_atomic(&mut portfolio, optional_deposit)\n                .map_err(map_v16_error)?;"
+    ));
+    assert!(production.contains("let result = match group.permissionless_auto_crank_not_atomic("));
+    assert!(production.contains("Err(err) => return Err(map_v16_error(err)),"));
 }
