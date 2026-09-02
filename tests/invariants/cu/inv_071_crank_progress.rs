@@ -2439,3 +2439,275 @@ fn v16_program_ewma_crank_commits_once_then_rejects_same_slot_fixed_point() {
     assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
     assert_eq!(env.svm.get_account(&portfolio).unwrap(), fixed_portfolio);
 }
+
+#[derive(Clone, Copy)]
+struct Inv071ProgressClass {
+    class: &'static str,
+    engine_proofs: &'static [&'static str],
+    public_witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv071_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+#[test]
+fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv071ProgressClass] = &[
+        Inv071ProgressClass {
+            class: "summary fidelity selector totality and wrapper dispatch",
+            engine_proofs: &[
+                "contract_check_actionable_summary_from_signals",
+                "contract_check_first_actionable_slot",
+                "contract_check_select_progress_witness",
+                "contract_check_select_auto_crank_plan",
+                "proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_072_order_robust_crankability.rs",
+                    "v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_bounded_reference_graph_exhausts_public_action_words",
+                ),
+            ],
+        },
+        Inv071ProgressClass {
+            class: "stale account accrual reset and recovery refresh",
+            engine_proofs: &[
+                "proof_v16_auto_crank_refresh_target_includes_recovery_reset_obligation",
+                "proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work",
+                "proof_v16_equity_active_accrual_requires_protective_progress_before_mutation",
+                "proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_reset_pending_seeded_frontier_is_exact_and_terminal",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_program_recovery_kf_refresh_at_14_leg_28_source_shape_is_bounded",
+                ),
+            ],
+        },
+        Inv071ProgressClass {
+            class: "side-local B settlement",
+            engine_proofs: &[
+                "proof_v16_auto_crank_b_settlement_pending_is_exact_and_fail_closed",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs",
+                    "v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_explicit_b_seeded_frontier_preserves_bounded_owner_exit",
+                ),
+            ],
+        },
+        Inv071ProgressClass {
+            class: "pending and expired bankruptcy close",
+            engine_proofs: &[
+                "proof_v16_auto_crank_pending_close_priority_is_total",
+                "proof_v16_expired_close_progress_declares_recovery_without_value_mutation",
+                "proof_v16_close_progress_ledger_residual_equation_is_enforced",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_071_crank_progress.rs",
+                    "v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_progress",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_active_close_seeded_frontier_preserves_episode_and_bounded_owner_exit",
+                ),
+            ],
+        },
+        Inv071ProgressClass {
+            class: "engine-selected liquidation and durable Recovery fallback",
+            engine_proofs: &[
+                "proof_v16_liquidation_preflight_accepts_only_fully_durable_residual",
+                "proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_recovery",
+                "proof_v16_liquidation_error_commits_only_fully_declared_recovery",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_061_deterministic_bounded_liquidation.rs",
+                    "v16_program_liquidation_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_attack_public_14_leg_28_source_equal_risk_liquidation_stays_bounded",
+                ),
+            ],
+        },
+        Inv071ProgressClass {
+            class: "source lien and released obligation cleanup",
+            engine_proofs: &[
+                "proof_v16_auto_crank_source_lien_release_is_total_and_prioritized",
+                "proof_v16_source_lien_face_burn_partition_is_total_disjoint_and_strict_progress",
+                "proof_v16_flat_source_lien_normalization_is_total_and_fail_closed",
+                "proof_v16_released_flat_pending_obligation_is_publicly_actionable",
+                "proof_v16_released_flat_pending_obligation_detach_is_value_neutral_progress",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_program_max_source_flat_lien_release_and_owner_exit_are_bounded",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_lien_impairment_seeded_frontier_preserves_bounded_owner_exit",
+                ),
+            ],
+        },
+        Inv071ProgressClass {
+            class: "resource failure oracle loss and terminal Recovery",
+            engine_proofs: &[
+                "proof_v16_permissionless_recovery_crank_is_accounting_neutral",
+                "proof_v16_public_permissionless_empty_market_crank_advances_clock_without_value_movement",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_078_permissionless_recovery_coverage.rs",
+                    "v16_program_recovery_resource_failure_lattice_preserves_public_exit",
+                ),
+                (
+                    "tests/invariants/stateful/inv_071_crank_progress.rs",
+                    "v16_program_unattributed_multi_asset_loss_reaches_liquidation_and_terminal_payout",
+                ),
+                (
+                    "tests/invariants/cu/inv_078_permissionless_recovery_coverage.rs",
+                    "v16_program_unavailable_pyth_feed_has_bounded_terminal_fallback",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_oracle_failure_seeded_frontier_is_exact_and_terminal",
+                ),
+            ],
+        },
+        Inv071ProgressClass {
+            class: "resolved account payout and terminal slab progress",
+            engine_proofs: &[
+                "contract_check_kernel_resolved_close_progress",
+                "contract_check_build_resolved_close_rank",
+                "contract_check_kernel_resolved_payout_step",
+                "proof_v16_terminal_slab_asset_step_is_total_and_priority_ordered",
+                "proof_v16_terminal_slab_wait_is_error_or_strict_cursor_progress",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_071_crank_progress.rs",
+                    "v16_program_permissionless_crank_closes_capital_only_resolved_account",
+                ),
+                (
+                    "tests/invariants/cu/inv_066_resolved_payout_fairness_and_order_independence.rs",
+                    "v16_program_resolved_payout_induction_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_receipt_conflict_seeded_frontier_is_exact_and_terminal",
+                ),
+            ],
+        },
+        Inv071ProgressClass {
+            class: "repeated calls fixed points and maximum supported work shape",
+            engine_proofs: &["proof_v16_seq_double_crank_is_monotone_and_value_flat"],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_071_crank_progress.rs",
+                    "v16_regression_crank_idempotent_at_settlement_fixed_point",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_attack_public_14_leg_28_source_recovery_forfeit_stays_bounded",
+                ),
+                (
+                    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+                    "v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-071/078 composition must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the liveness-certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut classes = std::collections::BTreeSet::new();
+    let mut proofs = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate liveness class");
+        assert!(!row.engine_proofs.is_empty());
+        assert!(!row.public_witnesses.is_empty());
+        for proof in row.engine_proofs {
+            assert!(proofs.insert(*proof), "duplicate engine proof {proof}");
+            assert!(
+                proof.starts_with("proof_v16_") || proof.starts_with("contract_check_"),
+                "unclassified liveness proof {proof}",
+            );
+        }
+        for (path, witness) in row.public_witnesses {
+            assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv071_source_defines_function(source, witness),
+                "liveness class '{}' lacks executable witness {path}#{witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 9, "liveness class roster drift");
+    assert_eq!(proofs.len(), 29, "liveness proof roster drift");
+    assert_eq!(witnesses.len(), 22, "liveness witness roster drift");
+
+    // The complete plan/parser gate is itself source-complete over all ten current
+    // AutoCrankPlanV16 shapes and the sole wrapper ingress. Requiring it here keeps
+    // this proof composition independent of finite scenario depth while avoiding a
+    // second parser or selector inventory.
+    let plan_gate = std::fs::read_to_string(
+        root.join("tests/invariants/cu/inv_072_order_robust_crankability.rs"),
+    )
+    .expect("read INV-072 plan gate");
+    for stratum in [
+        "NoAction",
+        "RefreshAccount(Some)",
+        "RefreshAccount(None)",
+        "SettleBChunk",
+        "Liquidate",
+        "ReleaseSourceLiens",
+        "AdvanceClose",
+        "DeclareRecovery",
+        "FinalizeRecovery",
+        "CloseResolved",
+    ] {
+        assert!(
+            plan_gate.contains(&format!("plan: \"{stratum}\"")),
+            "INV-072 lost auto-crank plan stratum {stratum}",
+        );
+    }
+}
