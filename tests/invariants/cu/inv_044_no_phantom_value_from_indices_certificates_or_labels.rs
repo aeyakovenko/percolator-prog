@@ -15,6 +15,11 @@
 //! or account-local leg order.
 //! Additional no-phantom-value coverage lives in INV-025, INV-026, INV-069, and
 //! INV-070.
+//! `v16_program_derived_value_class_roster_is_source_complete` partitions every current derived
+//! value surface into ten classes and binds each class to exact-pin engine proofs plus public
+//! value/encumbrance witnesses. The caller-field, wrapper-persisted-field, and wrapper-to-engine
+//! transition inventories are themselves executable dependencies, so a new input, mirror, or
+//! transition cannot silently inherit this closure.
 
 use super::*;
 
@@ -443,4 +448,259 @@ fn v16_attack_deposit_with_parked_pnl_clean() {
         "junior pnl still backed by residual"
     );
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
+
+#[derive(Clone, Copy)]
+struct Inv044DerivedValueClass {
+    class: &'static str,
+    engine_proofs: &'static [&'static str],
+    public_witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv044_source_defines_test(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+#[test]
+fn v16_program_derived_value_class_roster_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv044DerivedValueClass] = &[
+        Inv044DerivedValueClass {
+            class: "ADL A indices and effective quantity",
+            engine_proofs: &[
+                "proof_v16_adl_scaled_accrual_kernel_matches_every_valid_factor",
+                "proof_v16_adl_scaled_accrual_is_cross_side_zero_sum_at_every_factor_quantum",
+                "proof_v16_adl_kf_settlement_is_account_partition_invariant_and_zero_sum",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_053_full_health_recertification_equivalence.rs",
+                    "v16_program_incremental_trade_certificate_matches_full_refresh_with_nonunit_adl",
+                ),
+                (
+                    "tests/invariants/cu/inv_051_canonical_adl_effective_quantity.rs",
+                    "v16_program_liquidation_adl_effective_exit_matrix_preserves_bounded_cleanup",
+                ),
+            ],
+        },
+        Inv044DerivedValueClass {
+            class: "K and F accrual indices and cohort snapshots",
+            engine_proofs: &[
+                "proof_v16_kf_accrual_marks_each_stored_cohort_exactly_once",
+                "proof_v16_kf_settlement_disposes_one_cohort_member_without_underflow",
+                "proof_v16_canonical_accrual_path_is_partition_invariant",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_044_no_phantom_value_from_indices_certificates_or_labels.rs",
+                    "v16_program_cross_domain_settlement_is_crank_and_leg_slot_order_independent",
+                ),
+                (
+                    "tests/invariants/cu/inv_024_attributed_quote_value_conservation.rs",
+                    "v16_attack_funding_and_fee_combined_conserve",
+                ),
+            ],
+        },
+        Inv044DerivedValueClass {
+            class: "B index, stale flags, and pending settlement labels",
+            engine_proofs: &[
+                "proof_v16_b_settlement_atom_budget_clears_public_scale_gap",
+                "proof_v16_auto_crank_b_settlement_pending_is_exact_and_fail_closed",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_044_no_phantom_value_from_indices_certificates_or_labels.rs",
+                    "v16_program_permissionless_settle_b_on_healthy_account_is_safe_noop",
+                ),
+                (
+                    "tests/invariants/cu/inv_071_crank_progress.rs",
+                    "v16_program_public_b_prerequisite_preserves_later_liquidation_progress",
+                ),
+            ],
+        },
+        Inv044DerivedValueClass {
+            class: "health certificates, active bitmap, and epoch keys",
+            engine_proofs: &[
+                "proof_v16_raw_oracle_target_change_invalidates_all_prior_certificates",
+                "proof_v16_final_batch_margin_gate_accepts_only_final_certified_im",
+                "proof_v16_health_cert_capital_debit_preserves_im_or_rejects",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_053_full_health_recertification_equivalence.rs",
+                    "v16_program_incremental_trade_certificate_equals_public_full_refresh",
+                ),
+                (
+                    "tests/invariants/cu/inv_054_certificate_epoch_completeness.rs",
+                    "v16_attack_convert_released_pnl_requires_current_cert_and_public_refresh",
+                ),
+            ],
+        },
+        Inv044DerivedValueClass {
+            class: "claim bounds, source reservations, and encumbrance labels",
+            engine_proofs: &[
+                "proof_v16_available_source_support_excludes_liened_and_encumbered_amounts",
+                "proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_026_reservation_and_encumbrance_conservation_is_separate_from_token_value.rs",
+                    "v16_program_source_credit_reservation_labels_do_not_free_backing_value",
+                ),
+                (
+                    "tests/invariants/cu/inv_028_source_domain_realizability_cap.rs",
+                    "v16_program_source_realizability_cap_composition_is_source_complete",
+                ),
+            ],
+        },
+        Inv044DerivedValueClass {
+            class: "counterparty and insurance lien lifecycle labels",
+            engine_proofs: &[
+                "proof_v16_public_counterparty_lien_create_moves_fresh_to_valid_without_value_movement",
+                "proof_v16_public_counterparty_lien_release_restores_unliened_backing_without_value_movement",
+                "proof_v16_public_counterparty_lien_consume_creates_receivable_without_value_movement",
+                "proof_v16_public_counterparty_lien_impair_moves_valid_to_impaired_without_value_movement",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_032_exact_counterparty_lien_lifecycle.rs",
+                    "v16_program_counterparty_lien_lifecycle_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_033_insurance_backed_lien_single_classification.rs",
+                    "v16_program_public_source_lien_classification_never_double_counts_insurance",
+                ),
+                (
+                    "tests/invariants/cu/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs",
+                    "v16_program_single_use_lifecycle_composition_is_source_complete",
+                ),
+            ],
+        },
+        Inv044DerivedValueClass {
+            class: "soft credit, realizability rates, and durable-value admission",
+            engine_proofs: &[
+                "proof_v16_source_credit_rate_never_exceeds_available_backing_ratio",
+                "proof_v16_underbacked_source_credit_cannot_satisfy_im_lien_requirements",
+                "proof_v16_counterparty_source_credit_support_does_not_debit_vault_or_insurance",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_028_source_domain_realizability_cap.rs",
+                    "v16_attack_convert_released_pnl_cannot_mint_from_unbacked_pnl",
+                ),
+                (
+                    "tests/invariants/stateful/inv_028_source_domain_realizability_cap.rs",
+                    "v16_program_reciprocal_cross_asset_cycle_cannot_mint_credit",
+                ),
+                (
+                    "tests/invariants/cu/inv_027_protected_principal_seniority.rs",
+                    "v16_program_loss_stale_economic_routes_have_a_complete_seniority_disposition",
+                ),
+            ],
+        },
+        Inv044DerivedValueClass {
+            class: "backing, lifecycle, retirement, and wrapper policy tags",
+            engine_proofs: &[
+                "proof_v16_counterparty_backing_expiry_reclassifies_principal_and_impairs_lien",
+                "proof_v16_lapsed_source_backing_preempts_flat_lien_normalization",
+                "proof_v16_canonical_retired_asset_slot_preserves_identity_and_clears_local_ledgers",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_063_backing_expiry_normalization.rs",
+                    "v16_program_backing_expiry_consumer_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_069_terminal_normalization_and_retirement.rs",
+                    "v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper_cleanup",
+                ),
+                (
+                    "tests/invariants/cu/inv_087_no_phantom_controls_or_dead_security_fields.rs",
+                    "v16_program_all_wrapper_owned_persisted_structs_have_complete_field_rosters",
+                ),
+            ],
+        },
+        Inv044DerivedValueClass {
+            class: "global stocks, external token value, and terminal residue",
+            engine_proofs: &[
+                "proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency",
+                "proof_v16_public_terminal_insurance_retirement_is_exact_and_fully_framed",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_025_exact_stock_reconciliation.rs",
+                    "v16_program_public_value_lifecycle_reconciles_every_materialized_stock_census",
+                ),
+                (
+                    "tests/invariants/cu/inv_025_exact_stock_reconciliation.rs",
+                    "v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks",
+                ),
+                (
+                    "tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs",
+                    "v16_program_terminal_stock_and_close_slab_composition_is_source_complete",
+                ),
+            ],
+        },
+        Inv044DerivedValueClass {
+            class: "caller inputs, wrapper mirrors, summaries, and transition ownership",
+            engine_proofs: &[],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_023_caller_input_confinement_for_derived_safety_state.rs",
+                    "v16_program_caller_input_roster_owns_every_production_field",
+                ),
+                (
+                    "tests/invariants/cu/inv_087_no_phantom_controls_or_dead_security_fields.rs",
+                    "v16_program_every_wrapper_persisted_security_field_has_a_named_mutation_witness",
+                ),
+                (
+                    "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+                    "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-044 composes exact engine proofs and must reopen on a pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the same certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut classes = std::collections::BTreeSet::new();
+    let mut proofs = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate derived-value class");
+        assert!(!row.public_witnesses.is_empty());
+        for proof in row.engine_proofs {
+            assert!(proofs.insert(*proof), "duplicate engine proof {proof}");
+            assert!(proof.starts_with("proof_v16_"));
+        }
+        for (path, witness) in row.public_witnesses {
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv044_source_defines_test(source, witness),
+                "derived-value class '{}' lacks executable witness {path}#{witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 10, "derived-value class roster drift");
+    assert_eq!(proofs.len(), 25, "derived-value proof roster drift");
 }
