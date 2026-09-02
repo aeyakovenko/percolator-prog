@@ -101,6 +101,16 @@ not directly credit the close residual, so the former `pending_obligation_credit
 definitionally zero for v16.9.1. A future nonzero credit requires an explicit disjoint engine
 ledger representation and reopens this row.
 
+The invariant suite was frozen at wrapper commit `17732981` before the final holdout evaluation on
+2026-09-02. The live GitHub LoF/DoS-labelled PR roster, excluding this coverage PR itself, exactly
+matched all 143 local holdout rows from PR190 through PR393: 126 findings map to executable,
+invariant-owned generic discovery fingerprints, 17 have machine-checked nonqualifying public-route
+classifications, and none depend on a direct-only regression or remain unmapped. The holdout gate
+passes against that exact roster. This establishes finding-agnostic structural coverage for the
+current corpus; repository history cannot prove that every test author lacked prior knowledge of
+every finding, so this is not represented as an experimentally blind-discovery result. A new open
+finding, public route, engine pin, or changed qualification rule reopens the holdout evaluation.
+
 INV-051 now closes the current canonical-effective-quantity surface. The existing four-world
 maximum-shape product was strengthened to derive the selected leg's effective quantity before and
 after each of eleven liquidation episodes and each of four raw-basis owner reductions. Every step
