@@ -16,6 +16,82 @@
 
 use super::*;
 
+fn inv055_assert_init_portfolio_rejects_current_market_mode(env: &mut V16CuEnv, label: &str) {
+    let owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    let portfolio = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            portfolio,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0; env.portfolio_account_len],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "{label}: terminal market admitted a fresh portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "{label}: rejected init changed market state",
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "{label}: rejected init changed the candidate portfolio",
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "{label}: rejected init changed custody",
+    );
+}
+
+#[test]
+fn v16_program_init_portfolio_rejects_public_recovery_and_resolved_modes() {
+    let PublicActiveCloseFixture { mut env, loss, .. } = public_asset1_bankrupt_close_fixture();
+    let ledger = close_progress(&env.portfolio_state(loss));
+    env.svm.warp_to_slot(ledger.max_close_slot + 1);
+    env.crank(
+        loss,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: vec![],
+        },
+    );
+    assert_eq!(
+        env.market_state().1.mode,
+        MarketModeV16::Recovery,
+        "expired public close must expose the market-Recovery admission state",
+    );
+    inv055_assert_init_portfolio_rejects_current_market_mode(&mut env, "Recovery");
+
+    let mut resolved = V16CuEnv::new();
+    resolved.resolve();
+    assert_eq!(resolved.market_state().1.mode, MarketModeV16::Resolved);
+    inv055_assert_init_portfolio_rejects_current_market_mode(&mut resolved, "Resolved");
+}
+
 #[test]
 fn v16_program_reset_pending_admission_matrix_rejects_risk_then_restores_trade() {
     const OPEN_Q: u128 = 10 * POS_SCALE;
@@ -1432,4 +1508,359 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
         before,
         "failed Hybrid reconfiguration must not mutate market state"
     );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Inv055AdmissionOwner {
+    Bootstrap,
+    PortfolioLifecycle,
+    TradeLifecycle,
+    AutomaticProgress,
+    TerminalSettlement,
+    Resolution,
+    ReserveLifecycle,
+    AssetLifecycle,
+    OwnerRiskReduction,
+    CloseEpisode,
+    OracleLifecycle,
+    AuthorityPolicy,
+    LedgerReconciliation,
+    MatcherCapability,
+    CollateralConversion,
+}
+
+#[derive(Clone, Copy)]
+struct Inv055AdmissionEvidence {
+    owner: Inv055AdmissionOwner,
+    path: &'static str,
+    test: &'static str,
+}
+
+fn inv055_evidence(
+    owner: Inv055AdmissionOwner,
+    path: &'static str,
+    test: &'static str,
+) -> Inv055AdmissionEvidence {
+    Inv055AdmissionEvidence { owner, path, test }
+}
+
+fn inv055_public_route_admission(variant: &str) -> Option<Inv055AdmissionEvidence> {
+    use Inv055AdmissionOwner::*;
+
+    let evidence = match variant {
+        "InitMarket" => inv055_evidence(
+            Bootstrap,
+            "tests/invariants/cu/inv_083_boundary_completeness.rs",
+            "v16_attack_init_market_rejects_grief_config_without_burning_market_account",
+        ),
+        "InitPortfolio" => inv055_evidence(
+            PortfolioLifecycle,
+            "tests/invariants/cu/inv_055_state_indexed_admission.rs",
+            "v16_program_init_portfolio_rejects_public_recovery_and_resolved_modes",
+        ),
+        "Deposit" | "Withdraw" => inv055_evidence(
+            PortfolioLifecycle,
+            "tests/invariants/stateful/inv_055_state_indexed_admission.rs",
+            "v16_program_user_operation_lifecycle_admission_matrix",
+        ),
+        "ClosePortfolio" => inv055_evidence(
+            PortfolioLifecycle,
+            "tests/invariants/cu/inv_055_state_indexed_admission.rs",
+            "v16_attack_close_portfolio_with_pnl_rejected",
+        ),
+        "ConvertReleasedPnl" => inv055_evidence(
+            PortfolioLifecycle,
+            "tests/invariants/cu/inv_054_certificate_epoch_completeness.rs",
+            "v16_attack_convert_released_pnl_requires_current_cert_and_public_refresh",
+        ),
+        "SyncMaintenanceFee" => inv055_evidence(
+            PortfolioLifecycle,
+            "tests/invariants/cu/inv_073_no_permanent_user_lock.rs",
+            "v16_program_sync_maintenance_rejects_when_resolve_matured",
+        ),
+        "TradeNoCpi" | "TradeCpi" | "BatchTradeNoCpi" | "BatchTradeCpi" => inv055_evidence(
+            TradeLifecycle,
+            "tests/invariants/cu/inv_055_state_indexed_admission.rs",
+            "v16_program_reset_pending_admission_matrix_rejects_risk_then_restores_trade",
+        ),
+        "PermissionlessCrank" => inv055_evidence(
+            AutomaticProgress,
+            "tests/invariants/cu/inv_072_order_robust_crankability.rs",
+            "v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence",
+        ),
+        "CloseResolved" | "ClaimResolvedPayoutTopup" => inv055_evidence(
+            TerminalSettlement,
+            "tests/invariants/cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs",
+            "v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail",
+        ),
+        "CloseSlab" => inv055_evidence(
+            TerminalSettlement,
+            "tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs",
+            "v16_program_close_slab_rejects_until_market_has_zero_terminal_residue",
+        ),
+        "ResolveMarket" => inv055_evidence(
+            Resolution,
+            "tests/invariants/cu/inv_047_equivalent_route_semantics.rs",
+            "v16_program_authority_and_permissionless_resolution_match_at_maturity",
+        ),
+        "ResolveStalePermissionless" => inv055_evidence(
+            Resolution,
+            "tests/invariants/cu/inv_073_no_permanent_user_lock.rs",
+            "v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free",
+        ),
+        "ConfigurePermissionlessResolve" => inv055_evidence(
+            Resolution,
+            "tests/invariants/cu/inv_087_no_phantom_controls_or_dead_security_fields.rs",
+            "v16_program_configure_permissionless_resolve_gated_and_bounded",
+        ),
+        "TopUpInsurance" | "TopUpInsuranceDomain" => inv055_evidence(
+            ReserveLifecycle,
+            "tests/invariants/cu/inv_047_equivalent_route_semantics.rs",
+            "v16_program_legacy_insurance_topup_matches_explicit_domain_split",
+        ),
+        "WithdrawInsuranceAsset" => inv055_evidence(
+            ReserveLifecycle,
+            "tests/invariants/cu/inv_064_insurance_withdrawal_policy_equivalence.rs",
+            "v16_attack_live_insurance_asset_withdraw_uniform_for_asset0_and_permissionless_asset",
+        ),
+        "TopUpBackingBucket" | "WithdrawBackingBucket" => inv055_evidence(
+            ReserveLifecycle,
+            "tests/invariants/cu/inv_028_source_domain_realizability_cap.rs",
+            "v16_attack_backing_bucket_topup_withdraw_input_gates",
+        ),
+        "WithdrawBackingBucketEarnings" => inv055_evidence(
+            ReserveLifecycle,
+            "tests/invariants/cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs",
+            "v16_public_backing_earnings_withdrawal_matches_spl_and_internal_quote_deltas",
+        ),
+        "UpdateAssetLifecycle" => inv055_evidence(
+            AssetLifecycle,
+            "tests/invariants/cu/inv_065_reset_recovery_and_retired_state_isolation.rs",
+            "v16_program_reset_pending_rejects_fresh_counterparty_and_completes_recovery",
+        ),
+        "FinalizeResetSide" => inv055_evidence(
+            AssetLifecycle,
+            "tests/invariants/cu/inv_065_reset_recovery_and_retired_state_isolation.rs",
+            "v16_attack_finalize_reset_side_requires_empty_side_counts",
+        ),
+        "RestartAssetOracle" => inv055_evidence(
+            AssetLifecycle,
+            "tests/invariants/cu/inv_069_terminal_normalization_and_retirement.rs",
+            "v16_program_spent_only_recovery_asset_can_restart_without_value_drift",
+        ),
+        "RebalanceReduce" => inv055_evidence(
+            OwnerRiskReduction,
+            "tests/invariants/cu/inv_057_risk_reduction_availability.rs",
+            "v16_attack_non_base_local_stale_owner_reduce_remains_live",
+        ),
+        "ForfeitRecoveryLeg" => inv055_evidence(
+            OwnerRiskReduction,
+            "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs",
+            "v16_program_owner_recovery_forfeit_strictly_reduces_each_position_episode",
+        ),
+        "ForceCloseAbandonedAsset" => inv055_evidence(
+            OwnerRiskReduction,
+            "tests/invariants/cu/inv_078_permissionless_recovery_coverage.rs",
+            "v16_attack_locally_stale_permissionless_asset_can_shutdown_and_force_close",
+        ),
+        "CureAndCancelClose" => inv055_evidence(
+            CloseEpisode,
+            "tests/invariants/cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs",
+            "v16_program_public_close_zero_cure_rejects_atomically_and_terminal_progress_remains",
+        ),
+        "ConfigureHybridOracle" => inv055_evidence(
+            OracleLifecycle,
+            "tests/invariants/cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs",
+            "v16_program_external_oracle_hint_and_account_order_is_normalized_or_atomic",
+        ),
+        "ConfigureEwmaMark" | "PushEwmaMark" => inv055_evidence(
+            OracleLifecycle,
+            "tests/invariants/cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs",
+            "v16_bpf_configure_and_push_ewma_mark_are_bounded_and_clock_authenticated",
+        ),
+        "ConfigureAuthMark" | "PushAuthMark" => inv055_evidence(
+            OracleLifecycle,
+            "tests/invariants/cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs",
+            "v16_bpf_configure_and_push_auth_mark_are_bounded_and_clock_authenticated",
+        ),
+        "UpdateAuthority" | "UpdateAssetAuthority" => inv055_evidence(
+            AuthorityPolicy,
+            "tests/invariants/cu/inv_005_authority_incarnation_binding.rs",
+            "v16_attack_update_authority_requires_new_authority_signature",
+        ),
+        "UpdateLiquidationFeePolicy"
+        | "UpdateMaintenanceFeePolicy"
+        | "UpdateBackingFeePolicy"
+        | "UpdateTradeFeePolicy"
+        | "UpdateFeeRedirectPolicy"
+        | "UpdateMarketInitFeePolicy"
+        | "UpdateBaseUnitMints" => inv055_evidence(
+            AuthorityPolicy,
+            "tests/invariants/cu/inv_087_no_phantom_controls_or_dead_security_fields.rs",
+            "v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist",
+        ),
+        "SyncBackingDomainLedger" | "SyncInsuranceLedger" => inv055_evidence(
+            LedgerReconciliation,
+            "tests/invariants/cu/inv_025_exact_stock_reconciliation.rs",
+            "v16_bpf_accounting_ledger_tags_are_bounded_and_update_state",
+        ),
+        "SetMatcherConfig" => inv055_evidence(
+            MatcherCapability,
+            "tests/invariants/stateful/inv_010_out_of_order_safety.rs",
+            "v16_program_conflicting_matcher_controls_and_trade_exhaust_all_landing_orders",
+        ),
+        "SwapSecondaryForPrimary" => inv055_evidence(
+            CollateralConversion,
+            "tests/invariants/cu/inv_017_signer_writable_role_and_account_alias_safety.rs",
+            "v16_attack_swap_secondary_unauthorized_and_bounded",
+        ),
+        _ => return None,
+    };
+    Some(evidence)
+}
+
+fn inv055_source_defines_test(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+fn inv055_braced_body_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing production marker {marker}"));
+    let open = start
+        + source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("missing body after {marker}"));
+    let mut depth = 0i32;
+    for (offset, character) in source[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[(open + 1)..(open + offset)];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated body after {marker}");
+}
+
+#[test]
+fn v16_program_every_public_instruction_has_a_state_admission_owner() {
+    const REGISTRY: &str = include_str!("../public_instruction_coverage.tsv");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut variants = std::collections::BTreeSet::new();
+    let mut owners = std::collections::BTreeMap::<Inv055AdmissionOwner, usize>::new();
+    let mut witness_cache = std::collections::BTreeMap::<&str, String>::new();
+
+    for line in REGISTRY.lines() {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("tag\t") {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 5, "malformed public instruction row: {line}");
+        let variant = fields[1];
+        assert!(variants.insert(variant), "duplicate public route {variant}");
+        let evidence = inv055_public_route_admission(variant)
+            .unwrap_or_else(|| panic!("{variant} has no state-admission owner"));
+        *owners.entry(evidence.owner).or_default() += 1;
+        let source = witness_cache.entry(evidence.path).or_insert_with(|| {
+            std::fs::read_to_string(root.join(evidence.path))
+                .unwrap_or_else(|error| panic!("read {}: {error}", evidence.path))
+        });
+        assert!(
+            inv055_source_defines_test(source, evidence.test),
+            "{variant} points to missing admission witness {}#{}",
+            evidence.path,
+            evidence.test,
+        );
+    }
+    assert_eq!(variants.len(), 49, "public instruction roster drift");
+    assert_eq!(
+        owners.len(),
+        15,
+        "every admission-owner family must remain represented",
+    );
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    for (handler, guard) in [
+        ("fn handle_init_portfolio", "mode != MarketModeV16::Live"),
+        ("fn handle_deposit", "mode != MarketModeV16::Live"),
+        ("fn handle_withdraw", "mode != MarketModeV16::Live"),
+        (
+            "fn handle_batch_trade_nocpi",
+            "mode_pre != MarketModeV16::Live",
+        ),
+        (
+            "fn handle_trade_nocpi<'a>",
+            "mode_pre != MarketModeV16::Live",
+        ),
+        ("fn handle_trade_cpi<'a>", "mode_pre != MarketModeV16::Live"),
+        (
+            "fn handle_batch_trade_cpi",
+            "mode_pre != MarketModeV16::Live",
+        ),
+        ("fn handle_convert_released_pnl", "group.header.mode != 0"),
+        ("fn handle_close_slab", "group.header.mode != 1"),
+        ("fn handle_resolve_market", "group.header.mode != 0"),
+        (
+            "fn handle_update_asset_lifecycle",
+            "mode_pre != MarketModeV16::Live",
+        ),
+        ("fn handle_restart_asset_oracle", "group.header.mode != 0"),
+        (
+            "fn handle_configure_hybrid_oracle",
+            "group.header.mode != 0",
+        ),
+        ("fn handle_configure_managed_mark", "group.header.mode != 0"),
+        ("fn handle_push_managed_mark", "group.header.mode != 0"),
+        ("fn handle_close_resolved", "group.header.mode != 1"),
+    ] {
+        assert!(
+            inv055_braced_body_after(production, handler).contains(guard),
+            "{handler} lost state-admission guard {guard}",
+        );
+    }
+    for (handler, transition) in [
+        (
+            "fn handle_permissionless_crank<'a>",
+            "handle_permissionless_crank_zero_copy(",
+        ),
+        (
+            "fn handle_forfeit_recovery_leg",
+            ".forfeit_recovery_leg_not_atomic(",
+        ),
+        (
+            "fn handle_rebalance_reduce",
+            ".rebalance_reduce_position_not_atomic(",
+        ),
+        (
+            "fn handle_finalize_reset_side",
+            ".finalize_side_reset_not_atomic(",
+        ),
+        (
+            "fn handle_close_resolved",
+            ".permissionless_auto_crank_not_atomic(",
+        ),
+        (
+            "fn handle_claim_resolved_payout_topup",
+            ".claim_resolved_payout_topup_not_atomic(",
+        ),
+    ] {
+        assert!(
+            inv055_braced_body_after(production, handler).contains(transition),
+            "{handler} lost canonical state-machine transition {transition}",
+        );
+    }
 }
