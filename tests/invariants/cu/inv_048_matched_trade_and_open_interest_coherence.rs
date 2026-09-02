@@ -11,6 +11,13 @@
 //! state: its independent transition ledger tracks exact effective OI across
 //! matched trades, retained trades, liquidation, rebalance, reset cleanup, and
 //! forfeit without treating ADL-retained raw basis as effective OI.
+//! `v16_program_position_mutation_composition_is_source_complete` closes the
+//! induction boundary for the current wrapper surface. It pins the engine
+//! revision whose attach, resize, pending-obligation, and clear kernels are
+//! contract checked; inventories every wrapper callsite that can mutate a
+//! position; rejects direct wrapper writes to either OI lane; and requires a
+//! public census witness for every route class. A new engine pin, transition
+//! callsite, or wrapper-owned OI write reopens the invariant.
 
 use super::*;
 
@@ -199,4 +206,246 @@ fn v16_program_all_trade_routes_keep_oi_equal_to_active_leg_scan() {
     for route in MatchedTradeRoute::ALL {
         run_matched_trade_route(route);
     }
+}
+
+#[derive(Clone, Copy)]
+struct Inv048PositionMutationRoute {
+    owner: &'static str,
+    method: &'static str,
+    count: usize,
+    disposition: &'static str,
+    witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv048_source_defines_test(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+#[test]
+fn v16_program_position_mutation_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const ENGINE_CONTRACTS: &[&str] = &[
+        "contract_check_kernel_attach_leg",
+        "contract_check_kernel_resize_leg_same_side",
+        "contract_check_kernel_retain_leg_as_pending_obligation",
+        "contract_check_kernel_clear_leg",
+        "contract_check_kernel_classify_position_delta",
+        "contract_check_kernel_reduce_position_delta",
+        "composition_attach_body_frame_division_stubbed",
+        "composition_clear_leg_body_frame",
+        "composition_attach_value_conservation_under_axiom",
+        "composition_clear_leg_value_conservation",
+        "proof_v16_signed_trade_request_maps_to_opposite_account_deltas",
+        "proof_v16_view_trade_position_delta_preserves_oi_symmetry",
+        "proof_v16_trade_reductions_are_funded_only_by_preexisting_side_oi",
+        "proof_v16_wrapper_shape_distinct_asset_batch_projection_preserves_oi_and_outcome",
+        "proof_v16_live_market_shape_rejects_long_short_oi_mismatch",
+        "proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact",
+    ];
+    const ROUTES: &[Inv048PositionMutationRoute] = &[
+        Inv048PositionMutationRoute {
+            owner: "handle_trade_nocpi_zero_copy",
+            method: "execute_trade_with_fee_loss_stale_scoped_not_atomic",
+            count: 2,
+            disposition: "single CPI and no-CPI trades apply exact opposite deltas through canonical position kernels",
+            witnesses: &[(
+                "tests/invariants/cu/inv_048_matched_trade_and_open_interest_coherence.rs",
+                "v16_program_all_trade_routes_keep_oi_equal_to_active_leg_scan",
+            )],
+        },
+        Inv048PositionMutationRoute {
+            owner: "handle_batch_execute_zero_copy",
+            method: "execute_batch_with_fee_loss_stale_scoped_not_atomic",
+            count: 1,
+            disposition: "both batch transports share one engine transition and per-asset OI projection",
+            witnesses: &[(
+                "tests/invariants/cu/inv_048_matched_trade_and_open_interest_coherence.rs",
+                "v16_program_all_trade_routes_keep_oi_equal_to_active_leg_scan",
+            )],
+        },
+        Inv048PositionMutationRoute {
+            owner: "handle_permissionless_crank_zero_copy",
+            method: "permissionless_auto_crank_not_atomic",
+            count: 3,
+            disposition: "all live, expired-close, and Recovery crank dispatches use canonical effective quantity",
+            witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_scaled_liquidation_matches_independent_selector_model",
+                ),
+                (
+                    "tests/invariants/stateful/inv_061_deterministic_bounded_liquidation.rs",
+                    "v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete",
+                ),
+            ],
+        },
+        Inv048PositionMutationRoute {
+            owner: "handle_close_resolved",
+            method: "permissionless_auto_crank_not_atomic",
+            count: 1,
+            disposition: "resolved close dispatches bounded position cleanup before payout",
+            witnesses: &[(
+                "tests/invariants/stateful/inv_061_deterministic_bounded_liquidation.rs",
+                "v16_program_resolved_adl_close_order_matrix_preserves_funded_exits",
+            )],
+        },
+        Inv048PositionMutationRoute {
+            owner: "handle_force_close_abandoned_asset",
+            method: "forfeit_recovery_leg_not_atomic",
+            count: 2,
+            disposition: "pair fallback removes each side by its canonical effective quantity",
+            witnesses: &[(
+                "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                "v16_program_dual_adl_force_close_clamps_stale_and_raw_work",
+            )],
+        },
+        Inv048PositionMutationRoute {
+            owner: "handle_force_close_abandoned_asset",
+            method: "force_close_recovery_pair_not_atomic",
+            count: 1,
+            disposition: "atomic pair force-close preserves both OI lanes",
+            witnesses: &[(
+                "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                "v16_program_adl_force_close_clamp_matrix_matches_recovery_terminal_routes",
+            )],
+        },
+        Inv048PositionMutationRoute {
+            owner: "handle_forfeit_recovery_leg",
+            method: "forfeit_recovery_leg_not_atomic",
+            count: 1,
+            disposition: "owner Recovery forfeit removes only the bound episode's effective quantity",
+            witnesses: &[(
+                "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                "v16_program_dual_adl_recovery_forfeit_matches_effective_oi_model",
+            )],
+        },
+        Inv048PositionMutationRoute {
+            owner: "handle_rebalance_reduce",
+            method: "rebalance_reduce_position_not_atomic",
+            count: 1,
+            disposition: "owner unilateral reduction uses the same canonical position delta",
+            witnesses: &[(
+                "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                "v16_program_adl_reduction_clamp_matrix_matches_public_terminal_routes",
+            )],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-048 engine induction must be reviewed on every pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the same OI-certified engine revision",
+    );
+
+    let mut contracts = std::collections::BTreeSet::new();
+    for contract in ENGINE_CONTRACTS {
+        assert!(
+            contracts.insert(*contract),
+            "duplicate engine proof {contract}"
+        );
+        assert!(
+            contract.starts_with("contract_check_")
+                || contract.starts_with("composition_")
+                || contract.starts_with("proof_v16_"),
+            "unclassified OI proof {contract}",
+        );
+    }
+    assert_eq!(contracts.len(), 16, "OI engine-proof roster drift");
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    for (forbidden, comparison) in [
+        (".oi_eff_long_q =", ".oi_eff_long_q =="),
+        (".oi_eff_short_q =", ".oi_eff_short_q =="),
+    ] {
+        let direct_writes: Vec<_> = production
+            .lines()
+            .filter(|line| line.contains(forbidden) && !line.contains(comparison))
+            .collect();
+        assert!(
+            direct_writes.is_empty(),
+            "the wrapper must not directly mutate engine OI via {forbidden}: {direct_writes:?}",
+        );
+    }
+
+    let methods: std::collections::BTreeSet<_> = ROUTES.iter().map(|row| row.method).collect();
+    let mut current_function = "<module>";
+    let mut actual = std::collections::BTreeMap::<(String, String), usize>::new();
+    for line in production.lines() {
+        let trimmed = line.trim_start();
+        if let Some(fn_offset) = trimmed.find("fn ") {
+            let prefix = &trimmed[..fn_offset];
+            if prefix.is_empty() || prefix.starts_with("pub") {
+                let rest = &trimmed[fn_offset + 3..];
+                let end = rest
+                    .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .unwrap_or(rest.len());
+                current_function = &rest[..end];
+            }
+        }
+        for method in &methods {
+            let marker = format!(".{method}(");
+            let count = line.matches(&marker).count();
+            if count != 0 {
+                *actual
+                    .entry((current_function.to_string(), (*method).to_string()))
+                    .or_default() += count;
+            }
+        }
+    }
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    let mut expected = std::collections::BTreeMap::new();
+    for route in ROUTES {
+        assert!(!route.disposition.is_empty());
+        assert!(!route.witnesses.is_empty());
+        for (path, witness) in route.witnesses {
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv048_source_defines_test(source, witness),
+                "{}.{} lacks executable OI witness {path}#{witness}",
+                route.owner,
+                route.method,
+            );
+        }
+        assert!(
+            expected
+                .insert(
+                    (route.owner.to_string(), route.method.to_string()),
+                    route.count,
+                )
+                .is_none(),
+            "duplicate OI transition class {}.{}",
+            route.owner,
+            route.method,
+        );
+    }
+    assert_eq!(
+        actual, expected,
+        "every wrapper position mutation needs an inductive OI disposition and public census",
+    );
+
+    let transition_census =
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transition_census.contains(
+        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    ));
 }
