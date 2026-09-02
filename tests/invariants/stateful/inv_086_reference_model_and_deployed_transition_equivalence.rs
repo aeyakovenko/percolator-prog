@@ -1693,6 +1693,10 @@ fn v16_program_reference_model_dimension_composition_is_source_complete() {
                     "v16_program_position_mutation_composition_is_source_complete",
                 ),
                 (
+                    "tests/invariants/cu/inv_048_matched_trade_and_open_interest_coherence.rs",
+                    "v16_program_typed_matched_book_obligation_oracle_is_source_complete",
+                ),
+                (
                     "tests/invariants/cu/inv_061_deterministic_bounded_liquidation.rs",
                     "v16_program_liquidation_composition_is_source_complete",
                 ),
@@ -1852,9 +1856,20 @@ fn v16_program_reference_model_dimension_composition_is_source_complete() {
         }
     }
     assert_eq!(dimensions.len(), 9, "model dimension roster drift");
-    assert_eq!(witnesses.len(), 47, "model witness roster drift");
+    assert_eq!(witnesses.len(), 48, "model witness roster drift");
 
     let model = include_str!("../../support/fuzz_model.rs");
+    for required in [
+        "fn account_b_is_current(",
+        "fn account_source_backing_is_current(",
+        "struct MatchedBookObligationCensus",
+        "fn matched_book_obligation_census(",
+    ] {
+        assert!(
+            model.contains(required),
+            "independent model lost typed currentness/obligation owner {required}",
+        );
+    }
     let safety_prefix = inv086_source_section(
         model,
         "pub fn run_safety_prefix",

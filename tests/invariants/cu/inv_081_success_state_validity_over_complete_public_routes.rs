@@ -162,6 +162,11 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
             test: "v16_program_position_mutation_composition_is_source_complete",
         },
         Inv081CompositionOwner {
+            layer: "typed matched-book obligation census",
+            path: "tests/invariants/cu/inv_048_matched_trade_and_open_interest_coherence.rs",
+            test: "v16_program_typed_matched_book_obligation_oracle_is_source_complete",
+        },
+        Inv081CompositionOwner {
             layer: "scope frame induction",
             path: "tests/invariants/cu/inv_074_scope_locality.rs",
             test: "v16_program_scope_locality_composition_is_source_complete",
@@ -224,7 +229,7 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
             owner.test,
         );
     }
-    assert_eq!(layers.len(), 20, "INV-081 composition layer drift");
+    assert_eq!(layers.len(), 21, "INV-081 composition layer drift");
 
     for (path, theorem) in KANI_OWNERS {
         let source = std::fs::read_to_string(root.join(path))

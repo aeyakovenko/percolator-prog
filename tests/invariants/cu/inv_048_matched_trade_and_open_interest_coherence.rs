@@ -226,6 +226,139 @@ fn inv048_source_defines_test(source: &str, function: &str) -> bool {
     })
 }
 
+#[derive(Clone, Copy)]
+struct Inv048ObligationOwner {
+    category: &'static str,
+    census_field: &'static str,
+    path: &'static str,
+    witness: &'static str,
+}
+
+#[test]
+fn v16_program_typed_matched_book_obligation_oracle_is_source_complete() {
+    const OBLIGATIONS: &[Inv048ObligationOwner] = &[
+        Inv048ObligationOwner {
+            category: "effective exposure",
+            census_field: "effective_q",
+            path: "tests/invariants/cu/inv_048_matched_trade_and_open_interest_coherence.rs",
+            witness: "v16_program_all_trade_routes_keep_oi_equal_to_active_leg_scan",
+        },
+        Inv048ObligationOwner {
+            category: "ADL-reduced raw residue",
+            census_field: "adl_reduced_raw_q",
+            path: "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+            witness: "v16_program_adl_reduction_clamp_matrix_matches_public_terminal_routes",
+        },
+        Inv048ObligationOwner {
+            category: "reset-epoch raw residue",
+            census_field: "reset_residue_raw_q",
+            path: "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+            witness: "v16_program_reset_pending_seeded_frontier_is_exact_and_terminal",
+        },
+        Inv048ObligationOwner {
+            category: "Recovery effective exposure",
+            census_field: "recovery_effective_q",
+            path: "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+            witness: "v16_program_adl_force_close_clamp_matrix_matches_recovery_terminal_routes",
+        },
+        Inv048ObligationOwner {
+            category: "pending loss obligation count",
+            census_field: "pending_obligation_count",
+            path: "tests/invariants/stateful/inv_071_crank_progress.rs",
+            witness: "v16_program_cured_close_releases_counterparty_obligation",
+        },
+        Inv048ObligationOwner {
+            category: "pending loss weight",
+            census_field: "loss_weight_num",
+            path: "tests/invariants/stateful/inv_071_crank_progress.rs",
+            witness: "v16_program_cured_close_releases_counterparty_obligation",
+        },
+        Inv048ObligationOwner {
+            category: "active close residual",
+            census_field: "active_close_residual_num",
+            path: "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+            witness: "v16_program_active_close_seeded_frontier_preserves_episode_and_bounded_owner_exit",
+        },
+        Inv048ObligationOwner {
+            category: "active close booked B",
+            census_field: "active_close_b_loss_booked_num",
+            path: "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+            witness: "v16_program_active_close_seeded_frontier_preserves_episode_and_bounded_owner_exit",
+        },
+        Inv048ObligationOwner {
+            category: "booked B",
+            census_field: "b_index_num",
+            path: "tests/invariants/cu/inv_038_rounding_and_ratio_conservation.rs",
+            witness: "v16_program_social_loss_aggregate_and_chunked_routes_converge_exactly",
+        },
+        Inv048ObligationOwner {
+            category: "social-loss remainder",
+            census_field: "social_loss_remainder_num",
+            path: "tests/invariants/cu/inv_038_rounding_and_ratio_conservation.rs",
+            witness: "v16_program_social_loss_booking_and_settlement_preserve_exact_remainders",
+        },
+        Inv048ObligationOwner {
+            category: "social-loss dust",
+            census_field: "social_loss_dust_num",
+            path: "tests/invariants/cu/inv_038_rounding_and_ratio_conservation.rs",
+            witness: "v16_program_public_odd_atom_partitions_conserve_every_atom",
+        },
+        Inv048ObligationOwner {
+            category: "explicit unallocated loss",
+            census_field: "explicit_unallocated_loss_num",
+            path: "tests/invariants/stateful/inv_035_no_global_b_pool_residuals_remain_local.rs",
+            witness: "v16_program_ambiguous_multi_asset_deficit_order_matrix_avoids_domain_guess",
+        },
+        Inv048ObligationOwner {
+            category: "terminal unmatched effective exposure",
+            census_field: "terminal_unmatched_effective_q",
+            path: "tests/invariants/stateful/inv_061_deterministic_bounded_liquidation.rs",
+            witness: "v16_program_resolved_adl_close_order_matrix_preserves_funded_exits",
+        },
+    ];
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let model = include_str!("../../support/fuzz_model.rs");
+    assert!(model.contains("struct MatchedBookObligationCensus"));
+    assert!(model.contains("fn matched_book_obligation_census("));
+    assert!(model.contains("matched_book_obligations: [MatchedBookObligationCensus; ASSET_COUNT]"));
+    assert!(
+        !model.contains("protocol_positions"),
+        "an untyped balancing ghost can conceal a missing counterparty"
+    );
+    let mut categories = std::collections::BTreeSet::new();
+    let mut fields = std::collections::BTreeSet::new();
+    for obligation in OBLIGATIONS {
+        assert!(
+            categories.insert(obligation.category),
+            "duplicate matched-book obligation category {}",
+            obligation.category
+        );
+        assert!(
+            fields.insert(obligation.census_field),
+            "duplicate matched-book census field {}",
+            obligation.census_field
+        );
+        assert!(
+            model.contains(&format!("{}:", obligation.census_field)),
+            "matched-book census lacks typed field {}",
+            obligation.census_field
+        );
+        let source = std::fs::read_to_string(root.join(obligation.path))
+            .unwrap_or_else(|error| panic!("read {}: {error}", obligation.path));
+        assert!(
+            inv048_source_defines_test(&source, obligation.witness),
+            "{} lacks executable lifecycle owner {}#{}",
+            obligation.category,
+            obligation.path,
+            obligation.witness,
+        );
+    }
+    assert_eq!(categories.len(), 13, "matched-book obligation roster drift");
+    assert!(model.contains("effective + ADL residue + reset residue"));
+    assert!(model.contains("effective OI is not the sum of independently decoded effective legs"));
+}
+
 #[test]
 fn v16_program_position_mutation_composition_is_source_complete() {
     const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";

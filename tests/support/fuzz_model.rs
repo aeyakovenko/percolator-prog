@@ -1520,7 +1520,7 @@ impl Coverage {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ProgressRank {
     market_mark_lag: u128,
-    market_loss_lag: u128,
+    market_currentness_lag: u128,
     market_locks: u128,
     close_work: u128,
     b_work: u128,
@@ -1561,22 +1561,27 @@ impl ProgressRank {
     }
 
     fn reduced_from(self, before: Self) -> bool {
+        // Order the lexicographic rank by the production dispatch hierarchy. A higher-priority
+        // continuation may expose lower-priority work: settling B invalidates the health
+        // certificate, and advancing a close can create B or obligation work. Those are finite
+        // phase transitions, not regressions. Conversely, preserving every earlier lane while
+        // failing to reduce the selected lane remains a successful-no-op failure.
         (
-            self.market_mark_lag,
-            self.market_loss_lag,
             self.market_locks,
             self.close_work,
             self.b_work,
             self.obligation_work,
+            self.market_mark_lag,
+            self.market_currentness_lag,
             self.stale_legs,
             self.health_work,
         ) < (
-            before.market_mark_lag,
-            before.market_loss_lag,
             before.market_locks,
             before.close_work,
             before.b_work,
             before.obligation_work,
+            before.market_mark_lag,
+            before.market_currentness_lag,
             before.stale_legs,
             before.health_work,
         )
@@ -1585,7 +1590,7 @@ impl ProgressRank {
     fn components(self) -> [u128; 8] {
         [
             self.market_mark_lag,
-            self.market_loss_lag,
+            self.market_currentness_lag,
             self.market_locks,
             self.close_work,
             self.b_work,
@@ -2551,6 +2556,78 @@ impl CrankFailure {
     }
 }
 
+fn account_b_is_current(
+    group: &MarketGroupV16,
+    account: &PortfolioAccountV16,
+) -> Result<bool, String> {
+    for leg in decoded_legs(account).into_iter().filter(|leg| leg.active) {
+        let asset = group.assets.get(leg.asset_index as usize).ok_or_else(|| {
+            format!(
+                "B-currentness oracle found out-of-range asset {}",
+                leg.asset_index
+            )
+        })?;
+        let (current_target, epoch_start_target, side_mode, side_epoch) = match leg.side {
+            SideV16::Long => (
+                asset.b_long_num,
+                asset.b_epoch_start_long_num,
+                asset.mode_long,
+                asset.epoch_long,
+            ),
+            SideV16::Short => (
+                asset.b_short_num,
+                asset.b_epoch_start_short_num,
+                asset.mode_short,
+                asset.epoch_short,
+            ),
+        };
+        let target = if leg.b_epoch_snap == side_epoch {
+            current_target
+        } else if side_mode == SideModeV16::ResetPending
+            && leg.b_epoch_snap.checked_add(1) == Some(side_epoch)
+        {
+            epoch_start_target
+        } else {
+            return Ok(false);
+        };
+        if leg.b_stale || target > leg.b_snap {
+            return Ok(false);
+        }
+        if target < leg.b_snap {
+            return Err(format!(
+                "B-currentness oracle found snapshot reversal on asset {}: {} > {target}",
+                leg.asset_index, leg.b_snap
+            ));
+        }
+    }
+    Ok(true)
+}
+
+fn account_source_backing_is_current(
+    group: &MarketGroupV16,
+    account: &PortfolioAccountV16,
+) -> Result<bool, String> {
+    for source in account.source_domains.iter().copied() {
+        let occupied = source.is_occupied();
+        if source.domain.get() == 0 && source.source_claim_market_id.get() == 0 && !occupied {
+            break;
+        }
+        if !occupied {
+            continue;
+        }
+        let domain = source.domain.get() as usize;
+        let bucket = group.source_backing_buckets.get(domain).ok_or_else(|| {
+            format!("source-currentness oracle found out-of-range domain {domain}")
+        })?;
+        if bucket.status == BackingBucketStatusV16::Fresh
+            && bucket.expiry_slot <= group.current_slot
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn assert_current_certificate_matches_snapshot_full_refresh(
     label: &str,
     market_data: &[u8],
@@ -2563,12 +2640,21 @@ pub(crate) fn assert_current_certificate_matches_snapshot_full_refresh(
     let certificate = account.health_cert.try_to_runtime().map_err(|error| {
         format!("{label}: decode deployed health certificate for oracle: {error:?}")
     })?;
+    let b_current = account_b_is_current(&group, &account)?;
+    let source_backing_current = account_source_backing_is_current(&group, &account)?;
     let current = certificate.valid
         && certificate.cert_oracle_epoch == group.oracle_epoch
         && certificate.cert_funding_epoch == group.funding_epoch
         && certificate.cert_risk_epoch == group.risk_epoch
         && certificate.cert_asset_set_epoch == group.asset_set_epoch
-        && certificate.active_bitmap_at_cert == account.active_bitmap.map(|word| word.get());
+        && certificate.active_bitmap_at_cert == account.active_bitmap.map(|word| word.get())
+        && account.stale_state == 0
+        && account.b_stale_state == 0
+        && b_current
+        && source_backing_current
+        && decoded_legs(&account)
+            .iter()
+            .all(|leg| !leg.active || (!leg.stale && !leg.b_stale));
     if !current {
         return Ok(false);
     }
@@ -2918,12 +3004,21 @@ pub(crate) fn assert_current_certificate_matches_independent(
         .health_cert
         .try_to_runtime()
         .map_err(|error| format!("{label}: decode deployed health certificate: {error:?}"))?;
+    let b_current = account_b_is_current(group, account)?;
+    let source_backing_current = account_source_backing_is_current(group, account)?;
     let current = certificate.valid
         && certificate.cert_oracle_epoch == group.oracle_epoch
         && certificate.cert_funding_epoch == group.funding_epoch
         && certificate.cert_risk_epoch == group.risk_epoch
         && certificate.cert_asset_set_epoch == group.asset_set_epoch
-        && certificate.active_bitmap_at_cert == account.active_bitmap.map(|word| word.get());
+        && certificate.active_bitmap_at_cert == account.active_bitmap.map(|word| word.get())
+        && account.stale_state == 0
+        && account.b_stale_state == 0
+        && b_current
+        && source_backing_current
+        && decoded_legs(account)
+            .iter()
+            .all(|leg| !leg.active || (!leg.stale && !leg.b_stale));
     if !current {
         return Ok(false);
     }
@@ -2936,10 +3031,26 @@ pub(crate) fn assert_current_certificate_matches_independent(
     Ok(true)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct MatchedBookObligationCensus {
+    effective_q: [u128; 2],
+    adl_reduced_raw_q: [u128; 2],
+    reset_residue_raw_q: [u128; 2],
+    recovery_effective_q: [u128; 2],
+    pending_obligation_count: [u64; 2],
+    loss_weight_num: [u128; 2],
+    active_close_residual_num: [u128; 2],
+    active_close_b_loss_booked_num: [u128; 2],
+    b_index_num: [u128; 2],
+    social_loss_remainder_num: [u128; 2],
+    social_loss_dust_num: [u128; 2],
+    explicit_unallocated_loss_num: [u128; 2],
+    terminal_unmatched_effective_q: [u128; 2],
+}
+
 pub struct ScenarioRunner {
     env: V16Svm,
     positions: [[i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
-    protocol_positions: [i128; ASSET_COUNT],
     expected_effective_oi: [[u128; 2]; ASSET_COUNT],
     liveness_limit: usize,
     retained: VecDeque<RetainedTrade>,
@@ -2986,7 +3097,6 @@ impl ScenarioRunner {
         let out = Self {
             env,
             positions: [[0; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
-            protocol_positions: [0; ASSET_COUNT],
             expected_effective_oi: [[0; 2]; ASSET_COUNT],
             liveness_limit,
             retained: VecDeque::new(),
@@ -3426,9 +3536,6 @@ impl ScenarioRunner {
                             .checked_add(leg.basis_pos_q)
                             .ok_or("rebalance exit position overflow")
                     })?;
-                let user_delta = size_after
-                    .checked_sub(size_before)
-                    .ok_or("rebalance exit delta overflow")?;
                 let reduced = size_before
                     .unsigned_abs()
                     .checked_sub(size_after.unsigned_abs())
@@ -3494,9 +3601,6 @@ impl ScenarioRunner {
                     )
                 })?;
                 self.positions[user][asset] = size_after;
-                self.protocol_positions[asset] = self.protocol_positions[asset]
-                    .checked_sub(user_delta)
-                    .ok_or("rebalance exit protocol attribution overflow")?;
                 self.assert_positions_match()?;
                 Ok(size_after == 0)
             }
@@ -4573,9 +4677,6 @@ impl ScenarioRunner {
                 .checked_sub(observed_before[asset])
                 .ok_or("terminal position delta overflow")?;
             if delta != 0 {
-                self.protocol_positions[asset] = self.protocol_positions[asset]
-                    .checked_sub(delta)
-                    .ok_or("terminal protocol-position attribution overflow")?;
                 self.coverage.user_positions_closed +=
                     u64::from(observed_after[asset] == 0 && observed_before[asset] != 0);
             }
@@ -4995,13 +5096,7 @@ impl ScenarioRunner {
                         true,
                         "permissionless abandoned-asset residue removal",
                     )?;
-                    let residue_delta = residue_position_after
-                        .checked_sub(residue_position_before)
-                        .ok_or("force-close residue delta overflow")?;
                     self.positions[residue_actor][asset] = residue_position_after;
-                    self.protocol_positions[asset] = self.protocol_positions[asset]
-                        .checked_sub(residue_delta)
-                        .ok_or("force-close residue attribution overflow")?;
                     if self.env.primary_portfolio_data(untouched_actor)
                         != before.primary_portfolios[untouched_actor]
                     {
@@ -5110,13 +5205,7 @@ impl ScenarioRunner {
                     true,
                     "owner recovery-leg forfeit",
                 )?;
-                let actor_delta = size_after
-                    .checked_sub(size_before)
-                    .ok_or("recovery-forfeit position delta overflow")?;
                 self.positions[actor][asset] = size_after;
-                self.protocol_positions[asset] = self.protocol_positions[asset]
-                    .checked_sub(actor_delta)
-                    .ok_or("recovery-forfeit protocol attribution overflow")?;
                 if self.env.primary_portfolio_position_epoch(actor)
                     != position_epoch_before
                         .checked_add(1)
@@ -5649,6 +5738,14 @@ impl ScenarioRunner {
             maker_deltas[asset] = maker_deltas[asset]
                 .checked_sub(size)
                 .ok_or("maker ghost position overflow")?;
+        }
+        for asset in 0..ASSET_COUNT {
+            if taker_deltas[asset].checked_add(maker_deltas[asset]) != Some(0) {
+                return Err(format!(
+                    "matched trade request has asymmetric signed deltas for asset {asset}: {}/{}",
+                    taker_deltas[asset], maker_deltas[asset]
+                ));
+            }
         }
         self.reconcile_account_position_changes(
             taker,
@@ -6233,9 +6330,6 @@ impl ScenarioRunner {
         let mut unilateral_reductions = Vec::new();
         for (asset, new) in observed.into_iter().enumerate() {
             let old = before_positions[asset];
-            let delta = new
-                .checked_sub(old)
-                .ok_or("observed account position delta overflow")?;
             let expected = expected_deltas[asset];
             let old_leg = Self::account_leg_for_asset(account_before, asset)?;
             let new_leg = Self::account_leg_for_asset(&account_after, asset)?;
@@ -6253,9 +6347,6 @@ impl ScenarioRunner {
                 Self::prior_reset_cleanup_eligible(account_before, group_before, asset)
                     && new_effective == expected;
             if new_effective == ordinary_post && !prior_reset_cleanup {
-                self.protocol_positions[asset] = self.protocol_positions[asset]
-                    .checked_sub(delta)
-                    .ok_or("matched effective-position attribution overflow")?;
                 self.positions[actor][asset] = new;
                 continue;
             }
@@ -6274,9 +6365,6 @@ impl ScenarioRunner {
                      explains the difference"
                 ));
             }
-            self.protocol_positions[asset] = self.protocol_positions[asset]
-                .checked_sub(delta)
-                .ok_or("protocol unilateral-position attribution overflow")?;
             self.positions[actor][asset] = new;
             if !prior_reset_cleanup {
                 let reduced = old_effective
@@ -6636,7 +6724,7 @@ impl ScenarioRunner {
             close.active && !close.finalized && !close.canceled && close.residual_remaining != 0;
         let release_allowed = !close_has_pending_residual;
         let mut market_mark_lag = 0u128;
-        let mut market_loss_lag = 0u128;
+        let mut market_currentness_lag = 0u128;
         for asset in 0..ASSET_COUNT {
             let profile = self.env.primary_profile(asset);
             let engine_asset = &group.assets[asset];
@@ -6659,7 +6747,7 @@ impl ScenarioRunner {
                     .ok_or("mark-progress rank overflow")?;
             }
             if asset_contributes_to_loss_stale(engine_asset) {
-                market_loss_lag = market_loss_lag
+                market_currentness_lag = market_currentness_lag
                     .checked_add(u128::from(engine_asset.stale_account_count_long))
                     .and_then(|rank| {
                         rank.checked_add(u128::from(engine_asset.stale_account_count_short))
@@ -6675,6 +6763,7 @@ impl ScenarioRunner {
         let mut b_work = 0u128;
         let mut stale_legs = 0u128;
         let mut obligation_work = 0u128;
+        let mut selected_refresh_accrual_lag = None;
         for leg in decoded_legs(&account) {
             if !leg.active {
                 continue;
@@ -6683,6 +6772,22 @@ impl ScenarioRunner {
             let asset = group.assets.get(asset_index).ok_or_else(|| {
                 format!("progress-rank leg references missing asset {asset_index}")
             })?;
+            if selected_refresh_accrual_lag.is_none()
+                && group.mode == MarketModeV16::Live
+                && matches!(
+                    asset.lifecycle,
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                )
+            {
+                // Refresh certifies the account before it accrues the engine-selected first
+                // active asset. When that asset lags Clock, call one advances its slot and can
+                // invalidate the new certificate; call two then certifies against the advanced
+                // epochs. Track that first finite stage so only a real slot advance counts as
+                // progress, while a byte-identical successful crank still fails the rank check.
+                selected_refresh_accrual_lag = Some(u128::from(
+                    authenticated_slot.saturating_sub(asset.slot_last),
+                ));
+            }
             let (target_b, side_domain, opposite_stored, opposite_pending) = match leg.side {
                 SideV16::Long => {
                     let target = if leg.b_epoch_snap == asset.epoch_long {
@@ -6773,6 +6878,26 @@ impl ScenarioRunner {
                     .ok_or("K/F-cohort rank overflow")?;
             }
         }
+        if selected_refresh_accrual_lag.is_none()
+            && group.mode == MarketModeV16::Live
+            && decoded_legs(&account).into_iter().all(|leg| !leg.active)
+        {
+            // A flat stale account has no leg-selected refresh asset. The public wrapper's
+            // documented fallback supplies the first configured live asset as an authenticated
+            // observation and advances it by one bounded accrual chunk before the engine can
+            // recertify the account. Preserve that finite distance in the same rank lane.
+            selected_refresh_accrual_lag = group
+                .assets
+                .iter()
+                .take(ASSET_COUNT)
+                .find(|asset| {
+                    matches!(
+                        asset.lifecycle,
+                        AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                    )
+                })
+                .map(|asset| u128::from(authenticated_slot.saturating_sub(asset.slot_last)));
+        }
         if account.b_stale_state != 0 {
             b_work = b_work
                 .checked_add(1)
@@ -6789,6 +6914,11 @@ impl ScenarioRunner {
             || cert.cert_risk_epoch.get() != group.risk_epoch
             || cert.cert_asset_set_epoch.get() != group.asset_set_epoch
             || cert.active_bitmap_at_cert != account.active_bitmap;
+        if cert.valid == 0 || cert_epoch_mismatch {
+            market_currentness_lag = market_currentness_lag
+                .checked_add(selected_refresh_accrual_lag.unwrap_or(0))
+                .ok_or("selected-refresh accrual rank overflow")?;
+        }
         // Recovery legs cannot accrue or liquidate, but the sole public crank can now refresh
         // their already-committed K/F/B work before the owner's matched reduction. Count that
         // bounded work in the same health rank as Active/DrainOnly account refresh.
@@ -6893,7 +7023,7 @@ impl ScenarioRunner {
             .ok_or("market-lock progress rank overflow")?;
         Ok(ProgressRank {
             market_mark_lag,
-            market_loss_lag,
+            market_currentness_lag,
             market_locks,
             // AdvanceClose is selected ahead of B settlement and account refresh. Its finite rank
             // is the remaining attributed residual, not any market-level lock bit: booking a
@@ -6994,8 +7124,134 @@ impl ScenarioRunner {
         self.assert_positions_match()
     }
 
+    fn matched_book_obligation_census(
+        &self,
+        group: &MarketGroupV16,
+    ) -> Result<[MatchedBookObligationCensus; ASSET_COUNT], String> {
+        let mut census = [MatchedBookObligationCensus::default(); ASSET_COUNT];
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            let account = self.env.primary_portfolio(actor);
+            for leg in decoded_legs(&account).into_iter().filter(|leg| leg.active) {
+                let asset = leg.asset_index as usize;
+                if asset >= ASSET_COUNT {
+                    return Err(format!(
+                        "matched-book census found actor {actor} out-of-world asset {asset}"
+                    ));
+                }
+                let side = Self::side_index(leg.side);
+                let engine_asset = &group.assets[asset];
+                let (side_mode, side_epoch) = match leg.side {
+                    SideV16::Long => (engine_asset.mode_long, engine_asset.epoch_long),
+                    SideV16::Short => (engine_asset.mode_short, engine_asset.epoch_short),
+                };
+                let prior_reset_residue = side_mode == SideModeV16::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(side_epoch);
+                let pending_obligation = leg.basis_pos_q == 0 && leg.loss_weight != 0;
+                if pending_obligation {
+                    census[asset].pending_obligation_count[side] = census[asset]
+                        .pending_obligation_count[side]
+                        .checked_add(1)
+                        .ok_or("matched-book pending-obligation count overflow")?;
+                }
+                if !prior_reset_residue {
+                    census[asset].loss_weight_num[side] = census[asset].loss_weight_num[side]
+                        .checked_add(leg.loss_weight)
+                        .ok_or("matched-book loss-weight overflow")?;
+                }
+
+                let raw_q = leg.basis_pos_q.unsigned_abs();
+                if prior_reset_residue {
+                    census[asset].reset_residue_raw_q[side] = census[asset].reset_residue_raw_q
+                        [side]
+                        .checked_add(raw_q)
+                        .ok_or("matched-book reset-residue overflow")?;
+                    continue;
+                }
+                let effective_q = Self::leg_effective_oi(group, asset, leg, false)?;
+                let adl_residue_q = raw_q.checked_sub(effective_q).ok_or_else(|| {
+                    format!(
+                        "matched-book actor {actor} asset {asset} effective quantity {effective_q} exceeds raw {raw_q}"
+                    )
+                })?;
+                census[asset].effective_q[side] = census[asset].effective_q[side]
+                    .checked_add(effective_q)
+                    .ok_or("matched-book effective exposure overflow")?;
+                census[asset].adl_reduced_raw_q[side] = census[asset].adl_reduced_raw_q[side]
+                    .checked_add(adl_residue_q)
+                    .ok_or("matched-book ADL residue overflow")?;
+                if engine_asset.lifecycle == AssetLifecycleV16::Recovery {
+                    census[asset].recovery_effective_q[side] = census[asset].recovery_effective_q
+                        [side]
+                        .checked_add(effective_q)
+                        .ok_or("matched-book Recovery exposure overflow")?;
+                }
+            }
+
+            let close = account
+                .close_progress
+                .try_to_runtime()
+                .map_err(|error| format!("matched-book actor {actor} close decode: {error:?}"))?;
+            if close.active && !close.canceled && !close.finalized {
+                let asset = close.asset_index as usize;
+                if asset >= ASSET_COUNT {
+                    return Err(format!(
+                        "matched-book actor {actor} close names out-of-world asset {asset}"
+                    ));
+                }
+                let side = Self::side_index(close.domain_side);
+                census[asset].active_close_residual_num[side] = census[asset]
+                    .active_close_residual_num[side]
+                    .checked_add(close.residual_remaining)
+                    .ok_or("matched-book active-close residual overflow")?;
+                census[asset].active_close_b_loss_booked_num[side] = census[asset]
+                    .active_close_b_loss_booked_num[side]
+                    .checked_add(close.b_loss_booked)
+                    .ok_or("matched-book active-close B attribution overflow")?;
+            }
+        }
+
+        for (asset, entry) in census.iter_mut().enumerate() {
+            let engine_asset = group.assets[asset];
+            entry.b_index_num = [engine_asset.b_long_num, engine_asset.b_short_num];
+            entry.social_loss_remainder_num = [
+                engine_asset.social_loss_remainder_long_num,
+                engine_asset.social_loss_remainder_short_num,
+            ];
+            entry.social_loss_dust_num = [
+                engine_asset.social_loss_dust_long_num,
+                engine_asset.social_loss_dust_short_num,
+            ];
+            entry.explicit_unallocated_loss_num = [
+                engine_asset.explicit_unallocated_loss_long,
+                engine_asset.explicit_unallocated_loss_short,
+            ];
+            if entry.effective_q[0] >= entry.effective_q[1] {
+                entry.terminal_unmatched_effective_q[0] = entry.effective_q[0]
+                    .checked_sub(entry.effective_q[1])
+                    .ok_or("matched-book long terminal difference underflow")?;
+            } else {
+                entry.terminal_unmatched_effective_q[1] = entry.effective_q[1]
+                    .checked_sub(entry.effective_q[0])
+                    .ok_or("matched-book short terminal difference underflow")?;
+            }
+            let terminal_class = group.mode != MarketModeV16::Live
+                || !matches!(
+                    engine_asset.lifecycle,
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                );
+            if entry.terminal_unmatched_effective_q != [0, 0] && !terminal_class {
+                return Err(format!(
+                    "live asset {asset} has unclassified effective exposure imbalance {:?}",
+                    entry.terminal_unmatched_effective_q
+                ));
+            }
+        }
+        Ok(census)
+    }
+
     fn assert_positions_match(&self) -> Result<(), String> {
         let (_, group) = self.env.primary_market_state();
+        let obligation_census = self.matched_book_obligation_census(&group)?;
         let mut observed = [[0i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT];
         let mut observed_long_oi = [0u128; ASSET_COUNT];
         let mut observed_short_oi = [0u128; ASSET_COUNT];
@@ -7244,6 +7500,60 @@ impl ScenarioRunner {
                     engine_asset.mode_short,
                 ));
             }
+            let obligations = obligation_census[asset];
+            if obligations.effective_q != [engine_asset.oi_eff_long_q, engine_asset.oi_eff_short_q]
+            {
+                return Err(format!(
+                    "asset {asset} effective OI is not the sum of independently decoded effective legs: deployed={}/{}, census={:?}",
+                    engine_asset.oi_eff_long_q,
+                    engine_asset.oi_eff_short_q,
+                    obligations.effective_q,
+                ));
+            }
+            if obligations.pending_obligation_count
+                != [
+                    engine_asset.pending_obligation_count_long,
+                    engine_asset.pending_obligation_count_short,
+                ]
+                || obligations.loss_weight_num
+                    != [
+                        engine_asset.loss_weight_sum_long,
+                        engine_asset.loss_weight_sum_short,
+                    ]
+            {
+                return Err(format!(
+                    "asset {asset} typed pending-loss obligations diverged from deployed summaries: census={obligations:?}, deployed pending={}/{}, weight={}/{}",
+                    engine_asset.pending_obligation_count_long,
+                    engine_asset.pending_obligation_count_short,
+                    engine_asset.loss_weight_sum_long,
+                    engine_asset.loss_weight_sum_short,
+                ));
+            }
+            for (side, raw_q) in [observed_long_oi[asset], observed_short_oi[asset]]
+                .into_iter()
+                .enumerate()
+            {
+                let classified_q = obligations.effective_q[side]
+                    .checked_add(obligations.adl_reduced_raw_q[side])
+                    .and_then(|value| value.checked_add(obligations.reset_residue_raw_q[side]))
+                    .ok_or("matched-book raw-exposure partition overflow")?;
+                if raw_q != classified_q {
+                    return Err(format!(
+                        "asset {asset} side {side} raw exposure {raw_q} is not exactly effective + ADL residue + reset residue {classified_q}: {obligations:?}"
+                    ));
+                }
+            }
+            if engine_asset.lifecycle == AssetLifecycleV16::Recovery {
+                if obligations.recovery_effective_q != obligations.effective_q {
+                    return Err(format!(
+                        "asset {asset} Recovery exposure escaped its typed obligation: {obligations:?}"
+                    ));
+                }
+            } else if obligations.recovery_effective_q != [0, 0] {
+                return Err(format!(
+                    "asset {asset} non-Recovery state retained Recovery exposure: {obligations:?}"
+                ));
+            }
             for (side, effective_oi, raw_basis, stored_count, pending_count, mode, loss_weight) in [
                 (
                     "long",
@@ -7285,17 +7595,6 @@ impl ScenarioRunner {
                         "asset {asset} {side} has zero effective OI with raw basis {raw_basis} in {mode:?}; no bounded reset continuation"
                     ));
                 }
-            }
-            let user_net: i128 = observed.iter().map(|positions| positions[asset]).sum();
-            let net = user_net
-                .checked_add(self.protocol_positions[asset])
-                .ok_or("user/protocol position sum overflow")?;
-            if net != 0 {
-                return Err(format!(
-                    "asset {asset} position attribution diverged: users={user_net}, \
-                     protocol={}, net={net}; observed={observed:?}, ghost={:?}",
-                    self.protocol_positions[asset], self.positions
-                ));
             }
         }
         Ok(())
@@ -12212,7 +12511,7 @@ struct BoundedInsuranceReservationNode {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedReferenceNode {
     positions: [[i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
-    protocol_positions: [i128; ASSET_COUNT],
+    matched_book_obligations: [MatchedBookObligationCensus; ASSET_COUNT],
     expected_effective_oi: [[u128; 2]; ASSET_COUNT],
     capitals: [u128; PRIMARY_ACTOR_COUNT],
     pnl: [i128; PRIMARY_ACTOR_COUNT],
@@ -12707,9 +13006,10 @@ impl ScenarioRunner {
             })
             .collect();
 
+        let matched_book_obligations = self.matched_book_obligation_census(&group)?;
         Ok(BoundedReferenceNode {
             positions: self.positions,
-            protocol_positions: self.protocol_positions,
+            matched_book_obligations,
             expected_effective_oi: self.expected_effective_oi,
             capitals,
             pnl,
