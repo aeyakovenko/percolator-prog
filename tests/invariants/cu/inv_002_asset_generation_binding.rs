@@ -40,12 +40,20 @@ fn variant_body<'a>(instruction_enum: &'a str, variant: &str) -> &'a str {
 
 #[test]
 fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
+    crate::assert_certified_engine_pin("INV-002 asset-generation composition");
+
     let source = include_str!("../../../src/v16_program.rs");
     let public_generation_evidence =
         include_str!("../public_sbf/inv_002_asset_generation_binding.rs");
     let transaction_domain_evidence =
         include_str!("../public_sbf/inv_006_program_chain_message_type_and_version_binding.rs");
     let matcher_scope_evidence = include_str!("inv_012_capability_and_delegate_scope.rs");
+    let generated_generation_evidence =
+        include_str!("../stateful/inv_002_asset_generation_binding.rs");
+    let lifecycle_composition =
+        include_str!("inv_065_reset_recovery_and_retired_state_isolation.rs");
+    let ordering_composition = include_str!("inv_010_out_of_order_safety.rs");
+    let predicate_proofs = include_str!("../kani/inv_002_asset_generation_binding.rs");
     let instruction_enum =
         source_between(source, "pub enum Instruction {", "\n    impl Instruction {");
 
@@ -86,6 +94,18 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
     ));
     assert!(transaction_domain_evidence
         .contains("fn retained_transaction_binds_program_market_kind_schema_and_blockhash("));
+    assert!(generated_generation_evidence
+        .contains("fn v16_program_asset_generation_operation_matrix_discovers_stale_intents("));
+    assert!(public_generation_evidence
+        .contains("fn v16_program_retained_activation_binds_exact_next_generation_frontier("));
+    assert!(predicate_proofs.contains("fn kani_v16_asset_generation_binding_is_exact("));
+    assert!(predicate_proofs
+        .contains("fn kani_v16_asset_lifecycle_binding_selects_current_or_frontier_exactly("));
+    assert!(lifecycle_composition
+        .contains("proof_v16_restart_empty_asset_core_preserves_budgets_and_assigns_fresh_market"));
+    assert!(lifecycle_composition.contains("contract_check_asset_restart_next_counters"));
+    assert!(ordering_composition
+        .contains("fn v16_program_out_of_order_induction_composition_is_source_complete("));
 
     let matcher_config = variant_body(instruction_enum, "SetMatcherConfig");
     assert!(!matcher_config.contains("asset_index"));

@@ -166,6 +166,18 @@ Every finite landing schedule is a repetition of that checked step, so larger pe
 add no semantic state. Aggregate slippage, fee, and expiry terms remain explicit schema gaps under
 INV-008/009/011/059. No production defect was found.
 
+The special-method ledger now closes eight stale metamorphic rows by executable source-composition
+rather than multiplying finite scenario products. INV-001 composes permanent market retirement,
+the complete account-kind census, signed transaction domain, and arbitrary landing-order
+induction. INV-002 composes all retained asset families with the exact generation predicates,
+fresh-frontier restart contracts, and the same ordering induction. INV-004 source-locks every
+retained episode field and every position writer, including permissionless crank epoch bumps and
+terminal claim retries. INV-036/047/056/072/088 already owned complete fee, alternate-route,
+favorable-route, crank-plan/parser, and engine-transition censuses respectively; their method rows
+now point to those fail-closed gates. This leaves only INV-008/009/011/059 metamorphic work, all of
+which depends on the same absent aggregate-intent schema rather than another route permutation. No
+production defect was found.
+
 The latest wrapper tranche independently found a retained matcher-capability ABA violation. A
 single-CPI transaction retained under matcher sequence `s` still executed at 136,530 CU after the
 LP disabled and re-enabled the identical matcher tuple at `s + 2`; batch CPI had the same missing
@@ -3715,9 +3727,10 @@ that the whole program is LoF/DoS-free.
    and `C` for 2. Invariant-owned directories currently exist for only 12 `P`, 27 `F`, and 87 `I`
    owners. File presence is only a lower bound; many owners cover one scenario rather than the
    required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
-   obligations: 20 `M` rows, all 22 `R` rows, and both `C` rows are current-surface `CLOSED` by
-   executable coverage or proof-equivalence composition. Twelve `M` rows retain partial named
-   evidence and are the remaining special-method work.
+   obligations: 28 `M` rows, all 22 `R` rows, and both `C` rows are current-surface `CLOSED` by
+   executable coverage or proof-equivalence composition. Four `M` rows retain partial named
+   evidence; each is blocked on the shared aggregate-intent schema tracked by
+   INV-008/009/011/059.
 2. The deployed decoder has 49 public instruction variants. The shared stateful public-interface
    model generates 25 direct operation classes: trade, EWMA configuration, mark push, crank,
    deposit, withdraw, maintenance sync, matcher configuration, insurance top-up, backing top-up,

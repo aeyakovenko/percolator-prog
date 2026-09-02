@@ -162,4 +162,19 @@ fn v16_program_retained_position_binding_and_writer_rosters_are_source_complete(
     let crank = function_source(&source, "handle_permissionless_crank_zero_copy", "account");
     assert!(crank.contains("let positions_before = portfolio_position_vector_view(&portfolio);"));
     assert!(crank.contains("if position_changed"));
+    let position_changed = crank
+        .split_once("if position_changed")
+        .map(|(_, body)| body)
+        .expect("permissionless position-change disposition");
+    assert!(
+        position_changed.contains("state::bump_portfolio_position_epoch(&mut portfolio_data)?;")
+    );
+
+    let recovery_evidence =
+        include_str!("../stateful/inv_081_success_state_validity_over_complete_public_routes.rs");
+    assert!(recovery_evidence
+        .contains("fn v16_program_owner_recovery_forfeit_strictly_reduces_each_position_episode("));
+    let resolved_evidence = include_str!("inv_068_receipt_uniqueness_and_monotonic_topups.rs");
+    assert!(resolved_evidence
+        .contains("fn v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail("));
 }
