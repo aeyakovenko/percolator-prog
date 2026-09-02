@@ -28,9 +28,14 @@
 //! A final 20-world matrix retains nonzero target/effective lag and a real maintenance debit on one
 //! leg while every structural delta changes another leg through every public transport; the
 //! incremental certificate must still equal full refresh on the exact committed snapshot.
-//! The shared stateful runner now applies that same pinned-engine differential after every public
-//! transition to every current primary and foreign certificate. The cloned full refresh must leave
-//! the portfolio and all market state byte-exact except for the engine's typed touched-asset
+//! A separate public partial-ADL regression proves that another owner's unilateral reduction may
+//! lower the observer's effective quantity without rewriting its still-current certificate. That
+//! untouched cache must be equal to or stricter than a fresh certificate in every health lane, and
+//! the owner must retain a bounded risk-reducing continuation. Mutation checks reject every
+//! one-lane favorable deviation. The shared stateful runner applies this directional check after
+//! every public transition to every current primary and foreign certificate, while requiring the
+//! cloned full refresh to equal the independent raw-state model exactly. The refresh must frame all
+//! non-certificate portfolio bytes and all market bytes except the engine's typed touched-asset
 //! `loss_stale_active` observation cache; its safety consumers own independent complete scans.
 //! INV-088's production-derived 50-class/62-call wrapper-to-engine roster separately assigns every
 //! callsite a global-epoch, touched-account, health-independent, or terminal certificate duty.
@@ -228,6 +233,200 @@ fn snapshot_portfolio_full_refresh(env: &V16Svm, actor: usize) -> HealthCertV16 
     snapshot_engine_full_refresh(&env.market_data(false), &env.primary_portfolio_data(actor))
         .expect("pinned engine full refresh must accept the committed public state")
         .0
+}
+
+#[test]
+fn v16_health_certificate_directional_comparator_rejects_every_healthier_lane() {
+    use crate::support::fuzz_model::health_certificate_is_no_healthier_than;
+
+    let mut fresh = HealthCertV16 {
+        certified_equity: 100,
+        certified_initial_req: 200,
+        certified_maintenance_req: 150,
+        certified_liq_deficit: 50,
+        certified_worst_case_loss: 250,
+        cert_oracle_epoch: 11,
+        cert_funding_epoch: 12,
+        cert_risk_epoch: 13,
+        cert_asset_set_epoch: 14,
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    fresh.active_bitmap_at_cert[0] = 1;
+
+    assert!(health_certificate_is_no_healthier_than(fresh, fresh));
+    let conservative = HealthCertV16 {
+        certified_equity: fresh.certified_equity - 1,
+        certified_initial_req: fresh.certified_initial_req + 1,
+        certified_maintenance_req: fresh.certified_maintenance_req + 1,
+        certified_liq_deficit: fresh.certified_liq_deficit + 1,
+        certified_worst_case_loss: fresh.certified_worst_case_loss + 1,
+        ..fresh
+    };
+    assert!(health_certificate_is_no_healthier_than(conservative, fresh));
+
+    let mut mutations = Vec::new();
+    let mut candidate = fresh;
+    candidate.valid = false;
+    mutations.push(("invalid cache", candidate));
+    candidate = fresh;
+    candidate.cert_oracle_epoch += 1;
+    mutations.push(("oracle epoch", candidate));
+    candidate = fresh;
+    candidate.cert_funding_epoch += 1;
+    mutations.push(("funding epoch", candidate));
+    candidate = fresh;
+    candidate.cert_risk_epoch += 1;
+    mutations.push(("risk epoch", candidate));
+    candidate = fresh;
+    candidate.cert_asset_set_epoch += 1;
+    mutations.push(("asset-set epoch", candidate));
+    candidate = fresh;
+    candidate.active_bitmap_at_cert[0] ^= 1;
+    mutations.push(("active bitmap", candidate));
+    candidate = fresh;
+    candidate.certified_equity += 1;
+    mutations.push(("higher equity", candidate));
+    candidate = fresh;
+    candidate.certified_initial_req -= 1;
+    mutations.push(("lower initial requirement", candidate));
+    candidate = fresh;
+    candidate.certified_maintenance_req -= 1;
+    mutations.push(("lower maintenance requirement", candidate));
+    candidate = fresh;
+    candidate.certified_liq_deficit -= 1;
+    mutations.push(("lower liquidation deficit", candidate));
+    candidate = fresh;
+    candidate.certified_worst_case_loss -= 1;
+    mutations.push(("lower worst-case loss", candidate));
+
+    for (label, candidate) in mutations {
+        assert!(
+            !health_certificate_is_no_healthier_than(candidate, fresh),
+            "{label} mutation must fail closed: candidate={candidate:?}, fresh={fresh:?}"
+        );
+    }
+    let mut invalid_fresh = fresh;
+    invalid_fresh.valid = false;
+    assert!(!health_certificate_is_no_healthier_than(
+        fresh,
+        invalid_fresh
+    ));
+}
+
+#[test]
+fn v16_program_partial_adl_leaves_untouched_current_certificate_only_more_conservative() {
+    use crate::support::fuzz_model::{
+        assert_current_certificate_matches_independent,
+        assert_current_certificate_matches_snapshot_full_refresh,
+        health_certificate_is_no_healthier_than, independent_health_certificate,
+    };
+
+    const PRICE: u64 = 1_000_000;
+    const OBSERVER: usize = 0;
+    const REDUCER: usize = 1;
+    const OTHER_LONG: usize = 2;
+    const OTHER_SHORT: usize = 3;
+    const ASSET: u16 = 0;
+    let quantity = POS_SCALE;
+
+    let mut env = V16Svm::new(
+        [0xad; 32],
+        MarketConfig {
+            initial_price: PRICE,
+            maintenance_fee_per_slot: 0,
+            max_abs_funding_e9_per_slot: 0,
+            ..MarketConfig::default()
+        },
+    );
+    env.trade_no_cpi(REDUCER, OBSERVER, ASSET, quantity as i128, PRICE, 0)
+        .expect("open reducer-long/observer-short pair");
+    env.trade_no_cpi(OTHER_LONG, OTHER_SHORT, ASSET, quantity as i128, PRICE, 0)
+        .expect("open independent long/short pair");
+
+    let (_, market_before) = env.primary_market_state();
+    let observer_before = env.primary_portfolio(OBSERVER);
+    assert!(assert_current_certificate_matches_independent(
+        "pre-ADL observer certificate",
+        &market_before,
+        &observer_before,
+    )
+    .expect("pre-ADL observer certificate must match the raw-state model"));
+    let cached = observer_before
+        .health_cert
+        .try_to_runtime()
+        .expect("observer must start with a valid certificate");
+    let observer_bytes_before = env.primary_portfolio_data(OBSERVER);
+    let risk_epoch_before = market_before.risk_epoch;
+    let short_a_before = market_before.assets[ASSET as usize].a_short;
+
+    env.begin_public_trace();
+    env.rebalance_reduce(REDUCER, ASSET, quantity)
+        .expect("public unilateral reduction must make partial-ADL progress");
+
+    let market_bytes = env.market_data(false);
+    let observer_bytes = env.primary_portfolio_data(OBSERVER);
+    assert_eq!(
+        observer_bytes, observer_bytes_before,
+        "another owner's reduction must not rewrite the observer portfolio"
+    );
+    let (_, market_after) = env.primary_market_state();
+    let observer_after = env.primary_portfolio(OBSERVER);
+    assert_eq!(market_after.risk_epoch, risk_epoch_before);
+    assert!(
+        market_after.assets[ASSET as usize].a_short < short_a_before,
+        "fixture must lower the opposing short-side A index without resetting the side"
+    );
+
+    let (fresh, _, _) = snapshot_engine_full_refresh(&market_bytes, &observer_bytes)
+        .expect("pinned engine must refresh the public post-ADL snapshot");
+    let independent = independent_health_certificate(
+        "post-ADL observer certificate",
+        &market_after,
+        &observer_after,
+    )
+    .expect("independent model must price the public post-ADL snapshot");
+    assert_eq!(fresh, independent);
+    assert_ne!(
+        cached, fresh,
+        "fixture must expose the stale-exact cache case"
+    );
+    assert!(
+        health_certificate_is_no_healthier_than(cached, fresh),
+        "untouched cache must be conservative in every health lane: cached={cached:?}, fresh={fresh:?}"
+    );
+    assert!(assert_current_certificate_matches_snapshot_full_refresh(
+        "post-ADL observer directional oracle",
+        &market_bytes,
+        &observer_bytes,
+    )
+    .expect("shared stateful oracle must accept only a conservative current cache"));
+
+    let observer_q_before = leg_for_asset(observer_after, u32::from(ASSET))
+        .expect("observer short leg must remain active")
+        .basis_pos_q
+        .unsigned_abs();
+    env.rebalance_reduce(OBSERVER, ASSET, quantity)
+        .expect("owner must retain a bounded public risk-reducing continuation");
+    let observer_q_after = leg_for_asset(env.primary_portfolio(OBSERVER), u32::from(ASSET))
+        .map_or(0, |leg| leg.basis_pos_q.unsigned_abs());
+    assert!(
+        observer_q_after < observer_q_before,
+        "owner continuation must strictly reduce raw exposure"
+    );
+
+    let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("partial-ADL certificate trace must be public and rollback-exact");
+    assert_eq!(trace.out_of_band_economic_mutations, 0);
+    assert_eq!(trace.steps.len(), 2);
+    assert!(trace.steps.iter().all(|step| step.succeeded));
+    assert!(trace
+        .steps
+        .iter()
+        .flat_map(|step| &step.token_deltas)
+        .all(|(_, delta)| *delta == 0));
 }
 
 #[test]

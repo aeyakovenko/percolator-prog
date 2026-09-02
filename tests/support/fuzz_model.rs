@@ -10,7 +10,7 @@ use percolator::{
 };
 use percolator_prog::{
     constants::{
-        MARKET_GROUP_OFF, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        HEADER_LEN, MARKET_GROUP_OFF, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
         ORACLE_MODE_EWMA_MARK, ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL,
     },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
@@ -2551,7 +2551,7 @@ impl CrankFailure {
     }
 }
 
-fn assert_current_certificate_matches_snapshot_full_refresh(
+pub(crate) fn assert_current_certificate_matches_snapshot_full_refresh(
     label: &str,
     market_data: &[u8],
     portfolio_data: &[u8],
@@ -2573,15 +2573,19 @@ fn assert_current_certificate_matches_snapshot_full_refresh(
         return Ok(false);
     }
 
-    assert_current_certificate_matches_independent(label, &group, &account)?;
-
     let (full_refresh, refreshed_market, refreshed_portfolio) =
         snapshot_engine_full_refresh(market_data, portfolio_data).map_err(|error| {
             format!("{label}: current certificate cannot full-refresh: {error}")
         })?;
-    if certificate != full_refresh {
+    let independent = independent_health_certificate(label, &group, &account)?;
+    if full_refresh != independent {
         return Err(format!(
-            "{label}: current certificate diverged from snapshot full refresh: deployed={certificate:?}, full={full_refresh:?}"
+            "{label}: snapshot full refresh diverged from the independent raw-state model: full={full_refresh:?}, independent={independent:?}"
+        ));
+    }
+    if !health_certificate_is_no_healthier_than(certificate, full_refresh) {
+        return Err(format!(
+            "{label}: current certificate is more favorable than snapshot full refresh: cached={certificate:?}, full={full_refresh:?}"
         ));
     }
     // Full refresh rewrites this intentionally asset-local observation cache to the last leg it
@@ -2612,7 +2616,31 @@ fn assert_current_certificate_matches_snapshot_full_refresh(
             "{label}: current certificate concealed market work during snapshot full refresh; first byte deltas={byte_deltas:?}"
         ));
     }
-    if refreshed_portfolio != portfolio_data {
+    let mut normalized_refreshed_portfolio = refreshed_portfolio.clone();
+    if normalized_refreshed_portfolio.len() != portfolio_data.len() {
+        return Err(format!(
+            "{label}: snapshot full refresh changed portfolio length from {} to {}",
+            portfolio_data.len(),
+            normalized_refreshed_portfolio.len(),
+        ));
+    }
+    // A unilateral reduction can lower the opposing side's A index without rewriting every
+    // portfolio. The old certificate is still valid when every lane is conservative, but a full
+    // refresh replaces only that cache. Frame every other persisted portfolio byte exactly.
+    let health_cert_offset =
+        HEADER_LEN + core::mem::offset_of!(percolator::PortfolioAccountV16Account, health_cert);
+    let health_cert_end = health_cert_offset
+        .checked_add(core::mem::size_of::<percolator::HealthCertV16Account>())
+        .ok_or_else(|| format!("{label}: health-certificate byte range overflow"))?;
+    if health_cert_end > portfolio_data.len() {
+        return Err(format!(
+            "{label}: health-certificate byte range {health_cert_offset}..{health_cert_end} exceeds portfolio length {}",
+            portfolio_data.len(),
+        ));
+    }
+    normalized_refreshed_portfolio[health_cert_offset..health_cert_end]
+        .copy_from_slice(&portfolio_data[health_cert_offset..health_cert_end]);
+    if normalized_refreshed_portfolio != portfolio_data {
         let byte_deltas = portfolio_data
             .iter()
             .zip(&refreshed_portfolio)
@@ -2861,6 +2889,24 @@ pub(crate) fn independent_health_certificate(
         active_bitmap_at_cert: account.active_bitmap.map(|word| word.get()),
         valid: true,
     })
+}
+
+pub(crate) fn health_certificate_is_no_healthier_than(
+    cached: HealthCertV16,
+    fresh: HealthCertV16,
+) -> bool {
+    cached.valid
+        && fresh.valid
+        && cached.cert_oracle_epoch == fresh.cert_oracle_epoch
+        && cached.cert_funding_epoch == fresh.cert_funding_epoch
+        && cached.cert_risk_epoch == fresh.cert_risk_epoch
+        && cached.cert_asset_set_epoch == fresh.cert_asset_set_epoch
+        && cached.active_bitmap_at_cert == fresh.active_bitmap_at_cert
+        && cached.certified_equity <= fresh.certified_equity
+        && cached.certified_initial_req >= fresh.certified_initial_req
+        && cached.certified_maintenance_req >= fresh.certified_maintenance_req
+        && cached.certified_liq_deficit >= fresh.certified_liq_deficit
+        && cached.certified_worst_case_loss >= fresh.certified_worst_case_loss
 }
 
 pub(crate) fn assert_current_certificate_matches_independent(
