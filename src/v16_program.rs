@@ -4602,7 +4602,7 @@ pub mod oracle_v16 {
         constants::{
             ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK, ORACLE_LEG_FLAG_DIVIDE_LEG2,
             ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
-            ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, SWITCHBOARD_RESULT_SCALE,
+            ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL,
         },
         error::PercolatorError,
         state::{AssetOracleProfileV16, WrapperConfigV16},
@@ -4760,6 +4760,35 @@ pub mod oracle_v16 {
         lhs.0 > rhs.0 || (lhs.0 == rhs.0 && lhs.1 > rhs.1)
     }
 
+    pub fn decimal_scale_plan_to_e6(exponent: i32) -> Option<(bool, u32)> {
+        if !(-MAX_EXPO_ABS..=MAX_EXPO_ABS).contains(&exponent) {
+            return None;
+        }
+        let shift = exponent + 6;
+        Some((shift >= 0, shift.unsigned_abs()))
+    }
+
+    fn scale_decimal_exponent_to_e6(mantissa: i128, exponent: i32) -> Result<u64, ProgramError> {
+        if mantissa <= 0 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let (multiply, power) =
+            decimal_scale_plan_to_e6(exponent).ok_or(PercolatorError::OracleInvalid)?;
+        let factor = 10u128.pow(power);
+        let mantissa = mantissa as u128;
+        let out = if multiply {
+            mantissa
+                .checked_mul(factor)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
+        } else {
+            mantissa / factor
+        };
+        if out == 0 || out > percolator::MAX_ORACLE_PRICE as u128 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        Ok(out as u64)
+    }
+
     fn read_pyth_price_e6_from_bytes(
         data: &[u8],
         expected_feed_id: &[u8; 32],
@@ -4793,18 +4822,8 @@ pub mod oracle_v16 {
         if oracle_confidence_is_too_wide(msg.conf as u128, price_u, conf_bps) {
             return Err(PercolatorError::OracleConfTooWide.into());
         }
-        let scale = msg.exponent + 6;
-        let out = if scale >= 0 {
-            price_u
-                .checked_mul(10u128.pow(scale as u32))
-                .ok_or(PercolatorError::EngineArithmeticOverflow)?
-        } else {
-            price_u / 10u128.pow((-scale) as u32)
-        };
-        if out == 0 || out > percolator::MAX_ORACLE_PRICE as u128 {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
-        Ok((out as u64, msg.publish_time))
+        scale_decimal_exponent_to_e6(i128::from(msg.price), msg.exponent)
+            .map(|price| (price, msg.publish_time))
     }
 
     #[inline]
@@ -4845,24 +4864,6 @@ pub mod oracle_v16 {
             .try_into()
             .unwrap();
         Ok(i128::from_le_bytes(bytes))
-    }
-
-    fn scale_decimal_to_e6(mantissa: i128, scale: u32) -> Result<u64, ProgramError> {
-        if mantissa <= 0 || scale > MAX_EXPO_ABS as u32 {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
-        let mantissa = mantissa as u128;
-        let out = if scale >= 6 {
-            mantissa / 10u128.pow(scale - 6)
-        } else {
-            mantissa
-                .checked_mul(10u128.pow(6 - scale))
-                .ok_or(PercolatorError::EngineArithmeticOverflow)?
-        };
-        if out == 0 || out > percolator::MAX_ORACLE_PRICE as u128 {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
-        Ok(out as u64)
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4919,11 +4920,8 @@ pub mod oracle_v16 {
         if oracle_confidence_is_too_wide(observation.std_dev as u128, value_u, conf_bps) {
             return Err(PercolatorError::OracleConfTooWide.into());
         }
-        let out = value_u / SWITCHBOARD_RESULT_SCALE;
-        if out == 0 || out > percolator::MAX_ORACLE_PRICE as u128 {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
-        Ok((out as u64, observation.publish_time))
+        scale_decimal_exponent_to_e6(observation.value, -MAX_EXPO_ABS)
+            .map(|price| (price, observation.publish_time))
     }
 
     pub fn read_switchboard_observation_from_bytes(
@@ -5019,7 +5017,8 @@ pub mod oracle_v16 {
         if !oracle_publish_time_is_fresh(publish_time, now_unix_ts, max_staleness_secs) {
             return Err(PercolatorError::OracleStale.into());
         }
-        scale_decimal_to_e6(answer, decimals as u32).map(|p| (p, publish_time))
+        scale_decimal_exponent_to_e6(answer, -i32::from(decimals))
+            .map(|price| (price, publish_time))
     }
 
     pub fn read_oracle_price_e6_from_bytes(

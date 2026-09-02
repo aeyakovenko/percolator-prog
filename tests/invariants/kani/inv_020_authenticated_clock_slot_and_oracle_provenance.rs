@@ -9,15 +9,16 @@
 //! semantics. Canonical Pyth and Chainlink byte layouts compose symbolic price, freshness,
 //! identity, and structural fields through the shipping parser. Independent sparse-wire layouts
 //! bind every Switchboard field at the first and last timestamp offsets; the selected timestamp
-//! table and typed validation seam are proven separately, with concrete scale boundaries for all
-//! three providers. Independent host arithmetic covers the solver-bound relational product and
-//! division semantics; public SBF tests bind these predicates to account parsing, rollback/ignore
-//! semantics, terminal payout, and owner exit.
+//! table and typed validation seam are proven separately. Full-width symbolic Pyth exponents and
+//! Chainlink decimals, plus the fixed Switchboard exponent, are mapped through the exact canonical
+//! production scale plan. Independent bigint arithmetic discharges the named wide-multiply/divide
+//! equivalence boundary; public SBF tests bind these predicates to account parsing,
+//! rollback/ignore semantics, terminal payout, and owner exit.
 
 use percolator_prog::{
     error::PercolatorError,
     oracle_v16::{
-        oracle_confidence_is_too_wide, oracle_publish_time_is_fresh,
+        decimal_scale_plan_to_e6, oracle_confidence_is_too_wide, oracle_publish_time_is_fresh,
         oracle_publish_times_are_coherent, read_oracle_price_e6_from_bytes,
         read_switchboard_observation_from_bytes, read_switchboard_selected_publish_time,
         validate_switchboard_observation_e6, SwitchboardObservationV16, CHAINLINK_STORE_PROGRAM_ID,
@@ -358,6 +359,18 @@ fn kani_v16_pyth_confidence_routing_has_no_zero_cost_rejection() {
 #[kani::unwind(40)]
 fn kani_v16_pyth_full_width_invalid_exponents_reject_before_scale() {
     let exponent: i32 = kani::any();
+    let expected_plan = if (-18..=18).contains(&exponent) {
+        let shift = exponent + 6;
+        Some((shift >= 0, shift.unsigned_abs()))
+    } else {
+        None
+    };
+    assert_eq!(decimal_scale_plan_to_e6(exponent), expected_plan);
+    kani::cover!(expected_plan == Some((false, 12)), "maximum division scale");
+    kani::cover!(
+        expected_plan == Some((true, 24)),
+        "maximum multiplication scale"
+    );
     kani::cover!(exponent < -18);
     kani::cover!(exponent > 18);
     let feed_id = [0x48; 32];
@@ -560,6 +573,8 @@ fn kani_v16_switchboard_scale_boundaries_match_deployed_outputs() {
         )
     };
 
+    assert_eq!(decimal_scale_plan_to_e6(-18), Some((false, 12)));
+
     assert_eq!(
         validate(SCALE - 1),
         Err(PercolatorError::OracleInvalid.into())
@@ -646,6 +661,24 @@ fn kani_v16_chainlink_canonical_bytes_compose_structural_fields() {
 #[kani::unwind(40)]
 fn kani_v16_chainlink_full_width_invalid_decimals_reject_before_scale() {
     let decimals: u8 = kani::any();
+    let expected_plan = if decimals <= 18 {
+        let shift = 6 - i32::from(decimals);
+        Some((shift >= 0, shift.unsigned_abs()))
+    } else {
+        None
+    };
+    assert_eq!(
+        decimal_scale_plan_to_e6(-i32::from(decimals)),
+        expected_plan
+    );
+    kani::cover!(
+        expected_plan == Some((true, 6)),
+        "zero-decimal multiplication"
+    );
+    kani::cover!(
+        expected_plan == Some((false, 12)),
+        "maximum decimal division"
+    );
     kani::cover!(decimals == 19);
     kani::cover!(decimals == u8::MAX);
     let account_key = Pubkey::new_from_array([0x4d; 32]);

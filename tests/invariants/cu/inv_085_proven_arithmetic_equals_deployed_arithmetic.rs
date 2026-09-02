@@ -1125,8 +1125,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         ArithmeticOwner { function: "market_view_mut", class: "STRUCTURAL", evidence: "INV-015" },
         ArithmeticOwner { function: "market_from_wire_boxed", class: "STRUCTURAL", evidence: "INV-015" },
         ArithmeticOwner { function: "write_market_wire", class: "STRUCTURAL", evidence: "INV-025" },
-        ArithmeticOwner { function: "read_pyth_price_e6_from_bytes", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
-        ArithmeticOwner { function: "scale_decimal_to_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
+        ArithmeticOwner { function: "scale_decimal_exponent_to_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
         ArithmeticOwner { function: "compose_price_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
         ArithmeticOwner { function: "clamp_toward_engine_dt", class: "ORACLE", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
         ArithmeticOwner { function: "mul_div_u128_by_u64", class: "POLICY", evidence: "v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries" },
@@ -1184,6 +1183,28 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         .split("    #[cfg(test)]\n    mod tests")
         .next()
         .expect("production prefix exists");
+    assert_eq!(
+        production
+            .matches("scale_decimal_exponent_to_e6(")
+            .count(),
+        4,
+        "one canonical decimal scaler must have exactly the Pyth, Switchboard, and Chainlink callers",
+    );
+    for provider_call in [
+        "scale_decimal_exponent_to_e6(i128::from(msg.price), msg.exponent)",
+        "scale_decimal_exponent_to_e6(observation.value, -MAX_EXPO_ABS)",
+        "scale_decimal_exponent_to_e6(answer, -i32::from(decimals))",
+    ] {
+        assert_eq!(
+            production.matches(provider_call).count(),
+            1,
+            "provider scaling must use the canonical exponent plan: {provider_call}",
+        );
+    }
+    assert!(
+        !production.contains("fn scale_decimal_to_e6("),
+        "the legacy Chainlink-only decimal scaler must not return",
+    );
     let mut current_function = "<module>";
     let mut actual = std::collections::BTreeSet::new();
     for line in production.lines() {

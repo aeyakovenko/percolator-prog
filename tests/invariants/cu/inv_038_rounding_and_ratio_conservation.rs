@@ -863,12 +863,6 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
             evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus",
         },
         RoundingOwner {
-            function: "read_pyth_price_e6_from_bytes",
-            operations: 1,
-            class: "ORACLE",
-            evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms",
-        },
-        RoundingOwner {
             function: "reject_lapsed_source_backing_for_conversion_view",
             operations: 2,
             class: "STRUCTURAL",
@@ -881,7 +875,7 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
             evidence: "INV-034",
         },
         RoundingOwner {
-            function: "scale_decimal_to_e6",
+            function: "scale_decimal_exponent_to_e6",
             operations: 1,
             class: "ORACLE",
             evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms",
@@ -892,12 +886,6 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
             class: "EXACT_PARTITION",
             evidence:
                 "v16_program_pr225_mark_movement_fee_is_nonwithdrawable_and_terminally_burned",
-        },
-        RoundingOwner {
-            function: "validate_switchboard_observation_e6",
-            operations: 1,
-            class: "ORACLE",
-            evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms",
         },
         RoundingOwner {
             function: "verify_domain_withdrawal_preflight",

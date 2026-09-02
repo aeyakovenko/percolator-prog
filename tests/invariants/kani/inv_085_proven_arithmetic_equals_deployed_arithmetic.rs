@@ -11,9 +11,11 @@
 //!
 //! Guarantee boundary: premium funding uses the complete 8-bit input product;
 //! EWMA and fee-supported movement use complete 3-bit products because the
-//! 8-bit EWMA division circuit exceeded the isolated five-minute budget. This
-//! does not prove every full-width multiply/divide, BPF lowering, composite
-//! provider scale, or engine arithmetic path equivalent to a bigint model.
+//! 8-bit EWMA division circuit exceeded the isolated five-minute budget. Full-width provider
+//! exponent routing is unconditional; exact wide multiply/divide equivalence is conditional on
+//! `WRAPPER_WIDE_ARITHMETIC_AXIOM`, independently discharged against bigint references over the
+//! deployed boundary/generated corpus and every public provider composition. Engine arithmetic is
+//! engine-owned and is not duplicated here.
 
 use super::*;
 
