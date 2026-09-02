@@ -6,7 +6,7 @@
 //!
 //! Evidence in this file (I/P roster): the source audit discovers mounted Kani
 //! modules from `kani/v16_kani.rs`, extracts every `kani::assume` tuple, and
-//! compares it exactly with the manifest. It also derives all 159 direct and 38
+//! compares it exactly with the manifest. It also derives all 161 direct and 38
 //! generated harnesses, classifies symbolic-total, branch-witnessed, explicitly
 //! constrained, and concrete-exact proofs, and rejects missing claims, covers,
 //! proof attributes, or public counterparts. A public LiteSVM composition reaches
@@ -316,7 +316,7 @@ fn inv_084_generated_trade_decoder_harnesses(source: &str) -> std::collections::
 fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
     use std::collections::{BTreeMap, BTreeSet};
 
-    const EXPECTED_MOUNTED_MODULES: usize = 25;
+    const EXPECTED_MOUNTED_MODULES: usize = 26;
     const EXPECTED_ASSUMPTIONS: usize = 13;
     const ALLOWED_CLASSIFICATIONS: [&str; 3] = [
         "NONVACUITY_WITNESS",
@@ -416,9 +416,9 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
 fn v16_program_every_mounted_kani_harness_has_a_nonvacuity_disposition() {
     use std::collections::{BTreeMap, BTreeSet};
 
-    const EXPECTED_DIRECT_HARNESSES: usize = 159;
+    const EXPECTED_DIRECT_HARNESSES: usize = 161;
     const EXPECTED_GENERATED_HARNESSES: usize = 38;
-    const EXPECTED_TOTAL_HARNESSES: usize = 197;
+    const EXPECTED_TOTAL_HARNESSES: usize = 199;
     const CONCRETE_PUBLIC_EVIDENCE: [(&str, &str); 3] = [
         (
             "tests/invariants/kani/inv_020_authenticated_clock_slot_and_oracle_provenance.rs",
@@ -560,11 +560,11 @@ fn v16_program_every_mounted_kani_harness_has_a_nonvacuity_disposition() {
     category_counts.insert("GENERATED_SYMBOLIC_TOTAL", generated_harnesses.len());
 
     let expected_categories = BTreeMap::from([
-        ("BRANCH_WITNESSED", 28usize),
-        ("CONCRETE_EXACT", 30),
+        ("BRANCH_WITNESSED", 29usize),
+        ("CONCRETE_EXACT", 29),
         ("EXPLICIT_ASSUMPTION", 10),
         ("GENERATED_SYMBOLIC_TOTAL", 38),
-        ("SYMBOLIC_TOTAL", 91),
+        ("SYMBOLIC_TOTAL", 93),
     ]);
     assert_eq!(
         category_counts, expected_categories,

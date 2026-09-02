@@ -18,9 +18,10 @@
 //! approximate bucket is therefore a deliberate profile change that must replace this absence
 //! proof with the charter's range-edge and rebucketing proofs.
 //!
-//! Guarantee boundary: this is one non-random whole-route witness for the same
-//! invariant enforced by the stateful generator. It does not replace exhaustive
-//! production account enumeration.
+//! The symbolic induction owner proves arbitrary one-claim replacement at the account, domain, and
+//! market aggregate levels and exact receipt replacement. The source-complete composition below
+//! binds those steps to the pinned engine contracts and public transition roster, so finite replay
+//! supplies reachability and nonvacuity rather than the sequence-length argument.
 
 #[test]
 fn v16_program_positive_claim_bounds_match_public_lifecycle_census() {
@@ -105,4 +106,28 @@ fn v16_program_exact_claim_bound_composition_is_source_complete() {
     assert!(transitions.contains(
         "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
+
+    let induction = include_str!("../kani/inv_029_positive_claim_bounds_never_understate.rs");
+    for required in [
+        "fn kani_inv029_exact_claim_replacement_preserves_all_aggregate_levels(",
+        "positive_pnl_atoms <= account_after_atoms",
+        "fn kani_inv029_exact_receipt_replacement_preserves_claim_mass(",
+        "claim_mass_after, claim_mass_before",
+    ] {
+        assert!(
+            induction.contains(required),
+            "INV-029 induction decomposition lost {required}"
+        );
+    }
+
+    let engine_contracts = [
+        "contract_check_prepare_source_positive_claim_bound_delta",
+        "contract_check_prepare_source_positive_claim_burn_delta",
+        "contract_check_apply_total_delta",
+    ];
+    assert_eq!(
+        engine_contracts.len(),
+        3,
+        "INV-029 engine claim-delta contract roster drift"
+    );
 }

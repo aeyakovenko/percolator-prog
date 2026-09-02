@@ -64,6 +64,9 @@ mod inv_024_attributed_quote_value_conservation;
 #[path = "../tests/invariants/kani/inv_025_exact_stock_reconciliation.rs"]
 mod inv_025_exact_stock_reconciliation;
 
+#[path = "../tests/invariants/kani/inv_029_positive_claim_bounds_never_understate.rs"]
+mod inv_029_positive_claim_bounds_never_understate;
+
 #[path = "../tests/invariants/kani/inv_036_fee_destination_and_policy_version_integrity.rs"]
 mod inv_036_fee_destination_and_policy_version_integrity;
 
