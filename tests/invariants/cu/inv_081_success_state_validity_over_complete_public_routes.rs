@@ -16,8 +16,9 @@
 //! The source-composition gate in this file closes the route-count dimension without duplicating
 //! those scenarios. It joins the complete decoder/route/account/input/admission inventories to the
 //! wrapper-to-engine transition, wrapper-field, value, stock, certificate, position/OI, scope,
-//! rollback, and independent-model owners. Each owner remains independently executable; this gate
-//! fails if one disappears or the 49-route registry acquires an omission.
+//! adversarial-role containment, rollback, and independent-model owners. Each owner remains
+//! independently executable; this gate fails if one disappears or the 49-route registry acquires
+//! an omission.
 //!
 //! Guarantee boundary: this is a proof-equivalence decomposition for the current deployed surface,
 //! not one solver query over arbitrary account bytes. It relies on the exact pinned engine
@@ -127,6 +128,11 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
             test: "v16_program_configured_authority_route_dispositions_are_source_complete",
         },
         Inv081CompositionOwner {
+            layer: "adversarial role economic containment",
+            path: "tests/invariants/cu/inv_005_authority_incarnation_binding.rs",
+            test: "v16_program_adversarial_role_containment_matrix_is_source_complete",
+        },
+        Inv081CompositionOwner {
             layer: "account roles signers writability and aliases",
             path: "tests/invariants/cu/inv_017_signer_writable_role_and_account_alias_safety.rs",
             test: "v16_program_account_role_matrix_roster_is_source_complete",
@@ -229,7 +235,7 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
             owner.test,
         );
     }
-    assert_eq!(layers.len(), 21, "INV-081 composition layer drift");
+    assert_eq!(layers.len(), 22, "INV-081 composition layer drift");
 
     for (path, theorem) in KANI_OWNERS {
         let source = std::fs::read_to_string(root.join(path))

@@ -10,10 +10,15 @@
 //! `v16_program_authority_handoffs_share_one_incoming_key_validator` source-locks both authority
 //! handoff handlers to one validator: the market authority cannot be burned, while the asset-admin
 //! role retains its explicitly authorized burn path.
+//! `v16_program_adversarial_role_containment_matrix_is_source_complete` separately treats every
+//! correctly authorized role as economically hostile. It source-locks all configured, matcher,
+//! delegate, and permissionless callsites to explicit maximum/forbidden effects and independent
+//! public principal/claim containment witnesses.
 //!
-//! Guarantee boundary: this proves the alleged transition is not an unprivileged public attack.
-//! It does not protect users from a compromised configured authority; operational deployments
-//! must place that role behind their chosen multisignature or governance policy.
+//! Guarantee boundary: authentication alone does not protect users from a compromised configured
+//! authority. The role matrix proves only the deployed protocol envelope stated for each role;
+//! deployments still need an appropriate multisignature or governance policy for actions that are
+//! intentionally permitted inside that envelope.
 
 use super::*;
 
@@ -142,13 +147,12 @@ fn inv005_reaches_authority_check(
     })
 }
 
-fn inv005_authority_route_handlers(source: &str) -> std::collections::BTreeMap<String, String> {
+fn inv005_public_route_handlers(source: &str) -> std::collections::BTreeMap<String, String> {
     let process = inv005_braced_block_after(source, "pub fn process");
     let variants = inv005_instruction_variant_bodies(source);
-    let functions = inv005_processor_functions(source);
     variants
         .keys()
-        .filter_map(|variant| {
+        .map(|variant| {
             let marker = format!("Instruction::{variant}");
             let start = process
                 .find(&marker)
@@ -159,20 +163,60 @@ fn inv005_authority_route_handlers(source: &str) -> std::collections::BTreeMap<S
                 .map(|offset| marker.len() + offset)
                 .unwrap_or(tail.len());
             let arm = &tail[..end];
-            let handler_start = arm.find("handle_")?;
+            let handler_start = arm
+                .find("handle_")
+                .unwrap_or_else(|| panic!("{variant} dispatch arm has no handler"));
             let handler_end = arm[handler_start..]
                 .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
                 .map(|offset| handler_start + offset)
                 .unwrap_or(arm.len());
             let handler = arm[handler_start..handler_end].to_owned();
+            (variant.clone(), handler)
+        })
+        .collect()
+}
+
+fn inv005_authority_route_handlers(source: &str) -> std::collections::BTreeMap<String, String> {
+    let functions = inv005_processor_functions(source);
+    inv005_public_route_handlers(source)
+        .into_iter()
+        .filter(|(_, handler)| {
             inv005_reaches_authority_check(
-                &handler,
+                handler,
                 &functions,
                 &mut std::collections::BTreeSet::new(),
             )
-            .then_some((variant.clone(), handler))
         })
         .collect()
+}
+
+fn inv005_source_defines_test(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    let mut saw_test = false;
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            saw_test = true;
+        } else if line.starts_with("fn ") {
+            if saw_test
+                && line
+                    .strip_prefix(&marker)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            saw_test = false;
+        } else if saw_test && !line.is_empty() && !line.starts_with('#') {
+            saw_test = false;
+        }
+    }
+    false
+}
+
+fn inv005_evidence_parts(evidence: &str) -> (&str, &str) {
+    evidence
+        .split_once('#')
+        .unwrap_or_else(|| panic!("role evidence must be path#test: {evidence}"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -367,6 +411,197 @@ fn v16_program_configured_authority_route_dispositions_are_source_complete() {
     assert_eq!(
         actual_open, expected_open,
         "the explicit INV-005 gap queue changed"
+    );
+}
+
+#[test]
+fn v16_program_adversarial_role_containment_matrix_is_source_complete() {
+    const CONFIGURED_ROLES: &[&str] = &[
+        "MarketAuthority",
+        "AssetAdmin",
+        "OracleAuthority",
+        "InsuranceOperator",
+        "BackingOperator",
+    ];
+    const EXPECTED_AUTH_MODELS: &[(&str, &str)] = &[
+        ("MarketAuthority", "ConfiguredSigner"),
+        ("AssetAdmin", "ConfiguredSigner"),
+        ("OracleAuthority", "ConfiguredSigner"),
+        ("InsuranceOperator", "ConfiguredSigner"),
+        ("BackingOperator", "ConfiguredSigner"),
+        ("Matcher", "PortfolioCapability"),
+        ("Delegate", "ProgramDerivedSigner"),
+        ("Keeper", "Permissionless"),
+    ];
+    const MATCHER_ROUTES: &[&str] = &["BatchTradeCpi", "TradeCpi"];
+    const KEEPER_ROUTES: &[&str] = &[
+        "ClaimResolvedPayoutTopup",
+        "FinalizeResetSide",
+        "ForceCloseAbandonedAsset",
+        "PermissionlessCrank",
+        "ResolveStalePermissionless",
+        "SyncMaintenanceFee",
+    ];
+
+    crate::assert_certified_engine_pin("expanded-goal adversarial-role containment");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let production = include_str!("../../../src/v16_program.rs");
+    let functions = inv005_processor_functions(production);
+    let public_handlers = inv005_public_route_handlers(production);
+    let configured_handlers = inv005_authority_route_handlers(production);
+    assert_eq!(public_handlers.len(), 49, "public handler census drift");
+    assert_eq!(
+        configured_handlers.len(),
+        29,
+        "configured-role route census drift"
+    );
+
+    let expected_auth_models = EXPECTED_AUTH_MODELS
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let configured_roles = CONFIGURED_ROLES
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut role_routes =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    let mut configured_union = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<String, String>::new();
+
+    for line in include_str!("../inv_005_adversarial_role_containment.tsv").lines() {
+        if line.starts_with('#') || line.is_empty() || line.starts_with("role\t") {
+            continue;
+        }
+        let fields = line.splitn(7, '\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 7, "malformed adversarial-role row: {line}");
+        let role = fields[0];
+        let auth_model = fields[1];
+        let routes = fields[2]
+            .split(',')
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            expected_auth_models.get(role),
+            Some(&auth_model),
+            "unexpected authentication model for {role}"
+        );
+        assert!(!routes.is_empty(), "{role} needs a production route");
+        assert!(
+            fields[3].starts_with("May ") && fields[4].starts_with("Cannot "),
+            "{role} needs explicit maximum and forbidden economic effects"
+        );
+        assert!(
+            role_routes
+                .insert(role.to_owned(), routes.clone())
+                .is_none(),
+            "duplicate adversarial-role row for {role}"
+        );
+
+        if auth_model == "Permissionless" {
+            assert_eq!(
+                fields[5], "-",
+                "permissionless keeper has no identity grant"
+            );
+        } else {
+            let (path, function) = inv005_evidence_parts(fields[5]);
+            let source = source_cache.entry(path.to_owned()).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path)).unwrap_or_else(|error| {
+                    panic!("read role authentication evidence {path}: {error}")
+                })
+            });
+            assert!(
+                inv005_source_defines_test(source, function),
+                "{role} lacks executable authentication evidence {}",
+                fields[5]
+            );
+        }
+
+        let economic_evidence = fields[6].split(';').collect::<Vec<_>>();
+        assert!(
+            economic_evidence.len() >= 2,
+            "{role} needs independent correctly-authorized economic witnesses"
+        );
+        for evidence in economic_evidence {
+            let (path, function) = inv005_evidence_parts(evidence);
+            let source = source_cache.entry(path.to_owned()).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read role economic evidence {path}: {error}"))
+            });
+            assert!(
+                inv005_source_defines_test(source, function),
+                "{role} lacks executable economic-containment evidence {evidence}"
+            );
+        }
+
+        for route in &routes {
+            let handler = public_handlers
+                .get(route)
+                .unwrap_or_else(|| panic!("{role} names unknown public route {route}"));
+            let body = functions
+                .get(handler)
+                .unwrap_or_else(|| panic!("missing production body for {route}/{handler}"));
+            if configured_roles.contains(role) {
+                assert!(
+                    configured_handlers.contains_key(route),
+                    "{role} route {route} does not reach configured-authority validation"
+                );
+                let role_markers: &[&str] = match role {
+                    "MarketAuthority" => &["marketauth"],
+                    "AssetAdmin" => &["asset_admin"],
+                    "OracleAuthority" => &["oracle_authority"],
+                    "InsuranceOperator" => &["insurance_authority", "insurance_operator"],
+                    "BackingOperator" => &["backing_bucket_authority"],
+                    _ => unreachable!(),
+                };
+                assert!(
+                    role_markers.iter().any(|marker| body.contains(marker)),
+                    "{role} route {route}/{handler} lost its scope-specific authority read"
+                );
+                configured_union.insert(route.clone());
+            }
+            if matches!(role, "Matcher" | "Delegate") {
+                assert!(
+                    body.contains("matcher_delegate")
+                        && (body.contains("invoke_matcher(")
+                            || body.contains("invoke_matcher_batch(")),
+                    "{role} route {route}/{handler} lost the exact matcher/delegate CPI boundary"
+                );
+            }
+            if role == "Keeper" {
+                assert!(
+                    !configured_handlers.contains_key(route),
+                    "permissionless keeper route {route} unexpectedly gained configured authority"
+                );
+            }
+        }
+    }
+
+    assert_eq!(
+        role_routes
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_auth_models.keys().copied().collect(),
+        "the adversarial-role matrix must contain exactly the eight normative roles"
+    );
+    assert_eq!(
+        configured_union,
+        configured_handlers.keys().cloned().collect(),
+        "every configured-authority public route needs at least one logical adversarial-role owner"
+    );
+    let expected_matcher_routes = MATCHER_ROUTES
+        .iter()
+        .map(|route| (*route).to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(role_routes["Matcher"], expected_matcher_routes);
+    assert_eq!(role_routes["Delegate"], expected_matcher_routes);
+    assert_eq!(
+        role_routes["Keeper"],
+        KEEPER_ROUTES
+            .iter()
+            .map(|route| (*route).to_owned())
+            .collect()
     );
 }
 
