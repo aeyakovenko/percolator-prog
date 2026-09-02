@@ -34,6 +34,9 @@ mod inv_010_out_of_order_safety;
 #[path = "../tests/invariants/kani/inv_011_signed_aggregate_economic_bounds.rs"]
 mod inv_011_signed_aggregate_economic_bounds;
 
+#[path = "../tests/invariants/kani/inv_012_capability_and_delegate_scope.rs"]
+mod inv_012_capability_and_delegate_scope;
+
 #[path = "../tests/invariants/kani/inv_013_destructive_consent_scope.rs"]
 mod inv_013_destructive_consent_scope;
 

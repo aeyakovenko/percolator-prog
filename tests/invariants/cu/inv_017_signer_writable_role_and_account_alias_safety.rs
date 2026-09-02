@@ -2723,6 +2723,7 @@ fn matcher_config_alias_fixture(route: MatcherConfigAliasRoute) -> CoreAccountAl
         expected_sequence: env.portfolio_matcher_sequence(portfolio),
         enabled,
         trade_fee_cap_bps: if enabled == 0 { 0 } else { 10_000 },
+        expiry_slot: if enabled == 0 { 0 } else { u64::MAX },
     };
     let mut tracked_accounts = vec![env.market, portfolio];
     tracked_accounts.extend(accounts.iter().skip(3).map(|account| account.pubkey));

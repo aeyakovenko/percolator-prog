@@ -1872,6 +1872,11 @@ impl V16CuEnv {
         state::read_portfolio_matcher_sequence(&account.data).unwrap()
     }
 
+    fn portfolio_matcher_expiry(&self, portfolio: Pubkey) -> u64 {
+        let account = self.svm.get_account(&portfolio).expect("portfolio account");
+        state::read_portfolio_matcher_expiry(&account.data).unwrap()
+    }
+
     fn control_sequences(&self, asset_index: usize) -> state::AssetControlSequencesV16 {
         let account = self.svm.get_account(&self.market).expect("market account");
         state::read_asset_control_sequences(&account.data, asset_index).unwrap()
@@ -2878,6 +2883,30 @@ impl V16CuEnv {
         enabled: u8,
         trade_fee_cap_bps: u16,
     ) -> Result<Pubkey, String> {
+        self.try_set_matcher_config_with_trade_fee_cap_and_expiry(
+            matcher_program,
+            maker_owner,
+            maker_account,
+            matcher_context,
+            matcher_delegate,
+            enabled,
+            trade_fee_cap_bps,
+            if enabled == 0 { 0 } else { u64::MAX },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_set_matcher_config_with_trade_fee_cap_and_expiry(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_owner: &Keypair,
+        maker_account: Pubkey,
+        matcher_context: Pubkey,
+        matcher_delegate: Pubkey,
+        enabled: u8,
+        trade_fee_cap_bps: u16,
+        expiry_slot: u64,
+    ) -> Result<Pubkey, String> {
         let portfolio_id = self.portfolio_id(maker_account);
         let expected_sequence = self.portfolio_matcher_sequence(maker_account);
         self.svm.expire_blockhash();
@@ -2899,6 +2928,7 @@ impl V16CuEnv {
                 expected_sequence,
                 enabled,
                 trade_fee_cap_bps,
+                expiry_slot,
             },
             accounts,
             &[maker_owner],

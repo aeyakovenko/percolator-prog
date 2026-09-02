@@ -1015,6 +1015,7 @@ impl V16Svm {
                 expected_sequence,
                 enabled: 1,
                 trade_fee_cap_bps: 10_000,
+                expiry_slot: u64::MAX,
             },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
@@ -1072,6 +1073,7 @@ impl V16Svm {
                 expected_sequence,
                 enabled,
                 trade_fee_cap_bps,
+                expiry_slot: if enabled == 0 { 0 } else { u64::MAX },
             },
             accounts,
             &[owner],
@@ -1121,6 +1123,7 @@ impl V16Svm {
                 expected_sequence,
                 enabled,
                 trade_fee_cap_bps,
+                expiry_slot: if enabled == 0 { 0 } else { u64::MAX },
             },
             accounts,
             &[owner],

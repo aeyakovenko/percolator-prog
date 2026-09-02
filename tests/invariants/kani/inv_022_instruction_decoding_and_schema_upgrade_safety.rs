@@ -408,11 +408,13 @@ fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
     let expected_sequence: u64 = kani::any();
     let enabled: u8 = kani::any();
     let trade_fee_cap_bps: u16 = kani::any();
+    let expiry_slot: u64 = kani::any();
     let data = Instruction::SetMatcherConfig {
         portfolio_id,
         expected_sequence,
         enabled,
         trade_fee_cap_bps,
+        expiry_slot,
     }
     .encode();
 
@@ -422,11 +424,13 @@ fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
             expected_sequence: decoded_sequence,
             enabled: decoded_enabled,
             trade_fee_cap_bps: decoded_cap,
+            expiry_slot: decoded_expiry,
         } => {
             assert_eq!(decoded_portfolio_id, portfolio_id);
             assert_eq!(decoded_sequence, expected_sequence);
             assert_eq!(decoded_enabled, enabled);
             assert_eq!(decoded_cap, trade_fee_cap_bps);
+            assert_eq!(decoded_expiry, expiry_slot);
         }
         _ => unreachable!(),
     }

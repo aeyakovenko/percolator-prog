@@ -132,6 +132,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             expected_sequence: 1,
             enabled: 1,
             trade_fee_cap_bps: 25,
+            expiry_slot: u64::MAX,
         },
         ProgInstruction::ClosePortfolio {
             portfolio_id: 1,

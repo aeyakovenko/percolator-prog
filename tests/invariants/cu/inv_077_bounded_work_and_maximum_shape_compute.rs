@@ -5365,6 +5365,7 @@ fn v16_cu_set_matcher_config_enabled_and_disabled_are_bounded() {
                 expected_sequence: env.portfolio_matcher_sequence(maker),
                 enabled: 0,
                 trade_fee_cap_bps: 0,
+                expiry_slot: 0,
             },
             vec![
                 AccountMeta::new(maker_owner.pubkey(), true),
@@ -5383,6 +5384,7 @@ fn v16_cu_set_matcher_config_enabled_and_disabled_are_bounded() {
                 expected_sequence: env.portfolio_matcher_sequence(maker),
                 enabled: 1,
                 trade_fee_cap_bps: 10_000,
+                expiry_slot: u64::MAX,
             },
             vec![
                 AccountMeta::new(maker_owner.pubkey(), true),

@@ -1675,6 +1675,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
             expected_sequence,
             enabled: 1,
             trade_fee_cap_bps: 10_000,
+            expiry_slot: u64::MAX,
         },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),

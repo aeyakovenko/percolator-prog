@@ -482,6 +482,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             expected_sequence: 1,
             enabled: 1,
             trade_fee_cap_bps: 25,
+            expiry_slot: u64::MAX,
         },
         ProgInstruction::RestartAssetOracle {
             asset_index: 0,

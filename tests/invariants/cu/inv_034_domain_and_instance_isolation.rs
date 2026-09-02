@@ -169,6 +169,7 @@ fn set_matcher_config_on_market(
             expected_sequence,
             enabled: 1,
             trade_fee_cap_bps: 10_000,
+            expiry_slot: u64::MAX,
         },
         vec![
             AccountMeta::new(owner.pubkey(), true),

@@ -19,8 +19,9 @@
 //! The capability authorizes only CPI trade matching, so a separate operation set is structurally
 //! inapplicable; per-leg asset scope is carried by the generation-bound trade request.
 //!
-//! Guarantee boundary: both retained CPI routes bind the persisted matcher-config incarnation.
-//! The deployed capability still has no expiry, which remains explicit in AUDIT-012.
+//! Both retained CPI routes bind the persisted matcher-config incarnation and an authenticated,
+//! owner-selected expiry. Expiry is strict (`current_slot < expiry_slot`), uses the Clock sysvar,
+//! and is cleared with the capability on every unsynchronized position mutation.
 
 use super::*;
 
@@ -81,10 +82,20 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
     assert!(config.contains("portfolio_id != current_portfolio_id"));
     assert!(config.contains("expected_sequence != current_sequence"));
     assert!(config.contains("derive_matcher_delegate("));
+    assert!(config.contains("Clock::get()?.slot"));
+    assert!(config.contains("matcher_capability_config_is_valid("));
+    assert!(config.contains("write_portfolio_matcher_expiry(&mut data, expiry_slot)"));
     assert!(matcher_guard.contains("read_portfolio_matcher_sequence(&account_b_data)?"));
     assert!(matcher_guard.contains("!= expected_matcher_sequence"));
     assert!(matcher_guard.contains("PercolatorError::EngineStale"));
     assert!(matcher_guard.contains("read_portfolio_matcher_config(&account_b_data)?"));
+    assert!(matcher_guard.contains("read_portfolio_matcher_expiry(&account_b_data)?"));
+    assert!(matcher_guard.contains("matcher_capability_is_live(expiry_slot, Clock::get()?.slot)"));
+
+    let expiry_proof = include_str!("../kani/inv_012_capability_and_delegate_scope.rs");
+    assert!(expiry_proof.contains("fn kani_v16_matcher_capability_config_is_exact_at_full_width("));
+    assert!(include_str!("inv_012_capability_and_delegate_scope.rs")
+        .contains("fn v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes("));
 
     assert_eq!(
         source
@@ -98,6 +109,185 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
         2,
         "the typed predicate must have one definition and one production consumer"
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inv012_execute_matcher_trade(
+    env: &mut V16CuEnv,
+    batch: bool,
+    taker_owner: &Keypair,
+    taker: Pubkey,
+    lp_owner: &Keypair,
+    lp: Pubkey,
+    matcher_program: Pubkey,
+    matcher_context: Pubkey,
+    matcher_delegate: Pubkey,
+) -> Result<u64, String> {
+    env.svm.expire_blockhash();
+    if batch {
+        env.send(
+            env.batch_trade_cpi_ix(
+                taker,
+                lp,
+                vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            ),
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(lp, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(matcher_context, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
+            ],
+            &[taker_owner],
+        )
+    } else {
+        env.try_trade_cpi_with_cu_on_asset(
+            taker_owner,
+            taker,
+            lp_owner,
+            lp,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            POS_SCALE as i128,
+            0,
+        )
+    }
+}
+
+fn inv012_matcher_capability_expiry_case(batch: bool) {
+    const EXPIRY_SLOT: u64 = 2;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    env.try_set_matcher_config_with_trade_fee_cap_and_expiry(
+        matcher_program,
+        &lp_owner,
+        lp,
+        ctx,
+        delegate,
+        1,
+        10_000,
+        EXPIRY_SLOT,
+    )
+    .expect("install bounded matcher capability");
+    assert_eq!(env.portfolio_matcher_expiry(lp), EXPIRY_SLOT);
+
+    env.svm.warp_to_slot(EXPIRY_SLOT - 1);
+    inv012_execute_matcher_trade(
+        &mut env,
+        batch,
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+    )
+    .expect("capability is live one slot before expiry");
+    assert_eq!(
+        env.portfolio_matcher_expiry(lp),
+        EXPIRY_SLOT,
+        "a synchronized matcher fill preserves its own bounded capability"
+    );
+
+    let snapshot = |env: &V16CuEnv| {
+        (
+            env.svm.get_account(&env.market).unwrap(),
+            env.svm.get_account(&taker).unwrap(),
+            env.svm.get_account(&lp).unwrap(),
+            env.svm.get_account(&ctx).unwrap(),
+        )
+    };
+    let before_expiry = snapshot(&env);
+    for slot in [EXPIRY_SLOT, EXPIRY_SLOT + 1] {
+        env.svm.warp_to_slot(slot);
+        let error = inv012_execute_matcher_trade(
+            &mut env,
+            batch,
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            ctx,
+            delegate,
+        )
+        .expect_err("expired capability must reject before matcher CPI");
+        assert!(
+            error.contains(&format!("Custom({})", PercolatorError::Unauthorized as u32)),
+            "expired capability returned {error}"
+        );
+        assert_eq!(snapshot(&env), before_expiry, "expired route rollback");
+    }
+
+    let before_invalid_reauth = snapshot(&env);
+    env.try_set_matcher_config_with_trade_fee_cap_and_expiry(
+        matcher_program,
+        &lp_owner,
+        lp,
+        ctx,
+        delegate,
+        1,
+        10_000,
+        EXPIRY_SLOT + 1,
+    )
+    .expect_err("an expiry equal to the authenticated slot is invalid");
+    assert_eq!(
+        snapshot(&env),
+        before_invalid_reauth,
+        "invalid grant rollback"
+    );
+
+    env.try_set_matcher_config_with_trade_fee_cap_and_expiry(
+        matcher_program,
+        &lp_owner,
+        lp,
+        ctx,
+        delegate,
+        1,
+        10_000,
+        EXPIRY_SLOT + 3,
+    )
+    .expect("a fresh owner grant restores matcher availability");
+    env.svm.warp_to_slot(EXPIRY_SLOT + 2);
+    inv012_execute_matcher_trade(
+        &mut env,
+        batch,
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+    )
+    .expect("fresh bounded capability executes before its expiry");
+}
+
+#[test]
+fn v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes() {
+    inv012_matcher_capability_expiry_case(false);
+    inv012_matcher_capability_expiry_case(true);
 }
 
 fn issue406_signed_trade_invalidates_both_matchers(batch: bool) {
@@ -161,6 +351,7 @@ fn issue406_signed_trade_invalidates_both_matchers(batch: bool) {
         );
         assert_eq!(config.position_epoch(), 1);
         assert_eq!(config.trade_fee_cap_bps(), 10_000);
+        assert_eq!(env.portfolio_matcher_expiry(account), 0);
     }
 }
 
@@ -237,8 +428,11 @@ fn issue406_matcher_trade_preserves_only_participating_lp(batch: bool) {
         1,
         "the LP matcher remains synchronized after its own fill"
     );
+    assert_eq!(env.portfolio_matcher_expiry(taker), 0);
+    assert_eq!(env.portfolio_matcher_expiry(lp), u64::MAX);
     execute(&mut env, -(POS_SCALE as i128));
     assert_eq!(env.portfolio_matcher_config(lp).enabled(), 1);
+    assert_eq!(env.portfolio_matcher_expiry(lp), u64::MAX);
     assert!(!has_active_leg_for_asset(&env.portfolio_state(lp), 0));
 }
 
@@ -664,6 +858,7 @@ fn v16_program_non_owner_cannot_revoke_lp_matcher_capability() {
             expected_sequence,
             enabled: 0,
             trade_fee_cap_bps: 0,
+            expiry_slot: 0,
         },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
@@ -965,6 +1160,7 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
             expected_sequence,
             enabled: 0,
             trade_fee_cap_bps: 0,
+            expiry_slot: 0,
         },
         vec![
             AccountMeta::new(attacker_owner.pubkey(), true),
@@ -1033,6 +1229,7 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
                 expected_sequence,
                 enabled: 1,
                 trade_fee_cap_bps: 10_000,
+                expiry_slot: u64::MAX,
             },
             vec![
                 AccountMeta::new(lp_owner.pubkey(), true),

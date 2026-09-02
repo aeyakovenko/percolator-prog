@@ -79,8 +79,12 @@ pub mod constants {
     pub const PORTFOLIO_MATCHER_SEQUENCE_OFF: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
     pub const PORTFOLIO_MATCHER_SEQUENCE_LEN: usize = 8;
     pub const PORTFOLIO_LEGACY_ACCOUNT_LEN: usize = PORTFOLIO_MATCHER_SEQUENCE_OFF;
-    pub const PORTFOLIO_ACCOUNT_LEN: usize =
+    pub const PORTFOLIO_MATCHER_EXPIRY_OFF: usize =
         PORTFOLIO_MATCHER_SEQUENCE_OFF + PORTFOLIO_MATCHER_SEQUENCE_LEN;
+    pub const PORTFOLIO_MATCHER_EXPIRY_LEN: usize = 8;
+    pub const PORTFOLIO_PRE_EXPIRY_ACCOUNT_LEN: usize = PORTFOLIO_MATCHER_EXPIRY_OFF;
+    pub const PORTFOLIO_ACCOUNT_LEN: usize =
+        PORTFOLIO_MATCHER_EXPIRY_OFF + PORTFOLIO_MATCHER_EXPIRY_LEN;
     pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
     pub const MATCHER_ABI_VERSION: u32 = 3;
     pub const MATCHER_CONTEXT_MIN_LEN: usize = 64;
@@ -181,8 +185,10 @@ pub mod state {
             ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_ENGINE_ACCOUNT_LEN,
             PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF, PORTFOLIO_LEGACY_ACCOUNT_LEN,
             PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF,
-            PORTFOLIO_MATCHER_CONTROL_OFF, PORTFOLIO_MATCHER_SEQUENCE_LEN,
-            PORTFOLIO_MATCHER_SEQUENCE_OFF, PORTFOLIO_STATE_LEN, VERSION, WRAPPER_CONFIG_LEN,
+            PORTFOLIO_MATCHER_CONTROL_OFF, PORTFOLIO_MATCHER_EXPIRY_LEN,
+            PORTFOLIO_MATCHER_EXPIRY_OFF, PORTFOLIO_MATCHER_SEQUENCE_LEN,
+            PORTFOLIO_MATCHER_SEQUENCE_OFF, PORTFOLIO_PRE_EXPIRY_ACCOUNT_LEN, PORTFOLIO_STATE_LEN,
+            VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
     };
@@ -1012,6 +1018,51 @@ pub mod state {
     }
 
     #[inline]
+    pub fn read_portfolio_matcher_expiry(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        if data.len() <= PORTFOLIO_PRE_EXPIRY_ACCOUNT_LEN {
+            return Ok(0);
+        }
+        read_u64(data, PORTFOLIO_MATCHER_EXPIRY_OFF)
+    }
+
+    #[inline]
+    pub(crate) fn write_portfolio_matcher_expiry(
+        data: &mut [u8],
+        expiry_slot: u64,
+    ) -> Result<(), ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        data.get_mut(
+            PORTFOLIO_MATCHER_EXPIRY_OFF
+                ..PORTFOLIO_MATCHER_EXPIRY_OFF + PORTFOLIO_MATCHER_EXPIRY_LEN,
+        )
+        .ok_or(PercolatorError::InvalidAccountLen)?
+        .copy_from_slice(&expiry_slot.to_le_bytes());
+        Ok(())
+    }
+
+    #[inline]
+    pub fn matcher_capability_is_live(expiry_slot: u64, current_slot: u64) -> bool {
+        expiry_slot != 0 && current_slot < expiry_slot
+    }
+
+    #[inline]
+    pub fn matcher_capability_config_is_valid(
+        enabled: u8,
+        trade_fee_cap_bps: u16,
+        expiry_slot: u64,
+        current_slot: u64,
+    ) -> bool {
+        match enabled {
+            0 => trade_fee_cap_bps == 0 && expiry_slot == 0,
+            1 => {
+                trade_fee_cap_bps <= 10_000 && matcher_capability_is_live(expiry_slot, current_slot)
+            }
+            _ => false,
+        }
+    }
+
+    #[inline]
     pub fn portfolio_close_binding_matches(
         current_portfolio_id: u64,
         current_sequence: u64,
@@ -1130,6 +1181,9 @@ pub mod state {
         data.get_mut(PORTFOLIO_MATCHER_CONTROL_OFF..PORTFOLIO_MATCHER_CONTROL_OFF + 8)
             .ok_or(PercolatorError::InvalidAccountLen)?
             .copy_from_slice(&next_control.to_le_bytes());
+        if !matcher_synchronized {
+            write_portfolio_matcher_expiry(data, 0)?;
+        }
         Ok(next)
     }
 
@@ -2985,6 +3039,7 @@ pub mod ix {
             expected_sequence: u64,
             enabled: u8,
             trade_fee_cap_bps: u16,
+            expiry_slot: u64,
         },
         ClosePortfolio {
             portfolio_id: u64,
@@ -3537,6 +3592,7 @@ pub mod ix {
                     expected_sequence: read_u64(&mut rest)?,
                     enabled: read_u8(&mut rest)?,
                     trade_fee_cap_bps: read_u16(&mut rest)?,
+                    expiry_slot: read_u64(&mut rest)?,
                 },
                 8 => Self::ClosePortfolio {
                     portfolio_id: read_u64(&mut rest)?,
@@ -3928,12 +3984,14 @@ pub mod ix {
                     expected_sequence,
                     enabled,
                     trade_fee_cap_bps,
+                    expiry_slot,
                 } => {
                     out.push(68);
                     push_u64(&mut out, portfolio_id);
                     push_u64(&mut out, expected_sequence);
                     out.push(enabled);
                     push_u16(&mut out, trade_fee_cap_bps);
+                    push_u64(&mut out, expiry_slot);
                 }
                 Self::ClosePortfolio {
                     portfolio_id,
@@ -7064,6 +7122,7 @@ pub mod processor {
                 expected_sequence,
                 enabled,
                 trade_fee_cap_bps,
+                expiry_slot,
             } => handle_set_matcher_config(
                 program_id,
                 accounts,
@@ -7071,6 +7130,7 @@ pub mod processor {
                 expected_sequence,
                 enabled,
                 trade_fee_cap_bps,
+                expiry_slot,
             ),
             Instruction::ClosePortfolio {
                 portfolio_id,
@@ -9057,6 +9117,10 @@ pub mod processor {
         ) {
             return Err(PercolatorError::Unauthorized.into());
         }
+        let expiry_slot = state::read_portfolio_matcher_expiry(&account_b_data)?;
+        if !state::matcher_capability_is_live(expiry_slot, Clock::get()?.slot) {
+            return Err(PercolatorError::Unauthorized.into());
+        }
         Ok((7, cfg.trade_fee_cap_bps()))
     }
 
@@ -9338,8 +9402,15 @@ pub mod processor {
         expected_sequence: u64,
         enabled: u8,
         trade_fee_cap_bps: u16,
+        expiry_slot: u64,
     ) -> ProgramResult {
-        if enabled > 1 || trade_fee_cap_bps > 10_000 || (enabled == 0 && trade_fee_cap_bps != 0) {
+        let current_slot = Clock::get()?.slot;
+        if !state::matcher_capability_config_is_valid(
+            enabled,
+            trade_fee_cap_bps,
+            expiry_slot,
+            current_slot,
+        ) {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let lp_owner = account(accounts, 0)?;
@@ -9408,6 +9479,7 @@ pub mod processor {
         cfg.set_trade_fee_cap_bps(trade_fee_cap_bps)?;
         let mut data = lp_portfolio_ai.try_borrow_mut_data()?;
         state::write_portfolio_matcher_config(&mut data, &cfg)?;
+        state::write_portfolio_matcher_expiry(&mut data, expiry_slot)?;
         state::advance_portfolio_matcher_sequence(&mut data, expected_sequence)?;
         Ok(())
     }
@@ -16109,6 +16181,23 @@ pub mod processor {
         }
 
         #[test]
+        fn pre_expiry_portfolio_tail_reads_disabled_and_grows_zero_initialized() {
+            let mut data = vec![0u8; constants::PORTFOLIO_ACCOUNT_LEN];
+            state::init_portfolio_account_zero_copy(
+                &mut data, [1u8; 32], [2u8; 32], [3u8; 32], 0, 1, 7,
+            )
+            .expect("initialize prior-layout portfolio");
+            data.truncate(constants::PORTFOLIO_PRE_EXPIRY_ACCOUNT_LEN);
+
+            assert_eq!(state::read_portfolio_matcher_expiry(&data).unwrap(), 0);
+
+            data.resize(constants::PORTFOLIO_ACCOUNT_LEN, 0);
+            assert_eq!(state::read_portfolio_matcher_expiry(&data).unwrap(), 0);
+            state::write_portfolio_matcher_expiry(&mut data, 42).unwrap();
+            assert_eq!(state::read_portfolio_matcher_expiry(&data).unwrap(), 42);
+        }
+
+        #[test]
         fn portfolio_position_epoch_is_zero_initialized_checked_and_monotonic() {
             let mut data = vec![
                 0u8;
@@ -16122,9 +16211,10 @@ pub mod processor {
             assert_eq!(
                 data.len(),
                 constants::PORTFOLIO_ACCOUNT_LEN,
-                "the wrapper tail contains matcher config, portfolio ID, and matcher sequence"
+                "the wrapper tail contains matcher config, portfolio ID, sequence, and expiry"
             );
             assert_eq!(state::read_portfolio_matcher_sequence(&data).unwrap(), 0);
+            assert_eq!(state::read_portfolio_matcher_expiry(&data).unwrap(), 0);
             assert_eq!(
                 state::advance_portfolio_matcher_sequence(&mut data, 0).unwrap(),
                 1
