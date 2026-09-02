@@ -2,8 +2,9 @@
 //!
 //! Normative obligation: delayed signed controls cannot replace a newer authorized policy or
 //! observation. The public LiteSVM matrix signs an old request, commits a distinct newer request,
-//! then lands the old bytes. It covers matcher consent, AuthMark, EWMA, Hybrid, both backing sides,
-//! market-init, trade, redirect, liquidation, maintenance, and permissionless-resolve controls.
+//! then lands the old bytes. It covers matcher consent, AuthMark, EWMA, Hybrid, Recovery restart,
+//! both backing sides, market-init, trade, redirect, liquidation, maintenance, and
+//! permissionless-resolve controls.
 //! Rejection is checked against a complete economic-account fingerprint, so the sequence guard
 //! cannot partially consume state. The fresh mutation in every case is the nonvacuous control.
 //!
@@ -22,6 +23,149 @@ use crate::support::invariant_discovery::{
 };
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::BOUND_SCALE;
+
+fn inv014_braced_body<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing source marker {marker}"));
+    let open = source[start..]
+        .find('{')
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("missing opening brace for {marker}"));
+    let mut depth = 0usize;
+    for (offset, byte) in source[open..].bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[start..=open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated source item {marker}")
+}
+
+fn inv014_variant_body<'a>(instruction_enum: &'a str, variant: &str) -> &'a str {
+    inv014_braced_body(instruction_enum, &format!("{variant} {{"))
+}
+
+#[test]
+fn v16_program_delayed_control_matrix_is_source_complete() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let source = include_str!("../../../src/v16_program.rs");
+    let instruction_enum = inv014_braced_body(source, "pub enum Instruction {");
+    let policy_variants = [
+        "UpdateLiquidationFeePolicy",
+        "UpdateMaintenanceFeePolicy",
+        "UpdateBackingFeePolicy",
+        "UpdateTradeFeePolicy",
+        "UpdateFeeRedirectPolicy",
+        "UpdateMarketInitFeePolicy",
+        "ConfigurePermissionlessResolve",
+    ];
+    let observation_variants = [
+        "ConfigureHybridOracle",
+        "ConfigureEwmaMark",
+        "PushEwmaMark",
+        "ConfigureAuthMark",
+        "PushAuthMark",
+        "RestartAssetOracle",
+    ];
+
+    assert_eq!(
+        instruction_enum.matches("policy_sequence: u64").count(),
+        policy_variants.len(),
+        "a policy-sequence field was added or removed without an INV-014 matrix owner"
+    );
+    assert_eq!(
+        instruction_enum
+            .matches("observation_sequence: u64")
+            .count(),
+        observation_variants.len(),
+        "an observation-sequence field was added or removed without an INV-014 matrix owner"
+    );
+    for variant in policy_variants.into_iter().chain(observation_variants) {
+        let body = inv014_variant_body(instruction_enum, variant);
+        assert!(
+            body.contains("authority_epoch: u64"),
+            "{variant} must bind the current configured-authority incarnation"
+        );
+    }
+    assert!(
+        inv014_variant_body(instruction_enum, "SetMatcherConfig")
+            .contains("expected_sequence: u64"),
+        "matcher policy must bind its portfolio-local control incarnation"
+    );
+
+    let production_variants = policy_variants
+        .into_iter()
+        .chain(observation_variants)
+        .chain(["SetMatcherConfig"])
+        .collect::<BTreeSet<_>>();
+    let model_variants = SupersededIntentKind::ALL
+        .into_iter()
+        .map(SupersededIntentKind::instruction_variant)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        model_variants, production_variants,
+        "every production delayed-control sequence must have a finding-blind public matrix owner"
+    );
+
+    let semantic_counts = SupersededIntentKind::ALL.into_iter().fold(
+        BTreeMap::<_, usize>::new(),
+        |mut counts, kind| {
+            *counts.entry(kind.instruction_variant()).or_default() += 1;
+            counts
+        },
+    );
+    assert_eq!(semantic_counts.get("UpdateBackingFeePolicy"), Some(&2));
+    assert!(semantic_counts
+        .iter()
+        .all(|(variant, count)| { *variant == "UpdateBackingFeePolicy" || *count == 1 }));
+
+    let matcher = inv014_braced_body(source, "fn handle_set_matcher_config<'a>(");
+    assert!(matcher.contains("state::advance_portfolio_matcher_sequence("));
+    for handler in [
+        "fn handle_update_market_authority_policy<'a>(",
+        "fn handle_update_backing_fee_policy<'a>(",
+        "fn handle_update_trade_fee_policy<'a>(",
+        "fn handle_configure_permissionless_resolve<'a>(",
+        "fn handle_configure_hybrid_oracle<'a>(",
+        "fn handle_configure_managed_mark<'a>(",
+        "fn handle_push_managed_mark<'a>(",
+        "fn handle_restart_asset_oracle<'a>(",
+    ] {
+        let body = inv014_braced_body(source, handler);
+        assert!(
+            body.contains("require_authority_epoch_view("),
+            "{handler} lost its authority-incarnation check"
+        );
+        assert!(
+            body.contains("advance_control_sequence_view(")
+                || body.contains("advance_backing_fee_sequence_view("),
+            "{handler} lost its monotonic supersession check"
+        );
+    }
+
+    let restart = inv014_braced_body(source, "fn handle_restart_asset_oracle<'a>(");
+    assert!(restart.contains("require_asset_generation_view("));
+    assert!(restart.contains("restart_empty_asset_preserving_insurance_budget_not_atomic("));
+
+    let authority_evidence = include_str!("../cu/inv_005_authority_incarnation_binding.rs");
+    assert!(authority_evidence
+        .contains("fn v16_program_configured_authority_route_dispositions_are_source_complete("));
+    assert!(
+        authority_evidence.contains("fn v16_program_authority_epoch_matrix_is_source_complete(")
+    );
+    let market_evidence = include_str!("inv_007_no_aba_reuse.rs");
+    assert!(
+        market_evidence.contains("fn v16_wrapper_account_incarnation_census_is_source_complete(")
+    );
+}
 
 #[test]
 fn v16_program_backing_provider_fee_terms_survive_both_landing_orders() {

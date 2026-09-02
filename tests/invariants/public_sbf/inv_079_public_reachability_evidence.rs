@@ -633,6 +633,7 @@ fn v16_superseded_control_terminal_dispositions_are_source_complete() {
                     | "BOUNDED_LIVENESS"
                     | "LIVENESS_CANDIDATE"
                     | "PROVIDER_CONSENT_BOUND"
+                    | "EMPTY_GENERATION_CONTROL"
             ),
             "unknown supersession disposition: {line}"
         );
@@ -718,6 +719,15 @@ fn v16_superseded_control_terminal_dispositions_are_source_complete() {
             })
             .collect::<Vec<_>>(),
         ["LiquidationFeePolicy", "MaintenanceFeePolicy"]
+    );
+    assert_eq!(
+        dispositions
+            .iter()
+            .filter_map(|(kind, disposition)| {
+                (*disposition == "EMPTY_GENERATION_CONTROL").then_some(*kind)
+            })
+            .collect::<Vec<_>>(),
+        ["RestartAssetOracle"]
     );
 }
 

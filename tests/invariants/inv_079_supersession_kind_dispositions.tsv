@@ -13,3 +13,4 @@ MarketInitFeePolicy	SIGNED_ECONOMIC_BOUND	-	permissionless activation binds the 
 ResolvePolicy	BOUNDED_LIVENESS	ResolvePolicyLivenessDiscovery	both policy directions attempt live withdrawal and early resolution, then require finite permissionless resolution plus crank/direct payouts and slab closure with exact funded value
 BackingFeePolicy	PROVIDER_CONSENT_BOUND	-	live provider principal freezes changed fee terms and each trade binds the charged source fee; stale overwrite remains a policy-integrity failure
 BackingFeePolicyShort	PROVIDER_CONSENT_BOUND	-	the short source domain has the same provider-principal freeze and signed source-fee bound as the long domain
+RestartAssetOracle	EMPTY_GENERATION_CONTROL	-	restart is admitted only for an empty Recovery asset; stale bytes reject exactly and a fresh sequence consumes the exact global generation frontier, advances it once, and creates an empty Active asset without moving SPL value

@@ -5,9 +5,10 @@
 //! Evidence in this file (F over public I routes):
 //! `v16_program_superseded_control_matrix_rejects_stale_overwrites` generates retained controls,
 //! installs a distinct newer authorized value, then applies the stale bytes. The matrix covers
-//! matcher consent, every mark mode, both backing sides, and every market-wide fee/resolve lane in
-//! both retained-higher/current-lower and retained-lower/current-higher payload orders. Every stale
-//! request must reject with an exact whole-account rollback.
+//! matcher consent, every mark mode, empty-Recovery oracle restart, both backing sides, and every
+//! market-wide fee/resolve lane in both retained-higher/current-lower and
+//! retained-lower/current-higher payload orders. Every stale request must reject with an exact
+//! whole-account rollback.
 //! `v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` varies fresh-signed,
 //! retained, unsigned-LP, and activation routes and compares each affected signer's actual debit
 //! with the fee terms that signer authorized. The fresh-signed live control proves a policy update

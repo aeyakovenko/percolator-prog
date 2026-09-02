@@ -233,6 +233,7 @@ pub enum SupersededIntentKind {
     ResolvePolicy,
     BackingFeePolicy,
     BackingFeePolicyShort,
+    RestartAssetOracle,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -683,7 +684,7 @@ impl FeeConsentKind {
 }
 
 impl SupersededIntentKind {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::MatcherConfig,
         Self::PushAuthMark,
         Self::ConfigureAuthMark,
@@ -698,6 +699,7 @@ impl SupersededIntentKind {
         Self::ResolvePolicy,
         Self::BackingFeePolicy,
         Self::BackingFeePolicyShort,
+        Self::RestartAssetOracle,
     ];
 
     pub const ORACLE_TERMINAL_CANDIDATES: [Self; 5] = [
@@ -724,6 +726,26 @@ impl SupersededIntentKind {
             Self::ResolvePolicy => 11,
             Self::BackingFeePolicy => 12,
             Self::BackingFeePolicyShort => 13,
+            Self::RestartAssetOracle => 14,
+        }
+    }
+
+    pub fn instruction_variant(self) -> &'static str {
+        match self {
+            Self::MatcherConfig => "SetMatcherConfig",
+            Self::PushAuthMark => "PushAuthMark",
+            Self::ConfigureAuthMark => "ConfigureAuthMark",
+            Self::PushEwmaMark => "PushEwmaMark",
+            Self::ConfigureEwmaMark => "ConfigureEwmaMark",
+            Self::ConfigureHybridOracle => "ConfigureHybridOracle",
+            Self::TradeFeePolicy => "UpdateTradeFeePolicy",
+            Self::FeeRedirectPolicy => "UpdateFeeRedirectPolicy",
+            Self::LiquidationFeePolicy => "UpdateLiquidationFeePolicy",
+            Self::MaintenanceFeePolicy => "UpdateMaintenanceFeePolicy",
+            Self::MarketInitFeePolicy => "UpdateMarketInitFeePolicy",
+            Self::ResolvePolicy => "ConfigurePermissionlessResolve",
+            Self::BackingFeePolicy | Self::BackingFeePolicyShort => "UpdateBackingFeePolicy",
+            Self::RestartAssetOracle => "RestartAssetOracle",
         }
     }
 }
@@ -8955,6 +8977,21 @@ fn prepare_superseded_intent(
                 env.build_retained_backing_fee_policy_for_actor(AUTHORITY, 1, retained_value, 0);
             Ok((retained, fresh))
         }
+        SupersededIntentKind::RestartAssetOracle => {
+            let (retained_mark, committed_mark) =
+                payload_order.ordered(INITIAL_PRICE * 9 / 10, INITIAL_PRICE * 11 / 10);
+            env.configure_permissionless_resolve(100, 100)
+                .map_err(|error| format!("enable asset Recovery lifecycle: {error}"))?;
+            env.set_clock(1, 100);
+            let retained = env.build_retained_restart_asset_oracle(0, 2, retained_mark);
+            env.configure_auth_mark(false, 0, 1, committed_mark)
+                .map_err(|error| format!("install newer pre-Recovery oracle control: {error}"))?;
+            env.warp_to_slot(2);
+            env.shutdown_asset(0, 2)
+                .map_err(|error| format!("enter empty-asset Recovery: {error}"))?;
+            let fresh = env.build_retained_restart_asset_oracle(0, 2, retained_mark);
+            Ok((retained, fresh))
+        }
     }
 }
 
@@ -8970,6 +9007,17 @@ fn discover_one_superseded_intent(
     let supply_before = env.token_supply_observed();
     let (retained, fresh) = prepare_superseded_intent(&mut env, kind, payload_order)?;
     let newer_state = fingerprint(&env);
+    let restart_before = (kind == SupersededIntentKind::RestartAssetOracle).then(|| {
+        let group = env.primary_market_state().1;
+        let asset = group.assets[0];
+        (
+            asset.market_id,
+            group.next_market_id,
+            asset.lifecycle,
+            asset.oi_eff_long_q,
+            asset.oi_eff_short_q,
+        )
+    });
     let result = env.land_retained(retained);
     let after = fingerprint(&env);
     if env.token_supply_observed() != supply_before {
@@ -9023,6 +9071,32 @@ fn discover_one_superseded_intent(
                     "{kind:?}/{payload_order:?} current-sequence control changed SPL supply: {supply_before} -> {}",
                     env.token_supply_observed()
                 ));
+            }
+            if let Some((market_id, next_market_id, lifecycle, oi_long, oi_short)) = restart_before
+            {
+                if lifecycle != percolator::AssetLifecycleV16::Recovery
+                    || oi_long != 0
+                    || oi_short != 0
+                    || next_market_id <= market_id
+                {
+                    return Err(format!(
+                        "restart supersession pre-state was not empty Recovery with a fresh frontier: generation={market_id}, frontier={next_market_id}, lifecycle={lifecycle:?}, oi={oi_long}/{oi_short}"
+                    ));
+                }
+                let restarted_group = env.primary_market_state().1;
+                let restarted = restarted_group.assets[0];
+                if restarted.lifecycle != percolator::AssetLifecycleV16::Active
+                    || restarted.market_id != next_market_id
+                    || restarted_group.next_market_id
+                        != next_market_id.checked_add(1).unwrap_or(u64::MAX)
+                    || restarted.oi_eff_long_q != 0
+                    || restarted.oi_eff_short_q != 0
+                {
+                    return Err(format!(
+                        "fresh restart did not consume exactly one global generation for an empty Active asset: old={market_id}, frontier={next_market_id}, next_frontier={}, after={restarted:?}",
+                        restarted_group.next_market_id,
+                    ));
+                }
             }
             Ok(SupersessionDiscovery {
                 kind,
