@@ -82,14 +82,6 @@ fn v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit() {
         coverage.user_positions_closed, 0,
         "the post-shutdown owner-exit campaign must clear live positions"
     );
-    assert!(
-        coverage
-            .known_blocker_hits
-            .iter()
-            .chain(coverage.known_blocker_exit_locks.iter())
-            .all(|hits| *hits == 0),
-        "the lifecycle witness must not rely on blocker quarantine: {coverage:?}"
-    );
 }
 
 fn assert_public_reset_lifecycle(

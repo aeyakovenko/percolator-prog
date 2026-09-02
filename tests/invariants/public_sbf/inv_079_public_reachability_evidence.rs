@@ -566,15 +566,9 @@ fn v16_program_fixed_blockers_remain_progressing() {
                 serde_json::to_string_pretty(&scenario).unwrap()
             )
         });
-        let index = KnownBlocker::LiveLapsedSourceBacking.index();
-        assert_eq!(
-            coverage.known_blocker_hits[index], 0,
-            "{name} still reaches the PR 204 quarantine"
-        );
-        assert_eq!(
-            coverage.known_blocker_exit_locks[index], 0,
-            "{name} must not claim a persistent user-exit lock when authenticated same-price \
-             observations let the owner exit"
+        assert_ne!(
+            coverage.user_positions_closed, 0,
+            "{name} must retain a public owner exit"
         );
     }
 }

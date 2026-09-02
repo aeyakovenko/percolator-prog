@@ -1953,7 +1953,7 @@ proptest! {
         prop_assert!(
             coverage.crank_progress != 0
                 && coverage.token_frame_checks != 0
-                && coverage.user_positions_closed + coverage.known_blocker_exit_locks.iter().sum::<u64>() != 0
+                && coverage.user_positions_closed != 0
                 && coverage.liquidation_steps != 0,
             "reference-model run did not exercise liveness/value surfaces: {coverage:?}"
         );

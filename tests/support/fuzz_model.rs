@@ -73,7 +73,6 @@ pub enum SubstitutionKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KnownBlocker {
-    LiveLapsedSourceBacking,
     OmittedRescueAccrualLiquidation,
     PostExpiryBackingFee,
     TradeRetryReplay,
@@ -141,83 +140,6 @@ pub enum KnownBlocker {
     MatcherGrantMarketGenerationReplay,
     TradeFeeMarketGenerationReplay,
     ForfeitMarketGenerationReplay,
-}
-
-impl KnownBlocker {
-    pub const COUNT: usize = 68;
-
-    pub const fn index(self) -> usize {
-        match self {
-            Self::LiveLapsedSourceBacking => 0,
-            Self::OmittedRescueAccrualLiquidation => 1,
-            Self::PostExpiryBackingFee => 2,
-            Self::TradeRetryReplay => 3,
-            Self::AssetGenerationTradeReplay => 4,
-            Self::CpiCallerFeeSiphon => 5,
-            Self::CpiBackingFeeSiphon => 6,
-            Self::CompositeOracleRounding => 7,
-            Self::RoundedFundingOmission => 8,
-            Self::PendingEwmaInheritance => 9,
-            Self::ReclaimableEwmaFee => 10,
-            Self::TradeFundingErasure => 11,
-            Self::RebalanceFundingErasure => 12,
-            Self::ForfeitFundingErasure => 13,
-            Self::TradeDrivenLiquidationReward => 14,
-            Self::CrossDomainBackingDoubleSpend => 15,
-            Self::AssetGenerationMarkReplay => 16,
-            Self::AssetGenerationConfigReplay => 17,
-            Self::CrossDomainBSettlement => 18,
-            Self::PendingEwmaTargetOverride => 19,
-            Self::TerminalDustPayoutErasure => 20,
-            Self::CrossMarginInsuranceDrain => 21,
-            Self::CompositeOracleTimeSkew => 22,
-            Self::UnstagedMarkTarget => 23,
-            Self::PendingMarkFeeReward => 24,
-            Self::FractionalCapSettlement => 25,
-            Self::ProspectiveFundingRewrite => 26,
-            Self::ResolveBeforeCommittedAccrual => 27,
-            Self::BilateralFeeSupport => 28,
-            Self::DelayedAssetAuthorityRevival => 29,
-            Self::CollateralTopUpGenerationReplay => 30,
-            Self::InsuranceWithdrawalGenerationReplay => 31,
-            Self::InsuranceTopUpRetryReplay => 32,
-            Self::BackingTopUpGenerationReplay => 33,
-            Self::ActivationRetryReplay => 34,
-            Self::BackingTopUpRetryReplay => 35,
-            Self::WithdrawalRetryLiquidation => 36,
-            Self::DepositRetryReplay => 37,
-            Self::PortfolioIncarnationWithdrawal => 38,
-            Self::PortfolioIncarnationDeposit => 39,
-            Self::MarketIncarnationDeposit => 40,
-            Self::ResolveGenerationReplay => 41,
-            Self::ShutdownGenerationReplay => 42,
-            Self::ActivationFeeConsent => 43,
-            Self::BilateralBaseFeeConsent => 44,
-            Self::MaintenancePolicyGenerationReplay => 45,
-            Self::FeeRedirectGenerationReplay => 46,
-            Self::BackingFeeGenerationReplay => 47,
-            Self::LiquidationPolicyGenerationReplay => 48,
-            Self::DelayedMaintenancePolicyReplay => 49,
-            Self::DelayedLiquidationPolicyReplay => 50,
-            Self::DelayedTradeFeePolicyReplay => 51,
-            Self::DelayedFeeRedirectPolicyReplay => 52,
-            Self::DelayedBackingFeePolicyReplay => 53,
-            Self::DelayedOracleIntentReplay => 54,
-            Self::BackingFeeConsentReplay => 55,
-            Self::AuthorityHandoffAbaReplay => 56,
-            Self::DelayedResolvePolicyReplay => 57,
-            Self::ResolveAuthorityIncarnationReplay => 58,
-            Self::PortfolioCloseIncarnationReplay => 59,
-            Self::MatcherGrantPortfolioIncarnationReplay => 60,
-            Self::TradePortfolioIncarnationReplay => 61,
-            Self::ConvertPortfolioIncarnationReplay => 62,
-            Self::ConvertRetryReplay => 63,
-            Self::ForfeitPortfolioIncarnationReplay => 64,
-            Self::MatcherGrantMarketGenerationReplay => 65,
-            Self::TradeFeeMarketGenerationReplay => 66,
-            Self::ForfeitMarketGenerationReplay => 67,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1380,8 +1302,6 @@ pub struct Coverage {
     pub user_positions_closed: u64,
     pub liquidation_steps: u64,
     pub liquidated_abs_q: u128,
-    pub known_blocker_hits: [u64; KnownBlocker::COUNT],
-    pub known_blocker_exit_locks: [u64; KnownBlocker::COUNT],
     pub current_certificate_full_refresh_checks: u64,
     pub max_cu: u64,
 }
@@ -1447,8 +1367,6 @@ impl Default for Coverage {
             user_positions_closed: 0,
             liquidation_steps: 0,
             liquidated_abs_q: 0,
-            known_blocker_hits: [0; KnownBlocker::COUNT],
-            known_blocker_exit_locks: [0; KnownBlocker::COUNT],
             current_certificate_full_refresh_checks: 0,
             max_cu: 0,
         }
@@ -1483,9 +1401,7 @@ impl Coverage {
                 ));
             }
         }
-        if self.user_positions_closed == 0
-            && self.known_blocker_exit_locks.iter().all(|hits| *hits == 0)
-        {
+        if self.user_positions_closed == 0 {
             return Err("normal-user exit campaign closed no live position".into());
         }
         if self.liquidation_steps == 0 || self.liquidated_abs_q == 0 {
@@ -1595,20 +1511,6 @@ impl Coverage {
         self.liquidated_abs_q += other.liquidated_abs_q;
         self.current_certificate_full_refresh_checks +=
             other.current_certificate_full_refresh_checks;
-        for (target, value) in self
-            .known_blocker_hits
-            .iter_mut()
-            .zip(other.known_blocker_hits)
-        {
-            *target += value;
-        }
-        for (target, value) in self
-            .known_blocker_exit_locks
-            .iter_mut()
-            .zip(other.known_blocker_exit_locks)
-        {
-            *target += value;
-        }
         self.max_cu = self.max_cu.max(other.max_cu);
         self.crank_rank_nodes.extend(other.crank_rank_nodes);
         self.crank_rank_edges.extend(other.crank_rank_edges);
@@ -3152,49 +3054,6 @@ impl ScenarioRunner {
             self.liveness_limit,
             self.liveness_diagnostics()
         ))
-    }
-
-    pub fn quarantine_known_progress_blocker(&mut self, error: &str) -> Result<bool, String> {
-        let (_, group) = self.env.primary_market_state();
-        let lapsed_live_backing = group.mode == MarketModeV16::Live
-            && group.source_backing_buckets.iter().any(|bucket| {
-                bucket.status == BackingBucketStatusV16::Fresh
-                    && bucket.expiry_slot <= group.current_slot
-                    && (bucket.fresh_unliened_backing_num != 0
-                        || bucket.valid_liened_backing_num != 0
-                        || bucket.consumed_liened_backing_num != 0
-                        || bucket.impaired_liened_backing_num != 0)
-            });
-        let stale_rejection =
-            error.contains("Custom(19)") || error.contains("custom program error: 0x13");
-        if !lapsed_live_backing || !stale_rejection {
-            return Ok(false);
-        }
-
-        let before = self.snapshot();
-        let retry = self.drain_one_progress_step(None);
-        let retry_error = match retry {
-            Ok(()) => {
-                return Err(format!(
-                    "candidate PR 204 blocker progressed on an identical public retry; original failure: {error}"
-                ))
-            }
-            Err(error) => error,
-        };
-        self.assert_snapshot_unchanged(&before).map_err(|frame_error| {
-            format!(
-                "candidate PR 204 retry committed state before reporting failure: {retry_error}; {frame_error}"
-            )
-        })?;
-        if !(retry_error.contains("Custom(19)")
-            || retry_error.contains("custom program error: 0x13"))
-        {
-            return Err(format!(
-                "candidate PR 204 blocker changed rejection on identical retry: {retry_error}"
-            ));
-        }
-        self.coverage.known_blocker_hits[KnownBlocker::LiveLapsedSourceBacking.index()] += 1;
-        Ok(true)
     }
 
     pub fn run_direct_user_exit_campaign(&mut self) -> Result<(), String> {
@@ -6652,13 +6511,47 @@ impl ScenarioRunner {
                 (
                     actor,
                     account.health_cert.try_to_runtime().ok(),
-                    decoded_legs(&account),
+                    decoded_legs(&account)
+                        .into_iter()
+                        .filter(|leg| leg.active)
+                        .collect::<Vec<_>>(),
+                    account
+                        .source_domains
+                        .iter()
+                        .copied()
+                        .filter(|source| source.is_occupied())
+                        .map(|source| {
+                            (
+                                source.domain.get(),
+                                source.source_claim_bound_num.get(),
+                                source.source_claim_liened_num.get(),
+                                source.source_claim_impaired_num.get(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let live_backing: Vec<_> = group
+            .source_backing_buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, bucket)| bucket.status != BackingBucketStatusV16::Empty)
+            .map(|(domain, bucket)| {
+                (
+                    domain,
+                    bucket.status,
+                    bucket.expiry_slot,
+                    bucket.fresh_unliened_backing_num,
+                    bucket.valid_liened_backing_num,
+                    bucket.impaired_liened_backing_num,
                 )
             })
             .collect();
         format!(
             "liveness_state={{clock:{}, market_current:{}, market_slot:{}, epochs:[{},{},{},{}], \
-             locks:[{},{},{}], assets:{assets:?}, accounts:{accounts:?}}}",
+             locks:[{},{},{}], assets:{assets:?}, backing:{live_backing:?}, \
+             accounts:{accounts:?}}}",
             self.env.current_slot(),
             group.current_slot,
             group.slot_last,
@@ -6907,6 +6800,12 @@ impl ScenarioRunner {
         } else {
             0
         };
+        // Expiry is selected from this portfolio's bounded source-domain roster, so it is
+        // account-scoped Refresh work. Keeping it in the market-lock lane makes the scheduler
+        // skip the only progressing account whenever another account has stale work.
+        stale_legs = stale_legs
+            .checked_add(lapsed_live_backing)
+            .ok_or("source-expiry rank overflow")?;
         // Auto-crank receives one caller-selected portfolio. Reset work is actionable for that
         // call only when this portfolio owns an old-epoch leg or the side is already finalizable.
         // Include the future finalize step when this account owns the last stored leg so clear
@@ -6945,7 +6844,6 @@ impl ScenarioRunner {
             .checked_mul(1u128 << 120)
             .and_then(|value| value.checked_add(u128::from(group.threshold_stress_active)))
             .and_then(|value| value.checked_add(loss_work))
-            .and_then(|value| value.checked_add(lapsed_live_backing))
             .ok_or("market-lock progress rank overflow")?;
         Ok(ProgressRank {
             market_mark_lag,
@@ -7607,21 +7505,27 @@ impl ScenarioRunner {
 pub fn run_scenario(scenario: &Scenario) -> Result<Coverage, String> {
     let mut progress_runner = ScenarioRunner::new(scenario)?;
     progress_runner.run_safety_prefix(&scenario.actions)?;
-    if let Err(error) = progress_runner.run_permissionless_progress_campaign() {
-        if !progress_runner.quarantine_known_progress_blocker(&error)? {
-            return Err(error);
-        }
-    }
-
     let mut exit_runner = ScenarioRunner::new(scenario)?;
     exit_runner.run_safety_prefix(&scenario.actions)?;
-    if let Err(error) = exit_runner.run_direct_user_exit_campaign() {
-        let is_failed_exit = error.starts_with("normal exit needed public progress");
-        if !is_failed_exit || !exit_runner.quarantine_known_progress_blocker(&error)? {
-            return Err(error);
+    let progress_result = progress_runner.run_permissionless_progress_campaign();
+    let exit_result = exit_runner.run_direct_user_exit_campaign();
+    match (progress_result, exit_result) {
+        (Ok(()), Ok(())) => {}
+        (Err(progress), Ok(())) => {
+            return Err(format!(
+                "permissionless progress failed while the independent owner exit succeeded: {progress}"
+            ))
         }
-        exit_runner.coverage.known_blocker_exit_locks
-            [KnownBlocker::LiveLapsedSourceBacking.index()] += 1;
+        (Ok(()), Err(exit)) => {
+            return Err(format!(
+                "independent owner exit failed after permissionless progress succeeded: {exit}"
+            ))
+        }
+        (Err(progress), Err(exit)) => {
+            return Err(format!(
+                "permissionless progress and independent owner exit both failed:\nprogress: {progress}\nexit: {exit}"
+            ))
+        }
     }
     progress_runner
         .coverage

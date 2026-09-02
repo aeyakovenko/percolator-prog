@@ -297,14 +297,6 @@ fn v16_program_public_sequence_has_rank_decreasing_progress_and_exit_witnesses()
         coverage.liquidation_steps > 0 && coverage.liquidated_abs_q > 0,
         "independent liquidation liveness probe must make public progress: {coverage:?}"
     );
-    assert!(
-        coverage
-            .known_blocker_hits
-            .iter()
-            .chain(coverage.known_blocker_exit_locks.iter())
-            .all(|hits| *hits == 0),
-        "INV-082 witness must not rely on known-blocker quarantine: {coverage:?}"
-    );
 }
 
 #[test]

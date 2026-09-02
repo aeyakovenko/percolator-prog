@@ -101,11 +101,4 @@ fn v16_program_public_route_oracle_checks_success_and_reject_frames_fixed_case()
         coverage.liquidation_steps != 0 && coverage.liquidated_abs_q != 0,
         "liquidation progress must remain part of the complete public route oracle"
     );
-    assert!(
-        coverage
-            .known_blocker_exit_locks
-            .iter()
-            .all(|hits| *hits == 0),
-        "fixed-pin public route oracle must not quarantine an exit lock"
-    );
 }

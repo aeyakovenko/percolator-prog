@@ -6,9 +6,8 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! The shared runner propagates every failed progress or exit campaign directly; there is no
+//! known-finding quarantine that can convert a funded lock into successful coverage.
 
 use super::*;
 
@@ -21,12 +20,9 @@ fn v16_program_blocker_corpus_is_public_sbf_and_exit_live() {
                 serde_json::to_string_pretty(&scenario).unwrap()
             )
         });
-        assert!(
-            coverage
-                .known_blocker_exit_locks
-                .iter()
-                .all(|hits| *hits == 0),
-            "safe corpus scenario {name} reached a quarantined user-exit lock"
+        assert_ne!(
+            coverage.user_positions_closed, 0,
+            "safe corpus scenario {name} closed no funded public position"
         );
     }
 }

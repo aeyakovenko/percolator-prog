@@ -151,12 +151,4 @@ fn v16_program_public_liveness_survives_bad_hints_retained_route_and_substitutio
         coverage.liquidation_steps > 0 && coverage.liquidated_abs_q > 0,
         "independent liquidation liveness probe must still progress: {coverage:?}"
     );
-    assert!(
-        coverage
-            .known_blocker_hits
-            .iter()
-            .chain(coverage.known_blocker_exit_locks.iter())
-            .all(|hits| *hits == 0),
-        "INV-082 bad-hint witness must not rely on known-blocker quarantine: {coverage:?}"
-    );
 }

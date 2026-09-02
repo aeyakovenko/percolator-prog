@@ -32,6 +32,34 @@
 use super::*;
 
 #[test]
+fn v16_stateful_liveness_oracle_has_no_known_failure_quarantine() {
+    let model = include_str!("../../support/fuzz_model.rs");
+    assert!(model
+        .contains("let progress_result = progress_runner.run_permissionless_progress_campaign();"));
+    assert!(model.contains("let exit_result = exit_runner.run_direct_user_exit_campaign();"));
+    for propagated_failure in [
+        "permissionless progress failed while the independent owner exit succeeded",
+        "independent owner exit failed after permissionless progress succeeded",
+        "permissionless progress and independent owner exit both failed",
+    ] {
+        assert!(
+            model.contains(propagated_failure),
+            "the shared public liveness oracle must propagate {propagated_failure}"
+        );
+    }
+    for forbidden in [
+        "quarantine_known_progress_blocker",
+        "known_blocker_exit_locks",
+        "known_blocker_hits",
+    ] {
+        assert!(
+            !model.contains(forbidden),
+            "the shared public liveness oracle must not suppress {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn v16_program_funding_disabled_round_trip_mark_preserves_stale_terminal_progress() {
     const PRICE: u64 = 100;
     const HIGH_MARK: u64 = 101;
