@@ -15,6 +15,12 @@
 //! `v16_program_recovery_force_close_reaches_zero_residue_and_close_slab` composes the final path
 //! with a publicly reached Recovery episode and permissionless force-close. It proves terminal
 //! normalization does not rely on a market that stayed Active throughout its lifetime.
+//! `v16_program_terminal_stock_and_close_slab_composition_is_source_complete` closes the current
+//! surface by binding the exact engine pin's terminal-claim, reservation, recredit, retirement,
+//! and bounded-scan proofs to the existing public lifecycle and maximum-shape witnesses. It also
+//! locks the wrapper ordering: canonical vault and destination validation precedes the engine
+//! transition, and no SPL burn, transfer, close, or market tombstone write can occur before
+//! `ReadyToClose`.
 
 use super::*;
 
@@ -642,5 +648,231 @@ fn v16_attack_marketauth_terminal_close_cannot_burn_pending_payout_topup() {
         env.market_state().1.materialized_portfolio_count,
         0,
         "receipt-finalized account is closable"
+    );
+}
+
+#[derive(Clone, Copy)]
+struct Inv070TerminalCompositionClass {
+    class: &'static str,
+    engine_proofs: &'static [&'static str],
+    public_witnesses: &'static [&'static str],
+}
+
+fn inv070_source_defines_test(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+fn inv070_braced_body_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing production marker {marker}"));
+    let open = start
+        + source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("missing body after {marker}"));
+    let mut depth = 0i32;
+    for (offset, character) in source[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[(open + 1)..(open + offset)];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated body after {marker}");
+}
+
+#[test]
+fn v16_program_terminal_stock_and_close_slab_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv070TerminalCompositionClass] = &[
+        Inv070TerminalCompositionClass {
+            class: "unsettled accounts, capital, positive claims, and payout receipts",
+            engine_proofs: &[
+                "proof_v16_public_terminal_insurance_retirement_requires_resolved_ready_accounts",
+                "proof_v16_public_terminal_insurance_retirement_rejects_account_capital",
+                "proof_v16_public_terminal_insurance_retirement_rejects_positive_source_claim",
+            ],
+            public_witnesses: &[
+                "v16_program_close_slab_rejects_until_market_has_zero_terminal_residue",
+                "v16_attack_marketauth_terminal_close_cannot_skip_resolved_payout",
+                "v16_attack_marketauth_terminal_close_cannot_burn_pending_payout_topup",
+                "v16_program_full_terminal_lifecycle_is_claimant_order_independent",
+            ],
+        },
+        Inv070TerminalCompositionClass {
+            class: "fresh backing principal, provider earnings, expiry, and withdrawal",
+            engine_proofs: &[
+                "proof_v16_public_terminal_insurance_retirement_rejects_provider_earnings",
+                "proof_v16_public_terminal_insurance_retirement_rejects_backing_principal",
+            ],
+            public_witnesses: &[
+                "v16_program_resolved_close_normalizes_backing_at_expiry",
+                "insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_payout",
+                "expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup",
+            ],
+        },
+        Inv070TerminalCompositionClass {
+            class: "domain insurance budgets, reservations, spent overlap, and recredit",
+            engine_proofs: &[
+                "proof_v16_public_terminal_insurance_retirement_rejects_every_live_reservation_class",
+                "proof_v16_terminal_claim_free_overlap_recredit_is_exactly_bounded",
+                "proof_v16_terminal_claim_free_overlap_recredit_updates_only_paired_insurance_domain",
+            ],
+            public_witnesses: &[
+                "v16_program_prior_insurance_frames_all_partial_receipt_orders",
+                "expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup",
+            ],
+        },
+        Inv070TerminalCompositionClass {
+            class: "claim-free protocol surplus and final internal stock retirement",
+            engine_proofs: &[
+                "proof_v16_terminal_unbudgeted_insurance_retirement_is_exact_and_claim_safe",
+                "proof_v16_public_terminal_insurance_retirement_is_exact_and_fully_framed",
+            ],
+            public_witnesses: &[
+                "v16_program_recovery_force_close_reaches_zero_residue_and_close_slab",
+                "expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup",
+                "v16_primary_quote_routes_match_actual_spl_and_internal_accounting_deltas",
+            ],
+        },
+        Inv070TerminalCompositionClass {
+            class: "bounded asset scan and persisted strict-progress cursor",
+            engine_proofs: &[
+                "proof_v16_terminal_slab_asset_step_is_total_and_priority_ordered",
+                "proof_v16_terminal_slab_wait_is_error_or_strict_cursor_progress",
+            ],
+            public_witnesses: &[
+                "v16_bpf_terminal_claim_free_surplus_close_stays_bounded_on_10m_market",
+                "v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market",
+            ],
+        },
+        Inv070TerminalCompositionClass {
+            class: "authority, canonical vaults, optional secondary reserve, aliases, and tombstone",
+            engine_proofs: &[],
+            public_witnesses: &[
+                "v16_attack_close_slab_rejects_stale_marketauth_after_rotation",
+                "v16_program_close_slab_account_roles_are_exhaustive",
+                "v16_attack_close_slab_rejects_foreign_market_vaults",
+                "v16_attack_close_slab_requires_secondary_vault_recovery",
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-070 composes exact engine proofs and must reopen on a pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the same certified engine revision",
+    );
+
+    let witness_sources = [
+        include_str!("inv_005_authority_incarnation_binding.rs"),
+        include_str!("inv_017_signer_writable_role_and_account_alias_safety.rs"),
+        include_str!("inv_018_quote_mint_vault_token_program_and_authority_integrity.rs"),
+        include_str!("inv_034_domain_and_instance_isolation.rs"),
+        include_str!("inv_063_backing_expiry_normalization.rs"),
+        include_str!("inv_070_zero_unattributed_terminal_residue_and_close_slab.rs"),
+        include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
+        include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
+        include_str!("../stateful/inv_066_resolved_payout_fairness_and_order_independence.rs"),
+        include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs"),
+    ];
+    let mut classes = std::collections::BTreeSet::new();
+    let mut proofs = std::collections::BTreeSet::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate terminal stock class");
+        assert!(!row.public_witnesses.is_empty());
+        for proof in row.engine_proofs {
+            assert!(proofs.insert(*proof), "duplicate engine proof {proof}");
+            assert!(proof.starts_with("proof_v16_"));
+        }
+        for witness in row.public_witnesses {
+            assert!(
+                witness_sources
+                    .iter()
+                    .any(|source| inv070_source_defines_test(source, witness)),
+                "terminal class '{}' lacks executable public witness {witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 6, "terminal stock class roster drift");
+    assert_eq!(proofs.len(), 12, "terminal engine proof roster drift");
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    let body = inv070_braced_body_after(production, "fn handle_close_slab<'a>");
+    for required in [
+        "expect_live_authority(&cfg.marketauth, admin_dest.key)",
+        "require_authority_epoch_view(&group, 0, expected_authority_epoch)",
+        "group.header.mode != 1",
+        "group.header.c_tot.get() != 0",
+        "group.header.materialized_portfolio_count.get() != 0",
+        "verify_vault_token_account(vault_token, &vault_authority, &primary_mint)",
+        "verify_user_token_account(dest_token, admin_dest.key, &primary_mint)",
+        ".advance_terminal_slab_not_atomic(authenticated_slot, scan_start)",
+        "TerminalSlabOutcomeV16::ScanProgress",
+        "TerminalSlabOutcomeV16::BackingExpired",
+        "TerminalSlabOutcomeV16::InsuranceRecredited",
+        "TerminalSlabOutcomeV16::ReadyToClose",
+        ".checked_sub(retired_u64)",
+        "burn_tokens_signed(",
+        "transfer_tokens_signed(",
+        "spl_token::instruction::close_account(",
+        "market_ai.realloc(constants::HEADER_LEN, false)",
+        "state::write_closed_market_tombstone",
+    ] {
+        assert!(
+            body.contains(required),
+            "CloseSlab lost boundary {required}"
+        );
+    }
+
+    let engine = body
+        .find(".advance_terminal_slab_not_atomic(authenticated_slot, scan_start)")
+        .expect("terminal engine transition");
+    for validation in [
+        "verify_vault_token_account(vault_token, &vault_authority, &primary_mint)",
+        "verify_user_token_account(dest_token, admin_dest.key, &primary_mint)",
+    ] {
+        assert!(
+            body.find(validation).expect("custody validation") < engine,
+            "{validation} must precede terminal engine mutation",
+        );
+    }
+    for effect in [
+        "burn_tokens_signed(",
+        "transfer_tokens_signed(",
+        "spl_token::instruction::close_account(",
+        "market_ai.realloc(constants::HEADER_LEN, false)",
+        "state::write_closed_market_tombstone",
+    ] {
+        assert!(
+            engine < body.find(effect).expect("terminal external effect"),
+            "{effect} must remain after the engine reaches ReadyToClose",
+        );
+    }
+    assert_eq!(
+        body.matches(".advance_terminal_slab_not_atomic(").count(),
+        1,
+        "CloseSlab must have one canonical engine transition",
     );
 }
