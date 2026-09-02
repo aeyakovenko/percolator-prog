@@ -171,6 +171,150 @@ fn v16_program_split_withdraw_matches_aggregate_withdraw_economics() {
     );
 }
 
+#[test]
+fn v16_program_base_unit_swap_amount_is_history_partition_invariant() {
+    fn run(parts: &[u128]) -> (u64, u64, u64, u64) {
+        let mut env = V16CuEnv::new();
+        let secondary_mint = env.create_mint();
+        env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+        let primary_source = env.token_account_for_mint(env.mint, env.admin.pubkey(), 37);
+        let secondary_destination =
+            env.token_account_for_mint(secondary_mint, env.admin.pubkey(), 0);
+        let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+        env.svm
+            .set_account(
+                secondary_vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(secondary_mint, env.vault_authority, 37),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .expect("create funded secondary vault");
+
+        for amount in parts {
+            let cu = env.swap_secondary_for_primary_with_cu(
+                primary_source,
+                env.vault,
+                secondary_destination,
+                secondary_vault,
+                *amount,
+            );
+            assert!(cu < 1_400_000, "base-unit swap used {cu} CU");
+        }
+        let balances = (
+            env.token_amount(primary_source),
+            env.token_amount(env.vault),
+            env.token_amount(secondary_destination),
+            env.token_amount(secondary_vault),
+        );
+        assert_eq!(
+            u128::from(balances.0)
+                + u128::from(balances.1)
+                + u128::from(balances.2)
+                + u128::from(balances.3),
+            74,
+            "base-unit swap must conserve the two manually provisioned token stocks"
+        );
+        balances
+    }
+
+    let aggregate = run(&[37]);
+    let partitioned = run(&[5, 11, 21]);
+    let reversed = run(&[21, 11, 5]);
+    assert_eq!(partitioned, aggregate);
+    assert_eq!(reversed, aggregate);
+    assert_eq!(aggregate, (0, 37, 37, 0));
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MaintenanceCadenceOutcome {
+    payer_capital: u128,
+    cranker_capital: u128,
+    insurance: u128,
+    domain_budgets: [u128; 2],
+    vault: u128,
+    spl_vault: u64,
+    last_fee_slot: u64,
+    max_cu: u64,
+}
+
+fn run_maintenance_cadence(sync_slots: &[u64]) -> MaintenanceCadenceOutcome {
+    const CAPITAL: u128 = 100_000_000;
+    const FEE_PER_SLOT: u128 = 58;
+    const CRANKER_SHARE_BPS: u16 = 4_000;
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1,
+        10_000,
+        10_000,
+        10_000,
+        FEE_PER_SLOT,
+    );
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer = env.create_portfolio(&payer_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer, CAPITAL);
+    env.update_maintenance_fee_policy_with_cu(CRANKER_SHARE_BPS);
+
+    let mut max_cu = 0;
+    for slot in sync_slots {
+        env.svm.warp_to_slot(*slot);
+        max_cu = max_cu.max(env.sync_maintenance_fee_with_cu(payer, Some(cranker), *slot));
+    }
+    let (_, group) = env.market_state();
+    let payer_state = env.portfolio_state(payer);
+    let cranker_state = env.portfolio_state(cranker);
+    MaintenanceCadenceOutcome {
+        payer_capital: payer_state.capital.get(),
+        cranker_capital: cranker_state.capital.get(),
+        insurance: group.insurance,
+        domain_budgets: [
+            group.insurance_domain_budget[0],
+            group.insurance_domain_budget[1],
+        ],
+        vault: group.vault,
+        spl_vault: env.token_amount(env.vault),
+        last_fee_slot: payer_state.last_fee_slot.get(),
+        max_cu,
+    }
+}
+
+#[test]
+fn v16_program_maintenance_fee_cadence_is_conservative_and_value_exact() {
+    const CAPITAL: u128 = 100_000_000;
+    const TOTAL_FEE: u128 = 580;
+    let aggregate = run_maintenance_cadence(&[10]);
+    let two_parts = run_maintenance_cadence(&[4, 10]);
+    let three_parts = run_maintenance_cadence(&[4, 7, 10]);
+
+    for (parts, outcome) in [(1u128, aggregate), (2, two_parts), (3, three_parts)] {
+        assert_eq!(outcome.payer_capital, CAPITAL - TOTAL_FEE);
+        assert_eq!(outcome.cranker_capital + outcome.insurance, TOTAL_FEE);
+        assert_eq!(
+            outcome.domain_budgets.iter().sum::<u128>(),
+            outcome.insurance
+        );
+        assert_eq!(outcome.vault, CAPITAL);
+        assert_eq!(outcome.spl_vault, CAPITAL as u64);
+        assert_eq!(outcome.last_fee_slot, 10);
+        assert!(outcome.max_cu < 1_400_000);
+        assert!(
+            aggregate.cranker_capital - outcome.cranker_capital <= parts - 1,
+            "each extra partition may lose at most one cranker-share floor atom"
+        );
+        assert!(
+            outcome.cranker_capital <= aggregate.cranker_capital,
+            "partitioning must not improve the permissionless cranker reward"
+        );
+    }
+    assert_eq!(aggregate.cranker_capital, 232);
+    assert_eq!(two_parts.cranker_capital, 231);
+    assert_eq!(three_parts.cranker_capital, 230);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FundingCadenceOutcome {
     long_capital_before_close: u128,
@@ -992,6 +1136,10 @@ fn v16_program_split_merge_operation_family_composition_is_source_complete() {
                     "tests/invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs",
                     "v16_control_sequences_accept_gaps_reject_replays_and_keep_lanes_independent",
                 ),
+                (
+                    "tests/invariants/cu/inv_052_split_merge_invariance.rs",
+                    "v16_program_maintenance_fee_cadence_is_conservative_and_value_exact",
+                ),
             ],
         },
         Inv052PartitionClass {
@@ -1016,6 +1164,14 @@ fn v16_program_split_merge_operation_family_composition_is_source_complete() {
                 (
                     "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs",
                     "v16_program_value_withdrawal_routes_preserve_exact_whole_route_deltas",
+                ),
+                (
+                    "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+                    "v16_program_linear_amount_routes_are_history_partition_invariant",
+                ),
+                (
+                    "tests/invariants/cu/inv_052_split_merge_invariance.rs",
+                    "v16_program_base_unit_swap_amount_is_history_partition_invariant",
                 ),
                 (
                     "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
@@ -1070,7 +1226,7 @@ fn v16_program_split_merge_operation_family_composition_is_source_complete() {
         }
     }
     assert_eq!(classes.len(), 6, "partition class roster drift");
-    assert_eq!(witnesses.len(), 30, "partition witness roster drift");
+    assert_eq!(witnesses.len(), 33, "partition witness roster drift");
 
     // This is the complete INV-023 SIGNED_ECONOMIC/BOUNDED_WORK surface, including inbound and
     // provider operations. A new economic field must receive a split/merge disposition here.

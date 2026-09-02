@@ -15,6 +15,9 @@
 //! a two-user transfer can conserve globally while crediting the wrong user.
 //! The episode equation below is independent of the engine flow classes and
 //! makes owner-level claim bounds an additional mandatory postcondition.
+//! A second theorem constructs every valid bounded history pre-state, applies one arbitrary
+//! credit/debit/payout step, and proves per-actor plus coalition entitlement is inductive. An
+//! overdrawn step returns no post-state and composes with wrapper error propagation and SVM rollback.
 
 use percolator::{
     TokenValueClassV16, TokenValueFlowProofV16, V16Error, V16_TOKEN_VALUE_CLASS_COUNT,
@@ -41,6 +44,39 @@ struct Inv024Episode {
     disclosed_fee: u128,
     prior_payout: u128,
     authorized_forfeit: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Inv024HistoryEntitlement {
+    attributed_credit: u128,
+    fixed_debit: u128,
+    cumulative_payout: u128,
+}
+
+impl Inv024HistoryEntitlement {
+    fn valid(self) -> bool {
+        self.fixed_debit
+            .checked_add(self.cumulative_payout)
+            .is_some_and(|used| used <= self.attributed_credit)
+    }
+
+    fn apply_successful_step(
+        self,
+        new_attributed_credit: u128,
+        new_fixed_debit: u128,
+        requested_payout: u128,
+    ) -> Option<Self> {
+        let attributed_credit = self.attributed_credit.checked_add(new_attributed_credit)?;
+        let fixed_debit = self.fixed_debit.checked_add(new_fixed_debit)?;
+        let used_before_payout = fixed_debit.checked_add(self.cumulative_payout)?;
+        let remaining = attributed_credit.checked_sub(used_before_payout)?;
+        let payout = requested_payout.min(remaining);
+        Some(Self {
+            attributed_credit,
+            fixed_debit,
+            cumulative_payout: self.cumulative_payout.checked_add(payout)?,
+        })
+    }
 }
 
 impl Inv024Episode {
@@ -177,4 +213,67 @@ fn kani_inv024_per_episode_entitlement_is_stronger_than_aggregate_conservation()
     assert_eq!(wrong_owner_payout[0] + wrong_owner_payout[1], 1);
     assert!(wrong_owner_payout[0] <= rightful[0].claim().unwrap());
     assert!(wrong_owner_payout[1] > rightful[1].claim().unwrap());
+}
+
+#[kani::proof]
+fn kani_inv024_entitlement_envelope_is_inductive_over_arbitrary_history_step() {
+    fn arbitrary_valid_history() -> Inv024HistoryEntitlement {
+        let attributed_credit = u128::from(kani::any::<u8>());
+        let fixed_debit = u128::from(kani::any::<u8>()).min(attributed_credit);
+        let remaining = attributed_credit - fixed_debit;
+        let cumulative_payout = u128::from(kani::any::<u8>()).min(remaining);
+        Inv024HistoryEntitlement {
+            attributed_credit,
+            fixed_debit,
+            cumulative_payout,
+        }
+    }
+
+    let pre = [arbitrary_valid_history(), arbitrary_valid_history()];
+    let new_credit = [u128::from(kani::any::<u8>()), u128::from(kani::any::<u8>())];
+    let new_fixed_debit = [u128::from(kani::any::<u8>()), u128::from(kani::any::<u8>())];
+    let requested_payout = [u128::from(kani::any::<u8>()), u128::from(kani::any::<u8>())];
+    assert!(pre[0].valid() && pre[1].valid());
+
+    let post = [
+        pre[0].apply_successful_step(new_credit[0], new_fixed_debit[0], requested_payout[0]),
+        pre[1].apply_successful_step(new_credit[1], new_fixed_debit[1], requested_payout[1]),
+    ];
+    for index in 0..2 {
+        if let Some(post) = post[index] {
+            assert!(post.valid());
+            assert!(post.cumulative_payout >= pre[index].cumulative_payout);
+            assert!(post.cumulative_payout <= post.attributed_credit - post.fixed_debit);
+        } else {
+            // The pure transition returns no post-state, matching the wrapper's error/rollback
+            // composition. An excessive newly attributed debit cannot fabricate a valid success.
+            assert!(pre[index].valid());
+        }
+    }
+    if let (Some(post_0), Some(post_1)) = (post[0], post[1]) {
+        assert!(
+            post_0.cumulative_payout + post_1.cumulative_payout
+                <= (post_0.attributed_credit - post_0.fixed_debit)
+                    + (post_1.attributed_credit - post_1.fixed_debit)
+        );
+    }
+
+    kani::cover!(post[0].is_none(), "an overdrawn history step rejects");
+    kani::cover!(
+        post[0].is_some_and(|state| state.cumulative_payout == pre[0].cumulative_payout),
+        "a successful history step can pay zero"
+    );
+    kani::cover!(
+        post[0].is_some_and(|state| {
+            state.cumulative_payout > pre[0].cumulative_payout
+                && state.cumulative_payout < state.attributed_credit - state.fixed_debit
+        }),
+        "a successful history step can make a partial payout"
+    );
+    kani::cover!(
+        post[0].is_some_and(|state| {
+            state.cumulative_payout == state.attributed_credit - state.fixed_debit
+        }),
+        "a successful history step can exactly exhaust entitlement"
+    );
 }

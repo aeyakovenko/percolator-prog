@@ -117,7 +117,8 @@
 //! must not be consumed as a partition-invariant reward basis; the fixed regression proves their
 //! net and all economic state remain equal. Deterministic maximum-shape, Hybrid/Pyth, terminal SPL
 //! settlement, and wrapper/engine arithmetic proofs live in the INV-052 CU and Kani files. Exact
-//! staleness boundaries and other operation families listed in the coverage matrix remain open.
+//! staleness boundaries and nonpartitionable operations are composed through INV-010's complete
+//! public-route history-relation census rather than being falsely treated as commuting amounts.
 
 use super::*;
 use crate::support::{
@@ -139,6 +140,201 @@ use solana_sdk::signature::Signer;
 
 const INITIAL_PRICE: u64 = 1_000_000;
 const BACKING_FRESHNESS_HORIZON: u64 = 100;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LinearAmountEconomicFrame {
+    vault: u128,
+    spl_vault: u64,
+    c_tot: u128,
+    insurance: u128,
+    domain_insurance: [u128; 2],
+    domain_insurance_remaining_total: u128,
+    backing_provider_earnings: u128,
+    source_amounts: [u128; 11],
+    backing_bucket: percolator::BackingBucketV16,
+    actor_capital: u128,
+    actor_source: u64,
+    actor_destination: u64,
+    provider_source: u64,
+    provider_destination: u64,
+    backing_ledger: Option<state::BackingDomainLedgerAccountV16>,
+    token_supply: u128,
+}
+
+fn linear_amount_economic_frame(env: &V16Svm, domain: usize) -> LinearAmountEconomicFrame {
+    let group = env.primary_market_state().1;
+    let source = group.source_credit[domain];
+    let ledger_data = env.backing_domain_ledger_data();
+    let backing_ledger = if state::is_initialized(&ledger_data) {
+        Some(
+            state::read_backing_domain_ledger(&ledger_data)
+                .expect("decode initialized backing-domain ledger"),
+        )
+    } else {
+        assert!(
+            ledger_data.iter().all(|byte| *byte == 0),
+            "uninitialized backing-domain ledger must remain canonical zero state"
+        );
+        None
+    };
+    LinearAmountEconomicFrame {
+        vault: group.vault,
+        spl_vault: env.token_amount(env.vault),
+        c_tot: group.c_tot,
+        insurance: group.insurance,
+        domain_insurance: [
+            group.insurance_domain_budget[domain],
+            group.insurance_domain_budget[domain + 1],
+        ],
+        domain_insurance_remaining_total: group.insurance_domain_budget_remaining_total,
+        backing_provider_earnings: group.backing_provider_earnings_total,
+        source_amounts: [
+            source.positive_claim_bound_num,
+            source.exact_positive_claim_num,
+            source.fresh_reserved_backing_num,
+            source.spent_backing_num,
+            source.provider_receivable_num,
+            source.valid_liened_backing_num,
+            source.impaired_liened_backing_num,
+            source.insurance_credit_reserved_num,
+            source.valid_liened_insurance_num,
+            source.impaired_liened_insurance_num,
+            source.credit_rate_num,
+        ],
+        backing_bucket: group.source_backing_buckets[domain],
+        actor_capital: env.primary_portfolio(0).capital.get(),
+        actor_source: env.token_amount(env.actors[0].source_token),
+        actor_destination: env.token_amount(env.actors[0].destination_token),
+        provider_source: env.token_amount(env.provider_source_token),
+        provider_destination: env.token_amount(env.provider_destination_token),
+        backing_ledger,
+        token_supply: env.token_supply_observed(),
+    }
+}
+
+fn run_linear_amount_history(
+    seed: [u8; 32],
+    route: &str,
+    parts: &[u128],
+) -> Result<(LinearAmountEconomicFrame, u64, usize), String> {
+    const DOMAIN: usize = 0;
+    const TOTAL_BACKING: u128 = 97;
+    const EXPIRY: u64 = 50;
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let mut max_cu = 0u64;
+    env.begin_public_trace();
+
+    if route == "backing-withdraw" {
+        max_cu = max_cu.max(
+            env.top_up_backing_bucket(DOMAIN as u16, TOTAL_BACKING, EXPIRY)?
+                .compute_units,
+        );
+    }
+    for amount in parts {
+        let success = match route {
+            "deposit" => env.deposit_primary(0, *amount)?,
+            "insurance-top-up" => env.top_up_insurance(*amount)?,
+            "domain-insurance-top-up" => env.top_up_insurance_domain(DOMAIN as u16, *amount)?,
+            "backing-top-up" => env.top_up_backing_bucket(DOMAIN as u16, *amount, EXPIRY)?,
+            "backing-withdraw" => env.withdraw_backing_bucket(DOMAIN as u16, *amount)?,
+            _ => return Err(format!("unknown linear amount route {route}")),
+        };
+        max_cu = max_cu.max(success.compute_units);
+    }
+
+    let trace = env.finish_public_trace();
+    trace.validate_public_execution()?;
+    if trace.out_of_band_economic_mutations != 0
+        || trace.steps.iter().any(|step| !step.succeeded)
+        || max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "{route} amount history escaped public success/CU requirements: {trace:?}, CU={max_cu}"
+        ));
+    }
+    Ok((
+        linear_amount_economic_frame(&env, DOMAIN),
+        max_cu,
+        trace.steps.len(),
+    ))
+}
+
+#[test]
+fn v16_program_linear_amount_routes_are_history_partition_invariant() {
+    const TOTAL: u128 = 37;
+    const AGGREGATE: [u128; 1] = [TOTAL];
+    const PARTITION: [u128; 3] = [5, 11, 21];
+    const REVERSED: [u128; 3] = [21, 11, 5];
+
+    for (route_index, route) in [
+        "deposit",
+        "insurance-top-up",
+        "domain-insurance-top-up",
+        "backing-top-up",
+        "backing-withdraw",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(PARTITION.iter().sum::<u128>(), TOTAL);
+        let mut seed = [0x52; 32];
+        seed[0] ^= route_index as u8;
+        let aggregate = run_linear_amount_history(seed, route, &AGGREGATE)
+            .unwrap_or_else(|error| panic!("aggregate {route}: {error}"));
+        let partitioned = run_linear_amount_history(seed, route, &PARTITION)
+            .unwrap_or_else(|error| panic!("partitioned {route}: {error}"));
+        let reversed = run_linear_amount_history(seed, route, &REVERSED)
+            .unwrap_or_else(|error| panic!("reversed {route}: {error}"));
+
+        if route == "insurance-top-up" {
+            let mut aggregate_normalized = aggregate.0.clone();
+            let mut partitioned_normalized = partitioned.0.clone();
+            let mut reversed_normalized = reversed.0.clone();
+            aggregate_normalized.domain_insurance = [0; 2];
+            partitioned_normalized.domain_insurance = [0; 2];
+            reversed_normalized.domain_insurance = [0; 2];
+            assert_eq!(
+                partitioned_normalized, aggregate_normalized,
+                "base-market insurance partition changed state outside its bounded domain split"
+            );
+            assert_eq!(
+                reversed_normalized, aggregate_normalized,
+                "base-market insurance order changed state outside its bounded domain split"
+            );
+
+            for (frame, parts) in [
+                (&aggregate.0, AGGREGATE.as_slice()),
+                (&partitioned.0, PARTITION.as_slice()),
+                (&reversed.0, REVERSED.as_slice()),
+            ] {
+                let expected_long = parts.iter().map(|amount| amount / 2).sum::<u128>();
+                assert_eq!(
+                    frame.domain_insurance,
+                    [expected_long, TOTAL - expected_long],
+                    "each base-market top-up must split exactly floor/ceil across its two domains"
+                );
+                assert_eq!(
+                    frame.domain_insurance.iter().sum::<u128>(),
+                    TOTAL,
+                    "partitioning must not create or drop domain insurance"
+                );
+                assert!(
+                    TOTAL / 2 - frame.domain_insurance[0] <= parts.len().saturating_sub(1) as u128,
+                    "long-domain floor residue exceeded the N-1 partition envelope"
+                );
+            }
+        } else {
+            assert_eq!(
+                partitioned.0, aggregate.0,
+                "{route} partition changed economics"
+            );
+            assert_eq!(reversed.0, aggregate.0, "{route} order changed economics");
+        }
+        assert!(aggregate.1 < TX_CU_LIMIT && partitioned.1 < TX_CU_LIMIT);
+        assert_eq!(aggregate.2, usize::from(route == "backing-withdraw") + 1);
+        assert_eq!(partitioned.2, usize::from(route == "backing-withdraw") + 3);
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct TargetEpisode {
