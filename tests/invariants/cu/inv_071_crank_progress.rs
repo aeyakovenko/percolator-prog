@@ -2710,4 +2710,22 @@ fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
             "INV-072 lost auto-crank plan stratum {stratum}",
         );
     }
+
+    // The selector inventory above is joined to an arbitrary-rank induction step
+    // and the complete 2^8 actionable-summary overlap space. Keeping this source
+    // edge in the roster prevents a finite public campaign from silently becoming
+    // the only evidence for cross-class liveness composition.
+    let rank_composition = std::fs::read_to_string(
+        root.join("tests/invariants/kani/inv_082_state_indexed_liveness_theorem.rs"),
+    )
+    .expect("read INV-082 rank composition");
+    for theorem in [
+        "kani_inv082_actual_engine_selector_composes_to_strict_rank_decrease",
+        "kani_inv082_every_actionable_summary_overlap_reaches_fixed_point",
+    ] {
+        assert!(
+            inv071_source_defines_function(&rank_composition, theorem),
+            "INV-071 lost state-indexed liveness composition {theorem}",
+        );
+    }
 }

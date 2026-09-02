@@ -94,6 +94,9 @@ mod inv_074_scope_locality;
 #[path = "../tests/invariants/kani/inv_080_error_propagation_and_exact_rollback.rs"]
 mod inv_080_error_propagation_and_exact_rollback;
 
+#[path = "../tests/invariants/kani/inv_082_state_indexed_liveness_theorem.rs"]
+mod inv_082_state_indexed_liveness_theorem;
+
 #[path = "../tests/invariants/kani/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs"]
 mod inv_084_proof_assumptions_are_reachable_and_nonvacuous;
 
