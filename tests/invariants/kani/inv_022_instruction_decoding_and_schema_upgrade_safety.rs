@@ -2282,10 +2282,68 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
 #[kani::proof]
 #[kani::unwind(24)]
 fn kani_v16_unknown_or_truncated_tags_reject() {
-    for tag in [
-        2u8, 7, 11, 12, 14, 15, 16, 17, 18, 20, 21, 22, 25, 26, 27, 29, 31, 47, 70, 127, 255,
-    ] {
-        assert!(Instruction::decode(&[tag]).is_err());
+    let tag: u8 = kani::any();
+    let tail: [u8; 4] = kani::any();
+    let mut data = [0u8; 5];
+    data[0] = tag;
+    data[1..].copy_from_slice(&tail);
+    let known = matches!(
+        tag,
+        0 | 1
+            | 3
+            | 4
+            | 5
+            | 6
+            | 8
+            | 9
+            | 10
+            | 13
+            | 19
+            | 24
+            | 28
+            | 30
+            | 32
+            | 34
+            | 35
+            | 36
+            | 37
+            | 38
+            | 39
+            | 40
+            | 42
+            | 43
+            | 44
+            | 45
+            | 46
+            | 48
+            | 49
+            | 50
+            | 51
+            | 52
+            | 53
+            | 54
+            | 55
+            | 56
+            | 57
+            | 58
+            | 59
+            | 60
+            | 61
+            | 62
+            | 63
+            | 64
+            | 65
+            | 66
+            | 67
+            | 68
+            | 69
+    );
+    let split = Instruction::decode_tag_for_proof(&data);
+    kani::cover!(known, "public-tag gate admits a known tag");
+    kani::cover!(!known, "public-tag gate rejects an unknown tag");
+    assert_eq!(split.is_ok(), known);
+    if known {
+        assert_eq!(split.unwrap(), tag);
     }
 
     let deposit_tag_only = [3u8];

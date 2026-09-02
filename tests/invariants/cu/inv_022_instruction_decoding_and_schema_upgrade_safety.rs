@@ -8,8 +8,10 @@
 //! transactions. A canonical raw deposit first proves the fixture can mutate
 //! state through the deployed entrypoint; malformed, truncated, oversized,
 //! trailing, and systematically bit-mutated encodings must then fail before
-//! any market, portfolio, or vault bytes change. The mutation matrix covers
-//! every bit at each schema's tag and boundary-sensitive payload positions.
+//! any market, portfolio, or vault bytes change. The host matrices exhaust the
+//! complete single-byte edit neighborhood and a structured two-field product
+//! across every schema. A source lock requires the deployed decoder to enter
+//! through the full-symbolic public-tag gate proven in the INV-022 Kani owner.
 
 use super::*;
 
@@ -128,7 +130,6 @@ fn inv_022_known_public_tag(tag: u8) -> bool {
             | 38
             | 39
             | 40
-            | 41
             | 42
             | 43
             | 44
@@ -530,6 +531,13 @@ fn v16_program_one_byte_decoder_roster_rejects_every_unknown_or_truncated_tag() 
         1,
         "the canonical processor must have exactly one instruction decoder boundary",
     );
+    assert_eq!(
+        source
+            .matches("let (tag, mut rest) = Self::split_public_input(input)?;")
+            .count(),
+        1,
+        "the deployed decoder must pass through the proven public-tag gate",
+    );
     for (tag, body) in [
         (0, "decode_init_market_body"),
         (6, "decode_trade_nocpi_body"),
@@ -692,6 +700,66 @@ fn v16_host_decoder_exhausts_single_edit_neighborhood_for_every_schema() {
 }
 
 #[test]
+fn v16_host_decoder_canonicalizes_structured_multi_edit_neighborhood_for_every_schema() {
+    const REPLACEMENTS: [u8; 8] = [0x00, 0x01, 0x55, 0x7f, 0x80, 0xaa, 0xfe, 0xff];
+
+    let representatives = inv_022_representative_public_instructions();
+    assert_eq!(representatives.len(), 49, "every public schema is owned");
+    let mut exercised = 0usize;
+    let mut accepted = 0usize;
+    for instruction in representatives {
+        let canonical = instruction.encode();
+        let mut positions = std::collections::BTreeSet::from([0usize]);
+        if canonical.len() > 1 {
+            positions.extend([
+                1,
+                canonical.len() / 4,
+                canonical.len() / 2,
+                canonical.len() * 3 / 4,
+                canonical.len() - 1,
+            ]);
+        }
+        let positions = positions.into_iter().collect::<Vec<_>>();
+        for left_index in 0..positions.len() {
+            for right_index in left_index + 1..positions.len() {
+                let left = positions[left_index];
+                let right = positions[right_index];
+                for left_byte in REPLACEMENTS {
+                    for right_byte in REPLACEMENTS {
+                        let mut mutated = canonical.clone();
+                        mutated[left] = left_byte;
+                        mutated[right] = right_byte;
+                        exercised += 1;
+                        if let Ok(decoded) = ProgInstruction::decode(&mutated) {
+                            accepted += 1;
+                            assert_eq!(
+                                decoded.encode(),
+                                mutated,
+                                "tag {}: accepted two-field mutation at {left}/{right} was ambiguous",
+                                canonical[0],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        exercised >= 30_000,
+        "structured multi-edit corpus unexpectedly small: {exercised}",
+    );
+    assert!(
+        accepted > 0,
+        "multi-edit corpus must include canonical alternates"
+    );
+    assert!(
+        accepted < exercised,
+        "multi-edit corpus must exercise rejection"
+    );
+}
+
+#[test]
 fn v16_program_deployed_decoder_bit_mutation_matrix_is_total_canonical_and_atomic() {
     let representatives = inv_022_representative_public_instructions();
     let canonical_tags: std::collections::BTreeSet<u8> = representatives
@@ -807,7 +875,7 @@ fn v16_program_raw_instruction_decoder_rejects_ambiguity_without_mutation() {
     }
     .encode();
 
-    send_raw_program_instruction(
+    let canonical_cu = send_raw_program_instruction(
         &mut env,
         canonical_deposit.clone(),
         vec![
@@ -821,6 +889,11 @@ fn v16_program_raw_instruction_decoder_rejects_ambiguity_without_mutation() {
         &[&owner],
     )
     .expect("canonical raw deposit must execute through the deployed entrypoint");
+    assert_cu_within(
+        "canonical raw deposit decode",
+        canonical_cu,
+        CUSTODY_CU_LIMIT,
+    );
     assert_eq!(
         env.portfolio_state(portfolio).capital.get(),
         7,

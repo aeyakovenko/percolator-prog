@@ -3220,6 +3220,78 @@ pub mod ix {
     }
 
     impl Instruction {
+        #[inline(always)]
+        const fn public_tag_is_known(tag: u8) -> bool {
+            matches!(
+                tag,
+                0 | 1
+                    | 3
+                    | 4
+                    | 5
+                    | 6
+                    | 8
+                    | 9
+                    | 10
+                    | 13
+                    | 19
+                    | 24
+                    | 28
+                    | 30
+                    | 32
+                    | 34
+                    | 35
+                    | 36
+                    | 37
+                    | 38
+                    | 39
+                    | 40
+                    | 42
+                    | 43
+                    | 44
+                    | 45
+                    | 46
+                    | 48
+                    | 49
+                    | 50
+                    | 51
+                    | 52
+                    | 53
+                    | 54
+                    | 55
+                    | 56
+                    | 57
+                    | 58
+                    | 59
+                    | 60
+                    | 61
+                    | 62
+                    | 63
+                    | 64
+                    | 65
+                    | 66
+                    | 67
+                    | 68
+                    | 69
+            )
+        }
+
+        #[inline(always)]
+        fn split_public_input(input: &[u8]) -> Result<(u8, &[u8]), ProgramError> {
+            let (&tag, rest) = input
+                .split_first()
+                .ok_or(ProgramError::InvalidInstructionData)?;
+            if !Self::public_tag_is_known(tag) {
+                return Err(ProgramError::InvalidInstructionData);
+            }
+            Ok((tag, rest))
+        }
+
+        #[doc(hidden)]
+        #[cfg(kani)]
+        pub fn decode_tag_for_proof(input: &[u8]) -> Result<u8, ProgramError> {
+            Self::split_public_input(input).map(|(tag, _)| tag)
+        }
+
         fn decode_trade_nocpi_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
             Ok(Self::TradeNoCpi {
                 account_a_portfolio_id: read_u64(rest)?,
@@ -3417,9 +3489,7 @@ pub mod ix {
         }
 
         pub fn decode(input: &[u8]) -> Result<Self, ProgramError> {
-            let (&tag, mut rest) = input
-                .split_first()
-                .ok_or(ProgramError::InvalidInstructionData)?;
+            let (tag, mut rest) = Self::split_public_input(input)?;
             let ix = match tag {
                 0 => Self::decode_init_market_body(&mut rest)?,
                 1 => Self::InitPortfolio,
