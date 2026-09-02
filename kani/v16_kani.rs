@@ -79,6 +79,9 @@ mod inv_045_no_free_mark_movement;
 #[path = "../tests/invariants/kani/inv_052_split_merge_invariance.rs"]
 mod inv_052_split_merge_invariance;
 
+#[path = "../tests/invariants/kani/inv_053_full_health_recertification_equivalence.rs"]
+mod inv_053_full_health_recertification_equivalence;
+
 #[path = "../tests/invariants/kani/inv_063_backing_expiry_normalization.rs"]
 mod inv_063_backing_expiry_normalization;
 
