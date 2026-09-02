@@ -2,10 +2,12 @@
 //!
 //! CPI matchers may have less capacity than the signed requested size. A single
 //! trade may opt into a short fill through `FLAG_PARTIAL_OK`; it must account only
-//! the executed quantity and invalidate the consumed position epoch. A batch has
-//! no signed per-leg minimum or remaining-allowance ledger, so matcher-selected
-//! short fills must reject atomically rather than silently change the strategy's
-//! leg ratio. The cross-route matrix executes a real single-CPI half fill, proves
+//! the executed quantity and consume the entire one-shot authorization by
+//! advancing both position episodes. There is deliberately no persistent residual:
+//! any residual fill is a newly signed intent against the new episodes. A batch
+//! rejects matcher-selected short fills atomically rather than silently changing
+//! the strategy's signed leg ratio. The cross-route matrix executes a real
+//! single-CPI half fill, proves
 //! every prebuilt single/batch CPI/no-CPI encoding is stale, then executes the
 //! exact residual through every route with cumulative quantity, fee, OI, custody,
 //! epoch, rollback, and CU assertions. A programmable hostile matcher adds 14
@@ -20,6 +22,143 @@ use super::*;
 
 const FLAGGED_PARTIAL_MODE: u8 = 15;
 const ASYMMETRIC_BATCH_PARTIAL_MODE: u8 = 16;
+
+fn inv009_source_block<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    source
+        .split_once(start)
+        .and_then(|(_, tail)| tail.split_once(end))
+        .map(|(body, _)| body)
+        .unwrap_or_else(|| panic!("missing production source block {start:?}..{end:?}"))
+}
+
+fn inv009_variant_body<'a>(instruction_enum: &'a str, variant: &str) -> &'a str {
+    let start = instruction_enum
+        .find(&format!("{variant} {{"))
+        .unwrap_or_else(|| panic!("missing instruction variant {variant}"));
+    let open = start
+        + instruction_enum[start..]
+            .find('{')
+            .expect("instruction variant opening brace");
+    let mut depth = 0usize;
+    for (offset, byte) in instruction_enum.as_bytes()[open..]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &instruction_enum[open + 1..open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated instruction variant {variant}");
+}
+
+#[test]
+fn v16_program_one_shot_trade_consent_composition_is_source_complete() {
+    assert_certified_engine_pin("INV-008/009/011/059 one-shot trade consent");
+    let production = include_str!("../../../src/v16_program.rs");
+    let instruction_enum =
+        inv009_source_block(production, "pub enum Instruction", "impl Instruction");
+
+    for variant in ["TradeNoCpi", "TradeCpi", "BatchTradeNoCpi", "BatchTradeCpi"] {
+        let body = inv009_variant_body(instruction_enum, variant);
+        for binding in [
+            "account_a_portfolio_id: u64",
+            "account_a_position_epoch: u64",
+            "account_b_portfolio_id: u64",
+            "account_b_position_epoch: u64",
+        ] {
+            assert!(body.contains(binding), "{variant} omits {binding}");
+        }
+    }
+    let batch_cpi = inv009_variant_body(instruction_enum, "BatchTradeCpi");
+    assert!(batch_cpi.contains("max_slippage_atoms: u128"));
+    assert!(batch_cpi.contains("max_fee_atoms: u128"));
+
+    let matcher_validator = inv009_source_block(
+        production,
+        "pub fn validate_matcher_return(",
+        "pub fn validate_atomic_batch_matcher_return(",
+    );
+    for guard in [
+        "ret.exec_size.signum() != req_size.signum()",
+        "ret.exec_size.unsigned_abs() > req_size.unsigned_abs()",
+        "(ret.flags & FLAG_PARTIAL_OK) == 0",
+    ] {
+        assert!(
+            matcher_validator.contains(guard),
+            "single CPI omits {guard}"
+        );
+    }
+    let atomic_validator = inv009_source_block(
+        production,
+        "pub fn validate_atomic_batch_matcher_return(",
+        "pub mod oracle_v16",
+    );
+    assert!(atomic_validator.contains("if ret.exec_size != req_size"));
+
+    let single_cpi = inv009_source_block(
+        production,
+        "fn handle_trade_cpi<'a>(",
+        "fn handle_set_matcher_config<'a>(",
+    );
+    assert!(single_cpi.contains("matcher_abi::validate_matcher_return("));
+    assert!(single_cpi.contains("if ret.exec_size == 0"));
+    assert!(single_cpi.contains("handle_trade_nocpi_zero_copy("));
+
+    let batch_cpi_handler = inv009_source_block(
+        production,
+        "fn handle_batch_trade_cpi<'a>(",
+        "fn handle_close_portfolio<'a>(",
+    );
+    assert!(batch_cpi_handler.contains("matcher_abi::validate_atomic_batch_matcher_return("));
+    assert!(batch_cpi_handler.contains("policy_v16::accumulate_with_cap("));
+    assert!(batch_cpi_handler.contains("Some(max_fee_atoms)"));
+
+    for (start, end) in [
+        (
+            "fn handle_trade_nocpi_zero_copy<'a>(",
+            "fn portfolio_position_vector_view(",
+        ),
+        (
+            "fn handle_batch_execute_zero_copy<'a>(",
+            "fn handle_trade_nocpi<'a>(",
+        ),
+    ] {
+        let executor = inv009_source_block(production, start, end);
+        assert!(executor.contains("state::bump_portfolio_position_epoch(&mut account_a_data)?"));
+        assert!(executor.contains(
+            "state::bump_portfolio_position_epoch_after_matcher_fill(&mut account_b_data)?"
+        ));
+        assert!(executor.contains("state::bump_portfolio_position_epoch(&mut account_b_data)?"));
+    }
+
+    let transaction_envelope =
+        include_str!("../public_sbf/inv_006_program_chain_message_type_and_version_binding.rs");
+    assert!(transaction_envelope
+        .contains("fn retained_transaction_binds_program_market_kind_schema_and_blockhash("));
+    assert!(
+        transaction_envelope.contains("fn deployed_wrapper_has_no_detached_signature_interpreter(")
+    );
+
+    let episode_proof = include_str!("../kani/inv_004_position_episode_binding.rs");
+    assert!(episode_proof
+        .contains("fn kani_v16_successful_episode_consumption_invalidates_the_old_binding("));
+    let partial_proof = include_str!("../kani/inv_009_partial_fill_and_retry_accounting.rs");
+    assert!(
+        partial_proof.contains("fn kani_v16_atomic_batch_accepts_only_exact_bound_matcher_fill(")
+    );
+    let aggregate_owner = include_str!("inv_011_signed_aggregate_economic_bounds.rs");
+    assert!(aggregate_owner.contains(
+        "fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically("
+    ));
+}
 
 #[derive(Clone, Copy, Debug)]
 enum PartialRetryRoute {

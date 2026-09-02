@@ -13,11 +13,11 @@
 //! cure/cancellation, and requires the released counterparty obligation to clear through bounded
 //! mutating cranks.
 //!
-//! Guarantee boundary: the deployed ledger has `drift_consumed`, `support_consumed`, insurance,
-//! B, explicit loss, and remaining residual. It does not expose separate fields for every abstract
-//! provenance category named by the charter. This test proves the implemented partition oracle is
-//! nonvacuous on synthetic and public state; it does not manufacture evidence for absent
-//! provenance fields.
+//! The deployed ledger has `drift_consumed`, `support_consumed`, insurance, B, explicit loss, and
+//! remaining residual. The exhaustive struct literal below makes any category change a compile
+//! failure. Pending obligations remain separate leg/weight state under INV-039 and cannot directly
+//! reduce this residual. This test makes the exact implemented partition nonvacuous on synthetic
+//! and public state without inventing a duplicate wrapper ledger.
 
 use crate::support::fuzz_model::{
     run_close_cancel_partition_probe, run_recovery_support_partition_probe,

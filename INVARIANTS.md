@@ -58,7 +58,7 @@ IntentHeader {
     message_version
     intent_id                  // monotonic nonce or unique replay key
     not_before_slot            // optional
-    expiry_slot                // required for bounded replay windows
+    expiry_slot                // required for detached/durable replay windows
 }
 
 AssetBinding {
@@ -90,6 +90,17 @@ close. As a stricter equivalent for an account class, close may retain an immuta
 rent-exempt, program-owned tombstone that makes recreation at that pubkey impossible. That policy
 must reject public reinitialization even after arbitrary lamport funding and must leave fresh
 addresses usable; it does not remove chain/program/message-type domain requirements.
+
+The deployed wrapper has no detached-signature interpreter. For a standard recent-blockhash Solana
+transaction, the signed transaction signature is the unique one-shot replay key and validator
+recent-blockhash admission is the bounded expiry. A successful economic instruction must still
+consume its program-owned sequence or episode so separately pre-signed transactions against the
+same old state cannot compose into a larger authorization. A successful partial fill consumes the
+whole one-shot authorization; its remaining authorized quantity is zero, and any residual requires
+a new signature against the new state episode. Durable-nonce transactions are outside this expiry
+equivalence and must not carry retained user-economic intent unless the instruction has an explicit
+application-level expiry. Adding detached signatures, durable retained intent, or a persistent
+partial-fill protocol reopens INV-006, INV-008, INV-009, INV-011, and INV-059.
 
 ### Verification tags
 
@@ -221,20 +232,32 @@ must remain usable.
 
 **Statement.** Every retryable retained request has a unique monotonic `intent_id` or a bounded
 replay key and expiry. Across direct, batch, CPI, no-CPI, and retry routes, the same economic intent
-executes at most once.
+executes at most once. A standard signed Solana transaction is a one-shot retained request when its
+signature/recent-blockhash envelope supplies uniqueness and bounded validity and every nonzero
+economic success consumes the bound program episode. Re-signing a residual against the new episode
+creates a new intent; it is not a retry of the consumed authorization.
 
 **Required tests.** Duplicate the same signed request in one transaction, in later transactions,
 through another entrypoint, and after partial failure. Exactly one economic execution is permitted.
+Prove every public route's replay disposition, exact rollback on stale duplicates, strict episode or
+watermark consumption on success, transaction-domain binding, and the absence of an unowned
+detached-signature or durable-intent ingress.
 **Verification:** P, F, I, M
 
 ### INV-009 - Partial-fill and retry accounting
 
-**Statement.** Partial execution records the exact remaining authorized quantity, aggregate fee
-budget, slippage budget, and expiry. A retry cannot reset consumed limits, execute already-filled
-quantity, or collect a second per-intent minimum fee.
+**Statement.** Persistent partial execution records the exact remaining authorized quantity,
+aggregate fee budget, slippage budget, and expiry. A one-shot partial instead consumes the entire
+authorization atomically: accounting uses only the executed quantity, the old episode becomes
+invalid, remaining authorization is zero, and a residual requires a newly signed intent. Neither
+model permits a retry to reset consumed limits, execute already-filled quantity, or collect a
+second minimum fee from the same intent.
 
 **Required tests.** Randomly partition a signed intent into fills, interleave failures and retries,
-and assert cumulative quantity and fees never exceed the original signed bounds.
+and assert cumulative quantity and fees never exceed the original signed bounds. For a one-shot
+model, prove a nonzero partial advances every bound episode, all stale route encodings reject with
+exact rollback, a fresh residual is independently signed, and every multi-leg route without a
+persistent residual ledger accepts only exact fills.
 **Verification:** P, F, I, M
 
 ### INV-010 - Out-of-order safety
@@ -253,10 +276,17 @@ postconditions.
 
 **Statement.** Trades and conversions bind aggregate maximum fee, total quantity, slippage, price
 limits, deadline, final position bounds, and permitted collateral or PnL-credit use across all legs
-and partial fills. Per-leg checks cannot silently exceed an aggregate signed limit.
+and partial fills. A bound may be explicit or exact by construction: a one-leg instruction is its
+own aggregate; an exact-fill batch's signed leg vector fixes total quantity and final-position
+delta; and a standard transaction's recent blockhash supplies its deadline under the named
+validator assumption. Unknown matcher-selected multi-leg prices or fees require explicit aggregate
+quote-atom caps. Per-leg checks cannot silently exceed an aggregate signed limit.
 
 **Required tests.** Split one intent into many individually acceptable legs whose aggregate exceeds
-one signed bound; the sequence must reject or stop exactly at the remaining allowance.
+one signed bound; the sequence must reject or stop exactly at the remaining allowance. Prove exact
+fill of every batch quantity, exact-minus-one and exact aggregate slippage/fee boundaries, stale
+episode rollback, and deterministic conversion caps. Durable retained transactions require an
+explicit application deadline before this invariant can remain closed for them.
 **Verification:** P, F, I, M
 
 ### INV-012 - Capability and delegate scope
@@ -572,7 +602,6 @@ gross_loss_at_close_start
 + insurance_spent
 + b_loss_booked
 + explicit_loss_assigned
-+ pending_obligation_credits
 + remaining_residual
 ```
 
@@ -582,9 +611,12 @@ For the deployed v16.9.1 ledger, `drift_consumed` is the reserved adverse-drift 
 `support_consumed` is the realizable value payment. `junior_face_burned` is claim-face metadata,
 not an additional payment, and must not be added to the value partition. Consumed counterparty-
 credit lien backing is included exactly once in `support_consumed`; listing it as a second
-subtrahend is forbidden double counting. Any abstract category folded into a deployed field must
-have one documented, disjoint mapping; an absent category is not implicitly proven nonzero or
-independently attributable.
+subtrahend is forbidden double counting. Pending obligations are separate retained leg/weight state
+owned by INV-039 and do not directly credit or reduce the deployed close residual. The previously
+listed abstract `pending_obligation_credits` category is therefore definitionally zero in v16.9.1;
+a future nonzero credit requires a distinct ledger field or canonical disjoint reconstruction plus
+new whole-route proofs. An absent category is not implicitly proven nonzero or independently
+attributable.
 
 **Required tests.** Independently recompute the equality after every continuation, competing-close
 rejection, cancel attempt, recovery, and finalization.
@@ -862,7 +894,9 @@ choice. All arithmetic is checked at zero, one, maximum, and near-maximum values
 
 **Statement.** Across one liquidation or execution episode, cumulative fees do not exceed the
 signed or configured episode cap. A minimum fee is charged once per episode, or sub-minimum
-operations are rejected except for a final residual close.
+operations are rejected except for a final residual close. For one-shot execution consent, a
+successful partial consumes the whole signed episode and any residual is a new signer-authorized
+episode; an attacker cannot replay or subdivide one authorization to multiply fees.
 
 **Required tests.** Split a close into one-atom operations, retries, route changes, and partial
 failures; compare with one aggregate close.

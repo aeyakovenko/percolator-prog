@@ -21,9 +21,10 @@
 //! second payment term; only the realizable `support_consumed` atoms cover
 //! loss. The stateful INV-037 owner makes this distinction public and
 //! nonvacuous on all four trade routes: 1,000 retired face atoms coexist with
-//! exactly 251 realizable support atoms. The current ledger does not separately
-//! expose every normative INV-037 provenance category, so this owner pins the
-//! deployed equation without claiming the absent category-level decomposition.
+//! exactly 251 realizable support atoms. Pending-obligation legs and weights are
+//! governed separately by INV-039 and cannot directly credit this ledger. The
+//! exhaustive engine struct literal in the stateful owner source-locks the
+//! deployed category set, while the pinned engine contract proves its equation.
 
 use super::*;
 use crate::support::fuzz_model::verify_close_residual_partition;

@@ -1,15 +1,15 @@
 //! INV-011 - Signed aggregate economic bounds.
 //!
-//! The current wrapper wire format exposes signed per-leg CPI `limit_price`
-//! bounds and per-leg fee caps, but it does not yet expose a single aggregate
-//! slippage/fee budget across all legs and retries. This file owns the
-//! executable coverage for the bounds that exist today and documents the
-//! remaining aggregate-budget surface as a wire-format/spec gap:
+//! The batch-CPI wire carries aggregate adverse-slippage and taker engine-fee
+//! caps in addition to exact per-leg quantities and limit prices. This file
+//! composes those fields through the matcher CPI, shared engine transition, and
+//! transaction rollback boundary:
 //!
 //! * a single CPI fill cannot exceed the taker's signed limit price; and
 //! * a multi-leg CPI batch aborts atomically if any leg would exceed its signed
-//!   limit, so individually valid legs cannot be partially committed around a
-//!   violated bound.
+//!   limit or the aggregate quote-atom caps; and
+//! * exact-fill validation makes the signed leg vector the aggregate quantity
+//!   and final-position bound for the one-shot instruction.
 
 use super::*;
 
@@ -301,6 +301,20 @@ fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomical
             )
             .unwrap();
     assert!(expected_slippage > 0);
+    let ceil_div = |numerator: u128, denominator: u128| {
+        numerator / denominator + u128::from(numerator % denominator != 0)
+    };
+    let expected_fee = prices
+        .iter()
+        .map(|price| {
+            let notional = ceil_div(
+                size_q.unsigned_abs() * u128::from(*price),
+                POS_SCALE as u128,
+            );
+            ceil_div(notional * 100, 10_000)
+        })
+        .sum::<u128>();
+    assert!(expected_fee > 0);
 
     let asset_market_ids = [env.asset_market_id(0), env.asset_market_id(1)];
     let market = env.market;
@@ -365,7 +379,13 @@ fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomical
 
     env.svm.expire_blockhash();
     let fee_rejected = env.send(
-        env.batch_trade_cpi_ix_with_caps(taker_account, lp_account, legs(), expected_slippage, 0),
+        env.batch_trade_cpi_ix_with_caps(
+            taker_account,
+            lp_account,
+            legs(),
+            expected_slippage,
+            expected_fee - 1,
+        ),
         metas(),
         &[&taker],
     );
@@ -379,15 +399,18 @@ fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomical
             lp_account,
             legs(),
             expected_slippage,
-            u128::MAX,
+            expected_fee,
         ),
         metas(),
         &[&taker],
     )
     .expect("exact aggregate slippage boundary remains live");
     let taker_after = env.portfolio_state(taker_account);
-    assert!(has_active_leg_for_asset(&taker_after, 0));
-    assert!(has_active_leg_for_asset(&taker_after, 1));
+    assert_eq!(active_leg_for_asset(&taker_after, 0).basis_pos_q, size_q);
+    assert_eq!(active_leg_for_asset(&taker_after, 1).basis_pos_q, -size_q);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.assets[0].oi_eff_long_q, size_q.unsigned_abs());
+    assert_eq!(group_after.assets[1].oi_eff_short_q, size_q.unsigned_abs());
 }
 
 // security.md sweep — §6.2 profit conversion (#33/#35): ConvertReleasedPnl moves source-backed

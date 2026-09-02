@@ -11,7 +11,10 @@
 //! fee-bearing liquidations with a new authenticated mark and a fresh certified deficit across
 //! single/batch CPI/no-CPI setup routes. It proves retries and malformed discovery cannot
 //! manufacture episodes while genuine risk deterioration can, all route outcomes are identical,
-//! and a fresh owner reduction remains live after the second episode.
+//! and a fresh owner reduction remains live after the second episode. Execution fragmentation is
+//! closed by INV-009's source-complete one-shot composition: a successful single-CPI partial
+//! consumes both signed episodes, any residual requires a new signature, and batch CPI is exact
+//! fill with aggregate slippage and fee caps.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -641,6 +644,14 @@ fn v16_program_liquidation_fee_surface_is_single_route_and_engine_selected() {
         !CALLER_INPUT_ROSTER.contains("PermissionlessCrank.close"),
         "caller-selected close quantity would make liquidation partitioning public"
     );
+    let one_shot = include_str!("inv_009_partial_fill_and_retry_accounting.rs");
+    assert!(
+        one_shot.contains("fn v16_program_one_shot_trade_consent_composition_is_source_complete(")
+    );
+    let aggregate = include_str!("inv_011_signed_aggregate_economic_bounds.rs");
+    assert!(aggregate.contains(
+        "fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically("
+    ));
     crate::assert_certified_engine_pin("INV-059 engine-selected liquidation evidence");
 }
 
