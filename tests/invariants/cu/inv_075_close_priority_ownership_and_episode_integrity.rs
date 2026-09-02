@@ -1,4 +1,4 @@
-//! INV-075 - Close priority, ownership, and episode integrity.
+//! INV-075 - Exclusive close ownership and episode integrity.
 //!
 //! Normative obligation: close-ledger continuations are scoped to the proper
 //! owner and episode, and inert/canceled ledgers cannot be replayed to double
@@ -11,10 +11,11 @@
 //! terminal finalization, and exact terminal settlement of all six economically
 //! involved portfolios, including an unrelated live-asset pair. The two landing orders must produce identical per-role
 //! payouts, internal/SPL custody, insurance, aggregate capital, OI, and claim
-//! counts. The pinned engine implements first-landed exclusive domain
-//! ownership, not the charter's strict ClosePriority preemption order;
-//! resolving that specification/implementation divergence remains broader
-//! model and design work.
+//! counts. The pinned v16.9.1 engine and the charter both specify first-landed
+//! exclusive domain ownership: contention rejects before mutation, every close
+//! holds one domain, identity is monotonic, and immutable expiry supplies the
+//! terminal escape. The source-complete gate at the end composes those engine
+//! proofs with the public wrapper routes and rollback boundary.
 
 use super::*;
 
@@ -495,8 +496,7 @@ fn v16_program_public_close_episode_competing_actions_preserve_priority_and_iden
     );
 }
 
-// The pinned engine does not expose the charter's ClosePriority tuple. It
-// serializes close starts with a first-landed per-domain barrier instead. This
+// The pinned engine and charter use first-landed per-domain exclusion. This
 // bounded public model exhausts both 2! landing orders for equal close
 // contenders and pins that actual mechanism: the first start owns the barrier,
 // the second rejects with an exact frame, the accepted episode retains its
@@ -862,5 +862,178 @@ fn v16_audit_withdraw_after_cure_and_cancel_close() {
     assert_eq!(
         account.capital.get(), 0,
         "a flat, solvent user must be able to withdraw their capital after curing a cancelled close",
+    );
+}
+
+#[derive(Clone, Copy)]
+struct Inv075CloseClass {
+    class: &'static str,
+    engine_proofs: &'static [&'static str],
+    public_witnesses: &'static [(&'static str, &'static str)],
+}
+
+fn inv075_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+#[test]
+fn v16_program_exclusive_close_ownership_composition_is_source_complete() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv075CloseClass] = &[
+        Inv075CloseClass {
+            class: "exclusive domain and account acquisition",
+            engine_proofs: &[
+                "proof_v16_close_begin_rejects_occupied_domain_before_mutation",
+                "proof_v16_close_begin_rejects_account_with_active_close",
+                "proof_v16_close_begin_takes_barrier_and_stamps_immutable_identity",
+            ],
+            public_witnesses: &[(
+                "tests/invariants/cu/inv_075_close_priority_ownership_and_episode_integrity.rs",
+                "v16_program_public_close_episode_competing_actions_preserve_priority_and_identity",
+            )],
+        },
+        Inv075CloseClass {
+            class: "immutable snapshot residual identity and bounded expiry",
+            engine_proofs: &[
+                "contract_check_kernel_open_close_snapshot_is_stale",
+                "proof_v16_expired_close_progress_declares_recovery_without_value_mutation",
+                "proof_v16_close_progress_ledger_residual_equation_is_enforced",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/stateful/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs",
+                    "v16_program_same_asset_price_and_funding_drift_preserves_close_and_owner_exit",
+                ),
+                (
+                    "tests/invariants/cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs",
+                    "v16_program_unrelated_asset_slot_drift_preserves_local_close_progress_and_live_scope",
+                ),
+                (
+                    "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+                    "v16_program_active_close_seeded_frontier_preserves_episode_and_bounded_owner_exit",
+                ),
+            ],
+        },
+        Inv075CloseClass {
+            class: "same-domain landing order and different-domain progress",
+            engine_proofs: &["closure_kernel_advance_close_ledger_rank_witness"],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_075_close_priority_ownership_and_episode_integrity.rs",
+                    "v16_program_competing_close_starts_exhaust_both_landing_orders",
+                ),
+                (
+                    "tests/invariants/stateful/inv_074_scope_locality.rs",
+                    "v16_program_two_asset_closes_advance_without_crossing_scope",
+                ),
+            ],
+        },
+        Inv075CloseClass {
+            class: "owner cure replay and user-operation barriers",
+            engine_proofs: &[
+                "contract_check_flow_close_cure_to_account_capital",
+                "proof_v16_cure_and_cancel_close_rejects_without_active_close",
+                "proof_v16_withdraw_rejects_while_close_active",
+                "proof_v16_withdraw_allowed_after_canceled_close",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_075_close_priority_ownership_and_episode_integrity.rs",
+                    "v16_program_cure_and_cancel_close_owner_gated",
+                ),
+                (
+                    "tests/invariants/cu/inv_075_close_priority_ownership_and_episode_integrity.rs",
+                    "v16_program_cure_cannot_be_replayed_on_canceled_close_ledger",
+                ),
+                (
+                    "tests/invariants/cu/inv_075_close_priority_ownership_and_episode_integrity.rs",
+                    "v16_attack_deposit_during_active_close_safe",
+                ),
+                (
+                    "tests/invariants/cu/inv_075_close_priority_ownership_and_episode_integrity.rs",
+                    "v16_audit_withdraw_after_cure_and_cancel_close",
+                ),
+            ],
+        },
+        Inv075CloseClass {
+            class: "finalized inertness error propagation and rollback",
+            engine_proofs: &[
+                "proof_v16_finalized_zero_residual_close_is_inert_for_dematerialization",
+                "proof_v16_finalized_zero_residual_close_is_inert_for_flat_withdraw",
+                "proof_v16_finalized_zero_residual_close_is_inert_for_next_begin",
+            ],
+            public_witnesses: &[
+                (
+                    "tests/invariants/cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs",
+                    "v16_program_close_finalization_composition_is_source_complete",
+                ),
+                (
+                    "tests/invariants/cu/inv_080_error_propagation_and_exact_rollback.rs",
+                    "v16_program_dispatch_and_entrypoints_preserve_every_handler_error",
+                ),
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-075 composition must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the exclusive-close-certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut classes = std::collections::BTreeSet::new();
+    let mut proofs = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    for row in CLASSES {
+        assert!(classes.insert(row.class), "duplicate close class");
+        assert!(!row.engine_proofs.is_empty());
+        assert!(!row.public_witnesses.is_empty());
+        for proof in row.engine_proofs {
+            assert!(proofs.insert(*proof), "duplicate engine proof {proof}");
+            assert!(
+                proof.starts_with("proof_v16_")
+                    || proof.starts_with("contract_check_")
+                    || proof.starts_with("closure_"),
+                "unclassified close proof {proof}",
+            );
+        }
+        for (path, witness) in row.public_witnesses {
+            assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            let source = source_cache.entry(path).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path))
+                    .unwrap_or_else(|error| panic!("read {path}: {error}"))
+            });
+            assert!(
+                inv075_source_defines_function(source, witness),
+                "close class '{}' lacks executable witness {path}#{witness}",
+                row.class,
+            );
+        }
+    }
+    assert_eq!(classes.len(), 5, "exclusive close class roster drift");
+    assert_eq!(proofs.len(), 14, "exclusive close proof roster drift");
+    assert_eq!(witnesses.len(), 12, "exclusive close witness roster drift");
+
+    let charter = include_str!("../../../INVARIANTS.md");
+    assert!(charter.contains("### INV-075 - Exclusive close ownership and episode integrity"));
+    assert!(charter.contains("A contender for an occupied domain\nrejects before mutation"));
+    assert!(!charter.contains("Close priority is a strict total order"));
+    let production = include_str!("../../../src/v16_program.rs");
+    assert!(
+        !production.contains("ClosePriority"),
+        "a priority API requires a new ownership model and proof roster",
     );
 }

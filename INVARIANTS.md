@@ -1,9 +1,9 @@
 # Percolator Whole-Route Security Invariants and Verification Plan
 
-**Target:** Percolator risk engine v16.8.0 and the deployed `percolator-prog` wrapper
+**Target:** Percolator risk engine v16.9.1 and the deployed `percolator-prog` wrapper
 **Purpose:** Normative test and proof charter for public instructions, retained signed intents,
 stateful fuzzing, model checking, Kani/Lean proofs, and SVM integration tests
-**Status:** Verification plan. It complements rather than replaces the v16.8.0 source-of-truth
+**Status:** Verification plan. It complements rather than replaces the v16.9.1 source-of-truth
 specification.
 
 This document is not a certification claim. The executable coverage index is
@@ -385,7 +385,7 @@ versions, and upgrade migration boundaries.
 observations, or discovery hints only. Callers cannot directly choose admission/funding thresholds,
 future slots, lifecycle transitions, B chunk sizes, claim-bound membership or formulas, backing
 freshness, source-credit rates, lien interpretation, support/insurance allocation, residual
-attribution, lock/preemption priority, recovery prices, recovery transfer bounds, or cross-instance
+attribution, close ownership/serialization, recovery prices, recovery transfer bounds, or cross-instance
 netting. Every such value is derived from authenticated state and canonical configuration.
 
 **Required tests.** Fuzz every scalar and account supplied by the caller, attempt to substitute each
@@ -579,14 +579,14 @@ gross_loss_at_close_start
 
 No atom appears in two categories and no category is silently dropped.
 
-For the deployed v16.8 ledger, `drift_consumed` is the adverse-drift term and
+For the deployed v16.9.1 ledger, `drift_consumed` is the reserved adverse-drift term and
 `support_consumed` is the realizable value payment. `junior_face_burned` is claim-face metadata,
 not an additional payment, and must not be added to the value partition. Any abstract category
 folded into a deployed field must have one documented, disjoint mapping; an absent category is not
 implicitly proven nonzero or independently attributable.
 
-**Required tests.** Independently recompute the equality after every continuation, preemption,
-cancel attempt, recovery, and finalization.
+**Required tests.** Independently recompute the equality after every continuation, competing-close
+rejection, cancel attempt, recovery, and finalization.
 **Verification:** P, F
 
 ### INV-038 - Rounding and ratio conservation
@@ -1042,14 +1042,19 @@ maintained global summary, not the state of the last touched asset.
 domains remain usable except where a documented complete global invariant requires a lock.
 **Verification:** P, F, I
 
-### INV-075 - Close priority, ownership, and episode integrity
+### INV-075 - Exclusive close ownership and episode integrity
 
-**Statement.** Close priority is a strict total order; preemption cannot double-book value or create
-equal-priority livelock. `close_id`, market/portfolio generation, drift anchor, gross loss, and
-maximum close slot remain immutable throughout the episode.
+**Statement.** Close ownership is deterministic and exclusive: at most one active close may hold a
+domain and at most one active close may belong to an account. A contender for an occupied domain
+rejects before mutation; each close holds only one domain, so hold-and-wait cycles are impossible.
+`close_id` is strictly monotonic per account, while market/portfolio generation, drift anchor,
+gross loss, and maximum close slot remain immutable throughout the episode. An expired close routes
+to Recovery instead of retaining its domain. This is the v16.9.1 exclusive-serialization model; it
+supersedes the earlier unimplemented priority/preemption proposal.
 
-**Required tests.** Competing closers, equal inputs, preemption/restart, stale continuations,
-cure-and-cancel, and owner deposit interleavings.
+**Required tests.** Competing closers in both landing orders, same-domain exclusion, different-domain
+coexistence, exact rejected-contender rollback, stale continuations, expiry-to-Recovery,
+cure-and-cancel, canceled/finalized replay, and owner deposit interleavings.
 **Verification:** P, F, I, R
 
 ### INV-076 - Close drift, residual durability, and finalization atomicity
@@ -1059,8 +1064,8 @@ reserve or recovery. Basis, OI, PnL, and side weight are not freed until residua
 booked/backed/assigned. Quantity ADL, exposure clear, and ledger advancement are atomic or protected
 by a nonpreemptible finalization barrier.
 
-**Required tests.** Inject failure at every close phase, advance price/funding, preempt, restart, and
-verify no double booking or orphan exposure.
+**Required tests.** Inject failure at every close phase, advance price/funding, submit competing
+close attempts, restart, and verify no double booking or orphan exposure.
 **Verification:** P, F, I
 
 ### INV-077 - Bounded work and maximum-shape compute
@@ -1246,7 +1251,7 @@ Prioritize proofs over the actual public state structs for:
 7. backing expiry followed by close or claim;
 8. insurance withdrawal through every route;
 9. resolve, receipt creation, top-up, and claim close;
-10. bankrupt close continuation, preemption, recovery, and finalization;
+10. bankrupt close continuation, exclusive contention, recovery, and finalization;
 11. asset retirement and slot reuse;
 12. portfolio close and same-pubkey recreation.
 
@@ -1275,7 +1280,7 @@ The fuzzer should generate long sequences containing:
 - partial liquidation, ADL, cross-zero, rebalance, and unilateral reduction;
 - backing add, consume, release, impairment, and exact expiry boundaries;
 - insurance reservation, spend, impairment, and every withdrawal route;
-- close start, preemption, continuation, cure-and-cancel, and fault injection;
+- close start, exclusive contention, continuation, cure-and-cancel, and fault injection;
 - reset, recovery, resolve, exact receipts, top-ups, claims, forfeits, retirement, and `CloseSlab`;
 - maximum N, bucket count, domain count, and hint count.
 
@@ -1301,7 +1306,7 @@ old asset               vs retire/reuse same asset_index
 position episode e      vs close/reopen episode e+1
 expiry - 1              vs expiry vs expiry + 1
 raw price 0             vs 1 vs MAX
-normal close            vs preempted/restarted close
+normal close            vs contended/restarted close
 one withdrawal route    vs all alternate routes
 fast certificate        vs full recomputation
 proof U256              vs deployed U256 vs bigint oracle
@@ -1367,7 +1372,7 @@ considered mature:
 27. `proof_and_deployed_u256_match_bigint_on_boundary_partition`
 28. `maximum_supported_state_keeps_every_required_exit_below_cu_limit`
 29. `stale_or_adversarial_hints_cannot_prevent_canonical_progress`
-30. `close_preemption_restart_cannot_double_book_residual_or_free_exposure_early`
+30. `close_contention_restart_cannot_double_book_residual_or_free_exposure_early`
 
 ---
 
