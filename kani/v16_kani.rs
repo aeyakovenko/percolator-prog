@@ -31,6 +31,9 @@ mod inv_009_partial_fill_and_retry_accounting;
 #[path = "../tests/invariants/kani/inv_010_out_of_order_safety.rs"]
 mod inv_010_out_of_order_safety;
 
+#[path = "../tests/invariants/kani/inv_011_signed_aggregate_economic_bounds.rs"]
+mod inv_011_signed_aggregate_economic_bounds;
+
 #[path = "../tests/invariants/kani/inv_013_destructive_consent_scope.rs"]
 mod inv_013_destructive_consent_scope;
 

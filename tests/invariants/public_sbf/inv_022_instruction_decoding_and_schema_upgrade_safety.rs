@@ -123,6 +123,8 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             account_b_portfolio_id: 2,
             account_b_position_epoch: 0,
             account_b_matcher_sequence: 3,
+            max_slippage_atoms: u128::MAX,
+            max_fee_atoms: u128::MAX,
             legs: vec![batch_cpi_leg(0)],
         },
         ProgInstruction::SetMatcherConfig {
@@ -546,6 +548,8 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
         account_b_portfolio_id: 3,
         account_b_position_epoch: 4,
         account_b_matcher_sequence: 5,
+        max_slippage_atoms: u128::MAX,
+        max_fee_atoms: u128::MAX,
         legs: vec![batch_cpi_leg(0)],
     }
     .encode();
@@ -711,6 +715,8 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
             account_b_portfolio_id: 2,
             account_b_position_epoch: 0,
             account_b_matcher_sequence: 3,
+            max_slippage_atoms: u128::MAX,
+            max_fee_atoms: u128::MAX,
             legs: vec![],
         },
     );
@@ -732,6 +738,8 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
             account_b_portfolio_id: 2,
             account_b_position_epoch: 0,
             account_b_matcher_sequence: 3,
+            max_slippage_atoms: u128::MAX,
+            max_fee_atoms: u128::MAX,
             legs: (0..MAX_BATCH_LEGS).map(batch_cpi_leg).collect(),
         },
     );
@@ -778,6 +786,8 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
         account_b_portfolio_id: 2,
         account_b_position_epoch: 0,
         account_b_matcher_sequence: 3,
+        max_slippage_atoms: u128::MAX,
+        max_fee_atoms: u128::MAX,
         legs: (0..MAX_BATCH_LEGS).map(batch_cpi_leg).collect(),
     }
     .encode();

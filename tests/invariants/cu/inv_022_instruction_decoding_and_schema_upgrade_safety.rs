@@ -467,6 +467,8 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             account_b_portfolio_id: 2,
             account_b_position_epoch: 0,
             account_b_matcher_sequence: 3,
+            max_slippage_atoms: u128::MAX,
+            max_fee_atoms: u128::MAX,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 market_id: 1,

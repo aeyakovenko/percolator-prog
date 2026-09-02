@@ -1250,6 +1250,8 @@ fn v16_program_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() 
             account_b_portfolio_id: lp_portfolio_id,
             account_b_position_epoch: 0,
             account_b_matcher_sequence: lp_matcher_sequence,
+            max_slippage_atoms: u128::MAX,
+            max_fee_atoms: u128::MAX,
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,

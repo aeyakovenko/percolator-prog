@@ -14,6 +14,53 @@
 use super::*;
 
 #[test]
+fn v16_program_signed_aggregate_bound_composition_is_source_complete() {
+    assert_certified_engine_pin("INV-011 aggregate consent");
+    let production = include_str!("../../../src/v16_program.rs");
+    let batch_variant = production
+        .split_once("BatchTradeCpi {")
+        .and_then(|(_, tail)| tail.split_once("},").map(|(body, _)| body))
+        .expect("BatchTradeCpi wire variant");
+    for field in ["max_slippage_atoms: u128", "max_fee_atoms: u128"] {
+        assert!(
+            batch_variant.contains(field),
+            "missing signed field {field}"
+        );
+    }
+    let handler = production
+        .split_once("fn handle_batch_trade_cpi<'a>(")
+        .and_then(|(_, tail)| tail.split_once("fn handle_close_portfolio<'a>("))
+        .map(|(body, _)| body)
+        .expect("BatchTradeCpi handler");
+    for guard in [
+        "policy_v16::adverse_trade_slippage_atoms(",
+        "policy_v16::accumulate_with_cap(",
+        "Some(max_fee_atoms)",
+    ] {
+        assert!(handler.contains(guard), "missing aggregate guard {guard}");
+    }
+    let executor = production
+        .split_once("fn handle_batch_execute_zero_copy<'a>(")
+        .and_then(|(_, tail)| tail.split_once("fn handle_trade_nocpi<'a>("))
+        .map(|(body, _)| body)
+        .expect("shared batch executor");
+    assert!(executor.contains("outcome.fee_a > cap"));
+    assert!(
+        include_str!("inv_011_signed_aggregate_economic_bounds.rs").contains(
+            "fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically("
+        )
+    );
+    let decoder_proofs =
+        include_str!("../kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs");
+    assert!(decoder_proofs.contains("fn kani_v16_batch_cpi_preserves_aggregate_slippage_cap("));
+    assert!(decoder_proofs.contains("fn kani_v16_batch_cpi_preserves_aggregate_fee_cap("));
+    let aggregate_proofs = include_str!("../kani/inv_011_signed_aggregate_economic_bounds.rs");
+    assert!(aggregate_proofs.contains("fn kani_v16_adverse_slippage_direction_is_exact("));
+    assert!(aggregate_proofs
+        .contains("fn kani_v16_aggregate_slippage_accumulator_is_exact_and_fail_closed("));
+}
+
+#[test]
 fn v16_program_tradecpi_limit_price_enforced() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
@@ -205,6 +252,142 @@ fn v16_program_batch_cpi_per_leg_limit_aborts_whole_batch() {
         has_active_leg_for_asset(&taker_after, 0) && has_active_leg_for_asset(&taker_after, 1),
         "both legs filled when every signed leg bound is satisfied",
     );
+}
+
+#[test]
+fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically() {
+    const BASE_SPREAD_BPS: u32 = 500;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.update_trade_fee_policy_with_cu(100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 10_000_000);
+    env.deposit(&lp, lp_account, 10_000_000);
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &lp,
+        lp_account,
+        BASE_SPREAD_BPS,
+        BASE_SPREAD_BPS,
+    );
+
+    let size_q = (5 * POS_SCALE) as i128;
+    let prices = {
+        let (_, group) = env.market_state();
+        [
+            group.assets[0].effective_price,
+            group.assets[1].effective_price,
+        ]
+    };
+    let buy_price =
+        u64::try_from(u128::from(prices[0]) * (10_000 + u128::from(BASE_SPREAD_BPS)) / 10_000)
+            .unwrap();
+    let sell_price =
+        u64::try_from(u128::from(prices[1]) * (10_000 - u128::from(BASE_SPREAD_BPS)) / 10_000)
+            .unwrap();
+    let expected_slippage =
+        percolator_prog::policy_v16::adverse_trade_slippage_atoms(size_q, buy_price, prices[0])
+            .unwrap()
+            .checked_add(
+                percolator_prog::policy_v16::adverse_trade_slippage_atoms(
+                    -size_q, sell_price, prices[1],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    assert!(expected_slippage > 0);
+
+    let asset_market_ids = [env.asset_market_id(0), env.asset_market_id(1)];
+    let market = env.market;
+    let taker_pubkey = taker.pubkey();
+    let legs = move || {
+        vec![
+            BatchTradeCpiLeg {
+                asset_index: 0,
+                market_id: asset_market_ids[0],
+                size_q,
+                fee_bps: 100,
+                limit_price: u64::MAX,
+            },
+            BatchTradeCpiLeg {
+                asset_index: 1,
+                market_id: asset_market_ids[1],
+                size_q: -size_q,
+                fee_bps: 100,
+                limit_price: 1,
+            },
+        ]
+    };
+    let metas = move || {
+        vec![
+            AccountMeta::new(taker_pubkey, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+    let snapshot = |env: &V16CuEnv| {
+        (
+            env.svm.get_account(&env.market).unwrap(),
+            env.svm.get_account(&taker_account).unwrap(),
+            env.svm.get_account(&lp_account).unwrap(),
+            env.svm.get_account(&ctx).unwrap(),
+        )
+    };
+
+    let before = snapshot(&env);
+    env.svm.expire_blockhash();
+    let slippage_rejected = env.send(
+        env.batch_trade_cpi_ix_with_caps(
+            taker_account,
+            lp_account,
+            legs(),
+            expected_slippage - 1,
+            u128::MAX,
+        ),
+        metas(),
+        &[&taker],
+    );
+    assert!(slippage_rejected.is_err());
+    assert_eq!(
+        snapshot(&env),
+        before,
+        "slippage cap must roll back matcher CPI"
+    );
+
+    env.svm.expire_blockhash();
+    let fee_rejected = env.send(
+        env.batch_trade_cpi_ix_with_caps(taker_account, lp_account, legs(), expected_slippage, 0),
+        metas(),
+        &[&taker],
+    );
+    assert!(fee_rejected.is_err());
+    assert_eq!(snapshot(&env), before, "fee cap must roll back matcher CPI");
+
+    env.svm.expire_blockhash();
+    env.send(
+        env.batch_trade_cpi_ix_with_caps(
+            taker_account,
+            lp_account,
+            legs(),
+            expected_slippage,
+            u128::MAX,
+        ),
+        metas(),
+        &[&taker],
+    )
+    .expect("exact aggregate slippage boundary remains live");
+    let taker_after = env.portfolio_state(taker_account);
+    assert!(has_active_leg_for_asset(&taker_after, 0));
+    assert!(has_active_leg_for_asset(&taker_after, 1));
 }
 
 // security.md sweep — §6.2 profit conversion (#33/#35): ConvertReleasedPnl moves source-backed

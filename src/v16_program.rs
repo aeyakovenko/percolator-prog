@@ -2973,6 +2973,11 @@ pub mod ix {
             account_b_portfolio_id: u64,
             account_b_position_epoch: u64,
             account_b_matcher_sequence: u64,
+            /// Maximum aggregate adverse execution-price movement from the authenticated
+            /// landing-state prices, measured in quote atoms across all legs.
+            max_slippage_atoms: u128,
+            /// Maximum aggregate engine fee charged to the signing taker across all legs.
+            max_fee_atoms: u128,
             legs: Vec<BatchTradeCpiLeg>,
         },
         SetMatcherConfig {
@@ -3368,6 +3373,8 @@ pub mod ix {
                 account_b_portfolio_id: read_u64(rest)?,
                 account_b_position_epoch: read_u64(rest)?,
                 account_b_matcher_sequence: read_u64(rest)?,
+                max_slippage_atoms: read_u128(rest)?,
+                max_fee_atoms: read_u128(rest)?,
                 legs,
             })
         }
@@ -3895,6 +3902,8 @@ pub mod ix {
                     account_b_portfolio_id,
                     account_b_position_epoch,
                     account_b_matcher_sequence,
+                    max_slippage_atoms,
+                    max_fee_atoms,
                     ref legs,
                 } => {
                     out.push(67);
@@ -3911,6 +3920,8 @@ pub mod ix {
                     push_u64(&mut out, account_b_portfolio_id);
                     push_u64(&mut out, account_b_position_epoch);
                     push_u64(&mut out, account_b_matcher_sequence);
+                    push_u128(&mut out, max_slippage_atoms);
+                    push_u128(&mut out, max_fee_atoms);
                 }
                 Self::SetMatcherConfig {
                     portfolio_id,
@@ -5519,6 +5530,41 @@ pub mod policy_v16 {
         mul_div_u128_by_u64(notional, fee_bps, percolator::MAX_MARGIN_BPS, true)
     }
 
+    /// Quote-atom loss from executing away from the authenticated landing-state price in the
+    /// taker's adverse direction. A favorable execution contributes zero and therefore cannot
+    /// offset another leg's adverse movement.
+    pub fn adverse_trade_price_delta(
+        size_q: i128,
+        exec_price: u64,
+        authenticated_price: u64,
+    ) -> Option<u64> {
+        if size_q == i128::MIN {
+            return None;
+        }
+        Some(if size_q > 0 {
+            exec_price.saturating_sub(authenticated_price)
+        } else if size_q < 0 {
+            authenticated_price.saturating_sub(exec_price)
+        } else {
+            0
+        })
+    }
+
+    pub fn adverse_trade_slippage_atoms(
+        size_q: i128,
+        exec_price: u64,
+        authenticated_price: u64,
+    ) -> Option<u128> {
+        let adverse_price_delta =
+            adverse_trade_price_delta(size_q, exec_price, authenticated_price)?;
+        risk_notional_ceil(size_q.unsigned_abs(), adverse_price_delta)
+    }
+
+    pub fn accumulate_with_cap(total: u128, amount: u128, cap: u128) -> Option<u128> {
+        let next = total.checked_add(amount)?;
+        (next <= cap).then_some(next)
+    }
+
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
             return Some(0);
@@ -6998,6 +7044,8 @@ pub mod processor {
                 account_b_portfolio_id,
                 account_b_position_epoch,
                 account_b_matcher_sequence,
+                max_slippage_atoms,
+                max_fee_atoms,
                 legs,
             } => handle_batch_trade_cpi(
                 program_id,
@@ -7007,6 +7055,8 @@ pub mod processor {
                 account_b_portfolio_id,
                 account_b_position_epoch,
                 account_b_matcher_sequence,
+                max_slippage_atoms,
+                max_fee_atoms,
                 &legs,
             ),
             Instruction::SetMatcherConfig {
@@ -8183,6 +8233,7 @@ pub mod processor {
             legs,
             false,
             max_market_slots,
+            None,
         )
     }
 
@@ -8201,6 +8252,7 @@ pub mod processor {
         legs: &[ix::BatchTradeLeg],
         account_b_matcher_synchronized: bool,
         max_market_slots: usize,
+        max_account_a_fee_atoms: Option<u128>,
     ) -> ProgramResult {
         if legs.is_empty() {
             return Err(PercolatorError::EngineNonProgress.into());
@@ -8382,6 +8434,9 @@ pub mod processor {
                     &requests,
                 )
                 .map_err(map_v16_error)?;
+            if max_account_a_fee_atoms.is_some_and(|cap| outcome.fee_a > cap) {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
             ensure_new_counterparty_backed_liens_fresh_for_trade_view(
                 &group,
                 authenticated_market_slot_or_fallback_view(&group),
@@ -9422,6 +9477,8 @@ pub mod processor {
         account_b_portfolio_id: u64,
         account_b_position_epoch: u64,
         account_b_matcher_sequence: u64,
+        max_slippage_atoms: u128,
+        max_fee_atoms: u128,
         legs: &[ix::BatchTradeCpiLeg],
     ) -> ProgramResult {
         if legs.is_empty() || legs.len() > MATCHER_BATCH_MAX_LEGS {
@@ -9660,6 +9717,7 @@ pub mod processor {
         }
 
         let mut exec_legs: Vec<ix::BatchTradeLeg> = Vec::with_capacity(legs.len());
+        let mut aggregate_slippage_atoms = 0u128;
         for (i, leg) in legs.iter().enumerate() {
             let chunk = &ret_data[i * matcher_abi::MATCHER_RETURN_BYTES
                 ..(i + 1) * matcher_abi::MATCHER_RETURN_BYTES];
@@ -9682,6 +9740,18 @@ pub mod processor {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
             }
+            let leg_slippage = policy_v16::adverse_trade_slippage_atoms(
+                ret.exec_size,
+                ret.exec_price_e6,
+                oracle_prices[i],
+            )
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            aggregate_slippage_atoms = policy_v16::accumulate_with_cap(
+                aggregate_slippage_atoms,
+                leg_slippage,
+                max_slippage_atoms,
+            )
+            .ok_or(PercolatorError::InvalidInstruction)?;
             exec_legs.push(ix::BatchTradeLeg {
                 asset_index: leg.asset_index,
                 market_id: leg.market_id,
@@ -9706,6 +9776,7 @@ pub mod processor {
             &exec_legs,
             true,
             max_market_slots,
+            Some(max_fee_atoms),
         )
     }
 

@@ -839,6 +839,8 @@ struct CpiTradeWireFields {
     fee_bps: u64,
     limit_price: u64,
     backing_fee_cap_bps: u16,
+    max_slippage_atoms: u128,
+    max_fee_atoms: u128,
 }
 
 fn canonical_cpi_trade_fields() -> CpiTradeWireFields {
@@ -854,6 +856,8 @@ fn canonical_cpi_trade_fields() -> CpiTradeWireFields {
         fee_bps: 0x8888_8888_8888_8888,
         limit_price: 0x9999_9999_9999_9999,
         backing_fee_cap_bps: 0xaaaa,
+        max_slippage_atoms: 0xbbbb_bbbb_bbbb_bbbb_bbbb_bbbb_bbbb_bbbb,
+        max_fee_atoms: 0xcccc_cccc_cccc_cccc_cccc_cccc_cccc_cccc,
     }
 }
 
@@ -905,7 +909,7 @@ fn assert_single_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
 }
 
 fn assert_batch_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
-    let mut batch = [0u8; 84];
+    let mut batch = [0u8; 116];
     batch[0] = 67;
     batch[1] = 1;
     batch[2..4].copy_from_slice(&fields.asset_index.to_le_bytes());
@@ -918,6 +922,8 @@ fn assert_batch_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
     batch[60..68].copy_from_slice(&fields.account_b_portfolio_id.to_le_bytes());
     batch[68..76].copy_from_slice(&fields.account_b_position_epoch.to_le_bytes());
     batch[76..84].copy_from_slice(&fields.account_b_matcher_sequence.to_le_bytes());
+    batch[84..100].copy_from_slice(&fields.max_slippage_atoms.to_le_bytes());
+    batch[100..116].copy_from_slice(&fields.max_fee_atoms.to_le_bytes());
     match Instruction::decode_body_for_proof(67, &batch[1..]).unwrap() {
         Instruction::BatchTradeCpi {
             account_a_portfolio_id,
@@ -925,6 +931,8 @@ fn assert_batch_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
             account_b_portfolio_id,
             account_b_position_epoch,
             account_b_matcher_sequence,
+            max_slippage_atoms,
+            max_fee_atoms,
             legs,
         } => {
             assert_eq!(account_a_portfolio_id, fields.account_a_portfolio_id);
@@ -935,6 +943,8 @@ fn assert_batch_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
                 account_b_matcher_sequence,
                 fields.account_b_matcher_sequence
             );
+            assert_eq!(max_slippage_atoms, fields.max_slippage_atoms);
+            assert_eq!(max_fee_atoms, fields.max_fee_atoms);
             assert_eq!(legs.len(), 1);
             assert_eq!(legs[0].asset_index, fields.asset_index);
             assert_eq!(legs[0].market_id, fields.market_id);
@@ -944,6 +954,20 @@ fn assert_batch_cpi_trade_decoder_preserves(fields: CpiTradeWireFields) {
         }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_batch_cpi_preserves_aggregate_slippage_cap() {
+    let mut fields = canonical_cpi_trade_fields();
+    fields.max_slippage_atoms = kani::any();
+    assert_batch_cpi_trade_decoder_preserves(fields);
+}
+
+#[kani::proof]
+fn kani_v16_batch_cpi_preserves_aggregate_fee_cap() {
+    let mut fields = canonical_cpi_trade_fields();
+    fields.max_fee_atoms = kani::any();
+    assert_batch_cpi_trade_decoder_preserves(fields);
 }
 
 macro_rules! prove_nocpi_trade_field {

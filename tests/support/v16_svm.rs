@@ -2003,6 +2003,8 @@ impl V16Svm {
                 account_b_portfolio_id,
                 account_b_position_epoch,
                 account_b_matcher_sequence,
+                max_slippage_atoms: u128::MAX,
+                max_fee_atoms: u128::MAX,
                 legs,
             },
             vec![
@@ -4530,6 +4532,8 @@ impl V16Svm {
                 account_b_portfolio_id,
                 account_b_position_epoch,
                 account_b_matcher_sequence,
+                max_slippage_atoms: u128::MAX,
+                max_fee_atoms: u128::MAX,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index,
                     market_id,

@@ -473,6 +473,8 @@ fn v16_program_batch_decode_oversized_vectors_reject_before_allocation() {
             account_b_portfolio_id: env.portfolio_id(maker_account),
             account_b_position_epoch: 0,
             account_b_matcher_sequence: env.portfolio_matcher_sequence(maker_account),
+            max_slippage_atoms: u128::MAX,
+            max_fee_atoms: u128::MAX,
             legs: cpi_legs,
         },
         vec![],

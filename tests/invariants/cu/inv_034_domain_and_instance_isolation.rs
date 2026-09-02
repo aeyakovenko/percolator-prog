@@ -3558,6 +3558,8 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 account_b_portfolio_id: pb_portfolio_id,
                 account_b_position_epoch: 0,
                 account_b_matcher_sequence: pb_matcher_sequence,
+                max_slippage_atoms: u128::MAX,
+                max_fee_atoms: u128::MAX,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
                     market_id: first_generation_market_id((0) as u16),
@@ -3732,6 +3734,8 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             account_b_portfolio_id: cpi_lp_account_portfolio_id,
             account_b_position_epoch: 0,
             account_b_matcher_sequence: cpi_lp_matcher_sequence,
+            max_slippage_atoms: u128::MAX,
+            max_fee_atoms: u128::MAX,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 market_id: first_generation_market_id((0) as u16),
@@ -3789,6 +3793,8 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             account_b_portfolio_id: cpi_lp_account_portfolio_id,
             account_b_position_epoch: cpi_lp_position_epoch,
             account_b_matcher_sequence: cpi_lp_matcher_sequence,
+            max_slippage_atoms: u128::MAX,
+            max_fee_atoms: u128::MAX,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 market_id: first_generation_market_id((0) as u16),

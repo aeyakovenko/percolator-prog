@@ -2040,12 +2040,25 @@ impl V16CuEnv {
         account_b: Pubkey,
         legs: Vec<BatchTradeCpiLeg>,
     ) -> ProgInstruction {
+        self.batch_trade_cpi_ix_with_caps(account_a, account_b, legs, u128::MAX, u128::MAX)
+    }
+
+    fn batch_trade_cpi_ix_with_caps(
+        &self,
+        account_a: Pubkey,
+        account_b: Pubkey,
+        legs: Vec<BatchTradeCpiLeg>,
+        max_slippage_atoms: u128,
+        max_fee_atoms: u128,
+    ) -> ProgInstruction {
         ProgInstruction::BatchTradeCpi {
             account_a_portfolio_id: self.portfolio_id(account_a),
             account_a_position_epoch: self.portfolio_position_epoch(account_a),
             account_b_portfolio_id: self.portfolio_id(account_b),
             account_b_position_epoch: self.portfolio_position_epoch(account_b),
             account_b_matcher_sequence: self.portfolio_matcher_sequence(account_b),
+            max_slippage_atoms,
+            max_fee_atoms,
             legs,
         }
     }
@@ -5689,6 +5702,8 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
                 account_b_portfolio_id,
                 account_b_position_epoch: 0,
                 account_b_matcher_sequence,
+                max_slippage_atoms: u128::MAX,
+                max_fee_atoms: u128::MAX,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: ASSET,
                     market_id: old_market_id,
@@ -5835,6 +5850,8 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
                 account_b_portfolio_id,
                 account_b_position_epoch: 0,
                 account_b_matcher_sequence,
+                max_slippage_atoms: u128::MAX,
+                max_fee_atoms: u128::MAX,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: ASSET,
                     market_id: new_market_id,
