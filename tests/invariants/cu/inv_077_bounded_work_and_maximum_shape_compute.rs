@@ -1229,6 +1229,31 @@ struct CombinedMaxEqualRiskOutcome {
     terminal_vault: u64,
 }
 
+fn reference_effective_abs_after_max_shape_reduction(
+    group: &MarketGroupV16,
+    leg: percolator::PortfolioLegV16,
+) -> u128 {
+    let asset = group.assets[leg.asset_index as usize];
+    let (current_epoch, side_mode) = match leg.side {
+        SideV16::Long => (asset.epoch_long, asset.mode_long),
+        SideV16::Short => (asset.epoch_short, asset.mode_short),
+    };
+    if leg.epoch_snap == current_epoch {
+        return reference_current_epoch_effective_abs(group, leg);
+    }
+    assert_eq!(
+        side_mode,
+        SideModeV16::ResetPending,
+        "only a prior-reset obligation may retain raw basis after effective OI reaches zero",
+    );
+    assert_eq!(
+        leg.epoch_snap.checked_add(1),
+        Some(current_epoch),
+        "retained obligation must belong to the immediately prior side epoch",
+    );
+    0
+}
+
 fn run_public_14_leg_28_source_equal_risk_liquidation(
     reverse_leg_order: bool,
     reverse_observation_order: bool,
@@ -1354,6 +1379,7 @@ fn run_public_14_leg_28_source_equal_risk_liquidation(
     let mut max_crank_cu = 0;
     for step in 0..(usize::from(ACTIVE_CAP) * 2 + 4) {
         let before_group = env.market_state().1;
+        let lp_before_state = env.portfolio_state(lp);
         let market_before = env.svm.get_account(&env.market).unwrap();
         let account_before = env.svm.get_account(&lp).unwrap();
         env.svm.expire_blockhash();
@@ -1397,8 +1423,39 @@ fn run_public_14_leg_28_source_equal_risk_liquidation(
                 1,
                 "one bounded liquidation continuation may reduce only one equal-risk leg"
             );
+            let asset_index = changed_assets[0];
+            let before_leg = active_leg_for_asset(&lp_before_state, asset_index);
+            let effective_before = reference_current_epoch_effective_abs(&before_group, before_leg);
+            let lp_after_state = env.portfolio_state(lp);
+            let effective_after = lp_after_state
+                .legs
+                .iter()
+                .copied()
+                .filter_map(|leg| leg.try_to_runtime().ok())
+                .find(|leg| leg.active && leg.asset_index as usize == asset_index)
+                .map(|leg| reference_effective_abs_after_max_shape_reduction(&after_group, leg))
+                .unwrap_or(0);
+            let removed_long = before_group.assets[asset_index]
+                .oi_eff_long_q
+                .checked_sub(after_group.assets[asset_index].oi_eff_long_q)
+                .expect("liquidation cannot increase long effective OI");
+            let removed_short = before_group.assets[asset_index]
+                .oi_eff_short_q
+                .checked_sub(after_group.assets[asset_index].oi_eff_short_q)
+                .expect("liquidation cannot increase short effective OI");
+            assert_eq!(
+                removed_long, removed_short,
+                "maximum-shape liquidation must remove identical effective OI from both sides"
+            );
+            assert_eq!(
+                removed_short,
+                effective_before
+                    .checked_sub(effective_after)
+                    .expect("liquidation cannot increase selected-leg effective quantity"),
+                "maximum-shape liquidation must use the canonical ADL-effective quantity"
+            );
             liquidation_steps += 1;
-            first_selected_asset.get_or_insert(changed_assets[0]);
+            first_selected_asset.get_or_insert(asset_index);
         } else {
             non_liquidation_progress_steps += 1;
         }
@@ -1435,6 +1492,11 @@ fn run_public_14_leg_28_source_equal_risk_liquidation(
         else {
             break;
         };
+        let asset_index = leg.asset_index as usize;
+        let before_group = env.market_state().1;
+        let effective_before = reference_current_epoch_effective_abs(&before_group, leg);
+        let oi_long_before = before_group.assets[asset_index].oi_eff_long_q;
+        let oi_short_before = before_group.assets[asset_index].oi_eff_short_q;
         owner_reduce_steps += 1;
         assert!(owner_reduce_steps <= usize::from(ACTIVE_CAP));
         env.svm.expire_blockhash();
@@ -1450,6 +1512,21 @@ fn run_public_14_leg_28_source_equal_risk_liquidation(
             1_375_000,
         );
         max_owner_reduce_cu = max_owner_reduce_cu.max(cu);
+        let after_group = env.market_state().1;
+        assert_eq!(
+            oi_long_before - after_group.assets[asset_index].oi_eff_long_q,
+            effective_before,
+            "maximum-shape raw-basis request must remove only canonical long effective OI"
+        );
+        assert_eq!(
+            oi_short_before - after_group.assets[asset_index].oi_eff_short_q,
+            effective_before,
+            "maximum-shape raw-basis request must remove only canonical short effective OI"
+        );
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(lp), asset_index),
+            "a full effective owner reduction must detach the retained raw-basis leg"
+        );
     }
     assert!(percolator::active_bitmap_is_empty(active_bitmap(
         &env.portfolio_state(lp)

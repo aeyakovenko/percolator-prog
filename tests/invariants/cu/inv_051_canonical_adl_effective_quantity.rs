@@ -19,9 +19,14 @@
 //! Secondary coverage: INV-073, because each matrix also proves that the funded owner has a
 //! bounded public cleanup and capital-exit sequence after pooled OI reaches zero.
 //!
-//! Guarantee boundary: this closes the exact-zero pooled-OI boundary for crossed trades,
-//! unilateral rebalance, and one public liquidation schedule. It does not claim exhaustive
-//! reachability over every ADL schedule.
+//! Current-surface closure composes these directed routes with INV-048's source-complete roster of
+//! every wrapper position mutation and the pinned engine's canonical attach/resize/clear,
+//! effective-quantity inverse, and OI contracts. INV-077 adds four maximum-shape order worlds with
+//! fourteen active legs, twenty-eight source domains, eleven authenticated liquidation episodes,
+//! and four raw-basis owner reductions; every episode independently matches canonical effective
+//! quantity and equal two-sided OI removal. Transfer/import and caller-sized liquidation are absent
+//! from the public wrapper. A new position transition, wrapper OI writer, engine pin, or supported
+//! shape reopens this closure.
 
 use super::*;
 
