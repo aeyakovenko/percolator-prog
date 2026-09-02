@@ -4,11 +4,13 @@
 //! inert history and enter terminal/restarted states, while real obligations
 //! such as provider receivables cannot be erased by cleanup.
 //!
-//! Evidence in this file (I/C): all tests use deployed LiteSVM public wrapper
-//! instructions. They cover spent-only insurance history during asset restart,
-//! provider-receivable rejection with exact rollback, retired-slot policy cleanup
-//! so unrelated batch trading remains live, and marketauth terminal cleanup of an
-//! abandoned empty portfolio so CloseSlab can finish.
+//! Evidence in this file (I/C): deployed LiteSVM public wrapper instructions cover
+//! spent-only insurance history during asset restart, provider-receivable rejection with exact
+//! rollback, retired-slot policy cleanup so unrelated batch trading remains live, and marketauth
+//! terminal cleanup of an abandoned empty portfolio so CloseSlab can finish. The fixed-pin
+//! terminal-blocker census composes those routes with the public expiry, reset-history,
+//! pending-obligation, receipt, reservation, and zero-residue owners. It also source-locks the
+//! wrapper to call the engine's proven retirement transition before local canonicalization.
 
 use super::*;
 
@@ -599,4 +601,200 @@ fn v16_attack_permissionless_append_cannot_freeze_flat_withdrawal() {
         "permissionless create fee insurance remains untouched"
     );
     assert_domain_budget_remaining_total_consistent(&after_withdraw, "post-append flat withdraw");
+}
+
+#[derive(Clone, Copy)]
+struct Inv069TerminalBlockerClass {
+    class: &'static str,
+    engine_proofs: &'static [&'static str],
+    public_witnesses: &'static [&'static str],
+}
+
+#[test]
+fn v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper_cleanup() {
+    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const CLASSES: &[Inv069TerminalBlockerClass] = &[
+        Inv069TerminalBlockerClass {
+            class: "live OI, stored legs, stale cohorts, side modes, and prior epochs",
+            engine_proofs: &[
+                "proof_v16_retire_nonempty_asset_rejects",
+                "proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped",
+            ],
+            public_witnesses: &[
+                "v16_program_unilateral_zero_oi_reset_route_side_matrix_finalizes_permissionlessly",
+            ],
+        },
+        Inv069TerminalBlockerClass {
+            class: "pending loss, B, social-loss, and source-spent history",
+            engine_proofs: &[
+                "proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped",
+                "proof_v16_terminal_restart_cannot_erase_provider_receivable",
+            ],
+            public_witnesses: &[
+                "v16_program_reset_carry_liquidation_matrix_preserves_progress",
+                "v16_program_flat_negative_final_leg_route_matrix_reaches_terminal_payout",
+            ],
+        },
+        Inv069TerminalBlockerClass {
+            class: "fresh and expired backing labels plus provider receivables",
+            engine_proofs: &[
+                "proof_v16_retire_live_provider_receivable_rejects_without_mutation",
+                "proof_v16_retire_normalizes_unreferenced_lapsed_backing",
+                "proof_v16_retirement_backing_normalization_never_erases_obligations",
+            ],
+            public_witnesses: &[
+                "v16_program_retirement_obligation_lattice_is_order_independent",
+                "v16_program_retire_normalizes_unreferenced_lapsed_backing",
+                "v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_progress",
+            ],
+        },
+        Inv069TerminalBlockerClass {
+            class: "insurance budgets, spent history, and live reservations",
+            engine_proofs: &[
+                "proof_v16_public_terminal_insurance_retirement_rejects_every_live_reservation_class",
+                "proof_v16_public_terminal_insurance_retirement_is_exact_and_fully_framed",
+            ],
+            public_witnesses: &[
+                "v16_program_retirement_obligation_lattice_is_order_independent",
+                "v16_program_recovery_resource_failure_lattice_preserves_public_exit",
+            ],
+        },
+        Inv069TerminalBlockerClass {
+            class: "resolved receipts, pending topups, materialized accounts, and slab residue",
+            engine_proofs: &[
+                "proof_v16_public_terminal_insurance_retirement_requires_resolved_ready_accounts",
+            ],
+            public_witnesses: &[
+                "v16_program_receipt_conflict_seeded_frontier_is_exact_and_terminal",
+                "v16_attack_marketauth_terminal_close_cannot_burn_pending_payout_topup",
+                "v16_program_recovery_force_close_reaches_zero_residue_and_close_slab",
+            ],
+        },
+        Inv069TerminalBlockerClass {
+            class: "retired wrapper profile policy and authority residue",
+            engine_proofs: &[
+                "proof_v16_canonical_retired_asset_slot_preserves_identity_and_clears_local_ledgers",
+            ],
+            public_witnesses: &[
+                "v16_program_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate",
+            ],
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-069 composes exact engine retirement proofs and must reopen on a pin change",
+    );
+
+    let witness_sources = [
+        include_str!("inv_061_deterministic_bounded_liquidation.rs"),
+        include_str!("inv_069_terminal_normalization_and_retirement.rs"),
+        include_str!("inv_070_zero_unattributed_terminal_residue_and_close_slab.rs"),
+        include_str!("inv_073_no_permanent_user_lock.rs"),
+        include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
+        include_str!("../stateful/inv_065_reset_recovery_and_retired_state_isolation.rs"),
+        include_str!("../stateful/inv_069_terminal_normalization_and_retirement.rs"),
+        include_str!("../stateful/inv_071_crank_progress.rs"),
+        include_str!("../stateful/inv_078_permissionless_recovery_coverage.rs"),
+        include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs"),
+        include_str!("inv_063_backing_expiry_normalization.rs"),
+    ];
+    let mut classes = std::collections::BTreeSet::new();
+    let mut proofs = std::collections::BTreeSet::new();
+    for row in CLASSES {
+        assert!(
+            classes.insert(row.class),
+            "duplicate terminal blocker class"
+        );
+        assert!(!row.engine_proofs.is_empty());
+        assert!(!row.public_witnesses.is_empty());
+        for proof in row.engine_proofs {
+            assert!(proofs.insert(*proof) || proofs.contains(proof));
+            assert!(proof.starts_with("proof_v16_"));
+        }
+        for witness in row.public_witnesses {
+            assert!(
+                witness_sources
+                    .iter()
+                    .any(|source| source.contains(&format!("fn {witness}"))),
+                "terminal blocker class '{}' lacks public witness {witness}",
+                row.class,
+            );
+        }
+    }
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    let canonicalizer = production
+        .split_once("fn canonicalize_retired_asset_slot_view")
+        .map(|(_, tail)| tail)
+        .and_then(|tail| tail.split_once("fn handle_restart_asset_oracle"))
+        .map(|(body, _)| body)
+        .expect("retired-slot canonicalizer exists");
+    for guard in [
+        "AssetLifecycleV16::Retired",
+        "asset.market_id == 0",
+        "asset.retired_slot == 0",
+        "insurance_domain_budget_long.get() != 0",
+        "insurance_domain_budget_short.get() != 0",
+        "insurance_domain_spent_long.get() != 0",
+        "insurance_domain_spent_short.get() != 0",
+        "pending_domain_loss_barrier_long.get() != 0",
+        "pending_domain_loss_barrier_short.get() != 0",
+        "backing_long.utilization_fee_earnings != 0",
+        "backing_short.utilization_fee_earnings != 0",
+    ] {
+        assert!(
+            canonicalizer.contains(guard),
+            "wrapper retired-slot cleanup lost blocker guard: {guard}",
+        );
+    }
+
+    let lifecycle_handler = production
+        .split_once("fn handle_update_asset_lifecycle")
+        .map(|(_, tail)| tail)
+        .and_then(|tail| tail.split_once("fn handle_finalize_reset_side"))
+        .map(|(body, _)| body)
+        .expect("asset lifecycle handler exists");
+    assert_eq!(
+        lifecycle_handler
+            .matches(".retire_empty_asset_not_atomic(")
+            .count(),
+        2,
+        "both first retirement and idempotent recanonicalization need engine validation",
+    );
+    assert_eq!(
+        lifecycle_handler
+            .matches("canonicalize_retired_asset_slot_view(")
+            .count(),
+        2,
+        "both retirement branches need wrapper-local canonicalization",
+    );
+    let mut tail = lifecycle_handler;
+    for branch in 0..2 {
+        let engine_offset = tail
+            .find(".retire_empty_asset_not_atomic(")
+            .unwrap_or_else(|| panic!("retirement branch {branch} lost engine validation"));
+        tail = &tail[engine_offset + 1..];
+        let canonical_offset = tail
+            .find("canonicalize_retired_asset_slot_view(")
+            .unwrap_or_else(|| panic!("retirement branch {branch} lost canonicalization"));
+        let next_engine_offset = tail.find(".retire_empty_asset_not_atomic(");
+        assert!(
+            next_engine_offset.is_none() || canonical_offset < next_engine_offset.unwrap(),
+            "branch {branch} canonicalized before the matching engine validation",
+        );
+        tail = &tail[canonical_offset + 1..];
+    }
+
+    let transition_census =
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    assert!(transition_census.contains(
+        "owner: \"handle_update_asset_lifecycle\", method: \"retire_empty_asset_not_atomic\""
+    ));
 }
