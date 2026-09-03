@@ -14,10 +14,11 @@
 //! bounded owner exit and permissionless terminal continuation while preserving exact loss
 //! attribution, without duplicating an expensive public lifecycle.
 //!
-//! The `Recovery`-to-`Resolved` order probe below is intentionally RED on the pinned engine. It
-//! reaches global Recovery through an unrelated expired close, then proves that resolving the
-//! retained winner before its debtor drops that winner's loss weight and transfers two SPL atoms
-//! from an independent winner. Its expected frame is the exact debtor-first allocation.
+//! The `Recovery`-to-`Resolved` order regression below reaches global Recovery through an unrelated
+//! expired close. It proves that resolving the retained winner before its debtor cannot drop that
+//! winner's loss weight or transfer two SPL atoms from an independent winner: both public landing
+//! orders must equal the exact debtor-first allocation. The same unchanged test is RED on the
+//! exact pre-fix SBF and GREEN on the fixed engine pin.
 
 use super::*;
 
