@@ -330,7 +330,9 @@ Authority fields are split by scope:
 - **`AssetOracleProfileV16.asset_admin`**: per-asset cold key that rotates that asset's scoped authorities
 - **`AssetOracleProfileV16.insurance_authority` / `insurance_operator` / `backing_bucket_authority` / `oracle_authority`**: per-asset operational authorities
 
-Matcher requests do not use a persisted market nonce. The wrapper invokes the matcher and requires the response to echo the request id, LP identity, asset index, oracle price, and requested size/sign constraints.
+Matcher requests do not encode a persisted market nonce. The LP's wrapper-owned capability record
+snapshots the engine's monotonic `next_market_id` frontier, while the wrapper requires each response
+to echo the request id, LP identity, asset index, oracle price, and requested size/sign constraints.
 
 ### Vault token account (market collateral)
 - SPL Token account holding collateral for this market
@@ -363,6 +365,12 @@ The signed instruction carries `portfolio_id` and `expected_sequence`. It succee
 current portfolio incarnation and current sequence, then increments the sequence exactly once.
 This prevents a retained enable from crossing a later revoke. Prior-layout portfolios with a
 portfolio ID but no sequence tail read sequence zero and grow atomically on their first mutation.
+The portfolio capability tail also snapshots the current engine `next_market_id` frontier. A grant
+authorizes only nonzero asset generations below that frontier. Existing generations remain usable
+when an unrelated asset is appended, while an appended, retired-slot replacement, or Recovery
+restart generation requires fresh LP consent without scanning portfolios. The LP can reauthorize
+the same matcher tuple after an asset-generation change; the delegate PDA and matcher context stay
+stable. Legacy capability records without the frontier tail fail closed until reauthorized.
 
 During `TradeCpi` / `BatchTradeCpi`, Percolator reads this LP-account config and requires the
 instruction's matcher program, matcher context, and matcher delegate PDA to match it byte-for-byte.

@@ -709,6 +709,9 @@ fn v16_program_all_wrapper_owned_persisted_structs_have_complete_field_rosters()
             "matcher_program: matcher_prog.key.to_bytes()",
             "matcher_context: matcher_ctx.key.to_bytes()",
             "matcher_delegate: matcher_delegate.key.to_bytes()",
+            "read_portfolio_matcher_asset_generation_frontier",
+            "write_portfolio_matcher_asset_generation_frontier",
+            "matcher_asset_generation_frontier_authorizes",
             "next_portfolio_position_control_for_matcher_sync",
         ],
     );
