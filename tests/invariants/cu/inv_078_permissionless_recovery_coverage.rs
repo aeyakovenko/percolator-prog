@@ -468,19 +468,14 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     }
     assert_eq!(
         env.token_amount(admin_recovery),
-        55,
-        "admin must recover asset-domain insurance and backing funds"
-    );
-    assert_eq!(env.token_amount(env.vault), 2_000_025);
-
-    env.top_up_insurance_from_admin_token_with_cu(admin_recovery, 10);
-    env.top_up_backing_bucket_from_admin_token_with_cu(admin_recovery, 0, 45, 20);
-    assert_eq!(
-        env.token_amount(admin_recovery),
         0,
-        "recovered funds should be re-deposited into market-0 buckets"
+        "shutdown cleanup must not pay provider-attributed reserves to marketauth"
     );
-    assert_eq!(env.token_amount(env.vault), 2_000_080);
+    assert_eq!(
+        env.token_amount(env.vault),
+        2_000_080,
+        "cleanup must reattribute reserves without moving custody"
+    );
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (_, recovered_group) = state::read_market(&market_data).unwrap();
     assert_eq!(recovered_group.insurance_domain_budget[2], 0);
@@ -493,11 +488,11 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
         recovered_group.source_backing_buckets[3].fresh_unliened_backing_num,
         0
     );
-    assert_eq!(recovered_group.insurance_domain_budget[0], 17);
-    assert_eq!(recovered_group.insurance_domain_budget[1], 18);
+    assert_eq!(recovered_group.insurance_domain_budget[0], 39);
+    assert_eq!(recovered_group.insurance_domain_budget[1], 41);
     assert_eq!(
         recovered_group.source_backing_buckets[0].fresh_unliened_backing_num,
-        45 * BOUND_SCALE
+        0
     );
 
     env.update_asset_lifecycle_as_admin_with_cu(
