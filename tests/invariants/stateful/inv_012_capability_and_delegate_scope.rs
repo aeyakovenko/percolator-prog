@@ -18,6 +18,11 @@
 //! conversion with retained consumers on a separate live asset.
 //! The keeper child preserves retained consumers through fee collection and
 //! healthy mark settlement, without owner reauthorization or position changes.
+//! The position-mutation regression retains a matcher enable across a
+//! signed out-of-matcher position round trip and carries any stale revival through
+//! honest mark settlement to exact attacker gain and independent LP loss. A
+//! request built after either invalidation still executes, excluding an
+//! always-rejecting fix.
 
 use crate::support::v16_svm::{
     MarketConfig, PublicTerminalClassification, PublicTerminalObservation, TxSuccess, V16Svm,

@@ -101,6 +101,7 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
     assert!(batch.contains("leg.market_id != *market_id"));
     assert!(config.contains("portfolio_id != current_portfolio_id"));
     assert!(config.contains("expected_sequence != current_sequence"));
+    assert!(config.contains("position_epoch != current_position_epoch"));
     assert!(config.contains("derive_matcher_delegate("));
     assert!(config.contains("Clock::get()?.slot"));
     assert!(config.contains("matcher_capability_config_is_valid("));
@@ -1104,12 +1105,14 @@ fn v16_program_non_owner_cannot_revoke_lp_matcher_capability() {
     let ctx_before = env.svm.get_account(&ctx).unwrap();
     let portfolio_id = env.portfolio_id(lp);
     let expected_sequence = env.portfolio_matcher_sequence(lp);
+    let position_epoch = env.portfolio_position_epoch(lp);
 
     env.svm.expire_blockhash();
     let revoke = env.send(
         ProgInstruction::SetMatcherConfig {
             portfolio_id,
             expected_sequence,
+            position_epoch,
             enabled: 0,
             trade_fee_cap_bps: 0,
             expiry_slot: 0,
@@ -1406,12 +1409,14 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
     let attacker_before = env.svm.get_account(&attacker_lp).unwrap();
     let portfolio_id = env.portfolio_id(victim_lp);
     let expected_sequence = env.portfolio_matcher_sequence(victim_lp);
+    let position_epoch = env.portfolio_position_epoch(victim_lp);
 
     env.svm.expire_blockhash();
     let overwrite = env.send(
         ProgInstruction::SetMatcherConfig {
             portfolio_id,
             expected_sequence,
+            position_epoch,
             enabled: 0,
             trade_fee_cap_bps: 0,
             expiry_slot: 0,
@@ -1474,6 +1479,7 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
         .expect("init auth matcher context without setting percolator auth");
     let portfolio_id = env.portfolio_id(lp);
     let expected_sequence = env.portfolio_matcher_sequence(lp);
+    let position_epoch = env.portfolio_position_epoch(lp);
 
     let send_with_lp_account = |env: &mut V16CuEnv, lp_account: Pubkey| {
         env.svm.expire_blockhash();
@@ -1481,6 +1487,7 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
             ProgInstruction::SetMatcherConfig {
                 portfolio_id,
                 expected_sequence,
+                position_epoch,
                 enabled: 1,
                 trade_fee_cap_bps: 10_000,
                 expiry_slot: u64::MAX,
