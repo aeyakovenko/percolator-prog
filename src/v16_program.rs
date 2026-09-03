@@ -10508,19 +10508,7 @@ pub mod processor {
         }
 
         let domain_usize = domain as usize;
-        let (bump, amount_u64) = verify_domain_withdrawal_preflight(
-            program_id,
-            market_ai,
-            authority,
-            dest_token,
-            vault_token,
-            vault_authority_ai,
-            domain_usize,
-            amount,
-            expected_market_id,
-            false,
-            DOMAIN_WITHDRAW_AUTH_BACKING,
-        )?;
+        let escheat_to_base_insurance;
 
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
@@ -10546,17 +10534,15 @@ pub mod processor {
             if !local_authorized && !admin_shutdown_authorized {
                 return Err(PercolatorError::Unauthorized.into());
             }
+            // Marketauth is a shutdown-progress submitter, not the provider's payout authority.
+            escheat_to_base_insurance = admin_shutdown_authorized && !local_authorized;
             let epoch_asset_index = if local_authorized {
                 domain_usize / 2
             } else {
                 0
             };
             require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
-            let ledger_authority = if admin_shutdown_authorized && !local_authorized {
-                cfg.marketauth
-            } else {
-                authorities.backing_bucket_authority
-            };
+            let ledger_authority = authorities.backing_bucket_authority;
 
             let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
             if !policy_v16::backing_principal_withdrawal_is_fresh(
@@ -10589,6 +10575,9 @@ pub mod processor {
             group
                 .withdraw_fresh_counterparty_backing_not_atomic(domain_usize, amount)
                 .map_err(map_v16_error)?;
+            if escheat_to_base_insurance {
+                deposit_market_zero_insurance_view(&mut group, amount)?;
+            }
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_principal_atoms = ledger
                     .total_principal_atoms
@@ -10607,16 +10596,31 @@ pub mod processor {
             }
         }
 
-        let bump_arr = [bump];
-        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
-        transfer_tokens_signed(
-            token_program,
-            vault_token,
-            dest_token,
-            vault_authority_ai,
-            amount_u64,
-            signer_seeds,
-        )?;
+        if !escheat_to_base_insurance {
+            let (bump, amount_u64) = verify_domain_withdrawal_preflight(
+                program_id,
+                market_ai,
+                authority,
+                dest_token,
+                vault_token,
+                vault_authority_ai,
+                domain_usize,
+                amount,
+                expected_market_id,
+                false,
+                DOMAIN_WITHDRAW_AUTH_BACKING,
+            )?;
+            let bump_arr = [bump];
+            let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+            transfer_tokens_signed(
+                token_program,
+                vault_token,
+                dest_token,
+                vault_authority_ai,
+                amount_u64,
+                signer_seeds,
+            )?;
+        }
         Ok(())
     }
 
@@ -10649,19 +10653,7 @@ pub mod processor {
         }
 
         let domain_usize = domain as usize;
-        let (bump, amount_u64) = verify_domain_withdrawal_preflight(
-            program_id,
-            market_ai,
-            authority,
-            dest_token,
-            vault_token,
-            vault_authority_ai,
-            domain_usize,
-            amount,
-            expected_market_id,
-            false,
-            DOMAIN_WITHDRAW_AUTH_BACKING,
-        )?;
+        let escheat_to_base_insurance;
 
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
@@ -10687,17 +10679,15 @@ pub mod processor {
             if !local_authorized && !admin_shutdown_authorized {
                 return Err(PercolatorError::Unauthorized.into());
             }
+            // Marketauth is a shutdown-progress submitter, not the provider's payout authority.
+            escheat_to_base_insurance = admin_shutdown_authorized && !local_authorized;
             let epoch_asset_index = if local_authorized {
                 domain_usize / 2
             } else {
                 0
             };
             require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
-            let ledger_authority = if admin_shutdown_authorized && !local_authorized {
-                cfg.marketauth
-            } else {
-                authorities.backing_bucket_authority
-            };
+            let ledger_authority = authorities.backing_bucket_authority;
 
             let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
             if amount > bucket.utilization_fee_earnings || amount > group.header.vault.get() {
@@ -10715,6 +10705,9 @@ pub mod processor {
             group
                 .withdraw_backing_provider_earnings_not_atomic(domain_usize, amount)
                 .map_err(map_v16_error)?;
+            if escheat_to_base_insurance {
+                deposit_market_zero_insurance_view(&mut group, amount)?;
+            }
             ledger.last_observed_bucket_earnings_atoms = ledger
                 .last_observed_bucket_earnings_atoms
                 .checked_sub(amount)
@@ -10727,16 +10720,31 @@ pub mod processor {
             write_or_init_backing_domain_ledger(&mut ledger_data, &ledger, initialized)?;
         }
 
-        let bump_arr = [bump];
-        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
-        transfer_tokens_signed(
-            token_program,
-            vault_token,
-            dest_token,
-            vault_authority_ai,
-            amount_u64,
-            signer_seeds,
-        )?;
+        if !escheat_to_base_insurance {
+            let (bump, amount_u64) = verify_domain_withdrawal_preflight(
+                program_id,
+                market_ai,
+                authority,
+                dest_token,
+                vault_token,
+                vault_authority_ai,
+                domain_usize,
+                amount,
+                expected_market_id,
+                false,
+                DOMAIN_WITHDRAW_AUTH_BACKING,
+            )?;
+            let bump_arr = [bump];
+            let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+            transfer_tokens_signed(
+                token_program,
+                vault_token,
+                dest_token,
+                vault_authority_ai,
+                amount_u64,
+                signer_seeds,
+            )?;
+        }
         Ok(())
     }
 
@@ -10837,30 +10845,8 @@ pub mod processor {
         let long_domain = asset_index
             .checked_mul(2)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let amount_u64 = amount_to_u64(amount)?;
-        {
-            let market_data = market_ai.try_borrow_data()?;
-            let (cfg, mode, _, market_id, _, _) =
-                state::read_market_trade_preflight(&market_data, asset_index)?;
-            if market_id != expected_market_id {
-                return Err(PercolatorError::AssetGenerationMismatch.into());
-            }
-            if mode != MarketModeV16::Live && mode != MarketModeV16::Resolved {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
-            let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
-            expect_key(vault_authority_ai, &vault_authority)?;
-            let vault_balance = verify_withdrawable_token_accounts(
-                dest_token,
-                operator.key,
-                vault_token,
-                &vault_authority,
-                &cfg,
-                false,
-            )?;
-            require_token_balance(vault_balance, amount_u64)?;
-        }
-        let (_, bump) = derive_vault_authority(program_id, market_ai.key);
+        let escheat_to_base_insurance;
+        let destination_owner;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
@@ -10875,24 +10861,22 @@ pub mod processor {
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
+            let local_operator =
+                live_authority_matches(&authorities.insurance_operator, operator.key);
             let ledger_authority = if live_mode {
                 let shutdown_drain =
                     live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain)?;
-                let local_authorized =
-                    live_authority_matches(&authorities.insurance_operator, operator.key);
                 let admin_shutdown_authorized = asset_index != 0
                     && shutdown_drain
                     && live_authority_matches(&cfg.marketauth, operator.key);
-                if !local_authorized && !admin_shutdown_authorized {
+                if !local_operator && !admin_shutdown_authorized {
                     return Err(PercolatorError::Unauthorized.into());
                 }
-                let epoch_asset_index = if local_authorized { asset_index } else { 0 };
+                let epoch_asset_index = if local_operator { asset_index } else { 0 };
                 require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
-                if admin_shutdown_authorized && !local_authorized {
-                    cfg.marketauth
-                } else {
-                    authorities.insurance_authority
-                }
+                // Marketauth is a shutdown-progress submitter, not the operator's payout authority.
+                escheat_to_base_insurance = admin_shutdown_authorized && !local_operator;
+                authorities.insurance_authority
             } else {
                 if group.header.materialized_portfolio_count.get() != 0
                     || group.header.c_tot.get() != 0
@@ -10906,7 +10890,13 @@ pub mod processor {
                 group
                     .recredit_terminal_claim_free_residual_for_asset_not_atomic(asset_index)
                     .map_err(map_v16_error)?;
+                escheat_to_base_insurance = false;
                 authorities.insurance_authority
+            };
+            destination_owner = if local_operator {
+                *operator.key
+            } else {
+                Pubkey::new_from_array(authorities.insurance_authority)
             };
             let available = market_insurance_withdraw_capacity_view(&group, asset_index)?;
             if amount > available
@@ -10935,6 +10925,9 @@ pub mod processor {
             // Atomic insurance/vault/budget withdraw through the engine (maintains the
             // insurance_domain_budget_remaining_total aggregate).
             debit_market_insurance_budget_view(&mut group, asset_index, amount)?;
+            if escheat_to_base_insurance {
+                deposit_market_zero_insurance_view(&mut group, amount)?;
+            }
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_withdrawn_atoms = ledger
                     .total_withdrawn_atoms
@@ -10953,16 +10946,35 @@ pub mod processor {
                 write_or_init_insurance_ledger(data, ledger, *initialized)?;
             }
         }
-        let bump_arr = [bump];
-        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
-        transfer_tokens_signed(
-            token_program,
-            vault_token,
-            dest_token,
-            vault_authority_ai,
-            amount_u64,
-            signer_seeds,
-        )?;
+        if !escheat_to_base_insurance {
+            let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+            expect_key(vault_authority_ai, &vault_authority)?;
+            let amount_u64 = amount_to_u64(amount)?;
+            {
+                let market_data = market_ai.try_borrow_data()?;
+                let (cfg, _, _, _, _, _) =
+                    state::read_market_trade_preflight(&market_data, asset_index)?;
+                let vault_balance = verify_withdrawable_token_accounts(
+                    dest_token,
+                    &destination_owner,
+                    vault_token,
+                    &vault_authority,
+                    &cfg,
+                    false,
+                )?;
+                require_token_balance(vault_balance, amount_u64)?;
+            }
+            let bump_arr = [bump];
+            let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+            transfer_tokens_signed(
+                token_program,
+                vault_token,
+                dest_token,
+                vault_authority_ai,
+                amount_u64,
+                signer_seeds,
+            )?;
+        }
         Ok(())
     }
 

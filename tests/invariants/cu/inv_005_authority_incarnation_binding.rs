@@ -3433,6 +3433,138 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     );
 }
 
+// INV-005/INV-024/INV-034: marketauth may finish a mature shutdown when an asset provider is
+// unavailable, but that liveness fallback is not a transfer authorization. Provider-attributed
+// backing and insurance must stay in protocol custody and escheat to base insurance; they must
+// never become withdrawable by the marketauth signer.
+#[test]
+fn v16_attack_shutdown_cleanup_cannot_pay_foreign_reserves_to_marketauth() {
+    const INSURANCE: u128 = 300;
+    const BACKING: u128 = 500;
+    const RECLAIMED_INSURANCE: u128 = 100;
+    const RECLAIMED_BACKING: u128 = 200;
+
+    let mut env = V16CuEnv::new();
+    let marketauth = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 2);
+    env.update_market_init_fee_policy_with_cu(10);
+
+    let provider = Keypair::new();
+    let provider_key = provider.pubkey();
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &provider,
+        1,
+        1,
+        100,
+        provider_key,
+        provider_key,
+        provider_key,
+        provider_key,
+        10,
+    );
+    env.top_up_insurance_domain_with_authority(&provider, 2, INSURANCE);
+    env.top_up_backing_bucket_with_authority(&provider, 2, BACKING, 100);
+
+    let funded = env.market_state().1;
+    assert_eq!(funded.insurance_domain_budget[2], INSURANCE);
+    assert_eq!(
+        funded.source_backing_buckets[2].fresh_unliened_backing_num,
+        BACKING * BOUND_SCALE
+    );
+
+    env.svm.warp_to_slot(4);
+    env.try_shutdown_asset_with_authority(&marketauth, 1, 4)
+        .expect("marketauth may initiate bounded asset shutdown");
+    env.svm.warp_to_slot(7);
+
+    let (provider_insurance_dest, provider_insurance_cu) = env
+        .try_withdraw_insurance_asset_with_authority(&provider, 1, RECLAIMED_INSURANCE)
+        .expect("present insurance operator reclaims its own reserve");
+    assert_cu_within(
+        "shutdown provider insurance reclaim",
+        provider_insurance_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(provider_insurance_dest),
+        RECLAIMED_INSURANCE as u64
+    );
+
+    let provider_backing_dest = env.token_account(provider_key, 0);
+    let provider_backing_cu = env
+        .send(
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 2,
+                market_id: env.asset_market_id(1),
+                authority_epoch: env.withdrawal_authority_epoch(provider_key, 1, false),
+                amount: RECLAIMED_BACKING,
+            },
+            vec![
+                AccountMeta::new(provider_key, true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(provider_backing_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&provider],
+        )
+        .expect("present backing provider reclaims its own principal");
+    assert_cu_within(
+        "shutdown provider backing reclaim",
+        provider_backing_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(provider_backing_dest),
+        RECLAIMED_BACKING as u64
+    );
+
+    let admin_dest = env.token_account(marketauth.pubkey(), 0);
+    let base_insurance_before = {
+        let group = env.market_state().1;
+        group.insurance_domain_budget[0] + group.insurance_domain_budget[1]
+    };
+    let vault_tokens_before = env.token_amount(env.vault);
+    let header_vault_before = env.market_state().1.vault;
+
+    let abandoned_insurance = INSURANCE - RECLAIMED_INSURANCE;
+    let abandoned_backing = BACKING - RECLAIMED_BACKING;
+    let insurance_cu =
+        env.withdraw_insurance_domain_to_admin_token_with_cu(admin_dest, 2, abandoned_insurance);
+    assert_cu_within("shutdown insurance escheat", insurance_cu, CUSTODY_CU_LIMIT);
+    let backing_cu =
+        env.withdraw_backing_bucket_to_admin_token_with_cu(admin_dest, 2, abandoned_backing);
+    assert_cu_within("shutdown backing escheat", backing_cu, CUSTODY_CU_LIMIT);
+
+    assert_eq!(
+        env.token_amount(admin_dest),
+        0,
+        "shutdown progress cannot turn marketauth into the reserve beneficiary"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        vault_tokens_before,
+        "escheat is custody-neutral"
+    );
+    let after = env.market_state().1;
+    assert_eq!(
+        after.vault, header_vault_before,
+        "engine vault is unchanged"
+    );
+    assert_eq!(after.insurance_domain_budget[2], 0);
+    assert_eq!(
+        after.source_backing_buckets[2].fresh_unliened_backing_num,
+        0
+    );
+    assert_eq!(
+        after.insurance_domain_budget[0] + after.insurance_domain_budget[1],
+        base_insurance_before + abandoned_insurance + abandoned_backing,
+        "abandoned provider reserves escheat exactly to base insurance"
+    );
+}
+
 // Regression for percolator-cli#82 (fixed by 05a8f845): UpdateAssetLifecycle(Activate) must NOT let a
 // non-admin install attacker-controlled per-asset authorities. Exact exploit shape: a non-admin calls
 // Activate on a slot with ITSELF as oracle/insurance/operator/backing authority (written verbatim from
