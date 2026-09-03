@@ -24,6 +24,502 @@
 
 use super::*;
 
+const INV070_NATIVE_TERMINAL_SURPLUS: u64 = 7;
+
+fn inv070_install_canonical_native_mint(svm: &mut LiteSVM) {
+    let native_mint = Mint {
+        mint_authority: COption::None,
+        supply: 0,
+        decimals: spl_token::native_mint::DECIMALS,
+        is_initialized: true,
+        freeze_authority: COption::None,
+    };
+    let mut data = vec![0u8; Mint::LEN];
+    Mint::pack(native_mint, &mut data).expect("pack canonical native mint");
+    svm.set_account(
+        spl_token::native_mint::id(),
+        Account {
+            lamports: svm.minimum_balance_for_rent_exemption(Mint::LEN),
+            data,
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .expect("install canonical native-mint chain fixture");
+}
+
+fn inv070_public_create_account(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    account: &Keypair,
+    lamports: u64,
+    data_len: usize,
+    owner: Pubkey,
+) -> u64 {
+    send_raw_ixs(
+        svm,
+        payer,
+        vec![system_instruction::create_account(
+            &payer.pubkey(),
+            &account.pubkey(),
+            lamports,
+            data_len as u64,
+            &owner,
+        )],
+        &[account],
+    )
+    .expect("public SystemProgram CreateAccount")
+}
+
+fn inv070_public_native_env() -> V16CuEnv {
+    let params = V16CuMarketParams {
+        initial_price: 1_000_000,
+        max_trading_fee_bps: 100,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        ..V16CuMarketParams::default()
+    };
+    let mut svm = LiteSVM::new();
+    let program_id = percolator_prog::id();
+    svm.add_program(
+        program_id,
+        &std::fs::read(program_path()).expect("read exact-parent wrapper SBF"),
+    );
+    inv070_install_canonical_native_mint(&mut svm);
+
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 100_000_000_000)
+        .expect("fund test payer");
+    svm.airdrop(&admin.pubkey(), 1_000_000_000)
+        .expect("materialize market authority");
+
+    let market_keypair = Keypair::new();
+    let market = market_keypair.pubkey();
+    let market_len = state::market_account_len_for_capacity(1).expect("one-asset market length");
+    let market_rent = svm.minimum_balance_for_rent_exemption(market_len);
+    inv070_public_create_account(
+        &mut svm,
+        &payer,
+        &market_keypair,
+        market_rent,
+        market_len,
+        program_id,
+    );
+
+    let mint = spl_token::native_mint::id();
+    let vault_authority = Pubkey::find_program_address(&[b"vault", market.as_ref()], &program_id).0;
+    let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint);
+    let vault_account = svm.get_account(&vault).expect("native primary vault ATA");
+    let vault_state = TokenAccount::unpack(&vault_account.data).expect("native primary vault");
+    let vault_rent = svm.minimum_balance_for_rent_exemption(TokenAccount::LEN);
+    assert_eq!(vault_state.is_native, COption::Some(vault_rent));
+    assert_eq!(vault_state.amount, 0);
+    assert_eq!(vault_account.lamports, vault_rent);
+
+    let init_market_cu = send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new_readonly(mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("public native-wSOL InitMarket");
+
+    V16CuEnv {
+        svm,
+        program_id,
+        payer,
+        admin,
+        init_market_cu,
+        market,
+        mint,
+        vault,
+        vault_authority,
+        portfolio_account_len: state::portfolio_account_len_for_market_slots(1)
+            .expect("one-asset portfolio length"),
+        portfolios: Vec::new(),
+    }
+}
+
+fn inv070_public_create_portfolio(env: &mut V16CuEnv, owner: &Keypair) -> Pubkey {
+    env.svm
+        .airdrop(&owner.pubkey(), 1_000_000)
+        .expect("materialize portfolio owner");
+    let portfolio_keypair = Keypair::new();
+    let portfolio = portfolio_keypair.pubkey();
+    let rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(env.portfolio_account_len);
+    let payer = env.payer.insecure_clone();
+    inv070_public_create_account(
+        &mut env.svm,
+        &payer,
+        &portfolio_keypair,
+        rent,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[owner],
+    )
+    .expect("public InitPortfolio");
+    env.portfolios.push(portfolio);
+    portfolio
+}
+
+fn inv070_public_native_token_account(env: &mut V16CuEnv, owner: Pubkey, amount: u64) -> Pubkey {
+    let token_keypair = Keypair::new();
+    let token = token_keypair.pubkey();
+    let rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(TokenAccount::LEN);
+    let lamports = rent
+        .checked_add(amount)
+        .expect("native token account lamports");
+    let create = system_instruction::create_account(
+        &env.payer.pubkey(),
+        &token,
+        lamports,
+        TokenAccount::LEN as u64,
+        &spl_token::ID,
+    );
+    let initialize = spl_token::instruction::initialize_account(
+        &spl_token::ID,
+        &token,
+        &spl_token::native_mint::id(),
+        &owner,
+    )
+    .expect("build InitializeAccount for native wSOL");
+    let payer = env.payer.insecure_clone();
+    send_raw_ixs(
+        &mut env.svm,
+        &payer,
+        vec![create, initialize],
+        &[&token_keypair],
+    )
+    .expect("publicly create rent-correct native SPL account");
+
+    let account = env.svm.get_account(&token).expect("native SPL account");
+    let state = TokenAccount::unpack(&account.data).expect("decode native SPL account");
+    assert_eq!(state.mint, spl_token::native_mint::id());
+    assert_eq!(state.owner, owner);
+    assert_eq!(state.is_native, COption::Some(rent));
+    assert_eq!(state.amount, amount);
+    assert_eq!(account.lamports, lamports);
+    token
+}
+
+fn inv070_public_native_deposit(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    amount: u128,
+) {
+    let amount_u64 = u64::try_from(amount).expect("native deposit amount");
+    let source = inv070_public_native_token_account(env, owner.pubkey(), amount_u64);
+    env.send(
+        env.deposit_ix(portfolio, amount),
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[owner],
+    )
+    .expect("public native-wSOL Deposit");
+    assert_eq!(env.token_amount(source), 0);
+}
+
+fn inv070_public_native_withdraw(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    amount: u128,
+) -> Pubkey {
+    let destination = inv070_public_native_token_account(env, owner.pubkey(), 0);
+    env.send(
+        env.withdraw_ix(portfolio, amount),
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[owner],
+    )
+    .expect("public native-wSOL Withdraw");
+    assert_eq!(env.token_amount(destination), amount as u64);
+    destination
+}
+
+fn inv070_certificate_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
+    let group = env.market_state().1;
+    let account = env.portfolio_state(portfolio);
+    let cert = health_cert(&account);
+    cert.valid
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch
+        && cert.active_bitmap_at_cert == active_bitmap(&account)
+}
+
+fn inv070_native_close_slab_accounts(
+    env: &V16CuEnv,
+    destination: Pubkey,
+    sink: Pubkey,
+) -> Vec<AccountMeta> {
+    vec![
+        AccountMeta::new(env.admin.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new(destination, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+        // Keep the legacy primary-mint position stable. Native retirement adds the sink after it.
+        AccountMeta::new(env.mint, false),
+        AccountMeta::new(sink, false),
+    ]
+}
+
+// INV-070/077/079: this reaches the terminal residue exclusively through public wrapper, System,
+// ATA, and SPL Token instructions. Paid mark movement intentionally creates insurance that is not
+// assigned to an operator-withdrawable domain budget. Once all users exit and the market resolves,
+// CloseSlab must retire that value without returning it to marketauth. Native wSOL cannot use SPL
+// Burn, so the only policy-preserving terminal route is: transfer classified external surplus to
+// the validated admin token account, then close the nonempty native vault to Solana's canonical
+// incinerator. The wrong-sink attempt also pins account ordering and exact SVM rollback.
+#[test]
+fn v16_program_native_wsol_terminal_unbudgeted_insurance_retires_to_incinerator() {
+    const MARK: u64 = 1_000_000;
+    const RAW_UP: u64 = 2_000_000;
+    const DEPOSIT: u128 = 25_000_000;
+
+    let mut env = inv070_public_native_env();
+    env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = inv070_public_create_portfolio(&mut env, &long_owner);
+    let short = inv070_public_create_portfolio(&mut env, &short_owner);
+    inv070_public_native_deposit(&mut env, &long_owner, long, DEPOSIT);
+    inv070_public_native_deposit(&mut env, &short_owner, short, DEPOSIT);
+
+    env.svm.warp_to_slot(1);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        RAW_UP,
+        0,
+    );
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_DRAIN_ONLY, 0, 0, 0);
+    for _ in 0..6 {
+        for portfolio in [long, short] {
+            if !inv070_certificate_is_current(&env, portfolio) {
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 1,
+                        observations: vec![],
+                    },
+                );
+            }
+        }
+        if inv070_certificate_is_current(&env, long) && inv070_certificate_is_current(&env, short) {
+            break;
+        }
+    }
+    assert!(
+        inv070_certificate_is_current(&env, long) && inv070_certificate_is_current(&env, short),
+        "public DrainOnly route reaches current certificates",
+    );
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -(POS_SCALE as i128),
+        1,
+        0,
+    );
+    let released = env.portfolio_state(long).pnl.get();
+    if released > 0 {
+        env.convert_released_pnl_with_cu(&long_owner, long, released as u128);
+    }
+    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+        let capital = env.portfolio_state(portfolio).capital.get();
+        inv070_public_native_withdraw(&mut env, owner, portfolio, capital);
+        env.close_portfolio_with_cu(owner, portfolio);
+    }
+
+    let terminal = env.market_state().1;
+    let retired = terminal.insurance;
+    assert!(retired > 0, "paid mark movement creates terminal insurance");
+    assert_eq!(terminal.insurance_domain_budget.iter().sum::<u128>(), 0);
+    assert_eq!(terminal.vault, retired);
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.materialized_portfolio_count, 0);
+
+    let payer = env.payer.insecure_clone();
+    let admin = env.admin.insecure_clone();
+    let surplus_source = inv070_public_native_token_account(
+        &mut env,
+        admin.pubkey(),
+        INV070_NATIVE_TERMINAL_SURPLUS,
+    );
+    send_raw_tx(
+        &mut env.svm,
+        &payer,
+        spl_token::instruction::transfer(
+            &spl_token::ID,
+            &surplus_source,
+            &env.vault,
+            &admin.pubkey(),
+            &[],
+            INV070_NATIVE_TERMINAL_SURPLUS,
+        )
+        .expect("build public native-surplus transfer"),
+        &[&admin],
+    )
+    .expect("publicly add unaccounted native surplus");
+    env.resolve();
+
+    let destination = inv070_public_native_token_account(&mut env, admin.pubkey(), 0);
+    let wrong_sink = Pubkey::new_unique();
+    let market_before = env.svm.get_account(&env.market).expect("terminal market");
+    let vault_before = env
+        .svm
+        .get_account(&env.vault)
+        .expect("terminal native vault");
+    let destination_before = env
+        .svm
+        .get_account(&destination)
+        .expect("admin native destination");
+    let wrong_sink_before = env.svm.get_account(&wrong_sink);
+    env.svm.expire_blockhash();
+    let wrong_sink_result = env.send(
+        ProgInstruction::CloseSlab { authority_epoch: 0 },
+        inv070_native_close_slab_accounts(&env, destination, wrong_sink),
+        &[&admin],
+    );
+    assert!(
+        wrong_sink_result.is_err(),
+        "native terminal retirement must require the canonical incinerator",
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market),
+        Some(market_before.clone())
+    );
+    assert_eq!(env.svm.get_account(&env.vault), Some(vault_before.clone()));
+    assert_eq!(
+        env.svm.get_account(&destination),
+        Some(destination_before.clone())
+    );
+    assert_eq!(env.svm.get_account(&wrong_sink), wrong_sink_before);
+
+    let vault_state_before = TokenAccount::unpack(&vault_before.data).expect("native vault state");
+    assert_eq!(
+        vault_state_before.amount,
+        retired as u64 + INV070_NATIVE_TERMINAL_SURPLUS
+    );
+    let vault_lamports_before = vault_before.lamports;
+    let destination_lamports_before = destination_before.lamports;
+    let incinerator = solana_sdk::incinerator::id();
+    let incinerator_lamports_before = env.svm.get_balance(&incinerator).unwrap_or(0);
+    let mint_before = env
+        .svm
+        .get_account(&env.mint)
+        .expect("native mint before close");
+    let native_supply_before = Mint::unpack(&mint_before.data)
+        .expect("decode native mint")
+        .supply;
+    let admin_lamports_before = env.svm.get_balance(&admin.pubkey()).unwrap_or(0);
+    let market_lamports_before = market_before.lamports;
+    let retained_market_lamports = env
+        .svm
+        .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
+
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
+            inv070_native_close_slab_accounts(&env, destination, incinerator),
+            &[&admin],
+        )
+        .expect("native terminal residue must retire through canonical incinerator");
+    eprintln!("INV-070 native terminal CloseSlab CU: {close_cu}");
+    assert_cu_within("native terminal CloseSlab", close_cu, CUSTODY_CU_LIMIT);
+
+    assert_closed_market_tombstone(&env.svm.get_account(&env.market).expect("market tombstone"));
+    assert!(
+        env.svm.get_account(&env.vault).is_none(),
+        "native primary vault is closed",
+    );
+    let destination_after = env
+        .svm
+        .get_account(&destination)
+        .expect("admin native destination after close");
+    let destination_state =
+        TokenAccount::unpack(&destination_after.data).expect("admin native destination state");
+    assert_eq!(
+        destination_state.amount, INV070_NATIVE_TERMINAL_SURPLUS,
+        "admin receives only classified external surplus",
+    );
+    assert_eq!(
+        destination_after.lamports,
+        destination_lamports_before + INV070_NATIVE_TERMINAL_SURPLUS,
+    );
+    assert_eq!(
+        env.svm.get_balance(&incinerator).unwrap_or(0),
+        incinerator_lamports_before + vault_lamports_before - INV070_NATIVE_TERMINAL_SURPLUS,
+        "retired insurance and native-vault rent go only to the canonical sink",
+    );
+    assert_eq!(
+        env.svm.get_balance(&admin.pubkey()).unwrap_or(0),
+        admin_lamports_before + market_lamports_before - retained_market_lamports,
+        "marketauth receives market-account rent only, never retired native insurance or vault rent",
+    );
+    let mint_after = env
+        .svm
+        .get_account(&env.mint)
+        .expect("native mint after close");
+    assert_eq!(
+        Mint::unpack(&mint_after.data)
+            .expect("decode native mint after close")
+            .supply,
+        native_supply_before,
+        "native supply remains unchanged because wrapped SOL supply is lamport-backed, not minted",
+    );
+}
+
 #[test]
 fn v16_program_recovery_force_close_reaches_zero_residue_and_close_slab() {
     const INITIAL_CAPITAL: u128 = 1_000_000;
