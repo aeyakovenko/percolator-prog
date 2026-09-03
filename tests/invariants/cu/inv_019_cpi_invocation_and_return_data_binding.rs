@@ -1668,11 +1668,13 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
     let lp_before_config = env.svm.get_account(&lp).unwrap();
     let portfolio_id = env.portfolio_id(lp);
     let expected_sequence = env.portfolio_matcher_sequence(lp);
+    let position_epoch = env.portfolio_position_epoch(lp);
     env.svm.expire_blockhash();
     let self_config = env.send(
         ProgInstruction::SetMatcherConfig {
             portfolio_id,
             expected_sequence,
+            position_epoch,
             enabled: 1,
             trade_fee_cap_bps: 10_000,
             expiry_slot: u64::MAX,

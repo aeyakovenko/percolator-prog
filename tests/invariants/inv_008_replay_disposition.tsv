@@ -49,5 +49,5 @@ tag	variant	disposition	boundary
 65	UpdateAssetAuthority	incarnation-episode	Current asset generation and current authority signatures bind rotation.
 66	BatchTradeNoCpi	retry:BatchTradeNoCpi	Both portfolio incarnations and position episodes are exercised by the retry matrix.
 67	BatchTradeCpi	retry:BatchTradeCpi	Both portfolio incarnations and position episodes are exercised by the retry matrix.
-68	SetMatcherConfig	supersession:MatcherConfig	Portfolio-local sequence is exercised by the supersession matrix.
+68	SetMatcherConfig	supersession:MatcherConfig	Portfolio-local sequence rejects competing controls; position-epoch binding rejects retained grants after automatic mutation revocation.
 69	RestartAssetOracle	incarnation-episode	Asset generation and a fresh observation sequence bind the recovery restart.

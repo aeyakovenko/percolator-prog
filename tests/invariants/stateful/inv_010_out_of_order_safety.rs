@@ -458,49 +458,39 @@ fn run_landing_order(order: [LandingOperation; 3]) {
         trade: env.build_retained_cpi_trade(TAKER, LP, 0, POS_SCALE as i128, config.initial_price),
     };
 
-    let mut winning_control = None;
-    let mut trade_landed = false;
-    for operation in order {
+    let initial_position_epoch = env.primary_portfolio_position_epoch(LP);
+    let mut landed = None;
+    for (index, operation) in order.into_iter().enumerate() {
         let before = snapshot(&env);
         let result = env.land_retained(requests.transaction(operation));
-        match operation {
-            LandingOperation::Enable | LandingOperation::Disable => {
-                let enabled = operation == LandingOperation::Enable;
-                if winning_control.is_none() {
-                    result.expect("first same-sequence control must land");
-                    winning_control = Some(enabled);
-                } else {
-                    result.expect_err("second same-sequence control must reject");
-                    assert_eq!(
-                        snapshot(&env),
-                        before,
-                        "losing retained control must roll back exactly: {order:?}"
-                    );
-                }
-            }
-            LandingOperation::Trade => {
-                let matcher_enabled_at_landing = winning_control.unwrap_or(true);
-                if matcher_enabled_at_landing {
-                    result.expect("retained CPI trade inside current consent must land");
-                    trade_landed = true;
-                } else {
-                    result.expect_err("retained CPI trade after disable must reject");
-                    assert_eq!(
-                        snapshot(&env),
-                        before,
-                        "trade outside current consent must roll back exactly: {order:?}"
-                    );
-                }
-            }
+        if index == 0 {
+            result.expect("the first current matcher-sequence/position request must land");
+            landed = Some(operation);
+        } else {
+            result.expect_err(
+                "a control consumes the matcher sequence and a trade consumes the position epoch",
+            );
+            assert_eq!(
+                snapshot(&env),
+                before,
+                "stale retained follower must roll back exactly: {order:?}"
+            );
         }
     }
 
+    let landed = landed.expect("one request lands");
     assert_eq!(
         env.primary_portfolio_matcher_sequence(LP),
-        initial_sequence + 1,
-        "exactly one competing matcher control may land: {order:?}"
+        initial_sequence + u64::from(landed != LandingOperation::Trade),
+        "only a landed matcher control consumes the config sequence: {order:?}"
+    );
+    assert_eq!(
+        env.primary_portfolio_position_epoch(LP),
+        initial_position_epoch + u64::from(landed == LandingOperation::Trade),
+        "only a landed trade consumes the position episode: {order:?}"
     );
     let (_, after_order) = env.primary_market_state();
+    let trade_landed = landed == LandingOperation::Trade;
     let expected_oi = if trade_landed { POS_SCALE } else { 0 };
     assert_eq!(after_order.assets[0].oi_eff_long_q, expected_oi);
     assert_eq!(after_order.assets[0].oi_eff_short_q, expected_oi);
