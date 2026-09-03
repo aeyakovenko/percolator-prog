@@ -23,6 +23,126 @@ const ISSUE408_AGED_SLOT: u64 = 500;
 const ISSUE408_MOVE_SLOT: u64 = 542;
 const ISSUE408_LOTS: i128 = 10;
 
+#[test]
+fn v16_attack_flat_fee_debt_cannot_back_first_open_or_spend_independent_insurance() {
+    const PRICE: u64 = 1_000_000;
+    const AGED_SLOT: u64 = 500;
+    const MOVE_SLOT: u64 = 542;
+    const FEE_PER_SLOT: u128 = 2_000;
+    const INSURANCE: u128 = 1_000_000;
+    const ATTACKER_DEPOSIT_PER_ACCOUNT: u128 = 1_100_000;
+    const LOTS: i128 = 20;
+
+    let mut params = production_risk_params();
+    params.maintenance_fee_per_slot = FEE_PER_SLOT;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.update_liquidation_fee_policy_with_cu(0);
+    env.top_up_insurance(INSURANCE);
+    env.configure_auth_mark_with_cu(0, PRICE);
+
+    let aged_owner = Keypair::new();
+    let aged = env.create_portfolio(&aged_owner);
+    env.deposit(&aged_owner, aged, ATTACKER_DEPOSIT_PER_ACCOUNT);
+
+    let empty_owner = Keypair::new();
+    let empty = env.create_portfolio(&empty_owner);
+    for slot in (20..=AGED_SLOT).step_by(20) {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(0, slot, PRICE);
+        env.crank(
+            empty,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(env.portfolio_state(aged).last_fee_slot.get(), 0);
+
+    let fresh_owner = Keypair::new();
+    let fresh = env.create_portfolio(&fresh_owner);
+    env.deposit(&fresh_owner, fresh, ATTACKER_DEPOSIT_PER_ACCOUNT);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let aged_before = env.svm.get_account(&aged).unwrap();
+    let fresh_before = env.svm.get_account(&fresh).unwrap();
+    let vault_before = env.token_amount(env.vault);
+    let open = env.try_trade_asset_with_cu(
+        0,
+        &fresh_owner,
+        fresh,
+        &aged_owner,
+        aged,
+        LOTS * POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    if open.is_err() {
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&aged).unwrap(), aged_before);
+        assert_eq!(env.svm.get_account(&fresh).unwrap(), fresh_before);
+        assert_eq!(env.token_amount(env.vault), vault_before);
+
+        env.deposit(&aged_owner, aged, 1_000_000);
+        env.svm.expire_blockhash();
+        let open_cu = env.trade_asset_with_cu(
+            0,
+            &fresh_owner,
+            fresh,
+            &aged_owner,
+            aged,
+            LOTS * POS_SCALE as i128,
+            PRICE,
+            0,
+        );
+        assert_cu_within("fee-net flat first-open", open_cu, TRADE_CU_LIMIT);
+        let aged_after = env.portfolio_state(aged);
+        assert_eq!(aged_after.last_fee_slot.get(), AGED_SLOT);
+        assert_eq!(aged_after.capital.get(), ATTACKER_DEPOSIT_PER_ACCOUNT);
+        assert_eq!(
+            env.market_state().1.insurance,
+            INSURANCE + AGED_SLOT as u128 * FEE_PER_SLOT,
+        );
+        return;
+    }
+
+    env.svm.warp_to_slot(MOVE_SLOT);
+    env.push_auth_mark_with_cu(MOVE_SLOT, 1_100_000);
+    for _ in 0..64 {
+        for portfolio in [aged, fresh] {
+            let _ = env.crank_if_actionable(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: MOVE_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+    }
+
+    env.close_portfolio_with_cu(&aged_owner, aged);
+    env.resolve();
+    let fresh_dest = env.close_resolved(&fresh_owner, fresh);
+    let coalition_out = env.token_amount(fresh_dest) as u128;
+    let independent_insurance_after = env.market_state().1.insurance;
+    let attacker_deposits = 2 * ATTACKER_DEPOSIT_PER_ACCOUNT;
+
+    assert!(
+        coalition_out <= attacker_deposits,
+        "stale first-open extracted {} atoms from independent insurance: attacker deposits={}, payout={}, insurance {} -> {}",
+        coalition_out - attacker_deposits,
+        attacker_deposits,
+        coalition_out,
+        INSURANCE,
+        independent_insurance_after,
+    );
+    assert!(
+        independent_insurance_after >= INSURANCE,
+        "attacker-backed first-open must not consume pre-existing insurance"
+    );
+}
+
 fn issue408_advance_market_without_target_refresh(
     env: &mut V16CuEnv,
     empty: Pubkey,

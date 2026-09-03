@@ -249,6 +249,7 @@ pub struct CpiBackingFeeProtection {
     pub earnings_spl_vault_debit: u128,
     pub earnings_accounted_vault_debit: u128,
     pub attacker_capital_delta: i128,
+    pub attacker_maintenance_fee: u128,
     pub zero_cap_risk_reduction_landed: bool,
     pub max_route_cu: u64,
     pub token_supply_conserved: bool,
@@ -22561,7 +22562,7 @@ pub fn verify_cpi_backing_fee_consent(
     const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
     const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
     const WINNING_DOMAIN: u16 = 3;
-    const EXPECTED_ATTACKER_MAINTENANCE_FEE: i128 = 120;
+    const MAINTENANCE_FEE_PER_SLOT: u128 = 30;
 
     let mut env = V16Svm::new(
         seed,
@@ -22571,7 +22572,7 @@ pub fn verify_cpi_backing_fee_consent(
             initial_margin_bps: 1_000,
             max_price_move_bps_per_slot: 500,
             max_accrual_dt_slots: 1,
-            maintenance_fee_per_slot: 30,
+            maintenance_fee_per_slot: MAINTENANCE_FEE_PER_SLOT,
             actor_deposits: [
                 ATTACKER_DEPOSIT,
                 ATTACKER_DEPOSIT,
@@ -22668,6 +22669,19 @@ pub fn verify_cpi_backing_fee_consent(
         ));
     }
 
+    let attacker_before_maintenance = env.primary_portfolio(0).capital.get();
+    let attacker_fee_slot_before = env.primary_portfolio(0).last_fee_slot.get();
+    env.sync_maintenance_fee(0, 5)
+        .map_err(|error| format!("sync flat attacker maintenance fee: {error}"))?;
+    for actor in [0] {
+        crank_adapter_steps_with_observations(
+            &mut env,
+            actor,
+            5,
+            complete_lp_observations.clone(),
+            8,
+        )?;
+    }
     let lp_before = env.primary_portfolio(2).capital.get();
     let attacker_before = env.primary_portfolio(0).capital.get();
     let provider_before = env.primary_market_state().1.source_backing_buckets
@@ -22676,7 +22690,6 @@ pub fn verify_cpi_backing_fee_consent(
     let provider_destination_before = env.token_amount(env.actors[0].destination_token);
     let supply_before = env.token_supply_observed();
 
-    env.warp_to_slot(6);
     let before_rejection = tracked_economic_accounts(&env);
     let rejection = match env.trade_cpi(0, 2, 0, -INCREASE_Q, 0, 0) {
         Ok(_) => return Err("zero-cap matcher accepted an LP backing fee".into()),
@@ -22739,11 +22752,23 @@ pub fn verify_cpi_backing_fee_consent(
         .utilization_fee_earnings
         == earnings_before_reduction;
     let attacker_after = env.primary_portfolio(0).capital.get();
+    let attacker_fee_slot_after = env.primary_portfolio(0).last_fee_slot.get();
+    let attacker_maintenance_fee = u128::from(
+        attacker_fee_slot_after
+            .checked_sub(attacker_fee_slot_before)
+            .ok_or("attacker maintenance fee cursor moved backward")?,
+    )
+    .checked_mul(MAINTENANCE_FEE_PER_SLOT)
+    .ok_or("attacker maintenance fee overflow")?;
+    let expected_attacker_capital_delta = i128::try_from(attacker_maintenance_fee)
+        .map_err(|_| "attacker maintenance fee does not fit i128")?
+        .checked_neg()
+        .ok_or("attacker maintenance fee negation overflow")?;
     let attacker_capital_delta = i128::try_from(attacker_after)
-        .and_then(|after| i128::try_from(attacker_before).map(|before| after - before))
+        .and_then(|after| i128::try_from(attacker_before_maintenance).map(|before| after - before))
         .map_err(|_| "attacker capital does not fit i128")?;
     if !zero_cap_risk_reduction_landed
-        || attacker_capital_delta != -EXPECTED_ATTACKER_MAINTENANCE_FEE
+        || attacker_capital_delta != expected_attacker_capital_delta
         || observed_positions(&env.primary_portfolio(0))?[0] != 0
     {
         return Err(format!(
@@ -22793,6 +22818,7 @@ pub fn verify_cpi_backing_fee_consent(
         earnings_spl_vault_debit,
         earnings_accounted_vault_debit,
         attacker_capital_delta,
+        attacker_maintenance_fee,
         zero_cap_risk_reduction_landed,
         max_route_cu,
         token_supply_conserved,

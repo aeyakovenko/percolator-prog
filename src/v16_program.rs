@@ -6802,25 +6802,6 @@ pub mod processor {
         collect_maintenance_fee_to_slot_before_value_debit_view(cfg, group, portfolio, now_slot)
     }
 
-    fn collect_maintenance_fee_before_trade_view(
-        cfg: &WrapperConfigV16,
-        group: &mut state::MarketViewMutV16<'_>,
-        portfolio: &mut percolator::PortfolioV16ViewMut<'_>,
-    ) -> Result<u128, ProgramError> {
-        let active_bitmap = portfolio
-            .header
-            .active_bitmap
-            .map(percolator::V16PodU64::get);
-        if percolator::active_bitmap_is_empty(active_bitmap) {
-            // Opening a first leg does not debit an existing exposure. Leave flat-account fee
-            // realization to SyncMaintenanceFee/Withdraw instead of advancing its cursor ahead of
-            // the loss-current anchor immediately before it becomes nonflat.
-            return Ok(0);
-        }
-        let now_slot = authenticated_market_slot_or_fallback_view(group);
-        collect_maintenance_fee_to_slot_before_value_debit_view(cfg, group, portfolio, now_slot)
-    }
-
     fn require_asset_active_for_oracle_reconfiguration_view(
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -8081,8 +8062,8 @@ pub mod processor {
                 &account_b,
                 core::slice::from_ref(&req),
             )?;
-            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_a)?;
-            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_b)?;
+            collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut account_a)?;
+            collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut account_b)?;
             let account_a_needs_source_capacity =
                 trade_delta_may_require_source_domain_capacity(account_a_position, size_q)?;
             let account_b_needs_source_capacity =
@@ -8444,8 +8425,8 @@ pub mod processor {
                     &group, &account_a, &account_b, &requests,
                 )?;
             }
-            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_a)?;
-            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_b)?;
+            collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut account_a)?;
+            collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut account_b)?;
             if needs_source_domain_capacity {
                 let mut admitted_source_domains_a =
                     occupied_source_domains_snapshot_for_trade_view(&account_a)?;

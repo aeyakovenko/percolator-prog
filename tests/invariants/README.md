@@ -2956,8 +2956,11 @@ generators now reauthorize explicitly after an external position mutation instea
 stale fixture capability. The wrapper also closes issue 408's maintenance-debt seniority gap.
 Collectible maintenance is now crystallized
 before withdrawals, existing-exposure trades, force-close transfers, and eligible auto-crank
-actions; flat first opens remain available, and liquidation rewards snapshot insurance only after
-the maintenance credit. Two public issue408 worlds prove that neither an unsigned standing matcher
+actions; flat first opens remain available only when fee-net capital passes admission, and
+liquidation rewards snapshot insurance only after the maintenance credit. A public first-open
+regression ages a flat attacker portfolio, proves stale gross capital cannot back a 20x position,
+and closes the prior 457,999-atom independent-insurance drain. Two public issue408 worlds prove
+that neither an unsigned standing matcher
 nor a permissionless liquidator can spend the aged obligation first, while exact fee attribution,
 subsequent exposure reduction/recovery progress, and the maximum 14-leg CU paths remain live. The
 stateful withdrawal reference now separately reconciles `capital debit = SPL payout + maintenance`
