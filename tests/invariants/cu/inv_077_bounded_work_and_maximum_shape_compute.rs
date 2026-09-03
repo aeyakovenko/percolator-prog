@@ -4357,10 +4357,25 @@ fn v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_sha
 
 #[test]
 fn v16_attack_max_source_maintenance_sync_stays_bounded() {
-    let (mut env, _taker_owner, _lp_owner, _taker, lp, _slot) = setup_max_source_live_pair(1, 1);
+    let (mut env, taker_owner, lp_owner, taker, lp, _slot) = setup_max_source_live_pair(1, 1);
+    let final_asset = MAX_SOURCE_LIVE_ASSETS - 1;
+    let close_mark = env.market_state().1.assets[usize::from(final_asset)].effective_price;
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        final_asset,
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        -MAX_SOURCE_LIVE_SIZE_Q,
+        close_mark,
+        0,
+    );
     let before = env.portfolio_state(lp);
-    let group_before = env.market_state().1;
-    let custody_before = env.token_amount(env.vault);
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&before)),
+        "max-source fee benchmark must leave a flat account so authenticated clock progress alone advances its fee anchor"
+    );
     let charge_slot = before
         .last_fee_slot
         .get()
@@ -4368,6 +4383,8 @@ fn v16_attack_max_source_maintenance_sync_stays_bounded() {
         .expect("maintenance charge slot");
 
     env.svm.warp_to_slot(charge_slot);
+    let group_before = env.market_state().1;
+    let custody_before = env.token_amount(env.vault);
     env.svm.expire_blockhash();
     let cu = env.sync_maintenance_fee_with_cu(lp, None, charge_slot);
     println!("v16 28-source-domain SyncMaintenanceFee CU: {cu}");

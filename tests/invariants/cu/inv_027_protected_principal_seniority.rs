@@ -83,6 +83,27 @@ fn v16_attack_flat_fee_debt_cannot_back_first_open_or_spend_independent_insuranc
         assert_eq!(env.svm.get_account(&aged).unwrap(), aged_before);
         assert_eq!(env.svm.get_account(&fresh).unwrap(), fresh_before);
         assert_eq!(env.token_amount(env.vault), vault_before);
+
+        env.deposit(&aged_owner, aged, 1_000_000);
+        env.svm.expire_blockhash();
+        let open_cu = env.trade_asset_with_cu(
+            0,
+            &fresh_owner,
+            fresh,
+            &aged_owner,
+            aged,
+            LOTS * POS_SCALE as i128,
+            PRICE,
+            0,
+        );
+        assert_cu_within("fee-net flat first-open", open_cu, TRADE_CU_LIMIT);
+        let aged_after = env.portfolio_state(aged);
+        assert_eq!(aged_after.last_fee_slot.get(), AGED_SLOT);
+        assert_eq!(aged_after.capital.get(), ATTACKER_DEPOSIT_PER_ACCOUNT);
+        assert_eq!(
+            env.market_state().1.insurance,
+            INSURANCE + AGED_SLOT as u128 * FEE_PER_SLOT,
+        );
         return;
     }
 
