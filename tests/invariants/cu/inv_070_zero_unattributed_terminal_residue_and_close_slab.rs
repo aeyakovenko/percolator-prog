@@ -296,7 +296,7 @@ fn inv070_native_close_slab_accounts(
         AccountMeta::new(destination, false),
         AccountMeta::new_readonly(spl_token::ID, false),
         // Keep the legacy primary-mint position stable. Native retirement adds the sink after it.
-        AccountMeta::new(env.mint, false),
+        AccountMeta::new_readonly(env.mint, false),
         AccountMeta::new(sink, false),
     ]
 }
@@ -445,6 +445,32 @@ fn v16_program_native_wsol_terminal_unbudgeted_insurance_retires_to_incinerator(
     );
     assert_eq!(env.svm.get_account(&wrong_sink), wrong_sink_before);
 
+    let incinerator = solana_sdk::incinerator::id();
+    let mut readonly_sink_accounts =
+        inv070_native_close_slab_accounts(&env, destination, incinerator);
+    *readonly_sink_accounts
+        .last_mut()
+        .expect("native retirement sink account") = AccountMeta::new_readonly(incinerator, false);
+    env.svm.expire_blockhash();
+    let readonly_sink_result = env.send(
+        ProgInstruction::CloseSlab { authority_epoch: 0 },
+        readonly_sink_accounts,
+        &[&admin],
+    );
+    assert!(
+        readonly_sink_result.is_err(),
+        "native terminal retirement sink must be writable",
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market),
+        Some(market_before.clone())
+    );
+    assert_eq!(env.svm.get_account(&env.vault), Some(vault_before.clone()));
+    assert_eq!(
+        env.svm.get_account(&destination),
+        Some(destination_before.clone())
+    );
+
     let vault_state_before = TokenAccount::unpack(&vault_before.data).expect("native vault state");
     assert_eq!(
         vault_state_before.amount,
@@ -452,7 +478,6 @@ fn v16_program_native_wsol_terminal_unbudgeted_insurance_retires_to_incinerator(
     );
     let vault_lamports_before = vault_before.lamports;
     let destination_lamports_before = destination_before.lamports;
-    let incinerator = solana_sdk::incinerator::id();
     let incinerator_lamports_before = env.svm.get_balance(&incinerator).unwrap_or(0);
     let mint_before = env
         .svm
@@ -479,10 +504,18 @@ fn v16_program_native_wsol_terminal_unbudgeted_insurance_retires_to_incinerator(
     assert_cu_within("native terminal CloseSlab", close_cu, CUSTODY_CU_LIMIT);
 
     assert_closed_market_tombstone(&env.svm.get_account(&env.market).expect("market tombstone"));
-    assert!(
-        env.svm.get_account(&env.vault).is_none(),
-        "native primary vault is closed",
-    );
+    if let Some(closed_vault) = env.svm.get_account(&env.vault) {
+        assert_eq!(closed_vault.lamports, 0, "closed vault has no lamports");
+        assert!(
+            closed_vault.data.is_empty(),
+            "closed vault has no token data"
+        );
+        assert_eq!(
+            closed_vault.owner,
+            solana_sdk::system_program::ID,
+            "closed vault is returned to the System Program",
+        );
+    }
     let destination_after = env
         .svm
         .get_account(&destination)

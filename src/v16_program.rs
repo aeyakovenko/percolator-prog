@@ -11019,7 +11019,14 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         verify_token_program(token_program)?;
 
-        let (cfg_pre, retired_unbudgeted_insurance, bump, vault_balance, secondary_close) = {
+        let (
+            cfg_pre,
+            retired_unbudgeted_insurance,
+            bump,
+            vault_balance,
+            primary_vault_is_native,
+            secondary_close,
+        ) = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
             expect_live_authority(&cfg.marketauth, admin_dest.key)?;
@@ -11036,6 +11043,10 @@ pub mod processor {
             let primary_mint = primary_collateral_mint(&cfg);
             let vault_balance =
                 verify_vault_token_account(vault_token, &vault_authority, &primary_mint)?;
+            let primary_vault_is_native = unpack_token_account(vault_token)?.is_native();
+            if primary_vault_is_native != spl_token::native_mint::check_id(&primary_mint) {
+                return Err(PercolatorError::InvalidVaultAccount.into());
+            }
             verify_user_token_account(dest_token, admin_dest.key, &primary_mint)?;
             let secondary_close = if cfg.secondary_collateral_mint != [0u8; 32] {
                 let secondary_vault_token = account(accounts, 6)?;
@@ -11096,7 +11107,14 @@ pub mod processor {
             cfg.terminal_slab_scan_progress = 0;
             drop(group);
             state::write_wrapper_config(&mut market_data, &cfg)?;
-            (cfg, retired, bump, vault_balance, secondary_close)
+            (
+                cfg,
+                retired,
+                bump,
+                vault_balance,
+                primary_vault_is_native,
+                secondary_close,
+            )
         };
 
         let primary_mint = primary_collateral_mint(&cfg_pre);
@@ -11106,20 +11124,27 @@ pub mod processor {
             .ok_or(PercolatorError::InvalidTokenAccount)?;
         let bump_arr = [bump];
         let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+        let mut native_retirement_sink = None;
         if retired_u64 != 0 {
             let primary_mint_index = if secondary_close.is_some() { 8 } else { 6 };
             let primary_mint_ai = account(accounts, primary_mint_index)?;
-            expect_writable(primary_mint_ai)?;
             expect_key(primary_mint_ai, &primary_mint)?;
             verify_mint(primary_mint_ai)?;
-            burn_tokens_signed(
-                token_program,
-                vault_token,
-                primary_mint_ai,
-                vault_authority_ai,
-                retired_u64,
-                signer_seeds,
-            )?;
+            if primary_vault_is_native {
+                let incinerator_ai = account(accounts, primary_mint_index + 1)?;
+                verify_incinerator_account(incinerator_ai)?;
+                native_retirement_sink = Some(incinerator_ai);
+            } else {
+                expect_writable(primary_mint_ai)?;
+                burn_tokens_signed(
+                    token_program,
+                    vault_token,
+                    primary_mint_ai,
+                    vault_authority_ai,
+                    retired_u64,
+                    signer_seeds,
+                )?;
+            }
         }
         if primary_sweep_amount > 0 {
             transfer_tokens_signed(
@@ -11131,10 +11156,11 @@ pub mod processor {
                 signer_seeds,
             )?;
         }
+        let close_destination = native_retirement_sink.unwrap_or(admin_dest);
         let close_ix = spl_token::instruction::close_account(
             token_program.key,
             vault_token.key,
-            admin_dest.key,
+            close_destination.key,
             vault_authority_ai.key,
             &[],
         )?;
@@ -11142,7 +11168,7 @@ pub mod processor {
             &close_ix,
             &[
                 vault_token.clone(),
-                admin_dest.clone(),
+                close_destination.clone(),
                 vault_authority_ai.clone(),
                 token_program.clone(),
             ],
@@ -15915,6 +15941,18 @@ pub mod processor {
     fn expect_key(ai: &AccountInfo, expected: &Pubkey) -> Result<(), ProgramError> {
         if ai.key != expected {
             return Err(ProgramError::InvalidArgument);
+        }
+        Ok(())
+    }
+
+    fn verify_incinerator_account(incinerator_ai: &AccountInfo) -> ProgramResult {
+        expect_writable(incinerator_ai)?;
+        expect_key(incinerator_ai, &solana_program::incinerator::id())?;
+        if incinerator_ai.owner != &solana_program::system_program::ID
+            || incinerator_ai.executable
+            || incinerator_ai.data_len() != 0
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
         }
         Ok(())
     }
