@@ -1712,3 +1712,118 @@ fn v16_bpf_tradecpi_permissionless_lp_fill_does_not_need_lp_owner_signature() {
         (10 * POS_SCALE) as i128
     );
 }
+
+#[test]
+fn v16_program_asset_slot_reuse_rejects_stale_lp_matcher_capability() {
+    const ASSET: u16 = 1;
+    const RETIRE_SLOT: u64 = 3;
+    const REUSE_SLOT: u64 = 5;
+    const MOVE_SLOT: u64 = 6;
+    const OPEN_PRICE: u64 = 100;
+    const CLOSE_PRICE: u64 = 105;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 50_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    let attacker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let attacker = env.create_portfolio(&attacker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&attacker_owner, attacker, DEPOSIT);
+    env.deposit(&lp_owner, lp, DEPOSIT);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp);
+    let old_market_id = env.asset_market_id(ASSET);
+    assert_eq!(env.portfolio_matcher_config(lp).enabled(), 1);
+
+    env.svm.warp_to_slot(RETIRE_SLOT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_RETIRE,
+        ASSET,
+        RETIRE_SLOT,
+        0,
+    );
+    env.svm.warp_to_slot(REUSE_SLOT);
+    env.activate_asset(ASSET, REUSE_SLOT, OPEN_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, REUSE_SLOT, OPEN_PRICE);
+    assert_ne!(env.asset_market_id(ASSET), old_market_id);
+    assert_eq!(
+        env.portfolio_matcher_config(lp).enabled(),
+        1,
+        "retiring an unrelated empty slot cannot scan and mutate every portfolio"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let attacker_before = env.svm.get_account(&attacker).unwrap();
+    let lp_before = env.svm.get_account(&lp).unwrap();
+    let matcher_before = env.svm.get_account(&matcher_context).unwrap();
+    env.svm.expire_blockhash();
+    let stale_open = env.try_trade_cpi_with_cu_on_asset(
+        &attacker_owner,
+        attacker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        ASSET,
+        SIZE_Q,
+        0,
+    );
+    if stale_open.is_err() {
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&attacker).unwrap(), attacker_before);
+        assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+        assert_eq!(
+            env.svm.get_account(&matcher_context).unwrap(),
+            matcher_before
+        );
+        return;
+    }
+
+    env.svm.warp_to_slot(MOVE_SLOT);
+    env.push_auth_mark_for_asset_as_admin(ASSET, MOVE_SLOT, CLOSE_PRICE);
+    for portfolio in [lp, attacker] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: MOVE_SLOT,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+    env.trade_cpi_with_cu_on_asset(
+        &attacker_owner,
+        attacker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        ASSET,
+        -SIZE_Q,
+        0,
+    );
+    let released_pnl = env.portfolio_state(attacker).pnl.get();
+    assert!(
+        released_pnl > 0,
+        "replacement-asset trade must earn attacker PnL"
+    );
+    env.convert_released_pnl_with_cu(&attacker_owner, attacker, released_pnl as u128);
+    let attacker_capital = env.portfolio_state(attacker).capital.get();
+    let lp_capital = env.portfolio_state(lp).capital.get();
+    let (attacker_destination, _) =
+        env.withdraw_with_cu(&attacker_owner, attacker, attacker_capital);
+    assert_eq!(
+        env.token_amount(attacker_destination),
+        attacker_capital as u64
+    );
+    eprintln!(
+        "stale matcher asset-generation exploit: generation {old_market_id} -> {}, attacker {DEPOSIT} -> {attacker_capital}, LP {DEPOSIT} -> {lp_capital}",
+        env.asset_market_id(ASSET),
+    );
+    assert!(
+        attacker_capital <= DEPOSIT && lp_capital >= DEPOSIT,
+        "an old LP matcher grant must not transfer value on a replacement asset"
+    );
+}
