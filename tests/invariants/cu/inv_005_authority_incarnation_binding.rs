@@ -5067,6 +5067,8 @@ fn v16_attack_funded_asset_admin_cannot_seize_oracle_and_redistribute_user_value
             honest_oracle,
             "the funded asset must retain its incumbent oracle"
         );
+        env.update_asset_authority_from_admin(0, percolator_prog::processor::ASSET_AUTH_ORACLE, 3)
+            .expect("the incumbent oracle can still self-rotate while exposure is live");
         return;
     }
 
