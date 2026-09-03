@@ -5363,6 +5363,7 @@ fn v16_cu_set_matcher_config_enabled_and_disabled_are_bounded() {
             ProgInstruction::SetMatcherConfig {
                 portfolio_id: env.portfolio_id(maker),
                 expected_sequence: env.portfolio_matcher_sequence(maker),
+                position_epoch: env.portfolio_position_epoch(maker),
                 enabled: 0,
                 trade_fee_cap_bps: 0,
                 expiry_slot: 0,
@@ -5382,6 +5383,7 @@ fn v16_cu_set_matcher_config_enabled_and_disabled_are_bounded() {
             ProgInstruction::SetMatcherConfig {
                 portfolio_id: env.portfolio_id(maker),
                 expected_sequence: env.portfolio_matcher_sequence(maker),
+                position_epoch: env.portfolio_position_epoch(maker),
                 enabled: 1,
                 trade_fee_cap_bps: 10_000,
                 expiry_slot: u64::MAX,

@@ -8,8 +8,11 @@
 //! This public LiteSVM matrix covers both CPI transports. Each world retains a
 //! valid transaction, disables and re-enables the identical matcher tuple, and
 //! requires the old transaction to reject with exact program-account, matcher,
-//! token-supply, and lamport rollback. A transaction built after re-enable must
-//! still execute, excluding an always-rejecting fix.
+//! token-supply, and lamport rollback. It also retains a matcher enable across a
+//! signed out-of-matcher position round trip and carries any stale revival through
+//! honest mark settlement to exact attacker gain and independent LP loss. A
+//! request built after either invalidation still executes, excluding an
+//! always-rejecting fix.
 
 use crate::support::v16_svm::{
     MarketConfig, PublicTerminalClassification, PublicTerminalObservation, V16Svm,
