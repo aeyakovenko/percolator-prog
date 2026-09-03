@@ -634,8 +634,9 @@ pub mod state {
 
     /// Wrapper-only ordering watermarks stored in the unused tail of each asset slot.
     /// Asset zero owns the market-wide policy lanes; oracle, backing, and top-up lanes are per
-    /// asset. Both insurance top-up entrypoints share `insurance_top_up` so an intent cannot be
-    /// replayed through the alternate route.
+    /// asset. Insurance top-ups and withdrawals share the exact-next `insurance_top_up` lane so
+    /// retained stock mutations cannot be replayed after an intervening operation and neither
+    /// authority can exhaust the other authority's sequence with an arbitrary jump.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
     pub struct AssetControlSequencesV16 {
@@ -1785,6 +1786,17 @@ pub mod state {
     #[inline]
     pub fn require_newer_control_sequence(current: u64, proposed: u64) -> Result<(), ProgramError> {
         if proposed <= current {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn require_next_control_sequence(current: u64, proposed: u64) -> Result<(), ProgramError> {
+        let next = current
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow)?;
+        if proposed != next {
             return Err(PercolatorError::EngineStale.into());
         }
         Ok(())
@@ -3240,6 +3252,7 @@ pub mod ix {
         WithdrawInsuranceAsset {
             asset_index: u16,
             market_id: u64,
+            intent_id: u64,
             authority_epoch: u64,
             amount: u128,
         },
@@ -3761,6 +3774,7 @@ pub mod ix {
                 57 => Self::WithdrawInsuranceAsset {
                     asset_index: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
+                    intent_id: read_u64(&mut rest)?,
                     authority_epoch: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
@@ -4389,12 +4403,14 @@ pub mod ix {
                 Self::WithdrawInsuranceAsset {
                     asset_index,
                     market_id,
+                    intent_id,
                     authority_epoch,
                     amount,
                 } => {
                     out.push(57);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, market_id);
+                    push_u64(&mut out, intent_id);
                     push_u64(&mut out, authority_epoch);
                     push_u128(&mut out, amount);
                 }
@@ -6168,7 +6184,6 @@ pub mod processor {
         FeeRedirect,
         MarketInitFee,
         PermissionlessResolve,
-        InsuranceTopUp,
         BackingTopUp,
     }
 
@@ -6221,7 +6236,6 @@ pub mod processor {
             ControlSequenceLane::FeeRedirect => &mut sequences.fee_redirect,
             ControlSequenceLane::MarketInitFee => &mut sequences.market_init_fee,
             ControlSequenceLane::PermissionlessResolve => &mut sequences.permissionless_resolve,
-            ControlSequenceLane::InsuranceTopUp => &mut sequences.insurance_top_up,
             ControlSequenceLane::BackingTopUp => &mut sequences.backing_top_up,
         }
     }
@@ -6236,6 +6250,17 @@ pub mod processor {
         let current = control_sequence_mut(&mut sequences, lane);
         state::require_newer_control_sequence(*current, proposed)?;
         *current = proposed;
+        write_control_sequences_to_view(group, asset_index, &sequences)
+    }
+
+    fn advance_insurance_stock_sequence_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        proposed: u64,
+    ) -> ProgramResult {
+        let mut sequences = read_control_sequences_from_view(group, asset_index)?;
+        state::require_next_control_sequence(sequences.insurance_top_up, proposed)?;
+        sequences.insurance_top_up = proposed;
         write_control_sequences_to_view(group, asset_index, &sequences)
     }
 
@@ -7531,6 +7556,7 @@ pub mod processor {
             Instruction::WithdrawInsuranceAsset {
                 asset_index,
                 market_id,
+                intent_id,
                 authority_epoch,
                 amount,
             } => handle_withdraw_insurance_asset(
@@ -7538,6 +7564,7 @@ pub mod processor {
                 accounts,
                 asset_index,
                 market_id,
+                intent_id,
                 authority_epoch,
                 amount,
             ),
@@ -9983,7 +10010,7 @@ pub mod processor {
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
             require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;
             let sequences = read_control_sequences_from_view(&group, asset_index)?;
-            state::require_newer_control_sequence(sequences.insurance_top_up, intent_id)?;
+            state::require_next_control_sequence(sequences.insurance_top_up, intent_id)?;
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             (cfg, authorities.insurance_authority)
@@ -10011,6 +10038,8 @@ pub mod processor {
                 domain_authorities_from_view(&group, &cfg, scope.authority_domain())?
                     .insurance_authority;
             expect_live_authority(&insurance_authority, signer.key)?;
+            let sequences = read_control_sequences_from_view(&group, asset_index)?;
+            state::require_next_control_sequence(sequences.insurance_top_up, intent_id)?;
             let observed = match scope {
                 InsuranceTopUpScope::BaseMarket => {
                     market_insurance_remaining_view(&group, asset_index)?
@@ -10064,12 +10093,7 @@ pub mod processor {
             {
                 write_or_init_insurance_ledger(data, ledger, *initialized)?;
             }
-            advance_control_sequence_view(
-                &mut group,
-                asset_index,
-                ControlSequenceLane::InsuranceTopUp,
-                intent_id,
-            )?;
+            advance_insurance_stock_sequence_view(&mut group, asset_index, intent_id)?;
         }
         transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
         Ok(())
@@ -10810,6 +10834,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
         expected_market_id: u64,
+        intent_id: u64,
         expected_authority_epoch: u64,
         amount: u128,
     ) -> ProgramResult {
@@ -10908,6 +10933,8 @@ pub mod processor {
                     .map_err(map_v16_error)?;
                 authorities.insurance_authority
             };
+            let sequences = read_control_sequences_from_view(&group, asset_index)?;
+            state::require_next_control_sequence(sequences.insurance_top_up, intent_id)?;
             let available = market_insurance_withdraw_capacity_view(&group, asset_index)?;
             if amount > available
                 || amount > group.header.insurance.get()
@@ -10952,6 +10979,7 @@ pub mod processor {
             {
                 write_or_init_insurance_ledger(data, ledger, *initialized)?;
             }
+            advance_insurance_stock_sequence_view(&mut group, asset_index, intent_id)?;
         }
         let bump_arr = [bump];
         let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];

@@ -26,6 +26,27 @@ fn kani_v16_top_up_intent_accepts_only_a_strictly_newer_watermark() {
         assert!(state::require_newer_control_sequence(proposed, proposed).is_err());
         assert!(state::require_newer_control_sequence(proposed, current).is_err());
     }
+
+    let insurance_accepted = state::require_next_control_sequence(current, proposed).is_ok();
+    kani::cover!(
+        insurance_accepted,
+        "the exact next insurance stock intent is accepted"
+    );
+    kani::cover!(
+        !insurance_accepted,
+        "a stale, skipped, or exhausting insurance stock intent rejects"
+    );
+    assert_eq!(
+        insurance_accepted,
+        current != u64::MAX && proposed == current + 1
+    );
+    if insurance_accepted {
+        assert!(state::require_next_control_sequence(proposed, proposed).is_err());
+        assert!(state::require_next_control_sequence(proposed, current).is_err());
+    }
+    assert!(
+        state::require_next_control_sequence(current, u64::MAX).is_err() || current == u64::MAX - 1
+    );
 }
 
 #[kani::proof]

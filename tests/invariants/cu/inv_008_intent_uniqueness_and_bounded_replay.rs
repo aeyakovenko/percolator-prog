@@ -1,12 +1,13 @@
 //! INV-008 - Intent uniqueness and bounded replay.
 //!
-//! Normative obligation: each retained top-up carries a per-asset monotonic intent ID. The two
-//! insurance entrypoints share one lane, backing uses a separate lane, and a successful mutation
-//! consumes its lane only after all wrapper and engine validation. Public-SBF and stateful owners
-//! prove stale-retry rollback and fresh-intent liveness; this file pins source composition and the
-//! no-growth zero-copy layout used by those routes. The replay-disposition roster also classifies
-//! every public instruction and requires all retry/supersession generator kinds to retain a
-//! production route, so adding a public variant cannot silently bypass an explicit replay owner.
+//! Normative obligation: each retained insurance-stock mutation and backing top-up carries a
+//! per-asset monotonic intent ID. Insurance deposits and withdrawals share one lane, backing uses
+//! a separate lane, and a successful mutation consumes its lane only after all wrapper and engine
+//! validation. Public-SBF and stateful owners prove stale-retry rollback and fresh-intent
+//! liveness; this file pins source composition and the no-growth zero-copy layout used by those
+//! routes. The replay-disposition roster also classifies every public instruction and requires all
+//! retry/supersession generator kinds to retain a production route, so adding a public variant
+//! cannot silently bypass an explicit replay owner.
 
 use super::*;
 use crate::support::invariant_discovery::{RetryIntentKind, SupersededIntentKind};
@@ -226,27 +227,28 @@ fn v16_public_replay_disposition_roster_is_source_complete() {
 }
 
 #[test]
-fn v16_top_up_intent_wire_and_dispatch_roster_is_complete() {
+fn v16_insurance_stock_and_backing_intent_wire_and_dispatch_roster_is_complete() {
     let source = include_str!("../../../src/v16_program.rs");
     let instruction = braced_block_after(source, "pub enum Instruction");
     for variant in [
         "TopUpInsurance",
         "TopUpInsuranceDomain",
+        "WithdrawInsuranceAsset",
         "TopUpBackingBucket",
     ] {
         let body = braced_block_after(instruction, variant);
         assert!(
             body.contains("intent_id: u64"),
-            "{variant} must carry the monotonic top-up intent"
+            "{variant} must carry the monotonic stock-mutation intent"
         );
     }
 
     let decode = braced_block_after(source, "pub fn decode(input: &[u8])");
     let encode = braced_block_after(source, "pub fn encode(&self)");
     let process = braced_block_after(source, "pub fn process_instruction");
-    assert_eq!(decode.matches("intent_id: read_u64(&mut rest)?").count(), 3);
-    assert_eq!(encode.matches("push_u64(&mut out, intent_id)").count(), 3);
-    assert_eq!(process.matches("intent_id,").count(), 6);
+    assert_eq!(decode.matches("intent_id: read_u64(&mut rest)?").count(), 4);
+    assert_eq!(encode.matches("push_u64(&mut out, intent_id)").count(), 4);
+    assert_eq!(process.matches("intent_id,").count(), 8);
 }
 
 #[test]
@@ -254,24 +256,25 @@ fn v16_top_up_intent_guards_precede_mutation_and_consumption_is_last() {
     let source = include_str!("../../../src/v16_program.rs");
     let market = braced_block_after(source, "fn handle_top_up_insurance<'a>");
     let backing = braced_block_after(source, "fn handle_top_up_backing_bucket<'a>");
+    let withdrawal = braced_block_after(source, "fn handle_withdraw_insurance_asset<'a>");
 
     assert_ordered(
         market,
         &[
-            "require_newer_control_sequence(sequences.insurance_top_up, intent_id)",
+            "require_next_control_sequence(sequences.insurance_top_up, intent_id)",
             "deposit_market_zero_insurance_view",
             "group.validate_shape()",
-            "ControlSequenceLane::InsuranceTopUp",
+            "advance_insurance_stock_sequence_view",
             "transfer_tokens",
         ],
     );
     assert_ordered(
         market,
         &[
-            "require_newer_control_sequence(sequences.insurance_top_up, intent_id)",
+            "require_next_control_sequence(sequences.insurance_top_up, intent_id)",
             "deposit_domain_insurance_not_atomic",
             "group.validate_shape()",
-            "ControlSequenceLane::InsuranceTopUp",
+            "advance_insurance_stock_sequence_view",
             "transfer_tokens",
         ],
     );
@@ -285,9 +288,19 @@ fn v16_top_up_intent_guards_precede_mutation_and_consumption_is_last() {
             "transfer_tokens",
         ],
     );
+    assert_ordered(
+        withdrawal,
+        &[
+            "state::require_next_control_sequence(sequences.insurance_top_up, intent_id)",
+            "debit_market_insurance_budget_view",
+            "group.validate_shape()",
+            "advance_insurance_stock_sequence_view",
+            "transfer_tokens_signed",
+        ],
+    );
     assert_eq!(
         market
-            .matches("ControlSequenceLane::InsuranceTopUp")
+            .matches("advance_insurance_stock_sequence_view")
             .count(),
         1
     );

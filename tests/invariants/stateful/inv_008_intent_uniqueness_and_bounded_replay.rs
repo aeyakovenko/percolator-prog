@@ -13,6 +13,11 @@
 //! rejects the remaining duplicate without state or SPL-supply drift.
 //! A third probe selects any ordered pair of single/batch CPI/no-CPI encodings for one retained
 //! bilateral trade and requires the same rollback, exact-once, OI, basis, and supply properties.
+//! The insurance-stock probe uses independent provider and operator roles, replenishes the fund
+//! after one withdrawal lands, and proves a signature-distinct retry cannot consume the new
+//! provider principal while a freshly sequenced withdrawal remains executable. Its companion
+//! rejects arbitrary sequence jumps so either role cannot permanently exhaust the shared stock
+//! lane and deny the other role's next valid operation.
 //!
 //! Guarantee boundary: PRs 343/344/350/351/355/362 are fixed-pin certifications of the currently
 //! deployed retained families, not a claim that absent message fields exist. Successful partial
@@ -20,6 +25,137 @@
 //! schema requirements.
 
 use super::*;
+use crate::support::v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT};
+
+#[test]
+fn v16_program_retained_insurance_withdrawal_cannot_consume_replenished_principal() {
+    const PROVIDER: usize = 2;
+    const OPERATOR: usize = 3;
+    const ASSET: u16 = 0;
+    const DOMAIN: u16 = 0;
+    const AMOUNT: u128 = 100_000;
+
+    let mut env = V16Svm::new(
+        [0x81; 32],
+        MarketConfig {
+            actor_deposits: [1; PRIMARY_ACTOR_COUNT],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.begin_public_trace();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        PROVIDER,
+    )
+    .expect("install independent insurance provider");
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        OPERATOR,
+    )
+    .expect("install independent insurance operator");
+    env.top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, AMOUNT)
+        .expect("fund first insurance principal");
+
+    // These are signature-distinct fee-bump variants of one economic withdrawal.
+    let intended = env.build_retained_insurance_withdrawal_for_actor(OPERATOR, ASSET, AMOUNT);
+    let retry = env.build_retained_insurance_withdrawal_for_actor(OPERATOR, ASSET, AMOUNT);
+    let operator_destination = env.actors[OPERATOR].destination_token;
+    let operator_before = u128::from(env.token_amount(operator_destination));
+    env.land_retained(intended)
+        .expect("the intended insurance withdrawal must land");
+    assert_eq!(
+        u128::from(env.token_amount(operator_destination)) - operator_before,
+        AMOUNT,
+        "the intended request must withdraw exactly its signed amount"
+    );
+
+    // A later provider deposit must not revive the stale fee-bump variant.
+    env.top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, AMOUNT)
+        .expect("fund replacement insurance principal");
+    let market_before_retry = env.market_data(false);
+    let vault_before_retry = env.token_amount(env.vault);
+    let operator_before_retry = env.token_amount(operator_destination);
+    let retry_result = env.land_retained(retry);
+    let operator_retry_gain = u128::from(env.token_amount(operator_destination))
+        .saturating_sub(u128::from(operator_before_retry));
+    assert!(
+        retry_result.is_err(),
+        "stale retained withdrawal consumed {operator_retry_gain} atoms of replenished provider principal"
+    );
+    assert_eq!(env.market_data(false), market_before_retry);
+    assert_eq!(env.token_amount(env.vault), vault_before_retry);
+    assert_eq!(
+        env.token_amount(operator_destination),
+        operator_before_retry
+    );
+    assert_eq!(env.token_supply_observed(), supply_before);
+
+    let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("insurance replay reproduction must use only public instructions");
+    assert_eq!(trace.out_of_band_economic_mutations, 0);
+}
+
+#[test]
+fn v16_program_insurance_stock_sequence_rejects_operator_exhaustion() {
+    const PROVIDER: usize = 2;
+    const OPERATOR: usize = 3;
+    const ASSET: u16 = 0;
+    const DOMAIN: u16 = 0;
+    const AMOUNT: u128 = 100_000;
+
+    let mut env = V16Svm::new(
+        [0x82; 32],
+        MarketConfig {
+            actor_deposits: [1; PRIMARY_ACTOR_COUNT],
+            ..MarketConfig::default()
+        },
+    );
+    env.begin_public_trace();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        PROVIDER,
+    )
+    .expect("install independent insurance provider");
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        OPERATOR,
+    )
+    .expect("install independent insurance operator");
+    env.top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, AMOUNT)
+        .expect("fund insurance principal");
+
+    let poison =
+        env.build_retained_insurance_withdrawal_with_intent_for_actor(OPERATOR, ASSET, u64::MAX, 1);
+    let market_before = env.market_data(false);
+    let vault_before = env.token_amount(env.vault);
+    let operator_before = env.token_amount(env.actors[OPERATOR].destination_token);
+    env.land_retained(poison)
+        .expect_err("an operator cannot jump the shared insurance stock sequence");
+    assert_eq!(env.market_data(false), market_before);
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(
+        env.token_amount(env.actors[OPERATOR].destination_token),
+        operator_before
+    );
+
+    env.withdraw_insurance_asset(OPERATOR, ASSET, 1)
+        .expect("the exact-next operator withdrawal remains live");
+    env.top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, 1)
+        .expect("the independent provider can still replenish after the withdrawal");
+
+    let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("insurance sequence exhaustion probe must use only public instructions");
+    assert_eq!(trace.out_of_band_economic_mutations, 0);
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

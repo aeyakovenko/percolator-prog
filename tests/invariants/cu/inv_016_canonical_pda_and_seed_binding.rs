@@ -617,6 +617,7 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
                 substitute_vault_authority(slot, env.vault_authority, substitutions);
             let ix = ProgInstruction::WithdrawInsuranceAsset {
                 market_id: 0,
+                intent_id: u64::MAX,
                 authority_epoch: 0,
                 asset_index: 0,
                 amount: 100,

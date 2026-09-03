@@ -511,11 +511,13 @@ fn kani_v16_insurance_domain_top_up_decode_preserves_wire_fields() {
 fn kani_v16_asset_insurance_withdraw_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let market_id: u64 = kani::any();
+    let intent_id: u64 = kani::any();
     let authority_epoch: u64 = kani::any();
     let amount: u128 = kani::any();
     let encoded = Instruction::WithdrawInsuranceAsset {
         asset_index,
         market_id,
+        intent_id,
         authority_epoch,
         amount,
     }
@@ -525,11 +527,13 @@ fn kani_v16_asset_insurance_withdraw_decode_preserves_wire_fields() {
         Instruction::WithdrawInsuranceAsset {
             asset_index: got_asset,
             market_id: got_market_id,
+            intent_id: got_intent_id,
             authority_epoch: got_authority_epoch,
             amount: got_amount,
         } => {
             assert_eq!(got_asset, asset_index);
             assert_eq!(got_market_id, market_id);
+            assert_eq!(got_intent_id, intent_id);
             assert_eq!(got_authority_epoch, authority_epoch);
             assert_eq!(got_amount, amount);
         }
@@ -2020,6 +2024,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
         Instruction::WithdrawInsuranceAsset {
             asset_index: 0,
             market_id: 1,
+            intent_id: 1,
             authority_epoch: 0,
             amount: 1,
         },

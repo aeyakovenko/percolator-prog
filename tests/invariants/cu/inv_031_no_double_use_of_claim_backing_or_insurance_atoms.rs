@@ -245,6 +245,7 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
     let double_withdraw = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 1,
@@ -280,6 +281,7 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
     let legitimate_secondary = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 1,

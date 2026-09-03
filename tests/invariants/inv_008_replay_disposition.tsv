@@ -38,7 +38,7 @@ tag	variant	disposition	boundary
 54	SyncInsuranceLedger	state-derived	Current canonical market and ledger state determine synchronization.
 55	UpdateTradeFeePolicy	supersession:TradeFeePolicy	Scope-local policy sequence is exercised by the supersession matrix.
 56	TopUpInsuranceDomain	retry:InsuranceTopUp	The direct and domain routes share one executable insurance retry watermark.
-57	WithdrawInsuranceAsset	incarnation-episode	Asset generation, current operator, and available domain budget bind the debit.
+57	WithdrawInsuranceAsset	retry:InsuranceWithdrawal	Top-ups and withdrawals share one per-asset insurance-stock watermark; replenishment cannot revive a stale withdrawal variant.
 58	UpdateFeeRedirectPolicy	supersession:FeeRedirectPolicy	Scope-local policy sequence is exercised by the supersession matrix.
 59	UpdateMarketInitFeePolicy	supersession:MarketInitFeePolicy	Scope-local policy sequence is exercised by the supersession matrix.
 60	UpdateBaseUnitMints	live-authority	Current market authority and canonical mint state gate the update.

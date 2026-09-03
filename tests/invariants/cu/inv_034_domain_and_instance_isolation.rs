@@ -1525,6 +1525,7 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 40,
@@ -1574,6 +1575,7 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 40,
@@ -1759,6 +1761,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 40,
@@ -1822,6 +1825,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 40,
@@ -1856,6 +1860,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 40,
@@ -2461,6 +2466,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
     let withdraw = || ProgInstruction::WithdrawInsuranceAsset {
         asset_index: 0,
         market_id: group_b.assets[0].market_id,
+        intent_id: u64::MAX,
         authority_epoch: 0,
         amount: 40,
     };
@@ -2643,6 +2649,7 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
     let withdraw = || ProgInstruction::WithdrawInsuranceAsset {
         asset_index: 0,
         market_id: group_b.assets[0].market_id,
+        intent_id: u64::MAX,
         authority_epoch: 0,
         amount: 40,
     };
