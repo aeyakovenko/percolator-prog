@@ -4886,12 +4886,27 @@ impl V16Svm {
         asset_index: u16,
         amount: u128,
     ) -> Transaction {
-        let operator = copy_keypair(&self.actors[actor_index].signer);
-        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let intent_id = next_control_sequence(
             self.primary_control_sequences(asset_index as usize)
                 .insurance_top_up,
         );
+        self.build_retained_insurance_withdrawal_with_intent_for_actor(
+            actor_index,
+            asset_index,
+            intent_id,
+            amount,
+        )
+    }
+
+    pub fn build_retained_insurance_withdrawal_with_intent_for_actor(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        intent_id: u64,
+        amount: u128,
+    ) -> Transaction {
+        let operator = copy_keypair(&self.actors[actor_index].signer);
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         self.build_program_transaction(
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index,

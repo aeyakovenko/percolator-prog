@@ -15,7 +15,9 @@
 //! bilateral trade and requires the same rollback, exact-once, OI, basis, and supply properties.
 //! The insurance-stock probe uses independent provider and operator roles, replenishes the fund
 //! after one withdrawal lands, and proves a signature-distinct retry cannot consume the new
-//! provider principal while a freshly sequenced withdrawal remains executable.
+//! provider principal while a freshly sequenced withdrawal remains executable. Its companion
+//! rejects arbitrary sequence jumps so either role cannot permanently exhaust the shared stock
+//! lane and deny the other role's next valid operation.
 //!
 //! Guarantee boundary: PRs 343/344/350/351/355/362 are fixed-pin certifications of the currently
 //! deployed retained families, not a claim that absent message fields exist. Successful partial
@@ -95,6 +97,63 @@ fn v16_program_retained_insurance_withdrawal_cannot_consume_replenished_principa
     trace
         .validate_public_execution()
         .expect("insurance replay reproduction must use only public instructions");
+    assert_eq!(trace.out_of_band_economic_mutations, 0);
+}
+
+#[test]
+fn v16_program_insurance_stock_sequence_rejects_operator_exhaustion() {
+    const PROVIDER: usize = 2;
+    const OPERATOR: usize = 3;
+    const ASSET: u16 = 0;
+    const DOMAIN: u16 = 0;
+    const AMOUNT: u128 = 100_000;
+
+    let mut env = V16Svm::new(
+        [0x82; 32],
+        MarketConfig {
+            actor_deposits: [1; PRIMARY_ACTOR_COUNT],
+            ..MarketConfig::default()
+        },
+    );
+    env.begin_public_trace();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        PROVIDER,
+    )
+    .expect("install independent insurance provider");
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        OPERATOR,
+    )
+    .expect("install independent insurance operator");
+    env.top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, AMOUNT)
+        .expect("fund insurance principal");
+
+    let poison =
+        env.build_retained_insurance_withdrawal_with_intent_for_actor(OPERATOR, ASSET, u64::MAX, 1);
+    let market_before = env.market_data(false);
+    let vault_before = env.token_amount(env.vault);
+    let operator_before = env.token_amount(env.actors[OPERATOR].destination_token);
+    env.land_retained(poison)
+        .expect_err("an operator cannot jump the shared insurance stock sequence");
+    assert_eq!(env.market_data(false), market_before);
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(
+        env.token_amount(env.actors[OPERATOR].destination_token),
+        operator_before
+    );
+
+    env.withdraw_insurance_asset(OPERATOR, ASSET, 1)
+        .expect("the exact-next operator withdrawal remains live");
+    env.top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, 1)
+        .expect("the independent provider can still replenish after the withdrawal");
+
+    let trace = env.finish_public_trace();
+    trace
+        .validate_public_execution()
+        .expect("insurance sequence exhaustion probe must use only public instructions");
     assert_eq!(trace.out_of_band_economic_mutations, 0);
 }
 

@@ -634,8 +634,9 @@ pub mod state {
 
     /// Wrapper-only ordering watermarks stored in the unused tail of each asset slot.
     /// Asset zero owns the market-wide policy lanes; oracle, backing, and top-up lanes are per
-    /// asset. Insurance top-ups and withdrawals share `insurance_top_up` so retained stock
-    /// mutations cannot be replayed after an intervening deposit or withdrawal.
+    /// asset. Insurance top-ups and withdrawals share the exact-next `insurance_top_up` lane so
+    /// retained stock mutations cannot be replayed after an intervening operation and neither
+    /// authority can exhaust the other authority's sequence with an arbitrary jump.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
     pub struct AssetControlSequencesV16 {
@@ -1785,6 +1786,17 @@ pub mod state {
     #[inline]
     pub fn require_newer_control_sequence(current: u64, proposed: u64) -> Result<(), ProgramError> {
         if proposed <= current {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn require_next_control_sequence(current: u64, proposed: u64) -> Result<(), ProgramError> {
+        let next = current
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow)?;
+        if proposed != next {
             return Err(PercolatorError::EngineStale.into());
         }
         Ok(())
@@ -6172,7 +6184,6 @@ pub mod processor {
         FeeRedirect,
         MarketInitFee,
         PermissionlessResolve,
-        InsuranceTopUp,
         BackingTopUp,
     }
 
@@ -6225,7 +6236,6 @@ pub mod processor {
             ControlSequenceLane::FeeRedirect => &mut sequences.fee_redirect,
             ControlSequenceLane::MarketInitFee => &mut sequences.market_init_fee,
             ControlSequenceLane::PermissionlessResolve => &mut sequences.permissionless_resolve,
-            ControlSequenceLane::InsuranceTopUp => &mut sequences.insurance_top_up,
             ControlSequenceLane::BackingTopUp => &mut sequences.backing_top_up,
         }
     }
@@ -6240,6 +6250,17 @@ pub mod processor {
         let current = control_sequence_mut(&mut sequences, lane);
         state::require_newer_control_sequence(*current, proposed)?;
         *current = proposed;
+        write_control_sequences_to_view(group, asset_index, &sequences)
+    }
+
+    fn advance_insurance_stock_sequence_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        proposed: u64,
+    ) -> ProgramResult {
+        let mut sequences = read_control_sequences_from_view(group, asset_index)?;
+        state::require_next_control_sequence(sequences.insurance_top_up, proposed)?;
+        sequences.insurance_top_up = proposed;
         write_control_sequences_to_view(group, asset_index, &sequences)
     }
 
@@ -9989,7 +10010,7 @@ pub mod processor {
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
             require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;
             let sequences = read_control_sequences_from_view(&group, asset_index)?;
-            state::require_newer_control_sequence(sequences.insurance_top_up, intent_id)?;
+            state::require_next_control_sequence(sequences.insurance_top_up, intent_id)?;
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             (cfg, authorities.insurance_authority)
@@ -10017,6 +10038,8 @@ pub mod processor {
                 domain_authorities_from_view(&group, &cfg, scope.authority_domain())?
                     .insurance_authority;
             expect_live_authority(&insurance_authority, signer.key)?;
+            let sequences = read_control_sequences_from_view(&group, asset_index)?;
+            state::require_next_control_sequence(sequences.insurance_top_up, intent_id)?;
             let observed = match scope {
                 InsuranceTopUpScope::BaseMarket => {
                     market_insurance_remaining_view(&group, asset_index)?
@@ -10070,12 +10093,7 @@ pub mod processor {
             {
                 write_or_init_insurance_ledger(data, ledger, *initialized)?;
             }
-            advance_control_sequence_view(
-                &mut group,
-                asset_index,
-                ControlSequenceLane::InsuranceTopUp,
-                intent_id,
-            )?;
+            advance_insurance_stock_sequence_view(&mut group, asset_index, intent_id)?;
         }
         transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
         Ok(())
@@ -10916,7 +10934,7 @@ pub mod processor {
                 authorities.insurance_authority
             };
             let sequences = read_control_sequences_from_view(&group, asset_index)?;
-            state::require_newer_control_sequence(sequences.insurance_top_up, intent_id)?;
+            state::require_next_control_sequence(sequences.insurance_top_up, intent_id)?;
             let available = market_insurance_withdraw_capacity_view(&group, asset_index)?;
             if amount > available
                 || amount > group.header.insurance.get()
@@ -10961,12 +10979,7 @@ pub mod processor {
             {
                 write_or_init_insurance_ledger(data, ledger, *initialized)?;
             }
-            advance_control_sequence_view(
-                &mut group,
-                asset_index,
-                ControlSequenceLane::InsuranceTopUp,
-                intent_id,
-            )?;
+            advance_insurance_stock_sequence_view(&mut group, asset_index, intent_id)?;
         }
         let bump_arr = [bump];
         let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];

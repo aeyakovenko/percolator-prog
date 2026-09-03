@@ -261,20 +261,20 @@ fn v16_top_up_intent_guards_precede_mutation_and_consumption_is_last() {
     assert_ordered(
         market,
         &[
-            "require_newer_control_sequence(sequences.insurance_top_up, intent_id)",
+            "require_next_control_sequence(sequences.insurance_top_up, intent_id)",
             "deposit_market_zero_insurance_view",
             "group.validate_shape()",
-            "ControlSequenceLane::InsuranceTopUp",
+            "advance_insurance_stock_sequence_view",
             "transfer_tokens",
         ],
     );
     assert_ordered(
         market,
         &[
-            "require_newer_control_sequence(sequences.insurance_top_up, intent_id)",
+            "require_next_control_sequence(sequences.insurance_top_up, intent_id)",
             "deposit_domain_insurance_not_atomic",
             "group.validate_shape()",
-            "ControlSequenceLane::InsuranceTopUp",
+            "advance_insurance_stock_sequence_view",
             "transfer_tokens",
         ],
     );
@@ -291,16 +291,16 @@ fn v16_top_up_intent_guards_precede_mutation_and_consumption_is_last() {
     assert_ordered(
         withdrawal,
         &[
-            "state::require_newer_control_sequence(sequences.insurance_top_up, intent_id)",
+            "state::require_next_control_sequence(sequences.insurance_top_up, intent_id)",
             "debit_market_insurance_budget_view",
             "group.validate_shape()",
-            "ControlSequenceLane::InsuranceTopUp",
+            "advance_insurance_stock_sequence_view",
             "transfer_tokens_signed",
         ],
     );
     assert_eq!(
         market
-            .matches("ControlSequenceLane::InsuranceTopUp")
+            .matches("advance_insurance_stock_sequence_view")
             .count(),
         1
     );
