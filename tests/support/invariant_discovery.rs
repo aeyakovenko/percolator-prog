@@ -7098,6 +7098,7 @@ fn discover_one_asset_generation_replay(
         return discover_backing_earnings_generation_replay(seed);
     }
     const ASSET: u16 = 1;
+    const COUNTERPARTY: usize = 1;
     const AUTHORITY_ACTOR: usize = 2;
     const ACTIVATION_PAYER: usize = 3;
     seed[0] ^= 0xc9;
@@ -7227,6 +7228,14 @@ fn discover_one_asset_generation_replay(
                 return Err(format!(
                     "{kind:?} stale asset transaction rejected for the wrong reason: expected {expected}, got {error}"
                 ));
+            }
+
+            if matches!(
+                kind,
+                AssetIntentKind::TradeCpi | AssetIntentKind::BatchTradeCpi
+            ) {
+                env.set_matcher_config(COUNTERPARTY, 1)
+                    .map_err(|error| format!("refresh replacement-asset matcher grant: {error}"))?;
             }
 
             let fresh =

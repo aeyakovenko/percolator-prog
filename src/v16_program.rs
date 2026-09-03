@@ -83,8 +83,15 @@ pub mod constants {
         PORTFOLIO_MATCHER_SEQUENCE_OFF + PORTFOLIO_MATCHER_SEQUENCE_LEN;
     pub const PORTFOLIO_MATCHER_EXPIRY_LEN: usize = 8;
     pub const PORTFOLIO_PRE_EXPIRY_ACCOUNT_LEN: usize = PORTFOLIO_MATCHER_EXPIRY_OFF;
-    pub const PORTFOLIO_ACCOUNT_LEN: usize =
+    pub const PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_VALID_OFF: usize =
         PORTFOLIO_MATCHER_EXPIRY_OFF + PORTFOLIO_MATCHER_EXPIRY_LEN;
+    pub const PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_OFF: usize =
+        PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_VALID_OFF + 1;
+    pub const PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_LEN: usize = 9;
+    pub const PORTFOLIO_PRE_MATCHER_ASSET_GENERATION_FRONTIER_ACCOUNT_LEN: usize =
+        PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_VALID_OFF;
+    pub const PORTFOLIO_ACCOUNT_LEN: usize = PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_VALID_OFF
+        + PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_LEN;
     pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
     pub const MATCHER_ABI_VERSION: u32 = 3;
     pub const MATCHER_CONTEXT_MIN_LEN: usize = 64;
@@ -184,10 +191,14 @@ pub mod state {
             ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK, ORACLE_MODE_HYBRID_AFTER_HOURS,
             ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_ENGINE_ACCOUNT_LEN,
             PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF, PORTFOLIO_LEGACY_ACCOUNT_LEN,
-            PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF,
-            PORTFOLIO_MATCHER_CONTROL_OFF, PORTFOLIO_MATCHER_EXPIRY_LEN,
-            PORTFOLIO_MATCHER_EXPIRY_OFF, PORTFOLIO_MATCHER_SEQUENCE_LEN,
-            PORTFOLIO_MATCHER_SEQUENCE_OFF, PORTFOLIO_PRE_EXPIRY_ACCOUNT_LEN, PORTFOLIO_STATE_LEN,
+            PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_LEN,
+            PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_OFF,
+            PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_VALID_OFF, PORTFOLIO_MATCHER_CONFIG_LEN,
+            PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_MATCHER_CONTROL_OFF,
+            PORTFOLIO_MATCHER_EXPIRY_LEN, PORTFOLIO_MATCHER_EXPIRY_OFF,
+            PORTFOLIO_MATCHER_SEQUENCE_LEN, PORTFOLIO_MATCHER_SEQUENCE_OFF,
+            PORTFOLIO_PRE_EXPIRY_ACCOUNT_LEN,
+            PORTFOLIO_PRE_MATCHER_ASSET_GENERATION_FRONTIER_ACCOUNT_LEN, PORTFOLIO_STATE_LEN,
             VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
@@ -1042,6 +1053,49 @@ pub mod state {
     }
 
     #[inline]
+    pub fn read_portfolio_matcher_asset_generation_frontier(
+        data: &[u8],
+    ) -> Result<Option<u64>, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        if data.len() <= PORTFOLIO_PRE_MATCHER_ASSET_GENERATION_FRONTIER_ACCOUNT_LEN {
+            return Ok(None);
+        }
+        match data[PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_VALID_OFF] {
+            0 => Ok(None),
+            1 => Ok(Some(read_u64(
+                data,
+                PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_OFF,
+            )?)),
+            _ => Err(ProgramError::InvalidAccountData),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn write_portfolio_matcher_asset_generation_frontier(
+        data: &mut [u8],
+        frontier: Option<u64>,
+    ) -> Result<(), ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        data.get_mut(
+            PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_VALID_OFF
+                ..PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_VALID_OFF
+                    + PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_LEN,
+        )
+        .ok_or(PercolatorError::InvalidAccountLen)?
+        .fill(0);
+        if let Some(frontier) = frontier {
+            data[PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_VALID_OFF] = 1;
+            data.get_mut(
+                PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_OFF
+                    ..PORTFOLIO_MATCHER_ASSET_GENERATION_FRONTIER_OFF + 8,
+            )
+            .ok_or(PercolatorError::InvalidAccountLen)?
+            .copy_from_slice(&frontier.to_le_bytes());
+        }
+        Ok(())
+    }
+
+    #[inline]
     pub fn matcher_capability_is_live(expiry_slot: u64, current_slot: u64) -> bool {
         expiry_slot != 0 && current_slot < expiry_slot
     }
@@ -1843,6 +1897,22 @@ pub mod state {
             engine_config.max_market_slots as usize,
             header.asset_slot_capacity.get() as usize,
         ))
+    }
+
+    #[inline]
+    pub fn read_asset_generation_frontier(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        validate_market_dynamic_len(data)?;
+        Ok(market_header(data)?.next_market_id.get())
+    }
+
+    #[inline]
+    pub fn matcher_asset_generation_frontier_authorizes(
+        authorized_frontier: Option<u64>,
+        current_market_id: u64,
+    ) -> bool {
+        current_market_id != 0
+            && authorized_frontier.is_some_and(|frontier| current_market_id < frontier)
     }
 
     pub fn read_asset_lifecycle_generation_preflight(
@@ -9104,12 +9174,15 @@ pub mod processor {
         matcher_prog_key: &Pubkey,
         matcher_ctx_key: &Pubkey,
         matcher_delegate_key: &Pubkey,
-    ) -> Result<(usize, u16), ProgramError> {
+    ) -> Result<(usize, u16, u64), ProgramError> {
         let account_b_data = account_b_ai.try_borrow_data()?;
         if state::read_portfolio_matcher_sequence(&account_b_data)? != expected_matcher_sequence {
             return Err(PercolatorError::EngineStale.into());
         }
         let cfg = state::read_portfolio_matcher_config(&account_b_data)?;
+        let asset_generation_frontier =
+            state::read_portfolio_matcher_asset_generation_frontier(&account_b_data)?
+                .ok_or(PercolatorError::Unauthorized)?;
         if !cfg.authorizes_matcher_tuple(
             &matcher_prog_key.to_bytes(),
             &matcher_ctx_key.to_bytes(),
@@ -9121,7 +9194,7 @@ pub mod processor {
         if !state::matcher_capability_is_live(expiry_slot, Clock::get()?.slot) {
             return Err(PercolatorError::Unauthorized.into());
         }
-        Ok((7, cfg.trade_fee_cap_bps()))
+        Ok((7, cfg.trade_fee_cap_bps(), asset_generation_frontier))
     }
 
     fn validate_matcher_tail<'a>(
@@ -9267,13 +9340,20 @@ pub mod processor {
             matcher_ctx.key,
         );
         expect_key(matcher_delegate, &delegate)?;
-        let (tail_start, lp_trade_fee_cap_bps) = matcher_tail_start_or_verify_lp_config(
-            account_b_ai,
-            account_b_matcher_sequence,
-            matcher_prog.key,
-            matcher_ctx.key,
-            matcher_delegate.key,
-        )?;
+        let (tail_start, lp_trade_fee_cap_bps, matcher_asset_generation_frontier) =
+            matcher_tail_start_or_verify_lp_config(
+                account_b_ai,
+                account_b_matcher_sequence,
+                matcher_prog.key,
+                matcher_ctx.key,
+                matcher_delegate.key,
+            )?;
+        if !state::matcher_asset_generation_frontier_authorizes(
+            Some(matcher_asset_generation_frontier),
+            market_id,
+        ) {
+            return Err(PercolatorError::Unauthorized.into());
+        }
         if cfg_pre.trade_fee_base_bps > u64::from(lp_trade_fee_cap_bps) {
             return Err(PercolatorError::InvalidInstruction.into());
         }
@@ -9439,6 +9519,8 @@ pub mod processor {
             return Err(PercolatorError::EngineStale.into());
         }
         state::next_portfolio_matcher_sequence(current_sequence, expected_sequence)?;
+        let matcher_asset_generation_frontier =
+            state::read_asset_generation_frontier(&market_ai.try_borrow_data()?)?;
         ensure_portfolio_storage_for_market_slots(lp_portfolio_ai, 0)?;
         let prior_control =
             state::read_portfolio_matcher_config(&lp_portfolio_ai.try_borrow_data()?)?.control;
@@ -9480,6 +9562,10 @@ pub mod processor {
         let mut data = lp_portfolio_ai.try_borrow_mut_data()?;
         state::write_portfolio_matcher_config(&mut data, &cfg)?;
         state::write_portfolio_matcher_expiry(&mut data, expiry_slot)?;
+        state::write_portfolio_matcher_asset_generation_frontier(
+            &mut data,
+            (enabled != 0).then_some(matcher_asset_generation_frontier),
+        )?;
         state::advance_portfolio_matcher_sequence(&mut data, expected_sequence)?;
         Ok(())
     }
@@ -9612,6 +9698,7 @@ pub mod processor {
             backing_fee_policy_active,
             fee_bounds_ok,
             cpi_fee_bps,
+            market_ids,
         ) = {
             let market_data = market_ai.try_borrow_data()?;
             let (
@@ -9657,6 +9744,7 @@ pub mod processor {
                 cfg_pre.backing_trade_fee_policy_count != 0,
                 fee_bounds_ok,
                 cfg_pre.trade_fee_base_bps,
+                market_ids,
             )
         };
         if mode_pre != MarketModeV16::Live {
@@ -9699,13 +9787,22 @@ pub mod processor {
             matcher_ctx.key,
         );
         expect_key(matcher_delegate, &delegate)?;
-        let (tail_start, lp_trade_fee_cap_bps) = matcher_tail_start_or_verify_lp_config(
-            account_b_ai,
-            account_b_matcher_sequence,
-            matcher_prog.key,
-            matcher_ctx.key,
-            matcher_delegate.key,
-        )?;
+        let (tail_start, lp_trade_fee_cap_bps, matcher_asset_generation_frontier) =
+            matcher_tail_start_or_verify_lp_config(
+                account_b_ai,
+                account_b_matcher_sequence,
+                matcher_prog.key,
+                matcher_ctx.key,
+                matcher_delegate.key,
+            )?;
+        if market_ids.iter().any(|market_id| {
+            !state::matcher_asset_generation_frontier_authorizes(
+                Some(matcher_asset_generation_frontier),
+                *market_id,
+            )
+        }) {
+            return Err(PercolatorError::Unauthorized.into());
+        }
         if cpi_fee_bps > u64::from(lp_trade_fee_cap_bps) {
             return Err(PercolatorError::InvalidInstruction.into());
         }
@@ -16198,6 +16295,46 @@ pub mod processor {
         }
 
         #[test]
+        fn pre_asset_generation_frontier_portfolio_tail_fails_closed_and_roundtrips_full_width() {
+            let mut data = vec![0u8; constants::PORTFOLIO_ACCOUNT_LEN];
+            state::init_portfolio_account_zero_copy(
+                &mut data, [1u8; 32], [2u8; 32], [3u8; 32], 0, 1, 7,
+            )
+            .expect("initialize portfolio");
+            assert_eq!(
+                state::read_portfolio_matcher_asset_generation_frontier(&data).unwrap(),
+                None
+            );
+
+            for frontier in [0, 1, u64::MAX] {
+                state::write_portfolio_matcher_asset_generation_frontier(&mut data, Some(frontier))
+                    .unwrap();
+                assert_eq!(
+                    state::read_portfolio_matcher_asset_generation_frontier(&data).unwrap(),
+                    Some(frontier)
+                );
+            }
+            state::write_portfolio_matcher_asset_generation_frontier(&mut data, None).unwrap();
+            assert_eq!(
+                state::read_portfolio_matcher_asset_generation_frontier(&data).unwrap(),
+                None
+            );
+
+            data.truncate(constants::PORTFOLIO_PRE_MATCHER_ASSET_GENERATION_FRONTIER_ACCOUNT_LEN);
+            assert_eq!(
+                state::read_portfolio_matcher_asset_generation_frontier(&data).unwrap(),
+                None,
+                "a legacy enabled grant must not imply current-generation consent"
+            );
+            data.resize(constants::PORTFOLIO_ACCOUNT_LEN, 0);
+            assert_eq!(
+                state::read_portfolio_matcher_asset_generation_frontier(&data).unwrap(),
+                None,
+                "zero-initialized migration bytes must remain fail-closed"
+            );
+        }
+
+        #[test]
         fn portfolio_position_epoch_is_zero_initialized_checked_and_monotonic() {
             let mut data = vec![
                 0u8;
@@ -16211,7 +16348,7 @@ pub mod processor {
             assert_eq!(
                 data.len(),
                 constants::PORTFOLIO_ACCOUNT_LEN,
-                "the wrapper tail contains matcher config, portfolio ID, sequence, and expiry"
+                "the wrapper tail contains matcher config, portfolio ID, sequence, expiry, and asset-generation consent"
             );
             assert_eq!(state::read_portfolio_matcher_sequence(&data).unwrap(), 0);
             assert_eq!(state::read_portfolio_matcher_expiry(&data).unwrap(), 0);

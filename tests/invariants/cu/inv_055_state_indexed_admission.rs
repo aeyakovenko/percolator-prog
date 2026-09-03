@@ -588,6 +588,17 @@ fn v16_program_retired_slot_reactivation_restores_fresh_generation_trade_admissi
             AssetLifecycleV16::Active
         );
 
+        if matches!(route, "TradeCpi" | "BatchTradeCpi") {
+            env.set_matcher_config(
+                matcher_program,
+                &lp_owner,
+                lp,
+                matcher_context,
+                matcher_delegate,
+                1,
+            );
+        }
+
         env.svm.expire_blockhash();
         let open_cu = execute(&mut env).expect("fresh generation must restore trade admission");
         assert_cu_within(

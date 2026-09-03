@@ -16,8 +16,11 @@
 //!
 //! INV-016 exhausts the complete delegate PDA seed tuple. INV-002/003/004 independently compose
 //! asset generation, portfolio incarnation, and position episode checks around both CPI routes.
-//! The capability authorizes only CPI trade matching, so a separate operation set is structurally
-//! inapplicable; per-leg asset scope is carried by the generation-bound trade request.
+//! The capability authorizes only CPI trade matching. Its wrapper-owned portfolio tail snapshots
+//! the engine's monotonic next-asset-generation frontier. Existing generations remain authorized,
+//! while appending, reactivating, or restarting an asset creates a generation outside that frontier
+//! and requires fresh LP authorization without changing the external matcher PDA. Each CPI leg
+//! additionally carries the current asset generation.
 //!
 //! Both retained CPI routes bind the persisted matcher-config incarnation and an authenticated,
 //! owner-selected expiry. Expiry is strict (`current_slot < expiry_slot`), uses the Clock sysvar,
@@ -71,6 +74,8 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
             "{route} must bind both portfolio incarnations and position episodes"
         );
         assert!(body.contains("derive_matcher_delegate("));
+        assert!(body.contains("matcher_asset_generation_frontier"));
+        assert!(body.contains("matcher_asset_generation_frontier_authorizes("));
         assert!(body.contains("matcher_tail_start_or_verify_lp_config("));
         assert!(body.contains("account_b_matcher_sequence,"));
         assert!(body.contains("account_a_header.portfolio_account_id"));
@@ -82,6 +87,8 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
     assert!(config.contains("portfolio_id != current_portfolio_id"));
     assert!(config.contains("expected_sequence != current_sequence"));
     assert!(config.contains("derive_matcher_delegate("));
+    assert!(config.contains("read_asset_generation_frontier("));
+    assert!(config.contains("write_portfolio_matcher_asset_generation_frontier("));
     assert!(config.contains("Clock::get()?.slot"));
     assert!(config.contains("matcher_capability_config_is_valid("));
     assert!(config.contains("write_portfolio_matcher_expiry(&mut data, expiry_slot)"));
@@ -89,11 +96,15 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
     assert!(matcher_guard.contains("!= expected_matcher_sequence"));
     assert!(matcher_guard.contains("PercolatorError::EngineStale"));
     assert!(matcher_guard.contains("read_portfolio_matcher_config(&account_b_data)?"));
+    assert!(matcher_guard.contains("read_portfolio_matcher_asset_generation_frontier"));
     assert!(matcher_guard.contains("read_portfolio_matcher_expiry(&account_b_data)?"));
     assert!(matcher_guard.contains("matcher_capability_is_live(expiry_slot, Clock::get()?.slot)"));
 
     let expiry_proof = include_str!("../kani/inv_012_capability_and_delegate_scope.rs");
     assert!(expiry_proof.contains("fn kani_v16_matcher_capability_config_is_exact_at_full_width("));
+    assert!(expiry_proof.contains(
+        "fn kani_v16_matcher_asset_generation_frontier_requires_prior_generation_consent("
+    ));
     assert!(include_str!("inv_012_capability_and_delegate_scope.rs")
         .contains("fn v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes("));
 
@@ -1778,6 +1789,76 @@ fn v16_program_asset_slot_reuse_rejects_stale_lp_matcher_capability() {
             env.svm.get_account(&matcher_context).unwrap(),
             matcher_before
         );
+        env.svm.expire_blockhash();
+        let replacement_market_id = env.asset_market_id(ASSET);
+        let stale_batch = env.send(
+            env.batch_trade_cpi_ix(
+                attacker,
+                lp,
+                vec![
+                    BatchTradeCpiLeg {
+                        asset_index: 0,
+                        market_id: env.asset_market_id(0),
+                        size_q: POS_SCALE as i128,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    },
+                    BatchTradeCpiLeg {
+                        asset_index: ASSET,
+                        market_id: replacement_market_id,
+                        size_q: SIZE_Q,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    },
+                ],
+            ),
+            vec![
+                AccountMeta::new(attacker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(attacker, false),
+                AccountMeta::new(lp, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(matcher_context, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
+            ],
+            &[&attacker_owner],
+        );
+        assert!(
+            stale_batch.is_err(),
+            "BatchTradeCpi must reject the same stale asset-set capability"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&attacker).unwrap(), attacker_before);
+        assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+        assert_eq!(
+            env.svm.get_account(&matcher_context).unwrap(),
+            matcher_before
+        );
+        env.set_matcher_config(
+            matcher_program,
+            &lp_owner,
+            lp,
+            matcher_context,
+            matcher_delegate,
+            1,
+        );
+        env.trade_cpi_with_cu_on_asset(
+            &attacker_owner,
+            attacker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            ASSET,
+            SIZE_Q,
+            0,
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(lp), ASSET as usize).market_id,
+            env.asset_market_id(ASSET),
+            "a fresh post-reuse LP grant must retain normal matcher liveness"
+        );
         return;
     }
 
@@ -1825,5 +1906,165 @@ fn v16_program_asset_slot_reuse_rejects_stale_lp_matcher_capability() {
     assert!(
         attacker_capital <= DEPOSIT && lp_capital >= DEPOSIT,
         "an old LP matcher grant must not transfer value on a replacement asset"
+    );
+}
+
+#[test]
+fn v16_program_recovery_restart_rejects_stale_lp_matcher_capability() {
+    const ASSET: u16 = 1;
+    const SHUTDOWN_SLOT: u64 = 3;
+    const RESTART_SLOT: u64 = 4;
+    const PRICE: u64 = 100;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_permissionless_resolve_with_cu(20, 2);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp);
+    let old_market_id = env.asset_market_id(ASSET);
+
+    env.svm.warp_to_slot(SHUTDOWN_SLOT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_SHUTDOWN,
+        ASSET,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    env.svm.warp_to_slot(RESTART_SLOT);
+    let asset_admin = env.admin.insecure_clone();
+    env.try_restart_asset_oracle_with_authority(&asset_admin, ASSET, RESTART_SLOT, PRICE)
+        .expect("empty Recovery asset restarts");
+    assert_ne!(env.asset_market_id(ASSET), old_market_id);
+    assert_eq!(
+        env.portfolio_matcher_config(lp).enabled(),
+        1,
+        "generation changes cannot scan every portfolio"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let lp_before = env.svm.get_account(&lp).unwrap();
+    let matcher_before = env.svm.get_account(&matcher_context).unwrap();
+    env.svm.expire_blockhash();
+    assert!(
+        env.try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            ASSET,
+            SIZE_Q,
+            0,
+        )
+        .is_err(),
+        "an LP grant from the Recovery generation must not authorize its replacement"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+    assert_eq!(
+        env.svm.get_account(&matcher_context).unwrap(),
+        matcher_before
+    );
+
+    env.set_matcher_config(
+        matcher_program,
+        &lp_owner,
+        lp,
+        matcher_context,
+        matcher_delegate,
+        1,
+    );
+    env.trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        ASSET,
+        SIZE_Q,
+        0,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(lp), ASSET as usize).market_id,
+        env.asset_market_id(ASSET),
+        "fresh LP consent restores matcher liveness on the restarted generation"
+    );
+}
+
+#[test]
+fn v16_program_unrelated_asset_append_preserves_existing_generation_matcher_liveness() {
+    const EXISTING_ASSET: u16 = 0;
+    const APPENDED_ASSET: u16 = 1;
+    const APPEND_SLOT: u64 = 1;
+
+    let mut env = V16CuEnv::new();
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp);
+    let authorized_market_id = env.asset_market_id(EXISTING_ASSET);
+    let authorized_frontier = state::read_portfolio_matcher_asset_generation_frontier(
+        &env.svm.get_account(&lp).unwrap().data,
+    )
+    .unwrap()
+    .expect("enabled matcher grant stores an asset-generation frontier");
+    assert_eq!(
+        authorized_frontier,
+        state::read_asset_generation_frontier(&env.svm.get_account(&env.market).unwrap().data)
+            .unwrap(),
+        "SetMatcherConfig snapshots the current engine frontier"
+    );
+
+    env.update_market_init_fee_policy_with_cu(1);
+    let creator = Keypair::new();
+    env.svm.warp_to_slot(APPEND_SLOT);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        APPENDED_ASSET,
+        APPEND_SLOT,
+        100,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        1,
+    );
+    assert!(
+        env.asset_market_id(APPENDED_ASSET) >= authorized_frontier,
+        "the appended generation must fall outside the earlier LP grant"
+    );
+
+    env.trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        EXISTING_ASSET,
+        10 * POS_SCALE as i128,
+        0,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(lp), EXISTING_ASSET as usize).market_id,
+        authorized_market_id,
+        "a later unrelated generation must not revoke consent for an existing generation"
     );
 }
