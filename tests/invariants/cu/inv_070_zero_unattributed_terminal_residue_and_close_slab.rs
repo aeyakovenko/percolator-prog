@@ -609,6 +609,314 @@ fn v16_red_future_backing_expiry_requires_malicious_authority_for_terminal_close
 }
 
 #[test]
+fn v16_red_expired_provider_earnings_require_malicious_authority_for_terminal_close() {
+    const INITIAL_PRICE: u64 = 100;
+    const SOURCE_POSITION_Q: i128 = 200 * POS_SCALE as i128;
+    const HEDGE_POSITION_Q: i128 = 100 * POS_SCALE as i128;
+    const LIEN_GROWTH_Q: i128 = 20 * POS_SCALE as i128;
+    const INITIAL_CAPITAL: u128 = 3_130;
+    const COUNTERPARTY_CAPITAL: u128 = 10_000;
+    const MAINTENANCE_FEE: u128 = 530;
+    const FIRST_BACKING: u128 = 1_500;
+    const SECOND_BACKING: u128 = 50_000;
+    const EXTRA_CAPITAL: u128 = 500;
+    const DOMAIN: u16 = 1;
+    const ASSET_INDEX: u16 = 0;
+    const EXPIRY_SLOT: u64 = 10;
+
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        4,
+        1_000,
+        1_000,
+        500,
+        MAINTENANCE_FEE,
+    );
+    let admin = env.admin.insecure_clone();
+    let provider = Keypair::new();
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let fixture_supply =
+        INITIAL_CAPITAL + COUNTERPARTY_CAPITAL + 2 * EXTRA_CAPITAL + FIRST_BACKING + SECOND_BACKING;
+    let mut mint_account = env.svm.get_account(&env.mint).expect("quote mint");
+    let mut mint_state = Mint::unpack(&mint_account.data).expect("decode quote mint");
+    mint_state.supply = u64::try_from(fixture_supply).unwrap();
+    Mint::pack(mint_state, &mut mint_account.data).expect("encode quote mint");
+    env.svm.set_account(env.mint, mint_account).unwrap();
+
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.update_backing_fee_policy_with_cu(DOMAIN, 5_000, 2_500);
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&provider),
+        ASSET_INDEX,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        provider.pubkey().to_bytes(),
+    )
+    .expect("install an independent backing provider before value is funded");
+    env.svm.expire_blockhash();
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+
+    let ledger = env.backing_domain_ledger_account();
+    let top_up = |env: &mut V16CuEnv, amount: u128| {
+        let source = env.token_account(provider.pubkey(), amount as u64);
+        let (backing_fee_bps, insurance_share_bps) = env.backing_fee_policy(DOMAIN);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TopUpBackingBucket {
+                authority_epoch: 0,
+                intent_id: 0,
+                market_id: 0,
+                domain: DOMAIN,
+                backing_fee_bps,
+                insurance_share_bps,
+                amount,
+                expiry_slot: EXPIRY_SLOT,
+            },
+            vec![
+                AccountMeta::new(provider.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&provider],
+        )
+        .expect("independent provider funds backing through TopUpBackingBucket");
+    };
+    top_up(&mut env, FIRST_BACKING);
+
+    let cross_portfolio = env.create_portfolio(&cross_owner);
+    let counterparty_portfolio = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_portfolio, INITIAL_CAPITAL);
+    env.deposit(
+        &counterparty_owner,
+        counterparty_portfolio,
+        COUNTERPARTY_CAPITAL,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_portfolio,
+        &counterparty_owner,
+        counterparty_portfolio,
+        SOURCE_POSITION_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_portfolio,
+        &counterparty_owner,
+        counterparty_portfolio,
+        HEDGE_POSITION_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset_index) in [
+        (counterparty_portfolio, 0),
+        (cross_portfolio, 0),
+        (counterparty_portfolio, 1),
+    ] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations_for_assets(&[asset_index, 1 - asset_index]),
+            },
+        );
+    }
+    top_up(&mut env, SECOND_BACKING);
+    env.deposit(&cross_owner, cross_portfolio, EXTRA_CAPITAL);
+    env.deposit(&counterparty_owner, counterparty_portfolio, EXTRA_CAPITAL);
+    let earnings_before =
+        env.market_state().1.source_backing_buckets[DOMAIN as usize].utilization_fee_earnings;
+    env.try_trade_asset_with_backing_fee_cap_with_cu(
+        1,
+        &cross_owner,
+        cross_portfolio,
+        &counterparty_owner,
+        counterparty_portfolio,
+        LIEN_GROWTH_Q,
+        95,
+        0,
+        5_000,
+    )
+    .expect("public risk increase accrues a provider utilization fee");
+    let generated_earnings = env.market_state().1.source_backing_buckets[DOMAIN as usize]
+        .utilization_fee_earnings
+        .checked_sub(earnings_before)
+        .expect("provider earnings do not decrease");
+    assert!(
+        generated_earnings > 0,
+        "public route must generate earnings"
+    );
+
+    env.resolve();
+    let payouts = drain_resolved_cohort(
+        &mut env,
+        &[
+            (&cross_owner, cross_portfolio),
+            (&counterparty_owner, counterparty_portfolio),
+        ],
+        "provider-earnings terminal cohort",
+    );
+    assert!(payouts.iter().all(|payout| *payout > 0));
+    env.close_portfolio_with_cu(&cross_owner, cross_portfolio);
+    env.close_portfolio_with_cu(&counterparty_owner, counterparty_portfolio);
+    let insurance = env.market_state().1.insurance;
+    if insurance != 0 {
+        let (insurance_destination, _) = env.withdraw_insurance_with_cu(insurance);
+        assert_eq!(env.token_amount(insurance_destination), insurance as u64);
+    }
+    let claim_free = env.market_state().1;
+    assert_eq!(claim_free.materialized_portfolio_count, 0);
+    assert_eq!(claim_free.c_tot, 0);
+    assert_eq!(claim_free.pnl_pos_tot, 0);
+    assert_eq!(claim_free.resolved_payout_blocker_count, 0);
+    assert_eq!(claim_free.insurance, 0);
+    assert!(claim_free.backing_provider_earnings_total >= generated_earnings);
+
+    let admin_destination = env.token_account(admin.pubkey(), 0);
+    let close_slab = |env: &mut V16CuEnv| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseSlab {
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(admin_destination, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.mint, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    env.svm.warp_to_slot(EXPIRY_SLOT);
+    close_slab(&mut env).expect("terminal scan expires provider principal at its consented expiry");
+    let expired = env.market_state().1;
+    assert_eq!(
+        expired.source_backing_buckets[DOMAIN as usize].status,
+        BackingBucketStatusV16::Expired,
+    );
+    assert_eq!(
+        expired.source_backing_buckets[DOMAIN as usize].fresh_unliened_backing_num,
+        0,
+    );
+    assert_eq!(
+        expired.source_backing_buckets[DOMAIN as usize].valid_liened_backing_num,
+        0,
+    );
+    assert_eq!(
+        expired.backing_provider_earnings_total, claim_free.backing_provider_earnings_total,
+        "principal expiry must not silently confiscate provider earnings",
+    );
+
+    let blocked_market = env.svm.get_account(&env.market).unwrap();
+    let blocked_vault = env.svm.get_account(&env.vault).unwrap();
+    let blocked = close_slab(&mut env)
+        .expect_err("expired but unclaimed provider earnings must currently block CloseSlab");
+    assert!(
+        blocked.contains("Custom(21)"),
+        "unexpected error: {blocked}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), blocked_market);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), blocked_vault);
+
+    let admin_earnings_destination = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let admin_withdraw = env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: DOMAIN,
+            market_id: env.asset_market_id(ASSET_INDEX),
+            authority_epoch: env.withdrawal_authority_epoch(
+                admin.pubkey(),
+                ASSET_INDEX as usize,
+                false,
+            ),
+            amount: expired.backing_provider_earnings_total,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new(admin_earnings_destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(admin_withdraw
+        .expect_err("marketauth cannot impersonate the independent provider")
+        .contains("Custom(8)"));
+
+    let rescue_provider = Keypair::new();
+    let rotation_before = env.svm.get_account(&env.market).unwrap();
+    let admin_rotation = env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&rescue_provider),
+        ASSET_INDEX,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        rescue_provider.pubkey().to_bytes(),
+    );
+    assert!(admin_rotation
+        .expect_err("asset admin cannot seize a funded provider role")
+        .contains("Custom(21)"));
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), rotation_before);
+
+    let provider_destination = env.token_account(provider.pubkey(), 0);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: DOMAIN,
+            market_id: env.asset_market_id(ASSET_INDEX),
+            authority_epoch: env.withdrawal_authority_epoch(
+                provider.pubkey(),
+                ASSET_INDEX as usize,
+                false,
+            ),
+            amount: expired.backing_provider_earnings_total,
+        },
+        vec![
+            AccountMeta::new(provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new(provider_destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&provider],
+    )
+    .expect("the malicious provider alone can clear its expired terminal earnings");
+    assert_eq!(
+        env.token_amount(provider_destination),
+        expired.backing_provider_earnings_total as u64,
+    );
+    close_slab(&mut env).expect("terminal cleanup succeeds after provider cooperation");
+    assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
+
+    panic!(
+        "RED INV-070/073: public fees left {} provider-earnings atoms after expiry; user payouts={payouts:?}, claim-free vault={}, expired principal={}, and only the independent provider could release terminal CloseSlab",
+        expired.backing_provider_earnings_total,
+        claim_free.vault,
+        claim_free.source_backing_buckets[DOMAIN as usize].fresh_unliened_backing_num / BOUND_SCALE,
+    );
+}
+
+#[test]
 fn v16_program_close_slab_final_dust_destination_validation_is_atomic() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
