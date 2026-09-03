@@ -171,6 +171,20 @@ fn v16_program_late_unrelated_backing_cannot_outlive_and_erase_resolved_receipt(
     let pre_expiry_payout = env.token_amount(env.actors[WINNER].destination_token);
 
     env.warp_to_slot(EXPIRY_SLOT);
+    if pre_expiry_receipt.present {
+        let backing_progress = env
+            .crank(
+                WINNER,
+                EXPIRY_SLOT,
+                vec![CrankObservationHint {
+                    asset_index: UNRELATED_ASSET,
+                    oracle_accounts: 0,
+                }],
+            )
+            .expect("permissionless resolved crank expires hinted backing from committed state");
+        assert!(backing_progress.compute_units < TX_CU_LIMIT);
+        max_cu = max_cu.max(backing_progress.compute_units);
+    }
     inv067_drain_resolved_actor(&mut env, WINNER, &mut max_cu);
     max_cu = max_cu.max(
         env.close_primary_portfolio(WINNER)
