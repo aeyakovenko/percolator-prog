@@ -398,6 +398,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
             market_id: 1,
+            intent_id: 1,
             authority_epoch: 0,
             amount: 1,
         },

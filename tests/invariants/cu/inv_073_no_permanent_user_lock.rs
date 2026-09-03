@@ -4550,6 +4550,7 @@ fn v16_program_live_domain_withdrawals_reject_when_resolve_matured() {
     let stale_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 20,

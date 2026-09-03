@@ -615,6 +615,7 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
     env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: asset0_market_id,
+            intent_id: u64::MAX,
             authority_epoch,
             asset_index: 0,
             amount: 2 * DOMAIN_TRANCHE,

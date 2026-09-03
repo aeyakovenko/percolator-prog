@@ -6560,6 +6560,7 @@ fn v16_bpf_terminal_asset_insurance_partial_ledger_middle_domain_stays_bounded_o
         .send(
             ProgInstruction::WithdrawInsuranceAsset {
                 market_id,
+                intent_id: u64::MAX,
                 authority_epoch,
                 asset_index: MIDDLE_ASSET as u16,
                 amount: PARTIAL,

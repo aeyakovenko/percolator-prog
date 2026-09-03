@@ -1935,9 +1935,17 @@ impl V16CuEnv {
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index,
             market_id: self.asset_market_id(asset_index),
+            intent_id: self.next_insurance_intent_id(asset_index as usize),
             authority_epoch: self.withdrawal_authority_epoch(authority, asset_index as usize, true),
             amount,
         }
+    }
+
+    fn next_insurance_intent_id(&self, asset_index: usize) -> u64 {
+        self.control_sequences(asset_index)
+            .insurance_top_up
+            .checked_add(1)
+            .expect("insurance stock intent sequence")
     }
 
     fn portfolio_position_epoch(&self, portfolio: Pubkey) -> u64 {
@@ -4196,12 +4204,14 @@ impl V16CuEnv {
             .unwrap();
         let market_id = self.asset_market_id(0);
         let authority_epoch = self.withdrawal_authority_epoch(self.admin.pubkey(), 0, true);
+        let intent_id = self.next_insurance_intent_id(0);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
                 market_id,
+                intent_id,
                 authority_epoch,
                 asset_index: 0,
                 amount,
@@ -4230,12 +4240,14 @@ impl V16CuEnv {
         let market_id = self.asset_market_id(asset_index);
         let authority_epoch =
             self.withdrawal_authority_epoch(self.admin.pubkey(), asset_index as usize, true);
+        let intent_id = self.next_insurance_intent_id(asset_index as usize);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
                 market_id,
+                intent_id,
                 authority_epoch,
                 asset_index,
                 amount,
@@ -4416,12 +4428,14 @@ impl V16CuEnv {
         let market_id = self.asset_market_id(asset_index);
         let authority_epoch =
             self.withdrawal_authority_epoch(authority.pubkey(), asset_index as usize, true);
+        let intent_id = self.next_insurance_intent_id(asset_index as usize);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
                 market_id,
+                intent_id,
                 authority_epoch,
                 asset_index,
                 amount,
@@ -4461,6 +4475,7 @@ impl V16CuEnv {
         let market_id = self.asset_market_id(asset_index);
         let authority_epoch =
             self.withdrawal_authority_epoch(authority.pubkey(), asset_index as usize, true);
+        let intent_id = self.next_insurance_intent_id(asset_index as usize);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
@@ -4468,6 +4483,7 @@ impl V16CuEnv {
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index,
                 market_id,
+                intent_id,
                 authority_epoch,
                 amount,
             },
@@ -4508,6 +4524,7 @@ impl V16CuEnv {
         let market_id = self.asset_market_id(asset_index);
         let authority_epoch =
             self.withdrawal_authority_epoch(authority.pubkey(), asset_index as usize, true);
+        let intent_id = self.next_insurance_intent_id(asset_index as usize);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
@@ -4515,6 +4532,7 @@ impl V16CuEnv {
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index,
                 market_id,
+                intent_id,
                 authority_epoch,
                 amount,
             },

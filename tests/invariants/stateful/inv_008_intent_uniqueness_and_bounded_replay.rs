@@ -13,6 +13,9 @@
 //! rejects the remaining duplicate without state or SPL-supply drift.
 //! A third probe selects any ordered pair of single/batch CPI/no-CPI encodings for one retained
 //! bilateral trade and requires the same rollback, exact-once, OI, basis, and supply properties.
+//! The insurance-stock probe uses independent provider and operator roles, replenishes the fund
+//! after one withdrawal lands, and proves a signature-distinct retry cannot consume the new
+//! provider principal while a freshly sequenced withdrawal remains executable.
 //!
 //! Guarantee boundary: PRs 343/344/350/351/355/362 are fixed-pin certifications of the currently
 //! deployed retained families, not a claim that absent message fields exist. Successful partial
@@ -82,7 +85,10 @@ fn v16_program_retained_insurance_withdrawal_cannot_consume_replenished_principa
     );
     assert_eq!(env.market_data(false), market_before_retry);
     assert_eq!(env.token_amount(env.vault), vault_before_retry);
-    assert_eq!(env.token_amount(operator_destination), operator_before_retry);
+    assert_eq!(
+        env.token_amount(operator_destination),
+        operator_before_retry
+    );
     assert_eq!(env.token_supply_observed(), supply_before);
 
     let trace = env.finish_public_trace();

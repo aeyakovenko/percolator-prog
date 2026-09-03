@@ -692,6 +692,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: BAD_DOMAIN as u16,
             amount: 1,

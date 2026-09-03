@@ -695,6 +695,7 @@ fn v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers() {
     let withdrawal = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 1,
@@ -1485,6 +1486,7 @@ fn v16_attack_withdraw_insurance_asset_operator_gated() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 500_000,
@@ -1570,6 +1572,7 @@ fn v16_attack_live_asset_insurance_withdraw_uses_operator_not_authority() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 1,
             amount: 40,
@@ -3344,6 +3347,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     let r_foreign = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 1,
             amount: 500,
@@ -3374,6 +3378,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     let r_owner = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: 0,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 1,
             amount: 200,
@@ -4263,6 +4268,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: asset0_market_id,
+            intent_id: u64::MAX,
             authority_epoch: 0,
             asset_index: 0,
             amount: 100,
@@ -4306,6 +4312,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             market_id: asset0_market_id,
+            intent_id: u64::MAX,
             authority_epoch: current_authority_epoch,
             asset_index: 0,
             amount: 100,

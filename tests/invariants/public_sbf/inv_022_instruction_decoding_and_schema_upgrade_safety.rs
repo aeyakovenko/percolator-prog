@@ -322,6 +322,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
             market_id: 1,
+            intent_id: 1,
             authority_epoch: 0,
             amount: 1,
         },
@@ -601,6 +602,9 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
     let mut epochless_asset_insurance_withdrawal = vec![0u8; 27];
     epochless_asset_insurance_withdrawal[0] = 57;
 
+    let mut intentless_asset_insurance_withdrawal = vec![0u8; 35];
+    intentless_asset_insurance_withdrawal[0] = 57;
+
     let mut epochless_asset_lifecycle = vec![0u8; 172];
     epochless_asset_lifecycle[0] = 40;
 
@@ -663,6 +667,10 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
         (
             "legacy WithdrawInsuranceAsset without authority epoch",
             epochless_asset_insurance_withdrawal,
+        ),
+        (
+            "legacy WithdrawInsuranceAsset without intent ID",
+            intentless_asset_insurance_withdrawal,
         ),
         (
             "legacy UpdateAssetLifecycle without authority epoch",

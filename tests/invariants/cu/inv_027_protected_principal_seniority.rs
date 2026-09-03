@@ -963,6 +963,7 @@ fn inv027_try_withdraw_insurance(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index,
             market_id,
+            intent_id: u64::MAX,
             authority_epoch,
             amount,
         },
