@@ -22407,7 +22407,14 @@ pub fn verify_cpi_base_fee_consent(
     let send_fill = |env: &mut V16Svm, size_q: i128| {
         let market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
         match route {
-            TradeRoute::Cpi => env.trade_cpi(BENEFICIARY, LP, ASSET, size_q, 0, 0),
+            TradeRoute::Cpi => env.trade_cpi(
+                BENEFICIARY,
+                LP,
+                ASSET,
+                size_q,
+                INSTALLED_FEE_BPS,
+                0,
+            ),
             TradeRoute::BatchCpi => env.batch_trade_cpi(
                 BENEFICIARY,
                 LP,

@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Charged fees reach only the authorized destination under the bound policy version.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value`, `v16_program_mixed_direction_fee_allocation_matches_independent_side_ledger`, `v16_attack_mixed_direction_batch_fees_conserve_by_asset`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value`, `v16_program_mixed_direction_fee_allocation_matches_independent_side_ledger`, `v16_attack_mixed_direction_batch_fees_conserve_by_asset`, `v16_attack_retained_single_cpi_trade_rejects_increased_taker_base_fee`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -15,6 +15,74 @@
 //! destination helper, engine pin, or loss of a public witness reopens the current-surface closure.
 
 use super::*;
+use crate::support::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE};
+
+#[test]
+fn v16_attack_retained_single_cpi_trade_rejects_increased_taker_base_fee() {
+    const VICTIM: usize = 1;
+    const LP: usize = 2;
+    const FEE_BPS: u64 = 500;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+    const FEE_PER_SIDE: u128 = 50_000;
+
+    let mut env = V16Svm::new([0x41; 32], MarketConfig::default());
+    env.begin_public_trace();
+    env.set_matcher_config_with_trade_fee_cap(LP, 1, FEE_BPS as u16)
+        .expect("LP consents to the future fee independently of the taker");
+    let retained =
+        env.build_retained_cpi_trade_with_fee_caps(VICTIM, LP, 0, SIZE_Q, INITIAL_PRICE, 0, 0);
+    env.update_trade_fee_policy(FEE_BPS)
+        .expect("privileged fee authority raises the live base fee");
+
+    let victim_before = env.primary_portfolio(VICTIM).capital.get();
+    let lp_before = env.primary_portfolio(LP).capital.get();
+    let insurance_before = env.primary_market_state().1.insurance;
+    let retained_result = env.land_retained(retained);
+
+    assert!(
+        retained_result.is_err(),
+        "a retained CPI trade must not debit the taker above its signed fee_bps bound"
+    );
+    assert_eq!(env.primary_portfolio(VICTIM).capital.get(), victim_before);
+    assert_eq!(env.primary_portfolio(LP).capital.get(), lp_before);
+    assert_eq!(env.primary_market_state().1.insurance, insurance_before);
+
+    let authorized = env.build_retained_cpi_trade_with_fee_caps(
+        VICTIM,
+        LP,
+        0,
+        SIZE_Q,
+        INITIAL_PRICE,
+        FEE_BPS,
+        0,
+    );
+    env.land_retained(authorized)
+        .expect("a freshly authorized CPI trade remains available");
+    assert_eq!(
+        victim_before - env.primary_portfolio(VICTIM).capital.get(),
+        FEE_PER_SIDE
+    );
+    assert_eq!(
+        lp_before - env.primary_portfolio(LP).capital.get(),
+        FEE_PER_SIDE
+    );
+    assert_eq!(
+        env.primary_market_state().1.insurance - insurance_before,
+        FEE_PER_SIDE * 2
+    );
+
+    let fee_destination_before = env.token_amount(env.provider_destination_token);
+    env.withdraw_insurance_asset_as_admin(0, FEE_PER_SIDE * 2)
+        .expect("the fee authority may withdraw only the freshly authorized fees");
+    assert_eq!(
+        env.token_amount(env.provider_destination_token) - fee_destination_before,
+        (FEE_PER_SIDE * 2) as u64
+    );
+
+    env.finish_public_trace()
+        .validate_public_execution()
+        .expect("fee-consent regression uses only valid public SBF instructions");
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DirectionalFeeTerminalOutcome {

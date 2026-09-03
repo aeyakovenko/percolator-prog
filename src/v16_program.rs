@@ -9242,8 +9242,9 @@ pub mod processor {
         if stale_matured {
             return Err(PercolatorError::OracleStale.into());
         }
-        let fee_floor_pre = core::cmp::max(fee_bps, cfg_pre.trade_fee_base_bps);
-        if fee_floor_pre > max_trading_fee_bps {
+        // The taker signs `fee_bps` before the matcher runs. A later policy update cannot raise
+        // the base fee above that retained consent; the unsigned LP is bounded separately below.
+        if cfg_pre.trade_fee_base_bps > fee_bps || fee_bps > max_trading_fee_bps {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         if backing_fee_cap_bps > 10_000 {

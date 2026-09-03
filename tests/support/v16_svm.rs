@@ -4418,6 +4418,27 @@ impl V16Svm {
         limit_price: u64,
         backing_fee_cap_bps: u16,
     ) -> Transaction {
+        self.build_retained_cpi_trade_with_fee_caps(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            limit_price,
+            0,
+            backing_fee_cap_bps,
+        )
+    }
+
+    pub fn build_retained_cpi_trade_with_fee_caps(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        limit_price: u64,
+        fee_bps: u64,
+        backing_fee_cap_bps: u16,
+    ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let account_a_portfolio_id = self.primary_portfolio_id(taker);
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
@@ -4436,7 +4457,7 @@ impl V16Svm {
                 asset_index,
                 market_id,
                 size_q,
-                fee_bps: 0,
+                fee_bps,
                 limit_price,
                 backing_fee_cap_bps,
             },
