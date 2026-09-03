@@ -97,6 +97,7 @@ fn v16_program_matcher_cpi_identity_incarnation_census_is_source_complete() {
             "matcher_ctx.owner != matcher_prog.key",
             "derive_matcher_delegate(",
             "expect_key(matcher_delegate, &delegate)?",
+            "matcher_asset_generation_frontier_authorizes",
             "matcher_tail_start_or_verify_lp_config(",
             "state::bump_matcher_req_seq",
             "validate_matcher_tail(",
@@ -109,6 +110,8 @@ fn v16_program_matcher_cpi_identity_incarnation_census_is_source_complete() {
 
     // The delegate has no mutable account state or incarnation. Its complete seed tuple binds the
     // wrapper deployment, market address, LP portfolio and owner, matcher program, and context.
+    // The asset-generation frontier is deliberately stored in the LP grant, not the external
+    // matcher PDA.
     for seed in [
         "b\"matcher\"",
         "market_key.as_ref()",

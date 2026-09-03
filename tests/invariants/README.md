@@ -129,6 +129,19 @@ proves the exact enabled/fee/expiry predicate, decoder Kani preserves the new fi
 account length reads expiry as disabled and grows zero-initialized, and the measured config/CPI
 routes remain below their CU limits.
 
+INV-002/012 now also bind each retained LP matcher grant to the asset generations that existed when
+the LP consented. A public two-asset LiteSVM trace showed that a hostile asset administrator could
+retire an empty slot, reactivate it under a replacement generation, and use the LP's still-enabled
+old matcher grant to transfer 250,000 quote atoms from that independent LP. `SetMatcherConfig` now
+snapshots the engine's monotonic `next_market_id` frontier in a nine-byte wrapper-owned portfolio
+tail, and both CPI trade routes require every current nonzero asset generation to fall below it
+before matcher invocation. This preserves grants on unrelated existing assets while appended,
+retired-slot replacement, and Recovery-restart generations require fresh consent. The delegate PDA
+and external matcher context remain stable, so the LP can restore liquidity with one fresh
+authorization. Legacy grants without the tail fail closed. The regression covers stale single and
+batch CPI rollback, the independent-victim balance transfer on the exact parent, same-tuple
+reauthorization, replacement/restart-generation liveness, and full-width frontier binding.
+
 INV-037 is reconciled to the exact deployed `CloseProgressLedgerV16` rather than growing a wrapper
 mirror for an abstract category. Its exhaustive engine struct literal and pinned engine proof own
 `gross + drift = support + insurance + B + explicit + residual`; public continuation, cure,

@@ -42,3 +42,26 @@ fn kani_v16_matcher_capability_config_is_exact_at_full_width() {
     );
     kani::cover!(enabled > 1, "non-boolean enabled values reject");
 }
+
+#[kani::proof]
+fn kani_v16_matcher_asset_generation_frontier_requires_prior_generation_consent() {
+    let has_authorization: bool = kani::any();
+    let authorized_frontier: u64 = kani::any();
+    let current_market_id: u64 = kani::any();
+    let stored = has_authorization.then_some(authorized_frontier);
+
+    assert_eq!(
+        state::matcher_asset_generation_frontier_authorizes(stored, current_market_id),
+        has_authorization && current_market_id != 0 && current_market_id < authorized_frontier
+    );
+    kani::cover!(!has_authorization, "legacy or disabled grants reject");
+    kani::cover!(
+        has_authorization && current_market_id != 0 && current_market_id >= authorized_frontier,
+        "asset generations created after authorization reject"
+    );
+    kani::cover!(
+        has_authorization && current_market_id != 0 && current_market_id < authorized_frontier,
+        "generations existing at authorization remain usable"
+    );
+    kani::cover!(current_market_id == 0, "the disabled generation rejects");
+}
