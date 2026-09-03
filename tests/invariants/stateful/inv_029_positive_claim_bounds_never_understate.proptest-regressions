@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+# This case fixes reverse claimant order and the settled-loss recovery path across both domains.
+cc 73bbbb899d32d7b6e642a14e1346dc0c53c9c1891dc534ee790287baa7b551c5 # shrinks to seed = [0, 0, 2, 221, 184, 245, 187, 198, 93, 11, 191, 222, 21, 59, 125, 186, 148, 60, 85, 106, 78, 6, 200, 236, 48, 242, 253, 194, 27, 99, 240, 11], position_units = 4, price_move = 11, reverse_conversion_order = true

@@ -1,0 +1,12 @@
+# retry_kind	disposition	terminal_oracle	rationale
+Deposit	VALUE_NEUTRAL	-	retry moves the same owner's quote atoms from SPL source to portfolio capital and remains publicly withdrawable
+Withdraw	VALUE_NEUTRAL	-	retry moves the same owner's quote atoms from portfolio capital to its SPL destination
+TradeNoCpi	TERMINAL_LOF	TradeIntentReplayTerminalDiscovery	an accepted duplicate creates unconsented exposure whose exact adverse terminal transfer is measured
+TradeCpi	TERMINAL_LOF	TradeIntentReplayTerminalDiscovery	an accepted duplicate creates unconsented exposure whose exact adverse terminal transfer is measured
+BatchTradeNoCpi	TERMINAL_LOF	TradeIntentReplayTerminalDiscovery	an accepted duplicate creates unconsented exposure whose exact adverse terminal transfer is measured
+BatchTradeCpi	TERMINAL_LOF	TradeIntentReplayTerminalDiscovery	an accepted duplicate creates unconsented exposure whose exact adverse terminal transfer is measured
+ConvertReleasedPnl	CLAIM_CONVERSION_ONLY	-	retry converts a newly earned exact claim owned by the same signer and does not create claim face
+RebalanceReduce	RISK_REDUCING_ONLY	-	retry can violate consent but only reduces the same owner's exposure and has no immediate unauthorized value transfer
+InsuranceTopUp	RECOVERABLE_INSURANCE	-	an accepted duplicate locks additional signer principal in insurance, but the same insurance authority retains a terminal withdrawal route
+BackingTopUp	RECOVERABLE_PRINCIPAL	-	retry deposits provider principal that the same backing authority can withdraw through the public route
+AssetActivation	TERMINAL_LOF	DebitedIntentReplayDiscovery	an accepted duplicate charges a nonrecoverable activation fee from stale consent

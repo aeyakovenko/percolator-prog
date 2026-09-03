@@ -1,0 +1,53 @@
+# INV-008 source-complete replay disposition for every public instruction variant.
+# Columns: tag, variant, disposition, boundary.
+# `retry:*` and `supersession:*` suffixes name executable generator enum variants.
+tag	variant	disposition	boundary
+0	InitMarket	init-once	Canonical account initialization gates repeat execution.
+1	InitPortfolio	init-once	Canonical account initialization and monotonic portfolio allocation gate repeats.
+3	Deposit	retry:Deposit	Shared owner-state sequence is exercised by the retry matrix.
+4	Withdraw	retry:Withdraw	Shared owner-state sequence is exercised by the retry matrix.
+5	PermissionlessCrank	state-derived	Permissionless work is selected from current state and must make bounded progress or reject.
+6	TradeNoCpi	retry:TradeNoCpi	Both portfolio incarnations and position episodes are exercised by the retry matrix.
+8	ClosePortfolio	incarnation-episode	Portfolio incarnation, owner-state sequence, and position episode bind the close.
+9	TopUpInsurance	retry:InsuranceTopUp	Shared per-asset insurance intent watermark is exercised by the retry matrix.
+10	TradeCpi	retry:TradeCpi	Both portfolio incarnations and position episodes are exercised by the retry matrix.
+13	CloseSlab	state-derived	Terminal emptiness and exact custody state gate repeat execution.
+19	ResolveMarket	incarnation-episode	The current asset-generation frontier binds resolution.
+24	TopUpBackingBucket	retry:BackingTopUp	Per-asset backing intent watermark is exercised by the retry matrix.
+28	ConvertReleasedPnl	retry:ConvertReleasedPnl	Portfolio incarnation and position episode are exercised by the retry matrix.
+30	CloseResolved	state-derived	Current resolved claim and portfolio state determine the exact terminal debit.
+32	UpdateAuthority	live-authority	The current authority must sign; authority-incarnation ABA remains owned by INV-005.
+34	ConfigureHybridOracle	supersession:ConfigureHybridOracle	Scope-local observation sequence is exercised by the supersession matrix.
+35	ConfigureEwmaMark	supersession:ConfigureEwmaMark	Scope-local observation sequence is exercised by the supersession matrix.
+36	PushEwmaMark	supersession:PushEwmaMark	Scope-local observation sequence is exercised by the supersession matrix.
+37	UpdateLiquidationFeePolicy	supersession:LiquidationFeePolicy	Scope-local policy sequence is exercised by the supersession matrix.
+38	ConfigurePermissionlessResolve	supersession:ResolvePolicy	Scope-local policy sequence is exercised by the supersession matrix.
+39	ResolveStalePermissionless	state-derived	Authenticated current time and current stale state gate permissionless resolution.
+40	UpdateAssetLifecycle	retry:AssetActivation	Activation frontier retries are exercised directly; other actions bind current generation and state.
+42	CureAndCancelClose	incarnation-episode	Portfolio incarnation and exact close/position episode bind the cure.
+43	ForfeitRecoveryLeg	incarnation-episode	Portfolio incarnation and exact recovery/position episode bind the forfeit.
+44	RebalanceReduce	retry:RebalanceReduce	Portfolio incarnation and position episode are exercised by the retry matrix.
+45	FinalizeResetSide	state-derived	Current reset-side prerequisites determine the permissionless finalization.
+46	ClaimResolvedPayoutTopup	state-derived	Current receipt face and cumulative payout gate exact-once value release.
+48	SyncMaintenanceFee	state-derived	Authenticated current time and accrued maintenance state determine the debit.
+49	UpdateMaintenanceFeePolicy	supersession:MaintenanceFeePolicy	Scope-local policy sequence is exercised by the supersession matrix.
+50	WithdrawBackingBucket	incarnation-episode	Asset generation, provider authority, and current bucket principal bind the debit.
+51	UpdateBackingFeePolicy	supersession:BackingFeePolicy,BackingFeePolicyShort	Both side-domain policy kinds are exercised by the supersession matrix.
+52	WithdrawBackingBucketEarnings	incarnation-episode	Asset generation, provider authority, and current earnings bind the debit.
+53	SyncBackingDomainLedger	state-derived	Current canonical market and ledger state determine synchronization.
+54	SyncInsuranceLedger	state-derived	Current canonical market and ledger state determine synchronization.
+55	UpdateTradeFeePolicy	supersession:TradeFeePolicy	Scope-local policy sequence is exercised by the supersession matrix.
+56	TopUpInsuranceDomain	retry:InsuranceTopUp	The direct and domain routes share one executable insurance retry watermark.
+57	WithdrawInsuranceAsset	incarnation-episode	Asset generation, current operator, and available domain budget bind the debit.
+58	UpdateFeeRedirectPolicy	supersession:FeeRedirectPolicy	Scope-local policy sequence is exercised by the supersession matrix.
+59	UpdateMarketInitFeePolicy	supersession:MarketInitFeePolicy	Scope-local policy sequence is exercised by the supersession matrix.
+60	UpdateBaseUnitMints	live-authority	Current market authority and canonical mint state gate the update.
+61	SwapSecondaryForPrimary	balance-bounded	Each repeat consumes caller-owned secondary units and available primary custody.
+62	ConfigureAuthMark	supersession:ConfigureAuthMark	Scope-local observation sequence is exercised by the supersession matrix.
+63	PushAuthMark	supersession:PushAuthMark	Scope-local observation sequence is exercised by the supersession matrix.
+64	ForceCloseAbandonedAsset	state-derived	Current recovery state, authenticated time, and remaining exposure size the close.
+65	UpdateAssetAuthority	incarnation-episode	Current asset generation and current authority signatures bind rotation.
+66	BatchTradeNoCpi	retry:BatchTradeNoCpi	Both portfolio incarnations and position episodes are exercised by the retry matrix.
+67	BatchTradeCpi	retry:BatchTradeCpi	Both portfolio incarnations and position episodes are exercised by the retry matrix.
+68	SetMatcherConfig	supersession:MatcherConfig	Portfolio-local sequence is exercised by the supersession matrix.
+69	RestartAssetOracle	incarnation-episode	Asset generation and a fresh observation sequence bind the recovery restart.

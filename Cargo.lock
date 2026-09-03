@@ -2638,7 +2638,7 @@ dependencies = [
 [[package]]
 name = "percolator"
 version = "0.1.1"
-source = "git+https://github.com/aeyakovenko/percolator?rev=143e68c4917ed0400a27b952f036a5677047cd84#143e68c4917ed0400a27b952f036a5677047cd84"
+source = "git+https://github.com/aeyakovenko/percolator?rev=495a5590c97055bd71c6f94d849ff0298f243145#495a5590c97055bd71c6f94d849ff0298f243145"
 dependencies = [
  "bytemuck",
 ]
@@ -2653,6 +2653,7 @@ dependencies = [
  "borsh 0.10.4",
  "bytemuck",
  "litesvm",
+ "num-bigint 0.4.6",
  "num-derive 0.4.2",
  "num-traits",
  "percolator",
@@ -2662,6 +2663,7 @@ dependencies = [
  "pythnet-sdk",
  "rand 0.8.5",
  "rand_xorshift 0.3.0",
+ "serde",
  "serde_json",
  "serial_test",
  "shellexpand",
@@ -2669,6 +2671,7 @@ dependencies = [
  "solana-program 1.18.26",
  "solana-sdk",
  "spl-token",
+ "spl-token-2022",
  "thiserror 1.0.69",
  "tokio",
 ]

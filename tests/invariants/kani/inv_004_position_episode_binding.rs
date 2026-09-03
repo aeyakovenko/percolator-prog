@@ -1,0 +1,230 @@
+//! INV-004 - Position episode binding.
+//!
+//! Normative obligation: wrapper-owned position episodes advance monotonically; configured-matcher
+//! fills preserve approval, out-of-matcher mutations clear it, and both preserve cap/layout.
+//!
+//! Evidence in this file (P): Kani checks the exact packed-control transition used by production
+//! over every `u64` control word. It proves exact increment, policy-prescribed matcher state, cap
+//! preservation whenever another episode is representable, and fail-closed behavior for invalid
+//! caps or exhaustion.
+//!
+//! Guarantee boundary: this is a local wrapper-layout proof. Public-route episode coverage and
+//! exact rollback are exercised independently by the INV-004 stateful LiteSVM matrices.
+//! The final harness is cross-owned by INV-012 and proves the exact production matcher-capability
+//! tuple predicate; its public composition lives in INV-012's SVM/CU module.
+
+use super::*;
+use percolator_prog::state;
+
+#[kani::proof]
+fn kani_v16_position_binding_accepts_exactly_the_current_incarnation_and_episode() {
+    let current_portfolio_id: u64 = kani::any();
+    let current_position_epoch: u64 = kani::any();
+    let expected_portfolio_id: u64 = kani::any();
+    let expected_position_epoch: u64 = kani::any();
+
+    assert_eq!(
+        state::portfolio_position_binding_matches(
+            current_portfolio_id,
+            current_position_epoch,
+            expected_portfolio_id,
+            expected_position_epoch,
+        ),
+        current_portfolio_id == expected_portfolio_id
+            && current_position_epoch == expected_position_epoch
+    );
+}
+
+#[kani::proof]
+fn kani_v16_successful_episode_consumption_invalidates_the_old_binding() {
+    let portfolio_id: u64 = kani::any();
+    let control: u64 = kani::any();
+    let config = state::PortfolioMatcherConfigV16 {
+        control,
+        ..state::PortfolioMatcherConfigV16::default()
+    };
+    kani::assume(config.trade_fee_cap_bps() <= 10_000);
+    kani::assume(config.position_epoch() < state::PortfolioMatcherConfigV16::position_epoch_max());
+
+    let old_epoch = config.position_epoch();
+    let (new_epoch, _) = state::next_portfolio_position_control(control).unwrap();
+    assert!(state::portfolio_position_binding_matches(
+        portfolio_id,
+        old_epoch,
+        portfolio_id,
+        old_epoch,
+    ));
+    assert!(!state::portfolio_position_binding_matches(
+        portfolio_id,
+        new_epoch,
+        portfolio_id,
+        old_epoch,
+    ));
+    assert!(state::portfolio_position_binding_matches(
+        portfolio_id,
+        new_epoch,
+        portfolio_id,
+        new_epoch,
+    ));
+}
+
+#[kani::proof]
+fn kani_v16_position_epoch_control_is_monotonic_and_preserves_matcher_state() {
+    let control: u64 = kani::any();
+    let config = state::PortfolioMatcherConfigV16 {
+        control,
+        ..state::PortfolioMatcherConfigV16::default()
+    };
+    let epoch = config.position_epoch();
+    let matcher_enabled = config.enabled();
+    let trade_fee_cap_bps = config.trade_fee_cap_bps();
+    let result = state::next_portfolio_position_control(control);
+
+    kani::cover!(result.is_ok(), "a valid episode advances");
+    kani::cover!(
+        trade_fee_cap_bps > 10_000 && result.is_err(),
+        "an invalid packed fee cap rejects"
+    );
+    kani::cover!(
+        trade_fee_cap_bps <= 10_000
+            && epoch == state::PortfolioMatcherConfigV16::position_epoch_max()
+            && result.is_err(),
+        "an exhausted episode rejects"
+    );
+
+    if trade_fee_cap_bps > 10_000 || epoch == state::PortfolioMatcherConfigV16::position_epoch_max()
+    {
+        assert!(result.is_err());
+    } else {
+        let (next_epoch, next_control) = result.unwrap();
+        let next_config = state::PortfolioMatcherConfigV16 {
+            control: next_control,
+            ..state::PortfolioMatcherConfigV16::default()
+        };
+        assert_eq!(next_epoch, epoch + 1);
+        assert_eq!(next_config.position_epoch(), next_epoch);
+        assert_eq!(next_config.enabled(), matcher_enabled);
+        assert_eq!(next_config.trade_fee_cap_bps(), trade_fee_cap_bps);
+    }
+}
+
+#[kani::proof]
+fn kani_v16_matcher_toggle_preserves_position_epoch() {
+    let control: u64 = kani::any();
+    let enabled: u8 = kani::any();
+    kani::assume(enabled <= 1);
+    let mut config = state::PortfolioMatcherConfigV16 {
+        control,
+        ..state::PortfolioMatcherConfigV16::default()
+    };
+    let epoch = config.position_epoch();
+    let trade_fee_cap_bps = config.trade_fee_cap_bps();
+
+    config.set_enabled(enabled).unwrap();
+
+    assert_eq!(config.enabled(), u64::from(enabled));
+    assert_eq!(config.position_epoch(), epoch);
+    assert_eq!(config.trade_fee_cap_bps(), trade_fee_cap_bps);
+}
+
+#[kani::proof]
+fn kani_v16_matcher_fee_cap_update_is_bounded_and_preserves_other_control_fields() {
+    let control: u64 = kani::any();
+    let trade_fee_cap_bps: u16 = kani::any();
+    let mut config = state::PortfolioMatcherConfigV16 {
+        control,
+        ..state::PortfolioMatcherConfigV16::default()
+    };
+    let epoch = config.position_epoch();
+    let matcher_enabled = config.enabled();
+    let result = config.set_trade_fee_cap_bps(trade_fee_cap_bps);
+
+    kani::cover!(result.is_ok(), "an in-range fee cap is accepted");
+    kani::cover!(result.is_err(), "an over-limit fee cap is rejected");
+
+    if trade_fee_cap_bps > 10_000 {
+        assert!(result.is_err());
+        assert_eq!(config.control, control);
+    } else {
+        result.unwrap();
+        assert_eq!(config.trade_fee_cap_bps(), trade_fee_cap_bps);
+        assert_eq!(config.position_epoch(), epoch);
+        assert_eq!(config.enabled(), matcher_enabled);
+    }
+}
+
+#[kani::proof]
+fn kani_v16_position_epoch_sync_policy_is_total_and_exact() {
+    let control: u64 = kani::any();
+    let matcher_synchronized: bool = kani::any();
+    let config = state::PortfolioMatcherConfigV16 {
+        control,
+        ..state::PortfolioMatcherConfigV16::default()
+    };
+    let epoch = config.position_epoch();
+    let result =
+        state::next_portfolio_position_control_for_matcher_sync(control, matcher_synchronized);
+
+    kani::cover!(
+        result.is_ok() && matcher_synchronized,
+        "a synchronized matcher episode advances"
+    );
+    kani::cover!(
+        result.is_ok() && !matcher_synchronized,
+        "an unsynchronized mutation advances and disables"
+    );
+    kani::cover!(
+        result.is_err(),
+        "invalid or exhausted packed control rejects"
+    );
+
+    if config.trade_fee_cap_bps() > 10_000
+        || epoch == state::PortfolioMatcherConfigV16::position_epoch_max()
+    {
+        assert!(result.is_err());
+    } else {
+        let (next_epoch, next_control) = result.unwrap();
+        let next_config = state::PortfolioMatcherConfigV16 {
+            control: next_control,
+            ..state::PortfolioMatcherConfigV16::default()
+        };
+        assert_eq!(next_epoch, epoch + 1);
+        assert_eq!(next_config.position_epoch(), next_epoch);
+        assert_eq!(next_config.trade_fee_cap_bps(), config.trade_fee_cap_bps());
+        if matcher_synchronized {
+            assert_eq!(next_config.enabled(), config.enabled());
+        } else {
+            assert_eq!(next_config.enabled(), 0);
+        }
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+fn kani_v16_inv012_matcher_capability_authorizes_only_the_exact_enabled_tuple() {
+    let stored_program: [u8; 32] = kani::any();
+    let stored_context: [u8; 32] = kani::any();
+    let stored_delegate: [u8; 32] = kani::any();
+    let requested_program: [u8; 32] = kani::any();
+    let requested_context: [u8; 32] = kani::any();
+    let requested_delegate: [u8; 32] = kani::any();
+    let control: u64 = kani::any();
+    let config = state::PortfolioMatcherConfigV16 {
+        matcher_program: stored_program,
+        matcher_context: stored_context,
+        matcher_delegate: stored_delegate,
+        control,
+    };
+
+    assert_eq!(
+        config.authorizes_matcher_tuple(
+            &requested_program,
+            &requested_context,
+            &requested_delegate,
+        ),
+        config.enabled() == 1
+            && stored_program == requested_program
+            && stored_context == requested_context
+            && stored_delegate == requested_delegate
+    );
+}

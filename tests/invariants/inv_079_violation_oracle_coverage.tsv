@@ -1,0 +1,33 @@
+# oracle	evidence	rationale
+AccrualOrderingDiscovery	TERMINAL_LOF	all four exposure-removal routes resolve every participant and exact destination-token traces bind any conserved control-relative payout loss/gain to the terminal classifier; bounded no-gain recovery residue cannot classify as LoF
+AssetGenerationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
+AuthorityIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
+AuthorityFundedHandoffDiscovery	TERMINAL_LOF	public trace binds stale authority-epoch handoff to exact incumbent backing-principal extraction
+AuthorityResolveTerminalDiscovery	TERMINAL_LOF	public trace binds stale authority-epoch resolve to exact funded-user terminal loss
+BackingProviderConsentDiscovery	ECONOMIC_DELTA_ONLY	operator SPL gain is exact, but the LP authorized the fee and provider harm is counterfactual revenue under a privileged policy change
+BilateralMarkFeeDiscovery	TERMINAL_LOF	all six portfolios resolve through public payout rails; exact destination-token traces bind terminal coalition excess and noncoalition loss to the classifier while ordinary fee loss remains bounded-exit evidence
+CompositeRoundingDiscovery	TERMINAL_LOF	all five portfolios resolve through public payout rails; exact destination-token traces bind any rounded-composite liquidation loss and cranker gain to the terminal classifier
+DebitedIntentReplayDiscovery	TERMINAL_LOF	permissionless activation retries bind any accepted duplicate to a nonrecoverable exact payer SPL debit and matching canonical-vault credit; insurance top-up remains a recoverable consent/atomicity check
+FeeConsentDiscovery	TERMINAL_LOF	all eight signed fee families resolve every funded actor through public payout rails; exact affected-signer value loss and caller-fee beneficiary gain are bound to the terminal classifier
+FeeRedirectSupersessionDiscovery	TERMINAL_LOF	paired public traces flatten every position, withdraw every portfolio, and close the slab; stale acceptance binds the asset operator's exact SPL gain to the protected-domain terminal-value reduction
+FractionalMovementDiscovery	TERMINAL_LOF	public trace binds a stalled target's exact short underpayment to long overpayment while stale resolution proves it is not persistent DoS
+FundedRoleDiscovery	PRIVILEGED_TRANSFER	exact principal transfer requires the currently authorized asset admin to rotate the funded role
+IncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
+IntentReplayDiscovery	REPLAY_ONLY	duplicate economic mutation is not itself quantified LoF or persistent DoS
+MarketIncarnationDiscovery	REPLAY_ONLY	stale acceptance is not itself quantified LoF or persistent DoS
+MarkMovementReserveDiscovery	LOCAL_SAFETY_ONLY	public terminal evidence proves nonextraction, but rollback and reserve-admission failures are not themselves terminal LoF
+MatcherRevocationTerminalDiscovery	TERMINAL_LOF	paired public traces revoke matcher consent, attempt the retained grant and unsigned CPI fill, then resolve both users; exact LP loss and attacker gain are classifier-bound
+OracleSupersessionTerminalDiscovery	TERMINAL_LOF	paired public long/short traces cover all five retained oracle controls and bind stale acceptance to exact settlement loss and counterparty gain
+PendingMarkAdmissionDiscovery	TERMINAL_LOF	paired public worlds bind any stale-price risk admission to exact attacker payout gain and victim terminal loss; guard and liveness checks remain separate certification conditions
+PendingMarkInheritanceDiscovery	TERMINAL_LOF	paired public worlds bind any retained pre-target fill to exact attacker payout gain and victim terminal loss across all four trade encodings
+PendingTargetOverrideDiscovery	LOCAL_SAFETY_ONLY	paired public terminal evidence binds any payout extraction, while target and rollback failures remain local safety claims
+PendingZeroMoveTerminalDiscovery	TERMINAL_LOF	paired public traces terminalize both users and bind exact zero-move ordering payout loss/gain to the same SPL identities
+ProspectiveAccrualDiscovery	TERMINAL_LOF	all four public trade routes resolve every actor and bind exact control-relative SPL payout loss/gain to the terminal classifier
+ShutdownCommitOrderingDiscovery	TERMINAL_LOF	paired public traces terminalize both users and bind exact shutdown-order payout loss/gain to the same SPL identities
+SourceFeeConsentDiscovery	TERMINAL_LOF	public trace binds the unconsented LP debit to the provider's exact SPL withdrawal
+SupersessionDiscovery	REPLAY_ONLY	stale overwrite is not itself quantified LoF or persistent DoS
+TerminalCommitOrderingDiscovery	TERMINAL_LOF	paired public traces terminalize both users and bind exact resolve-order payout loss/gain to the same SPL identities
+TerminalDustDiscovery	TERMINAL_LOF	public trace and exact victim loss are classifier-bound
+TerminalGenerationDiscovery	TERMINAL_LOF	public trace and exact replacement-user loss are classifier-bound
+TradeDrivenLiquidationDiscovery	TERMINAL_LOF	all five portfolios resolve through public payout rails; exact destination-token traces bind any trade-driven victim loss and coalition gain to the terminal classifier while the fixed penalty remains nonextractive
+TradeIntentReplayTerminalDiscovery	TERMINAL_LOF	all four retained trade encodings compare one authorized execution against a stale retry through public resolution and exact counterparty payout deltas
