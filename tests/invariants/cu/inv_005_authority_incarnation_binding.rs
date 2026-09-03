@@ -21,6 +21,7 @@
 //! intentionally permitted inside that envelope.
 
 use super::*;
+use support::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE};
 
 fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
@@ -5005,4 +5006,100 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
     );
     let closed_market = env.svm.get_account(&env.market).unwrap();
     assert_closed_market_tombstone(&closed_market);
+}
+
+// A cold asset administrator is not an oracle trust root. Once an asset has live exposure, the
+// administrator must not replace the incumbent oracle without that oracle's consent. Otherwise a
+// compromised cold key can seize AuthMark, publish a bounded but false mark, and redistribute real
+// terminal value between independently funded traders without compromising the configured oracle.
+#[test]
+fn v16_attack_funded_asset_admin_cannot_seize_oracle_and_redistribute_user_value() {
+    const ATTACKER: usize = 0;
+    const VICTIM: usize = 1;
+    const SEIZED_ORACLE: usize = 2;
+    const DEPOSIT: u128 = 100_000_000;
+    const ATTACK_MARK: u64 = INITIAL_PRICE + INITIAL_PRICE / 10;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        [0xa5; 32],
+        MarketConfig {
+            max_price_move_bps_per_slot: 1_000,
+            ..MarketConfig::default()
+        },
+    );
+    env.begin_public_trace();
+    env.configure_auth_mark(false, 0, 1, INITIAL_PRICE)
+        .expect("configure the honest AuthMark oracle before exposure");
+    env.configure_permissionless_resolve(2, 1)
+        .expect("configure the normal permissionless terminal escape");
+    env.update_asset_authority_from_admin(
+        0,
+        percolator_prog::processor::ASSET_AUTH_ADMIN,
+        ATTACKER,
+    )
+    .expect("install the cold asset administrator while the asset is empty");
+
+    let honest_oracle = env.primary_profile(0).oracle_authority;
+    assert_ne!(
+        honest_oracle,
+        env.actors[ATTACKER].signer.pubkey().to_bytes(),
+        "the attacker must not already control the configured oracle"
+    );
+    env.trade_no_cpi(ATTACKER, VICTIM, 0, SIZE_Q, INITIAL_PRICE, 0)
+        .expect("open independently funded matched exposure");
+
+    let market_before_takeover = env.svm.get_account(&env.market).unwrap();
+    let takeover = env.update_asset_authority_between_actors(
+        0,
+        percolator_prog::processor::ASSET_AUTH_ORACLE,
+        ATTACKER,
+        SEIZED_ORACLE,
+    );
+    if takeover.is_err() {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_takeover,
+            "rejected cold-admin oracle takeover must roll back exactly"
+        );
+        assert_eq!(
+            env.primary_profile(0).oracle_authority,
+            honest_oracle,
+            "the funded asset must retain its incumbent oracle"
+        );
+        return;
+    }
+
+    env.warp_to_slot(2);
+    env.push_auth_mark_for_actor(SEIZED_ORACLE, 0, 2, ATTACK_MARK)
+        .expect("the seized oracle can publish the attack mark on the vulnerable program");
+    let observation = crank_observations(0);
+    env.crank(ATTACKER, 2, observation.clone())
+        .expect("commit the bounded mark and refresh the attacker");
+    env.crank(VICTIM, 2, observation)
+        .expect("refresh the victim at the seized mark");
+    assert_eq!(
+        env.primary_market_state().1.assets[0].effective_price,
+        ATTACK_MARK,
+        "the public crank must commit the attacker-controlled bounded mark"
+    );
+
+    env.resolve_stale_permissionless(4)
+        .expect("permissionless stale resolution freezes the seized mark");
+    let attacker_destination = env.actors[ATTACKER].destination_token;
+    let victim_destination = env.actors[VICTIM].destination_token;
+    let attacker_before = u128::from(env.token_amount(attacker_destination));
+    let victim_before = u128::from(env.token_amount(victim_destination));
+    env.close_resolved_primary_signed(VICTIM)
+        .expect("settle the victim through the public terminal route");
+    env.close_resolved_primary_signed(ATTACKER)
+        .expect("settle the attacker through the public terminal route");
+    let attacker_payout = u128::from(env.token_amount(attacker_destination)) - attacker_before;
+    let victim_payout = u128::from(env.token_amount(victim_destination)) - victim_before;
+
+    assert!(
+        attacker_payout <= DEPOSIT && victim_payout >= DEPOSIT,
+        "cold-admin oracle seizure redistributed independent user value: attacker payout \
+         {attacker_payout}, victim payout {victim_payout}, each deposited {DEPOSIT}"
+    );
 }
