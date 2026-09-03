@@ -170,8 +170,62 @@ fn v16_program_late_unrelated_backing_cannot_outlive_and_erase_resolved_receipt(
         .expect("decode pre-expiry receipt");
     let pre_expiry_payout = env.token_amount(env.actors[WINNER].destination_token);
 
+    if pre_expiry_receipt.present {
+        let market_before = env.market_data(false);
+        let portfolio_before = env.primary_portfolio_data(WINNER);
+        let destination_before = pre_expiry_payout;
+        let vault_before = env.token_amount(env.vault);
+        let error = env
+            .crank(
+                WINNER,
+                RESOLVE_SLOT + 2,
+                vec![CrankObservationHint {
+                    asset_index: UNRELATED_ASSET,
+                    oracle_accounts: 0,
+                }],
+            )
+            .expect_err("a backing hint before its committed expiry must not be a successful no-op");
+        assert!(
+            error.contains("Custom(22)") || error.contains("custom program error: 0x16"),
+            "unexpected pre-expiry crank error: {error}"
+        );
+        assert_eq!(env.market_data(false), market_before);
+        assert_eq!(env.primary_portfolio_data(WINNER), portfolio_before);
+        assert_eq!(
+            env.token_amount(env.actors[WINNER].destination_token),
+            destination_before
+        );
+        assert_eq!(env.token_amount(env.vault), vault_before);
+    }
+
     env.warp_to_slot(EXPIRY_SLOT);
     if pre_expiry_receipt.present {
+        for observations in [
+            vec![],
+            vec![CrankObservationHint {
+                asset_index: CLAIM_ASSET,
+                oracle_accounts: 0,
+            }],
+        ] {
+            let market_before = env.market_data(false);
+            let portfolio_before = env.primary_portfolio_data(WINNER);
+            let destination_before = env.token_amount(env.actors[WINNER].destination_token);
+            let vault_before = env.token_amount(env.vault);
+            let error = env
+                .crank(WINNER, EXPIRY_SLOT, observations)
+                .expect_err("missing or unrelated backing discovery must reject atomically");
+            assert!(
+                error.contains("Custom(22)") || error.contains("custom program error: 0x16"),
+                "unexpected unresolved-backing crank error: {error}"
+            );
+            assert_eq!(env.market_data(false), market_before);
+            assert_eq!(env.primary_portfolio_data(WINNER), portfolio_before);
+            assert_eq!(
+                env.token_amount(env.actors[WINNER].destination_token),
+                destination_before
+            );
+            assert_eq!(env.token_amount(env.vault), vault_before);
+        }
         let backing_progress = env
             .crank(
                 WINNER,
