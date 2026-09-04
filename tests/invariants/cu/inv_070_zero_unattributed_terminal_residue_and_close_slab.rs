@@ -200,11 +200,11 @@ fn inv070_terminal_insurance_withhold_fixture() -> Inv070TerminalInsuranceWithho
     }
 }
 
-// BLOCKER DoS RED: an unprivileged asset creator can retain a one-atom insurance claim forever.
-// Once all users are paid and the market is Resolved, the only route that clears that claim requires
-// the creator's insurance-authority signature. CloseSlab cannot retire attributed insurance, while
-// the honest market authority cannot withdraw it or replace the funded role. The future-safe route is
-// permissionless execution that transfers only to a token account owned by the configured authority.
+// BLOCKER DoS regression: an unprivileged asset creator could retain a one-atom insurance claim
+// forever by withholding its insurance-authority signature. Once all users are paid and the market is
+// Resolved, account zero remains bound to the configured authority and the destination remains owned
+// by it, but the signature is no longer required to deliver that exact entitlement. Live withdrawals
+// remain signed. Every rejected identity/destination variant must roll back accounting and SPL state.
 #[test]
 fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_close() {
     const ASSET_INDEX: u16 = 1;
@@ -213,10 +213,11 @@ fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_
     let mut attack = inv070_terminal_insurance_withhold_fixture();
     let admin = attack.env.admin.insecure_clone();
     let replacement = Keypair::new();
+    let insurance_authority = attack.insurance_authority.pubkey();
+    let cranker = attack.cranker.insecure_clone();
     let admin_destination = attack.env.token_account(admin.pubkey(), 0);
-    let attacker_destination = attack
-        .env
-        .token_account(attack.insurance_authority.pubkey(), 0);
+    let attacker_destination = attack.env.token_account(insurance_authority, 0);
+    let wrong_authority_destination = attack.env.token_account(cranker.pubkey(), 0);
     let market = attack.env.market;
     let vault = attack.env.vault;
     let vault_authority = attack.env.vault_authority;
@@ -229,6 +230,7 @@ fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_
 
     let market_before = attack.env.svm.get_account(&market).unwrap();
     let vault_before = attack.env.svm.get_account(&vault).unwrap();
+    let admin_destination_before = attack.env.svm.get_account(&admin_destination).unwrap();
     let admin_withdraw = inv070_send_with_metadata(
         &mut attack.env,
         ProgInstruction::WithdrawInsuranceAsset {
@@ -251,8 +253,16 @@ fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_
         admin_withdraw.is_err(),
         "market authority must not seize the creator's terminal insurance entitlement"
     );
+    assert_eq!(
+        admin_withdraw.as_ref().unwrap_err().0,
+        "InstructionError(2, Custom(8))"
+    );
     assert_eq!(attack.env.svm.get_account(&market).unwrap(), market_before);
     assert_eq!(attack.env.svm.get_account(&vault).unwrap(), vault_before);
+    assert_eq!(
+        attack.env.svm.get_account(&admin_destination).unwrap(),
+        admin_destination_before
+    );
 
     attack.env.ensure_signer_account(replacement.pubkey());
     attack.env.svm.expire_blockhash();
@@ -278,11 +288,11 @@ fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_
     );
     assert_eq!(attack.env.svm.get_account(&market).unwrap(), market_before);
 
-    // The cranker signs and supplies a destination owned by the configured insurance authority.
-    // This is the exact entitlement-preserving permissionless payout the fixed route must accept.
+    // The configured authority key alone is insufficient if the payout token account belongs to
+    // anyone else. This check runs without the authority signature and must still fail atomically.
     attack.env.svm.expire_blockhash();
-    let cranker = attack.cranker.insecure_clone();
-    let permissionless_payout = inv070_send_with_metadata(
+    let wrong_destination_before = attack.env.svm.get_account(&admin_destination).unwrap();
+    let wrong_destination = inv070_send_with_metadata(
         &mut attack.env,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: ASSET_INDEX,
@@ -291,14 +301,65 @@ fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_
             amount: INSURANCE_ATOMS,
         },
         vec![
-            AccountMeta::new(cranker.pubkey(), true),
+            AccountMeta::new_readonly(insurance_authority, false),
             AccountMeta::new(market, false),
-            AccountMeta::new(attacker_destination, false),
+            AccountMeta::new(admin_destination, false),
             AccountMeta::new(vault, false),
             AccountMeta::new_readonly(vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
-        &[&cranker],
+        &[],
+    );
+    assert_eq!(
+        wrong_destination.as_ref().unwrap_err().0,
+        "InstructionError(2, Custom(11))"
+    );
+    assert_eq!(attack.env.svm.get_account(&market).unwrap(), market_before);
+    assert_eq!(attack.env.svm.get_account(&vault).unwrap(), vault_before);
+    assert_eq!(
+        attack.env.svm.get_account(&admin_destination).unwrap(),
+        wrong_destination_before
+    );
+
+    // A permissionless caller also cannot redirect the budget by substituting its own key and a
+    // token account it owns. The supplied key must remain the configured insurance authority.
+    attack.env.svm.expire_blockhash();
+    let wrong_authority_destination_before = attack
+        .env
+        .svm
+        .get_account(&wrong_authority_destination)
+        .unwrap();
+    let wrong_authority = inv070_send_with_metadata(
+        &mut attack.env,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET_INDEX,
+            market_id,
+            authority_epoch,
+            amount: INSURANCE_ATOMS,
+        },
+        vec![
+            AccountMeta::new_readonly(cranker.pubkey(), false),
+            AccountMeta::new(market, false),
+            AccountMeta::new(wrong_authority_destination, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert_eq!(
+        wrong_authority.as_ref().unwrap_err().0,
+        "InstructionError(2, Custom(8))"
+    );
+    assert_eq!(attack.env.svm.get_account(&market).unwrap(), market_before);
+    assert_eq!(attack.env.svm.get_account(&vault).unwrap(), vault_before);
+    assert_eq!(
+        attack
+            .env
+            .svm
+            .get_account(&wrong_authority_destination)
+            .unwrap(),
+        wrong_authority_destination_before
     );
 
     let rent = attack.env.svm.get_sysvar::<solana_sdk::rent::Rent>();
@@ -308,9 +369,43 @@ fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_
         .lamports
         .saturating_sub(rent.minimum_balance(percolator_prog::constants::HEADER_LEN));
     let rent_locked = market_refund.saturating_add(terminal_vault.lamports);
+
+    // Any payer may now submit the canonical terminal payout: account zero is the configured
+    // authority but is deliberately not a signer, and custody can move only to its token account.
+    attack.env.svm.expire_blockhash();
+    let unsigned_canonical_payout = inv070_send_with_metadata(
+        &mut attack.env,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET_INDEX,
+            market_id,
+            authority_epoch,
+            amount: INSURANCE_ATOMS,
+        },
+        vec![
+            AccountMeta::new_readonly(insurance_authority, false),
+            AccountMeta::new(market, false),
+            AccountMeta::new(attacker_destination, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    )
+    .expect("resolved canonical insurance payout is permissionless");
+    let drained = attack.env.market_state().1;
+    assert_eq!(drained.insurance_domain_budget[2], 0);
+    assert_eq!(drained.insurance_domain_budget_remaining_total, 0);
+    assert_eq!(drained.insurance, 0);
+    assert_eq!(drained.vault, 0);
+    assert_eq!(attack.env.token_amount(vault), 0);
+    assert_eq!(
+        attack.env.token_amount(attacker_destination),
+        INSURANCE_ATOMS as u64
+    );
+
     let close_destination = attack.env.token_account(admin.pubkey(), 0);
     attack.env.svm.expire_blockhash();
-    let first_close = inv070_send_with_metadata(
+    let permissionless_close_cu = inv070_send_with_metadata(
         &mut attack.env,
         ProgInstruction::CloseSlab { authority_epoch: 0 },
         vec![
@@ -323,39 +418,11 @@ fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_
             AccountMeta::new(mint, false),
         ],
         &[&admin],
-    );
+    )
+    .expect("permissionless terminal payout makes CloseSlab reachable");
+    assert_closed_market_tombstone(&attack.env.svm.get_account(&market).unwrap());
 
-    let mut late_close = None;
-    if first_close.is_err() {
-        assert_eq!(
-            attack.env.svm.get_account(&market).unwrap(),
-            terminal_market
-        );
-        assert_eq!(attack.env.svm.get_account(&vault).unwrap(), terminal_vault);
-        attack.env.svm.warp_to_slot(1_000_000);
-        attack.env.svm.expire_blockhash();
-        late_close = Some(inv070_send_with_metadata(
-            &mut attack.env,
-            ProgInstruction::CloseSlab { authority_epoch: 0 },
-            vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(market, false),
-                AccountMeta::new(vault, false),
-                AccountMeta::new_readonly(vault_authority, false),
-                AccountMeta::new(close_destination, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-                AccountMeta::new(mint, false),
-            ],
-            &[&admin],
-        ));
-        assert!(late_close.as_ref().unwrap().is_err());
-        let terminal = attack.env.market_state().1;
-        assert_eq!(terminal.insurance_domain_budget[2], INSURANCE_ATOMS);
-        assert_eq!(terminal.vault, INSURANCE_ATOMS);
-        assert_eq!(attack.env.token_amount(vault), INSURANCE_ATOMS as u64);
-    }
-
-    // Discriminating control: the same public lifecycle closes immediately when the attacker signs.
+    // Compatibility control: the configured authority may still sign and withdraw exactly as before.
     let mut control = inv070_terminal_insurance_withhold_fixture();
     let (control_destination, attacker_withdraw_cu) =
         control.env.withdraw_terminal_insurance_with_authority(
@@ -370,28 +437,77 @@ fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_
     let cooperative_close_cu = control.env.close_slab_with_cu();
     assert_closed_market_tombstone(&control.env.svm.get_account(&control.env.market).unwrap());
 
+    // The signer relaxation is terminal-only. In Live mode the configured operator key without its
+    // signature still fails at the wrapper boundary, with every touched account byte-exactly rolled
+    // back by the failed transaction.
+    let mut live = V16CuEnv::new();
+    let live_admin = live.admin.insecure_clone();
+    live.enable_live_insurance_withdrawal();
+    live.top_up_insurance_domain_with_authority_and_cu(&live_admin, 0, INSURANCE_ATOMS);
+    let live_destination = live.token_account(live_admin.pubkey(), 0);
+    let live_market_before = live.svm.get_account(&live.market).unwrap();
+    let live_vault_before = live.svm.get_account(&live.vault).unwrap();
+    let live_destination_before = live.svm.get_account(&live_destination).unwrap();
+    let live_market_id = live.asset_market_id(0);
+    let live_authority_epoch = live.withdrawal_authority_epoch(live_admin.pubkey(), 0, true);
+    let live_market = live.market;
+    let live_vault = live.vault;
+    let live_vault_authority = live.vault_authority;
+    live.svm.expire_blockhash();
+    let live_unsigned = inv070_send_with_metadata(
+        &mut live,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            market_id: live_market_id,
+            authority_epoch: live_authority_epoch,
+            amount: INSURANCE_ATOMS,
+        },
+        vec![
+            AccountMeta::new_readonly(live_admin.pubkey(), false),
+            AccountMeta::new(live_market, false),
+            AccountMeta::new(live_destination, false),
+            AccountMeta::new(live_vault, false),
+            AccountMeta::new_readonly(live_vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert_eq!(
+        live_unsigned.as_ref().unwrap_err().0,
+        "InstructionError(2, Custom(6))"
+    );
+    assert_eq!(
+        live.svm.get_account(&live.market).unwrap(),
+        live_market_before
+    );
+    assert_eq!(
+        live.svm.get_account(&live.vault).unwrap(),
+        live_vault_before
+    );
+    assert_eq!(
+        live.svm.get_account(&live_destination).unwrap(),
+        live_destination_before
+    );
+
     println!(
-        "INV-070 terminal insurance withholding: users={:?}, create_cu={}, topup_cu={}, resolve_cu={}, admin_withdraw={:?}, admin_rotation={:?}, permissionless_payout={:?}, first_close={:?}, late_close={:?}, market_lamports={}, market_refund={}, vault_lamports={}, rent_locked={}, attacker_withdraw_cu={}, cooperative_close_cu={}",
+        "INV-070 terminal insurance withholding: users={:?}, create_cu={}, topup_cu={}, resolve_cu={}, admin_withdraw={:?}, admin_rotation={:?}, wrong_destination={:?}, wrong_authority={:?}, unsigned_canonical_payout_cu={}, permissionless_close_cu={}, live_unsigned={:?}, market_lamports={}, market_refund={}, vault_lamports={}, rent_locked={}, attacker_withdraw_cu={}, cooperative_close_cu={}",
         attack.user_payouts,
         attack.permissionless_create_cu,
         attack.insurance_top_up_cu,
         attack.resolve_cu,
         admin_withdraw,
         admin_rotation,
-        permissionless_payout,
-        first_close,
-        late_close,
+        wrong_destination,
+        wrong_authority,
+        unsigned_canonical_payout,
+        permissionless_close_cu,
+        live_unsigned,
         terminal_market.lamports,
         market_refund,
         terminal_vault.lamports,
         rent_locked,
         attacker_withdraw_cu,
         cooperative_close_cu,
-    );
-
-    assert!(
-        permissionless_payout.is_ok() && first_close.is_ok(),
-        "a funded permissionless-asset authority must not be able to withhold terminal progress; any cranker must be able to pay the exact claim only to the configured authority and then close the slab"
     );
 }
 

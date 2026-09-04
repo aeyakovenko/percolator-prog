@@ -1607,11 +1607,38 @@ fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaust
             "pair matrix must be complete"
         );
 
-        assert_reserve_custody_alias_rejects_atomically(
+        if matches!(
             route,
-            "authority signer downgrade",
-            |accounts| accounts[0].is_signer = false,
-        );
+            ReserveCustodyAliasRoute::WithdrawResolvedInsuranceAsset
+                | ReserveCustodyAliasRoute::WithdrawResolvedInsuranceAssetWithLedger
+        ) {
+            let mut unsigned = reserve_custody_alias_fixture(route);
+            let instruction = reserve_custody_alias_instruction(&unsigned, route);
+            let mut accounts = reserve_custody_alias_accounts(&unsigned, route);
+            accounts[0].is_signer = false;
+            let before = reserve_custody_alias_snapshot(&unsigned);
+            unsigned.env.svm.expire_blockhash();
+            let accepted = unsigned.env.send(instruction, accounts, &[]);
+            assert!(
+                accepted.is_ok(),
+                "{route:?}: resolved payout to the configured authority must be permissionless: {accepted:?}"
+            );
+            let after = reserve_custody_alias_snapshot(&unsigned);
+            assert_eq!(
+                u128::from(before.vault_atoms.abs_diff(after.vault_atoms)),
+                unsigned.amount
+            );
+            assert_eq!(
+                u128::from(before.user_atoms.abs_diff(after.user_atoms)),
+                unsigned.amount
+            );
+        } else {
+            assert_reserve_custody_alias_rejects_atomically(
+                route,
+                "authority signer downgrade",
+                |accounts| accounts[0].is_signer = false,
+            );
+        }
         let required_writable_roles: &[usize] = match route {
             ReserveCustodyAliasRoute::TopUpInsuranceWithLedger
             | ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger
