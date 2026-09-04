@@ -99,7 +99,8 @@ capabilities across every automatic revocation/incarnation writer, canonical ari
 across arbitrary route interleavings, and authenticated-observation completeness before favorable
 account actions.
 
-The first coverage repair now has reproducible generic red/green evidence. The invariant-owned
+The first two coverage repairs now have reproducible generic red/green evidence. The
+invariant-owned
 `v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` generator added retained CPI
 taker-fee histories to the existing actor-entitlement matrix. Without changing its generator or
 oracle, the minimized public LiteSVM history fails on vulnerable wrapper pin `d5e2ec6f` and passes
@@ -107,6 +108,16 @@ on PR411 fix pin `370eb6ab`. This repairs one omitted route/policy-order cell fo
 INV-011, INV-014, INV-024, INV-036, INV-047, and INV-081. Those rows remain `REOPENED` because the
 same generic cross-products are not yet complete for every retained fee-bearing route and because
 the production fix has not landed on the branch's base.
+
+The invariant-owned `v16_program_retry_operation_matrix_rejects_every_stale_retry` generator now
+also enumerates insurance withdrawal and inserts an independent public stock replenishment between
+two prebuilt requests. The unchanged matrix discovers `InsuranceWithdrawal` on vulnerable pin
+`d5e2ec6f` and discovers no violation on PR415 fix pin `d8c106e9`; its minimized seed is retained in
+`proptest-regressions/inv_008_intent_retry_discovery.txt`. This is generic replay/stock-lifecycle
+evidence. It is deliberately classified `REPLAY_ONLY`: PR415's separate provider/operator balance
+trace supplies the stronger loss attribution, while the generic matrix does not by itself prove a
+terminal victim loss. INV-008 and the related value rows remain `REOPENED` until the production fix
+lands and the remaining retained-withdrawal route and stock-transition partitions are covered.
 
 The detailed tranche notes below are historical evidence records. Their original use of words such
 as "closed" or "closure" is superseded by `invariant_status.tsv` and the audit ledger; it means only
