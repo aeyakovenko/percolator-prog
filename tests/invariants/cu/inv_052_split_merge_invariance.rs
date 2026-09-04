@@ -910,7 +910,11 @@ fn v16_program_target_change_resets_prior_price_movement_remainder() {
         2_400,
         "the new downward trajectory starts with zero carry instead of inheriting the old target's 2,400 numerator units"
     );
-    assert_eq!(second_profile._padding0, [0u8; 4]);
+    assert_eq!(
+        second_profile.effective_price_provenance,
+        percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED
+    );
+    assert_eq!(second_profile._padding0, [0u8; 3]);
     assert_eq!(env.market_state().1.assets[0].raw_oracle_target_price, 50);
     assert_eq!(env.market_state().1.assets[0].effective_price, PRICE);
 }

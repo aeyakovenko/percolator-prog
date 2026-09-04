@@ -93,6 +93,8 @@ pub mod constants {
     pub const ORACLE_MODE_HYBRID_AFTER_HOURS: u8 = 1;
     pub const ORACLE_MODE_EWMA_MARK: u8 = 2;
     pub const ORACLE_MODE_AUTH_MARK: u8 = 3;
+    pub const EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED: u8 = 0;
+    pub const EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN: u8 = 1;
     pub const ORACLE_LEG_FLAG_DIVIDE_LEG2: u8 = 1 << 0;
     pub const ORACLE_LEG_FLAG_DIVIDE_LEG3: u8 = 1 << 1;
     pub const ORACLE_LEG_FLAGS_MASK: u8 = ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3;
@@ -601,7 +603,10 @@ pub mod state {
         /// Canonical price-move numerator remainder. This occupies two bytes of the former
         /// six-byte padding lane, preserving the deployed account size and all later offsets.
         pub price_move_remainder_bps_num: u16,
-        pub _padding0: [u8; 4],
+        /// Whether the current effective-price path still includes a stale-Hybrid trade move.
+        /// It returns to authenticated only after the engine reaches a fresh oracle target.
+        pub effective_price_provenance: u8,
+        pub _padding0: [u8; 3],
         pub insurance_authority: [u8; 32],
         pub insurance_operator: [u8; 32],
         pub backing_bucket_authority: [u8; 32],
@@ -1487,7 +1492,12 @@ pub mod state {
             )
             || profile.invert > 1
             || profile.price_move_remainder_bps_num >= 10_000
-            || profile._padding0 != [0u8; 4]
+            || profile.effective_price_provenance
+                > crate::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+            || (profile.oracle_mode != ORACLE_MODE_HYBRID_AFTER_HOURS
+                && profile.effective_price_provenance
+                    != crate::constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED)
+            || profile._padding0 != [0u8; 3]
             || profile.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (profile.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
             || (profile.funding_mark_e6 != 0 && !valid_engine_oracle_price(profile.funding_mark_e6))
@@ -1584,7 +1594,8 @@ pub mod state {
             backing_trade_fee_insurance_share_bps_long: 0,
             backing_trade_fee_insurance_share_bps_short: 0,
             price_move_remainder_bps_num: 0,
-            _padding0: [0u8; 4],
+            effective_price_provenance: crate::constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED,
+            _padding0: [0u8; 3],
             insurance_authority: [0u8; 32],
             insurance_operator: [0u8; 32],
             backing_bucket_authority: [0u8; 32],
@@ -1623,7 +1634,8 @@ pub mod state {
             backing_trade_fee_insurance_share_bps_short: config
                 .backing_trade_fee_insurance_share_bps_short,
             price_move_remainder_bps_num: 0,
-            _padding0: [0u8; 4],
+            effective_price_provenance: crate::constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED,
+            _padding0: [0u8; 3],
             // At InitMarket the market key bootstraps asset 0 exactly like an activator bootstraps a
             // permissionless asset 1..N: it is asset 0's cold-storage admin and all its sub-authorities.
             insurance_authority: config.marketauth,
@@ -13140,7 +13152,8 @@ pub mod processor {
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
                 price_move_remainder_bps_num: 0,
-                _padding0: [0u8; 4],
+                effective_price_provenance: constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED,
+                _padding0: [0u8; 3],
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
@@ -13320,7 +13333,8 @@ pub mod processor {
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
                 price_move_remainder_bps_num: 0,
-                _padding0: [0u8; 4],
+                effective_price_provenance: constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED,
+                _padding0: [0u8; 3],
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
@@ -13958,7 +13972,10 @@ pub mod processor {
                 }
                 liquidation_fee_reclaimability.push((
                     asset_index,
-                    !profile_updates_mark_from_trade_view(&oracle_profile, authenticated_now_slot),
+                    liquidation_penalty_reclaimable_from_profile_view(
+                        &oracle_profile,
+                        authenticated_now_slot,
+                    ),
                 ));
                 write_oracle_profile_to_view(&mut group, asset_index, &oracle_profile)?;
                 observations.push(AutoCrankObservationV16 {
@@ -14081,7 +14098,10 @@ pub mod processor {
                     *reclaimable
                 } else {
                     let profile = read_oracle_profile_from_view(&group, &cfg, selected_fee_asset)?;
-                    !profile_updates_mark_from_trade_view(&profile, authenticated_now_slot)
+                    liquidation_penalty_reclaimable_from_profile_view(
+                        &profile,
+                        authenticated_now_slot,
+                    )
                 }
             } else {
                 false
@@ -14962,6 +14982,15 @@ pub mod processor {
                 && oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot))
     }
 
+    fn liquidation_penalty_reclaimable_from_profile_view(
+        profile: &state::AssetOracleProfileV16,
+        now_slot: u64,
+    ) -> bool {
+        !profile_updates_mark_from_trade_view(profile, now_slot)
+            && profile.effective_price_provenance
+                == constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED
+    }
+
     fn accepted_reported_trade_price_view(
         profile: &state::AssetOracleProfileV16,
         group: &state::MarketViewMutV16<'_>,
@@ -15402,6 +15431,10 @@ pub mod processor {
             simulated_profile.mark_ewma_e6 = effective_price;
             simulated_profile.mark_ewma_last_slot = now_slot;
         }
+        if update_fresh_hybrid_mark && effective_price == target {
+            simulated_profile.effective_price_provenance =
+                constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED;
+        }
         set_price_move_remainder_bps_num_view(&mut simulated_profile, price_move_remainder)?;
         *profile = simulated_profile;
         Ok(steps)
@@ -15740,6 +15773,10 @@ pub mod processor {
             record_funding_mark_transition_view(profile, asset_slot, post_trade_mark_e6, now_slot)?;
             profile.mark_ewma_e6 = post_trade_mark_e6;
             profile.mark_ewma_last_slot = now_slot;
+            if oracle_v16::profile_is_hybrid(profile) {
+                profile.effective_price_provenance =
+                    constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN;
+            }
         }
         Ok(())
     }
