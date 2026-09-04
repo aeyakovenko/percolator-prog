@@ -10,7 +10,7 @@
 //! `v16_finding_blind_violation_oracle_evidence_roster_is_source_complete`,
 //! `v16_program_fixed_blockers_remain_progressing`,
 //! `v16_program_open_lof_manifest_snapshot_is_structurally_honest`,
-//! `v16_open_security_finding_benchmark_is_complete_and_non_overclaiming`, and
+//! `v16_dated_open_security_finding_benchmark_is_non_overclaiming`, and
 //! `v16_invariant_charter_and_index_are_complete`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -509,6 +509,7 @@ fn v16_retained_retry_terminal_dispositions_are_source_complete() {
                     | "RISK_REDUCING_ONLY"
                     | "RECOVERABLE_PRINCIPAL"
                     | "RECOVERABLE_INSURANCE"
+                    | "REPLAY_ONLY"
             ),
             "unknown retained-retry disposition: {line}"
         );
@@ -726,7 +727,7 @@ fn v16_superseded_control_terminal_dispositions_are_source_complete() {
 }
 
 #[test]
-fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
+fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     let mut prior_pr = 0u16;
     let mut rows = 0usize;
     let mut direct = 0usize;
@@ -769,9 +770,12 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         rows += 1;
     }
 
-    assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
+    assert_eq!(rows, 160, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 0, "all benchmark rows need executable disposition");
+    assert_eq!(
+        missing, 17,
+        "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
+    );
     assert_eq!(
         independent, 126,
         "promote only genuinely finding-agnostic invariant discoveries"
@@ -1596,7 +1600,7 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
         );
 
         match status {
-            "PARTIAL" | "CLOSED" => {
+            "PARTIAL" | "COVERED" => {
                 let (path, function) = evidence.split_once('#').unwrap_or_else(|| {
                     panic!(
                         "row {} {status} evidence lacks path#function",
@@ -1616,11 +1620,11 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
                     "row {} evidence {path} does not define #[test] fn {function}",
                     line_index + 1
                 );
-                if status == "CLOSED" {
+                if status == "COVERED" {
                     assert_eq!(
                         remaining_gap,
                         "-",
-                        "row {} CLOSED method cannot name a remaining gap",
+                        "row {} COVERED method cannot name a remaining gap",
                         line_index + 1
                     );
                 } else {
@@ -1639,7 +1643,7 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
                 line_index + 1
             ),
             _ => panic!(
-                "row {} status must be CLOSED, PARTIAL, or OMITTED, got {status}",
+                "row {} status must be COVERED, PARTIAL, or OMITTED, got {status}",
                 line_index + 1
             ),
         }
@@ -1671,15 +1675,113 @@ fn audit_verdict_counts(markdown: &str) -> std::collections::BTreeMap<&str, usiz
             .map(str::trim)
             .expect("every audit row has a verdict column");
         assert!(
-            matches!(
-                verdict,
-                "CLOSED" | "OPEN-T" | "OPEN-D" | "PARTIAL" | "FRONTIER" | "N/A"
-            ),
+            matches!(verdict, "CONDITIONAL" | "REOPENED" | "N/A"),
             "unknown audit verdict {verdict}"
         );
         *counts.entry(verdict).or_insert(0) += 1;
     }
     counts
+}
+
+#[derive(Debug)]
+struct InvariantStatusRow<'a> {
+    id: u16,
+    disposition: &'a str,
+    required_scope: &'a str,
+    evidence_scope: &'a str,
+    quantification: &'a str,
+    assumption_profile: &'a str,
+    counterexamples: std::collections::BTreeSet<u16>,
+}
+
+fn parse_invariant_status(tsv: &str) -> Vec<InvariantStatusRow<'_>> {
+    const HEADER: &str = "invariant\tdisposition\trequired_scope\tevidence_scope\tquantification\tassumption_profile\tcounterexamples";
+
+    let mut rows = Vec::new();
+    let mut saw_header = false;
+    for (line_index, line) in tsv.lines().enumerate() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if !saw_header {
+            assert_eq!(line, HEADER, "invariant status header changed");
+            saw_header = true;
+            continue;
+        }
+
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 7, "malformed invariant status row: {line}");
+        let id = fields[0]
+            .strip_prefix("INV-")
+            .expect("invariant status id prefix")
+            .parse::<u16>()
+            .expect("numeric invariant status id");
+        let counterexamples = if fields[6] == "-" {
+            std::collections::BTreeSet::new()
+        } else {
+            fields[6]
+                .split(',')
+                .map(|pr| pr.parse::<u16>().expect("numeric counterexample PR"))
+                .collect()
+        };
+        let row = InvariantStatusRow {
+            id,
+            disposition: fields[1],
+            required_scope: fields[2],
+            evidence_scope: fields[3],
+            quantification: fields[4],
+            assumption_profile: fields[5],
+            counterexamples,
+        };
+
+        assert!(
+            matches!(
+                row.disposition,
+                "REFUTED_CURRENT"
+                    | "OPEN_IMPLEMENTATION"
+                    | "OPEN_EVIDENCE"
+                    | "SUPPORTED"
+                    | "PROVEN"
+                    | "N_A"
+            ),
+            "unknown invariant disposition on row {}: {}",
+            line_index + 1,
+            row.disposition
+        );
+        assert_eq!(row.required_scope, "TRANSITION_SYSTEM");
+        match row.disposition {
+            "REFUTED_CURRENT" | "OPEN_EVIDENCE" => {
+                assert!(!row.counterexamples.is_empty());
+            }
+            "SUPPORTED" => {
+                assert!(row.counterexamples.is_empty());
+                assert_ne!(row.assumption_profile, "-");
+            }
+            "PROVEN" => {
+                assert!(row.counterexamples.is_empty());
+                assert_eq!(row.evidence_scope, "TRANSITION_SYSTEM");
+                assert_eq!(row.quantification, "FULL_DOMAIN");
+                assert_eq!(row.assumption_profile, "-");
+            }
+            "N_A" => {
+                assert!(row.counterexamples.is_empty());
+                assert_eq!(row.evidence_scope, "N_A");
+                assert_eq!(row.quantification, "N_A");
+                assert_eq!(row.assumption_profile, "-");
+            }
+            "OPEN_IMPLEMENTATION" => {}
+            _ => unreachable!(),
+        }
+        rows.push(row);
+    }
+
+    assert!(saw_header, "invariant status header is missing");
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        (1..=89).collect::<Vec<_>>(),
+        "invariant status must cover INV-001 through INV-089 exactly once and in order"
+    );
+    rows
 }
 
 fn stated_audit_count(summary: &str, verdict: &str) -> usize {
@@ -1731,13 +1833,203 @@ fn v16_invariant_audit_summary_matches_every_verdict_row() {
         summary.starts_with("The current ledger is "),
         "the invariant audit must publish its current verdict totals"
     );
-    for verdict in ["CLOSED", "OPEN-T", "OPEN-D", "PARTIAL", "FRONTIER", "N/A"] {
+    for verdict in ["CONDITIONAL", "REOPENED", "N/A"] {
         assert_eq!(
             stated_audit_count(&summary, verdict),
             counts.get(verdict).copied().unwrap_or(0),
             "stale invariant audit summary for {verdict}"
         );
     }
+}
+
+#[test]
+fn v16_machine_invariant_status_is_authoritative_and_nonoverclaiming() {
+    let statuses = parse_invariant_status(include_str!("../invariant_status.tsv"));
+    let markdown_verdicts = include_str!("../README.md")
+        .lines()
+        .filter(|line| line.starts_with("| AUDIT-"))
+        .map(|line| {
+            let fields = line.split('|').map(str::trim).collect::<Vec<_>>();
+            let id = fields[1]
+                .strip_prefix("AUDIT-")
+                .expect("audit prefix")
+                .parse::<u16>()
+                .expect("numeric audit id");
+            (id, fields[2])
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let mut affected_prs =
+        std::collections::BTreeMap::<u16, std::collections::BTreeSet<u16>>::new();
+    let mut primary_invariants = std::collections::BTreeSet::new();
+    for line in include_str!("../coverage_reopenings.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .skip(1)
+    {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        let pr = fields[0].parse::<u16>().expect("numeric reopening PR");
+        let primary = fields[3]
+            .strip_prefix("INV-")
+            .expect("primary invariant prefix")
+            .parse::<u16>()
+            .expect("numeric primary invariant");
+        primary_invariants.insert(primary);
+        for affected in fields[4].split(',') {
+            let id = affected
+                .strip_prefix("INV-")
+                .expect("affected invariant prefix")
+                .parse::<u16>()
+                .expect("numeric affected invariant");
+            affected_prs.entry(id).or_default().insert(pr);
+        }
+    }
+
+    for row in &statuses {
+        let expected_counterexamples = affected_prs.get(&row.id).cloned().unwrap_or_default();
+        assert_eq!(
+            row.counterexamples, expected_counterexamples,
+            "stale counterexample projection for INV-{:03}",
+            row.id
+        );
+        let expected_disposition = if primary_invariants.contains(&row.id) {
+            "REFUTED_CURRENT"
+        } else if !expected_counterexamples.is_empty() {
+            "OPEN_EVIDENCE"
+        } else if matches!(row.id, 42 | 43) {
+            "N_A"
+        } else {
+            "SUPPORTED"
+        };
+        assert_eq!(
+            row.disposition, expected_disposition,
+            "stale disposition for INV-{:03}",
+            row.id
+        );
+        let expected_markdown = match row.disposition {
+            "REFUTED_CURRENT" | "OPEN_IMPLEMENTATION" | "OPEN_EVIDENCE" => "REOPENED",
+            "SUPPORTED" => "CONDITIONAL",
+            "PROVEN" => "PROVEN",
+            "N_A" => "N/A",
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            markdown_verdicts.get(&row.id).copied(),
+            Some(expected_markdown),
+            "README is not a projection of invariant_status.tsv for INV-{:03}",
+            row.id
+        );
+    }
+    assert!(
+        statuses.iter().all(|row| row.disposition != "PROVEN"),
+        "current bounded evidence cannot support a whole-system PROVEN disposition"
+    );
+}
+
+#[test]
+fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
+    const HEADER: &str = "pr\tkind\tseverity\tprimary_invariant\taffected_invariants\tomitted_dimension\trequired_generic_property\tstatus";
+
+    let audit_verdicts = include_str!("../README.md")
+        .lines()
+        .filter(|line| line.starts_with("| AUDIT-"))
+        .map(|line| {
+            let fields = line.split('|').map(str::trim).collect::<Vec<_>>();
+            let id = fields[1]
+                .strip_prefix("AUDIT-")
+                .expect("audit prefix")
+                .parse::<u16>()
+                .expect("numeric audit id");
+            (id, fields[2])
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let missing_findings = include_str!("../open_findings.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            (fields.get(4) == Some(&"missing")).then(|| {
+                fields[0]
+                    .parse::<u16>()
+                    .expect("numeric missing finding PR")
+            })
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut saw_header = false;
+    let mut prior_pr = 0u16;
+    let mut reopening_prs = std::collections::BTreeSet::new();
+    let mut affected = std::collections::BTreeSet::new();
+    let mut properties = std::collections::BTreeSet::new();
+    for line in include_str!("../coverage_reopenings.tsv").lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if !saw_header {
+            assert_eq!(line, HEADER, "coverage-reopening header changed");
+            saw_header = true;
+            continue;
+        }
+
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 8, "malformed reopening row: {line}");
+        let pr = fields[0].parse::<u16>().expect("numeric reopening PR");
+        assert!(pr > prior_pr, "reopening PRs must be unique and sorted");
+        prior_pr = pr;
+        assert!(matches!(fields[1], "LoF" | "DoS"));
+        assert!(matches!(
+            fields[2],
+            "BLOCKER" | "REAL" | "HARDENING" | "PRIVILEGED"
+        ));
+        assert_eq!(fields[7], "OPEN", "only unresolved gaps belong here");
+        assert!(
+            fields[5].split("+x-").count() >= 3,
+            "omitted dimension must name a cross-product, not one example: {line}"
+        );
+        assert!(
+            properties.insert(fields[6]),
+            "generic properties must be unique: {}",
+            fields[6]
+        );
+
+        let primary = fields[3]
+            .strip_prefix("INV-")
+            .expect("primary invariant prefix")
+            .parse::<u16>()
+            .expect("numeric primary invariant");
+        let row_affected = fields[4]
+            .split(',')
+            .map(|value| {
+                value
+                    .strip_prefix("INV-")
+                    .expect("affected invariant prefix")
+                    .parse::<u16>()
+                    .expect("numeric affected invariant")
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(row_affected.contains(&primary));
+        assert!(row_affected.iter().all(|id| (1..=89).contains(id)));
+        affected.extend(row_affected);
+        reopening_prs.insert(pr);
+    }
+    assert!(saw_header, "coverage-reopening header is missing");
+    assert_eq!(reopening_prs, missing_findings);
+
+    let reopened = audit_verdicts
+        .iter()
+        .filter_map(|(id, verdict)| (*verdict == "REOPENED").then_some(*id))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        reopened, affected,
+        "every and only counterexample-affected invariant must remain REOPENED"
+    );
+    assert!(
+        audit_verdicts
+            .values()
+            .all(|verdict| !matches!(*verdict, "CLOSED" | "PROVEN")),
+        "harness-relative evidence cannot be promoted to a whole-system proof label"
+    );
 }
 
 #[test]

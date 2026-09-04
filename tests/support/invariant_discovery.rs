@@ -213,6 +213,7 @@ pub enum RetryIntentKind {
     ConvertReleasedPnl,
     RebalanceReduce,
     InsuranceTopUp,
+    InsuranceWithdrawal,
     BackingTopUp,
     AssetActivation,
 }
@@ -253,6 +254,7 @@ pub enum FeeConsentKind {
     FreshSignedLiveBaseFee,
     RetainedNoCpiBaseFee,
     RetainedBatchNoCpiBaseFee,
+    RetainedCpiTakerBaseFee,
     CpiBaseFee,
     BatchCpiBaseFee,
     CpiCallerFee,
@@ -658,10 +660,11 @@ impl SourceFeeConsentRole {
 }
 
 impl FeeConsentKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::FreshSignedLiveBaseFee,
         Self::RetainedNoCpiBaseFee,
         Self::RetainedBatchNoCpiBaseFee,
+        Self::RetainedCpiTakerBaseFee,
         Self::CpiBaseFee,
         Self::BatchCpiBaseFee,
         Self::CpiCallerFee,
@@ -674,11 +677,12 @@ impl FeeConsentKind {
             Self::FreshSignedLiveBaseFee => 0,
             Self::RetainedNoCpiBaseFee => 1,
             Self::RetainedBatchNoCpiBaseFee => 2,
-            Self::CpiBaseFee => 3,
-            Self::BatchCpiBaseFee => 4,
-            Self::CpiCallerFee => 5,
-            Self::BatchCpiCallerFee => 6,
-            Self::PermissionlessActivationFee => 7,
+            Self::RetainedCpiTakerBaseFee => 3,
+            Self::CpiBaseFee => 4,
+            Self::BatchCpiBaseFee => 5,
+            Self::CpiCallerFee => 6,
+            Self::BatchCpiCallerFee => 7,
+            Self::PermissionlessActivationFee => 8,
         }
     }
 }
@@ -769,7 +773,7 @@ impl SupersessionPayloadOrder {
 }
 
 impl RetryIntentKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Deposit,
         Self::Withdraw,
         Self::TradeNoCpi,
@@ -779,6 +783,7 @@ impl RetryIntentKind {
         Self::ConvertReleasedPnl,
         Self::RebalanceReduce,
         Self::InsuranceTopUp,
+        Self::InsuranceWithdrawal,
         Self::BackingTopUp,
         Self::AssetActivation,
     ];
@@ -794,8 +799,9 @@ impl RetryIntentKind {
             Self::ConvertReleasedPnl => 6,
             Self::RebalanceReduce => 7,
             Self::InsuranceTopUp => 8,
-            Self::BackingTopUp => 9,
-            Self::AssetActivation => 10,
+            Self::InsuranceWithdrawal => 9,
+            Self::BackingTopUp => 10,
+            Self::AssetActivation => 11,
         }
     }
 }
@@ -8124,6 +8130,9 @@ fn retained_retry_pair(env: &mut V16Svm, kind: RetryIntentKind) -> (Transaction,
         RetryIntentKind::InsuranceTopUp => {
             env.build_retained_insurance_domain_top_up_for_actor(AUTHORITY, 0, AMOUNT)
         }
+        RetryIntentKind::InsuranceWithdrawal => {
+            env.build_retained_insurance_withdrawal_for_actor(AUTHORITY, ASSET, AMOUNT)
+        }
         RetryIntentKind::BackingTopUp => {
             env.build_retained_backing_bucket_top_up_for_actor(AUTHORITY, 1, AMOUNT, 100)
         }
@@ -8167,6 +8176,19 @@ fn prepare_intent_retry_environment(
             )
             .map_err(|error| format!("install insurance authority: {error}"))?;
         }
+        RetryIntentKind::InsuranceWithdrawal => {
+            for authority_kind in [
+                percolator_prog::processor::ASSET_AUTH_INSURANCE,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            ] {
+                env.update_asset_authority_from_admin(0, authority_kind, AUTHORITY)
+                    .map_err(|error| {
+                        format!("install insurance withdrawal role {authority_kind}: {error}")
+                    })?;
+            }
+            env.top_up_insurance_domain_for_actor(AUTHORITY, 0, 1_000)
+                .map_err(|error| format!("fund retained insurance withdrawal: {error}"))?;
+        }
         RetryIntentKind::BackingTopUp => {
             env.update_asset_authority_from_admin(
                 0,
@@ -8203,6 +8225,10 @@ pub fn discover_intent_retry(
     match kind {
         RetryIntentKind::ConvertReleasedPnl => {
             create_released_pnl(&mut env, 0, 1, 1_000_000, 1_000_000, 3, INITIAL_PRICE + 5)?;
+        }
+        RetryIntentKind::InsuranceWithdrawal => {
+            env.top_up_insurance_domain_for_actor(2, 0, 1_000)
+                .map_err(|error| format!("replenish insurance after first withdrawal: {error}"))?;
         }
         RetryIntentKind::AssetActivation => {
             env.warp_to_slot(4);
@@ -10615,7 +10641,8 @@ fn fee_consent_victim_actors(kind: FeeConsentKind) -> &'static [usize] {
     match kind {
         FeeConsentKind::FreshSignedLiveBaseFee
         | FeeConsentKind::RetainedNoCpiBaseFee
-        | FeeConsentKind::RetainedBatchNoCpiBaseFee => &BOTH_TRADERS,
+        | FeeConsentKind::RetainedBatchNoCpiBaseFee
+        | FeeConsentKind::RetainedCpiTakerBaseFee => &BOTH_TRADERS,
         FeeConsentKind::CpiBaseFee
         | FeeConsentKind::BatchCpiBaseFee
         | FeeConsentKind::CpiCallerFee
@@ -10831,12 +10858,19 @@ fn discover_trade_fee_consent_violation(
         );
     }
 
+    if kind == FeeConsentKind::RetainedCpiTakerBaseFee {
+        env.set_matcher_config_with_trade_fee_cap(LP, 1, BASE_FEE_BPS as u16)
+            .map_err(|error| format!("bind permissive LP fee cap before taker consent: {error}"))?;
+    }
     let retained = match kind {
         FeeConsentKind::RetainedNoCpiBaseFee => {
             Some(env.build_retained_no_cpi_trade(TAKER, LP, 0, size_q, INITIAL_PRICE))
         }
         FeeConsentKind::RetainedBatchNoCpiBaseFee => {
             Some(env.build_retained_batch_no_cpi_trade(TAKER, LP, 0, size_q, INITIAL_PRICE))
+        }
+        FeeConsentKind::RetainedCpiTakerBaseFee => {
+            Some(env.build_retained_cpi_trade(TAKER, LP, 0, size_q, 0))
         }
         _ => None,
     };
@@ -10851,6 +10885,7 @@ fn discover_trade_fee_consent_violation(
         kind,
         FeeConsentKind::RetainedNoCpiBaseFee
             | FeeConsentKind::RetainedBatchNoCpiBaseFee
+            | FeeConsentKind::RetainedCpiTakerBaseFee
             | FeeConsentKind::CpiBaseFee
             | FeeConsentKind::BatchCpiBaseFee
     ) {
@@ -10873,8 +10908,10 @@ fn discover_trade_fee_consent_violation(
     let trade_market_id = env.primary_market_state().1.assets[0].market_id;
     let before = fingerprint(&env);
     let execution = match kind {
-        FeeConsentKind::RetainedNoCpiBaseFee | FeeConsentKind::RetainedBatchNoCpiBaseFee => env
-            .land_retained(retained.expect("retained bilateral trade"))
+        FeeConsentKind::RetainedNoCpiBaseFee
+        | FeeConsentKind::RetainedBatchNoCpiBaseFee
+        | FeeConsentKind::RetainedCpiTakerBaseFee => env
+            .land_retained(retained.expect("retained trade"))
             .map(|success| success.compute_units),
         FeeConsentKind::CpiBaseFee => env
             .trade_cpi(TAKER, LP, 0, size_q, 0, 0)

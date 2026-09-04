@@ -8,5 +8,6 @@ BatchTradeCpi	TERMINAL_LOF	TradeIntentReplayTerminalDiscovery	an accepted duplic
 ConvertReleasedPnl	CLAIM_CONVERSION_ONLY	-	retry converts a newly earned exact claim owned by the same signer and does not create claim face
 RebalanceReduce	RISK_REDUCING_ONLY	-	retry can violate consent but only reduces the same owner's exposure and has no immediate unauthorized value transfer
 InsuranceTopUp	RECOVERABLE_INSURANCE	-	an accepted duplicate locks additional signer principal in insurance, but the same insurance authority retains a terminal withdrawal route
+InsuranceWithdrawal	REPLAY_ONLY	-	the generic matrix proves a retained request can consume replenished stock; independent terminal victim attribution remains a separate severity obligation
 BackingTopUp	RECOVERABLE_PRINCIPAL	-	retry deposits provider principal that the same backing authority can withdraw through the public route
 AssetActivation	TERMINAL_LOF	DebitedIntentReplayDiscovery	an accepted duplicate charges a nonrecoverable activation fee from stale consent
