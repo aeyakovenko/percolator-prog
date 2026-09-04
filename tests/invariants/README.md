@@ -99,6 +99,10 @@ capabilities across every automatic revocation/incarnation writer, canonical ari
 across arbitrary route interleavings, and authenticated-observation completeness before favorable
 account actions.
 
+The detailed tranche notes below are historical evidence records. Their original use of words such
+as "closed" or "closure" is superseded by `invariant_status.tsv` and the audit ledger; it means only
+that the named bounded tranche had no known counterexample at that checkpoint.
+
 The current engine pin is
 `495a5590c97055bd71c6f94d849ff0298f243145` on engine branch
 `codex/rebalance-max-shape-cu-20260901` ([engine PR195](https://github.com/aeyakovenko/percolator/pull/195)).
@@ -159,15 +163,13 @@ not directly credit the close residual, so the former `pending_obligation_credit
 definitionally zero for v16.9.1. A future nonzero credit requires an explicit disjoint engine
 ledger representation and reopens this row.
 
-The invariant suite was frozen at wrapper commit `17732981` before the final holdout evaluation on
-2026-09-02. The live GitHub LoF/DoS-labelled PR roster, excluding this coverage PR itself, exactly
-matched all 143 local holdout rows from PR190 through PR393: 126 findings map to executable,
-invariant-owned generic discovery fingerprints, 17 have machine-checked nonqualifying public-route
-classifications, and none depend on a direct-only regression or remain unmapped. The holdout gate
-passes against that exact roster. This establishes finding-agnostic structural coverage for the
-current corpus; repository history cannot prove that every test author lacked prior knowledge of
-every finding, so this is not represented as an experimentally blind-discovery result. A new open
-finding, public route, engine pin, or changed qualification rule reopens the holdout evaluation.
+The invariant suite was frozen at wrapper commit `17732981` before the dated holdout evaluation on
+2026-09-02. At that checkpoint, the 143-row PR190-through-PR393 snapshot had 126 rows mapped to
+generic discovery fingerprints and 17 classified as nonqualifying. That was evidence about a
+finite historical corpus, not proof of current completeness. PRs 410 through 426 arrived outside
+the frozen snapshot and demonstrate that its generated cross-products were incomplete. The live
+status is the reopening ledger above; an offline snapshot cannot certify that GitHub has no newer
+finding.
 
 INV-051 now closes the current canonical-effective-quantity surface. The existing four-world
 maximum-shape product was strengthened to derive the selected leg's effective quantity before and
@@ -3882,13 +3884,17 @@ charter.
 
 ## Exhaustiveness audit
 
-Audit last reconciled: 2026-09-02. Every invariant is now closed for the currently exposed
-production surface, or rigorously N/A, using the strongest computationally feasible proof/test
-composition recorded below. This is not literal exhaustive enumeration of the unbounded Solana
-state space and is not an unconditional claim that the program is LoF/DoS-free. The audit read the
-normative `Required tests` clause and the bodies of every owned and cross-referenced test/proof for
-each invariant. Passing tests, file presence, a vulnerable-pin counterexample, and a
-finding-specific regression do not by themselves close an invariant.
+Audit last reconciled: 2026-09-04. No invariant is currently certified as a full-domain theorem of
+the deployed transition system. The rows below summarize the strongest current evidence and its
+known gaps; they are not closure certificates. The audit reads the normative `Required tests`
+clause and the bodies of owned and cross-referenced tests/proofs. Passing tests, file presence, a
+vulnerable-pin counterexample, and a finding-specific regression do not by themselves prove an
+invariant.
+
+`invariant_status.tsv` is the authoritative aggregate status. It separates disposition, required
+scope, achieved evidence scope, quantification, assumptions, and current counterexamples. The
+Markdown verdict table is a machine-checked projection for readers, not an independent source of
+truth.
 
 Verdicts used below are deliberately narrower than proof-harness result labels:
 
@@ -3899,7 +3905,7 @@ Verdicts used below are deliberately narrower than proof-harness result labels:
 - **N/A** - the feature is not exposed by this wrapper. It must remain absent or become
   `REOPENED` when the API is introduced.
 
-The current ledger is 28 **CONDITIONAL**, 59 **REOPENED**, and 2 **N/A**. It contains zero
+The current ledger is 29 **CONDITIONAL**, 58 **REOPENED**, and 2 **N/A**. It contains zero
 whole-system **PROVEN** rows. This does not downgrade the validity of exhaustive leaf proofs inside
 their declared harness domains; it prevents those results from being generalized to unmodeled
 public histories.
@@ -4066,7 +4072,7 @@ omit an invariant. Verdicts mean:
 | AUDIT-077 | REOPENED | The production-derived registry maps all 49 instruction tags to named public-route measured-CU evidence with zero omissions. The account boundary is exact: 5,782 slots fit below 10 MiB and 5,783 exceed it by nine bytes. Public maximum products cover fourteen active legs, twenty-eight source records and simultaneous liens, 42 authenticated feed references, two accrual chunks, B settlement, liquidation, owner reduction, Recovery K/F progress, conversion, resolved close, insurance/backing tails, and chunked terminal slab discovery. The final reachability gap is closed without byte injection: two already-funded 14-leg/28-source portfolios survive 5,768 successful public asset appends to the exact 5,782-slot boundary; each append costs at most 7,182 CU, 30 strict automatic calls refresh both accounts at no more than 825,611 CU, unilateral reduction lands at 1,178,936 CU, and every ResetPending and owner-exit continuation remains bounded. Unsupported portfolio cardinality and source growth reject atomically before required work, while the full all-28 lien route releases one domain per call. A new route, supported bound, unbounded collection, engine pin, or multiplicative work composition reopens this current-surface closure. |
 | AUDIT-078 | REOPENED | The current permissionless terminal-failure lattice is complete by proof/public-route composition. Public products cover unavailable or stale oracle input, absent/expired backing, absent/exhausted insurance, B saturation, impaired liens, domain-local locks, close expiry, payout conflict, ResetPending, Recovery, and retirement/restart; every seed retains a bounded value-moving senior-preserving exit with exact stock, encumbrance, OI, and SPL reconciliation. The shared liveness gate binds those routes to selector totality, residual partition, declared-Recovery, rank-decrease, and terminal scanner proofs and the supported maximum account/source/oracle shapes. A new failure class, terminal mode, pin, or shape reopens closure. |
 | AUDIT-079 | CONDITIONAL | The LiteSVM trace schema records actual transaction signers, compiled account metas, exact authority-attributed tracked token/lamport deltas, rejected writable-account rollback with the fee-payer network charge separated from program effects, between-transaction economic mutation, and exact mint-supply deltas for terminal burns. The shared validator requires an allowlisted public construction sequence containing a real wrapper call and rejects malformed success, rollback, signer, account, payload, program, CU, token-owner, vault-participation, and quote-balance evidence. A recursive scan source-locks all 59 current trace consumers to validate or classify immediately, and both route and special-method registries now require actual `#[test]` functions. The normalized terminal classifier agrees with an independent decision model in all 663,552 representative cells spanning successful/rejected public traces, zero/one/full-width economic amounts, every terminal flag combination, and all required/attempted/progressing masks over three independent exit routes. Twenty-two of 32 finding-blind violation oracles carry classifier-bound exact LoF evidence; all 32 oracles, all 11 retained-retry kinds, all 15 same-incarnation supersession kinds, all 126 qualifying benchmark rows, and all seventeen nonqualifying rows have source-complete executable dispositions. The dated benchmark is evidence for the current finite surface, not a completeness claim against unknown findings; a new trace consumer, route, evidence class, retry/control kind, or benchmark row reopens this row. |
-| AUDIT-080 | REOPENED | The wrapper-specific obligation is complete propagation, while exact transaction rollback is a named SVM semantic assumption. Assumption-free Kani checks all twelve engine error variants. Source-complete guards own every explicit engine disposition, all 133 ordinary mapping sites, all 49 variant-to-handler returns over 43 canonical implementations, every shared handler family, both entrypoint adapters, and the sole authenticated hybrid parser-error fallback. The canonical Recovery-pair result is explicitly required to flow through `map_v16_error` rather than a safe-success branch. The only engine safe-success dispositions are optional deregistration that keeps the live user account and `NonProgress` after independently observed market progress, each with a public witness. Thirty exact-SBF tests sample late failures across engine mutation, realloc, oracle, matcher CPI, SPL CPI, resolved payout, insurance, and backing paths with exact persistent frames and live retries. Two multi-instruction transactions additionally prove a nonzero engine result prevents later SPL-deposit and matcher-return consumers from executing. A new disposition, handler, adapter, or swallowed engine result reopens this row. |
+| AUDIT-080 | CONDITIONAL | The wrapper-specific obligation is complete propagation, while exact transaction rollback is a named SVM semantic assumption. Assumption-free Kani checks all twelve engine error variants. Source-complete guards own every explicit engine disposition, all 133 ordinary mapping sites, all 49 variant-to-handler returns over 43 canonical implementations, every shared handler family, both entrypoint adapters, and the sole authenticated hybrid parser-error fallback. The canonical Recovery-pair result is explicitly required to flow through `map_v16_error` rather than a safe-success branch. The only engine safe-success dispositions are optional deregistration that keeps the live user account and `NonProgress` after independently observed market progress, each with a public witness. Thirty exact-SBF tests sample late failures across engine mutation, realloc, oracle, matcher CPI, SPL CPI, resolved payout, insurance, and backing paths with exact persistent frames and live retries. Two multi-instruction transactions additionally prove a nonzero engine result prevents later SPL-deposit and matcher-return consumers from executing. A new disposition, handler, adapter, or swallowed engine result reopens this row. |
 | AUDIT-081 | REOPENED | The shared public model directly applies independent success/rollback, value, OI, episode, lifecycle, certificate, terminal, and funded-exit oracles to 25 decoder variants and all generated action/frontier schedules. The remaining 24 variants are not inferred from examples: a fail-closed gate composes twenty-two independently executable source owners over the exact 49-route registry. Those layers own canonical decoding and transaction domain, all identity/authority/account/PDA/caller-field checks, state admission, every wrapper-to-engine call and wrapper persisted field, position/OI plus typed matched-book obligations and scope induction, all external-token/internal-quote routes, adversarial-role containment, the independent transition model, and every error boundary. Five mounted Kani theorems supply arbitrary value-flow, owner-episode entitlement, exact-stock, certificate-commit, and engine-error composition. The gate rejects a route omission and pins engine `495a5590`. This is current-surface proof-equivalence under each owner's named assumptions, not one arbitrary-byte monolithic query; a route, role, state/effect class, callsite, field, theorem, witness, or pin change reopens it. |
 | AUDIT-082 | REOPENED | The public graph independently reconstructs and decreases close, B, K/F, obligation, reset, source-lien, health, Recovery, and resolved ranks across every seeded ordering and documented overlap. Three assumption-free Kani proofs remove the finite-depth limitation: the first executes the actual pinned selector over arbitrary full-width magnitudes and proves every non-fixed-point result strictly lowers the seven-class lexicographic rank under the exact named continuation postcondition; the second exhausts all `2^8` actionable summaries and proves class-priority convergence to `NoAction`; the third proves the separate terminal-administration rank strictly decreases while classifying every post-economic phase as signer-dependent. The source-complete INV-071 and INV-073 gates connect those theorems to all plan shapes, cleanup phases and authorities, engine contracts, wrapper dispatch witnesses, and supported maximum shapes. Closure is conditional on classifier/postcondition fidelity for validated state, authenticated inputs, configured terminal policy, fair submission, named authority participation, SVM rollback, and the named arithmetic boundary. A new actionable flag, rank class, cleanup authority, plan/dispatch path, pin, or supported shape reopens it. |
 | AUDIT-083 | CONDITIONAL | The class roster requires executable invariant owners for zero, one, max-1, max, expiry-1/equal/+1, cross-zero, empty/full, and near-overflow. A second source-locked census maps all 234 fields across all 52 public input types into exactly 20 semantic boundary profiles, validates each field's specific executable owner, validates each profile's boundary witness, and pins exact profile counts so API drift fails closed. The public `InitMarket` matrix now exercises all 25 invalid scalar partitions with exact pristine-account rollback and proves every rejected account remains usable by a valid retry. Mounted INV-022 Kani proves full-width wire preservation; economic owners cover admitted/excluded public behavior; INV-085 separately owns deployed wide-arithmetic equivalence. A new field/type, profile count, scalar validation predicate, or supported shape reopens the row. |
