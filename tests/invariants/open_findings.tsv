@@ -1,5 +1,5 @@
 # Open public-route security finding benchmark
-# Snapshot: 2026-08-03 UTC; source: GitHub open PR titles
+# Snapshot extended: 2026-09-04 UTC; source: GitHub open PR titles
 # Evidence is PR135 evidence, not the PR author claim or fix status.
 # pr	kind	severity	primary_invariant	evidence	title
 190	DoS	BLOCKER	INV-071	independent-discovery	[BLOCKER DoS] Commit recovery-required auto-crank progress
@@ -145,3 +145,20 @@
 380	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Preserve funding across prospective EWMA updates
 381	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Round composite oracle prices once
 393	LoF	REAL	INV-010	independent-discovery	[REAL LoF] Order matcher config mutations
+410	LoF	PRIVILEGED	INV-024	missing	[PRIVILEGED LoF] Escheat abandoned shutdown reserves
+411	LoF	PRIVILEGED	INV-014	missing	[PRIVILEGED LoF] Bind retained single-CPI taker fee consent
+412	LoF	BLOCKER	INV-012	missing	[BLOCKER LoF] Bind matcher grants to position episodes
+413	LoF	BLOCKER	INV-027	missing	[BLOCKER LoF] Crystallize flat fees before first open
+414	LoF	PRIVILEGED	INV-012	missing	[PRIVILEGED LoF] Bind matcher grants to asset generations
+415	LoF	BLOCKER	INV-008	missing	[BLOCKER LoF] Bind retained insurance withdrawals to stock sequence
+416	LoF	PRIVILEGED	INV-005	missing	[PRIVILEGED LoF] Prevent cold-admin takeover of funded oracle
+417	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Preserve resolved receipts across late backing expiry
+418	DoS	BLOCKER	INV-070	missing	[BLOCKER DoS] Retire native wSOL terminal insurance
+419	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Retain pending loss weight through resolution
+420	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Make terminal provider claims permissionlessly payable
+421	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Make terminal insurance payout permissionless
+422	LoF	BLOCKER	INV-045	missing	[BLOCKER LoF] Preserve Hybrid liquidation reward provenance
+423	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Prevent latent source-domain exhaustion
+424	LoF	PRIVILEGED	INV-070	missing	[PRIVILEGED LoF] Restart terminal scan after backing expiry
+425	LoF	BLOCKER	INV-045	missing	[BLOCKER LoF] Preserve oracle cap carry across interleaved trades
+426	LoF	BLOCKER	INV-020	missing	[BLOCKER LoF] Require current Hybrid evidence before health refresh
