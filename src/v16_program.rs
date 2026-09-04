@@ -10820,7 +10820,6 @@ pub mod processor {
         let vault_authority_ai = account(accounts, 4)?;
         let token_program = account(accounts, 5)?;
         let ledger_ai = accounts.get(6);
-        expect_signer(operator)?;
         expect_writable(market_ai)?;
         expect_writable(dest_token)?;
         expect_writable(vault_token)?;
@@ -10847,6 +10846,12 @@ pub mod processor {
             }
             if mode != MarketModeV16::Live && mode != MarketModeV16::Resolved {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+            // Live insurance remains an operator-authorized withdrawal. Once every portfolio and
+            // capital claim is gone, the configured terminal authority is only a payout identity:
+            // anyone may deliver its exact remaining budget to a token account it owns.
+            if mode == MarketModeV16::Live {
+                expect_signer(operator)?;
             }
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;

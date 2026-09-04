@@ -5891,10 +5891,32 @@ fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market()
     );
 
     env.resolve();
-    let (dest, withdraw_cu) =
-        env.withdraw_terminal_insurance_with_authority(&admin, HIGH_ASSET as u16, FUNDED);
+    let dest = env.token_account(admin.pubkey(), 0);
+    let market_id = env.asset_market_id(HIGH_ASSET as u16);
+    let authority_epoch = env.withdrawal_authority_epoch(admin.pubkey(), HIGH_ASSET, true);
+    let withdraw_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: HIGH_ASSET as u16,
+            market_id,
+            authority_epoch,
+            amount: FUNDED,
+        },
+        vec![
+            AccountMeta::new_readonly(admin.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    )
+    .expect("permissionless terminal insurance payout at maximum market shape");
     println!(
-        "v16 10MiB resolved WithdrawInsuranceAsset: domains={}, funded_domain={}, CU={withdraw_cu}",
+        "v16 10MiB permissionless resolved WithdrawInsuranceAsset: domains={}, funded_domain={}, CU={withdraw_cu}",
         2 * N,
         last_domain
     );

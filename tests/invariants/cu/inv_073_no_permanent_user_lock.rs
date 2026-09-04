@@ -5001,9 +5001,9 @@ fn v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
 enum Inv073TerminalAuthority {
     PermissionlessEconomic,
     PermissionlessMechanical,
+    PermissionlessBoundAuthorityPayout,
     OwnerOrResolvedMarketAuthority,
     BackingAuthorityOrShutdownMarketAuthority,
-    InsuranceAuthorityOrShutdownMarketAuthority,
     MarketAuthority,
 }
 
@@ -5117,10 +5117,10 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
             rank_lane: "insurance-cleanup",
             handler: "fn handle_withdraw_insurance_asset<'a>(",
             transition: "debit_market_insurance_budget_view(",
-            authority: Inv073TerminalAuthority::InsuranceAuthorityOrShutdownMarketAuthority,
+            authority: Inv073TerminalAuthority::PermissionlessBoundAuthorityPayout,
             witness_path:
-                "tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs",
-            witness: "v16_program_prior_insurance_frames_all_partial_receipt_orders",
+                "tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs",
+            witness: "v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_close",
         },
         Inv073TerminalPhase {
             rank_lane: "asset-cleanup",
@@ -5258,6 +5258,15 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
     assert!(lifecycle.contains("expect_signer(authority)?;"));
     assert!(lifecycle.contains("if !live_authority_matches(&cfg_pre.marketauth, authority.key)"));
     assert!(lifecycle.contains("ASSET_ACTION_RETIRE =>"));
+
+    let insurance = inv073_braced_body_after(production, "fn handle_withdraw_insurance_asset<'a>(");
+    assert_eq!(insurance.matches("expect_signer(operator)?;").count(), 1);
+    assert!(insurance.contains("if mode == MarketModeV16::Live"));
+    assert!(insurance.contains("group.header.materialized_portfolio_count.get() != 0"));
+    assert!(insurance.contains("group.header.c_tot.get() != 0"));
+    assert!(insurance
+        .contains("live_authority_matches(&authorities.insurance_authority, operator.key)"));
+    assert!(insurance.contains("dest_token,\n                operator.key,"));
 
     let close_slab = inv073_braced_body_after(production, "fn handle_close_slab<'a>(");
     for guard in [
