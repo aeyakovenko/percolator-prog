@@ -253,6 +253,7 @@ pub enum FeeConsentKind {
     FreshSignedLiveBaseFee,
     RetainedNoCpiBaseFee,
     RetainedBatchNoCpiBaseFee,
+    RetainedCpiTakerBaseFee,
     CpiBaseFee,
     BatchCpiBaseFee,
     CpiCallerFee,
@@ -658,10 +659,11 @@ impl SourceFeeConsentRole {
 }
 
 impl FeeConsentKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::FreshSignedLiveBaseFee,
         Self::RetainedNoCpiBaseFee,
         Self::RetainedBatchNoCpiBaseFee,
+        Self::RetainedCpiTakerBaseFee,
         Self::CpiBaseFee,
         Self::BatchCpiBaseFee,
         Self::CpiCallerFee,
@@ -674,11 +676,12 @@ impl FeeConsentKind {
             Self::FreshSignedLiveBaseFee => 0,
             Self::RetainedNoCpiBaseFee => 1,
             Self::RetainedBatchNoCpiBaseFee => 2,
-            Self::CpiBaseFee => 3,
-            Self::BatchCpiBaseFee => 4,
-            Self::CpiCallerFee => 5,
-            Self::BatchCpiCallerFee => 6,
-            Self::PermissionlessActivationFee => 7,
+            Self::RetainedCpiTakerBaseFee => 3,
+            Self::CpiBaseFee => 4,
+            Self::BatchCpiBaseFee => 5,
+            Self::CpiCallerFee => 6,
+            Self::BatchCpiCallerFee => 7,
+            Self::PermissionlessActivationFee => 8,
         }
     }
 }
@@ -10615,7 +10618,8 @@ fn fee_consent_victim_actors(kind: FeeConsentKind) -> &'static [usize] {
     match kind {
         FeeConsentKind::FreshSignedLiveBaseFee
         | FeeConsentKind::RetainedNoCpiBaseFee
-        | FeeConsentKind::RetainedBatchNoCpiBaseFee => &BOTH_TRADERS,
+        | FeeConsentKind::RetainedBatchNoCpiBaseFee
+        | FeeConsentKind::RetainedCpiTakerBaseFee => &BOTH_TRADERS,
         FeeConsentKind::CpiBaseFee
         | FeeConsentKind::BatchCpiBaseFee
         | FeeConsentKind::CpiCallerFee
@@ -10831,12 +10835,19 @@ fn discover_trade_fee_consent_violation(
         );
     }
 
+    if kind == FeeConsentKind::RetainedCpiTakerBaseFee {
+        env.set_matcher_config_with_trade_fee_cap(LP, 1, BASE_FEE_BPS as u16)
+            .map_err(|error| format!("bind permissive LP fee cap before taker consent: {error}"))?;
+    }
     let retained = match kind {
         FeeConsentKind::RetainedNoCpiBaseFee => {
             Some(env.build_retained_no_cpi_trade(TAKER, LP, 0, size_q, INITIAL_PRICE))
         }
         FeeConsentKind::RetainedBatchNoCpiBaseFee => {
             Some(env.build_retained_batch_no_cpi_trade(TAKER, LP, 0, size_q, INITIAL_PRICE))
+        }
+        FeeConsentKind::RetainedCpiTakerBaseFee => {
+            Some(env.build_retained_cpi_trade(TAKER, LP, 0, size_q, 0))
         }
         _ => None,
     };
@@ -10851,6 +10862,7 @@ fn discover_trade_fee_consent_violation(
         kind,
         FeeConsentKind::RetainedNoCpiBaseFee
             | FeeConsentKind::RetainedBatchNoCpiBaseFee
+            | FeeConsentKind::RetainedCpiTakerBaseFee
             | FeeConsentKind::CpiBaseFee
             | FeeConsentKind::BatchCpiBaseFee
     ) {
@@ -10873,8 +10885,10 @@ fn discover_trade_fee_consent_violation(
     let trade_market_id = env.primary_market_state().1.assets[0].market_id;
     let before = fingerprint(&env);
     let execution = match kind {
-        FeeConsentKind::RetainedNoCpiBaseFee | FeeConsentKind::RetainedBatchNoCpiBaseFee => env
-            .land_retained(retained.expect("retained bilateral trade"))
+        FeeConsentKind::RetainedNoCpiBaseFee
+        | FeeConsentKind::RetainedBatchNoCpiBaseFee
+        | FeeConsentKind::RetainedCpiTakerBaseFee => env
+            .land_retained(retained.expect("retained trade"))
             .map(|success| success.compute_units),
         FeeConsentKind::CpiBaseFee => env
             .trade_cpi(TAKER, LP, 0, size_q, 0, 0)
