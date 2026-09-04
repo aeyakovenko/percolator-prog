@@ -34,6 +34,7 @@ enum OracleProfileMalformedCase {
     InvalidLegFlags,
     InvalidInvert,
     RemainderOutOfRange,
+    InvalidEffectivePriceProvenance,
     ReservedByteNonzero,
 }
 
@@ -250,6 +251,7 @@ fn v16_program_oracle_remainder_wire_bounds_reject_malformed_profiles_exactly() 
         OracleProfileMalformedCase::InvalidLegFlags,
         OracleProfileMalformedCase::InvalidInvert,
         OracleProfileMalformedCase::RemainderOutOfRange,
+        OracleProfileMalformedCase::InvalidEffectivePriceProvenance,
         OracleProfileMalformedCase::ReservedByteNonzero,
     ] {
         let mut env = V16CuEnv::new();
@@ -285,6 +287,14 @@ fn v16_program_oracle_remainder_wire_bounds_reject_malformed_profiles_exactly() 
                         price_move_remainder_bps_num
                     );
                 malformed_market.data[offset..offset + 2].copy_from_slice(&10_000u16.to_le_bytes());
+            }
+            OracleProfileMalformedCase::InvalidEffectivePriceProvenance => {
+                let offset = profile_offset
+                    + core::mem::offset_of!(
+                        state::AssetOracleProfileV16,
+                        effective_price_provenance
+                    );
+                malformed_market.data[offset] = 2;
             }
             OracleProfileMalformedCase::ReservedByteNonzero => {
                 let offset =

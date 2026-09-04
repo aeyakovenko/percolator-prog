@@ -2,14 +2,16 @@
 //!
 //! Normative obligation: Every mark movement remains elapsed-time bounded and economically paid across every trade route.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr260_pending_ewma_inheritance_rejects_then_trades_on_every_route`, `v16_program_pr282_pending_ewma_target_override_rejects_without_value_drift`, `v16_program_pr264_pr265_pr332_pr333_targets_stage_before_stale_cpi`, `v16_program_pr356_pending_mark_fee_sync_rejects_then_preserves_terminal_value`, `v16_program_pr369_one_sided_cpi_fee_cannot_subsidize_mark_gain`, `v16_program_pr225_mark_movement_fee_is_nonwithdrawable_and_terminally_burned`, `v16_program_pr280_trade_driven_liquidation_penalty_is_not_reclaimable`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr260_pending_ewma_inheritance_rejects_then_trades_on_every_route`, `v16_program_pr282_pending_ewma_target_override_rejects_without_value_drift`, `v16_program_pr264_pr265_pr332_pr333_targets_stage_before_stale_cpi`, `v16_program_pr356_pending_mark_fee_sync_rejects_then_preserves_terminal_value`, `v16_program_pr369_one_sided_cpi_fee_cannot_subsidize_mark_gain`, `v16_program_pr225_mark_movement_fee_is_nonwithdrawable_and_terminally_burned`, `v16_program_pr280_trade_driven_liquidation_penalty_is_not_reclaimable`, `v16_program_fresh_hybrid_oracle_liquidation_reward_remains_enabled`, and `v16_program_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_reward`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: PR260, PR264/265/332/333, PR282, PR356, and PR369 are fixed-pin regressions
 //! covering target staging, stale-admission rollback, post-catch-up liveness, target-aware fees,
 //! authenticated mark/fee ordering, bilateral CPI fee support, nonwithdrawable movement reserves,
-//! and nonreclaimable trade-driven liquidation penalties.
+//! and nonreclaimable trade-driven liquidation penalties. The cross-mode Hybrid regression proves
+//! freshness cannot erase stale-trade provenance before effective-price catch-up, while its fresh
+//! control and terminal catch-up prove ordinary authenticated rewards are preserved.
 
 use super::*;
 
@@ -188,7 +190,110 @@ fn v16_program_pr280_trade_driven_liquidation_penalty_is_not_reclaimable() {
 }
 
 #[test]
-fn probe_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_reward() {
+fn v16_program_fresh_hybrid_oracle_liquidation_reward_remains_enabled() {
+    use crate::support::v16_svm::{MarketConfig, V16Svm};
+    use percolator::POS_SCALE;
+
+    const MARK: u64 = 1_000_000;
+    const FRESH_MARK: u64 = 999_900;
+
+    fn asset_q(env: &V16Svm, actor: usize) -> u128 {
+        env.primary_portfolio(actor)
+            .legs
+            .iter()
+            .filter_map(|leg| leg.try_to_runtime().ok())
+            .find(|leg| leg.active && leg.asset_index == 0)
+            .map(|leg| leg.basis_pos_q.unsigned_abs())
+            .unwrap_or(0)
+    }
+
+    let mut env = V16Svm::new(
+        [0x92; 32],
+        MarketConfig {
+            initial_price: MARK,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            min_liquidation_abs: 500,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [50_000, 2_000_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    env.update_liquidation_fee_policy(10_000).unwrap();
+    env.set_clock(1, 100);
+    let feed = [0xefu8; 32];
+    let pyth = env.set_pyth_price(&feed, MARK as i64, -6, 0, 100);
+    env.configure_hybrid_oracle(0, 1, 100, 0, [feed, [0; 32], [0; 32]], &[pyth], 10, 0)
+        .unwrap();
+    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK, 0)
+        .unwrap();
+
+    let supply_before = env.token_supply_observed();
+    let mint_supply_before = env.mint_supply();
+    let cranker_before = env.primary_portfolio(2).capital.get();
+    env.set_clock(2, 101);
+    env.update_pyth_price(pyth, &feed, FRESH_MARK as i64, -6, 0, 101);
+    let observation = vec![percolator_prog::ix::CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: 1,
+    }];
+    let mut max_cu = 0;
+    for attempt in 0..4 {
+        let result = env
+            .crank_with_reward(
+                2,
+                0,
+                2,
+                if attempt == 0 {
+                    observation.clone()
+                } else {
+                    Vec::new()
+                },
+                if attempt == 0 {
+                    std::slice::from_ref(&pyth)
+                } else {
+                    &[]
+                },
+            )
+            .unwrap_or_else(|error| panic!("fresh Hybrid crank {attempt}: {error}"));
+        max_cu = max_cu.max(result.compute_units);
+        if asset_q(&env, 0) < POS_SCALE {
+            break;
+        }
+    }
+
+    let (wrapper, group) = env.primary_market_state();
+    let profile = env.primary_profile(0);
+    let reward = env.primary_portfolio(2).capital.get() - cranker_before;
+    assert!(asset_q(&env, 0) < POS_SCALE, "fresh mark must liquidate");
+    assert!(
+        reward > 0,
+        "authenticated Hybrid liquidation keeps its reward"
+    );
+    assert_eq!(wrapper.last_good_oracle_slot, 2);
+    assert_eq!(profile.last_good_oracle_slot, 2);
+    assert_eq!(
+        profile.effective_price_provenance,
+        percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED
+    );
+    assert_eq!(group.assets[0].raw_oracle_target_price, FRESH_MARK);
+    assert_eq!(group.assets[0].effective_price, FRESH_MARK);
+    assert_eq!(env.token_supply_observed(), supply_before);
+    assert_eq!(env.mint_supply(), mint_supply_before);
+    assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
+    eprintln!("fresh Hybrid liquidation reward={reward}, max_cu={max_cu}");
+}
+
+#[test]
+fn v16_program_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_reward() {
     use crate::support::v16_svm::{MarketConfig, V16Svm};
     use percolator::POS_SCALE;
 
@@ -299,6 +404,10 @@ fn probe_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_reward() 
     let movement_fee = group_after_move.insurance - insurance_before_move;
     assert!(movement_fee > 0);
     assert!(profile_after_move.mark_ewma_e6 < MARK);
+    assert_eq!(
+        env.primary_profile(0).effective_price_provenance,
+        percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+    );
 
     let observation = vec![percolator_prog::ix::CrankObservationHint {
         asset_index: 0,
@@ -383,6 +492,25 @@ fn probe_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_reward() 
     assert_eq!(fresh_profile.last_good_oracle_slot, 3);
     assert!(after_liquidation.assets[0].effective_price < MARK);
     assert_eq!(after_liquidation.assets[0].raw_oracle_target_price, MARK);
+    assert_eq!(
+        env.primary_profile(0).effective_price_provenance,
+        percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+    );
+
+    env.set_clock(4, 1_001);
+    let catchup = env
+        .crank_with_oracles(4, 4, observation.clone(), &[pyth])
+        .expect("fresh authenticated target catch-up");
+    max_crank_cu = max_crank_cu.max(catchup.compute_units);
+    let caught_up_profile = env.primary_profile(0);
+    let (_, caught_up_group) = env.primary_market_state();
+    assert_eq!(caught_up_group.assets[0].effective_price, MARK);
+    assert_eq!(caught_up_group.assets[0].raw_oracle_target_price, MARK);
+    assert_eq!(
+        caught_up_profile.effective_price_provenance,
+        percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED,
+        "rewards become eligible again once effective price reaches the authenticated target"
+    );
 
     for actor in [0usize, 1, 2, 3] {
         for attempt in 0..8 {
@@ -391,7 +519,7 @@ fn probe_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_reward() 
             }
             let effective_q = effective_asset_q(&env, actor);
             let result = if effective_q == 0 {
-                env.crank(actor, 3, Vec::new())
+                env.crank(actor, 4, Vec::new())
             } else {
                 env.rebalance_reduce(actor, 0, effective_q)
             };
@@ -404,7 +532,7 @@ fn probe_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_reward() 
     }
 
     for actor in 0..5 {
-        match env.crank_with_oracles(actor, 3, observation.clone(), &[pyth]) {
+        match env.crank_with_oracles(actor, 4, observation.clone(), &[pyth]) {
             Ok(result) => max_crank_cu = max_crank_cu.max(result.compute_units),
             Err(error)
                 if error.contains("Custom(22)") || error.contains("custom program error: 0x16") => {
@@ -458,10 +586,11 @@ fn probe_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_reward() 
     assert_eq!(env.mint_supply(), mint_supply_before);
     assert!(max_crank_cu < crate::support::v16_svm::TX_CU_LIMIT);
     assert!(victim_loss > 0);
-    assert!(cranker_reward > movement_fee);
-    assert!(attacker_gain > 0);
     assert_eq!(
         cranker_reward, 0,
         "a fresh feed must not make the inherited trade-driven liquidation penalty reclaimable"
     );
+    assert_eq!(attacker_gain, 0);
+    assert!(attacker_loss > 0);
+    assert!(retained_penalty > 0);
 }

@@ -557,6 +557,7 @@ fn v16_program_all_wrapper_owned_persisted_structs_have_complete_field_rosters()
                 "backing_trade_fee_insurance_share_bps_long",
                 "backing_trade_fee_insurance_share_bps_short",
                 "price_move_remainder_bps_num",
+                "effective_price_provenance",
                 "_padding0",
                 "insurance_authority",
                 "insurance_operator",
@@ -661,6 +662,7 @@ fn v16_program_all_wrapper_owned_persisted_structs_have_complete_field_rosters()
             "record_funding_mark_transition_view",
             "advance_funding_mark_checkpoint_view",
             "price_move_remainder_bps_num_view",
+            "liquidation_penalty_reclaimable_from_profile_view",
             "write_oracle_profile_to_view",
         ],
     );
