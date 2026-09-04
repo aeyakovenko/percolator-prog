@@ -24,6 +24,377 @@
 
 use super::*;
 
+struct Inv070TerminalInsuranceWithholdFixture {
+    env: V16CuEnv,
+    insurance_authority: Keypair,
+    cranker: Keypair,
+    user_payouts: [u64; 2],
+    permissionless_create_cu: u64,
+    insurance_top_up_cu: u64,
+    resolve_cu: u64,
+}
+
+fn inv070_create_rent_funded_portfolio(env: &mut V16CuEnv, owner: &Keypair) -> Pubkey {
+    let portfolio = Pubkey::new_unique();
+    env.ensure_signer_account(owner.pubkey());
+    let configured_assets = env.market_state().1.config.max_market_slots as usize;
+    let data_len = state::portfolio_account_len_for_market_slots(configured_assets).unwrap();
+    let lamports = env
+        .svm
+        .get_sysvar::<solana_sdk::rent::Rent>()
+        .minimum_balance(data_len);
+    env.svm
+        .set_account(
+            portfolio,
+            Account {
+                lamports,
+                data: vec![0u8; data_len],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[owner],
+    )
+    .expect("initialize rent-funded portfolio through the public wrapper");
+    portfolio
+}
+
+fn inv070_send_with_metadata(
+    env: &mut V16CuEnv,
+    instruction: ProgInstruction,
+    accounts: Vec<AccountMeta>,
+    extra_signers: &[&Keypair],
+) -> Result<u64, (String, u64)> {
+    let instruction = Instruction {
+        program_id: env.program_id,
+        accounts,
+        data: instruction.encode(),
+    };
+    let mut signers = Vec::with_capacity(1 + extra_signers.len());
+    signers.push(&env.payer);
+    signers.extend_from_slice(extra_signers);
+    let transaction = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), instruction],
+        Some(&env.payer.pubkey()),
+        &signers,
+        env.svm.latest_blockhash(),
+    );
+    match env.svm.send_transaction(transaction) {
+        Ok(metadata) => Ok(metadata.compute_units_consumed),
+        Err(failure) => Err((
+            format!("{:?}", failure.err),
+            failure.meta.compute_units_consumed,
+        )),
+    }
+}
+
+fn inv070_terminal_insurance_withhold_fixture() -> Inv070TerminalInsuranceWithholdFixture {
+    const CREATE_FEE: u128 = 2;
+    const INSURANCE_ATOMS: u128 = 1;
+    const USER_PRINCIPAL: u128 = 1_000;
+
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(CREATE_FEE);
+
+    let insurance_authority = Keypair::new();
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    let authority = insurance_authority.pubkey();
+    let (_, permissionless_create_cu) = env.activate_permissionless_asset_with_fee(
+        &insurance_authority,
+        1,
+        1,
+        100,
+        authority,
+        authority,
+        authority,
+        authority,
+        CREATE_FEE,
+    );
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(profile.asset_admin, authority.to_bytes());
+    assert_eq!(profile.insurance_authority, authority.to_bytes());
+    assert_eq!(profile.insurance_operator, authority.to_bytes());
+
+    let (insurance_source, insurance_top_up_cu) =
+        env.top_up_insurance_domain_with_authority_and_cu(&insurance_authority, 2, INSURANCE_ATOMS);
+    assert_eq!(env.token_amount(insurance_source), 0);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = inv070_create_rent_funded_portfolio(&mut env, &long_owner);
+    let short = inv070_create_rent_funded_portfolio(&mut env, &short_owner);
+    env.deposit(&long_owner, long, USER_PRINCIPAL);
+    env.deposit(&short_owner, short, USER_PRINCIPAL);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+
+    let resolve_cu = env.resolve();
+    let long_destination = env.close_resolved(&long_owner, long);
+    let short_destination = env.close_resolved(&short_owner, short);
+    let user_payouts = [
+        env.token_amount(long_destination),
+        env.token_amount(short_destination),
+    ];
+    assert_eq!(user_payouts, [USER_PRINCIPAL as u64; 2]);
+    env.close_portfolio_with_cu(&long_owner, long);
+    env.close_portfolio_with_cu(&short_owner, short);
+
+    // Remove the permissionless-create fee from asset 0 through its legitimate terminal owner.
+    // The only remaining token and accounting stock is the attacker's one-atom asset-1 budget.
+    let admin = env.admin.insecure_clone();
+    let (asset_zero_destination, _) = env
+        .try_withdraw_insurance_asset_with_authority(&admin, 0, CREATE_FEE)
+        .expect("asset-0 authority recovers the permissionless-create fee");
+    assert_eq!(env.token_amount(asset_zero_destination), CREATE_FEE as u64);
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.mode, MarketModeV16::Resolved);
+    assert_eq!(terminal.materialized_portfolio_count, 0);
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.vault, INSURANCE_ATOMS);
+    assert_eq!(terminal.insurance, INSURANCE_ATOMS);
+    assert_eq!(terminal.insurance_domain_budget[2], INSURANCE_ATOMS);
+    assert_eq!(
+        terminal.insurance_domain_budget_remaining_total,
+        INSURANCE_ATOMS
+    );
+    assert_eq!(env.token_amount(env.vault), INSURANCE_ATOMS as u64);
+
+    Inv070TerminalInsuranceWithholdFixture {
+        env,
+        insurance_authority,
+        cranker,
+        user_payouts,
+        permissionless_create_cu,
+        insurance_top_up_cu,
+        resolve_cu,
+    }
+}
+
+// BLOCKER DoS RED: an unprivileged asset creator can retain a one-atom insurance claim forever.
+// Once all users are paid and the market is Resolved, the only route that clears that claim requires
+// the creator's insurance-authority signature. CloseSlab cannot retire attributed insurance, while
+// the honest market authority cannot withdraw it or replace the funded role. The future-safe route is
+// permissionless execution that transfers only to a token account owned by the configured authority.
+#[test]
+fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_close() {
+    const ASSET_INDEX: u16 = 1;
+    const INSURANCE_ATOMS: u128 = 1;
+
+    let mut attack = inv070_terminal_insurance_withhold_fixture();
+    let admin = attack.env.admin.insecure_clone();
+    let replacement = Keypair::new();
+    let admin_destination = attack.env.token_account(admin.pubkey(), 0);
+    let attacker_destination = attack
+        .env
+        .token_account(attack.insurance_authority.pubkey(), 0);
+    let market = attack.env.market;
+    let vault = attack.env.vault;
+    let vault_authority = attack.env.vault_authority;
+    let mint = attack.env.mint;
+    let market_id = attack.env.asset_market_id(ASSET_INDEX);
+    let authority_epoch = attack
+        .env
+        .control_sequences(ASSET_INDEX as usize)
+        .authority_epoch;
+
+    let market_before = attack.env.svm.get_account(&market).unwrap();
+    let vault_before = attack.env.svm.get_account(&vault).unwrap();
+    let admin_withdraw = inv070_send_with_metadata(
+        &mut attack.env,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET_INDEX,
+            market_id,
+            authority_epoch,
+            amount: INSURANCE_ATOMS,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(admin_destination, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        admin_withdraw.is_err(),
+        "market authority must not seize the creator's terminal insurance entitlement"
+    );
+    assert_eq!(attack.env.svm.get_account(&market).unwrap(), market_before);
+    assert_eq!(attack.env.svm.get_account(&vault).unwrap(), vault_before);
+
+    attack.env.ensure_signer_account(replacement.pubkey());
+    attack.env.svm.expire_blockhash();
+    let admin_rotation = inv070_send_with_metadata(
+        &mut attack.env,
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: ASSET_INDEX,
+            market_id,
+            authority_epoch,
+            kind: processor::ASSET_AUTH_INSURANCE,
+            new_pubkey: replacement.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(replacement.pubkey(), true),
+            AccountMeta::new(market, false),
+        ],
+        &[&admin, &replacement],
+    );
+    assert!(
+        admin_rotation.is_err(),
+        "market authority must not replace a funded permissionless asset's insurance owner"
+    );
+    assert_eq!(attack.env.svm.get_account(&market).unwrap(), market_before);
+
+    // The cranker signs and supplies a destination owned by the configured insurance authority.
+    // This is the exact entitlement-preserving permissionless payout the fixed route must accept.
+    attack.env.svm.expire_blockhash();
+    let cranker = attack.cranker.insecure_clone();
+    let permissionless_payout = inv070_send_with_metadata(
+        &mut attack.env,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET_INDEX,
+            market_id,
+            authority_epoch,
+            amount: INSURANCE_ATOMS,
+        },
+        vec![
+            AccountMeta::new(cranker.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(attacker_destination, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&cranker],
+    );
+
+    let rent = attack.env.svm.get_sysvar::<solana_sdk::rent::Rent>();
+    let terminal_market = attack.env.svm.get_account(&market).unwrap();
+    let terminal_vault = attack.env.svm.get_account(&vault).unwrap();
+    let market_refund = terminal_market
+        .lamports
+        .saturating_sub(rent.minimum_balance(percolator_prog::constants::HEADER_LEN));
+    let rent_locked = market_refund.saturating_add(terminal_vault.lamports);
+    let close_destination = attack.env.token_account(admin.pubkey(), 0);
+    attack.env.svm.expire_blockhash();
+    let first_close = inv070_send_with_metadata(
+        &mut attack.env,
+        ProgInstruction::CloseSlab { authority_epoch: 0 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new(close_destination, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(mint, false),
+        ],
+        &[&admin],
+    );
+
+    let mut late_close = None;
+    if first_close.is_err() {
+        assert_eq!(
+            attack.env.svm.get_account(&market).unwrap(),
+            terminal_market
+        );
+        assert_eq!(attack.env.svm.get_account(&vault).unwrap(), terminal_vault);
+        attack.env.svm.warp_to_slot(1_000_000);
+        attack.env.svm.expire_blockhash();
+        late_close = Some(inv070_send_with_metadata(
+            &mut attack.env,
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(market, false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new_readonly(vault_authority, false),
+                AccountMeta::new(close_destination, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(mint, false),
+            ],
+            &[&admin],
+        ));
+        assert!(late_close.as_ref().unwrap().is_err());
+        let terminal = attack.env.market_state().1;
+        assert_eq!(terminal.insurance_domain_budget[2], INSURANCE_ATOMS);
+        assert_eq!(terminal.vault, INSURANCE_ATOMS);
+        assert_eq!(attack.env.token_amount(vault), INSURANCE_ATOMS as u64);
+    }
+
+    // Discriminating control: the same public lifecycle closes immediately when the attacker signs.
+    let mut control = inv070_terminal_insurance_withhold_fixture();
+    let (control_destination, attacker_withdraw_cu) =
+        control.env.withdraw_terminal_insurance_with_authority(
+            &control.insurance_authority,
+            ASSET_INDEX,
+            INSURANCE_ATOMS,
+        );
+    assert_eq!(
+        control.env.token_amount(control_destination),
+        INSURANCE_ATOMS as u64
+    );
+    let cooperative_close_cu = control.env.close_slab_with_cu();
+    assert_closed_market_tombstone(&control.env.svm.get_account(&control.env.market).unwrap());
+
+    println!(
+        "INV-070 terminal insurance withholding: users={:?}, create_cu={}, topup_cu={}, resolve_cu={}, admin_withdraw={:?}, admin_rotation={:?}, permissionless_payout={:?}, first_close={:?}, late_close={:?}, market_lamports={}, market_refund={}, vault_lamports={}, rent_locked={}, attacker_withdraw_cu={}, cooperative_close_cu={}",
+        attack.user_payouts,
+        attack.permissionless_create_cu,
+        attack.insurance_top_up_cu,
+        attack.resolve_cu,
+        admin_withdraw,
+        admin_rotation,
+        permissionless_payout,
+        first_close,
+        late_close,
+        terminal_market.lamports,
+        market_refund,
+        terminal_vault.lamports,
+        rent_locked,
+        attacker_withdraw_cu,
+        cooperative_close_cu,
+    );
+
+    assert!(
+        permissionless_payout.is_ok() && first_close.is_ok(),
+        "a funded permissionless-asset authority must not be able to withhold terminal progress; any cranker must be able to pay the exact claim only to the configured authority and then close the slab"
+    );
+}
+
 #[test]
 fn v16_program_recovery_force_close_reaches_zero_residue_and_close_slab() {
     const INITIAL_CAPITAL: u128 = 1_000_000;
