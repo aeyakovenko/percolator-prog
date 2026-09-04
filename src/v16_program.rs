@@ -15468,11 +15468,11 @@ pub mod processor {
         Ok(target)
     }
 
-    fn zero_move_funding_segment_for_profile_view(
-        profile: &state::AssetOracleProfileV16,
+    fn zero_move_funding_path_for_profile_view(
+        profile: &mut state::AssetOracleProfileV16,
         group: &mut state::MarketViewMutV16<'_>,
         asset_index: usize,
-    ) -> Result<Option<(u64, i128)>, V16Error> {
+    ) -> Result<Option<(u64, u64, Vec<AccrualStepV16>)>, V16Error> {
         if !oracle_v16::profile_is_price_managed(profile)
             || asset_index >= group.header.config.max_market_slots.get() as usize
             || asset_index >= group.markets.len()
@@ -15489,30 +15489,28 @@ pub mod processor {
         let effective_price = asset.effective_price.get();
         let target =
             stored_mark_target_for_zero_move_accrual_view(profile, group, asset_index, now_slot)?;
-        let bounded_price = oracle_v16::effective_price_from_target(
-            effective_price,
-            target,
-            group.header.config.max_price_move_bps_per_slot.get(),
-            segment_dt,
-            true,
-        );
-        // This helper settles only the interval a normal crank would process without changing K.
-        // Price-moving intervals stay on the ordinary observation-bearing crank route.
-        if bounded_price != effective_price {
-            return Ok(None);
-        }
-        let funding_rate_e9 = permissionless_funding_rate_e9_view(
-            profile,
+        let mut simulated_profile = *profile;
+        let path = canonical_accrual_path_for_target_view(
+            &mut simulated_profile,
             group,
             asset_index,
             now_slot,
-            effective_price,
+            target,
+            asset.slot_last.get().saturating_add(1),
         )
-        .map_err(|_| V16Error::ArithmeticOverflow)?;
-        if funding_rate_e9 == 0 {
+        .map_err(|_| V16Error::InvalidConfig)?;
+        // This helper settles only the interval a normal crank would process without changing K.
+        // Price-moving intervals stay on the ordinary observation-bearing crank route.
+        if path.is_empty()
+            || path
+                .iter()
+                .any(|step| step.effective_price != effective_price)
+            || path.iter().all(|step| step.funding_rate_e9 == 0)
+        {
             return Ok(None);
         }
-        Ok(Some((effective_price, funding_rate_e9)))
+        *profile = simulated_profile;
+        Ok(Some((now_slot, target, path)))
     }
 
     fn pending_zero_move_funding_requires_crank_view(
@@ -15571,8 +15569,8 @@ pub mod processor {
         }
         let asset_slot = group.markets[asset_index].engine.asset.slot_last.get();
         advance_funding_mark_checkpoint_view(profile, asset_slot);
-        let Some((effective_price, funding_rate_e9)) =
-            zero_move_funding_segment_for_profile_view(profile, group, asset_index)?
+        let Some((now_slot, target, path)) =
+            zero_move_funding_path_for_profile_view(profile, group, asset_index)?
         else {
             if require_full_catchup
                 && pending_zero_move_funding_requires_crank_view(profile, group, asset_index)?
@@ -15581,21 +15579,14 @@ pub mod processor {
             }
             return Ok(());
         };
-        let now_slot = authenticated_market_slot_or_fallback_view(group);
-        group.accrue_asset_to_not_atomic(
-            asset_index,
-            now_slot,
-            effective_price,
-            funding_rate_e9,
-            true,
-        )?;
+        group.accrue_asset_path_to_not_atomic(asset_index, now_slot, target, &path, true)?;
         let asset_slot = group.markets[asset_index].engine.asset.slot_last.get();
         advance_funding_mark_checkpoint_view(profile, asset_slot);
         // One instruction never performs an attacker-sized catch-up loop. If more deterministic
         // zero-move funding remains, roll this inline segment back and require bounded public
         // cranks before the unchanged position operation retries.
         if require_full_catchup
-            && (zero_move_funding_segment_for_profile_view(profile, group, asset_index)?.is_some()
+            && (zero_move_funding_path_for_profile_view(profile, group, asset_index)?.is_some()
                 || pending_zero_move_funding_requires_crank_view(profile, group, asset_index)?)
         {
             return Err(V16Error::Stale);

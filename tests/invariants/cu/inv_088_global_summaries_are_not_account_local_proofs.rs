@@ -1087,7 +1087,7 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
         Inv088EngineCallsite { owner: "handle_permissionless_crank_zero_copy", method: "accrue_asset_to_not_atomic", count: 1, summary_family: "asset-certificate", witness: "v16_program_per_asset_crank_isolation" },
         Inv088EngineCallsite { owner: "handle_permissionless_crank_zero_copy", method: "credit_account_from_insurance_not_atomic", count: 1, summary_family: "capital-insurance", witness: "v16_program_liquidation_updates_same_asset_summaries_without_clobbering_other_portfolios" },
         Inv088EngineCallsite { owner: "charge_account_backing_domain_fees_view", method: "charge_account_backing_fee_not_atomic", count: 1, summary_family: "capital-backing-earnings", witness: "v16_attack_backing_fee_split_conserves" },
-        Inv088EngineCallsite { owner: "accrue_zero_move_funding_before_position_change_for_profile_view", method: "accrue_asset_to_not_atomic", count: 1, summary_family: "asset-certificate", witness: "v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides" },
+        Inv088EngineCallsite { owner: "accrue_zero_move_funding_before_position_change_for_profile_view", method: "accrue_asset_path_to_not_atomic", count: 1, summary_family: "asset-certificate", witness: "v16_attack_risk_reducing_trade_cannot_erase_canonical_price_movement_remainder" },
         Inv088EngineCallsite { owner: "stage_trade_driven_mark_target_view", method: "set_asset_raw_oracle_target_not_atomic", count: 1, summary_family: "asset-oracle", witness: "v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered" },
     ];
 
