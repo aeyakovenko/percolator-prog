@@ -509,6 +509,7 @@ fn v16_retained_retry_terminal_dispositions_are_source_complete() {
                     | "RISK_REDUCING_ONLY"
                     | "RECOVERABLE_PRINCIPAL"
                     | "RECOVERABLE_INSURANCE"
+                    | "REPLAY_ONLY"
             ),
             "unknown retained-retry disposition: {line}"
         );

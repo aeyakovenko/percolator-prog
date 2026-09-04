@@ -13,6 +13,9 @@
 //! rejects the remaining duplicate without state or SPL-supply drift.
 //! A third probe selects any ordered pair of single/batch CPI/no-CPI encodings for one retained
 //! bilateral trade and requires the same rollback, exact-once, OI, basis, and supply properties.
+//! The operation registry also retains two insurance-withdrawal requests before either lands,
+//! executes one, replenishes the same stock through a separate public top-up, and requires the
+//! stale request to reject before it can consume the newly available stock.
 //!
 //! Guarantee boundary: PRs 343/344/350/351/355/362 are fixed-pin certifications of the currently
 //! deployed retained families, not a claim that absent message fields exist. Successful partial

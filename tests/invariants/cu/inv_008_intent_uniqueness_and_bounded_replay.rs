@@ -166,6 +166,7 @@ fn v16_public_replay_disposition_roster_is_source_complete() {
         ("TradeNoCpi", "trade"),
         ("UpdateAssetLifecycle", "asset-activation"),
         ("Withdraw", "withdrawal"),
+        ("WithdrawInsuranceAsset", "insurance-withdrawal"),
     ];
     assert_eq!(
         retry_variants,
@@ -211,6 +212,7 @@ fn v16_public_replay_disposition_roster_is_source_complete() {
             "ConfigurePermissionlessResolve",
             "PushAuthMark",
             "PushEwmaMark",
+            "RestartAssetOracle",
             "SetMatcherConfig",
             "UpdateBackingFeePolicy",
             "UpdateFeeRedirectPolicy",

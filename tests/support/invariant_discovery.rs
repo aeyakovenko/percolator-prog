@@ -213,6 +213,7 @@ pub enum RetryIntentKind {
     ConvertReleasedPnl,
     RebalanceReduce,
     InsuranceTopUp,
+    InsuranceWithdrawal,
     BackingTopUp,
     AssetActivation,
 }
@@ -772,7 +773,7 @@ impl SupersessionPayloadOrder {
 }
 
 impl RetryIntentKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Deposit,
         Self::Withdraw,
         Self::TradeNoCpi,
@@ -782,6 +783,7 @@ impl RetryIntentKind {
         Self::ConvertReleasedPnl,
         Self::RebalanceReduce,
         Self::InsuranceTopUp,
+        Self::InsuranceWithdrawal,
         Self::BackingTopUp,
         Self::AssetActivation,
     ];
@@ -797,8 +799,9 @@ impl RetryIntentKind {
             Self::ConvertReleasedPnl => 6,
             Self::RebalanceReduce => 7,
             Self::InsuranceTopUp => 8,
-            Self::BackingTopUp => 9,
-            Self::AssetActivation => 10,
+            Self::InsuranceWithdrawal => 9,
+            Self::BackingTopUp => 10,
+            Self::AssetActivation => 11,
         }
     }
 }
@@ -8127,6 +8130,9 @@ fn retained_retry_pair(env: &mut V16Svm, kind: RetryIntentKind) -> (Transaction,
         RetryIntentKind::InsuranceTopUp => {
             env.build_retained_insurance_domain_top_up_for_actor(AUTHORITY, 0, AMOUNT)
         }
+        RetryIntentKind::InsuranceWithdrawal => {
+            env.build_retained_insurance_withdrawal_for_actor(AUTHORITY, ASSET, AMOUNT)
+        }
         RetryIntentKind::BackingTopUp => {
             env.build_retained_backing_bucket_top_up_for_actor(AUTHORITY, 1, AMOUNT, 100)
         }
@@ -8170,6 +8176,19 @@ fn prepare_intent_retry_environment(
             )
             .map_err(|error| format!("install insurance authority: {error}"))?;
         }
+        RetryIntentKind::InsuranceWithdrawal => {
+            for authority_kind in [
+                percolator_prog::processor::ASSET_AUTH_INSURANCE,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            ] {
+                env.update_asset_authority_from_admin(0, authority_kind, AUTHORITY)
+                    .map_err(|error| {
+                        format!("install insurance withdrawal role {authority_kind}: {error}")
+                    })?;
+            }
+            env.top_up_insurance_domain_for_actor(AUTHORITY, 0, 1_000)
+                .map_err(|error| format!("fund retained insurance withdrawal: {error}"))?;
+        }
         RetryIntentKind::BackingTopUp => {
             env.update_asset_authority_from_admin(
                 0,
@@ -8206,6 +8225,10 @@ pub fn discover_intent_retry(
     match kind {
         RetryIntentKind::ConvertReleasedPnl => {
             create_released_pnl(&mut env, 0, 1, 1_000_000, 1_000_000, 3, INITIAL_PRICE + 5)?;
+        }
+        RetryIntentKind::InsuranceWithdrawal => {
+            env.top_up_insurance_domain_for_actor(2, 0, 1_000)
+                .map_err(|error| format!("replenish insurance after first withdrawal: {error}"))?;
         }
         RetryIntentKind::AssetActivation => {
             env.warp_to_slot(4);
