@@ -14006,7 +14006,7 @@ pub mod processor {
             // before either route can certify the account, even when the engine selects another
             // leg for the first bounded step.
             if (summary.stale || summary.liquidatable) && !summary.b_stale {
-                reject_missing_pending_liquidation_observations_view(
+                reject_incomplete_account_health_observations_view(
                     &cfg,
                     &group,
                     &portfolio,
@@ -14301,7 +14301,7 @@ pub mod processor {
         Ok(())
     }
 
-    fn reject_missing_pending_liquidation_observations_view(
+    fn reject_incomplete_account_health_observations_view(
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
@@ -14333,7 +14333,7 @@ pub mod processor {
                 }
                 seen_assets[seen_asset_count] = leg.asset_index;
                 seen_asset_count += 1;
-                reject_missing_observation_that_changes_accrual_view(
+                reject_incomplete_asset_health_observation_view(
                     cfg,
                     group,
                     leg.asset_index as usize,
@@ -14346,22 +14346,32 @@ pub mod processor {
         Ok(())
     }
 
-    fn reject_missing_observation_that_changes_accrual_view(
+    fn reject_incomplete_asset_health_observation_view(
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
         now_slot: u64,
         observations: &[AutoCrankObservationV16],
     ) -> ProgramResult {
-        if observations.iter().any(|o| o.asset_index == asset_index) {
-            return Ok(());
-        }
         if asset_index >= group.header.config.max_market_slots.get() as usize
             || asset_index >= group.markets.len()
         {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
+        // A stale-account refresh cannot consume this slot's accrual interval from a prior-slot
+        // Hybrid observation. In normal external mode every active health leg must have advanced
+        // from an authenticated report in this slot. Once the configured after-hours threshold
+        // matures, the mark fallback is canonical and no external report is required.
+        if oracle_v16::profile_is_hybrid(&profile)
+            && !oracle_v16::profile_hybrid_soft_stale_matured(&profile, now_slot)
+            && profile.last_good_oracle_slot != now_slot
+        {
+            return Err(PercolatorError::EngineNonProgress.into());
+        }
+        if observations.iter().any(|o| o.asset_index == asset_index) {
+            return Ok(());
+        }
         if !oracle_v16::profile_is_price_managed(&profile) {
             return Ok(());
         }
