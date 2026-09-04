@@ -5488,6 +5488,27 @@ impl V16Svm {
         key
     }
 
+    pub fn update_pyth_price(
+        &mut self,
+        key: Pubkey,
+        feed: &[u8; 32],
+        price: i64,
+        expo: i32,
+        conf: u64,
+        publish_time: i64,
+    ) {
+        let mut account = self.svm.get_account(&key).expect("existing Pyth fixture");
+        assert_eq!(
+            account.owner,
+            percolator_prog::oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+            "only the external Pyth fixture may be updated out of band"
+        );
+        account.data = make_pyth_data(feed, price, expo, conf, publish_time);
+        self.svm
+            .set_account(key, account)
+            .expect("update external Pyth fixture");
+    }
+
     pub fn current_slot(&self) -> u64 {
         self.svm.get_sysvar::<Clock>().slot
     }
