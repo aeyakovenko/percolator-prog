@@ -519,6 +519,191 @@ fn v16_program_external_oracle_hint_and_account_order_is_normalized_or_atomic() 
     );
 }
 
+struct Inv056ExternalRescueWorld {
+    env: V16CuEnv,
+    victim: Pubkey,
+    rescue_oracle: Pubkey,
+    position_before_q: i128,
+}
+
+fn inv056_external_rescue_world() -> Inv056ExternalRescueWorld {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const ADVERSE_PRICE: i64 = 997_600;
+    const POSITION_Q: i128 = 50 * POS_SCALE as i128;
+    const FEED: [u8; 32] = [0x58; 32];
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    set_test_clock(&mut env, 1, 100);
+    let initial = env.set_pyth_price_with_conf(&FEED, INITIAL_PRICE as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [FEED, [0; 32], [0; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure one-leg external oracle");
+
+    let victim_owner = Keypair::new();
+    let maker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let maker = env.create_portfolio(&maker_owner);
+    let observer = env.create_portfolio(&Keypair::new());
+    env.deposit(&victim_owner, victim, 2_600_000);
+    env.deposit(&maker_owner, maker, 100_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &maker_owner,
+        maker,
+        POSITION_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    let position_before_q = active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q;
+    assert_eq!(position_before_q, POSITION_Q);
+
+    set_test_clock(&mut env, 2, 101);
+    let adverse = env.set_pyth_price_with_conf(&FEED, ADVERSE_PRICE, -6, 0, 101);
+    env.crank_with_oracle_tail(
+        observer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: crank_observations(0),
+        },
+        &[adverse],
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        ADVERSE_PRICE as u64
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q,
+        position_before_q,
+        "observing the adverse mark through an unrelated portfolio must not mutate the victim"
+    );
+
+    set_test_clock(&mut env, 3, 102);
+    let rescue_oracle = env.set_pyth_price_with_conf(&FEED, INITIAL_PRICE as i64, -6, 0, 102);
+    Inv056ExternalRescueWorld {
+        env,
+        victim,
+        rescue_oracle,
+        position_before_q,
+    }
+}
+
+#[test]
+fn v16_attack_liquidation_cannot_omit_fresh_external_rescue_observation() {
+    let Inv056ExternalRescueWorld {
+        mut env,
+        victim,
+        position_before_q,
+        ..
+    } = inv056_external_rescue_world();
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+            ],
+            &[],
+        )
+        .expect("an omitted feed may refresh the stale certificate without moving value");
+    assert_cu_within(
+        "INV-056 cached external-oracle certificate refresh",
+        refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q,
+        position_before_q,
+        "the discovery-only refresh step must not liquidate"
+    );
+    assert!(
+        health_cert(&env.portfolio_state(victim)).certified_liq_deficit > 0,
+        "the cached adverse mark must expose the liquidation branch"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let insurance_before = env.market_state().1.insurance;
+    env.svm.expire_blockhash();
+    let omitted_liquidation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new_readonly(env.payer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[],
+    );
+    eprintln!(
+        "omitted_liquidation={omitted_liquidation:?} before_q={position_before_q} after={:?} health={:?} insurance_delta={}",
+        active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q,
+        health_cert(&env.portfolio_state(victim)),
+        env.market_state().1.insurance.saturating_sub(insurance_before),
+    );
+
+    let Inv056ExternalRescueWorld {
+        mut env,
+        victim,
+        rescue_oracle,
+        position_before_q,
+    } = inv056_external_rescue_world();
+    let observed_cu = env.crank_with_oracle_tail(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: crank_observations(0),
+        },
+        &[rescue_oracle],
+    );
+    assert_cu_within(
+        "INV-056 external rescue observation before liquidation",
+        observed_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert!(
+        env.market_state().1.assets[0].effective_price > 997_600,
+        "the authenticated rescue observation must move the effective price toward the live feed"
+    );
+    assert_eq!(
+        health_cert(&env.portfolio_state(victim)).certified_liq_deficit,
+        0,
+        "the bounded authenticated rescue move restores maintenance health"
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q,
+        position_before_q,
+        "the authenticated rescue observation keeps the same position healthy"
+    );
+    assert!(
+        omitted_liquidation.is_err(),
+        "omitting a configured external feed while liquidation is selected must reject: {omitted_liquidation:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&victim).unwrap(), victim_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+}
+
 #[test]
 fn v16_program_pending_close_bad_hints_roll_back_then_canonical_crank_progresses() {
     let PublicActiveCloseFixture {
