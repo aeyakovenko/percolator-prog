@@ -1982,8 +1982,10 @@ fn v16_attack_risk_reducing_trade_cannot_erase_canonical_price_movement_remainde
         interleaved.price_move_remainder_bps_num,
         canonical.price_move_remainder_bps_num
     );
-    assert!(interleaved.max_trade_cu < 1_400_000);
-    assert!(canonical.max_crank_cu < 1_400_000);
+    assert!(canonical.max_trade_cu < TRADE_CU_LIMIT);
+    assert!(interleaved.max_trade_cu < TRADE_CU_LIMIT);
+    assert!(canonical.max_crank_cu < CRANK_CU_LIMIT);
+    assert!(interleaved.max_crank_cu < CRANK_CU_LIMIT);
 }
 
 #[test]
