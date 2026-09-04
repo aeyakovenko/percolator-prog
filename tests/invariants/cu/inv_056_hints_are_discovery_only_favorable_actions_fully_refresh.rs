@@ -12,7 +12,10 @@
 //! refreshing cure, and stale-safe risk reduction; a new instruction cannot silently inherit a
 //! favorable-action exemption. Matched forward and
 //! reverse two-asset Pyth hint/account-tail orders normalize identically; mismatched tails reject
-//! with exact rollback and a live canonical retry. BatchTradeNoCpi and BatchTradeCpi open a new
+//! with exact rollback and a live canonical retry. A separate liquidation trace proves a caller
+//! cannot omit a current-slot external rescue report or replay a prior-slot adverse report; the
+//! authenticated rescue preserves the victim's full position. BatchTradeNoCpi and BatchTradeCpi
+//! open a new
 //! asset-0 leg for an account that already has a stale active asset-1 leg, and must discover and
 //! refresh that stale leg before admitting the new favorable leg. Pending-close and Recovery
 //! selector traces prove hostile hints roll back before an honest retry progresses; once Resolved,
@@ -517,6 +520,335 @@ fn v16_program_external_oracle_hint_and_account_order_is_normalized_or_atomic() 
         forward,
         "retry after hostile ordering must reach the canonical normalized state"
     );
+}
+
+struct Inv056ExternalRescueWorld {
+    env: V16CuEnv,
+    victim_owner: Keypair,
+    maker_owner: Keypair,
+    victim: Pubkey,
+    maker: Pubkey,
+    adverse_oracle: Pubkey,
+    rescue_oracle: Pubkey,
+    position_before_q: i128,
+}
+
+const INV056_EXTERNAL_RESCUE_FEED: [u8; 32] = [0x58; 32];
+
+fn inv056_external_rescue_world() -> Inv056ExternalRescueWorld {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const ADVERSE_PRICE: i64 = 997_600;
+    const POSITION_Q: i128 = 50 * POS_SCALE as i128;
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    set_test_clock(&mut env, 1, 100);
+    let initial = env.set_pyth_price_with_conf(
+        &INV056_EXTERNAL_RESCUE_FEED,
+        INITIAL_PRICE as i64,
+        -6,
+        0,
+        100,
+    );
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [INV056_EXTERNAL_RESCUE_FEED, [0; 32], [0; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure one-leg external oracle");
+    env.top_up_backing_bucket(1, 1_000_000, 1_000);
+
+    let victim_owner = Keypair::new();
+    let maker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let maker = env.create_portfolio(&maker_owner);
+    let observer = env.create_portfolio(&Keypair::new());
+    env.deposit(&victim_owner, victim, 2_600_000);
+    env.deposit(&maker_owner, maker, 100_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &maker_owner,
+        maker,
+        POSITION_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    let position_before_q = active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q;
+    assert_eq!(position_before_q, POSITION_Q);
+
+    set_test_clock(&mut env, 2, 101);
+    let adverse_oracle =
+        env.set_pyth_price_with_conf(&INV056_EXTERNAL_RESCUE_FEED, ADVERSE_PRICE, -6, 0, 101);
+    env.crank_with_oracle_tail(
+        observer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: crank_observations(0),
+        },
+        &[adverse_oracle],
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        ADVERSE_PRICE as u64
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q,
+        position_before_q,
+        "observing the adverse mark through an unrelated portfolio must not mutate the victim"
+    );
+
+    set_test_clock(&mut env, 3, 102);
+    let rescue_oracle = env.set_pyth_price_with_conf(
+        &INV056_EXTERNAL_RESCUE_FEED,
+        INITIAL_PRICE as i64,
+        -6,
+        0,
+        102,
+    );
+    Inv056ExternalRescueWorld {
+        env,
+        victim_owner,
+        maker_owner,
+        victim,
+        maker,
+        adverse_oracle,
+        rescue_oracle,
+        position_before_q,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Inv056ExternalRescueRoute {
+    Omitted,
+    PriorSlotReplay,
+    FreshControl,
+}
+
+#[derive(Debug)]
+struct Inv056ExternalRescueOutcome {
+    attack_succeeded: bool,
+    attack_exact_rollback: bool,
+    position_after_attack_q: i128,
+    attack_insurance_delta: u128,
+    victim_withdrawn: u64,
+    final_insurance: u128,
+    max_cu: u64,
+}
+
+fn inv056_run_external_rescue_route(
+    route: Inv056ExternalRescueRoute,
+) -> Inv056ExternalRescueOutcome {
+    let Inv056ExternalRescueWorld {
+        mut env,
+        victim_owner,
+        maker_owner,
+        victim,
+        maker,
+        adverse_oracle,
+        rescue_oracle,
+        position_before_q,
+    } = inv056_external_rescue_world();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let insurance_before = env.market_state().1.insurance;
+    let mut attack_results = Vec::new();
+    if !matches!(route, Inv056ExternalRescueRoute::FreshControl) {
+        for _ in 0..2 {
+            env.svm.expire_blockhash();
+            let (observations, oracle_tail) = match route {
+                Inv056ExternalRescueRoute::Omitted => (vec![], vec![]),
+                Inv056ExternalRescueRoute::PriorSlotReplay => (
+                    crank_observations_with_accounts(0, 1),
+                    vec![AccountMeta::new_readonly(adverse_oracle, false)],
+                ),
+                Inv056ExternalRescueRoute::FreshControl => unreachable!(),
+            };
+            let mut accounts = vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+            ];
+            accounts.extend(oracle_tail);
+            let result = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 0,
+                    observations,
+                },
+                accounts,
+                &[],
+            );
+            let rejected = result.is_err();
+            attack_results.push(result);
+            if rejected {
+                break;
+            }
+        }
+    }
+    let position_after_attack_q = active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q;
+    let attack_insurance_delta = env
+        .market_state()
+        .1
+        .insurance
+        .saturating_sub(insurance_before);
+    let attack_succeeded =
+        position_after_attack_q != position_before_q || attack_insurance_delta != 0;
+    let attack_exact_rollback = attack_results.iter().all(Result::is_err)
+        && env.svm.get_account(&env.market).unwrap() == market_before
+        && env.svm.get_account(&victim).unwrap() == victim_before
+        && env.svm.get_account(&env.vault).unwrap() == vault_before;
+    let mut max_cu = attack_results
+        .iter()
+        .filter_map(|result| result.as_ref().ok().copied())
+        .max()
+        .unwrap_or(0);
+
+    let rescue_cu = env.crank_with_oracle_tail(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: crank_observations(0),
+        },
+        &[rescue_oracle],
+    );
+    max_cu = max_cu.max(rescue_cu);
+    for (slot, unix_timestamp) in [(4, 103), (5, 104)] {
+        set_test_clock(&mut env, slot, unix_timestamp);
+        let terminal_rescue_oracle = env.set_pyth_price_with_conf(
+            &INV056_EXTERNAL_RESCUE_FEED,
+            1_000_000,
+            -6,
+            0,
+            unix_timestamp,
+        );
+        let terminal_rescue_cu = env.crank_with_oracle_tail(
+            victim,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: crank_observations(0),
+            },
+            &[terminal_rescue_oracle],
+        );
+        max_cu = max_cu.max(terminal_rescue_cu);
+    }
+    assert!(
+        env.market_state().1.assets[0].effective_price >= 1_000_000,
+        "the authenticated rescue observation must move the effective price toward the live feed"
+    );
+    assert_eq!(
+        health_cert(&env.portfolio_state(victim)).certified_liq_deficit,
+        0,
+        "the bounded authenticated rescue move restores maintenance health"
+    );
+
+    let remaining_q = active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q;
+    let close_price = env.market_state().1.assets[0].effective_price;
+    let close_cu = env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &maker_owner,
+        maker,
+        -remaining_q,
+        close_price,
+        0,
+    );
+    max_cu = max_cu.max(close_cu);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(victim), 0),
+        "the owner-signed risk reduction must leave the victim flat"
+    );
+    set_test_clock(&mut env, 6, 105);
+    let flat_refresh_oracle =
+        env.set_pyth_price_with_conf(&INV056_EXTERNAL_RESCUE_FEED, 1_000_000, -6, 0, 105);
+    let flat_refresh_cu = env.crank_with_oracle_tail(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: crank_observations(0),
+        },
+        &[flat_refresh_oracle],
+    );
+    max_cu = max_cu.max(flat_refresh_cu);
+    for _ in 0..4 {
+        env.svm.expire_blockhash();
+        if env
+            .crank_if_actionable(
+                victim,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 0,
+                    observations: vec![],
+                },
+            )
+            .is_none()
+        {
+            break;
+        }
+    }
+    let before_convert = env.portfolio_state(victim);
+    if before_convert.pnl.get() > 0 {
+        env.convert_released_pnl_with_cu(
+            &victim_owner,
+            victim,
+            u128::try_from(before_convert.pnl.get()).unwrap(),
+        );
+    }
+    let terminal = env.portfolio_state(victim);
+    assert_eq!(terminal.pnl.get(), 0);
+    let destination = env.withdraw(&victim_owner, victim, terminal.capital.get());
+    Inv056ExternalRescueOutcome {
+        attack_succeeded,
+        attack_exact_rollback,
+        position_after_attack_q,
+        attack_insurance_delta,
+        victim_withdrawn: env.token_amount(destination),
+        final_insurance: env.market_state().1.insurance,
+        max_cu,
+    }
+}
+
+#[test]
+fn v16_attack_liquidation_cannot_omit_fresh_external_rescue_observation() {
+    let control = inv056_run_external_rescue_route(Inv056ExternalRescueRoute::FreshControl);
+    let attacks = [
+        (
+            Inv056ExternalRescueRoute::PriorSlotReplay,
+            inv056_run_external_rescue_route(Inv056ExternalRescueRoute::PriorSlotReplay),
+        ),
+        (
+            Inv056ExternalRescueRoute::Omitted,
+            inv056_run_external_rescue_route(Inv056ExternalRescueRoute::Omitted),
+        ),
+    ];
+    for (attack, outcome) in attacks {
+        eprintln!("control={control:?}\nattack={outcome:?}");
+        assert!(!outcome.attack_succeeded, "{attack:?} must reject");
+        assert!(
+            outcome.attack_exact_rollback,
+            "{attack:?} must roll back market, portfolio, and vault exactly"
+        );
+        assert_eq!(outcome.position_after_attack_q, 50 * POS_SCALE as i128);
+        assert_eq!(outcome.attack_insurance_delta, 0);
+        assert_eq!(
+            outcome.victim_withdrawn, control.victim_withdrawn,
+            "{attack:?} must not reduce the victim's terminal SPL entitlement"
+        );
+        assert_eq!(outcome.final_insurance, control.final_insurance);
+        assert_cu_within(
+            "INV-056 external rescue terminal route",
+            outcome.max_cu,
+            CRANK_CU_LIMIT,
+        );
+    }
 }
 
 #[test]
