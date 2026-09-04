@@ -24,6 +24,10 @@
 //! through `CloseResolved` and the sole public crank while every other portfolio is allowed to
 //! progress. Every accepted call must mutate a terminal rank, every rejected call must roll back
 //! exactly, and all four funded portfolios must reach terminal disposition.
+//! `v16_attack_unsigned_lp_latent_source_domains_exhaust_every_exit` retains five independently
+//! admitted LP legs while an untrusted CPI taker churns historical source claims. Admission must
+//! reject the first trade that would make those latent claims exceed the bounded source table;
+//! the rejection rolls back exactly and every already-admitted leg still settles and closes.
 //!
 //! Secondary coverage: INV-030 credit-rate fail-closed behavior must still provide a terminal
 //! continuation after shared backing becomes impaired; INV-032 requires the exact account-local
@@ -577,6 +581,608 @@ fn v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk() 
     for order in SourceCapacityFillOrder::ALL {
         run_source_capacity_admission_order(order);
     }
+}
+
+#[test]
+fn v16_attack_unsigned_lp_latent_source_domains_exhaust_every_exit() {
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const HISTORICAL_ASSETS: u16 = ACTIVE_CAP;
+    const RETAINED_FIRST: u16 = HISTORICAL_ASSETS;
+    const RETAINED_COUNT: u16 = 5;
+    const LOW: u64 = 100;
+    const HIGH: u64 = 101;
+    const RETAINED_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: ACTIVE_CAP,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        70,
+    );
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    for asset_index in ACTIVE_CAP..RETAINED_FIRST + RETAINED_COUNT {
+        env.activate_asset(asset_index, u64::from(asset_index - ACTIVE_CAP + 1), LOW);
+    }
+    let mut slot = u64::from(RETAINED_COUNT);
+    env.svm.warp_to_slot(slot);
+    for asset_index in 0..RETAINED_FIRST + RETAINED_COUNT {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, slot, LOW);
+    }
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let lp_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&lp_owner);
+    let counterparty = env.create_portfolio(&attacker_owner);
+    env.deposit(&lp_owner, portfolio, 1_000_000);
+    env.deposit(&attacker_owner, counterparty, 1_000_000);
+    let (matcher_context, matcher_delegate, _) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &lp_owner, portfolio);
+    let try_cpi_fill = |env: &mut V16CuEnv, asset_index: u16, lp_size_q: i128| {
+        env.svm.expire_blockhash();
+        env.try_trade_cpi_with_cu_on_asset(
+            &attacker_owner,
+            counterparty,
+            &lp_owner,
+            portfolio,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            asset_index,
+            -lp_size_q,
+            0,
+        )
+    };
+
+    // These positions have no source record yet. Public admission checks the candidate pair but
+    // must also reserve capacity for positions admitted by earlier transactions.
+    for asset_index in RETAINED_FIRST..RETAINED_FIRST + RETAINED_COUNT {
+        try_cpi_fill(&mut env, asset_index, RETAINED_Q)
+            .unwrap_or_else(|error| panic!("unsigned-LP asset {asset_index} fill failed: {error}"));
+    }
+
+    let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
+        for account in [counterparty, portfolio] {
+            env.crank_steps_after_market_catchup(
+                account,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(asset_index),
+                },
+                1,
+            );
+        }
+    };
+
+    // Materialize both source sides for fourteen other assets, while keeping all five latent
+    // positions live. This reaches the wrapper's 28-domain public bound without state injection.
+    let mut capacity_guarded = false;
+    for asset_index in 0..HISTORICAL_ASSETS {
+        try_cpi_fill(&mut env, asset_index, POS_SCALE as i128)
+            .unwrap_or_else(|error| panic!("LP long open on asset {asset_index} failed: {error}"));
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, HIGH);
+        settle_both(&mut env, asset_index, slot);
+        try_cpi_fill(&mut env, asset_index, -(POS_SCALE as i128))
+            .unwrap_or_else(|error| panic!("LP long close on asset {asset_index} failed: {error}"));
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let owner_before = env.svm.get_account(&portfolio).unwrap();
+        let counterparty_before = env.svm.get_account(&counterparty).unwrap();
+        let matcher_before = env.svm.get_account(&matcher_context).unwrap();
+        let vault_before = env.token_amount(env.vault);
+        let short_open = try_cpi_fill(&mut env, asset_index, -(POS_SCALE as i128));
+        if let Err(error) = &short_open {
+            eprintln!("latent source-domain admission guard: {error}");
+            assert_eq!(
+                asset_index,
+                HISTORICAL_ASSETS - 1,
+                "capacity guard rejected before the exact 32-domain boundary: {error}"
+            );
+            assert!(
+                error.contains("Custom(21)"),
+                "capacity admission must return EngineLockActive, got {error}"
+            );
+            assert_capacity_attempt_rolls_back(
+                "latent source-domain admission guard",
+                &short_open,
+                &env,
+                portfolio,
+                counterparty,
+                &market_before,
+                &owner_before,
+                &counterparty_before,
+                vault_before,
+            );
+            assert_eq!(
+                env.svm.get_account(&matcher_context).unwrap(),
+                matcher_before,
+                "rejected CPI admission must roll back matcher state"
+            );
+            capacity_guarded = true;
+            break;
+        }
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, LOW);
+        settle_both(&mut env, asset_index, slot);
+        try_cpi_fill(&mut env, asset_index, POS_SCALE as i128).unwrap_or_else(|error| {
+            panic!("LP short close on asset {asset_index} failed: {error}")
+        });
+    }
+
+    if capacity_guarded {
+        let guarded = env.portfolio_state(portfolio);
+        assert_eq!(
+            guarded
+                .source_domains
+                .iter()
+                .filter(|source| source.is_occupied())
+                .count(),
+            percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS - 1,
+            "the guard must reject immediately before the latent obligations exceed capacity"
+        );
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&guarded)),
+            u32::from(RETAINED_COUNT)
+        );
+
+        // A sound admission guard must not solve the attack by locking earlier positions. Each
+        // reserved latent domain still has room to settle, and every leg closes through the same
+        // unsigned-LP public CPI route.
+        for (offset, asset_index) in (RETAINED_FIRST..RETAINED_FIRST + RETAINED_COUNT).enumerate() {
+            slot += 1;
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_for_asset_as_admin(asset_index, slot, HIGH);
+            settle_both(&mut env, asset_index, slot);
+            let settled = env.portfolio_state(portfolio);
+            assert_eq!(
+                settled
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.is_occupied())
+                    .count(),
+                percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS + offset,
+                "reserved source domain {asset_index} did not materialize exactly once"
+            );
+            try_cpi_fill(&mut env, asset_index, -RETAINED_Q).unwrap_or_else(|error| {
+                panic!("reserved LP leg on asset {asset_index} could not close: {error}")
+            });
+        }
+        let unwound = env.portfolio_state(portfolio);
+        assert!(
+            percolator::active_bitmap_is_empty(active_bitmap(&unwound)),
+            "all positions admitted before the guard must retain a bounded close path"
+        );
+        assert_eq!(
+            unwound
+                .source_domains
+                .iter()
+                .filter(|source| source.is_occupied())
+                .count(),
+            percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+        );
+    } else {
+        let churned = env.portfolio_state(portfolio);
+        assert_eq!(
+            churned
+                .source_domains
+                .iter()
+                .filter(|source| source.is_occupied())
+                .count(),
+            percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+        );
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&churned)),
+            u32::from(RETAINED_COUNT)
+        );
+
+        // The occupied records cannot be overwritten through asset-slot reuse: even the market
+        // authority cannot retire a flat historical asset while its source claims remain live.
+        let historical_asset = 1;
+        let historical_market_id = env.asset_market_id(historical_asset);
+        let authority_epoch = env
+            .control_sequences(historical_asset as usize)
+            .authority_epoch;
+        let market_before_retire = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        let retire_with_claim = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+                asset_index: historical_asset,
+                market_id: historical_market_id,
+                authority_epoch,
+                now_slot: slot,
+                initial_price: 0,
+                max_init_fee: u128::MAX,
+                insurance_authority: [0; 32],
+                insurance_operator: [0; 32],
+                backing_bucket_authority: [0; 32],
+                oracle_authority: [0; 32],
+            },
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&env.admin],
+        );
+        let retire_error = retire_with_claim
+            .as_ref()
+            .expect_err("asset retirement must reject while generation-bound source claims remain");
+        assert!(
+            retire_error.contains("Custom(21)"),
+            "source claims must block retirement through EngineLockActive, got {retire_error}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_retire,
+            "rejected retirement must not clear or relabel source claims"
+        );
+        assert_eq!(env.asset_market_id(historical_asset), historical_market_id);
+
+        // Four latent claims consume the engine-only spare tail. The fifth source attribution then
+        // needs slot 33, after all five positions were accepted by separate public transactions.
+        for asset_index in RETAINED_FIRST..RETAINED_FIRST + RETAINED_COUNT - 1 {
+            slot += 1;
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_for_asset_as_admin(asset_index, slot, HIGH);
+            settle_both(&mut env, asset_index, slot);
+            let state = env.portfolio_state(portfolio);
+            eprintln!(
+                "retained asset {asset_index}: price={} pnl={} occupied_domains={}",
+                env.market_state().1.assets[asset_index as usize].effective_price,
+                state.pnl.get(),
+                state
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.is_occupied())
+                    .count()
+            );
+        }
+        assert_eq!(
+            env.portfolio_state(portfolio)
+                .source_domains
+                .iter()
+                .filter(|source| source.is_occupied())
+                .count(),
+            percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+        );
+
+        let blocked_asset = RETAINED_FIRST + RETAINED_COUNT - 1;
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(blocked_asset, slot, HIGH);
+        env.crank_steps_after_market_catchup(
+            counterparty,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(blocked_asset),
+            },
+            1,
+        );
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let owner_before = env.svm.get_account(&portfolio).unwrap();
+        let counterparty_before = env.svm.get_account(&counterparty).unwrap();
+        let vault_before = env.token_amount(env.vault);
+        env.svm.expire_blockhash();
+        let crank = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(blocked_asset),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+        assert_capacity_attempt_rolls_back(
+            "latent fifth source-domain settlement",
+            &crank,
+            &env,
+            portfolio,
+            counterparty,
+            &market_before,
+            &owner_before,
+            &counterparty_before,
+            vault_before,
+        );
+
+        env.svm.expire_blockhash();
+        let conversion = env.send(
+            ProgInstruction::ConvertReleasedPnl {
+                portfolio_id: env.portfolio_id(portfolio),
+                position_epoch: env.portfolio_position_epoch(portfolio),
+                amount: 1,
+            },
+            vec![
+                AccountMeta::new(lp_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&lp_owner],
+        );
+        assert_capacity_attempt_rolls_back(
+            "claim conversion behind latent settlement",
+            &conversion,
+            &env,
+            portfolio,
+            counterparty,
+            &market_before,
+            &owner_before,
+            &counterparty_before,
+            vault_before,
+        );
+
+        env.svm.expire_blockhash();
+        let reduction = env.send(
+            ProgInstruction::RebalanceReduce {
+                portfolio_id: env.portfolio_id(portfolio),
+                position_epoch: env.portfolio_position_epoch(portfolio),
+                asset_index: blocked_asset,
+                reduce_q: RETAINED_Q as u128,
+            },
+            vec![
+                AccountMeta::new(lp_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&lp_owner],
+        );
+        assert_capacity_attempt_rolls_back(
+            "owner reduction behind latent settlement",
+            &reduction,
+            &env,
+            portfolio,
+            counterparty,
+            &market_before,
+            &owner_before,
+            &counterparty_before,
+            vault_before,
+        );
+
+        env.svm.expire_blockhash();
+        let forfeit = env.send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                portfolio_id: env.portfolio_id(portfolio),
+                position_epoch: env.portfolio_position_epoch(portfolio),
+                asset_index: blocked_asset,
+                b_delta_budget: percolator::MAX_VAULT_TVL,
+            },
+            vec![
+                AccountMeta::new(lp_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&lp_owner],
+        );
+        assert_capacity_attempt_rolls_back(
+            "owner forfeit outside privileged recovery",
+            &forfeit,
+            &env,
+            portfolio,
+            counterparty,
+            &market_before,
+            &owner_before,
+            &counterparty_before,
+            vault_before,
+        );
+
+        let withdraw_destination = env.token_account(lp_owner.pubkey(), 0);
+        let withdraw_destination_before = env.token_amount(withdraw_destination);
+        env.svm.expire_blockhash();
+        let withdrawal = env.send(
+            env.withdraw_ix(portfolio, 1),
+            vec![
+                AccountMeta::new(lp_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(withdraw_destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&lp_owner],
+        );
+        assert_capacity_attempt_rolls_back(
+            "owner principal withdrawal behind latent settlement",
+            &withdrawal,
+            &env,
+            portfolio,
+            counterparty,
+            &market_before,
+            &owner_before,
+            &counterparty_before,
+            vault_before,
+        );
+        assert_eq!(
+            env.token_amount(withdraw_destination),
+            withdraw_destination_before,
+            "rejected withdrawal must not move SPL custody"
+        );
+
+        env.svm.expire_blockhash();
+        let matched_close = env.try_trade_cpi_with_cu_on_asset(
+            &attacker_owner,
+            counterparty,
+            &lp_owner,
+            portfolio,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            blocked_asset,
+            RETAINED_Q,
+            0,
+        );
+        assert_capacity_attempt_rolls_back(
+            "matched close behind latent settlement",
+            &matched_close,
+            &env,
+            portfolio,
+            counterparty,
+            &market_before,
+            &owner_before,
+            &counterparty_before,
+            vault_before,
+        );
+
+        for (label, result) in [
+            ("crank", &crank),
+            ("conversion", &conversion),
+            ("owner reduction", &reduction),
+            ("owner forfeit", &forfeit),
+            ("owner withdrawal", &withdrawal),
+            ("matched close", &matched_close),
+        ] {
+            eprintln!("{label}: {}", result.as_ref().unwrap_err());
+        }
+    }
+
+    let resolve_slot = slot + 100;
+    let resolve_cu = env.resolve_stale_permissionless_with_cu(resolve_slot);
+    eprintln!("permissionless resolve: {resolve_cu} CU");
+    env.svm.warp_to_slot(resolve_slot + 1);
+
+    // Give the honest keeper the most favorable terminal ordering: fully dispose the losing
+    // counterparty first, then retry the source-full LP after aggregate OI has fallen.
+    let counterparty_destination = env.token_account(attacker_owner.pubkey(), 0);
+    let counterparty_destination_before = env.token_amount(counterparty_destination);
+    let mut counterparty_terminal = false;
+    let mut counterparty_steps = 0usize;
+    for _ in 0..64 {
+        let state = env.portfolio_state(counterparty);
+        let receipt = resolved_receipt(&state);
+        if percolator::active_bitmap_is_empty(active_bitmap(&state))
+            && state.capital.get() == 0
+            && state.pnl.get() == 0
+            && (!receipt.present || receipt.finalized)
+        {
+            counterparty_terminal = true;
+            break;
+        }
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(attacker_owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(counterparty, false),
+                AccountMeta::new(counterparty_destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        );
+        match result {
+            Ok(_) => counterparty_steps += 1,
+            Err(error) => panic!(
+                "the losing counterparty must be allowed to make terminal progress before the LP retry: {error}"
+            ),
+        }
+    }
+    assert!(
+        counterparty_terminal,
+        "the favorable resolved-close ordering did not dispose the losing counterparty in 64 steps"
+    );
+    let counterparty_payout =
+        env.token_amount(counterparty_destination) - counterparty_destination_before;
+    assert!(
+        counterparty_payout > 0,
+        "the counterparty should exit with its residual principal before the LP retry"
+    );
+    eprintln!(
+        "counterparty resolved first in {counterparty_steps} steps with payout={counterparty_payout}"
+    );
+
+    let destination = env.token_account(lp_owner.pubkey(), 0);
+    let destination_before = env.token_amount(destination);
+    let mut terminal = false;
+    let mut resolved_steps = 0usize;
+    let mut max_resolved_cu = 0u64;
+    for step in 0..64 {
+        let state = env.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&state);
+        if percolator::active_bitmap_is_empty(active_bitmap(&state))
+            && state.capital.get() == 0
+            && state.pnl.get() == 0
+            && (!receipt.present || receipt.finalized)
+        {
+            terminal = true;
+            break;
+        }
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(lp_owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        );
+        match result {
+            Ok(cu) => {
+                resolved_steps += 1;
+                max_resolved_cu = max_resolved_cu.max(cu);
+            }
+            Err(error) => {
+                eprintln!("resolved close step {step}: {error}");
+                break;
+            }
+        }
+    }
+    if !terminal {
+        let state = env.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&state);
+        terminal = percolator::active_bitmap_is_empty(active_bitmap(&state))
+            && state.capital.get() == 0
+            && state.pnl.get() == 0
+            && (!receipt.present || receipt.finalized);
+    }
+    eprintln!(
+        "resolved unwind: terminal={terminal} steps={resolved_steps} max_cu={max_resolved_cu} payout={}",
+        env.token_amount(destination) - destination_before
+    );
+    let resolved_state = env.portfolio_state(portfolio);
+    eprintln!(
+        "resolved residue: active={} capital={} pnl={} receipt={:?} occupied_domains={:?}",
+        percolator::active_bitmap_count_ones(active_bitmap(&resolved_state)),
+        resolved_state.capital.get(),
+        resolved_state.pnl.get(),
+        resolved_receipt(&resolved_state),
+        resolved_state
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .map(|source| (source.domain.get(), source.source_claim_bound_num.get()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        terminal,
+        "resolved close did not provide a bounded terminal escape from source-domain churn"
+    );
 }
 
 fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
