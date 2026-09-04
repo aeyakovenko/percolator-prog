@@ -14180,6 +14180,7 @@ fn build_underfunded_live_reference_prefix(
         bridge_disposition,
         trade_route,
         backing_plan,
+        2,
         UnderfundedAuxiliaryExit::BilateralTrade,
     )
 }
@@ -14265,6 +14266,7 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
     bridge_disposition: UnderfundedBridgeDisposition,
     trade_route: TradeRoute,
     backing_plan: UnderfundedBackingPlan,
+    bridge_asset: usize,
     auxiliary_exit: UnderfundedAuxiliaryExit,
 ) -> Result<ScenarioRunner, String> {
     const JUNIOR_WINNER: usize = 0;
@@ -14273,7 +14275,6 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
     const BACKED_LOSER: usize = 3;
     const PROVIDER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
     const BACKED_ASSET: usize = 1;
-    const BRIDGE_ASSET: usize = 2;
     const JUNIOR_DOMAIN: u16 = 1;
     const BACKED_DOMAIN: u16 = 3;
     const INITIAL_PRICE: u64 = 100;
@@ -14347,7 +14348,7 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
             trade_route,
             BACKED_WINNER,
             JUNIOR_LOSER,
-            vec![(BRIDGE_ASSET, EXTRA_BACKED_SIZE_Q)],
+            vec![(bridge_asset, EXTRA_BACKED_SIZE_Q)],
             0,
             0,
             true,
@@ -14359,7 +14360,7 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
             trade_route,
             JUNIOR_WINNER,
             PROVIDER,
-            vec![(BRIDGE_ASSET, BRIDGE_SIZE_Q)],
+            vec![(bridge_asset, BRIDGE_SIZE_Q)],
             0,
             0,
             true,
@@ -14383,10 +14384,11 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
         let slot = 2 + u64::try_from(offset).expect("bounded INV-086 mark sequence");
         bounded_reference_push_mark(&mut runner, 0, slot, mark)?;
         bounded_reference_push_mark(&mut runner, BACKED_ASSET as u16, slot, mark)?;
-        if bridge_disposition != UnderfundedBridgeDisposition::None
-            || backing_plan.extra_backed_trade
+        if (bridge_disposition != UnderfundedBridgeDisposition::None
+            || backing_plan.extra_backed_trade)
+            && bridge_asset != BACKED_ASSET
         {
-            bounded_reference_push_mark(&mut runner, BRIDGE_ASSET as u16, slot, mark)?;
+            bounded_reference_push_mark(&mut runner, bridge_asset as u16, slot, mark)?;
         }
         for actor in [JUNIOR_LOSER, JUNIOR_WINNER, BACKED_LOSER, BACKED_WINNER] {
             runner
@@ -14423,7 +14425,7 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
                     trade_route,
                     BACKED_WINNER,
                     JUNIOR_LOSER,
-                    vec![(BRIDGE_ASSET, -EXTRA_BACKED_SIZE_Q)],
+                    vec![(bridge_asset, -EXTRA_BACKED_SIZE_Q)],
                     0,
                     0,
                     true,
@@ -14438,7 +14440,7 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
                 };
                 drive_underfunded_recovery_pair(
                     &mut runner,
-                    BRIDGE_ASSET,
+                    bridge_asset,
                     order,
                     &format!("INV-066 auxiliary Recovery winner_first={winner_first}"),
                 )?;
@@ -14456,7 +14458,7 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
             trade_route,
             JUNIOR_WINNER,
             PROVIDER,
-            vec![(BRIDGE_ASSET, -BRIDGE_SIZE_Q)],
+            vec![(bridge_asset, -BRIDGE_SIZE_Q)],
             0,
             0,
             true,
@@ -14753,6 +14755,7 @@ fn build_underfunded_resolved_reference_seed_with_auxiliary_exit(
         UnderfundedBridgeDisposition::None,
         TradeRoute::NoCpi,
         backing_plan,
+        2,
         auxiliary_exit,
     )?;
 
@@ -14865,7 +14868,10 @@ fn finish_close_to_partial_receipt_composition(
     mut runner: ScenarioRunner,
     expectation: CloseBridgeExpectation,
     expected_close_asset: usize,
+    minimum_source_claim_domains: usize,
     terminal_cleanup_slot: Option<u64>,
+    pre_cleanup_scan_slot: Option<u64>,
+    require_full_backing_partition: bool,
 ) -> Result<CloseToPartialReceiptEvidence, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
@@ -14909,9 +14915,9 @@ fn finish_close_to_partial_receipt_composition(
         .iter()
         .filter(|source| source.positive_claim_bound_num != 0)
         .count();
-    if source_claim_domain_count < 3 {
+    if source_claim_domain_count < minimum_source_claim_domains {
         return Err(format!(
-            "INV-086 close bridge did not retain the independent underfunded claims: domains={source_claim_domain_count}"
+            "INV-086 close bridge did not retain the independent underfunded claims: domains={source_claim_domain_count}, required={minimum_source_claim_domains}"
         ));
     }
 
@@ -15037,7 +15043,13 @@ fn finish_close_to_partial_receipt_composition(
     let mut slab_close_compute_units = 0u64;
     let mut slab_closed = false;
     if let Some(terminal_cleanup_slot) = terminal_cleanup_slot {
-        runner.env.warp_to_slot(terminal_cleanup_slot);
+        let initial_cleanup_slot = pre_cleanup_scan_slot.unwrap_or(terminal_cleanup_slot);
+        if initial_cleanup_slot > terminal_cleanup_slot {
+            return Err(format!(
+                "INV-070 terminal pre-scan slot {initial_cleanup_slot} exceeds cleanup slot {terminal_cleanup_slot}"
+            ));
+        }
+        runner.env.warp_to_slot(initial_cleanup_slot);
         for actor in 0..PRIMARY_ACTOR_COUNT {
             let close = runner
                 .env
@@ -15074,9 +15086,9 @@ fn finish_close_to_partial_receipt_composition(
         if !fresh_terminal_backing.is_empty()
             && fresh_terminal_backing
                 .iter()
-                .all(|bucket| terminal_cleanup_slot < bucket.expiry_slot)
+                .all(|bucket| initial_cleanup_slot < bucket.expiry_slot)
         {
-            let market_before_scan = runner
+            let mut market_before_scan = runner
                 .env
                 .svm
                 .get_account(&runner.env.market)
@@ -15087,52 +15099,61 @@ fn finish_close_to_partial_receipt_composition(
                 .get_account(&runner.env.vault)
                 .ok_or("INV-070 pre-expiry vault account missing")?;
             let supply_before_scan = runner.env.mint_supply();
-            let scan = runner
-                .env
-                .close_primary_slab()
-                .map_err(|error| format!("INV-070 pre-expiry terminal scan: {error}"))?;
-            max_compute_units = max_compute_units.max(scan.compute_units);
-            let market_after_scan = runner
-                .env
-                .svm
-                .get_account(&runner.env.market)
-                .ok_or("INV-070 pre-expiry market account disappeared")?;
-            let scan_cfg = {
-                let mut decoded = market_after_scan.data.clone();
-                let (cfg, _) = state::market_view_mut(&mut decoded)
-                    .map_err(|error| format!("INV-070 pre-expiry cursor decode: {error:?}"))?;
-                cfg
-            };
-            if market_after_scan == market_before_scan
-                || scan_cfg.terminal_slab_scan_progress == 0
-                || runner.env.svm.get_account(&runner.env.vault) != Some(vault_before_scan)
-                || runner.env.mint_supply() != supply_before_scan
-            {
-                return Err(format!(
-                    "INV-070 pre-expiry scan did not park before live backing without moving custody: cursor={}",
-                    scan_cfg.terminal_slab_scan_progress
-                ));
+            let mut parked = false;
+            for scan_step in 0..=before_backing_cleanup.assets.len() {
+                match runner.env.close_primary_slab() {
+                    Ok(scan) => {
+                        max_compute_units = max_compute_units.max(scan.compute_units);
+                        let market_after_scan = runner
+                            .env
+                            .svm
+                            .get_account(&runner.env.market)
+                            .ok_or("INV-070 pre-expiry market account disappeared")?;
+                        let scan_cfg = {
+                            let mut decoded = market_after_scan.data.clone();
+                            let (cfg, _) =
+                                state::market_view_mut(&mut decoded).map_err(|error| {
+                                    format!("INV-070 pre-expiry cursor decode: {error:?}")
+                                })?;
+                            cfg
+                        };
+                        if market_after_scan == market_before_scan
+                            || scan_cfg.terminal_slab_scan_progress == 0
+                            || runner.env.svm.get_account(&runner.env.vault)
+                                != Some(vault_before_scan.clone())
+                            || runner.env.mint_supply() != supply_before_scan
+                        {
+                            return Err(format!(
+                                "INV-070 pre-expiry scan step {scan_step} did not progress toward live backing without moving custody: cursor={}",
+                                scan_cfg.terminal_slab_scan_progress
+                            ));
+                        }
+                        market_before_scan = market_after_scan;
+                        slab_progress_steps += 1;
+                    }
+                    Err(_) => {
+                        if runner.env.svm.get_account(&runner.env.market)
+                            != Some(market_before_scan.clone())
+                            || runner.env.svm.get_account(&runner.env.vault)
+                                != Some(vault_before_scan.clone())
+                            || runner.env.mint_supply() != supply_before_scan
+                        {
+                            return Err(
+                                "INV-070 blocked pre-expiry CloseSlab did not roll back exactly"
+                                    .to_string(),
+                            );
+                        }
+                        parked = true;
+                        break;
+                    }
+                }
             }
-            slab_progress_steps += 1;
-
-            let market_before_blocked = market_after_scan;
-            let vault_before_blocked = runner
-                .env
-                .svm
-                .get_account(&runner.env.vault)
-                .ok_or("INV-070 pre-expiry blocked vault account missing")?;
-            let supply_before_blocked = runner.env.mint_supply();
-            runner.env.close_primary_slab().expect_err(
-                "INV-070 cursor parked on live backing must reject, not succeed as a no-op",
-            );
-            if runner.env.svm.get_account(&runner.env.market) != Some(market_before_blocked)
-                || runner.env.svm.get_account(&runner.env.vault) != Some(vault_before_blocked)
-                || runner.env.mint_supply() != supply_before_blocked
-            {
-                return Err(
-                    "INV-070 blocked pre-expiry CloseSlab did not roll back exactly".to_string(),
-                );
+            if !parked {
+                return Err("INV-070 pre-expiry CloseSlab did not park on live backing".into());
             }
+        }
+        if pre_cleanup_scan_slot.is_some() {
+            runner.env.warp_to_slot(terminal_cleanup_slot);
         }
         for (domain, bucket) in before_backing_cleanup
             .source_backing_buckets
@@ -15278,7 +15299,9 @@ fn finish_close_to_partial_receipt_composition(
             .checked_add(terminal_insurance_withdrawn)
             .and_then(|value| value.checked_add(slab_custody_burned))
             .ok_or("INV-070 terminal custody partition overflow")?;
-        if backing_total != final_engine_vault || custody_total != final_spl_vault {
+        if (require_full_backing_partition && backing_total != final_engine_vault)
+            || custody_total != final_spl_vault
+        {
             return Err(format!(
                 "INV-070 terminal custody partition drifted: backing={terminal_backing_withdrawn}+{terminal_backing_expired}, custody={terminal_backing_withdrawn}+{terminal_insurance_withdrawn}+{slab_custody_burned}, expected={final_engine_vault}/{final_spl_vault}"
             ));
@@ -15321,27 +15344,41 @@ pub fn verify_close_to_partial_receipt_composition() -> Result<CloseToPartialRec
         TradeRoute::NoCpi,
         DEFAULT_UNDERFUNDED_BACKING_PLAN,
     )?;
-    finish_close_to_partial_receipt_composition(runner, CloseBridgeExpectation::Pending, 2, None)
+    finish_close_to_partial_receipt_composition(
+        runner,
+        CloseBridgeExpectation::Pending,
+        2,
+        3,
+        None,
+        None,
+        true,
+    )
 }
 
 fn verify_one_liquidation_to_partial_receipt_composition(
     route: TradeRoute,
     insurance_atoms: u16,
     terminal_cleanup_slot: Option<u64>,
+    bridge_asset: usize,
+    backing_plan: UnderfundedBackingPlan,
+    minimum_source_claim_domains: usize,
+    pre_cleanup_scan_slot: Option<u64>,
+    require_full_backing_partition: bool,
 ) -> Result<LiquidationToPartialReceiptEvidence, String> {
     const CLOSE_LOSER: usize = UNDERFUNDED_TERMINAL_UNRELATED_ACTOR;
-    const BRIDGE_ASSET: usize = 2;
     const MAX_LIQUIDATION_STEPS: usize = 16;
 
     let mut seed = [0x8c; 32];
     seed[0] ^= u8::try_from(route.index()).expect("four trade routes fit u8");
-    let mut runner = build_underfunded_live_reference_prefix(
+    let mut runner = build_underfunded_live_reference_prefix_with_auxiliary_exit(
         seed,
         UnderfundedBridgeDisposition::PermissionlessLiquidation,
         route,
-        DEFAULT_UNDERFUNDED_BACKING_PLAN,
+        backing_plan,
+        bridge_asset,
+        UnderfundedAuxiliaryExit::BilateralTrade,
     )?;
-    let (bridge_loser_domain, _) = v16_domain_pair_for_asset_index(BRIDGE_ASSET)
+    let (bridge_loser_domain, _) = v16_domain_pair_for_asset_index(bridge_asset)
         .map_err(|error| format!("INV-086 bridge domain mapping: {error:?}"))?;
     if insurance_atoms != 0 {
         runner.run_safety_prefix(&[Action::TopUpInsurance {
@@ -15358,16 +15395,16 @@ fn verify_one_liquidation_to_partial_receipt_composition(
             group_before.insurance_domain_budget[bridge_loser_domain]
         ));
     }
-    let pre_liquidation_effective_oi = group_before.assets[BRIDGE_ASSET].oi_eff_long_q;
+    let pre_liquidation_effective_oi = group_before.assets[bridge_asset].oi_eff_long_q;
     if pre_liquidation_effective_oi == 0
-        || pre_liquidation_effective_oi != group_before.assets[BRIDGE_ASSET].oi_eff_short_q
-        || runner.positions[CLOSE_LOSER][BRIDGE_ASSET] == 0
+        || pre_liquidation_effective_oi != group_before.assets[bridge_asset].oi_eff_short_q
+        || runner.positions[CLOSE_LOSER][bridge_asset] == 0
     {
         return Err(format!(
             "INV-086 liquidation bridge did not retain matched live exposure: oi_long={}, oi_short={}, position={}",
             pre_liquidation_effective_oi,
-            group_before.assets[BRIDGE_ASSET].oi_eff_short_q,
-            runner.positions[CLOSE_LOSER][BRIDGE_ASSET]
+            group_before.assets[bridge_asset].oi_eff_short_q,
+            runner.positions[CLOSE_LOSER][bridge_asset]
         ));
     }
     let close_before = runner
@@ -15418,7 +15455,7 @@ fn verify_one_liquidation_to_partial_receipt_composition(
     }
 
     let (_, group_after) = runner.env.primary_market_state();
-    let post_liquidation_effective_oi = group_after.assets[BRIDGE_ASSET].oi_eff_long_q;
+    let post_liquidation_effective_oi = group_after.assets[bridge_asset].oi_eff_long_q;
     let insurance_spent = group_after.insurance_domain_spent[bridge_loser_domain]
         .checked_sub(domain_spent_before_liquidation)
         .ok_or("INV-086 liquidation bridge insurance-spent counter decreased")?;
@@ -15444,7 +15481,7 @@ fn verify_one_liquidation_to_partial_receipt_composition(
     let liquidation_created_close = close_after.active
         && close_after.finalized
         && !close_after.canceled
-        && close_after.asset_index == BRIDGE_ASSET as u32
+        && close_after.asset_index == bridge_asset as u32
         && close_after.gross_loss_at_close_start != 0
         && close_after.residual_remaining == 0
         && runner.positions[CLOSE_LOSER]
@@ -15469,8 +15506,11 @@ fn verify_one_liquidation_to_partial_receipt_composition(
     let terminal = finish_close_to_partial_receipt_composition(
         runner,
         CloseBridgeExpectation::Finalized,
-        BRIDGE_ASSET,
+        bridge_asset,
+        minimum_source_claim_domains,
         terminal_cleanup_slot,
+        pre_cleanup_scan_slot,
+        require_full_backing_partition,
     )?;
     Ok(LiquidationToPartialReceiptEvidence {
         route,
@@ -15498,7 +15538,18 @@ pub fn verify_liquidation_to_partial_receipt_compositions(
         TradeRoute::BatchCpi,
     ]
     .into_iter()
-    .map(|route| verify_one_liquidation_to_partial_receipt_composition(route, 0, None))
+    .map(|route| {
+        verify_one_liquidation_to_partial_receipt_composition(
+            route,
+            0,
+            None,
+            2,
+            DEFAULT_UNDERFUNDED_BACKING_PLAN,
+            3,
+            None,
+            true,
+        )
+    })
     .collect()
 }
 
@@ -15511,7 +15562,18 @@ pub fn verify_insurance_liquidation_to_partial_receipt_compositions(
         TradeRoute::BatchCpi,
     ]
     .into_iter()
-    .map(|route| verify_one_liquidation_to_partial_receipt_composition(route, 123, Some(12)))
+    .map(|route| {
+        verify_one_liquidation_to_partial_receipt_composition(
+            route,
+            123,
+            Some(12),
+            2,
+            DEFAULT_UNDERFUNDED_BACKING_PLAN,
+            3,
+            None,
+            true,
+        )
+    })
     .collect()
 }
 
@@ -15534,9 +15596,32 @@ pub fn verify_expired_backing_terminal_cleanup_compositions(
                 route,
                 123,
                 Some(terminal_cleanup_slot),
+                2,
+                DEFAULT_UNDERFUNDED_BACKING_PLAN,
+                3,
+                None,
+                true,
             )
         })
         .collect()
+}
+
+pub fn verify_terminal_slab_revisits_prior_recredit_after_later_expiry(
+) -> Result<LiquidationToPartialReceiptEvidence, String> {
+    verify_one_liquidation_to_partial_receipt_composition(
+        TradeRoute::NoCpi,
+        123,
+        Some(13),
+        1,
+        UnderfundedBackingPlan {
+            backed_atoms: 123,
+            extra_backing: Some((5, 750, 13)),
+            extra_backed_trade: false,
+        },
+        2,
+        Some(12),
+        false,
+    )
 }
 
 fn verify_one_unattributed_loss_liquidation(
