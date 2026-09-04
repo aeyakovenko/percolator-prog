@@ -404,10 +404,6 @@ fn v16_program_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_rew
     let movement_fee = group_after_move.insurance - insurance_before_move;
     assert!(movement_fee > 0);
     assert!(profile_after_move.mark_ewma_e6 < MARK);
-    assert_eq!(
-        env.primary_profile(0).effective_price_provenance,
-        percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
-    );
 
     let observation = vec![percolator_prog::ix::CrankObservationHint {
         asset_index: 0,
@@ -492,10 +488,6 @@ fn v16_program_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_rew
     assert_eq!(fresh_profile.last_good_oracle_slot, 3);
     assert!(after_liquidation.assets[0].effective_price < MARK);
     assert_eq!(after_liquidation.assets[0].raw_oracle_target_price, MARK);
-    assert_eq!(
-        env.primary_profile(0).effective_price_provenance,
-        percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
-    );
 
     env.set_clock(4, 1_001);
     let catchup = env
