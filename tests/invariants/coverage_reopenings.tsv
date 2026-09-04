@@ -3,10 +3,10 @@
 # status remains OPEN until a generic invariant-owned generator/oracle (not the finding PoC)
 # fails on the vulnerable pin, the production fix lands, and the unchanged oracle passes.
 pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	required_generic_property	status
-410	LoF	PRIVILEGED	INV-024	INV-024,INV-064	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	OPEN
-411	LoF	PRIVILEGED	INV-014	INV-010,INV-014,INV-036,INV-047	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
-412	LoF	BLOCKER	INV-012	INV-004,INV-010,INV-012	capability+x-automatic-revocation+x-episode	retained-capability-cannot-cross-any-authority-revoking-state-transition	OPEN
-413	LoF	BLOCKER	INV-027	INV-027,INV-053,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
+410	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-036,INV-081	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	OPEN
+411	LoF	PRIVILEGED	INV-014	INV-005,INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-081	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
+412	LoF	BLOCKER	INV-012	INV-004,INV-005,INV-010,INV-012,INV-024,INV-081	capability+x-automatic-revocation+x-episode	retained-capability-cannot-cross-any-authority-revoking-state-transition	OPEN
+413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
 414	LoF	PRIVILEGED	INV-012	INV-002,INV-007,INV-012,INV-019,INV-089	capability+x-asset-reuse+x-generation	capabilities-bind-every-replaceable-economic-object-incarnation	OPEN
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN
 416	LoF	PRIVILEGED	INV-005	INV-005,INV-020,INV-024,INV-027,INV-055	cold-admin+x-funded-role+x-authority-containment	correctly-signed-role-management-cannot-seize-an-incumbent-funded-role	OPEN
