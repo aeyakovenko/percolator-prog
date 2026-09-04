@@ -543,9 +543,9 @@ pub mod state {
         pub permissionless_resolve_stale_slots: u64,
         pub force_close_delay_slots: u64,
         pub last_good_oracle_slot: u64,
-        // Program-owned next-asset index for bounded terminal scans; zero starts a scan. The
-        // engine never advances this cursor past still-live backing, so it remains complete when
-        // authenticated time changes between transactions.
+        // Program-owned next-asset index for bounded terminal scans; zero starts a scan.
+        // Backing expiry restarts the scan because newly released residual can make an earlier
+        // asset's insurance overlap recreditable.
         pub terminal_slab_scan_progress: u128,
         // Remaining reserved wire space from the removed insurance-withdraw policy.
         pub _reserved_insurance_withdraw_max_bps: u16,
@@ -11077,9 +11077,8 @@ pub mod processor {
                     state::write_wrapper_config(&mut market_data, &cfg)?;
                     return Ok(());
                 }
-                TerminalSlabOutcomeV16::BackingExpired { domain } => {
-                    cfg.terminal_slab_scan_progress =
-                        encode_terminal_slab_scan_progress(domain / 2, configured_assets)?;
+                TerminalSlabOutcomeV16::BackingExpired { .. } => {
+                    cfg.terminal_slab_scan_progress = 0;
                     drop(group);
                     state::write_wrapper_config(&mut market_data, &cfg)?;
                     return Ok(());

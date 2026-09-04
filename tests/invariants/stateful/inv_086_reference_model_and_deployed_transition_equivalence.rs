@@ -160,6 +160,7 @@ use crate::support::fuzz_model::{
     verify_expired_backing_terminal_cleanup_compositions,
     verify_insurance_liquidation_to_partial_receipt_compositions,
     verify_liquidation_to_partial_receipt_compositions,
+    verify_terminal_slab_revisits_prior_recredit_after_later_expiry,
 };
 
 #[test]
@@ -523,6 +524,35 @@ fn expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup
     assert!(
         normalized.windows(2).all(|pair| pair[0] == pair[1]),
         "opening transport or exact/late expiry changed terminal economics: {discoveries:?}"
+    );
+}
+
+#[test]
+fn terminal_slab_revisits_earlier_recredit_after_later_backing_expiry() {
+    let evidence = verify_terminal_slab_revisits_prior_recredit_after_later_expiry()
+        .expect("public terminal cleanup with an earlier overlap and later expiring backing");
+
+    // Public calls first park the bounded scan on live backing at a later asset. Once that
+    // backing expires, the released residual must be applied to every earlier insurance overlap
+    // before any remaining custody is retired.
+    assert_eq!(
+        (
+            evidence.insurance_spent,
+            evidence.terminal.terminal_backing_withdrawn,
+            evidence.terminal.terminal_backing_expired,
+            evidence.terminal.terminal_insurance_withdrawn,
+            evidence.terminal.slab_progress_steps,
+            evidence.terminal.slab_custody_burned,
+            evidence.terminal.slab_closed,
+        ),
+        (123, 0, 750, 123, 4, 628, true),
+        "backing expiry must restart the terminal scan before custody can be retired: {evidence:?}",
+    );
+    assert!(
+        evidence.terminal.max_compute_units < 1_400_000
+            && evidence.terminal.slab_close_compute_units != 0
+            && evidence.terminal.slab_close_compute_units < 1_400_000,
+        "the restarted bounded scan must retain transaction headroom: {evidence:?}",
     );
 }
 
