@@ -233,14 +233,13 @@ fn v16_program_close_slab_rejects_until_market_has_zero_terminal_residue() {
     assert_closed_market_tombstone(&closed_market);
 }
 
-// RED regression for INV-070/073: an unprivileged permissionless-asset creator can choose an
-// effectively unbounded backing expiry. Once the market resolves, the honest market authority
-// cannot withdraw or rotate that funded role, and CloseSlab parks on the live bucket. The control
-// at the end proves the backing authority's signature is the only difference between the blocked
-// terminal state and successful closure. All setup and transitions use public instructions; the
-// only fixture writes construct ordinary external SPL accounts and their matching mint supply.
+// INV-070/073 regression: an unprivileged permissionless-asset creator can choose an effectively
+// unbounded backing expiry. Once all user claims are gone, any caller can pay the exact principal
+// to a token account owned by the configured provider and release terminal cleanup without the
+// provider's signature. All setup and transitions use public instructions; the only fixture writes
+// construct ordinary external SPL accounts and their matching mint supply.
 #[test]
-fn v16_red_future_backing_expiry_requires_malicious_authority_for_terminal_close() {
+fn v16_future_backing_principal_is_permissionlessly_payable_at_terminal_close() {
     const INIT_FEE: u128 = 10;
     const USER_CAPITAL: u128 = 1_000;
     const BACKING_PRINCIPAL: u128 = 1;
@@ -416,9 +415,7 @@ fn v16_red_future_backing_expiry_requires_malicious_authority_for_terminal_close
     let parked_market = env.svm.get_account(&env.market).unwrap();
     let parked_vault = env.svm.get_account(&env.vault).unwrap();
     let parked_destination = env.svm.get_account(&admin_destination).unwrap();
-    let parked_result = close_slab(&mut env);
-    let parked_succeeded = parked_result.is_ok();
-    let parked = parked_result.expect_err("live future backing must park CloseSlab");
+    let parked = close_slab(&mut env).expect_err("live future backing must park CloseSlab");
     assert!(
         parked.contains("Custom(21)"),
         "unexpected parked error: {parked}"
@@ -432,14 +429,11 @@ fn v16_red_future_backing_expiry_requires_malicious_authority_for_terminal_close
 
     // Advancing beyond every configured wrapper timeout still leaves the attacker-selected expiry
     // live. Even the final predecessor slot cannot finish terminal cleanup.
-    let mut later_close_succeeded = false;
     for slot in [PROTOCOL_TIMEOUT_HORIZON, u64::MAX - 1] {
         env.svm.warp_to_slot(slot);
         let before_market = env.svm.get_account(&env.market).unwrap();
         let before_vault = env.svm.get_account(&env.vault).unwrap();
-        let blocked_result = close_slab(&mut env);
-        later_close_succeeded |= blocked_result.is_ok();
-        let blocked = blocked_result
+        let blocked = close_slab(&mut env)
             .expect_err("no honest bounded CloseSlab can pass the future-expiry bucket");
         assert!(
             blocked.contains("Custom(21)"),
@@ -454,29 +448,28 @@ fn v16_red_future_backing_expiry_requires_malicious_authority_for_terminal_close
     let before_admin_withdraw_market = env.svm.get_account(&env.market).unwrap();
     let before_admin_withdraw_vault = env.svm.get_account(&env.vault).unwrap();
     env.svm.expire_blockhash();
-    let admin_withdraw_result = env.send(
-        ProgInstruction::WithdrawBackingBucket {
-            domain: LONG_DOMAIN,
-            market_id: env.asset_market_id(ASSET_INDEX),
-            authority_epoch: env.withdrawal_authority_epoch(
-                admin.pubkey(),
-                ASSET_INDEX as usize,
-                false,
-            ),
-            amount: BACKING_PRINCIPAL,
-        },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(admin_backing_destination, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&admin],
-    );
-    let admin_withdraw_succeeded = admin_withdraw_result.is_ok();
-    let admin_withdraw = admin_withdraw_result
+    let admin_withdraw = env
+        .send(
+            ProgInstruction::WithdrawBackingBucket {
+                domain: LONG_DOMAIN,
+                market_id: env.asset_market_id(ASSET_INDEX),
+                authority_epoch: env.withdrawal_authority_epoch(
+                    admin.pubkey(),
+                    ASSET_INDEX as usize,
+                    false,
+                ),
+                amount: BACKING_PRINCIPAL,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(admin_backing_destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
         .expect_err("resolved market authority must not impersonate the backing authority");
     assert!(
         admin_withdraw.contains("Custom(8)"),
@@ -492,20 +485,59 @@ fn v16_red_future_backing_expiry_requires_malicious_authority_for_terminal_close
     );
     assert_eq!(env.token_amount(admin_backing_destination), 0);
 
+    // Permissionless settlement is destination-confined: naming the real provider without its
+    // signature does not authorize redirecting that provider's principal to the market admin.
+    let before_redirect_market = env.svm.get_account(&env.market).unwrap();
+    let before_redirect_vault = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let redirected = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: LONG_DOMAIN,
+            market_id: env.asset_market_id(ASSET_INDEX),
+            authority_epoch: env.withdrawal_authority_epoch(
+                attacker.pubkey(),
+                ASSET_INDEX as usize,
+                false,
+            ),
+            amount: BACKING_PRINCIPAL,
+        },
+        vec![
+            AccountMeta::new_readonly(attacker.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(admin_backing_destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        redirected.is_err(),
+        "terminal provider principal cannot be redirected"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_redirect_market
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        before_redirect_vault
+    );
+    assert_eq!(env.token_amount(admin_backing_destination), 0);
+
     // Nor can the honest market authority rotate a funded per-asset backing role to a rescue key.
     let rescue = Keypair::new();
     env.ensure_signer_account(rescue.pubkey());
     let before_rotation = env.svm.get_account(&env.market).unwrap();
-    let rotation_result = env.try_update_per_asset_authority_with_cu(
-        &admin,
-        Some(&rescue),
-        ASSET_INDEX,
-        processor::ASSET_AUTH_BACKING_BUCKET,
-        rescue.pubkey().to_bytes(),
-    );
-    let rotation_succeeded = rotation_result.is_ok();
-    let rotation =
-        rotation_result.expect_err("marketauth must not seize a funded local backing role");
+    let rotation = env
+        .try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(&rescue),
+            ASSET_INDEX,
+            processor::ASSET_AUTH_BACKING_BUCKET,
+            rescue.pubkey().to_bytes(),
+        )
+        .expect_err("marketauth must not seize a funded local backing role");
     assert!(
         rotation.contains("Custom(8)"),
         "unexpected market-authority rotation error: {rotation}",
@@ -529,6 +561,8 @@ fn v16_red_future_backing_expiry_requires_malicious_authority_for_terminal_close
         "ClosePortfolio credits its exact rent to the market slab",
     );
     assert_eq!(vault_lamports_before, initial_vault_lamports);
+    assert_eq!(stranded_user_claim_atoms, 0);
+    assert_eq!(recovered_protocol_atoms, INIT_FEE as u64);
     assert_eq!(
         stranded_total_lamports,
         stranded_initial_market_lamports
@@ -536,9 +570,9 @@ fn v16_red_future_backing_expiry_requires_malicious_authority_for_terminal_close
             + initial_vault_lamports,
     );
 
-    // Non-vacuous control: at the same authenticated slot, the malicious backing authority can
-    // withdraw its single atom. The very next CloseSlab burns the protocol fee, closes custody, and
-    // refunds exactly the previously stranded market/vault lamports to the honest market authority.
+    // At the same authenticated slot, an honest caller supplies the configured provider pubkey and
+    // a provider-owned destination but no provider signature. The payout cannot be redirected, and
+    // the next CloseSlab can close custody and refund the previously stranded rent.
     let attacker_destination = env.token_account(attacker.pubkey(), 0);
     env.svm.expire_blockhash();
     env.send(
@@ -553,16 +587,16 @@ fn v16_red_future_backing_expiry_requires_malicious_authority_for_terminal_close
             amount: BACKING_PRINCIPAL,
         },
         vec![
-            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new_readonly(attacker.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(attacker_destination, false),
             AccountMeta::new(env.vault, false),
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
-        &[&attacker],
+        &[],
     )
-    .expect("the malicious backing authority alone can release the terminal lock");
+    .expect("any caller can pay the exact terminal principal to the configured provider");
     assert_eq!(
         env.token_amount(attacker_destination),
         BACKING_PRINCIPAL as u64
@@ -587,29 +621,10 @@ fn v16_red_future_backing_expiry_requires_malicious_authority_for_terminal_close
         stranded_total_lamports,
         "successful terminal cleanup refunds exactly market slab plus vault rent",
     );
-
-    let honest_bounded_terminal_path_exists = first_close_reached_terminal
-        || parked_succeeded
-        || later_close_succeeded
-        || admin_withdraw_succeeded
-        || rotation_succeeded;
-    assert!(
-        honest_bounded_terminal_path_exists,
-        "RED INV-070/073: expiry=u64::MAX left user_claims={stranded_user_claim_atoms}, \
-         attacker_backing={BACKING_PRINCIPAL}, stranded_protocol_atoms={stranded_protocol_atoms}, \
-         recovered_protocol_atoms={recovered_protocol_atoms}, \
-         initial_market_refund_lamports={stranded_initial_market_lamports}, \
-         closed_portfolio_rent_lamports={stranded_closed_portfolio_lamports}, \
-         vault_rent_lamports={vault_lamports_before}, refundable_market_lamports={stranded_market_lamports}, \
-         total_stranded_lamports={stranded_total_lamports}; CloseSlab stayed LockActive through \
-         slot {}, marketauth withdrawal and funded-role rotation both rejected, and only the \
-         malicious backing authority released the terminal lock",
-        u64::MAX - 1,
-    );
 }
 
 #[test]
-fn v16_red_expired_provider_earnings_require_malicious_authority_for_terminal_close() {
+fn v16_expired_provider_earnings_are_permissionlessly_payable_at_terminal_close() {
     const INITIAL_PRICE: u64 = 100;
     const SOURCE_POSITION_Q: i128 = 200 * POS_SCALE as i128;
     const HEDGE_POSITION_Q: i128 = 100 * POS_SCALE as i128;
@@ -876,6 +891,55 @@ fn v16_red_expired_provider_earnings_require_malicious_authority_for_terminal_cl
         .contains("Custom(21)"));
     assert_eq!(env.svm.get_account(&env.market).unwrap(), rotation_before);
 
+    // The permissionless terminal branch pays only the configured provider. A caller cannot pair
+    // the provider identity with a market-admin destination and redirect earned fees.
+    let redirect_market_before = env.svm.get_account(&env.market).unwrap();
+    let redirect_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let redirect_ledger_before = env.svm.get_account(&ledger).unwrap();
+    env.svm.expire_blockhash();
+    let redirected = env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: DOMAIN,
+            market_id: env.asset_market_id(ASSET_INDEX),
+            authority_epoch: env.withdrawal_authority_epoch(
+                provider.pubkey(),
+                ASSET_INDEX as usize,
+                false,
+            ),
+            amount: expired.backing_provider_earnings_total,
+        },
+        vec![
+            AccountMeta::new_readonly(provider.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new(admin_earnings_destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        redirected.is_err(),
+        "terminal provider earnings cannot be redirected"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        redirect_market_before
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        redirect_vault_before
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        redirect_ledger_before
+    );
+    assert_eq!(env.token_amount(admin_earnings_destination), 0);
+
+    // Preserve the provider's earned entitlement while removing its signature as a terminal
+    // liveness dependency: any caller may transfer the exact claim only to a provider-owned token
+    // account once the market is Resolved and claim-free.
     let provider_destination = env.token_account(provider.pubkey(), 0);
     env.svm.expire_blockhash();
     env.send(
@@ -890,7 +954,7 @@ fn v16_red_expired_provider_earnings_require_malicious_authority_for_terminal_cl
             amount: expired.backing_provider_earnings_total,
         },
         vec![
-            AccountMeta::new(provider.pubkey(), true),
+            AccountMeta::new_readonly(provider.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(ledger, false),
             AccountMeta::new(provider_destination, false),
@@ -898,22 +962,15 @@ fn v16_red_expired_provider_earnings_require_malicious_authority_for_terminal_cl
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
-        &[&provider],
+        &[],
     )
-    .expect("the malicious provider alone can clear its expired terminal earnings");
+    .expect("any caller can pay terminal earnings to the configured provider");
     assert_eq!(
         env.token_amount(provider_destination),
         expired.backing_provider_earnings_total as u64,
     );
-    close_slab(&mut env).expect("terminal cleanup succeeds after provider cooperation");
+    close_slab(&mut env).expect("terminal cleanup succeeds after permissionless provider payout");
     assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
-
-    panic!(
-        "RED INV-070/073: public fees left {} provider-earnings atoms after expiry; user payouts={payouts:?}, claim-free vault={}, expired principal={}, and only the independent provider could release terminal CloseSlab",
-        expired.backing_provider_earnings_total,
-        claim_free.vault,
-        claim_free.source_backing_buckets[DOMAIN as usize].fresh_unliened_backing_num / BOUND_SCALE,
-    );
 }
 
 #[test]

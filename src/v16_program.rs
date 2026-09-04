@@ -10265,6 +10265,32 @@ pub mod processor {
     const DOMAIN_WITHDRAW_AUTH_INSURANCE: u8 = 0;
     const DOMAIN_WITHDRAW_AUTH_BACKING: u8 = 1;
 
+    fn terminal_backing_provider_payout_is_permissionless_view(
+        group: &state::MarketViewMutV16<'_>,
+        backing_authority: &[u8; 32],
+        authority: &AccountInfo<'_>,
+    ) -> bool {
+        group.header.mode == 1
+            && group.header.materialized_portfolio_count.get() == 0
+            && group.header.c_tot.get() == 0
+            && live_authority_matches(backing_authority, authority.key)
+    }
+
+    fn terminal_backing_provider_payout_is_permissionless(
+        market_ai: &AccountInfo<'_>,
+        authority: &AccountInfo<'_>,
+        domain: usize,
+    ) -> Result<bool, ProgramError> {
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (cfg, group) = state::market_view_mut(&mut market_data)?;
+        let authorities = domain_authorities_from_view(&group, &cfg, domain)?;
+        Ok(terminal_backing_provider_payout_is_permissionless_view(
+            &group,
+            &authorities.backing_bucket_authority,
+            authority,
+        ))
+    }
+
     #[inline(never)]
     fn verify_domain_withdrawal_preflight<'a>(
         program_id: &Pubkey,
@@ -10493,7 +10519,6 @@ pub mod processor {
         let vault_authority_ai = account(accounts, 4)?;
         let token_program = account(accounts, 5)?;
         let ledger_ai = accounts.get(6);
-        expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_writable(dest_token)?;
         expect_writable(vault_token)?;
@@ -10508,6 +10533,11 @@ pub mod processor {
         }
 
         let domain_usize = domain as usize;
+        let terminal_permissionless =
+            terminal_backing_provider_payout_is_permissionless(market_ai, authority, domain_usize)?;
+        if !terminal_permissionless {
+            expect_signer(authority)?;
+        }
         let (bump, amount_u64) = verify_domain_withdrawal_preflight(
             program_id,
             market_ai,
@@ -10541,6 +10571,15 @@ pub mod processor {
             };
             let local_authorized =
                 live_authority_matches(&authorities.backing_bucket_authority, authority.key);
+            if !authority.is_signer
+                && !terminal_backing_provider_payout_is_permissionless_view(
+                    &group,
+                    &authorities.backing_bucket_authority,
+                    authority,
+                )
+            {
+                expect_signer(authority)?;
+            }
             let admin_shutdown_authorized =
                 shutdown_drain && live_authority_matches(&cfg.marketauth, authority.key);
             if !local_authorized && !admin_shutdown_authorized {
@@ -10636,7 +10675,6 @@ pub mod processor {
         let vault_token = account(accounts, 4)?;
         let vault_authority_ai = account(accounts, 5)?;
         let token_program = account(accounts, 6)?;
-        expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_writable(ledger_ai)?;
         expect_writable(dest_token)?;
@@ -10649,6 +10687,11 @@ pub mod processor {
         }
 
         let domain_usize = domain as usize;
+        let terminal_permissionless =
+            terminal_backing_provider_payout_is_permissionless(market_ai, authority, domain_usize)?;
+        if !terminal_permissionless {
+            expect_signer(authority)?;
+        }
         let (bump, amount_u64) = verify_domain_withdrawal_preflight(
             program_id,
             market_ai,
@@ -10682,6 +10725,15 @@ pub mod processor {
             };
             let local_authorized =
                 live_authority_matches(&authorities.backing_bucket_authority, authority.key);
+            if !authority.is_signer
+                && !terminal_backing_provider_payout_is_permissionless_view(
+                    &group,
+                    &authorities.backing_bucket_authority,
+                    authority,
+                )
+            {
+                expect_signer(authority)?;
+            }
             let admin_shutdown_authorized =
                 shutdown_drain && live_authority_matches(&cfg.marketauth, authority.key);
             if !local_authorized && !admin_shutdown_authorized {
