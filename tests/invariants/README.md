@@ -99,6 +99,15 @@ capabilities across every automatic revocation/incarnation writer, canonical ari
 across arbitrary route interleavings, and authenticated-observation completeness before favorable
 account actions.
 
+The first coverage repair now has reproducible generic red/green evidence. The invariant-owned
+`v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` generator added retained CPI
+taker-fee histories to the existing actor-entitlement matrix. Without changing its generator or
+oracle, the minimized public LiteSVM history fails on vulnerable wrapper pin `d5e2ec6f` and passes
+on PR411 fix pin `370eb6ab`. This repairs one omitted route/policy-order cell for INV-005, INV-010,
+INV-011, INV-014, INV-024, INV-036, INV-047, and INV-081. Those rows remain `REOPENED` because the
+same generic cross-products are not yet complete for every retained fee-bearing route and because
+the production fix has not landed on the branch's base.
+
 The detailed tranche notes below are historical evidence records. Their original use of words such
 as "closed" or "closure" is superseded by `invariant_status.tsv` and the audit ledger; it means only
 that the named bounded tranche had no known counterexample at that checkpoint.
