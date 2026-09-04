@@ -1770,6 +1770,222 @@ fn v16_program_micro_price_schedule_is_partition_invariant_and_eventually_progre
     assert_eq!(eager.vault_tokens, delayed.vault_tokens);
 }
 
+#[derive(Debug)]
+struct TradeInterleavedPriceRemainderOutcome {
+    effective_price: u64,
+    price_move_remainder_bps_num: u16,
+    victim_withdrawn: u128,
+    attacker_withdrawn: u128,
+    wash_withdrawn: u128,
+    vault_tokens: u64,
+    max_trade_cu: u64,
+    max_crank_cu: u64,
+}
+
+fn run_trade_interleaved_price_remainder_world(
+    trade_before_crank: bool,
+) -> TradeInterleavedPriceRemainderOutcome {
+    const PRICE: u64 = 100;
+    const TARGET: u64 = 200;
+    const FINAL_SLOT: u64 = 5;
+    const DEPOSIT: u128 = 1_000_000;
+    const MAIN_Q: i128 = 100 * POS_SCALE as i128;
+    const WASH_STEP_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 24,
+        max_accrual_dt_slots: 20,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let victim_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let wash_long_owner = Keypair::new();
+    let wash_short_owner = Keypair::new();
+    let observer_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    let wash_long = env.create_portfolio(&wash_long_owner);
+    let wash_short = env.create_portfolio(&wash_short_owner);
+    let observer = env.create_portfolio(&observer_owner);
+    for (owner, portfolio) in [
+        (&victim_owner, victim),
+        (&attacker_owner, attacker),
+        (&wash_long_owner, wash_long),
+        (&wash_short_owner, wash_short),
+    ] {
+        env.deposit(owner, portfolio, DEPOSIT);
+    }
+    let (matcher_context, matcher_delegate, _) =
+        env.init_matcher_context_authorized(matcher_program, &victim_owner, victim);
+    // The victim authorizes a passive LP once. Only the attacker signs either CPI trade.
+    env.trade_cpi_with_cu(
+        &attacker_owner,
+        attacker,
+        &victim_owner,
+        victim,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        -MAIN_Q,
+        0,
+    );
+    env.trade_with_cu(
+        &wash_long_owner,
+        wash_long,
+        &wash_short_owner,
+        wash_short,
+        WASH_STEP_Q * i128::from(FINAL_SLOT - 1),
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, TARGET);
+    env.svm.expire_blockhash();
+    let mut max_crank_cu = env.crank(
+        observer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    let mut max_trade_cu = 0;
+
+    for slot in 2..=FINAL_SLOT {
+        env.svm.warp_to_slot(slot);
+        if !trade_before_crank {
+            env.svm.expire_blockhash();
+            max_crank_cu = max_crank_cu.max(env.crank(
+                observer,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            ));
+        }
+        env.svm.expire_blockhash();
+        max_trade_cu = max_trade_cu.max(env.trade_with_cu(
+            &wash_long_owner,
+            wash_long,
+            &wash_short_owner,
+            wash_short,
+            -WASH_STEP_Q,
+            PRICE,
+            0,
+        ));
+        if trade_before_crank {
+            env.svm.expire_blockhash();
+            if let Some(cu) = env.crank_if_actionable(
+                observer,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            ) {
+                max_crank_cu = max_crank_cu.max(cu);
+            }
+        }
+    }
+
+    env.svm.expire_blockhash();
+    max_trade_cu = max_trade_cu.max(env.trade_cpi_with_cu(
+        &attacker_owner,
+        attacker,
+        &victim_owner,
+        victim,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        MAIN_Q,
+        0,
+    ));
+    let mut destinations = Vec::new();
+    for (owner, portfolio) in [
+        (&victim_owner, victim),
+        (&attacker_owner, attacker),
+        (&wash_long_owner, wash_long),
+        (&wash_short_owner, wash_short),
+    ] {
+        for _ in 0..8 {
+            env.svm.expire_blockhash();
+            if env
+                .crank_if_actionable(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: FINAL_SLOT,
+                        observations: crank_observations(0),
+                    },
+                )
+                .is_none()
+            {
+                break;
+            }
+        }
+        let before_convert = env.portfolio_state(portfolio);
+        if before_convert.pnl.get() > 0 {
+            env.convert_released_pnl_with_cu(
+                owner,
+                portfolio,
+                u128::try_from(before_convert.pnl.get()).unwrap(),
+            );
+        }
+        let after_convert = env.portfolio_state(portfolio);
+        assert_eq!(after_convert.pnl.get(), 0);
+        destinations.push(env.withdraw(owner, portfolio, after_convert.capital.get()));
+    }
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    TradeInterleavedPriceRemainderOutcome {
+        effective_price: env.market_state().1.assets[0].effective_price,
+        price_move_remainder_bps_num: profile.price_move_remainder_bps_num,
+        victim_withdrawn: u128::from(env.token_amount(destinations[0])),
+        attacker_withdrawn: u128::from(env.token_amount(destinations[1])),
+        wash_withdrawn: u128::from(env.token_amount(destinations[2]))
+            + u128::from(env.token_amount(destinations[3])),
+        vault_tokens: env.token_amount(env.vault),
+        max_trade_cu,
+        max_crank_cu,
+    }
+}
+
+#[test]
+fn v16_attack_risk_reducing_trade_cannot_erase_canonical_price_movement_remainder() {
+    let canonical = run_trade_interleaved_price_remainder_world(false);
+    let interleaved = run_trade_interleaved_price_remainder_world(true);
+    eprintln!("canonical={canonical:?}\ninterleaved={interleaved:?}");
+
+    assert_eq!(canonical.effective_price, 101);
+    assert_eq!(canonical.price_move_remainder_bps_num, 2_000);
+    assert_eq!(canonical.victim_withdrawn, 1_000_100);
+    assert_eq!(canonical.attacker_withdrawn, 999_900);
+    assert_eq!(canonical.wash_withdrawn, 2_000_000);
+    assert_eq!(canonical.vault_tokens, 0);
+    assert_eq!(
+        canonical.victim_withdrawn + canonical.attacker_withdrawn + canonical.wash_withdrawn,
+        4_000_000
+    );
+    assert_eq!(interleaved.victim_withdrawn, canonical.victim_withdrawn);
+    assert_eq!(interleaved.attacker_withdrawn, canonical.attacker_withdrawn);
+    assert_eq!(interleaved.wash_withdrawn, canonical.wash_withdrawn);
+    assert_eq!(interleaved.vault_tokens, canonical.vault_tokens);
+    assert_eq!(interleaved.effective_price, canonical.effective_price);
+    assert_eq!(
+        interleaved.price_move_remainder_bps_num,
+        canonical.price_move_remainder_bps_num
+    );
+    assert!(interleaved.max_trade_cu < 1_400_000);
+    assert!(canonical.max_crank_cu < 1_400_000);
+}
+
 #[test]
 fn v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account() {
     let mut env = V16CuEnv::new();
