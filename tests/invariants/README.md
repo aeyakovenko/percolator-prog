@@ -4578,6 +4578,33 @@ Uncovered products include route-family interleavings, changing loss denominator
 carry, repeated ratio/top-up episodes and combined multi-asset/maximum-shape histories. Reordered
 authenticated events are not equivalent partitions; noncommuting results need explicit envelopes.
 
+**Bounded-patch assessment at `0963a10d`, 2026-09-07: docs only.** No non-duplicative executable
+slice was identified within the stateful INV-038 file plus registry/documentation write scope.
+[fuzz_model.rs](../support/fuzz_model.rs) derives `junior_residual` from custody minus observed
+stocks, so rerunning that census cannot independently identify rounding origin or reject a
+reclassification into senior value. `PublicTraceStep` records instruction/account identities,
+token deltas and rejection frames, but not successful prefix snapshots of B carries, source claims
+or receipt rates. The public B seed used by the CU INV-038 fixture lives in the separate `v16_cu`
+binary, and that booking oracle intentionally holds the loss-weight denominator fixed.
+
+The blocker is reusable public construction plus independent prefix observation/attribution, not
+another engine arithmetic proof or a production residue ledger. A pure quotient/remainder model
+would duplicate INV-085 unless it is tied back to deployed public execution.
+
+**Next non-duplicative slice:** first expose a reusable public B seed and transaction observer under
+shared-helper ownership. Then bound one asset/side and a small funded cohort, establish nonzero
+carry, and enumerate short histories that interleave booking, account settlement and an admitted
+owner reduction before zero-OI cleanup. Require an actual loss-weight denominator change while
+carry remains; a rejected reduction or unchanged denominator does not count. Check every successful
+setup/helper/history step against a source- and actor-keyed reference using
+[reference_math.rs](../support/reference_math.rs), including `X = sum(allocations) + residue`,
+units/denominator bounds and exact persisted carry disposition. Keep outstanding B carry/dust/
+explicit loss distinct from cash residue; classify cash residue only as
+`SettlementRoundingResidue` or `UnallocatedProtocolSurplus` and independently exclude credits to
+health, backing, insurance capacity, payout entitlement and senior capital. Check exact tracked
+rollback on errors and a bounded honest completion. Vary side, chunk boundary and route order;
+receipt/top-up, funding, additional assets and maximum-shape products remain separate gaps.
+
 ### INV-059 executing evidence and F plan
 
 Traceability review, 2026-09-07: the INV-059 M row in `special_method_coverage.tsv` now selects
