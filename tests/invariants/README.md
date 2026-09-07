@@ -4533,6 +4533,42 @@ Benchmark bookkeeping requires the unified roster to have zero `Missing` and zer
 regression` entries and the executable manifest to have zero `Missing` and zero `Quarantined`
 entries. These are necessary snapshot checks, not sufficient evidence of invariant completion.
 
+### INV-002 generated mixed-generation histories
+
+The executable owner
+[`v16_program_generated_mixed_generation_batches_preserve_retained_scope`](stateful/inv_002_asset_generation_binding.rs)
+adds a shrinkable public-history partition beyond the existing one-leg generation replay matrix.
+Each history performs two to five retire/reactivate cycles over the two non-base slots, retaining
+signed two-leg BatchTradeCpi or BatchTradeNoCpi requests before each cycle. Every retained batch
+combines that slot's generation with the unchanged base asset, with generated leg order, sign,
+quantity, transport, and immediate or delayed delivery. Pending messages can span further reuse
+events in either slot; they are submitted unchanged and only once, so duplicate-signature caching
+cannot supply the generation-rejection evidence.
+
+A separate ledger starts from public creation identities and advances the generation frontier
+only on successful public activation. After each post-setup public instruction it checks generations, portfolio
+identities and position epochs, signed positions, OI, unchanged capital/PnL, activation-fee custody,
+and SPL supply. Each stale batch must return AssetGenerationMismatch and preserve the full tracked
+account/metadata/matcher/SPL/economic-lamport frame, excluding the transaction fee payer. An
+unchanged-asset request retained by a disjoint funded pair before the whole history must still
+execute on its generated single/batch CPI/no-CPI route. The last batch then succeeds with only its
+generation fields repaired and a new signature, preserving its original position epochs, matcher
+grant, signed quantities and limits. These positive controls distinguish per-leg identity checks
+from blanket invalidation or another stale authorization field masking the test.
+
+The default campaign uses 32 seeded ChaCha cases and at most 64 shrink iterations, configurable by
+`PERCOLATOR_FUZZ_CASES` and `PERCOLATOR_FUZZ_SHRINK_ITERS`. On base `2f56c118`, the new owner passes
+on freshly rebuilt default-feature SBF `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`:
+128 slot reuses and exact stale-batch rejections, 64 funded fills, 69 deliveries after additional
+reuse, and 26 histories switching batch transport. All 16 slot/transport/leg-order/sign cells and
+all four unchanged-scope transports occur in that seeded run; this is not their exhaustive history
+product. This is a bounded wrapper F increment:
+three asset slots, two-leg batches, two funded pairs, quantities of one through eight POS_SCALE,
+price 100, zero trade/funding/maintenance fees, and an explicit honest base-mark refresh before the
+funded controls. Validator blockhash age, partial fills, capability expiry, nonzero economic caps,
+populated retirement, other identity writers and maximum shapes remain outside this owner. It
+reuses the pinned engine contracts and neither duplicates INV-009/011/012 nor promotes any status.
+
 ### INV-009 executing evidence and F plan
 
 Traceability review, 2026-09-07: the INV-009 M registry now points at the executing
