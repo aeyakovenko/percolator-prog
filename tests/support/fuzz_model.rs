@@ -17822,7 +17822,22 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
     })
 }
 
-fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunner, u128), String> {
+/// Public active close before its first B booking, with an independently funded live cohort.
+/// Actors 0/1 own the close; actor 2 is on `winner_side` and actor 3 is its matched peer.
+/// Construction uses the existing public close runner and its per-transition global checks.
+pub fn public_b_close_seed(
+    winner_side: SideV16,
+    cohort_q: u128,
+    public_b_chunk_atoms: u128,
+) -> Result<V16Svm, String> {
+    Ok(build_public_b_close_seed(winner_side, cohort_q, public_b_chunk_atoms)?.env)
+}
+
+fn build_public_b_close_seed(
+    winner_side: SideV16,
+    cohort_q: u128,
+    public_b_chunk_atoms: u128,
+) -> Result<ScenarioRunner, String> {
     const CLOSE_WINNER: usize = 0;
     const CLOSE_LOSER: usize = 1;
     const B_OWNER: usize = 2;
@@ -17839,6 +17854,7 @@ fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunne
         initial_margin_bps: 1_000,
         actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
         actor_token_balances: [1_000_000, 161_600, 2_000_000, 1_000_000, 1],
+        public_b_chunk_atoms,
         ..MarketConfig::default()
     };
     let seed_byte = match winner_side {
@@ -17847,9 +17863,10 @@ fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunne
     };
     let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
 
+    let cohort_q = i128::try_from(cohort_q).map_err(|_| "public B cohort quantity overflow")?;
     let independent_q = match winner_side {
-        SideV16::Long => POS_SCALE as i128 / 2,
-        SideV16::Short => -(POS_SCALE as i128 / 2),
+        SideV16::Long => cohort_q,
+        SideV16::Short => -cohort_q,
     };
     if !runner.execute_trade(
         TradeRoute::NoCpi,
@@ -17873,6 +17890,16 @@ fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunne
         TradeRoute::NoCpi,
         winner_side,
     )?;
+
+    Ok(runner)
+}
+
+fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunner, u128), String> {
+    const CLOSE_LOSER: usize = 1;
+    const B_OWNER: usize = 2;
+    const ASSET: usize = 0;
+    let mut runner =
+        build_public_b_close_seed(winner_side, POS_SCALE / 2, percolator::MAX_VAULT_TVL)?;
 
     for step in 0..32 {
         let close = runner

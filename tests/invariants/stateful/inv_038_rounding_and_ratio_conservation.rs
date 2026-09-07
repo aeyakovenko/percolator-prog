@@ -29,6 +29,13 @@
 //! `v16_program_zero_move_dust_prefix_cannot_consume_later_ewma_capacity` proves a one-quantum
 //! prefix that produces no mark movement also consumes no movement fee, lock, or discovery slot;
 //! the remainder reaches the same mark and custody state as the aggregate fill.
+//! `v16_program_b_carry_survives_admitted_owner_weight_changes` adds one bounded public
+//! booking/settlement/reduction history on the short loss side. A close-loss-origin ledger checks
+//! scaled B allocations, retained liability
+//! carry, actual owner PnL and unchanged capital at every post-seed transaction through zero OI.
+//! It distinguishes a successful reduction that retains weight from a later nonzero denominator
+//! change with nonzero market and leg carry. K/F seed construction remains separately owned;
+//! this is not a mixed funding/receipt generator or a cash-residue classification proof.
 //! Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -51,6 +58,482 @@ const TRADE_ROUTES: [TradeRoute; 4] = [
     TradeRoute::BatchNoCpi,
     TradeRoute::BatchCpi,
 ];
+
+#[derive(Clone)]
+struct BHistorySnapshot {
+    group: state::MarketGroupV16,
+    accounts: Vec<state::PortfolioAccountV16>,
+}
+
+impl BHistorySnapshot {
+    fn read(env: &V16Svm) -> Self {
+        Self {
+            group: env.primary_market_state().1,
+            accounts: (0..env.actors.len())
+                .map(|actor| env.primary_portfolio(actor))
+                .collect(),
+        }
+    }
+
+    fn leg(&self, actor: usize) -> Option<percolator::PortfolioLegV16> {
+        self.accounts[actor]
+            .legs
+            .iter()
+            .map(|leg| leg.try_to_runtime().unwrap())
+            .find(|leg| leg.active && leg.asset_index == 0)
+    }
+
+    // Both carries are liability numerators, not collateral atoms or payout entitlements.
+    fn side(&self, side: usize) -> (u128, u128, u128, u128, u128) {
+        let asset = self.group.assets[0];
+        if side == 0 {
+            (
+                asset.loss_weight_sum_long,
+                asset.b_long_num,
+                asset.social_loss_remainder_long_num,
+                asset.social_loss_dust_long_num,
+                asset.explicit_unallocated_loss_long,
+            )
+        } else {
+            (
+                asset.loss_weight_sum_short,
+                asset.b_short_num,
+                asset.social_loss_remainder_short_num,
+                asset.social_loss_dust_short_num,
+                asset.explicit_unallocated_loss_short,
+            )
+        }
+    }
+}
+
+fn b_side(side: percolator::SideV16) -> usize {
+    usize::from(side == percolator::SideV16::Short)
+}
+
+fn b_account_value(account: &state::PortfolioAccountV16) -> i128 {
+    i128::try_from(account.capital.get())
+        .unwrap()
+        .checked_add(account.pnl.get())
+        .unwrap()
+}
+
+/// One-asset observer reusable across public crank/reduction schedules after K/F settlement.
+/// The origin is the close's outstanding loss, not custody minus observed senior stocks.
+struct PublicBHistoryObserver {
+    booked: [u128; 2],
+    allocated: [u128; 2],
+    capital: Vec<u128>,
+    values: Vec<i128>,
+    steps: usize,
+    rejected: usize,
+    bookings: usize,
+    settlements: usize,
+    health_checks: usize,
+}
+
+impl PublicBHistoryObserver {
+    fn new(env: &V16Svm) -> Self {
+        let snapshot = BHistorySnapshot::read(env);
+        let out = Self {
+            booked: [0; 2],
+            allocated: [0; 2],
+            capital: snapshot
+                .accounts
+                .iter()
+                .map(|account| account.capital.get())
+                .collect(),
+            values: snapshot.accounts.iter().map(b_account_value).collect(),
+            steps: 0,
+            rejected: 0,
+            bookings: 0,
+            settlements: 0,
+            health_checks: 0,
+        };
+        out.verify(&snapshot).expect("zero-B origin");
+        out
+    }
+
+    fn verify(&self, snapshot: &BHistorySnapshot) -> Result<(), String> {
+        for (actor, account) in snapshot.accounts.iter().enumerate() {
+            if b_account_value(account) != self.values[actor]
+                || account.capital.get() != self.capital[actor]
+            {
+                return Err(format!(
+                    "B actor {actor} value: actual={}, expected={}",
+                    b_account_value(account),
+                    self.values[actor]
+                ));
+            }
+        }
+        for side in 0..2 {
+            let (_, index, remainder, dust, explicit) = snapshot.side(side);
+            if dust >= percolator::SOCIAL_LOSS_DEN {
+                return Err("B dust escaped its collateral-atom denominator".into());
+            }
+            let mut outstanding = remainder + dust + explicit * percolator::SOCIAL_LOSS_DEN;
+            for actor in 0..snapshot.accounts.len() {
+                if let Some(leg) = snapshot.leg(actor).filter(|leg| b_side(leg.side) == side) {
+                    if leg.b_rem >= percolator::SOCIAL_LOSS_DEN {
+                        return Err("B leg carry escaped its collateral-atom denominator".into());
+                    }
+                    let asset = snapshot.group.assets[0];
+                    let (epoch, prior_index) = if side == 0 {
+                        (asset.epoch_long, asset.b_epoch_start_long_num)
+                    } else {
+                        (asset.epoch_short, asset.b_epoch_start_short_num)
+                    };
+                    let target = if leg.b_epoch_snap == epoch {
+                        index
+                    } else {
+                        if leg.b_epoch_snap.checked_add(1) != Some(epoch) {
+                            return Err(
+                                "B observer only admits current or immediate reset epochs".into()
+                            );
+                        }
+                        prior_index
+                    };
+                    let gap = target
+                        .checked_sub(leg.b_snap)
+                        .ok_or("B snapshot passed target")?;
+                    outstanding += leg.loss_weight * gap + leg.b_rem;
+                }
+            }
+            if self.booked[side] * percolator::SOCIAL_LOSS_DEN
+                != self.allocated[side] * percolator::SOCIAL_LOSS_DEN + outstanding
+            {
+                return Err(format!(
+                    "B side {side}: origin={}, allocated={}, outstanding_num={outstanding}",
+                    self.booked[side], self.allocated[side]
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn step(&mut self, env: &mut V16Svm, actor: usize, reduce_q: Option<u128>) -> bool {
+        use crate::support::fuzz_model::assert_current_certificate_matches_snapshot_full_refresh;
+        use crate::support::reference_math;
+
+        let before = BHistorySnapshot::read(env);
+        self.verify(&before).expect("B prefix before transaction");
+        let tokens = env.all_token_account_data();
+        let keys = std::iter::once(env.market)
+            .chain(env.actors.iter().map(|actor| actor.portfolio))
+            .chain([env.foreign_market, env.foreign_actor.portfolio])
+            .collect::<Vec<_>>();
+        let raw = keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>();
+        let result = if let Some(q) = reduce_q {
+            env.rebalance_reduce(actor, 0, q).map(Some)
+        } else {
+            env.crank_if_actionable(
+                actor,
+                env.current_slot(),
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+        };
+        self.steps += 1;
+        let after = BHistorySnapshot::read(env);
+        assert_eq!(
+            env.all_token_account_data(),
+            tokens,
+            "B history cannot move SPL value"
+        );
+        let landed = result.unwrap_or_else(|error| {
+            panic!(
+                "B step {} actor {actor} reduce={reduce_q:?}: {error}",
+                self.steps
+            )
+        });
+        for (index, key) in keys.iter().enumerate() {
+            if landed.is_none() || (*key != env.market && *key != env.actors[actor].portfolio) {
+                assert_eq!(
+                    env.svm.get_account(key),
+                    raw[index],
+                    "B rejected/unrelated account frame"
+                );
+            }
+        }
+        if let Some(tx) = landed {
+            assert!(tx.compute_units < TX_CU_LIMIT);
+        } else {
+            self.rejected += 1;
+            return false;
+        }
+        assert_eq!(after.group.vault, before.group.vault);
+        assert_eq!(after.group.vault, u128::from(env.token_amount(env.vault)));
+        assert_eq!(after.group.insurance, before.group.insurance);
+        assert_eq!(
+            after.group.insurance_domain_budget,
+            before.group.insurance_domain_budget
+        );
+        assert_eq!(
+            after.group.backing_provider_earnings_total,
+            before.group.backing_provider_earnings_total
+        );
+        assert_eq!(&after.group.assets[1..], &before.group.assets[1..]);
+
+        let old_close = before.accounts[1].close_progress.try_to_runtime().unwrap();
+        let new_close = after.accounts[1].close_progress.try_to_runtime().unwrap();
+        let booked = old_close
+            .residual_remaining
+            .checked_sub(new_close.residual_remaining)
+            .unwrap();
+        assert_eq!(new_close.b_loss_booked - old_close.b_loss_booked, booked);
+        assert_eq!(new_close.close_id, old_close.close_id);
+        assert_eq!(new_close.domain_side, old_close.domain_side);
+        assert_eq!(new_close.market_id, old_close.market_id);
+        assert_eq!(
+            new_close.gross_loss_at_close_start,
+            old_close.gross_loss_at_close_start
+        );
+        assert_eq!(
+            (
+                new_close.support_consumed,
+                new_close.junior_face_burned,
+                new_close.insurance_spent,
+                new_close.explicit_loss_assigned,
+                new_close.drift_consumed
+            ),
+            (0, 0, 0, 0, 0)
+        );
+        let loss_side = b_side(old_close.domain_side);
+        if booked != 0 {
+            assert_eq!(actor, 1);
+            assert_eq!(
+                booked,
+                old_close
+                    .residual_remaining
+                    .min(before.group.config.public_b_chunk_atoms)
+            );
+            let (weight, index, carry, _, _) = before.side(loss_side);
+            let (new_weight, new_index, new_carry, _, _) = after.side(loss_side);
+            assert_eq!(weight, new_weight);
+            let (q, r) = reference_math::mul_div_floor_with_remainder(
+                booked,
+                percolator::SOCIAL_LOSS_DEN,
+                weight,
+            )
+            .unwrap();
+            assert_eq!(new_index - index, q + (r + carry) / weight);
+            assert_eq!(new_carry, (r + carry) % weight);
+            self.booked[loss_side] += booked;
+            self.values[1] += i128::try_from(booked).unwrap();
+            assert!(
+                self.values[1] <= 0,
+                "booking may clear the close's loss, not create a claim"
+            );
+            self.bookings += 1;
+        }
+
+        for owner in 0..before.accounts.len() {
+            let mut settled = 0;
+            if let Some(leg) = before.leg(owner) {
+                let next = after.leg(owner);
+                let delta = next
+                    .map_or(before.side(b_side(leg.side)).1, |leg| leg.b_snap)
+                    .checked_sub(leg.b_snap)
+                    .expect("monotonic B account snapshot");
+                let (q, r) = reference_math::mul_div_floor_with_remainder(
+                    leg.loss_weight,
+                    delta,
+                    percolator::SOCIAL_LOSS_DEN,
+                )
+                .unwrap();
+                settled = q + (r + leg.b_rem) / percolator::SOCIAL_LOSS_DEN;
+                if let Some(next) = next {
+                    assert_eq!(next.b_rem, (r + leg.b_rem) % percolator::SOCIAL_LOSS_DEN);
+                }
+                self.allocated[b_side(leg.side)] += settled;
+                self.settlements += usize::from(settled != 0);
+            }
+            self.values[owner] -= i128::try_from(settled).unwrap();
+            assert!(
+                after.accounts[owner].capital.get() <= before.accounts[owner].capital.get(),
+                "B carry cannot credit senior capital"
+            );
+            self.health_checks += usize::from(
+                assert_current_certificate_matches_snapshot_full_refresh(
+                    "INV-038 B prefix",
+                    &env.svm.get_account(&env.market).unwrap().data,
+                    &env.primary_portfolio_data(owner),
+                )
+                .unwrap(),
+            );
+        }
+        if reduce_q.is_some() {
+            assert_eq!(
+                after.group.source_credit, before.group.source_credit,
+                "carry-only reduction cannot credit claims/backing"
+            );
+            assert_eq!(
+                after.group.source_backing_buckets,
+                before.group.source_backing_buckets
+            );
+        }
+        self.verify(&after).unwrap_or_else(|error| {
+            panic!(
+                "B step {} actor {actor} reduce={reduce_q:?}: {error}",
+                self.steps
+            )
+        });
+        assert_public_stock_census("INV-038 B prefix", env).unwrap();
+        true
+    }
+
+    fn settle(&mut self, env: &mut V16Svm, actors: &[usize]) {
+        for &actor in actors {
+            let mut complete = false;
+            for _ in 0..16 {
+                if !self.step(env, actor, None) {
+                    complete = true;
+                    break;
+                }
+            }
+            assert!(
+                complete,
+                "B actor {actor} exceeded the 16-call continuation bound"
+            );
+        }
+    }
+}
+
+#[test]
+fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
+    use crate::support::fuzz_model::public_b_close_seed;
+    use percolator::SideV16;
+
+    let side = SideV16::Short;
+    let chunk = 250_007;
+    let order = [3, 2, 0];
+    let mut env = public_b_close_seed(side, POS_SCALE / 2 + 3, chunk).unwrap();
+    // K/F belongs to the existing seed owner. Start the B ledger only after it is current.
+    for actor in [2, 3] {
+        let mut current = false;
+        for _ in 0..8 {
+            let tx = env
+                .crank_if_actionable(
+                    actor,
+                    env.current_slot(),
+                    vec![CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: 0,
+                    }],
+                )
+                .unwrap();
+            assert_public_stock_census("INV-038 pre-B K/F settlement", &env).unwrap();
+            if tx.is_none() {
+                current = true;
+                break;
+            }
+        }
+        assert!(current);
+    }
+    env.begin_public_trace();
+    let mut observer = PublicBHistoryObserver::new(&env);
+    assert!(observer.step(&mut env, 1, None));
+    observer.settle(&mut env, &order);
+    let before = BHistorySnapshot::read(&env);
+    assert!(observer.step(&mut env, 2, Some(POS_SCALE / 11)));
+    assert_eq!(
+        before.leg(2).unwrap().basis_pos_q.unsigned_abs()
+            - BHistorySnapshot::read(&env)
+                .leg(2)
+                .unwrap()
+                .basis_pos_q
+                .unsigned_abs(),
+        POS_SCALE / 11
+    );
+    assert_eq!(
+        BHistorySnapshot::read(&env).side(b_side(side)).0,
+        before.side(b_side(side)).0,
+        "active close retains loss weight despite position reduction"
+    );
+    for _ in 0..16 {
+        if env
+            .primary_portfolio(1)
+            .close_progress
+            .try_to_runtime()
+            .unwrap()
+            .finalized
+        {
+            break;
+        }
+        assert!(observer.step(&mut env, 1, None));
+        observer.settle(&mut env, &order);
+    }
+    assert!(
+        env.primary_portfolio(1)
+            .close_progress
+            .try_to_runtime()
+            .unwrap()
+            .finalized
+    );
+    let before = BHistorySnapshot::read(&env);
+    assert!(before.side(b_side(side)).2 > 0);
+    assert!(before.leg(2).unwrap().b_rem > 0);
+    assert!(observer.step(&mut env, 2, Some(POS_SCALE / 7)));
+    let after = BHistorySnapshot::read(&env);
+    let remaining_weight = crate::support::reference_math::mul_div_ceil(
+        after.leg(2).unwrap().basis_pos_q.unsigned_abs(),
+        percolator::SOCIAL_WEIGHT_SCALE,
+        after.leg(2).unwrap().a_basis,
+    )
+    .unwrap();
+    assert_eq!(after.leg(2).unwrap().loss_weight, remaining_weight);
+    assert_eq!(
+        after.side(b_side(side)).0,
+        before.side(b_side(side)).0 - before.leg(2).unwrap().loss_weight + remaining_weight
+    );
+    assert!(after.side(b_side(side)).0 < before.side(b_side(side)).0);
+    assert!(after.side(b_side(side)).0 > 0);
+    assert_eq!(after.side(b_side(side)).2, before.side(b_side(side)).2);
+    assert_eq!(after.leg(2).unwrap().b_rem, before.leg(2).unwrap().b_rem);
+    let remaining_q = after.leg(2).unwrap().basis_pos_q.unsigned_abs();
+    assert!(observer.step(&mut env, 2, Some(remaining_q)));
+    observer.settle(&mut env, &order);
+    observer.settle(&mut env, &[1]);
+    let terminal = BHistorySnapshot::read(&env);
+    assert_eq!(terminal.group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(terminal.group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(terminal.side(0).0, 0);
+    assert_eq!(terminal.side(1).0, 0);
+    assert!((0..env.actors.len()).all(|actor| terminal.leg(actor).is_none()));
+    assert_eq!(
+        terminal.side(b_side(side)).2,
+        after.side(b_side(side)).2,
+        "the live-side booking numerator remains an explicit liability at zero OI"
+    );
+    // Corrupt observations only, never deployed accounts. Conservation alone must not
+    // accept moving a claim atom into senior capital or transferring it to another owner.
+    let mut wrong = terminal.clone();
+    wrong.group.assets[0].social_loss_dust_long_num += 1;
+    assert!(observer.verify(&wrong).is_err());
+    let mut wrong = terminal.clone();
+    wrong.accounts[2].capital = percolator::V16PodU128::new(wrong.accounts[2].capital.get() + 1);
+    wrong.accounts[2].pnl = percolator::V16PodI128::new(wrong.accounts[2].pnl.get() - 1);
+    assert!(observer.verify(&wrong).is_err());
+    let mut wrong = terminal.clone();
+    wrong.accounts[2].pnl = percolator::V16PodI128::new(wrong.accounts[2].pnl.get() + 1);
+    wrong.accounts[0].pnl = percolator::V16PodI128::new(wrong.accounts[0].pnl.get() - 1);
+    assert!(observer.verify(&wrong).is_err());
+    eprintln!("INV-038 {side:?} chunk={chunk} order={order:?}: steps={}, rejected={}, bookings={}, settlements={}, health={}", observer.steps, observer.rejected, observer.bookings, observer.settlements, observer.health_checks);
+    assert!(observer.bookings > 1 && observer.settlements > 0 && observer.health_checks > 0);
+    assert!(observer.rejected > 0);
+    let trace = env.finish_public_trace();
+    trace.validate_public_execution().unwrap();
+    assert_eq!(trace.out_of_band_economic_mutations, 0);
+    assert_eq!(trace.steps.len(), observer.steps);
+    assert_eq!(
+        trace.steps.iter().filter(|step| !step.succeeded).count(),
+        observer.rejected
+    );
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EwmaFeeSegment {
