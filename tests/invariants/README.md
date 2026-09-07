@@ -12,6 +12,32 @@ interface, not from known findings. For each invariant, identify and exhaust its
 ordering, boundary, account-shape, and environmental partitions; a passing example, leaf proof, or
 file bearing the invariant number is not completion.
 
+Run a 24-hour agent loop under the scope and evidence rules in
+[`../../scripts/loop.md`](../../scripts/loop.md):
+
+1. The coordinating agent selects gaps from the invariant charter and public interface, then
+   assigns each subagent a narrow, non-overlapping invariant/route partition, explicit file
+   ownership, an independent oracle, and focused verification commands. Each agent works in a
+   separate worktree; shared helpers have one designated owner.
+2. Subagents return their scoped diff, invariant/partition coverage, exact commands and results,
+   and remaining gaps and assumptions. Only generic invariant-owned generators, oracles, and
+   proof/composition evidence count toward invariant coverage; finding-specific regressions and
+   duplicated evidence do not close gaps.
+3. The coordinating agent reviews every output before integration for normative fidelity, oracle
+   independence, public reachability, ownership overlap, production simplicity, and claim strength.
+   Integrate only accepted changes, then run the affected combined gates and update the evidence
+   ledger from observed results.
+4. Reassess the remaining gaps and repeat with fresh non-overlapping assignments until the
+   24-hour budget ends. Report reviewed and integrated work separately from pending agent output,
+   with exact verification results and unresolved gaps; elapsed time is not completion.
+
+Reuse pinned engine-owned proofs and contracts instead of duplicating engine-proof work. Wrapper
+coverage owns authentication, routing, account validation, CPI/token/oracle behavior, and
+composition with those engine contracts; make their assumptions explicit. Do not claim
+"exhaustive" or "10/10" invariant coverage without the whole-route proof and completion criteria
+below. Bounded exploration, passing test counts, and leaf proofs remain scoped evidence with
+explicit partitions, assumptions, and uncovered routes.
+
 Open security PRs are a sealed holdout dataset. During invariant development, do not inspect or
 cherry-pick their branches, diffs, fixes, tests, titles, or issue-specific reproductions. Freeze the
 finding-blind invariant suite first, then evaluate it against the holdout roster. A holdout finding
@@ -32,7 +58,7 @@ needed; deployed state and control flow should become smaller or more canonical.
 Completion requires all of the following. The repository does not currently satisfy these criteria:
 
 1. Every invariant is `PROVEN` or rigorously `N/A`; no `REOPENED` or merely `CONDITIONAL` row
-   remains. `PROVEN` requires the whole-route induction defined above, not artifact enumeration.
+   remains. `PROVEN` requires the whole-route induction defined below, not artifact enumeration.
 2. Every public instruction has whole-route success-postcondition and exact-error-rollback evidence,
    with all required verification methods from the charter accounted for.
 3. The frozen finding-blind suite independently rediscovers every qualifying holdout LoF, persistent
