@@ -15,6 +15,11 @@
 //! closed by INV-009's source-complete one-shot composition: a successful single-CPI partial
 //! consumes both signed episodes, any residual requires a new signature, and batch CPI is exact
 //! fill with aggregate slippage and fee caps.
+//! A bounded minimum-fee history matrix compares aggregate owner reductions with two freshly
+//! signed one-quantum reductions across changing transports, then one engine-selected full close.
+//! Both signs and four minimum/cap profiles retain the same projected economics despite rejected
+//! discovery and healthy retries; every world also reaches an exact funded owner withdrawal.
+//! This is finite metamorphic coverage, not randomized history closure or caller-sized liquidation.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -610,6 +615,280 @@ fn v16_program_new_liquidation_fee_episode_requires_new_authenticated_deficit() 
             "{route:?}: transport choice changed repeated-liquidation economics"
         );
     }
+}
+
+#[test]
+fn v16_program_minimum_fee_episode_histories_match_aggregate_close() {
+    const PRICE: u64 = 100;
+    const CAPITAL: u128 = 1_000;
+    const OPEN_Q: i128 = (10 * POS_SCALE) as i128;
+    let mut worlds = 0;
+    let mut rejections = 0;
+
+    for direction in [-1i128, 1] {
+        for (fee_bps, minimum, cap) in [(0, 1, 1), (0, 10, 10), (1, 10, 10), (1, 10, 11)] {
+            assert!(liquidation_fee_oracle(OPEN_Q as u128, PRICE, fee_bps, 0, cap) < minimum);
+            let mut aggregate = None;
+            // World zero aggregates the owner reduction. The others rotate all four transports.
+            for schedule in 0..=RepeatedLiquidationRoute::ALL.len() {
+                let case = format!(
+                    "direction={direction}, bps={fee_bps}, min={minimum}, cap={cap}, schedule={schedule}"
+                );
+                let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+                    min_nonzero_mm_req: 100,
+                    min_nonzero_im_req: 200,
+                    liquidation_fee_bps: fee_bps,
+                    liquidation_fee_cap: cap,
+                    min_liquidation_abs: minimum,
+                    max_price_move_bps_per_slot: 500,
+                    ..V16CuMarketParams::default()
+                });
+                env.configure_auth_mark_with_cu(0, PRICE);
+                let owner = Keypair::new();
+                let peer_owner = Keypair::new();
+                let target = env.create_portfolio(&owner);
+                let peer = env.create_portfolio(&peer_owner);
+                let target_token = env.deposit(&owner, target, CAPITAL);
+                let peer_token = env.deposit(&peer_owner, peer, 1_000_000);
+                let staging_owner = Keypair::new();
+                let staging = env.create_portfolio(&staging_owner);
+                let custody = |env: &V16CuEnv| {
+                    [env.vault, env.mint, target_token, peer_token]
+                        .map(|key| env.svm.get_account(&key).unwrap())
+                };
+                let initial_custody = custody(&env);
+                let initial_group = env.market_state().1;
+                let mut expected_fees = 0u128;
+                let assert_fees = |env: &V16CuEnv, fees: u128| {
+                    let group = env.market_state().1;
+                    assert!(fees <= cap, "{case}: cumulative configured episode cap");
+                    assert_eq!(group.insurance, initial_group.insurance + fees, "{case}");
+                    assert_eq!(group.c_tot, initial_group.c_tot - fees, "{case}");
+                    assert_eq!(
+                        env.portfolio_state(target).capital.get(),
+                        CAPITAL - fees,
+                        "{case}"
+                    );
+                    assert_eq!(env.portfolio_state(peer).capital.get(), 1_000_000, "{case}");
+                    assert_eq!(env.portfolio_state(target).pnl.get(), 0, "{case}");
+                    assert_eq!(env.portfolio_state(peer).pnl.get(), 0, "{case}");
+                    assert_eq!(group.vault, initial_group.vault, "{case}");
+                    assert_eq!(
+                        group.vault,
+                        u128::from(env.token_amount(env.vault)),
+                        "{case}"
+                    );
+                    assert_eq!(custody(env), initial_custody, "{case}");
+                };
+
+                execute_repeated_liquidation_trade(
+                    &mut env,
+                    RepeatedLiquidationRoute::TradeNoCpi,
+                    &owner,
+                    target,
+                    &peer_owner,
+                    peer,
+                    direction * OPEN_Q,
+                    PRICE,
+                );
+                assert_fees(&env, expected_fees);
+                let reductions = if schedule == 0 {
+                    vec![2i128]
+                } else {
+                    vec![1, 1]
+                };
+                let mut remaining_q = OPEN_Q;
+                for (step, quantity) in reductions.into_iter().enumerate() {
+                    let route = if schedule == 0 {
+                        RepeatedLiquidationRoute::TradeNoCpi
+                    } else {
+                        RepeatedLiquidationRoute::ALL[(schedule - 1 + step) % 4]
+                    };
+                    execute_repeated_liquidation_trade(
+                        &mut env,
+                        route,
+                        &owner,
+                        target,
+                        &peer_owner,
+                        peer,
+                        -direction * quantity,
+                        PRICE,
+                    );
+                    remaining_q -= quantity;
+                    assert_eq!(
+                        active_leg_for_asset(&env.portfolio_state(target), 0).basis_pos_q,
+                        direction * remaining_q,
+                        "{case}: each fresh signed reduction must execute exactly"
+                    );
+                    let group = env.market_state().1;
+                    assert_eq!(group.assets[0].oi_eff_long_q, remaining_q as u128, "{case}");
+                    assert_eq!(
+                        group.assets[0].oi_eff_short_q, remaining_q as u128,
+                        "{case}"
+                    );
+                    assert_fees(&env, expected_fees);
+                }
+
+                // Same-slot authenticated target lag changes risk, not marked PnL or funding.
+                let target_price = if direction < 0 { PRICE * 2 } else { 1 };
+                env.push_auth_mark_with_cu(0, target_price);
+                assert_fees(&env, expected_fees);
+                env.crank(
+                    staging,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 0,
+                        observations: crank_observations(0),
+                    },
+                );
+                assert_fees(&env, expected_fees);
+                let group = env.market_state().1;
+                assert_eq!(group.assets[0].effective_price, PRICE, "{case}");
+                assert_eq!(
+                    group.assets[0].raw_oracle_target_price, target_price,
+                    "{case}"
+                );
+
+                let metas = vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(target, false),
+                ];
+                let send = |env: &mut V16CuEnv, observations| {
+                    env.svm.expire_blockhash();
+                    env.send(
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot: 0,
+                            observations,
+                        },
+                        metas.clone(),
+                        &[],
+                    )
+                };
+                // Every crank writable except its network fee payer, plus unrelated accounts/custody.
+                let frame = |env: &V16CuEnv| {
+                    [
+                        env.market,
+                        target,
+                        peer,
+                        staging,
+                        owner.pubkey(),
+                        peer_owner.pubkey(),
+                        env.vault,
+                        env.mint,
+                        target_token,
+                        peer_token,
+                    ]
+                    .map(|key| env.svm.get_account(&key).unwrap())
+                };
+                for phase in 0..2 {
+                    if schedule != 0 {
+                        let before = frame(&env);
+                        let error = send(&mut env, crank_observations_for_assets(&[0, 0]))
+                            .expect_err("duplicate discovery must not consume a fee episode");
+                        assert!(
+                            error.contains(&format!(
+                                "Custom({})",
+                                PercolatorError::InvalidInstruction as u32
+                            )),
+                            "{case}: wrong discovery error: {error}"
+                        );
+                        assert_eq!(frame(&env), before, "{case}: phase={phase} exact rollback");
+                        assert_fees(&env, expected_fees);
+                        rejections += 1;
+                    }
+                    let cu = send(&mut env, crank_observations(0))
+                        .unwrap_or_else(|error| panic!("{case}, phase={phase}: {error}"));
+                    assert_cu_within("INV-059 minimum-fee episode history", cu, CRANK_CU_LIMIT);
+                    let account = env.portfolio_state(target);
+                    if phase == 0 {
+                        assert_eq!(
+                            active_leg_for_asset(&account, 0).basis_pos_q,
+                            direction * remaining_q,
+                            "{case}: refresh cannot close or charge"
+                        );
+                        assert!(health_cert(&account).certified_liq_deficit > 0, "{case}");
+                    } else {
+                        assert!(
+                            !has_active_leg_for_asset(&account, 0),
+                            "{case}: final residual close"
+                        );
+                        expected_fees = liquidation_fee_oracle(
+                            remaining_q as u128,
+                            PRICE,
+                            fee_bps,
+                            minimum,
+                            cap,
+                        );
+                        assert_eq!(
+                            expected_fees, minimum,
+                            "{case}: nonzero minimum charged once"
+                        );
+                        assert!(expected_fees > 0, "{case}");
+                        let group = env.market_state().1;
+                        assert_eq!(group.assets[0].oi_eff_long_q, 0, "{case}");
+                        assert_eq!(group.assets[0].oi_eff_short_q, 0, "{case}");
+                    }
+                    assert_fees(&env, expected_fees);
+                }
+                if schedule != 0 {
+                    for _ in 0..3 {
+                        let before = frame(&env);
+                        let error = send(&mut env, vec![])
+                            .expect_err("same-episode retries cannot collect another minimum");
+                        assert!(
+                            error.contains("Custom(22)")
+                                || error.contains("custom program error: 0x16"),
+                            "{case}: wrong retry error: {error}"
+                        );
+                        assert_eq!(frame(&env), before, "{case}: retry exact rollback");
+                        assert_fees(&env, expected_fees);
+                        rejections += 1;
+                    }
+                }
+
+                let group = env.market_state().1;
+                let outcome = (
+                    remaining_q,
+                    expected_fees,
+                    group.insurance,
+                    group.c_tot,
+                    group.vault,
+                    env.portfolio_state(target).capital.get(),
+                    env.portfolio_state(peer).capital.get(),
+                );
+                if let Some(expected) = aggregate {
+                    assert_eq!(
+                        outcome, expected,
+                        "{case}: split/route/retry history vs aggregate"
+                    );
+                } else {
+                    aggregate = Some(outcome);
+                }
+                let withdraw = CAPITAL - expected_fees;
+                let (destination, cu) = env.withdraw_with_cu(&owner, target, withdraw);
+                assert_cu_within(
+                    "INV-059 minimum-fee history withdrawal",
+                    cu,
+                    CUSTODY_CU_LIMIT,
+                );
+                assert_eq!(env.token_amount(destination), withdraw as u64, "{case}");
+                assert_eq!(env.portfolio_state(target).capital.get(), 0, "{case}");
+                let after = env.market_state().1;
+                assert_eq!(
+                    after.insurance, group.insurance,
+                    "{case}: withdrawal cannot recharge fees"
+                );
+                assert_eq!(after.vault, group.vault - withdraw, "{case}");
+                assert_eq!(
+                    after.vault,
+                    u128::from(env.token_amount(env.vault)),
+                    "{case}"
+                );
+                worlds += 1;
+            }
+        }
+    }
+    assert_eq!((worlds, rejections), (40, 160));
 }
 
 #[test]
