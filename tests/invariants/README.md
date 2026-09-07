@@ -4901,12 +4901,39 @@ it does not add engine proofs or cover owner-window signatures, maximum-N, feed/
 or simultaneous source-lien maxima. The `CloseResolved` CU registry pointer now selects this test;
 the ordinary custody witness above remains separate evidence. Invariant status is unchanged.
 
-Explicit unmeasured cells remain: full-shape abandoned-asset force close, rewarded maintenance at
-full active/source shape, maximum-work B settlement, and combined maximum-N/feed/backlog/terminal
-occupancy, plus the direct-close partitions excluded above. A reverted CU
+Cells still lacking successful maximum-shape evidence include full-shape abandoned-asset force
+close, rewarded maintenance at full active/source shape, maximum-work B settlement, and combined
+maximum-N/feed/backlog/terminal occupancy, plus the remaining direct-close partitions. The
+owner-window increment below narrows only its named signature boundary. A reverted CU
 burn is not a persistent DoS under `scripts/loop.md`; a kept INV-077 result must show successful
 bounded progress for a required owner/keeper continuation at the stated shape. Metadata repair and
 route indexing do not create fresh SBF measurements or promote the invariant status.
+
+Additional owner-window evidence, 2026-09-07:
+[`v16_program_max_shape_owner_window_signature_has_bounded_public_progress`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
+adds one signature-bound continuation, not another resolved payout-order matrix. The public
+fourteen-AuthMark-asset fixture enters with fourteen LP legs and twenty-eight value-bearing sources.
+One slot before the five-slot owner window expires, the unsigned call rejects with `ExpectedSigner`
+and exact market/portfolio/counterparty/vault rollback; the same owner then signs `CloseResolved`
+and commits one leg detach in **1,156,425 CU**. At exact expiry, an unsigned continuation commits
+a second detach from thirteen legs in **925,429 CU**. Both succeed under the 1,375,000 guardrail
+and retain every source record, capital, PnL, counterparty and SPL custody, with no early payout.
+The exact test passes on `df33270c` / engine `495a5590`, using a private copy of the existing
+default-feature SBF SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`;
+production sources, Cargo manifests/lock and auth-matcher sources are unchanged from its recorded
+`7d6d4cfb` baseline. No SBF rebuild, engine proof, full owner-window payout/drain, alternate claimant
+order, feed/backlog or simultaneous-lien product is claimed. Invariant status is unchanged.
+
+Rewarded-maintenance readiness remains blocked in this bounded scope: the distinct-recipient
+`SyncMaintenanceFee` attempt at fourteen active legs/twenty-eight source records did not complete
+under the 1,400,000 transaction limit. The failing prototype was removed, not retained as
+rejection-only coverage. The next wrapper/CU owner is
+`cu/inv_077_bounded_work_and_maximum_shape_compute.rs`; the existing public construction and
+checkpoint helpers are `setup_max_source_live_pair` and `terminal_accrual_attempt_bound` in
+`tests/v16_cu.rs`. This reverted call alone establishes neither a persistent DoS nor the absence
+of another required continuation. Full-shape force close, maximum-work B, combined occupancy and
+the remaining owner-window/lien partitions above stay open.
 
 ### INV-082 implementation-readiness
 

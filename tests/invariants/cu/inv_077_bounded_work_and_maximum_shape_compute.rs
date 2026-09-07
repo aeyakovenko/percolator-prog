@@ -953,7 +953,11 @@ fn v16_program_direct_close_resolved_at_14_leg_28_source_shape_is_bounded() {
         env.configure_permissionless_resolve_with_cu(1, 1);
         let resolve_slot = slot + 2;
         let resolve_cu = env.resolve_stale_permissionless_with_cu(resolve_slot);
-        assert_cu_within("direct-close fixture resolution", resolve_cu, CLOSE_CU_LIMIT);
+        assert_cu_within(
+            "direct-close fixture resolution",
+            resolve_cu,
+            CLOSE_CU_LIMIT,
+        );
         env.svm.warp_to_slot(resolve_slot + 1);
         assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
         assert_eq!(env.token_amount(env.vault) as u128, 2 * DEPOSIT);
@@ -992,9 +996,16 @@ fn v16_program_direct_close_resolved_at_14_leg_28_source_shape_is_bounded() {
             );
             assert_eq!(
                 before.capital.get(),
-                if portfolio == lp { DEPOSIT } else { DEPOSIT - gain }
+                if portfolio == lp {
+                    DEPOSIT
+                } else {
+                    DEPOSIT - gain
+                }
             );
-            assert_eq!(before.pnl.get(), if portfolio == lp { gain as i128 } else { 0 });
+            assert_eq!(
+                before.pnl.get(),
+                if portfolio == lp { gain as i128 } else { 0 }
+            );
             let other = if portfolio == lp { taker } else { lp };
             let other_before = env.svm.get_account(&other).unwrap();
             let vault_before = env.svm.get_account(&env.vault).unwrap();
@@ -1002,7 +1013,11 @@ fn v16_program_direct_close_resolved_at_14_leg_28_source_shape_is_bounded() {
 
             env.svm.expire_blockhash();
             let (destination, cu) = env.close_resolved_with_cu(owner, portfolio);
-            assert_cu_within("direct 14-leg CloseResolved first progress", cu, CLOSE_CU_LIMIT);
+            assert_cu_within(
+                "direct 14-leg CloseResolved first progress",
+                cu,
+                CLOSE_CU_LIMIT,
+            );
             first_max_cu = first_max_cu.max(cu);
             let after = env.portfolio_state(portfolio);
             assert_eq!(
@@ -1054,7 +1069,10 @@ fn v16_program_direct_close_resolved_at_14_leg_28_source_shape_is_bounded() {
         );
         let terminal = env.market_state().1;
         assert_eq!(terminal.materialized_portfolio_count, 0);
-        assert_eq!((terminal.vault, terminal.c_tot, terminal.insurance), (0, 0, 0));
+        assert_eq!(
+            (terminal.vault, terminal.c_tot, terminal.insurance),
+            (0, 0, 0)
+        );
         assert_eq!(env.token_amount(env.vault), 0);
         assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
         for asset in &terminal.assets[..usize::from(MAX_SOURCE_LIVE_ASSETS)] {
@@ -1065,6 +1083,133 @@ fn v16_program_direct_close_resolved_at_14_leg_28_source_shape_is_bounded() {
              continuation={continuation_max_cu}, payouts={by_owner:?}"
         );
     }
+}
+
+#[test]
+fn v16_program_max_shape_owner_window_signature_has_bounded_public_progress() {
+    const CLOSE_CU_LIMIT: u64 = 1_375_000;
+    const OWNER_WINDOW: u64 = 5;
+    assert_certified_engine_pin("INV-077 maximum-shape owner-window signature");
+    assert_eq!(
+        MAX_SOURCE_LIVE_ASSETS,
+        percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS
+    );
+    let (mut env, _taker_owner, lp_owner, taker, lp, slot) =
+        setup_max_source_live_pair(0, MAX_SOURCE_LIVE_ASSETS);
+    env.configure_permissionless_resolve_with_cu(1, OWNER_WINDOW);
+    let resolve_slot = slot + 2;
+    let resolve_cu = env.resolve_stale_permissionless_with_cu(resolve_slot);
+    assert_cu_within(
+        "owner-window fixture resolution",
+        resolve_cu,
+        CLOSE_CU_LIMIT,
+    );
+    let (cfg, resolved) = env.market_state();
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_eq!(resolved.resolved_slot, resolve_slot);
+    assert_eq!(cfg.force_close_delay_slots, OWNER_WINDOW);
+    let expiry = resolve_slot + OWNER_WINDOW;
+    env.svm.warp_to_slot(expiry - 1);
+
+    let before = env.portfolio_state(lp);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&before)),
+        u32::from(MAX_SOURCE_LIVE_ASSETS)
+    );
+    assert_eq!(
+        before
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() > 0)
+            .count(),
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let lp_before = env.svm.get_account(&lp).unwrap();
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let (destination, unsigned) = env.try_close_resolved_with_cu(&lp_owner, lp);
+    let error =
+        unsigned.expect_err("the owner window must still require a signature at expiry - 1");
+    assert!(
+        error.contains(&format!(
+            "Custom({})",
+            PercolatorError::ExpectedSigner as u32
+        )),
+        "{error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.token_amount(destination), 0);
+
+    // The existing close helper is unsigned; exercise the actual owner signer here.
+    env.svm.expire_blockhash();
+    let signed_cu = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(lp_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lp, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&lp_owner],
+        )
+        .expect("the signed owner must make progress before the window expires");
+    assert_cu_within(
+        "14-leg/28-source signed owner-window close",
+        signed_cu,
+        CLOSE_CU_LIMIT,
+    );
+    assert_eq!(env.svm.get_sysvar::<Clock>().slot, expiry - 1);
+    let signed = env.portfolio_state(lp);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&signed)),
+        u32::from(MAX_SOURCE_LIVE_ASSETS - 1)
+    );
+    assert_eq!(signed.source_domains, before.source_domains);
+    assert_eq!((signed.capital, signed.pnl), (before.capital, before.pnl));
+    assert_eq!(env.token_amount(destination), 0);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.market_state().1.vault, resolved.vault);
+
+    env.svm.warp_to_slot(expiry);
+    env.svm.expire_blockhash();
+    let (destination, expiry_cu) = env.close_resolved_with_cu(&lp_owner, lp);
+    assert_cu_within(
+        "exact-expiry unsigned owner continuation",
+        expiry_cu,
+        CLOSE_CU_LIMIT,
+    );
+    assert_eq!(env.svm.get_sysvar::<Clock>().slot, expiry);
+    let after_expiry = env.portfolio_state(lp);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&after_expiry)),
+        u32::from(MAX_SOURCE_LIVE_ASSETS - 2)
+    );
+    assert_eq!(after_expiry.source_domains, before.source_domains);
+    assert_eq!(
+        (after_expiry.capital, after_expiry.pnl),
+        (before.capital, before.pnl)
+    );
+    assert_eq!(env.token_amount(destination), 0);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.market_state().1.vault, resolved.vault);
+    println!(
+        "INV-077 owner-window 14-leg/28-source close CU: signed={signed_cu}, \
+         exact_expiry_13_leg={expiry_cu}, max={}",
+        signed_cu.max(expiry_cu)
+    );
 }
 
 fn run_max_source_liquidation_asset(adverse_asset: u16) {
