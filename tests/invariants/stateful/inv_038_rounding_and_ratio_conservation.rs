@@ -36,6 +36,11 @@
 //! It distinguishes a successful reduction that retains weight from a later nonzero denominator
 //! change with nonzero market and leg carry. K/F seed construction remains separately owned;
 //! this is not a mixed funding/receipt generator or a cash-residue classification proof.
+//! `v16_program_generated_receipt_histories_preserve_deferred_rounding` compares eager and
+//! deferred claims across generated backing releases, expiry spacing and mixed claim/close/crank
+//! schedules. Every suffix transaction checks immutable-face entitlement, explicit floor residue,
+//! per-owner SPL payout, custody and exact rejected frames. The common endpoint remains partial;
+//! this is claim-cadence equivalence, not a permutation of authenticated expiry events.
 //! Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -1014,6 +1019,406 @@ fn v16_program_resolved_topups_preserve_exact_floor_remainders() {
     );
     assert!(evidence.second_paid < evidence.receipt_face);
     assert_eq!(evidence.final_engine_vault, evidence.final_spl_vault);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReceiptHistoryFrame {
+    markets: [Vec<u8>; 2],
+    portfolios: Vec<Vec<u8>>,
+    foreign_portfolio: Vec<u8>,
+    backing_ledger: Vec<u8>,
+    tokens: Vec<(solana_sdk::pubkey::Pubkey, Vec<u8>)>,
+    matchers: Vec<Vec<u8>>,
+    lamports: Vec<(solana_sdk::pubkey::Pubkey, u64)>,
+}
+
+impl ReceiptHistoryFrame {
+    fn read(env: &V16Svm) -> Self {
+        Self {
+            markets: [env.market_data(false), env.market_data(true)],
+            portfolios: env.all_primary_portfolio_data(),
+            foreign_portfolio: env.foreign_portfolio_data(),
+            backing_ledger: env.backing_domain_ledger_data(),
+            tokens: env.all_token_account_data(),
+            matchers: env.all_matcher_context_data(),
+            lamports: env.all_economic_account_lamports(),
+        }
+    }
+}
+
+struct ReceiptHistoryOracle {
+    receipt: percolator::ResolvedPayoutReceiptV16,
+    residual: u128,
+    claim_bound: u128,
+    vault: u128,
+    capitals: Vec<u128>,
+    destinations: Vec<u64>,
+    paid: u128,
+    released: u128,
+    steps: usize,
+    rejections: usize,
+    payments: usize,
+    nonzero_remainders: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReceiptPayoutRoute {
+    Claim,
+    Close,
+    Crank,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReceiptHistoryAction {
+    Payout(ReceiptPayoutRoute),
+    Release { domain: usize, amount: u128 },
+    TryDelete,
+}
+
+impl ReceiptHistoryOracle {
+    fn new(env: &V16Svm) -> Self {
+        let group = env.primary_market_state().1;
+        let receipt = env
+            .primary_portfolio(0)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .unwrap();
+        assert!(receipt.present && !receipt.finalized);
+        assert!(receipt.paid_effective < receipt.terminal_positive_claim_face);
+        let ledger = group.resolved_payout_ledger;
+        Self {
+            receipt,
+            residual: ledger.snapshot_residual,
+            claim_bound: ledger.terminal_claim_exact_receipts_num
+                + ledger.terminal_claim_bound_unreceipted_num,
+            vault: group.vault,
+            capitals: (0..env.actors.len())
+                .map(|actor| env.primary_portfolio(actor).capital.get())
+                .collect(),
+            destinations: env
+                .actors
+                .iter()
+                .map(|actor| env.token_amount(actor.destination_token))
+                .collect(),
+            paid: receipt.paid_effective,
+            released: 0,
+            steps: 0,
+            rejections: 0,
+            payments: 0,
+            nonzero_remainders: 0,
+        }
+    }
+
+    fn entitlement(&self) -> (u128, u128) {
+        crate::support::reference_math::mul_div_floor_with_remainder(
+            self.receipt.terminal_positive_claim_face,
+            (self.residual + self.released) * percolator::BOUND_SCALE,
+            self.claim_bound,
+        )
+        .unwrap()
+    }
+
+    fn verify_receipt(
+        &self,
+        mut receipt: percolator::ResolvedPayoutReceiptV16,
+        destinations: &[u64],
+    ) -> bool {
+        if receipt.paid_effective != self.paid {
+            return false;
+        }
+        receipt.paid_effective = self.receipt.paid_effective;
+        receipt == self.receipt
+            && destinations.len() == self.destinations.len()
+            && destinations.iter().enumerate().all(|(actor, value)| {
+                u128::from(*value)
+                    == u128::from(self.destinations[actor])
+                        + if actor == 0 {
+                            self.paid - self.receipt.paid_effective
+                        } else {
+                            0
+                        }
+            })
+    }
+
+    fn verify(&self, env: &V16Svm) {
+        let group = env.primary_market_state().1;
+        let ledger = group.resolved_payout_ledger;
+        let expected_residual = self.residual + self.released;
+        assert!(expected_residual * percolator::BOUND_SCALE < self.claim_bound);
+        assert_eq!(ledger.snapshot_residual, expected_residual);
+        assert_eq!(group.payout_snapshot, expected_residual);
+        assert_eq!(
+            ledger.current_payout_rate_num,
+            expected_residual * percolator::BOUND_SCALE
+        );
+        assert_eq!(ledger.current_payout_rate_den, self.claim_bound);
+        assert_eq!(
+            ledger.terminal_claim_exact_receipts_num + ledger.terminal_claim_bound_unreceipted_num,
+            self.claim_bound,
+        );
+        let receipt = env
+            .primary_portfolio(0)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .unwrap();
+        let destinations = env
+            .actors
+            .iter()
+            .map(|actor| env.token_amount(actor.destination_token))
+            .collect::<Vec<_>>();
+        assert!(self.verify_receipt(receipt, &destinations));
+        let (entitlement, remainder) = self.entitlement();
+        assert!(self.paid <= entitlement && remainder < self.claim_bound);
+        assert_eq!(
+            receipt.terminal_positive_claim_face * expected_residual * percolator::BOUND_SCALE,
+            entitlement * self.claim_bound + remainder,
+        );
+        assert_eq!(
+            group.vault,
+            self.vault - (self.paid - self.receipt.paid_effective)
+        );
+        assert_eq!(group.vault, u128::from(env.token_amount(env.vault)));
+        assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+        for (actor, capital) in self.capitals.iter().enumerate() {
+            assert_eq!(env.primary_portfolio(actor).capital.get(), *capital);
+        }
+        assert_public_stock_census("INV-038 receipt history", env).unwrap();
+    }
+
+    fn step(&mut self, env: &mut V16Svm, action: ReceiptHistoryAction) {
+        use ReceiptHistoryAction::{Payout, Release, TryDelete};
+
+        self.verify(env);
+        let before = ReceiptHistoryFrame::read(env);
+        let before_group = env.primary_market_state().1;
+        let expected_paid = if matches!(action, Payout(_)) {
+            self.entitlement().0
+        } else {
+            self.paid
+        };
+        let actor = if matches!(action, Release { .. }) {
+            2
+        } else {
+            0
+        };
+        let result = match action {
+            Release { .. } | Payout(ReceiptPayoutRoute::Close) => {
+                env.close_resolved_primary_signed(actor)
+            }
+            Payout(ReceiptPayoutRoute::Claim) => env.claim_resolved_payout_topup_primary(actor),
+            Payout(ReceiptPayoutRoute::Crank) => {
+                env.crank_resolved_primary_signed(actor, env.current_slot(), vec![])
+            }
+            TryDelete => env.close_primary_portfolio(actor),
+        };
+        self.steps += 1;
+        let after = ReceiptHistoryFrame::read(env);
+        if matches!(action, TryDelete) {
+            assert!(
+                result.is_err(),
+                "a partial receipt must block account deletion"
+            );
+        }
+        match result {
+            Err(error) => {
+                assert!(
+                    !matches!(action, Release { .. }) && expected_paid == self.paid,
+                    "required receipt progress {action:?}: {error}"
+                );
+                assert_eq!(after, before, "rejected receipt history frame");
+                self.rejections += 1;
+            }
+            Ok(tx) => {
+                assert!(tx.compute_units < TX_CU_LIMIT);
+                if let Release { domain, amount } = action {
+                    assert_eq!(
+                        before_group.source_backing_buckets[domain].status,
+                        percolator::BackingBucketStatusV16::Fresh
+                    );
+                    assert_eq!(
+                        before_group.source_credit[domain].fresh_reserved_backing_num,
+                        amount * percolator::BOUND_SCALE
+                    );
+                    assert_ne!(
+                        env.primary_market_state().1.source_backing_buckets[domain].status,
+                        percolator::BackingBucketStatusV16::Fresh
+                    );
+                    self.released += amount;
+                }
+                self.payments += usize::from(expected_paid > self.paid);
+                self.paid = expected_paid;
+                self.nonzero_remainders += usize::from(self.entitlement().1 != 0);
+                for (owner, data) in before.portfolios.iter().enumerate() {
+                    if owner != actor {
+                        assert_eq!(&after.portfolios[owner], data);
+                    }
+                }
+                for ((key, data), (after_key, after_data)) in
+                    before.tokens.iter().zip(&after.tokens)
+                {
+                    assert_eq!(key, after_key);
+                    if *key != env.vault && *key != env.actors[actor].destination_token {
+                        assert_eq!(data, after_data);
+                    }
+                }
+                assert_eq!(before.tokens.len(), after.tokens.len());
+                assert_eq!(before.markets[1], after.markets[1]);
+                assert_eq!(before.foreign_portfolio, after.foreign_portfolio);
+                assert_eq!(before.backing_ledger, after.backing_ledger);
+                assert_eq!(before.matchers, after.matchers);
+                assert_eq!(before.lamports, after.lamports);
+                assert_eq!(
+                    before_group.insurance,
+                    env.primary_market_state().1.insurance
+                );
+                assert_eq!(
+                    before_group.backing_provider_earnings_total,
+                    env.primary_market_state().1.backing_provider_earnings_total
+                );
+            }
+        }
+        self.verify(env);
+    }
+}
+
+fn run_receipt_rounding_history(
+    amounts: [u128; 2],
+    expiry_gap: u64,
+    routes: &[ReceiptPayoutRoute],
+    eager: bool,
+) -> (ReceiptHistoryFrame, bool) {
+    use ReceiptHistoryAction::{Payout, Release, TryDelete};
+
+    let mut env =
+        crate::support::fuzz_model::public_resolved_receipt_seed(amounts, 13 + expiry_gap).unwrap();
+    let mut oracle = ReceiptHistoryOracle::new(&env);
+    assert_eq!(oracle.paid, oracle.entitlement().0);
+    let mut separately_rounded_paid = oracle.paid;
+    env.begin_public_trace();
+    oracle.step(&mut env, TryDelete);
+    for &route in routes {
+        oracle.step(&mut env, Payout(route));
+    }
+    for (index, domain) in [3, 5].into_iter().enumerate() {
+        env.warp_to_slot(13 + if index == 0 { 0 } else { expiry_gap });
+        // Seed capital backs domain 3 by 250 atoms. Domain 5 receives two solvent
+        // five-price-atom moves over four units before its counterparty exhausts capital.
+        let released = amounts[index] + [250, 2 * 5 * 4][index];
+        separately_rounded_paid += crate::support::reference_math::mul_div_floor_with_remainder(
+            oracle.receipt.terminal_positive_claim_face,
+            released * percolator::BOUND_SCALE,
+            oracle.claim_bound,
+        )
+        .unwrap()
+        .0;
+        oracle.step(
+            &mut env,
+            Release {
+                domain,
+                amount: released,
+            },
+        );
+        oracle.step(&mut env, TryDelete);
+        if eager || index == 1 {
+            for &route in routes {
+                oracle.step(&mut env, Payout(route));
+            }
+        }
+    }
+    assert_eq!(oracle.paid, oracle.entitlement().0);
+    assert_eq!(oracle.payments, if eager { 2 } else { 1 });
+    assert!(oracle.nonzero_remainders > 0);
+    let receipt = env
+        .primary_portfolio(0)
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+    let destinations = env
+        .actors
+        .iter()
+        .map(|actor| env.token_amount(actor.destination_token))
+        .collect::<Vec<_>>();
+    let mut wrong = receipt;
+    wrong.paid_effective += 1;
+    assert!(!oracle.verify_receipt(wrong, &destinations));
+    let mut wrong_owner = destinations.clone();
+    wrong_owner[0] -= 1;
+    wrong_owner[2] += 1;
+    assert!(!oracle.verify_receipt(receipt, &wrong_owner));
+    let lost_carry = oracle.paid.checked_sub(separately_rounded_paid).unwrap();
+    assert!(lost_carry <= 2);
+    if lost_carry != 0 {
+        let mut wrong = receipt;
+        wrong.paid_effective = separately_rounded_paid;
+        let mut wrong_payout = destinations.clone();
+        wrong_payout[0] -= u64::try_from(lost_carry).unwrap();
+        assert!(!oracle.verify_receipt(wrong, &wrong_payout));
+    }
+    let trace = env.finish_public_trace();
+    trace.validate_public_execution().unwrap();
+    assert_eq!(trace.out_of_band_economic_mutations, 0);
+    assert_eq!(trace.steps.len(), oracle.steps);
+    assert_eq!(
+        trace.steps.iter().filter(|step| !step.succeeded).count(),
+        oracle.rejections
+    );
+    eprintln!("INV-038 receipt eager={eager} amounts={amounts:?} gap={expiry_gap} routes={routes:?}: steps={}, rejections={}, payments={}, nonzero_remainders={}, lost_carry={lost_carry}", oracle.steps, oracle.rejections, oracle.payments, oracle.nonzero_remainders);
+    (ReceiptHistoryFrame::read(&env), lost_carry != 0)
+}
+
+#[test]
+fn v16_program_generated_receipt_histories_preserve_deferred_rounding() {
+    use proptest::test_runner::{RngAlgorithm, TestRng, TestRunner};
+    use ReceiptPayoutRoute::{Claim, Close, Crank};
+
+    let compare = |amounts, gap, routes: &[ReceiptPayoutRoute]| {
+        let eager = run_receipt_rounding_history(amounts, gap, routes, true);
+        let deferred = run_receipt_rounding_history(amounts, gap, routes, false);
+        assert!(
+            eager.0 == deferred.0,
+            "claim-cadence endpoint mismatch: {amounts:?} gap={gap} routes={routes:?}"
+        );
+        assert_eq!(eager.1, deferred.1);
+        eager.1
+    };
+    let mut carry_witnesses = 0;
+    for (amounts, gap, routes) in [
+        ([1, 1], 1, [Claim, Close, Crank]),
+        ([199, 199], 4, [Close, Crank, Claim]),
+        ([127, 3], 2, [Crank, Claim, Close]),
+    ] {
+        carry_witnesses += usize::from(compare(amounts, gap, &routes));
+    }
+    assert!(
+        carry_witnesses > 0,
+        "boundary histories must distinguish cumulative from per-top-up floors"
+    );
+
+    let strategy = (
+        prop::array::uniform2(1u128..=199),
+        1u64..=4,
+        prop::collection::vec(prop::sample::select(vec![Claim, Close, Crank]), 1..=6),
+    );
+    let config = ProptestConfig {
+        cases: env_usize("PERCOLATOR_INV038_RECEIPT_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_038_receipt_history.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    };
+    let mut runner = TestRunner::new_with_rng(
+        config,
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[0x38; 32]),
+    );
+    runner
+        .run(&strategy, |(amounts, gap, routes)| {
+            compare(amounts, gap, &routes);
+            Ok(())
+        })
+        .unwrap();
 }
 
 proptest! {

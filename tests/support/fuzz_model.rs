@@ -16034,6 +16034,35 @@ fn require_resolved_receipt_blocks_lifecycle_reentry(
     Ok(rejected)
 }
 
+/// Public partial-receipt checkpoint; the two backed domains expire at 13 and `second_expiry`.
+pub fn public_resolved_receipt_seed(
+    backing_atoms: [u128; 2],
+    second_expiry: u64,
+) -> Result<V16Svm, String> {
+    if backing_atoms
+        .iter()
+        .any(|amount| !(1..=199).contains(amount))
+        || second_expiry < 14
+    {
+        return Err(
+            "receipt seed requires two partial backing amounts and ordered expiries".into(),
+        );
+    }
+    let UnderfundedResolvedSeed { runner, .. } = build_underfunded_resolved_reference_seed(
+        BoundedExpiryLanding::Before,
+        false,
+        true,
+        None,
+        UnderfundedBackingPlan {
+            backed_atoms: backing_atoms[0],
+            extra_backing: Some((5, backing_atoms[1], second_expiry)),
+            extra_backed_trade: true,
+        },
+    )?;
+    runner.assert_global_invariants()?;
+    Ok(runner.env)
+}
+
 pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopupEvidence, String> {
     const CLAIMANT: usize = 0;
     const BACKED_WINNER: usize = 2;
