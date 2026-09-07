@@ -3766,6 +3766,9 @@ These untested coverage gaps are not findings and receive no severity/impact lab
    TODO: own writer family, capability scope/incarnation, and expiry partitions together, with an
    independent authorization-history oracle and fresh-authorized liveness controls. Keep rejection
    or stale-acceptance evidence separate from attributed economic harm; share with INV-004/005.
+   The [implementation-readiness slice](#inv-012-implementation-readiness) below links the existing
+   component evidence and specifies the smallest next history product; the reusable F owner remains
+   missing in [`traceability_gaps.tsv`](traceability_gaps.tsv).
 
 4. **INV-056: favorable-action observation completeness.** Owner:
    [`cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs`](cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs).
@@ -3799,6 +3802,94 @@ These untested coverage gaps are not findings and receive no severity/impact lab
 Each TODO needs an invariant-owned executable entrypoint naming its reusable generator, independent
 oracle, route/partition domain, and secondary owners. Shared helpers may stay in `tests/support/`;
 coverage ownership must not stop there. No new issue-specific adapter satisfies this queue.
+
+### INV-012 implementation-readiness
+
+Finding-blind traceability review of `6b0100c3` (2026-09-07). The boundary is
+[INV-012](../../INVARIANTS.md#inv-012---capability-and-delegate-scope), with position writers owned by
+INV-004 and authority incarnation/containment owned by INV-005. This is an evidence-link and
+implementation plan only: no new F, SBF, or proof result, no production change, and no status
+promotion. Issue-labeled reproduction bodies were not inspected or used to design this slice.
+
+**Existing links and limits.** The following are separate component owners, not one reusable
+retained authorization-history oracle:
+
+| Component | Executing or supporting owner | Observed assertion boundary |
+| --- | --- | --- |
+| Disable/re-enable and retained CPI transport | [`stateful/inv_012_capability_and_delegate_scope.rs`](stateful/inv_012_capability_and_delegate_scope.rs), `v16_program_cpi_trades_bind_matcher_capability_incarnation` | Two fixed single/one-leg-batch worlds require a distinct replacement config sequence, stale-grant rejection, market/portfolio/matcher bytes, SPL supply and portfolio-lamport rollback, and fresh requests with real exposure. This is not a generated writer/scope/expiry history. |
+| Enabled state and expiry | [`cu/inv_012_capability_and_delegate_scope.rs`](cu/inv_012_capability_and_delegate_scope.rs), `v16_program_disabled_lp_matcher_config_blocks_all_cpi_fills` and `v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes` | Disabled state rejects on both transports. Expiry uses one fixed slot profile on both transports: pre-expiry success, exact/late rejection, invalid equal-slot grant rollback, then live renewal. Its rollback frame is the market, both portfolios and matcher context; it builds current requests rather than retaining one across the expiry history. |
+| Capability tuple and owner scope | Same CU owner, `v16_program_tradecpi_requires_exact_lp_authorized_matcher_tuple`, `v16_program_batch_tradecpi_requires_exact_lp_authorized_matcher_tuple`, and `v16_program_non_owner_cannot_revoke_lp_matcher_capability` | Fixed alternate-tuple and non-owner cases reject with their tracked account frames and allow the authorized control. The tuple cases do not generate one-field-at-a-time substitutions or all scope/lifecycle combinations. External matcher fixtures are not injected wrapper state. |
+| Position and lifecycle writers | [`stateful/inv_004_position_episode_binding.rs`](stateful/inv_004_position_episode_binding.rs), `v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not`, `v16_program_position_episode_matrix_rejects_stale_consent_atomically`, and `v16_program_cure_consent_cannot_cross_close_episodes_in_one_portfolio` | Four-transport episode advancement plus reduction, Recovery-forfeit, conversion and close/cure consent checks support writer/episode reuse. They do not assert a common retained matcher-authorization history. The INV-012 CU header also documents direct position/lifecycle regressions; those remain direct evidence, not generic F ownership. |
+| Consumer and writer census | CU INV-012 `v16_program_matcher_capability_route_roster_binds_every_current_scope`; [`cu/inv_004_position_episode_binding.rs`](cu/inv_004_position_episode_binding.rs), `v16_program_retained_position_binding_and_writer_rosters_are_source_complete` | Source drift guards bind the two CPI consumers and episode fields/writer callsites. Source membership is not an executing writer-family oracle, and an episode bump alone does not establish the grant's disposition. |
+| Authority ownership | [`inv_005_adversarial_role_containment.tsv`](inv_005_adversarial_role_containment.tsv), Matcher/Delegate rows; [`stateful/inv_005_authority_incarnation_binding.rs`](stateful/inv_005_authority_incarnation_binding.rs), `v16_program_authority_incarnation_operation_matrix_rejects_aba_replays` | The Matcher row delegates incarnation checks to the same fixed INV-012 test; the Delegate row delegates CPI identity to INV-019. The separate configured-authority matrix does not supply the missing capability-history product or substitute authentication for economic containment. |
+
+The shared [`fuzz_model.rs`](../support/fuzz_model.rs) has `SetMatcherConfig`, writer actions and a
+retained queue, but `Action::RetainTrade` builds only a no-CPI transaction. `LandRetained` checks
+trade accounting or rollback, not a separately modeled CPI grant history; matcher configuration
+has no generated expiry field. These helpers therefore do not close the missing owner link.
+
+Reuse the local wrapper harnesses
+`kani_v16_inv012_matcher_capability_authorizes_only_the_exact_enabled_tuple` and
+`kani_v16_position_epoch_sync_policy_is_total_and_exact` in
+[`kani/inv_004_position_episode_binding.rs`](kani/inv_004_position_episode_binding.rs), and
+`kani_v16_matcher_capability_config_is_exact_at_full_width` in
+[`kani/inv_012_capability_and_delegate_scope.rs`](kani/inv_012_capability_and_delegate_scope.rs).
+INV-022 owns matcher sequence/config wire binding; INV-016 owns delegate PDA domains. These are
+local predicate/layout obligations, not a history induction or newly executed proof result. Reuse
+the engine contracts pinned by `Cargo.toml`; do not duplicate engine position/liquidation proofs.
+
+**Smallest next generator.** Add one typed, shrinkable public-history entrypoint,
+`v16_program_retained_capability_histories_preserve_authorization_scope`, in the existing INV-012
+stateful module. Start with bounded public checkpoints and one writer transition per history,
+including a no-op/rejected-writer control; longer writer words are a follow-on. Cross these axes:
+
+- Writer family: explicit owner grant/revoke/renewal; single/batch no-CPI position changes;
+  configured single/batch CPI fills; owner position/recovery/close changes; permissionless
+  liquidation, force-close and lifecycle/crank changes. Reuse the INV-004 census and public
+  builders to name each route's grant disposition: invalidate, preserve participating LP only,
+  preserve untouched scope, or replace incarnation. Unconstructed or unclassified routes stay
+  explicit gaps, never assumed no-ops; a census does not make every route executable in this slice.
+- Capability scope: both consuming CPI transports, participating LP versus taker/unrelated LP,
+  and exact scope versus one differing domain, market/asset generation, portfolio incarnation,
+  matcher program/context/slab, delegate, config incarnation, or applicable limit at a time. Use
+  both position signs, initially one leg, and current request/fee-cap boundaries. The grant is
+  portfolio-local and trade-only; per-leg asset/operation/amount limits belong to the signed
+  request. Do not invent a separate stored allowed-asset list or standalone delegate operation.
+- Time/control: enabled/disabled, retained versus current grant incarnation, and authenticated
+  `expiry-1`, `expiry`, `expiry+1`, including invalid equal-slot renewal and a valid future renewal.
+  Keep retained transactions within their valid runtime blockhash window; transport expiry or
+  duplicate-signature rejection cannot stand in for an application authorization check.
+
+Use only successful public construction with honest observations and normal external matcher
+fixtures. Record every helper-issued public instruction, including automatic matcher setup, so
+hidden reauthorization cannot erase the history being checked. Report constructed and skipped
+cells with their writer, scope and expiry partitions. Scope-preserving cells and live-grant
+controls must include successful nonzero fills; a rejected-only product is insufficient.
+
+**Independent step oracle.** Retain an append-only authorization history keyed by program/market
+and portfolio incarnation, owner and matcher scope. Initialize assigned identities from successful
+public creation; derive subsequent grant incarnation, enabled state, cap, expiry and matcher
+observation frontier from authorized grant events and independently classified writer effects.
+Keep signed request epochs/limits and one-shot consumption separate from grant liveness. A
+configured fill may preserve the LP grant without reviving a consumed request. Never derive the
+expected authorization from the post-state enabled bit, config sequence, expiry or wrapper guard.
+
+At every prefix, compare expected grant disposition and scope to decoded state and bound accepted
+effects by the retained signed request. Distinguish request freshness from capability liveness:
+stale-position rejection alone does not demonstrate invalidation of the retained grant. Include a
+current-request control without silently renewing that grant, and a separately fresh-authorized
+control where the public lifecycle admits trading. Terminal profiles need their bounded owner or
+keeper continuation, not an impossible fresh-trade requirement. On errors, preserve the history
+and all tracked writable accounts, matcher contexts, SPL custody/supply and economic lamports
+exactly, with the network fee-payer charge separated. A fresh grant must not rewrite old history.
+
+Before counting this owner, require it in `v16_program_stateful_fuzz --list`, execute its bounded
+partition matrix and seeded/shrinking tail on same-worktree SBF artifacts, and add pure oracle
+controls for a wrong-scope acceptance, an omitted invalidation and an incorrect exact-expiry
+admission. Oracle-input controls are not injected program states or public findings. Multi-writer
+ordering, multi-leg/max-shape products, all lifecycle frontiers and any unconstructed one-field
+scope cells remain follow-ons. Record stale acceptance, rollback and fresh liveness separately
+from attributed economic harm under `scripts/loop.md`; none alone promotes invariant status.
 
 ### INV-024 implementation-readiness
 
@@ -4065,7 +4156,7 @@ charter.
 | INV-009 | P + SVM/CU + M + F gap | `cu/inv_009_partial_fill_and_retry_accounting.rs` owns fixed public partial/retry matrices; `kani/inv_009_partial_fill_and_retry_accounting.rs` owns local exact-fill batch admission, not history accounting. The repeated-partition matrix now owns the M registry row with executing quantity, fee, epoch, rollback, custody, and conservative-rounding checks. A successful single-CPI partial consumes the whole one-shot authorization; an owner must sign a new residual request against the advanced episodes. Batch CPI is exact-fill-only and rejects uniform or asymmetric partials atomically. Randomized partial partitions with failure/retry schedules remain unowned in the inspected generic owners; INV-008 replay fuzzing and source-composition gates do not discharge that F obligation. Persistent remaining authorization or durable-nonce economic consent reopens this row. |
 | INV-010 | Independent + P + SVM/CU + M + R | The public products exhaust all `3!` matcher/control/trade and value/control orders, both deposit/reduction orders, all 48 authority/policy worlds, both funded and underfunded authority/resolve orders, and all 144 policy/boundary/handoff/resolve terminal cells. `kani/inv_010_out_of_order_safety.rs` proves exact current-sequence admission and strict one-step consumption over full `u64`; `cu/inv_010_out_of_order_safety.rs` source-composes that induction with every retained family, delayed-control lane, identity/authority binding, successful attributed delta, and exact rollback. Every finite landing permutation is a repetition of this checked serial step. INV-008/009/011/059 own the current one-shot and aggregate trade bounds. A retained route, binding lane, rollback disposition, signed field, detached authorization, or durable-nonce economic-intent change reopens this row. |
 | INV-011 | P + SVM/CU + M + F gap | `cu/inv_011_signed_aggregate_economic_bounds.rs` owns executing single/per-leg price-limit and two-leg batch-CPI aggregate quote-cap witnesses, plus a separate source-composition drift guard. `stateful/inv_052_split_merge_invariance.rs` is the explicit conversion secondary owner for generated strict-sub-cap attempts, exact complete conversion, and exhausted-claim rollback. The M registry now points at the executing aggregate-cap boundary test. Existing wrapper Kani owns cap direction/accumulation and wire preservation; it does not supply a generic signed-leg/trade-cap-history F strategy, which remains unowned in the inspected owners. No evidence or invariant status is promoted. |
-| INV-012 | P + Static roster + SVM/CU + Cross-invariant composition | `cu/inv_012_capability_and_delegate_scope.rs`, `stateful/inv_012_capability_and_delegate_scope.rs`, `kani/inv_004_position_episode_binding.rs`, `kani/inv_012_capability_and_delegate_scope.rs`, and `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` prove the exact enabled/program/context/delegate/sequence/expiry predicate over full symbolic keys and control words and bind it to both production CPI handlers. Public partial liquidation, force-close/reuse, no-CPI mutation, and expiry at or after the authenticated Clock slot invalidate; configured CPI fills preserve only the participating LP; old-grant single and batch CPI requests reject after identical disable/re-enable with exact rollback; and fresh current-sequence pre-expiry requests install real exposure. Prior-layout accounts read the appended expiry lane as disabled before zero-initialized growth. INV-016 exhausts the delegate PDA domain, while INV-002/003/004 bind asset generation, portfolio incarnation, and position episode. A new capability operation, scope, consumer, time source, or layout reopens this row. |
+| INV-012 | P + Static roster + SVM/CU + Cross-invariant composition | `cu/inv_012_capability_and_delegate_scope.rs`, `stateful/inv_012_capability_and_delegate_scope.rs`, `kani/inv_004_position_episode_binding.rs`, `kani/inv_012_capability_and_delegate_scope.rs`, and `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` prove the exact enabled/program/context/delegate/sequence/expiry predicate over full symbolic keys and control words and bind it to both production CPI handlers. Public partial liquidation, force-close/reuse, no-CPI mutation, and expiry at or after the authenticated Clock slot invalidate; configured CPI fills preserve only the participating LP; old-grant single and batch CPI requests reject after identical disable/re-enable with exact rollback; and fresh current-sequence pre-expiry requests install real exposure. Prior-layout accounts read the appended expiry lane as disabled before zero-initialized growth. INV-016 exhausts the delegate PDA domain, while INV-002/003/004 bind asset generation, portfolio incarnation, and position episode. These component owners do not supply the reusable retained authorization-history F oracle; the [readiness slice](#inv-012-implementation-readiness) and `traceability_gaps.tsv` keep the writer/scope/expiry product explicit. A new capability operation, scope, consumer, time source, or layout reopens this row. |
 | INV-013 | P + F + SVM/CU + source composition | `public_sbf/inv_013_destructive_consent_scope.rs`, `stateful/inv_013_destructive_consent_scope.rs`, `kani/inv_013_destructive_consent_scope.rs`, and `cu/inv_013_destructive_consent_scope.rs` cover delayed close across later funding, generated empty-state ABA, failed-deposit rollback, fresh-close liveness, exact close binding, and stale reduction rollback. INV-004 source-locks all five retained portfolio/episode families and adds Recovery forfeit, released-PnL conversion, and close/cure episodes; INV-002 owns every asset-generation shutdown/resolve field and guard; INV-005 classifies all 29 configured-authority routes with no open epoch gap; INV-006 binds the signed program/market/kind/schema transaction; and INV-001/007 make market-address retirement permanent. `CloseSlab` binds the current live market authority and epoch, dispatches that epoch unchanged, and writes the typed tombstone. Permissionless liquidation, abandoned close, reset finalization, claims, and terminal continuations derive from current state rather than retained consent. A new retained destructive route, authority route, close path, or account-reuse mechanism reopens this current-surface closure. |
 | INV-014 | Independent + Direct + P + F + SVM/CU + M + source composition | `public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`, and `kani/inv_014_delayed_policy_and_policy_epoch_safety.rs` cover strict sequence monotonicity, exact stale rollback, and all fifteen semantic delayed-control families in both payload directions. A production-derived gate owns all seven policy-sequence variants, all six observation-sequence variants, matcher configuration, their authority/portfolio incarnation checks, and every sequence-advancing handler. The newly discovered Recovery-restart partition requires stale rollback followed by exact global-frontier consumption, one-step frontier advance, an empty Active post-state, and no SPL movement. Fee-consent, provider-principal, fee-redirection terminal-value, and resolve-policy bounded-liveness oracles retain their independent economic checks. INV-005 owns every configured-authority epoch route and INV-001/007 prohibit whole-market address reuse. A new sequence field, handler, policy lane, authority scope, or detached control format reopens this current-surface closure. |
 | INV-015 | P + SVM/CU | `kani/inv_015_account_ownership_layout_discriminator_and_length_validity.rs`, `public_sbf/inv_015_account_ownership_layout_discriminator_and_length_validity.rs`, and `cu/inv_015_account_ownership_layout_discriminator_and_length_validity.rs` prove the exact header predicate and every short length, then compose owner, canonical minimum/maximum length, type, alignment, all 40 engine byte domains, all six wrapper-config domains, fourteen auxiliary-ledger cases, and six oracle-profile domains through their real consuming routes. Every route has a mutating valid control and every malformed case returns an instruction error with exact persistent rollback. Public System Program creation proves `InitPortfolio` normalizes oversized uninitialized storage to the canonical wrapper length; auxiliary ledgers initialize exactly and reject overlong or malformed nonzero first use. Matcher context remains opaque external-program data and no public layout migration exists. A new account kind, persisted byte domain, migration, or alignment requirement reopens this current-surface closure. |
