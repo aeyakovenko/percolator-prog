@@ -20,6 +20,7 @@ use proptest::{
 };
 use solana_sdk::{
     account::Account,
+    compute_budget::ComputeBudgetInstruction,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signature::Signer,
@@ -712,4 +713,323 @@ fn v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes(
         invalidated, live,
         "dropping the writer cannot preserve the expected history"
     );
+}
+
+// Ordered grant-only words extend the one-writer prototype above. No position
+// writer runs before retained delivery, so episode rejection cannot mask scope.
+#[test]
+fn v16_program_ordered_grant_histories_bind_retained_cpi_disposition() {
+    const LP: usize = 1;
+    const EXPIRY: u64 = 4;
+    const FEE_BPS: u16 = 1;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Writer {
+        UnrelatedRenewal,
+        InvalidCap,
+        Renew,
+        Disable,
+        LowerCap,
+        ExtendExpiry,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Disposition {
+        Live,
+        Stale,
+        Disabled,
+        Expired,
+        FeeLimited,
+    }
+
+    #[derive(Debug, Default)]
+    struct Evidence {
+        histories: usize,
+        transactions: usize,
+        writer_rejects: usize,
+        // Retained/current requests, in Disposition order; regrant fills separate.
+        consumers: [[usize; 5]; 2],
+        fresh_fills: usize,
+        max_cu: u64,
+    }
+
+    fn step(
+        env: &mut V16Svm,
+        history: &mut AuthorizationHistory,
+        evidence: &mut Evidence,
+        event: Option<AuthorizationEvent>,
+        expected_error: Option<PercolatorError>,
+        execute: impl FnOnce(&mut V16Svm) -> Result<TxSuccess, String>,
+    ) {
+        let error = capability_step(env, history, expected_error.is_none(), event, |env| {
+            let result = execute(env);
+            if let Ok(success) = &result {
+                evidence.max_cu = evidence.max_cu.max(success.compute_units);
+            }
+            result
+        });
+        if let Some(expected) = expected_error {
+            let error = error.expect("expected application rejection");
+            assert!(
+                error.contains(&format!("Custom({})", expected as u32)),
+                "wrong application rejection: {error}"
+            );
+        }
+        evidence.transactions += 1;
+    }
+
+    fn write_grant(
+        env: &mut V16Svm,
+        history: &mut AuthorizationHistory,
+        evidence: &mut Evidence,
+        actor: usize,
+        cap: Option<u16>,
+        expiry: u64,
+    ) {
+        let grant = history.replay()[actor];
+        let owner = &env.actors[actor].signer;
+        let payer = &env.actors[4].signer;
+        let mut accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(grant.scope[2], false),
+        ];
+        if cap.is_some() {
+            accounts.extend(
+                grant.scope[4..]
+                    .iter()
+                    .map(|key| AccountMeta::new_readonly(*key, false)),
+            );
+        }
+        let tx = Transaction::new_signed_with_payer(
+            &[
+                // Distinct transport even for identical failed writes; no
+                // signature-cache rejection may count as capability evidence.
+                ComputeBudgetInstruction::set_compute_unit_price(evidence.transactions as u64 + 1),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts,
+                    data: ProgInstruction::SetMatcherConfig {
+                        portfolio_id: grant.portfolio_id,
+                        expected_sequence: grant.sequence,
+                        enabled: u8::from(cap.is_some()),
+                        trade_fee_cap_bps: cap.unwrap_or(0),
+                        expiry_slot: expiry,
+                    }
+                    .encode(),
+                },
+            ],
+            Some(&payer.pubkey()),
+            &[payer, owner],
+            env.svm.latest_blockhash(),
+        );
+        let valid = match cap {
+            Some(cap) => cap <= 10_000 && env.current_slot() < expiry,
+            None => expiry == 0,
+        };
+        step(
+            env,
+            history,
+            evidence,
+            Some(AuthorizationEvent::Grant { actor, cap, expiry }),
+            (!valid).then_some(PercolatorError::InvalidInstruction),
+            |env| env.land_retained(tx),
+        );
+        evidence.writer_rejects += usize::from(!valid);
+    }
+
+    fn disposition(grant: GrantOracle, request: GrantOracle, slot: u64) -> Disposition {
+        assert_eq!(grant.epoch, request.epoch, "no episode masking");
+        assert_eq!(grant.portfolio_id, request.portfolio_id);
+        assert_eq!(
+            grant.scope, request.scope,
+            "unchanged owner/matcher/delegate scope"
+        );
+        if grant.sequence != request.sequence {
+            Disposition::Stale
+        } else if !grant.enabled {
+            Disposition::Disabled
+        } else if slot >= grant.expiry {
+            Disposition::Expired
+        } else if grant.cap < FEE_BPS {
+            Disposition::FeeLimited
+        } else {
+            Disposition::Live
+        }
+    }
+
+    fn consume(
+        env: &mut V16Svm,
+        history: &mut AuthorizationHistory,
+        evidence: &mut Evidence,
+        tx: Transaction,
+        request: &[GrantOracle],
+        size: i128,
+    ) -> Disposition {
+        let current = history.replay();
+        assert_eq!(current[0].epoch, request[0].epoch, "fresh taker episode");
+        let outcome = disposition(current[LP], request[LP], env.current_slot());
+        let expected_error = match outcome {
+            Disposition::Live => None,
+            Disposition::Stale => Some(PercolatorError::EngineStale),
+            Disposition::Disabled | Disposition::Expired => Some(PercolatorError::Unauthorized),
+            Disposition::FeeLimited => Some(PercolatorError::InvalidInstruction),
+        };
+        step(
+            env,
+            history,
+            evidence,
+            Some(AuthorizationEvent::Fill {
+                taker: 0,
+                lp: LP,
+                size,
+                cpi: true,
+            }),
+            expected_error,
+            |env| env.land_retained(tx),
+        );
+        outcome
+    }
+
+    let writers = [
+        Writer::UnrelatedRenewal,
+        Writer::InvalidCap,
+        Writer::Renew,
+        Writer::Disable,
+        Writer::LowerCap,
+        Writer::ExtendExpiry,
+    ];
+    let mut evidence = Evidence::default();
+    for first in writers {
+        for second in writers {
+            for route in [CpiRoute::Single, CpiRoute::Batch] {
+                for boundary in [-1i64, 0, 1] {
+                    for sign in [-1, 1] {
+                        let case = (first, second, route, boundary, sign);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let mut env = V16Svm::new(
+                                [0x1c; 32],
+                                MarketConfig {
+                                    initial_price: 100,
+                                    actor_deposits: [1_000_000; 5],
+                                    actor_token_balances: [2_000_000; 5],
+                                    ..MarketConfig::default()
+                                },
+                            );
+                            let mut history = AuthorizationHistory::new(&env);
+                            step(&mut env, &mut history, &mut evidence, None, None, |env| {
+                                env.update_trade_fee_policy(u64::from(FEE_BPS))
+                            });
+                            write_grant(
+                                &mut env,
+                                &mut history,
+                                &mut evidence,
+                                LP,
+                                Some(FEE_BPS),
+                                EXPIRY,
+                            );
+                            let size = sign * POS_SCALE as i128;
+                            let request = history.replay();
+                            let retained = retained_capability_trade(&mut env, route, size);
+                            for writer in [first, second] {
+                                let (actor, cap, expiry) = match writer {
+                                    Writer::UnrelatedRenewal => (2, Some(10_000), u64::MAX),
+                                    Writer::InvalidCap => (LP, Some(10_001), EXPIRY),
+                                    Writer::Renew => (LP, Some(FEE_BPS), EXPIRY),
+                                    Writer::Disable => (LP, None, 0),
+                                    Writer::LowerCap => (LP, Some(0), EXPIRY),
+                                    Writer::ExtendExpiry => (LP, Some(FEE_BPS), EXPIRY + 2),
+                                };
+                                write_grant(
+                                    &mut env,
+                                    &mut history,
+                                    &mut evidence,
+                                    actor,
+                                    cap,
+                                    expiry,
+                                );
+                            }
+                            let grant = history.replay()[LP];
+                            let expiry = if grant.enabled { grant.expiry } else { EXPIRY };
+                            let slot = (expiry as i64 + boundary) as u64;
+                            env.warp_to_slot(slot);
+                            assert_eq!(env.current_slot(), slot, "authenticated Clock boundary");
+                            let outcome = consume(
+                                &mut env,
+                                &mut history,
+                                &mut evidence,
+                                retained,
+                                &request,
+                                size,
+                            );
+                            evidence.consumers[0][outcome as usize] += 1;
+
+                            // Repair request freshness only, leaving the modeled grant intact.
+                            let current_request = history.replay();
+                            let current = retained_capability_trade(&mut env, route, size);
+                            let outcome = consume(
+                                &mut env,
+                                &mut history,
+                                &mut evidence,
+                                current,
+                                &current_request,
+                                size,
+                            );
+                            evidence.consumers[1][outcome as usize] += 1;
+                            write_grant(
+                                &mut env,
+                                &mut history,
+                                &mut evidence,
+                                LP,
+                                Some(FEE_BPS),
+                                slot,
+                            );
+                            write_grant(
+                                &mut env,
+                                &mut history,
+                                &mut evidence,
+                                LP,
+                                Some(FEE_BPS),
+                                slot + 2,
+                            );
+                            let fresh_request = history.replay();
+                            let fresh = retained_capability_trade(&mut env, route, size);
+                            assert_eq!(
+                                consume(
+                                    &mut env,
+                                    &mut history,
+                                    &mut evidence,
+                                    fresh,
+                                    &fresh_request,
+                                    size,
+                                ),
+                                Disposition::Live,
+                                "freshly authorized nonzero fill must execute",
+                            );
+                            assert!(env
+                                .primary_portfolio(0)
+                                .active_bitmap
+                                .iter()
+                                .any(|w| w.get() != 0));
+                            assert!(env
+                                .primary_portfolio(LP)
+                                .active_bitmap
+                                .iter()
+                                .any(|w| w.get() != 0));
+                            evidence.fresh_fills += 1;
+                            evidence.histories += 1;
+                        }));
+                        assert!(result.is_ok(), "ordered grant partition failed: {case:?}");
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(evidence.histories, 432);
+    assert_eq!(evidence.transactions, 432 * 9);
+    assert_eq!(evidence.writer_rejects, 576);
+    assert_eq!(evidence.consumers[0], [16, 384, 0, 32, 0]);
+    assert_eq!(evidence.consumers[1], [80, 0, 96, 224, 32]);
+    assert_eq!(evidence.fresh_fills, 432);
+    eprintln!("INV-012 ordered grant product: {evidence:?}; one asset/leg, fixed matcher tuple; gaps: longer words, tuple substitutions, lifecycle writers, multi-leg/max shapes");
 }

@@ -3891,6 +3891,43 @@ ordering, multi-leg/max-shape products, all lifecycle frontiers and any unconstr
 scope cells remain follow-ons. Record stale acceptance, rollback and fresh liveness separately
 from attributed economic harm under `scripts/loop.md`; none alone promotes invariant status.
 
+**Executing increment: ordered grant histories (base `fe856361`).**
+`v16_program_ordered_grant_histories_bind_retained_cpi_disposition` in the
+[stateful owner](stateful/inv_012_capability_and_delegate_scope.rs) extends the existing
+single-writer prototype with 36 ordered two-event words, both CPI consumers, both position signs,
+and three authenticated Clock boundaries: **432 histories and 3,888 checked transactions** after
+standard public fixture construction. The sole generated writer route is `SetMatcherConfig`:
+unrelated-portfolio renewal (a target-scope no-op), invalid-cap rejection, identical renewal,
+disable, zero-cap replacement and extended-expiry replacement. The suffix separately rejects an
+equal-slot renewal, installs a future grant and requires a nonzero fresh-authorized fill.
+
+The reused append-only `AuthorizationHistory` derives sequence, enabled state, cap, expiry, scope
+and signed positions from successful public events, checking every prefix against decoded state.
+Both request episodes must remain current at every consumer attempt, including retained delivery;
+no position writer precedes that delivery. A current-request control does not renew the grant.
+A publicly fixed one-basis-point market fee makes a zero grant cap observably limiting, rather
+than counting only config-sequence staleness. Expiry partitions use the event-derived final grant
+deadline (slot 4 or 6); disabled profiles use slot 4 solely as a landing-time control.
+
+The asserted disposition counts are 16 live / 384 stale / 32 expired retained requests, and
+80 live / 96 disabled / 224 expired / 32 fee-limited current requests, followed by 432 live
+regrant fills. All 576 rejected writes and 768 rejected consumers require exact account data and
+metadata, matcher-context/delegate, SPL mint/token and economic-lamport rollback, separating the
+network fee payers. Distinct unsent transports exclude signature-cache rejection; every checked
+step validates the public trace and forbids hidden setup or reauthorization.
+
+The focused run passes on same-worktree default-feature SBF artifacts built with platform-tools
+v1.52; its maximum observed successful transaction is 176,184 CU. The engine pin is unchanged.
+This is bounded deterministic coverage only, with no status promotion or engine/proof edits.
+The matcher program/context/delegate tuple is fixed. Longer words, alternate tuple domains,
+lifecycle/keeper writers, arbitrary fee/quantity limits, multiple assets/legs and maximum shapes
+remain gaps. These admission rejections occur before CPI; they do not add a post-CPI-write rollback
+or worst-case CU claim. The focused command is:
+
+```bash
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_program_ordered_grant_histories_bind_retained_cpi_disposition -- --exact --nocapture
+```
+
 ### INV-024 implementation-readiness
 
 Finding-blind audit of `4b314bcd`, followed by a bounded wrapper-test increment rerun on integration head `4653161d`
