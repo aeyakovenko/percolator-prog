@@ -70,6 +70,11 @@
 //! remains byte- and token-identical. The underfunded final-leg row exposed a distinct crank
 //! liveness counterexample and is owned by INV-071.
 //!
+//! The principal-interleaving history below instead moves unrelated senior capital around a
+//! publicly created half-backed claim. Its history oracle checks each transaction and requires
+//! the same haircut and recipient payouts whether that principal exits before or after conversion.
+//! This is bounded Active-market composition, not an engine proof or a terminal-debt liveness claim.
+//!
 //! Secondary coverage: INV-039. The same trace proves that novation cannot erase or transfer a
 //! pre-existing cohort's pending loss obligation, while INV-027 owns principal attribution.
 
@@ -415,6 +420,365 @@ fn v16_program_fully_backed_pnl_route_matrix_preserves_unrelated_principal() {
     ] {
         run_fully_backed_pnl_seniority_control(route);
     }
+}
+
+const INV027_HISTORY_PRINCIPAL: u128 = 1_000;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Inv027SeniorityHistory {
+    face: u128,
+    converted: u128,
+    haircut: u128,
+    senior_extra: u128,
+    paid: [u128; 2],
+    loser_settled: bool,
+}
+
+impl Inv027SeniorityHistory {
+    fn observation(self) -> [(u128, i128, u128); 2] {
+        [
+            (
+                INV027_HISTORY_PRINCIPAL + self.converted - self.paid[0],
+                (self.face - self.converted - self.haircut) as i128,
+                self.paid[0],
+            ),
+            (
+                INV027_HISTORY_PRINCIPAL + self.senior_extra - self.paid[1],
+                0,
+                self.paid[1],
+            ),
+        ]
+    }
+}
+
+fn inv027_check_seniority_observation(
+    history: Inv027SeniorityHistory,
+    observed: [(u128, i128, u128); 2],
+) -> Result<(), String> {
+    if observed != history.observation() {
+        return Err(format!(
+            "claimant/senior capital, PnL, payout {observed:?} != history {history:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Inv027PrincipalTiming {
+    BeforeConversion,
+    AcrossConversion,
+    AfterPayout,
+}
+
+fn inv027_run_principal_interleaving(
+    route: TradeRoute,
+    extra: u128,
+    timing: Inv027PrincipalTiming,
+) -> Result<([u128; 2], usize), String> {
+    use solana_sdk::signature::Signer;
+    use support::fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census};
+
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const REPLACEMENT: usize = 2;
+    const SENIOR: usize = 3;
+    const DOMAIN: usize = 1;
+    const START: u64 = 100;
+    const END: u64 = 150;
+    const UNITS: u128 = 40;
+    const FACE: u128 = UNITS * (END - START) as u128;
+    const SUPPORT: u128 = INV027_HISTORY_PRINCIPAL;
+
+    let mut tokens = [INV027_HISTORY_PRINCIPAL as u64; 5];
+    tokens[SENIOR] += extra as u64;
+    let mut env = V16Svm::new(
+        [0x27; 32],
+        MarketConfig {
+            initial_price: START,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 0,
+            actor_deposits: [INV027_HISTORY_PRINCIPAL; 5],
+            actor_token_balances: tokens,
+            ..MarketConfig::default()
+        },
+    );
+    // Public setup deposits are inputs to the ledger; no observed capital seeds it.
+    let mut history = Inv027SeniorityHistory::default();
+    let supply = env.token_supply_observed();
+    let identities = [WINNER, SENIOR].map(|actor| env.primary_portfolio_id(actor));
+    let fixed_portfolio = env.primary_portfolio_data(4);
+    let foreign = (env.market_data(true), env.foreign_portfolio_data());
+    let token_frame = env.all_token_account_data();
+    let mutable_tokens = [
+        env.vault,
+        env.actors[SENIOR].source_token,
+        env.actors[SENIOR].destination_token,
+        env.actors[WINNER].destination_token,
+    ];
+    let observe = |env: &V16Svm| {
+        [WINNER, SENIOR].map(|actor| {
+            let p = env.primary_portfolio(actor);
+            (
+                p.capital.get(),
+                p.pnl.get(),
+                u128::from(env.token_amount(env.actors[actor].destination_token)),
+            )
+        })
+    };
+    let check = |env: &V16Svm, h: Inv027SeniorityHistory| -> Result<(), String> {
+        inv027_check_seniority_observation(h, observe(env))?;
+        assert_public_stock_census("INV-027 principal interleaving", env)?;
+        assert_public_encumbrance_census("INV-027 principal interleaving", env)?;
+        for (index, actor) in [WINNER, SENIOR].into_iter().enumerate() {
+            let (header, owner) = percolator_prog::state::read_portfolio_owner_preflight(
+                &env.primary_portfolio_data(actor),
+            )
+            .map_err(|error| format!("actor {actor}: owner preflight {error:?}"))?;
+            if env.primary_portfolio_id(actor) != identities[index]
+                || header.market_group_id != env.market.to_bytes()
+                || owner != env.actors[actor].signer.pubkey().to_bytes()
+            {
+                return Err(format!("actor {actor}: principal/claim identity changed"));
+            }
+        }
+        let (_, group) = env.primary_market_state();
+        let expected_vault =
+            5 * INV027_HISTORY_PRINCIPAL + h.senior_extra - h.paid.iter().sum::<u128>();
+        if group.vault != expected_vault
+            || u128::from(env.token_amount(env.vault)) != expected_vault
+            || group.insurance != 0
+            || group.mode != percolator::MarketModeV16::Live
+            || env.token_supply_observed() != supply
+            || u128::from(env.token_amount(env.actors[SENIOR].source_token))
+                != extra - h.senior_extra
+        {
+            return Err("external principal, insurance, or custody drift".into());
+        }
+        if h.loser_settled {
+            let source = group.source_credit[DOMAIN];
+            if env.primary_portfolio(LOSER).capital.get() != 0
+                || source.positive_claim_bound_num
+                    != (h.face - h.converted - h.haircut) * BOUND_SCALE
+                || source.fresh_reserved_backing_num != (SUPPORT - h.converted) * BOUND_SCALE
+                || source.spent_backing_num != h.converted * BOUND_SCALE
+                || group.vault - group.c_tot != SUPPORT - h.converted
+            {
+                return Err("junior face/backing or residual escaped the losing principal".into());
+            }
+        }
+        if env.primary_portfolio_data(4) != fixed_portfolio
+            || (env.market_data(true), env.foreign_portfolio_data()) != foreign
+        {
+            return Err("unrelated account frame changed".into());
+        }
+        let current_tokens = env.all_token_account_data();
+        if current_tokens.len() != token_frame.len()
+            || token_frame
+                .iter()
+                .zip(current_tokens)
+                .any(|((key, before), (after_key, after))| {
+                    *key != after_key || (!mutable_tokens.contains(key) && *before != after)
+                })
+        {
+            return Err("unrelated token frame changed".into());
+        }
+        Ok(())
+    };
+    let mut steps = 0;
+    macro_rules! step {
+        ($label:expr, $call:expr, $update:block) => {{
+            env.begin_public_trace();
+            let result = $call;
+            let trace = env.finish_public_trace();
+            trace.validate_public_execution()?;
+            result.map_err(|error| format!("step {steps} {}: {error}", $label))?;
+            if trace.steps.len() != 1 {
+                return Err(format!("{} hid an unchecked helper transaction", $label));
+            }
+            $update
+            check(&env, history).map_err(|error| format!("step {steps} {}: {error}", $label))?;
+            steps += 1;
+        }};
+    }
+    macro_rules! deposit_senior {
+        () => {
+            step!("senior deposit", env.deposit_primary(SENIOR, extra), {
+                history.senior_extra += extra;
+            });
+        };
+    }
+    macro_rules! withdraw_senior {
+        () => {
+            step!(
+                "senior exit",
+                env.withdraw_primary(SENIOR, INV027_HISTORY_PRINCIPAL + extra),
+                {
+                    history.paid[1] += INV027_HISTORY_PRINCIPAL + extra;
+                }
+            );
+        };
+    }
+    check(&env, history)?;
+    if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+        step!("opening matcher grant", env.set_matcher_config(LOSER, 1), {
+        });
+    }
+    step!(
+        "open",
+        execute_trade_route(
+            &mut env,
+            route,
+            WINNER,
+            LOSER,
+            0,
+            (UNITS * POS_SCALE) as i128,
+            START,
+            0
+        ),
+        {}
+    );
+    // Reuse INV-031's public half-backed cohort construction, not its retry oracle.
+    for (offset, mark) in (105..=END).step_by(5).enumerate() {
+        let slot = 2 + offset as u64;
+        env.warp_to_slot(slot);
+        step!("authenticated mark", env.push_auth_mark(0, slot, mark), {});
+        step!(
+            "winner settlement",
+            env.crank(
+                WINNER,
+                slot,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: env.primary_profile(0).oracle_leg_count,
+                }]
+            ),
+            {
+                history.face += UNITS * 5;
+            }
+        );
+    }
+    step!(
+        "losing cohort settlement",
+        env.crank(
+            LOSER,
+            11,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: env.primary_profile(0).oracle_leg_count,
+            }]
+        ),
+        {
+            history.loser_settled = true;
+        }
+    );
+    if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+        step!(
+            "closing matcher grant",
+            env.set_matcher_config(REPLACEMENT, 1),
+            {}
+        );
+    }
+    step!(
+        "flatten claimant",
+        execute_trade_route(
+            &mut env,
+            route,
+            WINNER,
+            REPLACEMENT,
+            0,
+            -((UNITS * POS_SCALE) as i128),
+            END,
+            0
+        ),
+        {}
+    );
+    assert_eq!(history.face, FACE);
+    assert!(SUPPORT < FACE, "the junior haircut must be nonzero");
+    if !matches!(timing, Inv027PrincipalTiming::AfterPayout) {
+        deposit_senior!();
+    }
+    if matches!(timing, Inv027PrincipalTiming::BeforeConversion) {
+        withdraw_senior!();
+    }
+    step!(
+        "full haircut conversion",
+        env.convert_released_pnl(WINNER, SUPPORT),
+        {
+            history.converted = SUPPORT;
+            history.haircut = FACE - SUPPORT;
+        }
+    );
+    // Mutate only oracle observations: shifting a capital atom preserves every aggregate.
+    let mut wrong_owner = observe(&env);
+    wrong_owner[0].0 -= 1;
+    wrong_owner[1].0 += 1;
+    assert!(inv027_check_seniority_observation(history, wrong_owner).is_err());
+    step!(
+        "claimant exit",
+        env.withdraw_primary(WINNER, INV027_HISTORY_PRINCIPAL + SUPPORT),
+        {
+            history.paid[0] += INV027_HISTORY_PRINCIPAL + SUPPORT;
+        }
+    );
+    if matches!(timing, Inv027PrincipalTiming::AfterPayout) {
+        deposit_senior!();
+    }
+    if !matches!(timing, Inv027PrincipalTiming::BeforeConversion) {
+        withdraw_senior!();
+    }
+    let final_observation = observe(&env);
+    let mut wrong_recipient = final_observation;
+    wrong_recipient[0].2 += 1;
+    wrong_recipient[1].2 -= 1;
+    assert!(inv027_check_seniority_observation(history, wrong_recipient).is_err());
+    Ok((
+        [final_observation[0].2, final_observation[1].2 - extra],
+        steps,
+    ))
+}
+
+#[test]
+fn v16_program_unrelated_principal_histories_do_not_reprice_underbacked_claims() {
+    let mut worlds = 0;
+    let mut checked_steps = 0;
+    let mut reference = None;
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        for extra in [1, 5_000_003] {
+            for timing in [
+                Inv027PrincipalTiming::BeforeConversion,
+                Inv027PrincipalTiming::AcrossConversion,
+                Inv027PrincipalTiming::AfterPayout,
+            ] {
+                let (paid, steps) = inv027_run_principal_interleaving(route, extra, timing)
+                    .unwrap_or_else(|error| {
+                        panic!("INV-027 {route:?} extra={extra} {timing:?}: {error}")
+                    });
+                assert_eq!(
+                    paid,
+                    [2 * INV027_HISTORY_PRINCIPAL, INV027_HISTORY_PRINCIPAL]
+                );
+                assert_eq!(
+                    *reference.get_or_insert(paid),
+                    paid,
+                    "principal timing or transport repriced the claim"
+                );
+                worlds += 1;
+                checked_steps += steps;
+            }
+        }
+    }
+    assert_eq!(worlds, 24);
+    eprintln!("INV-027: {worlds} principal histories, {checked_steps} checked transactions");
 }
 
 proptest! {
