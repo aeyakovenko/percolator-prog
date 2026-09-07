@@ -3749,8 +3749,8 @@ These untested coverage gaps are not findings and receive no severity/impact lab
 2. **INV-082: environment-aware permissionless completion.** Owner:
    [`stateful/inv_082_state_indexed_liveness_theorem.rs`](stateful/inv_082_state_indexed_liveness_theorem.rs).
    Route family: crank/close continuation, expiry normalization, Recovery, claims, and retirement.
-   Gap: the fixed-prefix graph, seeded frontiers, and selector-composition owner in
-   `special_method_coverage.tsv` do not own one generator crossing environmental changes,
+   Gap: the fixed-prefix graph, seeded frontiers, capital-only deadline matrix, and
+   selector-composition owner in `special_method_coverage.tsv` do not own one generator crossing environmental changes,
    overlapping lifecycle work, and role availability at retained progress states.
    TODO: give that product a reusable current-state rank and economic-terminal oracle; search
    bounded honest continuations and report signer-gated deletion separately. Share the owner with
@@ -4940,14 +4940,42 @@ states. Same-slot barriers require a named finite wait and later public progress
 error path must preserve writable bytes, SPL balances, and lamports under SVM rollback, with the
 fee-payer network charge separated.
 
-Acceptance for the first implementation slice: add
-`v16_program_environmental_completion_prefixes_preserve_permissionless_exit`, require it in
-`--list`, report constructed/attempted/progressing/terminal cells and signer sets, and include
-oracle controls that reject an unchanged preterminal crank, a false terminal label with outstanding
-claim work, and an owner-signed economic shortcut. Backing expiry/impairment, insurance depletion,
-B saturation, source/domain locks, partial receipts, unavailable feeds, arbitrary interleavings,
-other trade transports, administrative restart, and supported maxima remain explicit follow-ons.
-No status promotion follows from this readiness slice.
+The bounded capital-only subset is now executable in [SF-082]
+`v16_program_environmental_completion_prefixes_preserve_permissionless_exit` (base `4653161d`,
+2026-09-07). Its 36 public worlds cross two configured stale/force-close delay pairs, before/exact/after
+both authenticated Clock deadlines, and empty versus complete current hints. Five owners have
+unequal positive deposits including one atom; hints are paired with opposite claimant orders and
+alternating `PermissionlessCrank`/`CloseResolved` entrypoints, not an independent order product.
+After public setup, every transaction must have only its keeper fee-payer signature. Pre-deadline
+rejections preserve tracked account bytes, tokens and economic lamports; the finite wait is one
+slot and is counted separately from successful public instructions.
+
+The oracle recomputes a concrete Live/Resolved/wait/unpaid-principal rank from decoded state and
+Clock, requires strict decrease on resolution and each payout, and independently checks each
+owner's initial deposit equals remaining capital plus actual SPL destination payout. It rejects
+unchanged preterminal progress, a false terminal label while other claims remain, and trace records
+modified to add an owner signature or use an owner fee payer. The captured signer roster excludes
+owner/admin shortcuts. Both paid-account retries must reject with exact rollback. Economic completion
+requires all five exact principal payouts and zero engine/SPL vault; five materialized portfolios
+remain. Their deletion/retirement authority requirements remain delegated to INV-073, not executed
+or claimed permissionless here. This adds wrapper postcondition/environment evidence without a new
+engine selector/rank proof or any status promotion.
+
+Focused validation on this base: the exact test filter lists one test and passes all 36 worlds,
+with 612 attempted calls, 216 rank-decreasing successes, 396 exact rejections, 24 one-slot waits,
+and 180 completed owner payouts. Maximum observed CU is 103,125, not a supported-maxima claim.
+The fresh default-feature SBF built with platform-tools v1.52 matches the recorded
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20` artifact.
+
+The broader proposed checkpoint product above is still unimplemented: this test constructs no
+exposure, stale-account refresh, pending close/reset overlap, Recovery, or junior claims. Backing
+expiry/impairment, insurance depletion, B saturation, source/domain locks, partial receipts,
+unavailable feeds, arbitrary interleavings, trade transports, administrative restart, and supported
+maxima remain gaps. The next non-duplicative slice should retain a publicly constructed stale-account
+checkpoint, vary authenticated observation readiness at a fixed Clock boundary, and require a
+concrete refresh postcondition followed by the same independently paid terminal disposition.
+Whole-transition classifier/continuation fidelity and the concrete `FinalizeRecovery` proof link
+remain open as documented in the INV-071 index.
 
 ### INV-086 generator and oracle boundaries
 

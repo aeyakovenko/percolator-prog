@@ -52,16 +52,352 @@
 //! reset prerequisite inside Recovery while the independent close remains
 //! active. It therefore checks the Recovery classifier/dispatcher boundary,
 //! not merely another ResetPending quantity.
+//!
+//! The environmental-completion matrix retains publicly funded capital-only
+//! checkpoints across both stale-resolution and force-close Clock deadlines.
+//! It checks concrete wrapper admission, exact principal payout, and a finite
+//! mode/wait/unpaid-principal rank with only a keeper fee-payer signature after
+//! policy setup. Empty/current hints and both terminal entrypoints are exercised;
+//! economic completion leaves the materialized, signer-gated administrative tail.
+//! This finite environment slice does not cover exposure, junior claims, Recovery,
+//! overlapping close/reset work, unavailable feeds, or maximum account shapes.
 
 use super::*;
 use crate::support::fuzz_model::{
     run_bounded_public_liveness_graph, run_close_recovery_overlap_probe,
     run_close_reset_overlap_probe, run_multileg_loss_stale_progress_regression,
 };
-use crate::support::v16_svm::{MarketConfig, V16Svm};
-use percolator::{AssetLifecycleV16, POS_SCALE};
+use crate::support::v16_svm::{
+    MarketConfig, PublicTraceStep, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT,
+};
+use percolator::{active_bitmap_is_empty, AssetLifecycleV16, MarketModeV16, POS_SCALE};
+use percolator_prog::error::PercolatorError;
 use percolator_prog::ix::CrankObservationHint;
+use solana_sdk::{account::Account, pubkey::Pubkey, signature::Signer};
 use std::collections::{BTreeSet, VecDeque};
+
+type Inv082AccountFrame = Vec<(Pubkey, Option<Account>)>;
+
+fn inv082_account_frame(env: &V16Svm) -> Inv082AccountFrame {
+    let mut keys: BTreeSet<_> = env
+        .all_economic_account_lamports()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    keys.extend(env.actors.iter().map(|actor| actor.signer.pubkey()));
+    keys.insert(env.foreign_actor.signer.pubkey());
+    keys.into_iter()
+        .map(|key| (key, env.svm.get_account(&key)))
+        .collect()
+}
+
+fn inv082_assert_frame(env: &V16Svm, before: &Inv082AccountFrame, allowed: &[Pubkey]) {
+    for (key, account) in before {
+        if !allowed.contains(key) {
+            assert_eq!(
+                &env.svm.get_account(key),
+                account,
+                "unexpected mutation: {key}"
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Inv082CapitalCompletion {
+    rank: (u8, u64, u128),
+    economic_terminal: bool,
+    administrative_portfolios: u64,
+}
+
+fn inv082_capital_completion(
+    env: &V16Svm,
+    deposits: [u128; PRIMARY_ACTOR_COUNT],
+    destinations_before: [u64; PRIMARY_ACTOR_COUNT],
+) -> Inv082CapitalCompletion {
+    let (cfg, market) = env.primary_market_state();
+    let mut unpaid = 0u128;
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let account = env.primary_portfolio(actor);
+        let paid = env
+            .token_amount(env.actors[actor].destination_token)
+            .checked_sub(destinations_before[actor])
+            .expect("destination principal cannot decrease");
+        assert_eq!(account.capital.get() + u128::from(paid), deposits[actor]);
+        unpaid += account.capital.get();
+        assert_eq!(account.pnl.get(), 0);
+        assert_eq!(account.reserved_pnl.get(), 0);
+        assert_eq!(account.fee_credits.get(), 0);
+        assert_eq!(account.cancel_deposit_escrow.get(), 0);
+        assert_eq!(account.stale_state, 0);
+        assert_eq!(account.b_stale_state, 0);
+        assert_eq!(account.rebalance_lock, 0);
+        assert_eq!(account.liquidation_lock, 0);
+        assert!(active_bitmap_is_empty(
+            account.active_bitmap.map(|word| word.get())
+        ));
+        assert!(account
+            .source_domains
+            .iter()
+            .all(|source| !source.is_occupied()));
+        let receipt = account.resolved_payout_receipt.try_to_runtime().unwrap();
+        assert!(!receipt.present || receipt.finalized);
+        assert!(!account.close_progress.try_to_runtime().unwrap().active);
+    }
+    assert_eq!(market.c_tot, unpaid);
+    assert_eq!(market.vault, unpaid);
+    assert_eq!(u128::from(env.token_amount(env.vault)), unpaid);
+    assert_eq!(market.insurance, 0);
+    assert_eq!(
+        market.materialized_portfolio_count,
+        PRIMARY_ACTOR_COUNT as u64
+    );
+    let economic_terminal = market.mode == MarketModeV16::Resolved && unpaid == 0;
+    let rank = match market.mode {
+        MarketModeV16::Live => (
+            2,
+            (cfg.last_good_oracle_slot + cfg.permissionless_resolve_stale_slots)
+                .saturating_sub(env.current_slot()),
+            unpaid,
+        ),
+        MarketModeV16::Resolved if !economic_terminal => (
+            1,
+            (market.resolved_slot + cfg.force_close_delay_slots).saturating_sub(env.current_slot()),
+            unpaid,
+        ),
+        MarketModeV16::Resolved => (0, 0, 0),
+        mode => panic!("unconstructed mode in capital-only completion slice: {mode:?}"),
+    };
+    Inv082CapitalCompletion {
+        rank,
+        economic_terminal,
+        administrative_portfolios: market.materialized_portfolio_count,
+    }
+}
+
+fn inv082_completion_step_is_valid(
+    before: Inv082CapitalCompletion,
+    after: Inv082CapitalCompletion,
+    reports_terminal: bool,
+) -> bool {
+    after.rank < before.rank && reports_terminal == after.economic_terminal
+}
+
+fn inv082_keeper_only(step: &PublicTraceStep, unavailable: &BTreeSet<Pubkey>) -> bool {
+    !unavailable.contains(&step.fee_payer)
+        && step.transaction_signers == vec![step.fee_payer]
+        && step
+            .accounts
+            .iter()
+            .all(|meta| !meta.is_signer || meta.key == step.fee_payer)
+}
+
+fn inv082_assert_rejected(error: String, expected: PercolatorError) {
+    assert!(
+        error.contains(&format!("Custom({})", expected as u32)),
+        "unexpected wrapper rejection: {error}"
+    );
+}
+
+#[test]
+fn v16_program_environmental_completion_prefixes_preserve_permissionless_exit() {
+    let deposits = [1, 17, 123, 1_000, 2_001];
+    let mut worlds = 0;
+    let mut attempts = 0;
+    let mut progressing = 0;
+    let mut rejected = 0;
+    let mut waits = 0;
+    let mut terminal = 0;
+    let mut max_cu = 0;
+    for (stale_slots, force_close_delay) in [(2u64, 1u64), (5, 3)] {
+        for resolution_boundary in 0..3u64 {
+            for payout_boundary in 0..3u64 {
+                for complete_hints in [false, true] {
+                    let mut seed = [0x82; 32];
+                    seed[0] = worlds;
+                    let mut env = V16Svm::new(
+                        seed,
+                        MarketConfig {
+                            actor_deposits: deposits,
+                            ..MarketConfig::default()
+                        },
+                    );
+                    env.configure_permissionless_resolve(stale_slots, force_close_delay)
+                        .expect("public terminal-policy setup");
+                    let destinations_before = std::array::from_fn(|actor| {
+                        env.token_amount(env.actors[actor].destination_token)
+                    });
+                    let supply_before = env.token_supply_observed();
+                    let maturity = env.primary_market_state().0.last_good_oracle_slot + stale_slots;
+                    let mut unavailable: BTreeSet<_> = env
+                        .actors
+                        .iter()
+                        .map(|actor| actor.signer.pubkey())
+                        .collect();
+                    unavailable.insert(Pubkey::new_from_array(
+                        env.primary_market_state().0.marketauth,
+                    ));
+                    env.begin_public_trace();
+                    env.warp_to_slot(maturity - 1 + resolution_boundary);
+                    let mut before = inv082_capital_completion(&env, deposits, destinations_before);
+                    assert_eq!(before.rank.0, 2);
+                    assert!(!before.economic_terminal);
+                    assert!(!inv082_completion_step_is_valid(before, before, false));
+                    if resolution_boundary == 0 {
+                        let frame = inv082_account_frame(&env);
+                        let slot = env.current_slot();
+                        inv082_assert_rejected(
+                            env.resolve_stale_permissionless(slot)
+                                .expect_err("not mature yet"),
+                            PercolatorError::OracleStale,
+                        );
+                        inv082_assert_frame(&env, &frame, &[]);
+                        env.warp_to_slot(maturity);
+                        let ready = inv082_capital_completion(&env, deposits, destinations_before);
+                        assert_eq!(before.rank.1, 1, "only a named finite wait is admitted");
+                        assert!(ready.rank < before.rank);
+                        before = ready;
+                        waits += 1;
+                    }
+                    let frame = inv082_account_frame(&env);
+                    let slot = env.current_slot();
+                    env.resolve_stale_permissionless(slot)
+                        .expect("mature public resolution");
+                    let after = inv082_capital_completion(&env, deposits, destinations_before);
+                    assert_eq!(after.rank.0, 1);
+                    assert!(inv082_completion_step_is_valid(before, after, false));
+                    inv082_assert_frame(&env, &frame, &[env.market]);
+
+                    let payout_maturity =
+                        env.primary_market_state().1.resolved_slot + force_close_delay;
+                    env.warp_to_slot(payout_maturity - 1 + payout_boundary);
+                    let hints = if complete_hints {
+                        (0..crate::support::v16_svm::ASSET_COUNT)
+                            .map(|asset| CrankObservationHint {
+                                asset_index: asset as u16,
+                                oracle_accounts: env.primary_profile(asset).oracle_leg_count,
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![]
+                    };
+                    if payout_boundary == 0 {
+                        let waiting =
+                            inv082_capital_completion(&env, deposits, destinations_before);
+                        for use_crank in [true, false] {
+                            let frame = inv082_account_frame(&env);
+                            let result = if use_crank {
+                                env.crank(0, env.current_slot(), hints.clone())
+                            } else {
+                                env.close_resolved_primary(0)
+                            };
+                            inv082_assert_rejected(
+                                result.expect_err("owner window is not permissionless"),
+                                PercolatorError::ExpectedSigner,
+                            );
+                            inv082_assert_frame(&env, &frame, &[]);
+                        }
+                        env.warp_to_slot(payout_maturity);
+                        let ready = inv082_capital_completion(&env, deposits, destinations_before);
+                        assert_eq!(waiting.rank.1, 1);
+                        assert!(ready.rank < waiting.rank);
+                        waits += 1;
+                    }
+
+                    // Alternate entrypoints and owner orders without owner signatures.
+                    for index in 0..PRIMARY_ACTOR_COUNT {
+                        let actor = if complete_hints {
+                            PRIMARY_ACTOR_COUNT - 1 - index
+                        } else {
+                            index
+                        };
+                        let before = inv082_capital_completion(&env, deposits, destinations_before);
+                        let frame = inv082_account_frame(&env);
+                        let result = if index % 2 == usize::from(complete_hints) {
+                            env.crank(actor, env.current_slot(), hints.clone())
+                        } else {
+                            env.close_resolved_primary(actor)
+                        };
+                        result.expect("one bounded permissionless principal payout per account");
+                        let after = inv082_capital_completion(&env, deposits, destinations_before);
+                        assert!(inv082_completion_step_is_valid(
+                            before,
+                            after,
+                            after.economic_terminal
+                        ));
+                        if index == 0 {
+                            assert!(!after.economic_terminal, "other funded claims remain");
+                            assert!(!inv082_completion_step_is_valid(before, after, true));
+                        }
+                        assert_eq!(env.primary_portfolio(actor).capital.get(), 0);
+                        inv082_assert_frame(
+                            &env,
+                            &frame,
+                            &[
+                                env.market,
+                                env.actors[actor].portfolio,
+                                env.actors[actor].destination_token,
+                                env.vault,
+                            ],
+                        );
+                        let frame = inv082_account_frame(&env);
+                        for use_crank in [true, false] {
+                            let retry = if use_crank {
+                                env.crank(actor, env.current_slot(), hints.clone())
+                            } else {
+                                env.close_resolved_primary(actor)
+                            };
+                            inv082_assert_rejected(
+                                retry.expect_err("paid account must not report progress again"),
+                                PercolatorError::EngineNonProgress,
+                            );
+                            inv082_assert_frame(&env, &frame, &[]);
+                        }
+                    }
+                    let done = inv082_capital_completion(&env, deposits, destinations_before);
+                    assert!(done.economic_terminal);
+                    assert_eq!(done.rank, (0, 0, 0));
+                    assert_eq!(done.administrative_portfolios, PRIMARY_ACTOR_COUNT as u64);
+                    assert_eq!(env.token_supply_observed(), supply_before);
+                    let trace = env.finish_public_trace();
+                    trace
+                        .validate_public_execution()
+                        .expect("public, rollback-exact continuation");
+                    for step in &trace.steps {
+                        assert!(
+                            inv082_keeper_only(step, &unavailable),
+                            "owner/admin shortcut"
+                        );
+                        let mut signed_shortcut = step.clone();
+                        signed_shortcut
+                            .transaction_signers
+                            .push(env.actors[0].signer.pubkey());
+                        assert!(!inv082_keeper_only(&signed_shortcut, &unavailable));
+                        signed_shortcut.fee_payer = env.actors[0].signer.pubkey();
+                        signed_shortcut.transaction_signers = vec![signed_shortcut.fee_payer];
+                        assert!(!inv082_keeper_only(&signed_shortcut, &unavailable));
+                        if step.succeeded {
+                            max_cu = max_cu.max(step.compute_units.expect("landed instruction CU"));
+                        }
+                    }
+                    attempts += trace.steps.len();
+                    progressing += trace.steps.iter().filter(|step| step.succeeded).count();
+                    rejected += trace.steps.iter().filter(|step| !step.succeeded).count();
+                    terminal += usize::from(done.economic_terminal);
+                    worlds += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(worlds, 36);
+    assert_eq!(progressing, 36 * (1 + PRIMARY_ACTOR_COUNT));
+    assert_eq!(rejected, 36 * 2 * PRIMARY_ACTOR_COUNT + 12 + 24);
+    assert_eq!(attempts, progressing + rejected);
+    assert_eq!(waits, 24);
+    assert_eq!(terminal, 36);
+    assert!(max_cu < TX_CU_LIMIT);
+    eprintln!("INV-082 constructed={worlds} attempted={attempts} progressing={progressing} rejected={rejected} finite_waits={waits} terminal={terminal} signer_set=keeper-fee-payer-only administrative_portfolios_per_world={PRIMARY_ACTOR_COUNT} max_cu={max_cu}");
+}
 
 #[test]
 fn v16_program_bounded_public_crank_graph_reaches_terminal_rank() {
