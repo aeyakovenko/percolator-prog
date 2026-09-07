@@ -3754,6 +3754,8 @@ These untested coverage gaps are not findings and receive no severity/impact lab
    TODO: give that product a reusable current-state rank and economic-terminal oracle; search
    bounded honest continuations and report signer-gated deletion separately. Share the owner with
    INV-063/071/073/078; one failed candidate or a working escape must not become a DoS claim.
+   The [implementation-readiness slice](#inv-082-implementation-readiness) below specifies the
+   next bounded increment without promoting the existing method or invariant statuses.
 
 3. **INV-012: retained capability lifecycle.** Owner:
    [`stateful/inv_012_capability_and_delegate_scope.rs`](stateful/inv_012_capability_and_delegate_scope.rs).
@@ -4412,6 +4414,47 @@ cells; after each success assert cumulative quantity, fees, OI, consumed episode
 bounded fresh continuation; after each error assert exact account-frame rollback. Residual fills
 must be newly signed intents, not remaining authorization on a consumed one-shot request. This is
 planned coverage only and does not promote the invariant status.
+
+### INV-082 implementation-readiness
+
+Finding-blind review, 2026-09-07: the next liveness increment is a bounded environmental product,
+not a full no-DoS proof. It should live in
+`stateful/inv_082_state_indexed_liveness_theorem.rs` and reuse pinned engine selector/rank
+contracts instead of reimplementing the engine selector in the wrapper suite.
+
+The proposed owner should retain public checkpoints after successful construction only: stale
+account work, pending close plus independent ResetPending work, Recovery continuation, and Resolved
+capital or fully payable claim work. Cross each checkpoint with authenticated Clock boundaries,
+empty versus complete current hints, owner/cleanup-authority signer availability, and a fixed
+honest-observation profile. Do not inject cursors, lifecycle flags, balances, or summary bits; if a
+profile cannot be publicly constructed, record it as a coverage gap rather than assumed unreachable.
+
+The reusable oracle has three independent outputs:
+
+- `current_rank`: recomputed from decoded market, portfolio, domain, and authenticated-input state,
+  validating cached cursors and selected plans rather than trusting them.
+- `economic_disposition`: proof that the user-facing claim is paid, terminally receipted, or moved
+  to an explicitly authorized junior-value outcome; `NoAction`, healthy exposure, or mere receipt
+  creation is not enough.
+- `administrative_tail`: remaining account deletion, provider/operator cleanup, asset retirement,
+  and market close work with its exact required signer. Signer-gated deletion is not permissionless
+  economic progress.
+
+For each fixed environment, search admitted permissionless candidates, regenerate candidates after
+each success, require every successful crank/continuation to strictly lower the rank or enter a
+lower terminal mode, and classify rejected hints as ignored discovery failures rather than stuck
+states. Same-slot barriers require a named finite wait and later public progress witness. Every
+error path must preserve writable bytes, SPL balances, and lamports under SVM rollback, with the
+fee-payer network charge separated.
+
+Acceptance for the first implementation slice: add
+`v16_program_environmental_completion_prefixes_preserve_permissionless_exit`, require it in
+`--list`, report constructed/attempted/progressing/terminal cells and signer sets, and include
+oracle controls that reject an unchanged preterminal crank, a false terminal label with outstanding
+claim work, and an owner-signed economic shortcut. Backing expiry/impairment, insurance depletion,
+B saturation, source/domain locks, partial receipts, unavailable feeds, arbitrary interleavings,
+other trade transports, administrative restart, and supported maxima remain explicit follow-ons.
+No status promotion follows from this readiness slice.
 
 ## Commands
 
