@@ -413,6 +413,238 @@ fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomical
     assert_eq!(group_after.assets[1].oi_eff_short_q, size_q.unsigned_abs());
 }
 
+#[test]
+fn v16_program_bounded_signed_cap_histories_preserve_cross_route_fee_budgets() {
+    const CAPITAL: u128 = 1_000_000;
+    const PRICE: u64 = 100;
+    const FEE_BPS: u64 = 100;
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    let ceil_div = |n: u128, d: u128| n / d + u128::from(n % d != 0);
+    let mut counts = [0usize; 4]; // Histories, fills, cap rejections, consumed retries.
+
+    for direction in [-1i128, 1] {
+        for batch_first in [false, true] {
+            for failure_mask in 0u8..8 {
+                let case = format!(
+                    "direction={direction}, batch_first={batch_first}, failures={failure_mask:03b}"
+                );
+                let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+                env.update_trade_fee_policy_with_cu(FEE_BPS);
+                let matcher = Pubkey::new_unique();
+                env.svm.add_program(matcher, &matcher_bytes);
+                let taker = Keypair::new();
+                let lp = Keypair::new();
+                let ta = env.create_portfolio(&taker);
+                let la = env.create_portfolio(&lp);
+                let taker_token = env.deposit(&taker, ta, CAPITAL);
+                let lp_token = env.deposit(&lp, la, CAPITAL);
+                let (ctx, delegate, _) =
+                    env.init_matcher_context_with_passive_spread_authorized(matcher, &lp, la, 0, 0);
+                let metas = vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ta, false),
+                    AccountMeta::new(la, false),
+                    AccountMeta::new_readonly(matcher, false),
+                    AccountMeta::new(ctx, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ];
+                let send = |env: &mut V16CuEnv, ix| {
+                    env.svm.expire_blockhash();
+                    env.send(ix, metas.clone(), &[&taker])
+                };
+                // All trade writables, the CPI delegate, and SPL custody; exclude only the fee payer.
+                let frame = |env: &V16CuEnv| {
+                    [
+                        env.market,
+                        ta,
+                        la,
+                        ctx,
+                        taker.pubkey(),
+                        lp.pubkey(),
+                        delegate,
+                        env.vault,
+                        env.mint,
+                        taker_token,
+                        lp_token,
+                    ]
+                    .map(|key| env.svm.get_account(&key).unwrap())
+                };
+                let custody = |env: &V16CuEnv| {
+                    [env.vault, env.mint, taker_token, lp_token]
+                        .map(|key| env.svm.get_account(&key).unwrap())
+                };
+                let initial_custody = custody(&env);
+                let (_, initial_market) = env.market_state();
+                // Zero spread and no clock/funding movement isolate actual per-actor fee debits.
+                let assert_prefix = |env: &V16CuEnv, quantities: [i128; 2], fees: u128| {
+                    for (key, sign) in [(ta, 1), (la, -1)] {
+                        let account = env.portfolio_state(key);
+                        assert_eq!(account.capital.get(), CAPITAL - fees, "{case}");
+                        assert_eq!(account.pnl.get(), 0, "{case}");
+                        for (asset, quantity) in quantities.into_iter().enumerate() {
+                            if quantity == 0 {
+                                assert!(!has_active_leg_for_asset(&account, asset), "{case}");
+                            } else {
+                                assert_eq!(
+                                    active_leg_for_asset(&account, asset).basis_pos_q,
+                                    sign * quantity,
+                                    "{case}"
+                                );
+                            }
+                        }
+                    }
+                    let (_, market) = env.market_state();
+                    for (asset, quantity) in quantities.into_iter().enumerate() {
+                        assert_eq!(market.assets[asset].effective_price, PRICE, "{case}");
+                        assert_eq!(
+                            market.assets[asset].oi_eff_long_q,
+                            quantity.unsigned_abs(),
+                            "{case}"
+                        );
+                        assert_eq!(
+                            market.assets[asset].oi_eff_short_q,
+                            quantity.unsigned_abs(),
+                            "{case}"
+                        );
+                    }
+                    assert_eq!(
+                        market.insurance,
+                        initial_market.insurance + 2 * fees,
+                        "{case}"
+                    );
+                    assert_eq!(market.c_tot, initial_market.c_tot - 2 * fees, "{case}");
+                    assert_eq!(market.vault, initial_market.vault, "{case}");
+                    assert_eq!(market.c_tot + market.insurance, market.vault, "{case}");
+                    assert_eq!(
+                        market.vault,
+                        u128::from(env.token_amount(env.vault)),
+                        "{case}"
+                    );
+                    assert_eq!(custody(env), initial_custody, "{case}");
+                };
+
+                let sizes = [
+                    direction * (POS_SCALE + 1) as i128,
+                    -direction * (2 * POS_SCALE + 1) as i128,
+                ];
+                let mut quantities = [0i128; 2];
+                let mut fees = 0u128;
+                assert_prefix(&env, quantities, fees);
+                for step in 0..3 {
+                    let batch = batch_first == (step % 2 == 0);
+                    let assets = if batch { vec![0, 1] } else { vec![step % 2] };
+                    let legs: Vec<_> = assets
+                        .iter()
+                        .map(|&asset| BatchTradeCpiLeg {
+                            asset_index: asset as u16,
+                            market_id: env.asset_market_id(asset as u16),
+                            size_q: sizes[asset],
+                            fee_bps: FEE_BPS,
+                            limit_price: PRICE,
+                        })
+                        .collect();
+                    // Independently price each signed leg, including both quote and fee ceilings.
+                    let fee = legs
+                        .iter()
+                        .map(|leg| {
+                            let notional =
+                                ceil_div(leg.size_q.unsigned_abs() * u128::from(PRICE), POS_SCALE);
+                            ceil_div(notional * u128::from(FEE_BPS), 10_000)
+                        })
+                        .sum::<u128>();
+                    assert_eq!(fee, if batch { 5 } else { 2 + assets[0] as u128 }, "{case}");
+                    let current = if batch {
+                        env.batch_trade_cpi_ix_with_caps(ta, la, legs, 0, fee)
+                    } else {
+                        env.trade_cpi_ix(
+                            ta,
+                            la,
+                            legs[0].asset_index,
+                            legs[0].size_q,
+                            FEE_BPS,
+                            PRICE,
+                        )
+                    };
+                    if failure_mask & (1 << step) != 0 {
+                        for tighten_fee in [false, true] {
+                            // Aggregate fee-atom caps are batch-only; singles retain price limits.
+                            if tighten_fee && !batch {
+                                continue;
+                            }
+                            let mut rejected = current.clone();
+                            let tight_price =
+                                |size: i128| if size > 0 { PRICE - 1 } else { PRICE + 1 };
+                            match &mut rejected {
+                                ProgInstruction::TradeCpi {
+                                    size_q,
+                                    limit_price,
+                                    ..
+                                } => {
+                                    *limit_price = tight_price(*size_q);
+                                }
+                                ProgInstruction::BatchTradeCpi {
+                                    max_fee_atoms,
+                                    legs,
+                                    ..
+                                } => {
+                                    if tighten_fee {
+                                        *max_fee_atoms -= 1;
+                                    } else {
+                                        let last = legs.last_mut().unwrap();
+                                        last.limit_price = tight_price(last.size_q);
+                                    }
+                                }
+                                _ => unreachable!(),
+                            }
+                            for attempt in 0..2 {
+                                let before = frame(&env);
+                                assert!(
+                                    send(&mut env, rejected.clone()).is_err(),
+                                    "{case}, step={step}, fee={tighten_fee}, attempt={attempt}"
+                                );
+                                assert_eq!(
+                                    frame(&env),
+                                    before,
+                                    "{case}, step={step}: cap rejection must roll back exactly"
+                                );
+                                assert_prefix(&env, quantities, fees);
+                                counts[2] += 1;
+                            }
+                        }
+                    }
+
+                    send(&mut env, current.clone()).unwrap_or_else(|error| {
+                        panic!("{case}, step={step}: exact-cap continuation failed: {error}")
+                    });
+                    for asset in assets {
+                        quantities[asset] += sizes[asset];
+                    }
+                    fees += fee;
+                    assert_prefix(&env, quantities, fees);
+                    counts[1] += 1;
+
+                    let before = frame(&env);
+                    assert!(
+                        send(&mut env, current).is_err(),
+                        "{case}, step={step}: consumed retry"
+                    );
+                    assert_eq!(
+                        frame(&env),
+                        before,
+                        "{case}, step={step}: consumed retry rollback"
+                    );
+                    assert_prefix(&env, quantities, fees);
+                    counts[3] += 1;
+                }
+                counts[0] += 1;
+            }
+        }
+    }
+    assert_eq!(counts, [32, 96, 144, 96]);
+    println!("INV-011: 32 bounded histories; 96 fills; 144 cap rejections; 96 consumed retries");
+}
+
 // security.md sweep — §6.2 profit conversion (#33/#35): ConvertReleasedPnl moves source-backed
 // released pnl into withdrawable capital. The caller supplies `amount`, but it must only be a CAP:
 // a caller must never convert MORE than the engine's release-bounded amount (which would print
