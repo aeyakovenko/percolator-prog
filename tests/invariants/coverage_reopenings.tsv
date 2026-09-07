@@ -1,5 +1,6 @@
 # PR410-426 are 17 post-hoc holdout misses affecting 60 invariant rows.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
+# Kind/severity are recorded claims, not impact acceptance under scripts/loop.md; OPEN does not confirm LoF/DoS.
 # status remains OPEN until a generic invariant-owned generator/oracle (not the finding PoC)
 # fails on the vulnerable pin, the production fix lands, and the unchanged oracle passes.
 pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	required_generic_property	status

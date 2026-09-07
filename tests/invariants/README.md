@@ -5,6 +5,19 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
 ## Current goal
 
+The requirements below are targets, not achieved verdicts. `invariant_status.tsv` currently
+projects to **60 REOPENED, 27 CONDITIONAL, 2 N/A, and 0 PROVEN** invariants.
+
+Finding acceptance follows [`../../scripts/loop.md`](../../scripts/loop.md), independently of
+coverage status. LoF requires publicly reachable net-extractable loss to an independent user or
+canonical provider in a normally initialized live market under the accepted oracle and admin
+trusts. Persistent DoS requires failure of every bounded owner/keeper continuation despite honest
+correct inputs; a reverted CU burn, stale retry, or blocked optional route is insufficient.
+Only `BLOCKER`, `PRIVILEGED`, and `HARDENING` are current severity labels. `BLOCKER` or
+`PRIVILEGED` acceptance requires exact pre-fix-parent and fixed-head evidence. Privileged access
+alone is not a nonqualifying disposition, and an independent-discovery mapping alone does not
+establish qualifying impact.
+
 Close every tractable gap in INV-001 through INV-089 with the strongest computationally feasible
 combination of proof, public-route stateful fuzzing, metamorphic testing, bounded reachability, and
 maximum-shape SBF measurement. Work starts from the invariant charter and deployed public
@@ -145,9 +158,13 @@ trace supplies the stronger loss attribution, while the generic matrix does not 
 terminal victim loss. INV-008 and the related value rows remain `REOPENED` until the production fix
 lands and the remaining retained-withdrawal route and stock-transition partitions are covered.
 
-The detailed tranche notes below are historical evidence records. Their original use of words such
-as "closed" or "closure" is superseded by `invariant_status.tsv` and the audit ledger; it means only
-that the named bounded tranche had no known counterexample at that checkpoint.
+## Historical evidence checkpoints
+
+The tranche and next-work notes in this section are historical records, not current summaries.
+Their "current", "now", "closed", "closure", and "proof-equivalence" language refers to the
+original checkpoint and its declared bounds and assumptions. It does not override
+`invariant_status.tsv`, establish exhaustive transition-system proof, promote independent
+discovery, or establish LoF/DoS acceptance under `scripts/loop.md`.
 
 The current engine pin is
 `495a5590c97055bd71c6f94d849ff0298f243145` on engine branch
@@ -3778,7 +3795,12 @@ Each TODO needs an invariant-owned executable entrypoint naming its reusable gen
 oracle, route/partition domain, and secondary owners. Shared helpers may stay in `tests/support/`;
 coverage ownership must not stop there. No new issue-specific adapter satisfies this queue.
 
-## Current PR135 inventory
+## Recorded PR135 inventory
+
+This is an artifact inventory with historical fixed-pin evidence descriptions, not a current
+invariant or impact verdict. Closure and certification language in the tranche summaries below
+is limited to the recorded examples and harness domains; current status remains in
+`invariant_status.tsv`.
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
@@ -3790,10 +3812,9 @@ coverage ownership must not stop there. No new issue-specific adapter satisfies 
 The executable 99-finding manifest currently contains 91 `Certified`, 0 `Quarantined`, 8
 `Nonqualifying`, and 0 `Missing` entries. Certified adapters assert positive safety/liveness
 outcomes on this fixed pin, and every
-nonqualifying row is tied to a public proof that the alleged route is privileged-only, transient,
-or unreachable on this pin. A vulnerable-pin counterexample proves public reachability but does
-not certify the invariant until the fixed pin rejects the attack or preserves the required safe
-outcome.
+nonqualifying row retains its recorded public-route disposition. Privileged-only access does not
+by itself make a finding nonqualifying under `scripts/loop.md`. Vulnerable/fixed-pin evidence can
+support a scoped regression result, but does not by itself certify the whole invariant.
 
 The current fixed pin enforces matcher consent for CPI backing fees (PR223), ignores unsigned CPI
 caller fees (PR224), requires bilateral no-CPI consent to the live base fee (PR310), requires a
@@ -4006,12 +4027,12 @@ charter.
 
 ## Exhaustiveness audit
 
-Audit last reconciled: 2026-09-04. No invariant is currently certified as a full-domain theorem of
-the deployed transition system. The rows below summarize the strongest current evidence and its
-known gaps; they are not closure certificates. The audit reads the normative `Required tests`
-clause and the bodies of owned and cross-referenced tests/proofs. Passing tests, file presence, a
-vulnerable-pin counterexample, and a finding-specific regression do not by themselves prove an
-invariant.
+Status last reconciled: 2026-09-04; wording audited: 2026-09-07. No invariant is currently certified
+as a full-domain theorem of the deployed transition system. The rows below pair current verdicts
+with recorded evidence and its known gaps; they are not closure certificates. The audit reads the
+normative `Required tests` clause and the bodies of owned and cross-referenced tests/proofs.
+Passing tests, file presence, a vulnerable-pin counterexample, and a finding-specific regression
+do not by themselves prove an invariant.
 
 `invariant_status.tsv` is the authoritative aggregate status. It separates disposition, required
 scope, achieved evidence scope, quantification, assumptions, and current counterexamples. The
@@ -4038,9 +4059,8 @@ passing sampled corpus do not establish full-domain coverage or a whole-invarian
 ### Cross-cutting coverage bugs
 
 1. The charter requests `P` for 76 invariants, `F` for 85, `I` for 66, `M` for 32, `R` for 22,
-   and `C` for 2. Invariant-owned directories currently exist for only 12 `P`, 27 `F`, and 87 `I`
-   owners. File presence is only a lower bound; many owners cover one scenario rather than the
-   required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
+   and `C` for 2. File presence is only an artifact count; many owners cover one scenario rather
+   than the required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
    obligations: all 32 `M` rows, all 22 `R` rows, and both `C` rows have executable owners marked
    `COVERED` by the machine registry. That registry does not prove their parent invariants. The
    final four `M` rows are supported through
@@ -4055,17 +4075,18 @@ passing sampled corpus do not establish full-domain coverage or a whole-invarian
    recovery-leg forfeit, asset-oracle restart, and permissionless stale resolution, plus
    replay/substitution meta-actions. Shared success/rollback, token/account frame, ghost-position,
    and global-state oracles apply to those routes; terminal routes additionally get exact
-   receipt/payout/OI reconciliation. INV-081 now closes the other 24 variants by composing their
-   dedicated public-route owners with the complete decoder, admission, account/input, engine-call,
+   receipt/payout/OI reconciliation. INV-081 records evidence for the other 24 variants by composing
+   their dedicated public-route owners with the complete decoder, admission, account/input, engine-call,
    wrapper-field, value, stock, certificate, scope, and rollback inventories. A new variant or
    omitted route fails the 49-row composition gate.
 3. Stateful suites default to 4 or 8 cases, generally 12 to 16 actions. Those are CI smoke budgets,
    not saturation evidence. There is no time-budgeted campaign, transition/branch coverage target,
    mutation score, or corpus-stability criterion for declaring a generator exhausted.
 4. No single bounded BFS enumerates the entire public lifecycle graph. INV-057/073/082 instead
-   close their unbounded sequence and class-overlap dimensions by composing the actual selector,
+   combine sequence and class-overlap evidence from the actual selector,
    arbitrary-rank induction, all `2^8` actionable summaries, the source-complete continuation
    roster, bounded public frontiers, and maximum-shape execution under the named assumptions.
+   That composition does not establish liveness over every publicly reachable history.
    INV-086 still exhausts all words through depth three over thirteen public action classes before
    extending every one of 685 exact authenticated tracked states with all thirteen actions.
    INV-066,
@@ -4094,9 +4115,9 @@ passing sampled corpus do not establish full-domain coverage or a whole-invarian
 6. Kani proofs cover local wrapper helpers and explicit engine-contract composition boundaries.
    INV-084 source-inventories every mounted harness, assumption, branch-limited claim, generated
    proof, and concrete fixture; INV-088 inventories every wrapper-to-engine transition. There is
-   no single theorem asserts all 89 charter predicates over arbitrary raw account bytes after every
-   public wrapper instruction. INV-081 closes the current validated public surface through the
-   explicit nineteen-layer proof-equivalence decomposition; raw malformed bytes remain owned by
+   no single theorem that asserts all 89 charter predicates over arbitrary raw account bytes after
+   every public wrapper instruction. INV-081 retains source-owner composition evidence for validated
+   public routes, not a whole-system proof; raw malformed bytes remain owned by
    INV-015/022/080 rather than admitted as valid pre-state.
 7. The known-finding benchmark is a dated snapshot. Independent rediscovery of its rows is useful
    regression evidence, but it cannot establish completeness against unknown attack classes or
@@ -4104,9 +4125,11 @@ passing sampled corpus do not establish full-domain coverage or a whole-invarian
 
 ### Per-invariant coverage bugs
 
-The last clause in each row describes the evidence boundary that was previously treated as
-closure. `AUDIT-NNN` identifiers are machine-checked below so a future README edit cannot silently
-omit an invariant. Verdicts mean:
+Only the verdict column is the current status projection. The descriptive column retains
+historical evidence claims and boundaries: "closed", "complete", "discharged", and
+"proof-equivalence" are not current invariant verdicts or impact acceptance. `AUDIT-NNN`
+identifiers are machine-checked below so a future README edit cannot silently omit an invariant.
+Verdicts mean:
 
 - `CONDITIONAL`: no counterexample is currently registered, but evidence is harness-relative,
   bounded, or relies on named assumptions.
@@ -4116,7 +4139,7 @@ omit an invariant. Verdicts mean:
 
 `CLOSED` and `PROVEN` are deliberately invalid verdicts in this ledger.
 
-| Audit | Verdict | Known coverage bugs and strongest feasible closure |
+| Audit | Verdict | Recorded evidence and boundaries (historical claims, not verdicts) |
 | --- | --- | --- |
 | AUDIT-001 | CONDITIONAL | The 11-route finding-blind public matrix certifies the explicit strict no-reuse policy: `CloseSlab` leaves an exact rent-exempt typed tombstone, public funding cannot make `InitMarket` reuse that pubkey, every retained market request rejects with exact rollback, and a fresh market address remains live. An assumption-free Kani theorem proves arbitrary prior header bytes become the canonical initialized tombstone. INV-006 source-locks the absence of any detached signed-message surface and separately owns transaction-domain binding. A new market close/reuse route or detached request format reopens this row. |
 | AUDIT-002 | REOPENED | The production roster owns all 17 direct generation fields, both batch-leg fields, and every generation guard. A 21-family generated matrix covers every retained control, including all four trade routes and a nonvacuous backing-earnings withdrawal across two publicly constructed generations. Public retire/reuse and consumed-frontier traces require stale rejection, exact rollback, and fresh economic mutation. Kani proves exact current/frontier equality and compact wire preservation; exhaustive host decoding plus deployed-SBF composition cover the wider lifecycle schema. `market_id` is the program-assigned asset generation, while the signed Solana transaction binds program ID, market account, instruction kind, schema bytes, and blockhash. Resolved claims are permissionless current-state transitions, and matcher configuration is portfolio-scoped while each CPI leg is generation-bound. A new generation-bearing instruction, detached signed-message format, or alternate asset-consent route reopens this row. |
@@ -4210,6 +4233,11 @@ omit an invariant. Verdicts mean:
 
 ## Known-finding benchmark
 
+The current TSV has 160 rows: 126 `independent-discovery`, 17 `nonqualifying`, and 17 `missing`.
+These are recorded evidence dispositions, not new impact or severity acceptance under
+`scripts/loop.md`. Historical severity strings, including `REAL`, are not current classification
+labels; this documentation audit does not reclassify or promote any finding.
+
 `open_findings.tsv` includes the historical 2026-08-03 snapshot of 143 open PRs whose titles identify
 a public-route LoF or DoS class. It maps every row to a primary invariant. That dated snapshot has 0
 **Direct regression** rows, 0 **Missing** rows, 126 **Independent discovery** rows, and seventeen
@@ -4240,13 +4268,15 @@ primary invariant matches the benchmark, its generator is an actual `#[test]` in
 module or an explicitly documented secondary owner, and the coverage index reports the same
 invariant as Independent. Metadata alone cannot promote a finding.
 
-`nonqualifying_findings.tsv` is the equally strict negative roster. It may remove an open claim
-from the gap count only when an invariant-owned public SBF test proves the pinned program is safe,
-the alleged value is nonextractable, an honest bounded exit remains, or the claim is otherwise
-outside the accepted public LoF/DoS definition. PR titles and fix-branch tests are not evidence.
+`nonqualifying_findings.tsv` is the equally strict negative roster. A disposition requires scoped
+public-route evidence that the alleged value is nonextractable, an honest bounded exit remains,
+or the claim is otherwise outside the `scripts/loop.md` acceptance rule. A passing finite test
+does not prove the whole pinned program safe; privileged access alone, PR titles, and green-only
+fix-branch tests do not establish a nonqualifying disposition.
 
-Verification is complete only when the unified roster has zero `Missing` and zero `Direct
-regression` entries and the executable manifest has zero `Missing` and zero `Quarantined` entries.
+Benchmark bookkeeping requires the unified roster to have zero `Missing` and zero `Direct
+regression` entries and the executable manifest to have zero `Missing` and zero `Quarantined`
+entries. These are necessary snapshot checks, not sufficient evidence of invariant completion.
 
 ## Commands
 

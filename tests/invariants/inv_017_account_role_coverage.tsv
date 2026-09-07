@@ -1,5 +1,7 @@
 # INV-017 source-complete account-role matrix roster.
-# Status: EXHAUSTIVE covers every current account shape; PARTIAL names an uncovered dynamic shape;
+# Status: EXHAUSTIVE covers the account shapes enumerated by the named matrix, not all reachable histories.
+# These are local roster labels, not aggregate invariant verdicts; see invariant_status.tsv.
+# PARTIAL names an uncovered dynamic shape;
 # OPEN has no generated pair/privilege matrix yet. Evidence is an INV-017 test function or '-'.
 tag	variant	status	evidence	remaining_gap
 0	InitMarket	EXHAUSTIVE	v16_program_init_market_account_roles_are_exhaustive	-

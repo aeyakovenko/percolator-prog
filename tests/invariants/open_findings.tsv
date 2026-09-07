@@ -1,6 +1,8 @@
 # Open public-route security finding benchmark
 # Snapshot extended: 2026-09-04 UTC; source: GitHub open PR titles
 # Evidence is PR135 evidence, not the PR author claim or fix status.
+# Kind/severity preserve historical claims (including legacy REAL), not current scripts/loop.md classifications.
+# Evidence mappings alone do not establish qualifying LoF/DoS impact or whole-invariant proof.
 # pr	kind	severity	primary_invariant	evidence	title
 190	DoS	BLOCKER	INV-071	independent-discovery	[BLOCKER DoS] Commit recovery-required auto-crank progress
 202	DoS	REAL	INV-073	nonqualifying	[REAL DoS] Keep partially ADL-reduced users exit-live
