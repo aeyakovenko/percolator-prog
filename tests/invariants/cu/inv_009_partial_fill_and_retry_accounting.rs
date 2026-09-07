@@ -17,6 +17,9 @@
 //! four atoms. Twelve more worlds execute the public maximum-minus-one and
 //! maximum admitted quantities in both directions at 1/255, 127/255, and
 //! 254/255, retaining the same replay, residual, accounting, and CU oracle.
+//! A bounded schedule product inserts repeated failures at every subset of three
+//! fill prefixes, retries unchanged unconsumed instructions, and delays consumed
+//! instruction replays across multiple partial-fill episodes.
 
 use super::*;
 
@@ -994,6 +997,226 @@ fn v16_program_tradecpi_partial_partition_matrix_preserves_cumulative_budget() {
             run_flagged_partial_partition(total_units, partial_rounds);
         }
     }
+}
+
+fn run_partial_failure_retry_schedule(
+    direction: i128,
+    stale_route: PartialRetryRoute,
+    failure_mask: u8,
+) -> u64 {
+    let (mut env, taker, lp, taker_account, lp_account, matcher, ctx, delegate) =
+        setup_hostile_partial_env(1);
+    let total_q = direction * (255 * POS_SCALE + POS_SCALE / 2 + 1) as i128;
+    let case = format!("direction={direction}, stale={stale_route:?}, failures={failure_mask:03b}");
+    let (_, initial_market) = env.market_state();
+    let initial_epochs = [
+        env.portfolio_position_epoch(taker_account),
+        env.portfolio_position_epoch(lp_account),
+    ];
+    let initial_custody = [env.vault, env.mint].map(|key| env.svm.get_account(&key).unwrap());
+    // Include every trade writable plus custody and the delegate; only the SVM fee payer is excluded.
+    let frame = |env: &V16CuEnv| {
+        [
+            env.market,
+            taker_account,
+            lp_account,
+            ctx,
+            env.vault,
+            env.mint,
+            taker.pubkey(),
+            lp.pubkey(),
+            delegate,
+        ]
+        .map(|key| env.svm.get_account(&key).unwrap())
+    };
+    let send = |env: &mut V16CuEnv, route, ix| {
+        send_partial_retry_route(
+            env,
+            route,
+            ix,
+            &taker,
+            &lp,
+            taker_account,
+            lp_account,
+            matcher,
+            ctx,
+            delegate,
+        )
+    };
+    let assert_prefix = |env: &V16CuEnv, quantity: i128, fees: u128, fills: u64| {
+        let context = format!("{case}, accepted={fills}");
+        for (key, epoch, signed_q) in [
+            (taker_account, initial_epochs[0], quantity),
+            (lp_account, initial_epochs[1], -quantity),
+        ] {
+            let account = env.portfolio_state(key);
+            if signed_q == 0 {
+                assert!(!has_active_leg_for_asset(&account, 0), "{context}");
+            } else {
+                assert_eq!(
+                    active_leg_for_asset(&account, 0).basis_pos_q,
+                    signed_q,
+                    "{context}"
+                );
+            }
+            assert_eq!(account.capital.get(), 1_000_000 - fees / 2, "{context}");
+            assert_eq!(
+                env.portfolio_position_epoch(key),
+                epoch + fills,
+                "{context}"
+            );
+        }
+        let (_, market) = env.market_state();
+        assert_eq!(
+            market.assets[0].oi_eff_long_q,
+            quantity.unsigned_abs(),
+            "{context}"
+        );
+        assert_eq!(
+            market.assets[0].oi_eff_short_q,
+            quantity.unsigned_abs(),
+            "{context}"
+        );
+        assert_eq!(
+            market.insurance,
+            initial_market.insurance + fees,
+            "{context}"
+        );
+        assert_eq!(market.c_tot + fees, initial_market.c_tot, "{context}");
+        assert_eq!(market.vault, initial_market.vault, "{context}");
+        assert_eq!(market.c_tot + market.insurance, market.vault, "{context}");
+        assert_eq!(
+            market.vault,
+            u128::from(env.token_amount(env.vault)),
+            "{context}"
+        );
+        assert_eq!(
+            [env.vault, env.mint].map(|key| env.svm.get_account(&key).unwrap()),
+            initial_custody,
+            "{context}"
+        );
+        let unsplit_fee = partial_retry_reference_fee(quantity);
+        assert!(fees >= unsplit_fee, "{context}");
+        assert!(
+            fees - unsplit_fee <= 4 * u128::from(fills.saturating_sub(1)),
+            "{context}"
+        );
+    };
+
+    let mut quantity = 0i128;
+    let mut fees = 0u128;
+    let mut consumed = Vec::new();
+    let mut max_cu = 0;
+    assert_prefix(&env, quantity, fees, 0);
+    for (step, numerator) in [Some(127u8), Some(254u8), None].into_iter().enumerate() {
+        let remaining = total_q - quantity;
+        let route = if numerator.is_some() {
+            PartialRetryRoute::Cpi
+        } else {
+            PartialRetryRoute::BatchCpi
+        };
+        let current = retained_partial_retry_ix(&env, route, taker_account, lp_account, remaining);
+        consumed.push(retained_partial_retry_ix(
+            &env,
+            stale_route,
+            taker_account,
+            lp_account,
+            remaining,
+        ));
+
+        if failure_mask & (1 << step) != 0 {
+            if numerator.is_some() {
+                set_hostile_matcher_mode(&mut env, ctx, matcher, 7); // Unflagged single short fill.
+            } else {
+                set_hostile_matcher_ratio(&mut env, ctx, matcher, 127); // Flagged batch short fill.
+            }
+            for attempt in 0..2 {
+                let before = frame(&env);
+                assert!(
+                    send(&mut env, route, current.clone()).is_err(),
+                    "{case}, step={step}, attempt={attempt}: short fill must reject"
+                );
+                assert_eq!(
+                    frame(&env),
+                    before,
+                    "{case}, step={step}, attempt={attempt}"
+                );
+                assert_prefix(&env, quantity, fees, step as u64);
+            }
+        }
+
+        let executed = if let Some(numerator) = numerator {
+            set_hostile_matcher_ratio(&mut env, ctx, matcher, numerator);
+            // This bounded input fits a direct product, independently of the matcher's div/rem split.
+            let magnitude = remaining.unsigned_abs() * u128::from(numerator) / 255;
+            assert!(
+                magnitude > 0 && magnitude < remaining.unsigned_abs(),
+                "{case}"
+            );
+            assert_ne!(
+                magnitude % POS_SCALE,
+                0,
+                "{case}: exercise nonintegral partials"
+            );
+            direction * magnitude as i128
+        } else {
+            set_hostile_matcher_mode(&mut env, ctx, matcher, 9);
+            remaining
+        };
+        // A failure consumes no consent: retry the same instruction, changing only matcher capacity
+        // or its partial flag and the transaction's blockhash/signature, never rebinding its epochs.
+        let cu = send(&mut env, route, current)
+            .unwrap_or_else(|error| panic!("{case}, step={step}: current retry rejected: {error}"));
+        assert_cu_within("bounded partial/failure/retry schedule", cu, 1_400_000);
+        max_cu = max_cu.max(cu);
+        quantity += executed;
+        fees += partial_retry_reference_fee(executed);
+        assert_prefix(&env, quantity, fees, step as u64 + 1);
+
+        // Full capacity removes short-fill rejection as an alternative reason for a stale error.
+        set_hostile_matcher_mode(&mut env, ctx, matcher, 9);
+        for (old_step, stale) in consumed.iter().enumerate() {
+            let before = frame(&env);
+            assert!(
+                send(&mut env, stale_route, stale.clone()).is_err(),
+                "{case}, step={step}: consumed instruction from step {old_step} replayed"
+            );
+            assert_eq!(
+                frame(&env),
+                before,
+                "{case}, step={step}, old_step={old_step}"
+            );
+            assert_prefix(&env, quantity, fees, step as u64 + 1);
+        }
+    }
+    assert_eq!(
+        quantity, total_q,
+        "{case}: bounded fresh residual must finish"
+    );
+    max_cu
+}
+
+#[test]
+fn v16_program_bounded_partial_failure_retry_schedules_preserve_every_prefix() {
+    let mut histories = 0;
+    let mut max_cu = 0;
+    for direction in [-1i128, 1] {
+        for stale_route in PartialRetryRoute::ALL {
+            for failure_mask in 0u8..8 {
+                max_cu = max_cu.max(run_partial_failure_retry_schedule(
+                    direction,
+                    stale_route,
+                    failure_mask,
+                ));
+                histories += 1;
+            }
+        }
+    }
+    assert_eq!(histories, 64);
+    println!(
+        "INV-009: {histories} bounded histories; 192 fills; 192 short-fill rejections; \
+         384 stale rejections; max fill CU={max_cu}"
+    );
 }
 
 #[test]

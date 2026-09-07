@@ -4498,14 +4498,28 @@ worlds, maximum-domain partials, and BatchTradeCpi atomic short-fill rejection. 
 the accepted quantity, OI, position epochs, fee totals or conservative fee envelope, custody, and
 exact rollback for their stated snapshots.
 
-That still does not supply a randomized F owner for partial partitions with generated failure and
-retry schedules. The next executable increment should stay in
-`cu/inv_009_partial_fill_and_retry_accounting.rs`: generate shrinkable histories over both signs,
-integral/residue/max boundaries, all four stale/residual transports, and atomic batch failure
-cells; after each success assert cumulative quantity, fees, OI, consumed episodes, custody, and
-bounded fresh continuation; after each error assert exact account-frame rollback. Residual fills
-must be newly signed intents, not remaining authorization on a consumed one-shot request. This is
-planned coverage only and does not promote the invariant status.
+The new
+[`v16_program_bounded_partial_failure_retry_schedules_preserve_every_prefix`](cu/inv_009_partial_fill_and_retry_accounting.rs)
+adds 64 bounded histories: both signs, all four stale transports, and all eight failure-placement
+masks around two nonintegral single-CPI partials (127/255 then 254/255) and a one-leg BatchTradeCpi
+residual. Each selected failure is submitted twice: unflagged single short fills or flagged batch
+short fills. The unchanged current instruction then succeeds after matcher reconfiguration; every
+prebuilt consumed instruction is retried at each later prefix, with full matcher capacity. Every
+step checks history-derived quantity, per-actor capital, independent cumulative fees/fragmentation,
+OI, epochs and custody; every error frames the market, portfolios, matcher context, signers,
+delegate, mint and vault exactly, excluding the SVM transaction fee payer. On wrapper `f220f209`,
+fresh default-feature SBF passes 192 fills, 192 short-fill rejections and 384 stale rejections;
+maximum successful fill is 467,951 CU. This is net-new failure-placement/delayed-retry composition,
+not randomized F coverage or a status promotion.
+
+The remaining F gap is a shrinkable partition/failure history generator. This bounded witness fixes
+one asset, one nonintegral total, two partial ratios, authenticated price 100, fee 100 bps, no
+funding/time movement, two rejections per selected prefix, and a batch-CPI final residual. Generated
+lengths/quantities/rounding/max boundaries, other residual transports, multi-leg atomic failure
+placement and environmental interleavings remain unowned by this increment. Keep the per-step
+accounting/rollback oracle and bounded fresh continuation when extending it. Successful partials
+consume the entire one-shot authorization; residuals require newly signed intents against the new
+episodes. No production change or duplicate engine proof is needed for the bounded witness.
 
 ### INV-011 aggregate-cap evidence and F plan
 
