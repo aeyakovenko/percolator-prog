@@ -5240,6 +5240,38 @@ with these frontiers. Deeper histories, combined lifecycle/feed/authority/residu
 stale-certificate equivalence and a complete history-derived entitlement oracle remain excluded.
 Eight cases and 64 shrink iterations are smoke/minimization budgets, not saturation evidence.
 
+### INV-063 expiry/refill failure histories
+
+`stateful/inv_063_backing_expiry_normalization.rs` now owns
+`v16_program_expiry_refill_failure_histories_preserve_claim_and_senior_exit`:
+32 public LiteSVM worlds cross all four opening/flattening transports, exact/late expiry,
+aggregate/two-part refills, and absent/twice-repeated failed bundles at each of two expiry cycles.
+The bundle's refill and authenticated claimant refresh both succeed, including a real SPL
+transfer, before the conversion suffix rejects its undersized cap. Exact rollback must restore
+both markets, all tracked portfolios, backing ledger, matcher contexts, token data and economic
+lamports, including the pre-refill bucket classification and control sequence. Network fees stay
+outside the economic lamport frame.
+
+The new relation is repeated replacement-backing history, not another fixed expiry boundary,
+standalone conversion-cap rejection (INV-031/052), or generic rollback prefix (INV-080).
+History inputs independently determine source face, fresh/spent backing, per-owner capital/PnL,
+provider SPL debits, payouts and custody. Stock, encumbrance and source-credit transition oracles
+compose at each checked public step; bounded expiry/recertification continuations also check the
+history ledger. Aggregate/split and clean/failed histories must agree on actual SPL payouts, with
+only the final fresh tranche converted and unrelated senior principal returned exactly. The
+exact test at base `228afad2` passes 912 checked transactions, including 64 rejected bundles,
+and pays all three funded owners in each world. Expiry and recertification each have an
+eight-call bound per phase.
+
+Scope remains one flat, unliened source claim, one source side/asset, fixed backing ratios and
+zero fees/funding/insurance; batch transports have one leg. Normalization precedes replacement
+funding. Impaired liens, insurance policy/consumption, implicit normalization by refill, arbitrary
+history lengths, partial receipts, Recovery and supported maxima remain open. Owner payouts are
+signed; this is not permissionless retirement or whole-state liveness. The test reuses wrapper
+oracles and the pinned engine contract, adds no engine proof, and promotes no status. Verification
+uses private copies of the existing default-feature SBF `230b6db1` and matcher `50e53226`, not a
+fresh SBF build.
+
 ## Commands
 
 ```bash
