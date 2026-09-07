@@ -20,6 +20,10 @@
 //! Both signs and four minimum/cap profiles retain the same projected economics despite rejected
 //! discovery and healthy retries; every world also reaches an exact funded owner withdrawal.
 //! This is finite metamorphic coverage, not randomized history closure or caller-sized liquidation.
+//! A separate sixteen-world INV-059/061 history interleaves owner deposits and insurance top-ups
+//! with a proportional-fee partial liquidation, an authenticated reward tail, and two owner-exit
+//! routes. An input-driven ledger separates principal, fees, rewards and SPL custody at each
+//! prefix; wrong-owner reward tails and healthy retries frame exactly. Marked PnL remains zero.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -889,6 +893,440 @@ fn v16_program_minimum_fee_episode_histories_match_aggregate_close() {
         }
     }
     assert_eq!((worlds, rejections), (40, 160));
+}
+
+#[test]
+fn v16_program_liquidation_mixed_cashflows_preserve_reward_attribution_and_owner_exit() {
+    const PRICE: u64 = 100;
+    const CAPITAL: u128 = 1_000;
+    const PEER_CAPITAL: u128 = 10_000;
+    const KEEPER_CAPITAL: u128 = 23;
+    const INSURANCE: u128 = 101;
+    const OPEN_Q: u128 = 10 * POS_SCALE;
+    const FEE_BPS: u64 = 137;
+    const FEE_CAP: u128 = 100;
+    const REWARD_BPS: u16 = 3_333;
+
+    #[derive(Default)]
+    struct Ledger {
+        deposited: u128,
+        topped_up: u128,
+        fee: u128,
+        reward: u128,
+        owner_withdrawn: u128,
+        keeper_withdrawn: u128,
+    }
+
+    let mut worlds = 0;
+    let mut rejections = 0;
+    let mut withdrawals = 0;
+    let mut refreshes = 0;
+    let mut max_crank_cu = 0;
+    let mut max_exit_cu = 0;
+    let mut max_custody_cu = 0;
+    for direction in [-1i128, 1] {
+        for bilateral_exit in [false, true] {
+            for cashflows_before in [false, true] {
+                for amount in [1u128, 17] {
+                    let case = format!(
+                        "direction={direction}, bilateral={bilateral_exit}, before={cashflows_before}, amount={amount}"
+                    );
+                    eprintln!("INV-059/061 mixed cashflows: {case}");
+                    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+                        min_nonzero_mm_req: 10,
+                        min_nonzero_im_req: 20,
+                        liquidation_fee_bps: FEE_BPS,
+                        liquidation_fee_cap: FEE_CAP,
+                        max_price_move_bps_per_slot: 500,
+                        ..V16CuMarketParams::default()
+                    });
+                    env.update_liquidation_fee_policy_with_cu(REWARD_BPS);
+                    env.configure_auth_mark_with_cu(0, PRICE);
+                    let owner = Keypair::new();
+                    let peer_owner = Keypair::new();
+                    let keeper_owner = Keypair::new();
+                    let target = env.create_portfolio(&owner);
+                    let peer = env.create_portfolio(&peer_owner);
+                    let keeper = env.create_portfolio(&keeper_owner);
+                    env.deposit(&owner, target, CAPITAL + 2 * amount);
+                    let peer_token = env.deposit(&peer_owner, peer, PEER_CAPITAL);
+                    let keeper_token = env.deposit(&keeper_owner, keeper, KEEPER_CAPITAL);
+                    env.top_up_insurance(INSURANCE + 3 * amount);
+                    // Pre-fund the history through public withdrawals, then reuse these SPL accounts.
+                    let owner_token = env.withdraw(&owner, target, 2 * amount);
+                    let insurance_token = env.withdraw_insurance_with_cu(3 * amount).0;
+                    env.trade_asset_with_cu(
+                        0,
+                        &owner,
+                        target,
+                        &peer_owner,
+                        peer,
+                        direction * OPEN_Q as i128,
+                        PRICE,
+                        0,
+                    );
+
+                    let mut ledger = Ledger::default();
+                    let mint = env.svm.get_account(&env.mint).unwrap();
+                    let total_tokens =
+                        INSURANCE + CAPITAL + PEER_CAPITAL + KEEPER_CAPITAL + 5 * amount;
+                    let assert_ledger = |env: &V16CuEnv, ledger: &Ledger| {
+                        let group = env.market_state().1;
+                        let capitals = [
+                            CAPITAL + ledger.deposited - ledger.fee - ledger.owner_withdrawn,
+                            PEER_CAPITAL,
+                            KEEPER_CAPITAL + ledger.reward - ledger.keeper_withdrawn,
+                        ];
+                        for (portfolio, capital) in [target, peer, keeper].into_iter().zip(capitals)
+                        {
+                            let account = env.portfolio_state(portfolio);
+                            assert_eq!(account.capital.get(), capital, "{case}: principal ledger");
+                            assert_eq!(account.pnl.get(), 0, "{case}: no marked PnL attribution");
+                        }
+                        assert_eq!(group.c_tot, capitals.into_iter().sum::<u128>(), "{case}");
+                        assert_eq!(
+                            group.insurance,
+                            INSURANCE + ledger.topped_up + ledger.fee - ledger.reward,
+                            "{case}: external top-ups are not liquidation proceeds"
+                        );
+                        let vault = INSURANCE
+                            + CAPITAL
+                            + PEER_CAPITAL
+                            + KEEPER_CAPITAL
+                            + ledger.deposited
+                            + ledger.topped_up
+                            - ledger.owner_withdrawn
+                            - ledger.keeper_withdrawn;
+                        assert_eq!(group.vault, vault, "{case}: input-driven custody ledger");
+                        assert_eq!(group.c_tot + group.insurance, vault, "{case}");
+                        let balances = [
+                            (env.vault, vault),
+                            (
+                                owner_token,
+                                2 * amount - ledger.deposited + ledger.owner_withdrawn,
+                            ),
+                            (insurance_token, 3 * amount - ledger.topped_up),
+                            (keeper_token, ledger.keeper_withdrawn),
+                            (peer_token, 0),
+                        ];
+                        for (token, expected) in balances {
+                            assert_eq!(u128::from(env.token_amount(token)), expected, "{case}");
+                        }
+                        assert_eq!(
+                            balances
+                                .into_iter()
+                                .map(|(_, balance)| balance)
+                                .sum::<u128>(),
+                            total_tokens,
+                            "{case}: all endowed SPL tokens remain attributed"
+                        );
+                        assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint, "{case}");
+                    };
+                    // All crank writables except the network-fee payer, plus unrelated custody/owners.
+                    let frame = |env: &V16CuEnv| {
+                        [
+                            env.market,
+                            target,
+                            peer,
+                            keeper,
+                            owner.pubkey(),
+                            peer_owner.pubkey(),
+                            keeper_owner.pubkey(),
+                            env.admin.pubkey(),
+                            env.vault,
+                            env.mint,
+                            owner_token,
+                            peer_token,
+                            keeper_token,
+                            insurance_token,
+                        ]
+                        .map(|key| env.svm.get_account(&key).unwrap())
+                    };
+                    let custody = |env: &V16CuEnv| {
+                        [
+                            env.vault,
+                            env.mint,
+                            owner_token,
+                            peer_token,
+                            keeper_token,
+                            insurance_token,
+                        ]
+                        .map(|key| env.svm.get_account(&key).unwrap())
+                    };
+                    let crank = |env: &mut V16CuEnv, signer: &Keypair, observations| {
+                        env.svm.expire_blockhash();
+                        env.send(
+                            ProgInstruction::PermissionlessCrank {
+                                now_slot: 0,
+                                observations,
+                            },
+                            vec![
+                                AccountMeta::new(signer.pubkey(), true),
+                                AccountMeta::new(env.market, false),
+                                AccountMeta::new(target, false),
+                                AccountMeta::new(keeper, false),
+                            ],
+                            &[signer],
+                        )
+                    };
+                    assert_ledger(&env, &ledger);
+                    env.push_auth_mark_with_cu(0, if direction < 0 { PRICE * 2 } else { 1 });
+                    assert_ledger(&env, &ledger);
+                    let cu = crank(&mut env, &keeper_owner, crank_observations(0))
+                        .expect("authenticated deficit refresh");
+                    assert_cu_within("INV-059/061 mixed-flow refresh", cu, CRANK_CU_LIMIT);
+                    max_crank_cu = max_crank_cu.max(cu);
+                    refreshes += 1;
+                    assert_eq!(
+                        env.market_state().1.assets[0].effective_price,
+                        PRICE,
+                        "{case}"
+                    );
+                    assert_eq!(
+                        active_leg_for_asset(&env.portfolio_state(target), 0).basis_pos_q,
+                        direction * OPEN_Q as i128,
+                        "{case}: refresh cannot liquidate"
+                    );
+                    assert!(health_cert(&env.portfolio_state(target)).certified_liq_deficit > 0);
+                    assert_ledger(&env, &ledger);
+
+                    let before = frame(&env);
+                    let error = crank(&mut env, &owner, crank_observations(0))
+                        .expect_err("a different owner's valid reward portfolio must reject");
+                    assert!(
+                        error
+                            .contains(&format!("Custom({})", PercolatorError::Unauthorized as u32)),
+                        "{case}: wrong reward-tail error: {error}"
+                    );
+                    assert_eq!(frame(&env), before, "{case}: reward-tail exact rollback");
+                    assert_ledger(&env, &ledger);
+                    rejections += 1;
+
+                    for before_liquidation in [true, false] {
+                        if cashflows_before == before_liquidation {
+                            env.svm.expire_blockhash();
+                            let cu = env
+                                .send(
+                                    env.deposit_ix(target, amount),
+                                    vec![
+                                        AccountMeta::new(owner.pubkey(), true),
+                                        AccountMeta::new(env.market, false),
+                                        AccountMeta::new(target, false),
+                                        AccountMeta::new(owner_token, false),
+                                        AccountMeta::new(env.vault, false),
+                                        AccountMeta::new_readonly(spl_token::ID, false),
+                                    ],
+                                    &[&owner],
+                                )
+                                .expect("public owner re-deposit around liquidation");
+                            assert_cu_within(
+                                "INV-059/061 mixed-flow deposit",
+                                cu,
+                                CUSTODY_CU_LIMIT,
+                            );
+                            max_custody_cu = max_custody_cu.max(cu);
+                            ledger.deposited += amount;
+                            assert_ledger(&env, &ledger);
+                            let cu = env.top_up_insurance_from_admin_token_with_cu(
+                                insurance_token,
+                                3 * amount,
+                            );
+                            assert_cu_within("INV-059/061 mixed-flow top-up", cu, CUSTODY_CU_LIMIT);
+                            max_custody_cu = max_custody_cu.max(cu);
+                            ledger.topped_up += 3 * amount;
+                            assert_ledger(&env, &ledger);
+                        }
+                        if !before_liquidation {
+                            continue;
+                        }
+                        // A deposit may invalidate the certificate; allow at most one re-refresh.
+                        for step in 0..2 {
+                            let custody_before = custody(&env);
+                            let peer_before = env.svm.get_account(&peer).unwrap();
+                            let cu = crank(&mut env, &keeper_owner, crank_observations(0))
+                                .unwrap_or_else(|error| {
+                                    panic!("{case}: crank step={step}: {error}")
+                                });
+                            assert_cu_within(
+                                "INV-059/061 mixed-flow liquidation",
+                                cu,
+                                CRANK_CU_LIMIT,
+                            );
+                            max_crank_cu = max_crank_cu.max(cu);
+                            assert_eq!(custody(&env), custody_before, "{case}: crank SPL frame");
+                            assert_eq!(env.svm.get_account(&peer).unwrap(), peer_before, "{case}");
+                            let account = env.portfolio_state(target);
+                            let remaining_q =
+                                active_leg_for_asset(&account, 0).basis_pos_q.unsigned_abs();
+                            if remaining_q == OPEN_Q {
+                                assert_eq!(step, 0, "{case}: bounded recertification");
+                                assert!(health_cert(&account).certified_liq_deficit > 0, "{case}");
+                                refreshes += 1;
+                                assert_ledger(&env, &ledger);
+                                continue;
+                            }
+                            assert!(
+                                remaining_q > 0 && remaining_q < OPEN_Q,
+                                "{case}: partial close"
+                            );
+                            let closed_q = OPEN_Q - remaining_q;
+                            ledger.fee =
+                                liquidation_fee_oracle(closed_q, PRICE, FEE_BPS, 0, FEE_CAP);
+                            ledger.reward = ledger.fee * u128::from(REWARD_BPS) / 10_000;
+                            assert!(ledger.reward > 0 && ledger.reward < ledger.fee, "{case}");
+                            assert!(
+                                ledger.fee < FEE_CAP,
+                                "{case}: proportional, not minimum/cap dominated"
+                            );
+                            assert_ne!(ledger.fee * u128::from(REWARD_BPS) % 10_000, 0, "{case}");
+                            assert_eq!(health_cert(&account).certified_liq_deficit, 0, "{case}");
+                            let group = env.market_state().1;
+                            assert_eq!(group.assets[0].oi_eff_long_q, remaining_q, "{case}");
+                            assert_eq!(group.assets[0].oi_eff_short_q, remaining_q, "{case}");
+                            assert_ledger(&env, &ledger);
+                            eprintln!(
+                                "  closed_q={closed_q}, fee={}, reward={}, liquidation_cu={cu}",
+                                ledger.fee, ledger.reward
+                            );
+                            break;
+                        }
+                        assert!(ledger.fee > 0, "{case}: the bounded history must liquidate");
+                        let before = frame(&env);
+                        let error = crank(&mut env, &keeper_owner, vec![])
+                            .expect_err("a healthy retry cannot pay the reward twice");
+                        assert!(
+                            error.contains(&format!(
+                                "Custom({})",
+                                PercolatorError::EngineNonProgress as u32
+                            )),
+                            "{case}: wrong healthy-retry error: {error}"
+                        );
+                        assert_eq!(frame(&env), before, "{case}: rewarded retry exact rollback");
+                        assert_ledger(&env, &ledger);
+                        rejections += 1;
+                    }
+
+                    let remaining_q = active_leg_for_asset(&env.portfolio_state(target), 0)
+                        .basis_pos_q
+                        .unsigned_abs();
+                    let custody_before = custody(&env);
+                    env.svm.expire_blockhash();
+                    let cu = if bilateral_exit {
+                        env.trade_asset_with_cu(
+                            0,
+                            &owner,
+                            target,
+                            &peer_owner,
+                            peer,
+                            -direction * remaining_q as i128,
+                            PRICE,
+                            0,
+                        )
+                    } else {
+                        env.rebalance_reduce_with_cu(&owner, target, 0, remaining_q)
+                    };
+                    assert_cu_within(
+                        "INV-059/061 post-progress owner reduction",
+                        cu,
+                        TRADE_CU_LIMIT,
+                    );
+                    max_exit_cu = max_exit_cu.max(cu);
+                    assert!(
+                        !has_active_leg_for_asset(&env.portfolio_state(target), 0),
+                        "{case}"
+                    );
+                    assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 0, "{case}");
+                    assert_eq!(env.market_state().1.assets[0].oi_eff_short_q, 0, "{case}");
+                    assert_eq!(
+                        custody(&env),
+                        custody_before,
+                        "{case}: owner reduction SPL frame"
+                    );
+                    assert_ledger(&env, &ledger);
+
+                    for (signer, portfolio, destination, payout) in [
+                        (
+                            &keeper_owner,
+                            keeper,
+                            keeper_token,
+                            KEEPER_CAPITAL + ledger.reward,
+                        ),
+                        (&owner, target, owner_token, amount),
+                        (&owner, target, owner_token, CAPITAL - ledger.fee),
+                    ] {
+                        env.svm.expire_blockhash();
+                        let cu = env
+                            .send(
+                                env.withdraw_ix(portfolio, payout),
+                                vec![
+                                    AccountMeta::new(signer.pubkey(), true),
+                                    AccountMeta::new(env.market, false),
+                                    AccountMeta::new(portfolio, false),
+                                    AccountMeta::new(destination, false),
+                                    AccountMeta::new(env.vault, false),
+                                    AccountMeta::new_readonly(env.vault_authority, false),
+                                    AccountMeta::new_readonly(spl_token::ID, false),
+                                ],
+                                &[signer],
+                            )
+                            .unwrap_or_else(|error| panic!("{case}: funded owner exit: {error}"));
+                        assert_cu_within(
+                            "INV-059/061 funded mixed-flow exit",
+                            cu,
+                            CUSTODY_CU_LIMIT,
+                        );
+                        max_custody_cu = max_custody_cu.max(cu);
+                        if portfolio == keeper {
+                            ledger.keeper_withdrawn += payout;
+                        } else {
+                            ledger.owner_withdrawn += payout;
+                        }
+                        assert_ledger(&env, &ledger);
+                        withdrawals += 1;
+                    }
+                    let custody_before = custody(&env);
+                    for (signer, portfolio) in [(&owner, target), (&keeper_owner, keeper)] {
+                        let rent = env.svm.get_account(&portfolio).unwrap().lamports;
+                        let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+                        let count = env.market_state().1.materialized_portfolio_count;
+                        let cu = env.close_portfolio_with_cu(signer, portfolio);
+                        assert_cu_within("INV-059/061 empty owner close", cu, CUSTODY_CU_LIMIT);
+                        max_custody_cu = max_custody_cu.max(cu);
+                        assert_eq!(
+                            env.market_state().1.materialized_portfolio_count,
+                            count - 1,
+                            "{case}"
+                        );
+                        assert_eq!(
+                            env.svm.get_account(&env.market).unwrap().lamports,
+                            market_lamports + rent,
+                            "{case}"
+                        );
+                        if let Some(closed) = env.svm.get_account(&portfolio) {
+                            assert_eq!(closed.lamports, 0, "{case}");
+                            assert!(
+                                closed.data.is_empty() || !state::is_initialized(&closed.data),
+                                "{case}"
+                            );
+                        }
+                    }
+                    assert_eq!(custody(&env), custody_before, "{case}: close SPL frame");
+                    let group = env.market_state().1;
+                    assert_eq!(group.c_tot, PEER_CAPITAL, "{case}");
+                    assert_eq!(
+                        group.insurance,
+                        INSURANCE + 3 * amount + ledger.fee - ledger.reward,
+                        "{case}"
+                    );
+                    assert_eq!(group.vault, group.c_tot + group.insurance, "{case}");
+                    worlds += 1;
+                }
+            }
+        }
+    }
+    assert_eq!((worlds, rejections, withdrawals), (16, 32, 48));
+    assert!((16..=24).contains(&refreshes));
+    eprintln!("INV-059/061 mixed cashflows: worlds={worlds}, liquidations={worlds}, refreshes={refreshes}, rejections={rejections}, owner_reductions={worlds}, withdrawals={withdrawals}, closes={}, max_crank_cu={max_crank_cu}, max_exit_cu={max_exit_cu}, max_custody_cu={max_custody_cu}", 2 * worlds);
 }
 
 #[test]

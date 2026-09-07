@@ -4699,6 +4699,7 @@ unchanged `COVERED` M cell does not discharge the episode-history F gap.
 | `v16_program_healthy_partial_liquidation_retries_cannot_multiply_fees` | One single-asset public world with an engine-selected nonzero-fee partial close restoring certified health, followed by sixteen same-state retries. `liquidation_fee_oracle` checks the charge; each retry checks explicit NonProgress and exact market, target-portfolio, and SPL-vault account frames. |
 | `v16_program_new_liquidation_fee_episode_requires_new_authenticated_deficit` | `RepeatedLiquidationRoute::ALL` rebuilds four worlds: TradeNoCpi, TradeCpi, BatchTradeNoCpi, and BatchTradeCpi. `run_new_liquidation_fee_episode` checks two fee-bearing deficit episodes, an intervening same-state retry and rejected discovery input, then a fresh owner reduction. Opening and reduction use the same transport in each world; liquidation always uses PermissionlessCrank. This is not a cross-route history product. |
 | `v16_program_minimum_fee_episode_histories_match_aggregate_close` | Forty public worlds: both signs, four `(bps, minimum, cap)` profiles, and an aggregate owner-reduction control versus four rotating cross-transport split schedules. Each reaches one engine-selected full liquidation with exactly one nonzero minimum fee within the configured cap, then withdraws the target's exact remaining capital. The split histories include 64 duplicate-discovery rejections and 96 healthy retries, each with exact tracked rollback. |
+| `v16_program_liquidation_mixed_cashflows_preserve_reward_attribution_and_owner_exit` | Sixteen INV-059/061 public histories cross both signs, RebalanceReduce/bilateral TradeNoCpi owner exits, deposits and insurance top-ups before/after liquidation, and amounts 1/17. A separate input-driven ledger checks proportional fees, floor-rounded rewards, principal, zero marked PnL and fixed-endowment SPL custody after each economic prefix. Wrong-owner reward tails and healthy retries frame fourteen accounts exactly; every world withdraws both target and keeper capital and closes both portfolios. |
 
 The first two campaigns fix one asset, the liquidated short side, fee rate 100 bps, minimum zero, and cap
 10 atoms. They do not generate fee profiles, episode counts, retry placements, or arbitrary
@@ -4748,6 +4749,29 @@ and matcher rollback remain with INV-011's existing owners, including
 `v16_program_bounded_signed_cap_histories_preserve_cross_route_fee_budgets`; they are not duplicated.
 The matrix does not close randomized F, arbitrary transport/error schedules, multiple minimum-fee
 episodes, mixed insurance/reward flows, noncommuting oracle histories, lifecycle or maximum shapes.
+
+The mixed-cashflow entrypoint adds coverage-only SBF evidence on wrapper `4efc6f6e`, 2026-09-07;
+no engine proof, direct-crank composition row or invariant status is changed. Public withdrawals
+pre-fund reusable owner/admin SPL accounts before the history baseline. The history then deposits
+1 or 17 atoms and tops up insurance by three times that amount, either before or after a single
+engine-selected partial liquidation. The fee oracle uses the observed closed quantity and fixed
+effective price, never the insurance delta; its 137-bps proportional fee is 7 atoms in all sixteen
+worlds, below the 100-atom cap with minimum zero. Independent integer division of that fee at
+3,333 bps yields a 2-atom keeper reward, leaving 5 atoms in insurance. External top-ups, principal
+deposits and withdrawals cannot be counted as fees or rewards. Same-slot authenticated target lag
+keeps marked PnL, funding and maintenance/trade fees zero; this does not cover nonzero PnL attribution.
+The complete mint account remains unchanged and all endowed token balances reconcile at each prefix.
+
+The focused run passed 16/16 worlds with 24 account refreshes, 16 partial liquidations, 32 exact
+fourteen-account rejection frames (excluding only the network-fee payer), 16 fresh owner reductions,
+48 funded withdrawals and 32 portfolio closes with exact rent movement. Peak crank, owner-reduction
+and custody/close CU were respectively 309,825, 178,937 and 63,883. The rebuilt default-feature SBF
+retains SHA-256 `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+Both exit routes reach zero effective OI and exact target/keeper payouts; the peer remains funded
+and materialized. These are bounded mixed-flow witnesses, not equality of the differently timed
+liquidation quantities, arbitrary-history commutativity or full-state route equivalence. Randomized
+F, multiple deficit/recovery episodes, nonzero PnL, alternate reward-tail schedules, CPI exits,
+multi-asset/lifecycle interleavings and maximum shapes remain outside this increment.
 
 The source-only ingress guard remains a useful drift check: callers supply authenticated time and
 discovery hints, never a liquidation close quantity. The engine selects the close and owns the
