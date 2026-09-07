@@ -4537,13 +4537,18 @@ claim/lien episode, and exhausted conversion retry rejects. These are cap-bounda
 checks, not a generic history oracle over all signed leg vectors, route interleavings, fee debit
 attribution, collateral/PnL-credit spending allowances, or variable claim/backing shapes.
 
-The next F owner should stay in `cu/inv_011_signed_aggregate_economic_bounds.rs`: generate typed,
-shrinkable signed-leg/cap histories across applicable transports, signs, supported leg counts and
-orders, quantity/rounding/cap boundaries, rejection placement, retries, and fresh residual
-signatures. It must derive quote costs, fees, position/value/credit allowances from signed inputs
-and authenticated history, assert every successful prefix and exact writable/CPI/SPL rollback on
-errors, then prove a bounded fresh continuation remains. Reuse INV-006/008/009/052/085 and pinned
-engine contracts; do not duplicate engine arithmetic proofs or promote status from this plan.
+Wrapper `de57e8f6` adds `v16_program_bounded_signed_cap_histories_preserve_cross_route_fee_budgets`:
+32 bounded single/batch CPI histories over both signs, both route orders and all three-step
+rejection masks. The test independently prices every signed leg, checks per-prefix capital, fee,
+OI, market-insurance, vault/SPL custody and exact rollback for limit-price/fee-cap rejections and
+consumed retries. It is substantive bounded coverage, not a production fix or a randomized F claim.
+
+The remaining F owner should stay in `cu/inv_011_signed_aggregate_economic_bounds.rs`: generalize
+the bounded witness into typed, shrinkable signed-leg/cap histories across supported leg counts and
+orders, quantity/rounding/cap boundaries, residual signatures, collateral/PnL-credit spending
+allowances, variable claim/backing shapes and environmental interleavings. Reuse INV-006/008/009/
+052/085 and pinned engine contracts; do not duplicate engine arithmetic proofs or promote status
+from this bounded increment.
 
 ### INV-038 executing evidence and mixed-history gap
 
