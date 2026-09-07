@@ -3742,6 +3742,8 @@ These untested coverage gaps are not findings and receive no severity/impact lab
    TODO: compose these families under one reusable per-episode claim oracle, including attributed
    support, losses, forfeits, and junior haircuts; check each recipient's claim after every step
    and reconcile external payouts. Reuse it in INV-081/086 instead of substituting stock equality.
+   The [implementation-readiness slice](#inv-024-implementation-readiness) below specifies the
+   smallest next increment; it does not close this broader TODO.
 
 2. **INV-082: environment-aware permissionless completion.** Owner:
    [`stateful/inv_082_state_indexed_liveness_theorem.rs`](stateful/inv_082_state_indexed_liveness_theorem.rs).
@@ -3794,6 +3796,120 @@ These untested coverage gaps are not findings and receive no severity/impact lab
 Each TODO needs an invariant-owned executable entrypoint naming its reusable generator, independent
 oracle, route/partition domain, and secondary owners. Shared helpers may stay in `tests/support/`;
 coverage ownership must not stop there. No new issue-specific adapter satisfies this queue.
+
+### INV-024 implementation-readiness
+
+Finding-blind audit of `4b314bcd` (2026-09-07), with engine `495a5590c97055bd71c6f94d849ff0298f243145`
+from `Cargo.toml`. This is a proposed implementation slice, not new executable evidence or a status
+promotion. The normative boundary remains [INV-024](../../INVARIANTS.md#inv-024---attributed-quote-value-conservation)
+and [`scripts/loop.md`](../../scripts/loop.md).
+
+**Observed boundary.** The stateful owner has a 32-world zero-fee route-pair/orientation matrix,
+two fixed four-transport histories, and an authority-attributed public-trace test.
+`Inv024EpisodeEntitlement` and `verify_multi_episode_entitlement_history` in
+[`fuzz_model.rs`](../support/fuzz_model.rs) retain principal, signed realized PnL, disclosed fees,
+and external payouts for two actors. The histories use equal opposing PnL rounds, full conversion,
+and end-only withdrawals; `assert_episode_claims` compares `capital + pnl` at compound stage
+boundaries. They do not maintain separate spendable/released balances at each public transaction.
+The two rounds share each portfolio's incarnation, rather than exercising close/recreation.
+[`inv_024_entitlement_route_dispositions.tsv`](inv_024_entitlement_route_dispositions.tsv) contains
+49 routes and 32 immediate-effect classes; its source gate checks route/effect/owner presence, not
+that each effect updates this history ledger. Leave that roster unchanged until new owners execute.
+
+**Next increment: generated solvent payout prefixes.** Extend this owner with one bounded generator
+and a reusable step oracle for partial conversion and withdrawal between changing-winner rounds.
+This adds recipient-specific checks before later losses, fees, or deposits can obscure a bad early
+credit, without first modeling Recovery or re-proving the engine's 17-class conservation equation.
+Use two independent funded owners and the existing unrelated-account frames, one Active asset,
+honest AuthMark observations, full fills of exactly one `POS_SCALE` unit, zero funding/maintenance
+fees, and enough independently budgeted capital for both rounds. Fully settle and close each round
+before conversion/withdrawal, and finish its conversions before the next round. Do not generalize
+this solvent, fully released profile to margin-bound withdrawals or underbacked claims.
+
+| Route partition | Next generator/oracle obligation |
+| --- | --- |
+| `InitMarket` (0), `InitPortfolio` (1), fixed oracle/matcher setup | Bind market and portfolio incarnations, owner and token-authority identities. Derive starting principal from successful public deposits, not token balances or portfolio capital. Capture any additional setup instruction explicitly; it is not generated policy-change coverage. |
+| `Deposit` (3) | Cover initial funding and an optional positive inter-round deposit from normally prefunded source tokens. Credit only that owner's external principal; prior payouts must survive the deposit. |
+| `TradeNoCpi` (6), `TradeCpi` (10), `BatchTradeNoCpi` (66), `BatchTradeCpi` (67) | Reuse the two existing four-transport orders, invert the first winner, and reverse the winner in round two. Generate unequal integer round gains as well as the equal-gain control. Keep batches single-leg; retain the existing 32-world route-pair test rather than claiming a new exhaustive route-word product. |
+| `PushAuthMark` (63), `PermissionlessCrank` (5) | Attribute each authenticated price/quantity settlement once to the correct owner and round. Publishing a mark is not itself portfolio realization. This slice covers funded accrual/settlement only, not the crank's liquidation, reward, or terminal branches. |
+| `ConvertReleasedPnl` (28) | For independently modeled released amount `Q >= 5`, cover one full conversion and two chunks split at `1`, `floor(Q/2)`, or `Q-1`, with odd/even `Q`; these split points are distinct. Conversion moves released claim to capital for the same owner; it creates neither principal nor an external payout. |
+| `Withdraw` (4) | Compare conversion-then-withdrawal with alternating conversion/withdrawal chunks, paying converted gains before round two while retaining enough capital for the next round. Bound each payment by modeled spendable capital and remaining claim, check the exact destination SPL delta, and carry cumulative payouts through the later round and final withdrawal. |
+| Matcher reauthorization, unchanged observations, and rejected calls | Check identity/account frames and zero economic effect where applicable. Include helper-issued `SetMatcherConfig` (68) and every individual crank transaction, not just the return from `execute_trade_route` or `crank_market_then_accounts_once`. Rejection leaves the history ledger and tracked economic state unchanged. |
+
+Use the Cartesian product of the two existing transport orders, both first-winner orientations,
+both payout schedules, and the four conversion partitions as the deterministic 32-cell prefix
+matrix. Run each cell with two amount profiles: equal even gains without an inter-round deposit,
+and unequal odd gains with a positive inter-round deposit. Require all 64 bounded worlds to succeed,
+then add a bounded seeded parameter tail; the amount profiles do not exhaust their cross-product.
+The full-conversion/alternating cell is a control, not another partial-conversion witness. Require
+nonzero partial conversion and early payout for each owner across the matrix, successful nonzero
+fee debits, and a final legitimate exit. Do not count rejected-only cells or a larger seed count as
+history-domain completion.
+
+**Reusable oracle contract.** Keep generator intent and observed SBF results separate:
+
+- Inputs: the prior shadow ledger keyed by market/portfolio incarnation and owner; round/position
+  epoch provenance; signed route, quantity and fee terms; authenticated mark/slot history and
+  per-owner applied-observation cursor; requested deposit/conversion/payout amounts; and actual
+  success/error, portfolio snapshots, authority-attributed SPL deltas and unrelated-account frames.
+  A position-epoch change must not reset lifetime principal, fees, or payouts.
+- Expected outputs: next per-owner remaining claim, capital, unconverted PnL and its currently
+  released slice, cumulative external payouts, expected fee destination delta, and the allowed
+  mutation set. Capital is treated as spendable only at the admitted flat, settled checkpoints.
+  In this profile `remaining = principal + signed_realized_pnl - fees - prior_payouts`; negative
+  realized PnL is already a debit and must not also be subtracted as a separate loss. Conversion
+  preserves remaining claim while reducing its released slice and increasing capital. Model the
+  funded loser's capital debit separately from the winner's released credit.
+- Check each actual public transaction before accepting its ledger update. Derive expected credits
+  from authenticated history and the named settlement contract, never from observed `capital`,
+  `pnl`, a cached claim bound, or the payout being checked. Validate the recipient's bound before
+  recording its payout. Compare capital and PnL separately as well as their sum; an
+  unchanged sum alone cannot certify how much is spendable. Keep the existing stock, SPL supply,
+  authority-attribution and exact-error-rollback checks as additional obligations, not substitutes.
+- Reuse `inv024_exact_trade_fee` only under its current one-unit, zero-base-fee/zero-spread assumptions:
+  bilateral routes charge their signed fee; the CPI fee field is a taker cap and those routes
+  charge zero here. Track the canonical insurance credit from those charged fees. Uniform nonzero
+  CPI fees require a separately specified consent/policy profile, not copying the cap into fees.
+- Return checked-step and nonzero partition counts plus a seed/action-prefix diagnostic on mismatch.
+  Test the pure oracle with a conserved wrong-owner observation and with a cleared prior-payout
+  counter; both must fail while the unmodified public observation passes. These are oracle-input
+  mutations only, never injected program state or claimed public findings.
+
+**Implementation and gates.** Add the proposed entrypoint
+`v16_program_generated_payout_prefixes_preserve_history_entitlement` in the existing INV-024
+stateful module. Keep the generator and step oracle adjacent to the current entitlement helpers;
+one owner may extract the existing snapshot/frame plumbing for reuse. `PublicTraceEvidence`
+provides public provenance and token attribution but does not contain portfolio claim snapshots,
+so it cannot alone supply the step oracle. Fail closed on unsupported value effects; do not silently
+treat them as no-ops or wire this partial model into every INV-081/086 action yet.
+
+Build the default wrapper and authenticated matcher SBF artifacts from this same worktree using
+the [build instructions](../../README.md#build--test), with the pinned dependency above. Do not use
+another worktree's `PERCOLATOR_FUZZ_SBF` or `CARGO_TARGET_DIR` artifact. After implementation run:
+
+```bash
+cargo check --tests
+cargo test --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation -- --list
+cargo test --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation -- --nocapture
+cargo test --test v16_cu v16_program_entitlement_effect_roster_is_source_complete -- --nocapture
+git diff --check
+```
+
+Require the new entrypoint in `--list` and record its actual checked partitions. The current fixed
+INV-024 tests do not consume `PERCOLATOR_FUZZ_CASES`/`PERCOLATOR_FUZZ_ACTIONS`; only advertise larger
+campaign commands after the new generator explicitly honors a budget. No new engine/Kani proof is
+needed for this increment: reuse the existing entitlement induction and engine-flow contracts,
+without claiming that symbolic credits/debits bind these new public histories automatically.
+
+**Remaining gap.** Support assignment and provider ownership, backing/insurance withdrawals and
+earnings, maintenance/liquidation rewards, source impairment and attributed residual losses,
+Recovery/forfeits, resolved receipts and junior haircuts still need history-event adapters under
+their focused invariant owners. Multi-asset or partial-fill batches, arbitrary route/interleaving
+words, funding/fee-policy changes, portfolio close/recreation and shared INV-081/086 integration are
+also deferred. A domain top-up must not become a user's principal or new PnL; eventual receipt
+replacement must not duplicate a claim. Preserve INV-024's current status until those compositions
+have generic executable owners. A discrepancy in this slice is an oracle/coverage failure pending
+public economic evidence under `scripts/loop.md`, not by itself a LoF classification.
 
 ## Recorded PR135 inventory
 
