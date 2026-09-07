@@ -3702,6 +3702,82 @@ state-preserving because the wrapper returns the error and SVM rollback applies.
 8. A module header must not claim a universal guarantee from one route, bounded input domain, or
    vulnerable-pin counterexample. Missing proof/fuzz/reachability methods remain explicit gaps.
 
+## Ranked generic-ownership TODOs
+
+Coverage-index review of `6bf45a55` (2026-09-07), ranked by shared coverage impact, not finding
+severity. These are missing reusable owners for the stated compositions, not claims that the
+invariants have no tests. Existing route matrices, secondary owners, and engine proofs remain
+useful; neither a named file nor a source-completeness roster supplies the missing generator/oracle.
+This queue does not change evidence classifications or duplicate the status/count audit.
+
+Apply [`scripts/loop.md`](../../scripts/loop.md): use normally initialized public histories and
+honest oracle inputs. LoF requires independent-user/provider net extractable loss; persistent DoS
+requires failure of every bounded honest owner/keeper continuation. Stale acceptance, rejection,
+self-reclaim, non-extractable rounding, or a reverted optional-batch CU probe alone is insufficient.
+Separate compromised non-oracle admin effects from the honest-key model and reserved admin trusts.
+These untested coverage gaps are not findings and receive no severity/impact labels.
+
+1. **INV-024: history-wide entitlement.** Owner:
+   [`stateful/inv_024_attributed_quote_value_conservation.rs`](stateful/inv_024_attributed_quote_value_conservation.rs).
+   Route family: trades, conversions, fees/rewards, backing/insurance support, Recovery, and payouts.
+   Gap: the two-owner/two-episode history and `inv_024_entitlement_route_dispositions.tsv` supply
+   fixed history and per-route witnesses, not one generated history owner for every value effect.
+   TODO: compose these families under one reusable per-episode claim oracle, including attributed
+   support, losses, forfeits, and junior haircuts; check each recipient's claim after every step
+   and reconcile external payouts. Reuse it in INV-081/086 instead of substituting stock equality.
+
+2. **INV-082: environment-aware permissionless completion.** Owner:
+   [`stateful/inv_082_state_indexed_liveness_theorem.rs`](stateful/inv_082_state_indexed_liveness_theorem.rs).
+   Route family: crank/close continuation, expiry normalization, Recovery, claims, and retirement.
+   Gap: the fixed-prefix graph, seeded frontiers, and selector-composition owner in
+   `special_method_coverage.tsv` do not own one generator crossing environmental changes,
+   overlapping lifecycle work, and role availability at retained progress states.
+   TODO: give that product a reusable current-state rank and economic-terminal oracle; search
+   bounded honest continuations and report signer-gated deletion separately. Share the owner with
+   INV-063/071/073/078; one failed candidate or a working escape must not become a DoS claim.
+
+3. **INV-012: retained capability lifecycle.** Owner:
+   [`stateful/inv_012_capability_and_delegate_scope.rs`](stateful/inv_012_capability_and_delegate_scope.rs).
+   Route family: matcher grants and both CPI transports, composed with position/lifecycle writers.
+   Gap: the explicit disable/re-enable matrix and CU writer cases do not supply a reusable retained
+   authorization generator across all automatic and explicit invalidation families.
+   TODO: own writer family, capability scope/incarnation, and expiry partitions together, with an
+   independent authorization-history oracle and fresh-authorized liveness controls. Keep rejection
+   or stale-acceptance evidence separate from attributed economic harm; share with INV-004/005.
+
+4. **INV-056: favorable-action observation completeness.** Owner:
+   [`cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs`](cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs).
+   Route family: trade, withdrawal, conversion, and certificate refresh.
+   Gap: the favorable-route disposition roster and individual stale-leg/hint matrices lack one
+   reusable route-by-provider-by-observation-completeness generator/oracle owner.
+   TODO: derive the required authenticated observation set independently of persisted certificate
+   currentness, then compare favorable admission with complete refresh under the same honest
+   external inputs. Reuse INV-020/053/054 evidence; retain valid public progress controls.
+
+5. **INV-038: mixed-history residue accounting.** Owner:
+   [`stateful/inv_038_rounding_and_ratio_conservation.rs`](stateful/inv_038_rounding_and_ratio_conservation.rs).
+   Route family: accrual, trading, reduction/liquidation, allocation, and receipt settlement.
+   Gap: separate EWMA, payout-remainder, backing-fee, and INV-052 cadence/partition products do not
+   own one mixed-route history generator with a common exact residue-attribution oracle.
+   TODO: compose the existing arithmetic references across generated route interleavings and
+   partitions, preserving authenticated event history and explicitly bounding noncommuting outcomes.
+   Check per-actor value as well as quotient/remainder conservation; distinguish non-extractable
+   drift from LoF. Reuse INV-010/052/085 rather than duplicating engine arithmetic proofs.
+
+6. **INV-021: account-lifecycle composition.** Owner:
+   [`cu/inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs`](cu/inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs).
+   Route family: portfolio creation, growth, close/reuse, and rent/lamport destinations.
+   Gap: `public_instruction_coverage.tsv` indexes individual creation/close witnesses; the shared
+   `Action` model does not generate portfolio creation/close/reuse as economic-history actions.
+   TODO: own a public lifecycle generator crossing supported account shapes, funding, and roles,
+   with independent lamport, materialized-account, and surviving-claim oracles. Compose success
+   and CPI/transfer rollback with funded-user exit checks; do not use injected account states as
+   public-reachability evidence.
+
+Each TODO needs an invariant-owned executable entrypoint naming its reusable generator, independent
+oracle, route/partition domain, and secondary owners. Shared helpers may stay in `tests/support/`;
+coverage ownership must not stop there. No new issue-specific adapter satisfies this queue.
+
 ## Current PR135 inventory
 
 | Suite | Tests | Evidence |
