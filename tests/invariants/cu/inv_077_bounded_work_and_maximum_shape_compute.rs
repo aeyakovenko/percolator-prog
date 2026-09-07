@@ -39,6 +39,9 @@
 //! both funded portfolios already hold fourteen legs and twenty-eight source records. Thirty
 //! bounded automatic cranks refresh both accounts, unilateral reduction lands below 1.179M CU,
 //! and ResetPending cleanup plus every remaining owner exit completes without state injection.
+//! Direct `CloseResolved` separately measures the public 14-leg/28-source product after the
+//! owner window, with both claimant orders, strict first-leg progress, and bounded continuation
+//! to exact per-owner SPL payouts and empty portfolios.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -933,6 +936,135 @@ fn v16_program_max_shape_resolved_close_order_matrix_is_bounded_and_fair() {
         "INV-077 max resolved close CU: forward={} ({} calls), reverse={} ({} calls)",
         forward.1, forward.2, reverse.1, reverse.2
     );
+}
+
+#[test]
+fn v16_program_direct_close_resolved_at_14_leg_28_source_shape_is_bounded() {
+    const CLOSE_CU_LIMIT: u64 = 1_375_000;
+    const DEPOSIT: u128 = 2_000_000;
+    // The public fixture earns two one-price-unit moves of 1,000 units on each asset.
+    let gain = u128::from(MAX_SOURCE_LIVE_ASSETS) * 2 * 1_000;
+    let expected_payouts = [DEPOSIT - gain, DEPOSIT + gain];
+    assert_certified_engine_pin("INV-077 direct maximum-shape CloseResolved");
+
+    for reverse in [false, true] {
+        let (mut env, taker_owner, lp_owner, taker, lp, slot) =
+            setup_max_source_live_pair(0, MAX_SOURCE_LIVE_ASSETS);
+        env.configure_permissionless_resolve_with_cu(1, 1);
+        let resolve_slot = slot + 2;
+        let resolve_cu = env.resolve_stale_permissionless_with_cu(resolve_slot);
+        assert_cu_within("direct-close fixture resolution", resolve_cu, CLOSE_CU_LIMIT);
+        env.svm.warp_to_slot(resolve_slot + 1);
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+        assert_eq!(env.token_amount(env.vault) as u128, 2 * DEPOSIT);
+        let mint_before = env.svm.get_account(&env.mint).unwrap();
+        let claims = if reverse {
+            [(&lp_owner, lp), (&taker_owner, taker)]
+        } else {
+            [(&taker_owner, taker), (&lp_owner, lp)]
+        };
+        let mut first_max_cu = 0;
+        for (owner, portfolio) in claims {
+            let before = env.portfolio_state(portfolio);
+            let active_before = percolator::active_bitmap_count_ones(active_bitmap(&before));
+            let expected_sources = if portfolio == lp {
+                percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+            } else {
+                0
+            };
+            assert_eq!(active_before, u32::from(MAX_SOURCE_LIVE_ASSETS));
+            assert_eq!(
+                before
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.is_occupied())
+                    .count(),
+                expected_sources
+            );
+            assert_eq!(
+                before
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.source_claim_bound_num.get() != 0)
+                    .count(),
+                expected_sources,
+                "every occupied source must retain a value-bearing claim at direct entry"
+            );
+            assert_eq!(
+                before.capital.get(),
+                if portfolio == lp { DEPOSIT } else { DEPOSIT - gain }
+            );
+            assert_eq!(before.pnl.get(), if portfolio == lp { gain as i128 } else { 0 });
+            let other = if portfolio == lp { taker } else { lp };
+            let other_before = env.svm.get_account(&other).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let engine_vault_before = env.market_state().1.vault;
+
+            env.svm.expire_blockhash();
+            let (destination, cu) = env.close_resolved_with_cu(owner, portfolio);
+            assert_cu_within("direct 14-leg CloseResolved first progress", cu, CLOSE_CU_LIMIT);
+            first_max_cu = first_max_cu.max(cu);
+            let after = env.portfolio_state(portfolio);
+            assert_eq!(
+                percolator::active_bitmap_count_ones(active_bitmap(&after)) + 1,
+                active_before,
+                "direct CloseResolved must commit one canonical leg detach at maximum shape"
+            );
+            assert_eq!(
+                after
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.is_occupied())
+                    .count(),
+                expected_sources,
+                "the first leg detach must not consume terminal sources"
+            );
+            assert_eq!(after.capital, before.capital);
+            assert_eq!(after.pnl, before.pnl);
+            assert_eq!(env.token_amount(destination), 0);
+            assert_eq!(env.svm.get_account(&other).unwrap(), other_before);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+            assert_eq!(env.market_state().1.vault, engine_vault_before);
+        }
+
+        // This shared oracle submits only CloseResolved, bounds the drain to 64 rounds,
+        // requires mutation on success, and frames any waiting claimant's exact rollback.
+        let (payouts, continuation_max_cu) = drain_resolved_cohort_with_cu_limit(
+            &mut env,
+            &claims,
+            "direct max-shape CloseResolved continuation",
+            CLOSE_CU_LIMIT,
+        );
+        let mut by_owner = [0u128; 2];
+        for ((owner, portfolio), payout) in claims.into_iter().zip(payouts) {
+            let index = if portfolio == lp { 1 } else { 0 };
+            by_owner[index] = payout;
+            assert!(resolved_portfolio_is_terminal(&env, portfolio));
+            env.svm.expire_blockhash();
+            let close_cu = env.close_portfolio_with_cu(owner, portfolio);
+            assert_cu_within(
+                "direct resolved portfolio dematerialization",
+                close_cu,
+                CUSTODY_CU_LIMIT,
+            );
+        }
+        assert_eq!(
+            by_owner, expected_payouts,
+            "direct close order changed funded entitlements"
+        );
+        let terminal = env.market_state().1;
+        assert_eq!(terminal.materialized_portfolio_count, 0);
+        assert_eq!((terminal.vault, terminal.c_tot, terminal.insurance), (0, 0, 0));
+        assert_eq!(env.token_amount(env.vault), 0);
+        assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
+        for asset in &terminal.assets[..usize::from(MAX_SOURCE_LIVE_ASSETS)] {
+            assert_eq!((asset.oi_eff_long_q, asset.oi_eff_short_q), (0, 0));
+        }
+        println!(
+            "INV-077 direct CloseResolved CU: reverse={reverse}, first={first_max_cu}, \
+             continuation={continuation_max_cu}, payouts={by_owner:?}"
+        );
+    }
 }
 
 fn run_max_source_liquidation_asset(adverse_asset: u16) {
