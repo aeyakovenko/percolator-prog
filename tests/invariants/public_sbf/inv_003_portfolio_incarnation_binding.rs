@@ -15,10 +15,78 @@
 //! economic delta, preventing an always-rejecting implementation from satisfying
 //! the matrix. The trace schema additionally proves every lifecycle edge is a
 //! real public transaction.
+//! A separate retained-deposit control keeps its original signature across another
+//! portfolio's A -> B -> A cycle, proving unrelated incarnation allocation does
+//! not invalidate consent for an unchanged portfolio.
 
 use crate::support::invariant_discovery::{
     discover_portfolio_incarnation_replays, PortfolioIntentKind,
 };
+use crate::support::v16_svm::{MarketConfig, V16Svm};
+
+#[test]
+fn v16_program_retained_deposit_survives_unrelated_portfolio_recreation() {
+    const RETAINED_OWNER: usize = 0;
+    const RECREATED_OWNER: usize = 1;
+    const INTERMEDIATE_OWNER: usize = 2;
+    const AMOUNT: u64 = 1_000;
+
+    let mut env = V16Svm::new([0x3d; 32], MarketConfig::default());
+    let retained_id = env.primary_portfolio_id(RETAINED_OWNER);
+    let retained_portfolio = env.primary_portfolio_data(RETAINED_OWNER);
+    let old_id = env.primary_portfolio_id(RECREATED_OWNER);
+    let retained = env.build_retained_deposit(RETAINED_OWNER, u128::from(AMOUNT));
+
+    let old_capital = env.primary_portfolio(RECREATED_OWNER).capital.get();
+    env.withdraw_primary(RECREATED_OWNER, old_capital)
+        .expect("empty the neighboring portfolio");
+    env.close_primary_portfolio(RECREATED_OWNER)
+        .expect("close the neighboring portfolio");
+    let (intermediate_id, replacement_id) = env
+        .cycle_closed_primary_portfolio_through_owner(RECREATED_OWNER, INTERMEDIATE_OWNER)
+        .expect("recreate the neighboring portfolio through owners A-B-A");
+    assert!(intermediate_id > old_id);
+    assert!(replacement_id > intermediate_id);
+    assert_eq!(env.primary_portfolio_id(RETAINED_OWNER), retained_id);
+    assert_eq!(
+        env.primary_portfolio_data(RETAINED_OWNER),
+        retained_portfolio,
+        "the signed portfolio's identity and replay sequence remain unchanged"
+    );
+
+    let source = env.actors[RETAINED_OWNER].source_token;
+    let source_before = env.token_amount(source);
+    let vault_before = env.token_amount(env.vault);
+    let capital_before = env.primary_portfolio(RETAINED_OWNER).capital.get();
+    let total_before = env.primary_market_state().1.c_tot;
+    let portfolios_before = env.all_primary_portfolio_data();
+    let matchers_before = env.all_matcher_context_data();
+    let lamports_before = env.all_economic_account_lamports();
+    let supply_before = env.token_supply_observed();
+
+    // Submit the original signed request, not a control rebuilt after allocation.
+    env.land_retained(retained)
+        .expect("unrelated portfolio recreation must preserve retained deposit consent");
+    assert_eq!(env.primary_portfolio_id(RETAINED_OWNER), retained_id);
+    assert_eq!(env.token_amount(source), source_before - AMOUNT);
+    assert_eq!(env.token_amount(env.vault), vault_before + AMOUNT);
+    assert_eq!(
+        env.primary_portfolio(RETAINED_OWNER).capital.get(),
+        capital_before + u128::from(AMOUNT)
+    );
+    assert_eq!(
+        env.primary_market_state().1.c_tot,
+        total_before + u128::from(AMOUNT)
+    );
+    for (actor, before) in portfolios_before.iter().enumerate() {
+        if actor != RETAINED_OWNER {
+            assert_eq!(&env.primary_portfolio_data(actor), before);
+        }
+    }
+    assert_eq!(env.all_matcher_context_data(), matchers_before);
+    assert_eq!(env.all_economic_account_lamports(), lamports_before);
+    assert_eq!(env.token_supply_observed(), supply_before);
+}
 
 #[test]
 fn v16_program_all_retained_portfolio_intents_reject_after_same_pubkey_recreate() {
