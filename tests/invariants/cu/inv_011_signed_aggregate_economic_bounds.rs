@@ -10,8 +10,550 @@
 //!   limit or the aggregate quote-atom caps; and
 //! * exact-fill validation makes the signed leg vector the aggregate quantity
 //!   and final-position bound for the one-shot instruction.
+//!
+//! Generated heterogeneous leg vectors also compare aggregate, reordered, and
+//! partitioned single/batch CPI execution (INV-010/052). The independent oracle
+//! owns a numerical economic projection and exact passive/rollback frames, not
+//! arbitrary-history equivalence or a persistent multi-intent spending allowance.
 
 use super::*;
+
+#[derive(Clone, Debug)]
+struct SignedLegPartitionCase {
+    // Distinct assets, not partial quantities of one leg.
+    legs: Vec<(u64, i128)>,
+    fee_bps: u64,
+    spreads: [u64; 2],
+    permutation: usize,
+    cuts: u8,
+    single_cpi: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SignedLegPartitionOutcome {
+    owners: [(u128, i128); 2],
+    stocks: [u128; 3],
+    exposure: [(i128, i128, u128, u128); 3],
+    quote_fee_slippage: [u128; 4],
+}
+
+fn run_signed_leg_partition(
+    case: &SignedLegPartitionCase,
+    schedule: &[Vec<usize>],
+    single_cpi: bool,
+) -> (SignedLegPartitionOutcome, [u64; 3]) {
+    use crate::support::v16_svm::{MarketConfig, V16Svm};
+    use percolator_prog::matcher_abi::{read_matcher_return, MATCHER_RETURN_BYTES};
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16Svm::new(
+        [0x52; 32],
+        MarketConfig {
+            initial_price: case.legs[0].0,
+            ..MarketConfig::default()
+        },
+    );
+    for (asset, &(mark, _)) in case.legs.iter().enumerate() {
+        env.configure_auth_mark(false, asset as u16, 1, mark)
+            .expect("public flat-market mark configuration");
+    }
+    env.update_trade_fee_policy(case.fee_bps)
+        .expect("public base-fee policy");
+    env.set_matcher_spreads(1, case.spreads[0], case.spreads[1])
+        .expect("LP-authorized asymmetric quotes");
+    // The shared fixture initializes zeroed program accounts via public instructions and
+    // reconciles its external SPL endowment with mint supply. Only this fee payer is untracked.
+    let payer = Keypair::new();
+    env.svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
+    let ceil = |n: u128, d: u128| n / d + u128::from(n % d != 0);
+    let quote = |mark: u64, size: i128| {
+        let multiplier = if size > 0 {
+            10_000 + case.spreads[1]
+        } else {
+            10_000 - case.spreads[0]
+        };
+        mark * multiplier / 10_000
+    };
+    // Price the authenticated inputs without calling production arithmetic or reading debits.
+    let economics = |mark: u64, size: i128, price: u64| {
+        let q = size.unsigned_abs();
+        let adverse = if size > 0 {
+            price.saturating_sub(mark)
+        } else {
+            mark.saturating_sub(price)
+        };
+        [
+            if size > 0 {
+                ceil(q * u128::from(price), POS_SCALE)
+            } else {
+                0
+            },
+            if size < 0 {
+                q * u128::from(price) / POS_SCALE
+            } else {
+                0
+            },
+            ceil(q * u128::from(adverse), POS_SCALE),
+            ceil(
+                ceil(q * u128::from(mark), POS_SCALE) * u128::from(case.fee_bps),
+                10_000,
+            ),
+        ]
+    };
+    let sum = |assets: &[usize]| {
+        let mut total = [0u128; 4];
+        for &asset in assets {
+            let (mark, size) = case.legs[asset];
+            for (target, value) in total
+                .iter_mut()
+                .zip(economics(mark, size, quote(mark, size)))
+            {
+                *target += value;
+            }
+        }
+        total
+    };
+    let original_budget = sum(&(0..case.legs.len()).collect::<Vec<_>>());
+    let initial_market = env.primary_market_state().1;
+    let initial_capital = [0, 1].map(|actor| env.primary_portfolio(actor).capital.get());
+    let initial_epochs = [0, 1].map(|actor| env.primary_portfolio_position_epoch(actor));
+    let mut keys: Vec<_> = env
+        .all_economic_account_lamports()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    keys.extend(env.actors.iter().map(|actor| actor.signer.pubkey()));
+    keys.extend([
+        env.program_id,
+        env.matcher_program,
+        spl_token::ID,
+        solana_sdk::compute_budget::ID,
+    ]);
+    keys.sort_unstable();
+    keys.dedup();
+    let frame = |env: &V16Svm, keys: &[Pubkey]| {
+        keys.iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>()
+    };
+    let mutable = [
+        env.market,
+        env.actors[0].portfolio,
+        env.actors[1].portfolio,
+        env.actors[1].matcher_context,
+    ];
+    let passive_keys: Vec<_> = keys
+        .iter()
+        .copied()
+        .filter(|key| !mutable.contains(key))
+        .collect();
+    let initial_passive = frame(&env, &passive_keys);
+    let check_prefix = |env: &V16Svm, filled: &[usize], observed: [u128; 4], commits: u64| {
+        assert_eq!(
+            observed,
+            sum(filled),
+            "{case:?}: independent per-leg budget"
+        );
+        for i in [0, 2, 3] {
+            assert!(
+                observed[i] <= original_budget[i],
+                "{case:?}: cumulative cap {i}"
+            );
+        }
+        let market = env.primary_market_state().1;
+        let owners = [0, 1].map(|actor| {
+            let account = env.primary_portfolio(actor);
+            assert_eq!(
+                account.capital.get(),
+                initial_capital[actor] - observed[3],
+                "{case:?}: owner fee debit"
+            );
+            assert_eq!(
+                account.pnl.get(),
+                0,
+                "manual marks must not book matcher spread as PnL"
+            );
+            assert_eq!(
+                env.primary_portfolio_position_epoch(actor),
+                initial_epochs[actor] + commits
+            );
+            assert_eq!(
+                account
+                    .legs
+                    .iter()
+                    .filter(|leg| leg.try_to_runtime().unwrap().active)
+                    .count(),
+                filled.len()
+            );
+            (account.capital.get(), account.pnl.get())
+        });
+        let exposure = std::array::from_fn(|asset| {
+            let size = if filled.contains(&asset) {
+                case.legs[asset].1
+            } else {
+                0
+            };
+            let positions = [0, 1].map(|actor| {
+                let account = env.primary_portfolio(actor);
+                account
+                    .legs
+                    .iter()
+                    .filter_map(|leg| leg.try_to_runtime().ok())
+                    .find(|leg| leg.active && leg.asset_index as usize == asset)
+                    .map_or(0, |leg| leg.basis_pos_q)
+            });
+            assert_eq!(
+                positions,
+                [size, -size],
+                "{case:?}: per-asset signed exposure"
+            );
+            let state = &market.assets[asset];
+            assert_eq!(
+                state.effective_price,
+                case.legs.get(asset).map_or(case.legs[0].0, |leg| leg.0)
+            );
+            assert_eq!(state.oi_eff_long_q, size.unsigned_abs());
+            assert_eq!(state.oi_eff_short_q, size.unsigned_abs());
+            (
+                positions[0],
+                positions[1],
+                state.oi_eff_long_q,
+                state.oi_eff_short_q,
+            )
+        });
+        assert_eq!(market.c_tot, initial_market.c_tot - 2 * observed[3]);
+        assert_eq!(market.insurance, initial_market.insurance + 2 * observed[3]);
+        assert_eq!(market.vault, initial_market.vault);
+        assert_eq!(market.vault, market.c_tot + market.insurance);
+        assert_eq!(market.vault, u128::from(env.token_amount(env.vault)));
+        assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+        assert_eq!(u128::from(env.mint_supply()), env.initial_token_supply);
+        assert_eq!(
+            frame(env, &passive_keys),
+            initial_passive,
+            "{case:?}: complete passive custody/foreign frame"
+        );
+        SignedLegPartitionOutcome {
+            owners,
+            stocks: [market.vault, market.c_tot, market.insurance],
+            exposure,
+            quote_fee_slippage: observed,
+        }
+    };
+    let send = |env: &mut V16Svm, ix: ProgInstruction| {
+        env.expire_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                cu_ix(),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new(env.actors[0].signer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(env.actors[0].portfolio, false),
+                        AccountMeta::new(env.actors[1].portfolio, false),
+                        AccountMeta::new_readonly(env.matcher_program, false),
+                        AccountMeta::new(env.actors[1].matcher_context, false),
+                        AccountMeta::new_readonly(env.actors[1].matcher_delegate, false),
+                    ],
+                    data: ix.encode(),
+                },
+            ],
+            Some(&payer.pubkey()),
+            &[&payer, &env.actors[0].signer],
+            env.svm.latest_blockhash(),
+        );
+        assert!(
+            bincode::serialized_size(&tx).unwrap() <= solana_sdk::packet::PACKET_DATA_SIZE as u64
+        );
+        env.svm.send_transaction(tx)
+    };
+    let mut filled = Vec::new();
+    let mut observed = [0u128; 4];
+    let mut counts = [0u64; 3]; // Commits, cap rejects, maximum CU.
+    check_prefix(&env, &filled, observed, 0);
+    for assets in schedule {
+        let budget = sum(assets);
+        let legs: Vec<_> = assets
+            .iter()
+            .map(|&asset| {
+                let (mark, size_q) = case.legs[asset];
+                BatchTradeCpiLeg {
+                    asset_index: asset as u16,
+                    market_id: initial_market.assets[asset].market_id,
+                    size_q,
+                    // CPI uses the LP-consented base fee, not the taker's larger reported fee.
+                    fee_bps: case.fee_bps + 11 * (asset as u64 + 1),
+                    limit_price: quote(mark, size_q),
+                }
+            })
+            .collect();
+        let batch = !single_cpi || legs.len() != 1;
+        let current = if batch {
+            ProgInstruction::BatchTradeCpi {
+                account_a_portfolio_id: env.primary_portfolio_id(0),
+                account_a_position_epoch: env.primary_portfolio_position_epoch(0),
+                account_b_portfolio_id: env.primary_portfolio_id(1),
+                account_b_position_epoch: env.primary_portfolio_position_epoch(1),
+                account_b_matcher_sequence: env.primary_portfolio_matcher_sequence(1),
+                max_slippage_atoms: budget[2],
+                max_fee_atoms: budget[3],
+                legs: legs.clone(),
+            }
+        } else {
+            ProgInstruction::TradeCpi {
+                account_a_portfolio_id: env.primary_portfolio_id(0),
+                account_a_position_epoch: env.primary_portfolio_position_epoch(0),
+                account_b_portfolio_id: env.primary_portfolio_id(1),
+                account_b_position_epoch: env.primary_portfolio_position_epoch(1),
+                account_b_matcher_sequence: env.primary_portfolio_matcher_sequence(1),
+                asset_index: legs[0].asset_index,
+                market_id: legs[0].market_id,
+                size_q: legs[0].size_q,
+                fee_bps: legs[0].fee_bps,
+                limit_price: legs[0].limit_price,
+                backing_fee_cap_bps: 0,
+            }
+        };
+        for tighten_fee in [false, true] {
+            let mut tight = current.clone();
+            match &mut tight {
+                ProgInstruction::BatchTradeCpi {
+                    max_slippage_atoms,
+                    max_fee_atoms,
+                    ..
+                } => {
+                    let cap = if tighten_fee {
+                        max_fee_atoms
+                    } else {
+                        max_slippage_atoms
+                    };
+                    if *cap == 0 {
+                        continue;
+                    }
+                    *cap -= 1;
+                }
+                ProgInstruction::TradeCpi {
+                    size_q,
+                    limit_price,
+                    ..
+                } => {
+                    if tighten_fee {
+                        continue;
+                    }
+                    *limit_price = if *size_q > 0 {
+                        *limit_price - 1
+                    } else {
+                        *limit_price + 1
+                    };
+                }
+                _ => unreachable!(),
+            }
+            let before = frame(&env, &keys);
+            let error = send(&mut env, tight).expect_err("one-atom-tight signed bound");
+            assert_eq!(
+                error.err,
+                TransactionError::InstructionError(
+                    2,
+                    InstructionError::Custom(PercolatorError::InvalidInstruction as u32)
+                ),
+                "{case:?}"
+            );
+            assert_eq!(
+                frame(&env, &keys),
+                before,
+                "{case:?}: exact whole-account rollback"
+            );
+            check_prefix(&env, &filled, observed, counts[0]);
+            counts[1] += 1;
+            counts[2] = counts[2].max(error.meta.compute_units_consumed);
+        }
+        assert!(budget[2] <= original_budget[2] - observed[2]);
+        assert!(budget[3] <= original_budget[3] - observed[3]);
+        let landed = send(&mut env, current).unwrap_or_else(|error| {
+            panic!("{case:?}, {assets:?}: exact capped continuation: {error:?}")
+        });
+        let bytes = if batch {
+            assert_eq!(landed.return_data.program_id, env.matcher_program);
+            landed.return_data.data
+        } else {
+            env.svm
+                .get_account(&env.actors[1].matcher_context)
+                .unwrap()
+                .data[..MATCHER_RETURN_BYTES]
+                .to_vec()
+        };
+        assert_eq!(bytes.len(), legs.len() * MATCHER_RETURN_BYTES);
+        for (chunk, leg) in bytes.chunks_exact(MATCHER_RETURN_BYTES).zip(&legs) {
+            let ret = read_matcher_return(chunk).unwrap();
+            let asset = leg.asset_index as usize;
+            assert_eq!(ret.asset_index, u64::from(leg.asset_index));
+            assert_eq!(ret.exec_size, leg.size_q);
+            assert_eq!(ret.exec_price_e6, leg.limit_price);
+            assert_eq!(ret.oracle_price_e6, case.legs[asset].0);
+            for (total, value) in observed.iter_mut().zip(economics(
+                ret.oracle_price_e6,
+                ret.exec_size,
+                ret.exec_price_e6,
+            )) {
+                *total += value;
+            }
+            assert!(
+                !filled.contains(&asset),
+                "the schedule must partition the signed vector"
+            );
+            filled.push(asset);
+        }
+        counts[0] += 1;
+        counts[2] = counts[2].max(landed.compute_units_consumed);
+        check_prefix(&env, &filled, observed, counts[0]);
+    }
+    assert_eq!(filled.len(), case.legs.len());
+    assert_eq!(observed, original_budget);
+    assert_cu_within(
+        "INV-010/011/052 signed leg partitions",
+        counts[2],
+        1_375_000,
+    );
+    (check_prefix(&env, &filled, observed, counts[0]), counts)
+}
+
+#[test]
+fn v16_program_generated_signed_leg_partitions_are_order_independent() {
+    use proptest::{
+        prelude::*,
+        test_runner::{Config, RngAlgorithm, TestRng, TestRunner},
+    };
+    const ORDERS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [1, 0, 2],
+        [0, 2, 1],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let totals = std::cell::Cell::new([0u64; 4]); // Worlds, commits, cap rejects, maximum CU.
+    let record = |case: SignedLegPartitionCase| {
+        let mut tally = totals.get();
+        let order: Vec<_> = ORDERS[case.permutation]
+            .into_iter()
+            .filter(|&asset| asset < case.legs.len())
+            .collect();
+        let mut partition = vec![Vec::new()];
+        for (index, &asset) in order.iter().enumerate() {
+            partition.last_mut().unwrap().push(asset);
+            if index + 1 < order.len() && case.cuts & (1 << index) != 0 {
+                partition.push(Vec::new());
+            }
+        }
+        assert!(partition.len() > 1, "nonvacuous partition");
+        let canonical: Vec<_> = (0..case.legs.len()).collect();
+        let mut schedules = vec![(vec![canonical.clone()], false)];
+        if order != canonical {
+            schedules.push((vec![order], false));
+        }
+        schedules.push((partition, case.single_cpi));
+        let mut reference = None;
+        for (schedule, single_cpi) in &schedules {
+            let (outcome, counts) = run_signed_leg_partition(&case, schedule, *single_cpi);
+            if let Some(expected) = &reference {
+                assert_eq!(
+                    &outcome, expected,
+                    "{case:?}: aggregate/reordered/partitioned economics"
+                );
+            } else {
+                reference = Some(outcome);
+            }
+            tally[0] += 1;
+            tally[1] += counts[0];
+            tally[2] += counts[1];
+            tally[3] = tally[3].max(counts[2]);
+        }
+        totals.set(tally);
+    };
+    for len in [2, 3] {
+        for permutation in 0..if len == 2 { 2 } else { 6 } {
+            for direction in [-1, 1] {
+                record(SignedLegPartitionCase {
+                    legs: [
+                        (101, 1),
+                        (1_109, -(POS_SCALE as i128 - 1)),
+                        (2_117, (2 * POS_SCALE + 1) as i128),
+                    ]
+                    .into_iter()
+                    .take(len)
+                    .map(|(mark, size)| (mark, direction * size))
+                    .collect(),
+                    fee_bps: [1, 333, 1_000][permutation % 3],
+                    spreads: [317, 653],
+                    permutation,
+                    cuts: 1 + (permutation as u8 % ((1 << (len - 1)) - 1)),
+                    single_cpi: permutation % 2 == 0,
+                });
+            }
+        }
+    }
+    let strategy = (
+        prop::collection::vec(
+            (
+                0u64..=997,
+                0u128..=5,
+                prop::sample::select(vec![0, 1, POS_SCALE / 2, POS_SCALE - 1]),
+                any::<bool>(),
+            ),
+            2..=3,
+        ),
+        1u64..=1_000,
+        100u64..=1_000,
+        200u64..=1_200,
+        0usize..6,
+        0u8..3,
+        any::<bool>(),
+    )
+        .prop_map(|(legs, fee_bps, bid, ask, permutation, cuts, single_cpi)| {
+            let len = legs.len();
+            SignedLegPartitionCase {
+                legs: legs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(asset, (mark, units, residue, negative))| {
+                        (
+                            101 + asset as u64 * 1_001 + mark,
+                            (units * POS_SCALE + residue + 1) as i128
+                                * if negative { -1 } else { 1 },
+                        )
+                    })
+                    .collect(),
+                fee_bps,
+                spreads: [bid, ask],
+                permutation,
+                cuts: 1 + cuts % ((1 << (len - 1)) - 1),
+                single_cpi,
+            }
+        });
+    TestRunner::new_with_rng(
+        Config {
+            cases: 32,
+            max_shrink_iters: 128,
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(
+                    "tests/invariants/cu/inv_011_signed_leg_partitions.proptest-regressions",
+                ),
+            )),
+            ..Config::default()
+        },
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[0x11; 32]),
+    )
+    .run(&strategy, |case| {
+        record(case);
+        Ok(())
+    })
+    .unwrap();
+    let totals = totals.get();
+    assert!(totals[0] >= 96);
+    println!("INV-010/011/052: 16 boundary + 32 seeded leg-vector histories; worlds/commits/cap rejects/max CU={totals:?}");
+}
 
 #[test]
 fn v16_program_signed_aggregate_bound_composition_is_source_complete() {

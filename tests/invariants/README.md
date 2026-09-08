@@ -5290,6 +5290,74 @@ allowances, variable claim/backing shapes and environmental interleavings. Reuse
 052/085 and pinned engine contracts; do not duplicate engine arithmetic proofs or promote status
 from this bounded increment.
 
+### INV-011 heterogeneous signed-leg partitions
+
+[`v16_program_generated_signed_leg_partitions_are_order_independent`](cu/inv_011_signed_aggregate_economic_bounds.rs)
+adds a finding-blind INV-010/011/052 comparison that the fixed-price funded-prefix and one-asset
+partial-fill owners do not provide. Each input is one two- or three-asset signed leg vector,
+executed as one batch, a reordered batch when its order differs, and a partition of whole legs
+into fresh single/batch CPI instructions. Sixteen mandatory histories cover both two-leg orders,
+all six three-leg permutations, both alternating-sign orientations, dust and unit-neighbor sizes,
+and 1/333/1,000-bps fee policies. Thirty-two seeded shrinkable histories vary quantities, signs,
+distinct per-asset manual marks, asymmetric bid/ask spreads, fee policy, permutation, partition
+boundaries, and whether singleton groups use TradeCpi or BatchTradeCpi. The seed is ChaCha
+`[0x11; 32]`, with 128 shrink iterations and a local invariant regression path.
+
+An independent integer oracle prices each leg from its input mark, quantity and configured quote,
+then compares it with decoded matcher returns. Actual fees use the LP-consented base policy,
+not the taker's deliberately larger reported per-leg fee. Each batch signs the exact sum of its
+leg fee/slippage atoms, bounded by the original plan less observed debits. Every successful prefix
+checks per-owner capital and PnL separately, signed positions by asset, exact long/short OI,
+position epochs, insurance/c_tot/vault, SPL custody and mint supply. Batch fee/slippage caps one
+atom below the required sum, and singleton price limits one atom too tight, must return the exact
+wrapper InvalidInstruction error and restore complete tracked accounts including economic lamports
+and matcher state. Fresh blockhashes exclude duplicate-signature rejection. Unrelated portfolios,
+foreign market, all SPL accounts, mint and passive program accounts remain byte-exact throughout.
+
+The V16Svm fixture initializes zeroed program-owned accounts through public instructions and
+reconciles its external SPL endowment with mint supply; this test performs no program-state
+injection. The endpoint comparison is a numerical economic projection, not whole-state equality:
+request counts, authorization epochs, leg storage order and health-cache bookkeeping may differ
+between schedules. No quantity is split within a leg, so the same per-leg ceilings imply exact
+economic equality, not an extra fragmentation allowance. Marks and fee policy vary between input
+histories but stay fixed within each compared history, with no funding or maintenance accrual.
+
+This remains sampled wrapper evidence. General multi-intent spending allowances, partial fills,
+noncommuting policy/oracle histories, collateral/PnL-credit use, backing/claims, no-CPI transports
+and maximum shapes remain outside it. The plan is off-chain; TradeCpi does not acquire native
+aggregate-atom caps, and matcher quote/slippage is not an SPL trade transfer. Existing INV-009,
+INV-047 and INV-052 owners remain authoritative for those other relations. No engine proof is
+duplicated and no invariant status is promoted. A second fixed-price fee/partial-fill candidate
+was discarded as duplicate; redundant identity-order worlds were also removed from this runner.
+
+Validation uses private build artifacts: default-feature wrapper SBF
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20` and authenticated matcher
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Base `9e70f079` has identical `src`, `Cargo.toml` and `Cargo.lock` Git objects to the documented
+fresh-build checkpoint `7d8c99ea`; the fixture source is unchanged. No SBF rebuild or production
+change is claimed. The exact property passes 127 nonduplicate worlds, 182 committed transactions
+and 325 exact bound rejections in 66.59 seconds, with a maximum of 280,964 CU against the
+1,375,000-CU guardrail. These are post-setup counts; there was no red public-route finding.
+Exact validation commands, run from the isolated worktree:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/pr427-inv010-011-052-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
+cargo test --locked --offline --test v16_cu inv_011_signed_aggregate_economic_bounds::v16_program_generated_signed_leg_partitions_are_order_independent -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_011_signed_aggregate_economic_bounds::v16_program_signed_aggregate_bound_composition_is_source_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_010_out_of_order_safety::v16_program_every_public_route_has_an_explicit_history_relation -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_052_split_merge_invariance::v16_program_split_merge_operation_family_composition_is_source_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_program_invariant_harnesses_are_test_free_roots -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_011_signed_aggregate_economic_bounds.rs
+git diff --check
+```
+
 ### INV-038 executing evidence and mixed-history gap
 
 Updated from base `ff262c38`, 2026-09-08: the bounded public B history now independently observes
