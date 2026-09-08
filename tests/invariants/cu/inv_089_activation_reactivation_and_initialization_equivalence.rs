@@ -8,7 +8,9 @@
 //! maximum-portfolio-shape history through retirement and both reuse branches, normalizing only
 //! the expected program-assigned generation IDs. Unsupported shape rejects atomically without
 //! poisoning the reused slot, and the replacement becomes tradable as soon as one bounded leg is
-//! closed. These tests exercise public wrapper routes against real SBF.
+//! closed. Independent retirement/global cooldown boundaries preserve the generation frontier on
+//! rejection and converge with fresh append once both deadlines mature, under both caller roles.
+//! These tests exercise public wrapper routes against real SBF.
 
 use super::*;
 
@@ -1021,6 +1023,300 @@ fn v16_attack_permissionless_reuse_respects_activation_cooldown_and_fee_atomicit
             .asset_admin,
         creator.pubkey().to_bytes(),
         "successful reuse installs fresh creator-scoped authorities"
+    );
+}
+
+// The same-slot activate/retire test above cannot distinguish the two cooldown guards. Here each
+// reuse rejection has exactly one immature deadline; the sibling-activation case also rejects a
+// fresh append at the same global boundary. Neither failure may consume the next generation.
+#[test]
+fn v16_program_reuse_cooldowns_independently_preserve_generation_frontier() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const ASSET: u16 = 2;
+    const FEE: u128 = 40;
+    const PRICE: u64 = 250;
+    const REJECT_SLOT: u64 = 5;
+    const ADMIT_SLOT: u64 = 6;
+
+    let mut rejections = 0;
+    let mut admissions = 0;
+    let mut max_cu = 0;
+    for permissionless in [false, true] {
+        for recent_retirement in [false, true] {
+            let label =
+                format!("permissionless={permissionless}, recent_retirement={recent_retirement}");
+            let shared_admin = Keypair::new();
+            let activator = if permissionless {
+                Keypair::new()
+            } else {
+                shared_admin.insecure_clone()
+            };
+            let mut fresh = V16CuEnv::new();
+            let mut reused = V16CuEnv::new();
+            for env in [&mut fresh, &mut reused] {
+                env.update_asset_authority_with_cu(&shared_admin);
+                env.admin = shared_admin.insecure_clone();
+                env.update_market_init_fee_policy_with_cu(FEE);
+                env.ensure_signer_account(activator.pubkey());
+            }
+
+            reused.activate_asset(1, 1, 100);
+            reused.activate_asset(ASSET, 2, 100);
+            let old_generation = reused.asset_market_id(ASSET);
+            let retired_slot = if recent_retirement { REJECT_SLOT } else { 3 };
+            reused.svm.warp_to_slot(retired_slot);
+            reused.update_asset_lifecycle_as_admin_with_cu(
+                processor::ASSET_ACTION_RETIRE,
+                ASSET,
+                retired_slot,
+                0,
+            );
+            if !recent_retirement {
+                reused.update_asset_lifecycle_as_admin_with_cu(
+                    processor::ASSET_ACTION_RETIRE,
+                    1,
+                    retired_slot,
+                    0,
+                );
+                reused.activate_asset(1, REJECT_SLOT, 100);
+            }
+            fresh.activate_asset(1, if recent_retirement { 1 } else { REJECT_SLOT }, 100);
+            let fresh_source = fresh.token_account(activator.pubkey(), FEE as u64 + 7);
+            let reused_source = reused.token_account(activator.pubkey(), FEE as u64 + 7);
+
+            let (retired_cfg, retired) = reused.market_state();
+            assert_eq!(retired_cfg.free_market_slot_count, 1, "{label}");
+            assert_eq!(
+                retired.assets[ASSET as usize].lifecycle,
+                AssetLifecycleV16::Retired
+            );
+            assert_eq!(retired.assets[ASSET as usize].retired_slot, retired_slot);
+            assert_eq!(retired.config.asset_activation_cooldown_slots, 1);
+            assert_eq!(
+                retired.last_asset_activation_slot,
+                if recent_retirement { 2 } else { REJECT_SLOT }
+            );
+            assert_eq!(
+                REJECT_SLOT - retired.last_asset_activation_slot
+                    < retired.config.asset_activation_cooldown_slots,
+                !recent_retirement,
+                "{label}: only the selected global deadline may be immature"
+            );
+            assert_eq!(
+                REJECT_SLOT - retired_slot < retired.config.asset_activation_cooldown_slots,
+                recent_retirement,
+                "{label}: only the selected retirement deadline may be immature"
+            );
+
+            // The transaction fee payer is separate from these economic rollback accounts.
+            let snapshot = |env: &V16CuEnv, source: Pubkey| {
+                [
+                    env.market,
+                    env.vault,
+                    source,
+                    env.mint,
+                    activator.pubkey(),
+                    env.admin.pubkey(),
+                ]
+                .map(|key| (key, env.svm.get_account(&key)))
+            };
+            // Encode explicitly: retry the captured frontier, without the harness's automatic
+            // generation rebinding. Only Clock/now_slot and the transaction blockhash advance.
+            let activate = |env: &mut V16CuEnv, source: Pubkey, generation: u64, slot: u64| {
+                env.svm.warp_to_slot(slot);
+                env.svm.expire_blockhash();
+                let mut accounts = vec![
+                    AccountMeta::new(activator.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ];
+                if permissionless {
+                    accounts.extend([
+                        AccountMeta::new(source, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ]);
+                }
+                let ix = Instruction {
+                    program_id: env.program_id,
+                    accounts,
+                    data: ProgInstruction::UpdateAssetLifecycle {
+                        action: processor::ASSET_ACTION_ACTIVATE,
+                        asset_index: ASSET,
+                        market_id: generation,
+                        authority_epoch: if permissionless {
+                            0
+                        } else {
+                            env.control_sequences(0).authority_epoch
+                        },
+                        now_slot: slot,
+                        initial_price: PRICE,
+                        max_init_fee: FEE,
+                        insurance_authority: activator.pubkey().to_bytes(),
+                        insurance_operator: activator.pubkey().to_bytes(),
+                        backing_bucket_authority: activator.pubkey().to_bytes(),
+                        oracle_authority: activator.pubkey().to_bytes(),
+                    }
+                    .encode(),
+                };
+                let tx = Transaction::new_signed_with_payer(
+                    &[heap_ix(), cu_ix(), ix],
+                    Some(&env.payer.pubkey()),
+                    &[&env.payer, &activator],
+                    env.svm.latest_blockhash(),
+                );
+                env.svm.send_transaction(tx)
+            };
+
+            for (env, source, is_reuse) in [
+                (&mut fresh, fresh_source, false),
+                (&mut reused, reused_source, true),
+            ] {
+                let before = snapshot(env, source);
+                let (cfg_before, group_before) = env.market_state();
+                let frontier = group_before.next_market_id;
+                assert_eq!(cfg_before.free_market_slot_count, u16::from(is_reuse));
+                assert_eq!(
+                    group_before.config.max_market_slots,
+                    if is_reuse { 3 } else { 2 }
+                );
+                if is_reuse || !recent_retirement {
+                    let rejected = activate(env, source, frontier, REJECT_SLOT)
+                        .expect_err("the isolated activation deadline must reject");
+                    assert_eq!(
+                        rejected.err,
+                        TransactionError::InstructionError(
+                            2,
+                            if is_reuse {
+                                InstructionError::Custom(PercolatorError::EngineLockActive as u32)
+                            } else {
+                                // Append maps engine errors through the account-wire adapter.
+                                InstructionError::InvalidAccountData
+                            }
+                        ),
+                        "{label}, reuse={is_reuse}: rejection must reach the cooldown guard"
+                    );
+                    assert_eq!(
+                        snapshot(env, source),
+                        before,
+                        "{label}: exact economic rollback"
+                    );
+                    max_cu = max_cu.max(rejected.meta.compute_units_consumed);
+                    rejections += 1;
+                }
+
+                let accepted = activate(env, source, frontier, ADMIT_SLOT)
+                    .expect("the same generation frontier remains live when both deadlines mature");
+                max_cu = max_cu.max(accepted.compute_units_consumed);
+                admissions += 1;
+                let (cfg_after, group_after) = env.market_state();
+                assert_eq!(cfg_after.free_market_slot_count, 0, "{label}");
+                assert_eq!(
+                    group_after.config.max_market_slots,
+                    group_before.config.max_market_slots + u32::from(!is_reuse)
+                );
+                assert_eq!(group_after.assets[ASSET as usize].market_id, frontier);
+                assert_eq!(group_after.next_market_id, frontier + 1);
+                assert_eq!(
+                    group_after.asset_activation_count,
+                    group_before.asset_activation_count + 1
+                );
+                // Fresh append additionally changes capacity; reuse only activates the slot.
+                let epoch_delta = if is_reuse { 1 } else { 2 };
+                assert_eq!(
+                    group_after.asset_set_epoch,
+                    group_before.asset_set_epoch + epoch_delta
+                );
+                assert_eq!(
+                    group_after.risk_epoch,
+                    group_before.risk_epoch + epoch_delta
+                );
+                assert_eq!(group_after.last_asset_activation_slot, ADMIT_SLOT);
+                assert_eq!(group_after.assets[ASSET as usize].retired_slot, 0);
+                assert_eq!(
+                    group_after.assets[ASSET as usize].lifecycle,
+                    AssetLifecycleV16::Active
+                );
+                let fee = if permissionless { FEE } else { 0 };
+                assert_eq!(env.token_amount(source), (FEE + 7 - fee) as u64);
+                assert_eq!(group_after.vault, group_before.vault + fee);
+                assert_eq!(group_after.insurance, group_before.insurance + fee);
+                assert_eq!(env.token_amount(env.vault) as u128, group_after.vault);
+                assert_eq!(env.svm.get_account(&activator.pubkey()), before[4].1);
+                assert_eq!(
+                    env.svm.get_account(&env.market).unwrap().lamports,
+                    before[0].1.as_ref().unwrap().lamports
+                );
+                if is_reuse {
+                    assert_ne!(frontier, old_generation);
+                    assert_eq!(
+                        env.svm.get_account(&env.market).unwrap().data.len(),
+                        before[0].1.as_ref().unwrap().data.len(),
+                        "reuse must not grow the market account"
+                    );
+                }
+            }
+            assert_eq!(
+                normalized_persisted_asset_slot(&reused, ASSET as usize),
+                normalized_persisted_asset_slot(&fresh, ASSET as usize),
+                "{label}: deadline retry must leave exactly a fresh persisted slot"
+            );
+
+            let long_owner = Keypair::new();
+            let short_owner = Keypair::new();
+            let long = reused.create_portfolio(&long_owner);
+            let short = reused.create_portfolio(&short_owner);
+            for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+                reused.deposit(owner, portfolio, 10_000);
+            }
+            for size in [POS_SCALE as i128, -(POS_SCALE as i128)] {
+                reused.trade_asset_with_cu(
+                    ASSET,
+                    &long_owner,
+                    long,
+                    &short_owner,
+                    short,
+                    size,
+                    PRICE,
+                    0,
+                );
+                if size > 0 {
+                    let asset = reused.market_state().1.assets[ASSET as usize];
+                    assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+                    assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+                    for portfolio in [long, short] {
+                        assert_eq!(
+                            active_leg_for_asset(
+                                &reused.portfolio_state(portfolio),
+                                ASSET as usize
+                            )
+                            .market_id,
+                            asset.market_id,
+                            "{label}: a real leg must bind the replacement generation"
+                        );
+                    }
+                }
+            }
+            for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+                assert!(percolator::active_bitmap_is_empty(active_bitmap(
+                    &reused.portfolio_state(portfolio)
+                )));
+                let destination = reused.withdraw(owner, portfolio, 10_000);
+                assert_eq!(reused.token_amount(destination), 10_000, "{label}");
+                reused.close_portfolio_with_cu(owner, portfolio);
+            }
+            let (_, exited) = reused.market_state();
+            assert_eq!(exited.assets[ASSET as usize].oi_eff_long_q, 0);
+            assert_eq!(exited.assets[ASSET as usize].oi_eff_short_q, 0);
+            assert_eq!(exited.vault, if permissionless { FEE } else { 0 });
+            assert_eq!(reused.token_amount(reused.vault) as u128, exited.vault);
+        }
+    }
+    assert_eq!((rejections, admissions), (6, 8));
+    assert_cu_within("independent activation cooldowns", max_cu, CUSTODY_CU_LIMIT);
+    println!(
+        "INV-089: 4 worlds, {rejections} exact cooldown rollbacks, {admissions} activations, \
+         4 replacement-generation roundtrips; peak activation/rejection CU={max_cu}"
     );
 }
 
