@@ -7,6 +7,10 @@
 //! same-account close/B priority composition, and current solvent partial-liquidation progress. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! A fixed-Clock two-asset terminal-accrual trace replays a completed asset's hint before/after
+//! still-pending work: every accepted call lowers decoded remaining work and frames the completed
+//! asset, then permissionless stale resolution enters the lower mode. This is a finite,
+//! funding-disabled hint-reclassification boundary, not a payout or complete lifecycle-rank proof.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -2611,6 +2615,223 @@ fn v16_program_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     );
     assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
     assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
+}
+
+#[test]
+fn v16_program_completed_terminal_hint_replay_preserves_remaining_crank_rank() {
+    const OPEN_SLOT: u64 = 1;
+    const MARK_SLOT: u64 = 2;
+    const STALE_SLOTS: u64 = 6;
+    const RESOLVE_SLOT: u64 = MARK_SLOT + STALE_SLOTS;
+    const PRICE: u64 = 100;
+    const TARGETS: [u64; 2] = [101, 150];
+    const DEPOSIT: u128 = 1_000_000;
+
+    // At fixed time with zero funding and one immutable endpoint per asset, only an unfinished
+    // price interval needs terminal accrual. Its remaining authenticated slots are a finite rank;
+    // reaching the endpoint removes that interval even if unused slots remain. No selector or
+    // modeled engine transition participates in this oracle.
+    let rank = |group: &MarketGroupV16| -> (u8, u64) {
+        let mode = match group.mode {
+            MarketModeV16::Live => 1,
+            MarketModeV16::Resolved => return (0, 0),
+            other => panic!("unexpected terminal-accrual mode: {other:?}"),
+        };
+        let remaining = TARGETS
+            .iter()
+            .enumerate()
+            .filter(|(index, target)| group.assets[*index].effective_price != **target)
+            .map(|(index, _)| {
+                RESOLVE_SLOT
+                    .checked_sub(group.assets[index].slot_last)
+                    .unwrap()
+            })
+            .sum();
+        (mode, remaining)
+    };
+    let mut traces = Vec::new();
+    let mut max_cu = 0;
+    for order in [[0, 1], [1, 0]] {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            max_portfolio_assets: 2,
+            max_price_move_bps_per_slot: 1_000,
+            max_accrual_dt_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_permissionless_resolve_with_cu(STALE_SLOTS, 1);
+        env.svm.warp_to_slot(OPEN_SLOT);
+        for asset in [0, 1] {
+            assert_eq!(
+                env.market_state().1.assets[asset as usize].lifecycle,
+                AssetLifecycleV16::Active
+            );
+            env.configure_auth_mark_for_asset_as_admin(asset, OPEN_SLOT, PRICE);
+        }
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        let long_source = env.deposit(&long_owner, long, DEPOSIT);
+        let short_source = env.deposit(&short_owner, short, DEPOSIT);
+        for asset in [0, 1] {
+            env.trade_asset_with_cu(
+                asset,
+                &long_owner,
+                long,
+                &short_owner,
+                short,
+                POS_SCALE as i128,
+                PRICE,
+                0,
+            );
+        }
+        env.svm.warp_to_slot(MARK_SLOT);
+        for (asset, target) in TARGETS.into_iter().enumerate() {
+            env.push_auth_mark_for_asset_as_admin(asset as u16, MARK_SLOT, target);
+        }
+        env.svm.warp_to_slot(RESOLVE_SLOT);
+        let initial = env.market_state().1;
+        assert_eq!(initial.config.max_abs_funding_e9_per_slot, 0);
+        for asset in &initial.assets[..2] {
+            assert_eq!(asset.effective_price, PRICE);
+            assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+            assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+            assert!(asset.slot_last < MARK_SLOT);
+        }
+        let initial_rank = rank(&initial);
+        assert!(initial_rank.1 > 0);
+        let frame = inv071_continuation_frame(
+            &env,
+            &[
+                long_owner.pubkey(),
+                short_owner.pubkey(),
+                long_source,
+                short_source,
+            ],
+        );
+        env.svm.expire_blockhash();
+        let premature = env
+            .send(
+                ProgInstruction::ResolveStalePermissionless {
+                    now_slot: OPEN_SLOT,
+                },
+                vec![AccountMeta::new(env.market, false)],
+                &[],
+            )
+            .expect_err("pending terminal accrual must block resolution");
+        assert!(is_engine_stale_error(&premature), "{premature}");
+        inv071_assert_continuation_frame(&env, &frame, &[]);
+
+        // The identical observation list is retained after asset 0 stops needing accrual. The
+        // stale caller slot is also held fixed; only the authenticated Clock defines the horizon.
+        let instruction = ProgInstruction::PermissionlessCrank {
+            now_slot: OPEN_SLOT,
+            observations: crank_observations_for_assets(&order),
+        };
+        let mut trace = Vec::new();
+        let mut completed_hint_replays = 0;
+        while rank(&env.market_state().1).1 > 0 {
+            assert!(trace.len() < initial_rank.1 as usize, "finite crank bound");
+            let before = env.market_state().1;
+            let before_rank = rank(&before);
+            let completed_profile = state::read_asset_oracle_profile(
+                &env.svm.get_account(&env.market).unwrap().data,
+                0,
+            )
+            .unwrap();
+            let completed_hint = before.assets[0].effective_price == TARGETS[0];
+            if completed_hint {
+                assert!(before.assets[0].slot_last < RESOLVE_SLOT);
+                assert_eq!(completed_profile.funding_mark_pending_e6, 0);
+                assert_ne!(before.assets[1].effective_price, TARGETS[1]);
+                assert!(before.assets[1].slot_last < RESOLVE_SLOT);
+            }
+            env.svm.expire_blockhash();
+            let cu = env
+                .send(
+                    instruction.clone(),
+                    vec![
+                        AccountMeta::new_readonly(env.payer.pubkey(), false),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(long, false),
+                    ],
+                    &[],
+                )
+                .expect("completed terminal hint must not block remaining bounded accrual");
+            assert_cu_within("INV-071 completed terminal hint replay", cu, CRANK_CU_LIMIT);
+            max_cu = max_cu.max(cu);
+            let after = env.market_state().1;
+            let after_rank = rank(&after);
+            assert!(
+                after_rank < before_rank,
+                "{order:?}: successful crank must reduce rank: {before_rank:?} -> {after_rank:?}"
+            );
+            assert_eq!(after.mode, MarketModeV16::Live);
+            assert_eq!(env.svm.get_sysvar::<Clock>().slot, RESOLVE_SLOT);
+            inv071_assert_continuation_frame(&env, &frame, &[env.market]);
+            assert_eq!(
+                (after.vault, after.c_tot, after.insurance),
+                (2 * DEPOSIT, 2 * DEPOSIT, 0)
+            );
+            if completed_hint {
+                completed_hint_replays += 1;
+                assert_eq!(after.assets[0], before.assets[0]);
+                assert_eq!(
+                    state::read_asset_oracle_profile(
+                        &env.svm.get_account(&env.market).unwrap().data,
+                        0,
+                    )
+                    .unwrap(),
+                    completed_profile,
+                    "completed discovery hint must not manufacture profile-only progress"
+                );
+                assert!(after.assets[1].slot_last > before.assets[1].slot_last);
+            }
+            trace.push((after_rank, [after.assets[0], after.assets[1]]));
+        }
+        assert!(
+            completed_hint_replays >= 2,
+            "must replay a stale hint across multiple steps"
+        );
+        let ready = env.market_state().1;
+        assert_eq!(rank(&ready), (1, 0));
+        assert_eq!(
+            [
+                ready.assets[0].effective_price,
+                ready.assets[1].effective_price
+            ],
+            TARGETS
+        );
+        env.svm.expire_blockhash();
+        let resolve_cu = env
+            .send(
+                ProgInstruction::ResolveStalePermissionless {
+                    now_slot: OPEN_SLOT,
+                },
+                vec![AccountMeta::new(env.market, false)],
+                &[],
+            )
+            .expect("completed accrual must enable permissionless stale resolution");
+        assert_cu_within(
+            "INV-071 completed-hint stale resolution",
+            resolve_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        max_cu = max_cu.max(resolve_cu);
+        let resolved = env.market_state().1;
+        assert_eq!(rank(&resolved), (0, 0));
+        assert_eq!(resolved.resolved_slot, RESOLVE_SLOT);
+        inv071_assert_continuation_frame(&env, &frame, &[env.market]);
+        eprintln!(
+            "INV-071 terminal hint replay: order={order:?} cranks={} completed_hint_replays={completed_hint_replays} initial_rank={initial_rank:?} final_rank=(0, 0) exact_rejections=1 max_cu={max_cu}",
+            trace.len()
+        );
+        traces.push(trace);
+    }
+    assert_eq!(
+        traces[0], traces[1],
+        "hint order must preserve every economic rank edge"
+    );
 }
 
 // Same-slot retries must not double-realize loss or funding. The sole public crank must make real
