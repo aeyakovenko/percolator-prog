@@ -9,6 +9,9 @@
 //! the portfolio is empty, starts and completes a funded trading episode, records nonzero paid
 //! funding, returns all collateral, and submits the retained close. Rejection must preserve exact
 //! market, portfolio, SPL, and supply state; a freshly bound close must remain live.
+//! `v16_program_close_consent_is_scoped_to_the_funded_portfolio` pairs two retained closes:
+//! a funding round trip invalidates only the affected portfolio's consent, while the untouched
+//! portfolio's retained close remains live and preserves the other portfolio and SPL accounts.
 //!
 //! Guarantee boundary: the wrapper has no reward-mint route, so this test proves the exact public
 //! prerequisite that issue 402's external reward controller consumes: deletion of a nonzero,
@@ -162,4 +165,85 @@ fn v16_program_failed_deposit_does_not_consume_close_sequence() {
         .land_retained(retained_close)
         .expect("a close remains valid after a fully rolled-back deposit");
     assert!(close.compute_units < 1_400_000);
+}
+
+#[test]
+fn v16_program_close_consent_is_scoped_to_the_funded_portfolio() {
+    const UNTOUCHED: usize = 0;
+    const FUNDED: usize = 1;
+    const AMOUNT: u128 = 17;
+    let mut env = V16Svm::new(
+        [0x60; 32],
+        MarketConfig {
+            actor_deposits: [0, 0, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let untouched_before = env.primary_portfolio_data(UNTOUCHED);
+    let funded_id = env.primary_portfolio_id(FUNDED);
+    let funded_sequence = env.primary_portfolio_matcher_sequence(FUNDED);
+    let retained_untouched = env.build_retained_close_primary_portfolio(UNTOUCHED);
+    let retained_funded = env.build_retained_close_primary_portfolio(FUNDED);
+
+    env.begin_public_trace();
+    env.deposit_primary(FUNDED, AMOUNT)
+        .expect("fund only the second portfolio");
+    assert_eq!(env.primary_portfolio(FUNDED).capital.get(), AMOUNT);
+    assert_eq!(
+        env.primary_portfolio_matcher_sequence(FUNDED),
+        funded_sequence + 1
+    );
+    env.withdraw_primary(FUNDED, AMOUNT)
+        .expect("return the second portfolio to empty");
+    assert_eq!(env.primary_portfolio_id(FUNDED), funded_id);
+    assert_eq!(env.primary_portfolio(FUNDED).capital.get(), 0);
+    assert_eq!(env.primary_portfolio(FUNDED).pnl.get(), 0);
+    assert_eq!(env.primary_portfolio_data(UNTOUCHED), untouched_before);
+
+    let market_before = env.market_data(false);
+    let funded_before = env.primary_portfolio_data(FUNDED);
+    assert!(
+        env.land_retained(retained_funded).is_err(),
+        "the later funded episode invalidates its own retained close"
+    );
+    assert_eq!(env.market_data(false), market_before);
+    assert_eq!(env.primary_portfolio_data(FUNDED), funded_before);
+    assert_eq!(env.primary_portfolio_data(UNTOUCHED), untouched_before);
+
+    let mut protected_keys = vec![env.vault, env.mint];
+    for (index, actor) in env.actors.iter().enumerate() {
+        protected_keys.extend([actor.source_token, actor.destination_token]);
+        if index != UNTOUCHED {
+            protected_keys.push(actor.portfolio);
+        }
+    }
+    let protected_before: Vec<_> = protected_keys
+        .iter()
+        .map(|key| env.svm.get_account(key))
+        .collect();
+    let portfolio = env.actors[UNTOUCHED].portfolio;
+    let portfolio_rent = env.account_lamports(portfolio);
+    let market_lamports = env.account_lamports(env.market);
+    assert!(portfolio_rent > 0);
+
+    let close = env
+        .land_retained(retained_untouched)
+        .expect("another portfolio's funding must not revoke untouched close consent");
+    assert!(close.compute_units < 1_400_000);
+    assert_eq!(env.account_lamports(portfolio), 0);
+    assert_eq!(
+        env.account_lamports(env.market),
+        market_lamports + portfolio_rent
+    );
+    for (key, before) in protected_keys.iter().zip(protected_before) {
+        assert_eq!(env.svm.get_account(key), before, "close changed {key}");
+    }
+
+    let fresh = env
+        .close_primary_portfolio(FUNDED)
+        .expect("fresh consent for the funded portfolio remains live");
+    assert!(fresh.compute_units < 1_400_000);
+    env.finish_public_trace()
+        .validate_public_execution()
+        .expect("the scope trace uses only public routes with exact rejected rollback");
 }
