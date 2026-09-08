@@ -746,10 +746,10 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
         let pr: u16 = fields[0].parse().expect("numeric PR ID");
         assert!(pr > prior_pr, "finding PRs must be unique and sorted");
         prior_pr = pr;
-        assert!(matches!(fields[1], "LoF" | "DoS"));
+        assert!(matches!(fields[1], "LoF" | "DoS" | "Conformance"));
         assert!(matches!(
             fields[2],
-            "BLOCKER" | "REAL" | "HARDENING" | "PRIVILEGED"
+            "BLOCKER" | "REAL" | "HARDENING" | "PRIVILEGED" | "LIMIT"
         ));
         let invariant: u16 = fields[3]
             .strip_prefix("INV-")
@@ -1960,6 +1960,7 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
     let mut saw_header = false;
     let mut prior_pr = 0u16;
     let mut reopening_prs = std::collections::BTreeSet::new();
+    let mut conformance_prs = std::collections::BTreeSet::new();
     let mut affected = std::collections::BTreeSet::new();
     let mut properties = std::collections::BTreeSet::new();
     for line in include_str!("../coverage_reopenings.tsv").lines() {
@@ -1977,10 +1978,13 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         let pr = fields[0].parse::<u16>().expect("numeric reopening PR");
         assert!(pr > prior_pr, "reopening PRs must be unique and sorted");
         prior_pr = pr;
-        assert!(matches!(fields[1], "LoF" | "DoS"));
+        assert!(matches!(fields[1], "LoF" | "DoS" | "Conformance"));
+        if fields[1] == "Conformance" {
+            conformance_prs.insert(pr);
+        }
         assert!(matches!(
             fields[2],
-            "BLOCKER" | "REAL" | "HARDENING" | "PRIVILEGED"
+            "BLOCKER" | "REAL" | "HARDENING" | "PRIVILEGED" | "LIMIT"
         ));
         assert_eq!(fields[7], "OPEN", "only unresolved gaps belong here");
         assert!(
@@ -2014,7 +2018,11 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         reopening_prs.insert(pr);
     }
     assert!(saw_header, "coverage-reopening header is missing");
-    assert_eq!(reopening_prs, missing_findings);
+    let expected_reopenings = missing_findings
+        .union(&conformance_prs)
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(reopening_prs, expected_reopenings);
 
     let reopened = audit_verdicts
         .iter()

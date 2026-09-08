@@ -1,4 +1,4 @@
-# PR410-426 are 17 post-hoc holdout misses affecting 60 invariant rows.
+# PR410-427 are 18 post-hoc holdout/conformance misses affecting 61 invariant rows.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
 # Kind/severity are recorded claims, not impact acceptance under scripts/loop.md; OPEN does not confirm LoF/DoS.
 # status remains OPEN until a generic invariant-owned generator/oracle (not the finding PoC)
@@ -21,3 +21,4 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 424	LoF	PRIVILEGED	INV-070	INV-024,INV-025,INV-033,INV-041,INV-063,INV-069,INV-070,INV-071,INV-086,INV-088	persisted-cursor+x-time-reclassification+x-earlier-slot	any-environmental-transition-that-changes-actionability-invalidates-scanned-prefixes	OPEN
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
+427	Conformance	LIMIT	INV-058	INV-058	disjoint-portfolios+x-side-oi-cap+x-public-trades	side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs	OPEN
