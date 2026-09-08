@@ -13,12 +13,18 @@
 //! terminal witnesses and fails when the pinned wrapper adds an unclassified ingress.
 //! The stale-positive-PnL withdrawal test composes implicit maintenance collection with a real
 //! released claim: rejected partial withdrawals roll back, and principal exits before conversion.
+//! The recovery-forfeit sibling separates an already booked junior claim from a later unrefreshed
+//! gain: owner forfeiture may discard only the latter, while every senior principal atom exits
+//! independently of whether an unrelated depositor withdraws before or after recovery cleanup.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[path = "inv_027_recovery_forfeit_seniority.rs"]
+mod recovery_forfeit_seniority;
 
 const ISSUE408_FEE_PER_SLOT: u128 = 1_000;
 const ISSUE408_AGED_SLOT: u64 = 500;
