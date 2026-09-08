@@ -4415,6 +4415,90 @@ terminal debtor clearance, recreation, maximum shapes and shared INV-081/086 his
 remain outside this bounded product. No randomized F completion, status promotion, engine-proof
 execution or production change is claimed.
 
+### INV-031/032 shared-lien partial-consumption histories
+
+`stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs` now owns
+`v16_program_shared_lien_partial_consumption_retries_preserve_sibling_claim`. The existing
+`v16_program_two_accounts_cannot_reserve_the_same_source_backing_atoms` stops after shared
+reservation/release, and `v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing`
+has one consuming claimant. Neither previously checked a retained conversion retry after one
+owner consumes part of a shared pool while a sibling still owns a live lien and claim.
+
+The new test reuses the existing publicly funded shared-lien prefix, then crosses both source
+sides, both reservation/exit orders and a 37-atom refill split as `37` or `17 + 20`: **eight
+no-CPI histories, 116 checked suffix transactions, 24 exact suffix rejections and 16 owner
+payouts**. The prefix retains its two admission-frontier rejections per world. One owner flattens,
+releases its exact lien, converts its 100-atom claim and withdraws 413 atoms. Two distinct signed
+transactions retaining the consumed position episode reject with `Custom(16)`, before and after
+refill; neither result is LiteSVM's `AlreadyProcessed` cache rejection. The sibling stays byte-exact
+with its nonzero lien until its own turn. Its 99-atom conversion cap rejects with `Custom(21)`,
+then the 100-atom cap and full 413-atom withdrawal succeed.
+
+The suffix ledger independently derives each owner's capital/PnL, shared claim face, provider
+debits and actual SPL payouts from the fixed public trade/deposit inputs and successful suffix
+events. The two checkpoint liens come from the existing independently censused public growth
+prefix, not a new IM-admission model. Each bounded flat-owner crank may retain or completely
+release only that owner's checkpoint lien; source and bucket sums must match the remaining
+owner exactly. Fresh refill reduces provider receivable but cannot erase historical spend:
+the common endpoint is **49 fresh, 200 spent and 163 provider-receivable atoms**, no liens,
+no shared claim face and 413 atoms paid to each winner. All five owners' value lanes, untouched
+owner bytes, foreign/unrelated frames, custody, stock and encumbrance censuses and independent
+source-rate/transition checks run after every suffix attempt. Failed attempts preserve the exact
+tracked account bytes and economic lamports. Conserved wrong-owner capital, payout and lien
+observations fail the same pure owner comparator without modifying any program account.
+
+Evidence base: wrapper `284650c5` after rebasing the initial `7d8c99ea` worktree, engine
+`495a5590c97055bd71c6f94d849ff0298f243145`. All existing INV-054 README/TSV content is preserved.
+Default-feature wrapper and authenticated matcher SBF were built from this worktree; SHA-256
+prefixes are `230b6db1` and `50e53226`. Cached compilation outputs were copied to a private target;
+no production, shared-helper, status or engine-proof changes are part of this increment.
+
+After the rebase, both SBF build commands below exit zero and all **14 exact test selectors
+pass one test each**: five INV-031 stateful tests, the INV-031/032 composition guards, the
+INV-033 public classification test and six metadata/status guards. Formatting, diff whitespace,
+eight-column TSV structure and unchanged production/status guards also pass. Removing only this
+subsection and the new INV-031 TSV row reproduces both upstream documents byte-for-byte.
+
+Exact build/test commands, from the isolated worktree (each test selector uses `--exact`):
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/inv031-033-lien-history-20260908-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --offline -- --locked
+# In tests/fixtures/auth_matcher:
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir /tmp/codex-agent-worktrees/inv031-033-lien-history-20260908/tests/fixtures/auth_matcher/target/deploy -- --locked
+# Back in the worktree root:
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_shared_lien_partial_consumption_retries_preserve_sibling_claim -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_two_accounts_cannot_reserve_the_same_source_backing_atoms -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_live_source_lien_route_pairs_preserve_single_backing_ownership -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_two_source_claims_preserve_source_backing_single_use -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_single_use_lifecycle_composition_is_source_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_032_exact_counterparty_lien_lifecycle::v16_program_counterparty_lien_lifecycle_composition_is_source_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_033_insurance_backed_lien_single_classification::v16_program_public_source_lien_classification_never_double_counts_insurance -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_program_invariant_harnesses_are_test_free_roots -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs
+git diff --check 284650c5
+awk -F '\t' '!/^#/ && NF != 8 {print NR, NF; bad=1} END {exit bad}' tests/invariants/traceability_gaps.tsv
+git diff --exit-code 284650c5 -- Cargo.toml Cargo.lock src tests/support tests/invariants/invariant_status.tsv tests/invariants/special_method_coverage.tsv
+diff -u <(git show 284650c5:tests/invariants/traceability_gaps.tsv) <(awk -F '\t' '$1 != "INV-031"' tests/invariants/traceability_gaps.tsv)
+diff -u <(git show 284650c5:tests/invariants/README.md) <(awk '/^### INV-031\/032 shared-lien partial-consumption histories$/ {skip=1} /^## Recorded PR135 inventory$/ {skip=0} !skip' tests/invariants/README.md)
+```
+
+**Remaining gap.** This is a fully backed, fixed-slot, zero-fee/funding suffix with one shared
+domain, two equal claims and disjoint adverse assets. Reservation and exit order are coupled;
+other retry placements, cross-transport suffixes, unequal claims/ratios, expiry/impairment,
+Recovery/receipts, provider withdrawal, counterparty-claim terminal completion and maximum shapes
+remain open. The separate INV-063 shared-lien expiry/refill gap is unchanged. INV-033 retains its
+existing public absence guard and pinned engine-owned contracts; no insurance-lien creation,
+engine proof rerun, generic F completion or invariant status promotion is claimed.
+
 ## Recorded PR135 inventory
 
 This is an artifact inventory with historical fixed-pin evidence descriptions, not a current

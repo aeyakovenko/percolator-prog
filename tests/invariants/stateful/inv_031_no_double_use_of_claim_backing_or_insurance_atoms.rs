@@ -22,6 +22,11 @@
 //! an independent sum of account-local liens must equal the one source aggregate and backing
 //! bucket after every mutation. Both accounts reach the shared admission frontier, reject with
 //! exact rollback, and release the exact original pool through bounded public cranks.
+//! `v16_program_shared_lien_partial_consumption_retries_preserve_sibling_claim` extends that
+//! shared-lien prefix with interleaved release, conversion, payout, refill and retained retries.
+//! Its suffix ledger checks both owners separately while the sibling still owns a live lien,
+//! then requires its exact claim conversion and payout. This is eight no-CPI histories, not
+//! expiry/impairment, arbitrary histories, insurance-lien reachability or engine-proof closure.
 //! The haircut-conversion matrix also submits a cap one atom below the independently known
 //! conversion amount. The deployed handler reaches its post-conversion cap rejection, and SVM
 //! rollback must restore the claim, backing bucket, portfolio, custody, and every auxiliary
@@ -36,9 +41,10 @@
 use super::*;
 use crate::support::{
     fuzz_model::{
-        assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
+        assert_public_encumbrance_census, assert_public_stock_census,
+        assert_source_credit_rate_transition, assert_source_credit_rates, execute_trade_route,
     },
-    v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT},
+    v16_svm::{MarketConfig, TxSuccess, V16Svm, PRIMARY_ACTOR_COUNT},
 };
 use percolator::{BackingBucketStatusV16, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
@@ -441,6 +447,7 @@ fn verify_two_account_concurrent_lien_ownership(
     route: TradeRoute,
     reverse_order: bool,
     winner_long: bool,
+    split_refill: Option<bool>,
 ) -> Result<(), String> {
     const WINNERS: [usize; 2] = [0, 1];
     const COUNTERPARTIES: [usize; 2] = [2, 3];
@@ -466,7 +473,7 @@ fn verify_two_account_concurrent_lien_ownership(
         TradeRoute::BatchCpi => 3,
     };
     let label = format!(
-        "INV-031 concurrent route={route:?} reverse={reverse_order} winner_long={winner_long}"
+        "INV-031 concurrent route={route:?} reverse={reverse_order} winner_long={winner_long} split_refill={split_refill:?}"
     );
     let mut seed = [0x31; 32];
     seed[0] ^= 0xa0 | route_index;
@@ -660,90 +667,104 @@ fn verify_two_account_concurrent_lien_ownership(
         ));
     }
 
-    for pair in actor_order {
-        let accepted_q = i128::try_from(accepted_increments[pair])
-            .map_err(|_| format!("{label} pair {pair} increment conversion overflow"))?
-            .checked_mul(RISK_INCREMENT_Q)
-            .ok_or_else(|| format!("{label} pair {pair} increment quantity overflow"))?;
-        execute_trade_route(
+    let extra_rejections = if let Some(split) = split_refill {
+        verify_shared_lien_partial_consumption_suffix(
+            &label,
             &mut env,
-            route,
-            WINNERS[pair],
-            COUNTERPARTIES[pair],
-            ADVERSE_ASSETS[pair],
-            -direction * (ADVERSE_SIZE_Q + accepted_q),
-            adverse_mark,
-            0,
-        )
-        .map_err(|error| format!("{label} pair {pair} flatten adverse leg: {error}"))?;
-        execute_trade_route(
-            &mut env,
-            route,
-            WINNERS[pair],
-            COUNTERPARTIES[pair],
-            WINNING_ASSET,
-            -direction * WINNING_SIZE_Q,
-            winning_mark,
-            0,
-        )
-        .map_err(|error| format!("{label} pair {pair} flatten winning leg: {error}"))?;
-    }
-
-    let mut release_steps = 0usize;
-    for step in 0..32 {
-        let remaining = WINNERS.iter().try_fold(0u128, |sum, winner| {
-            sum.checked_add(counterparty_lien_backing(&env, *winner, source_domain))
-                .ok_or_else(|| format!("{label} remaining lien sum overflow"))
-        })?;
-        if remaining == 0 {
-            break;
-        }
-        let mut progressed = false;
+            winner_long,
+            actor_order,
+            accepted_increments,
+            split,
+        )?;
+        3
+    } else {
         for pair in actor_order {
-            if counterparty_lien_backing(&env, WINNERS[pair], source_domain) == 0 {
-                continue;
+            let accepted_q = i128::try_from(accepted_increments[pair])
+                .map_err(|_| format!("{label} pair {pair} increment conversion overflow"))?
+                .checked_mul(RISK_INCREMENT_Q)
+                .ok_or_else(|| format!("{label} pair {pair} increment quantity overflow"))?;
+            execute_trade_route(
+                &mut env,
+                route,
+                WINNERS[pair],
+                COUNTERPARTIES[pair],
+                ADVERSE_ASSETS[pair],
+                -direction * (ADVERSE_SIZE_Q + accepted_q),
+                adverse_mark,
+                0,
+            )
+            .map_err(|error| format!("{label} pair {pair} flatten adverse leg: {error}"))?;
+            execute_trade_route(
+                &mut env,
+                route,
+                WINNERS[pair],
+                COUNTERPARTIES[pair],
+                WINNING_ASSET,
+                -direction * WINNING_SIZE_Q,
+                winning_mark,
+                0,
+            )
+            .map_err(|error| format!("{label} pair {pair} flatten winning leg: {error}"))?;
+        }
+
+        let mut release_steps = 0usize;
+        for step in 0..32 {
+            let remaining = WINNERS.iter().try_fold(0u128, |sum, winner| {
+                sum.checked_add(counterparty_lien_backing(&env, *winner, source_domain))
+                    .ok_or_else(|| format!("{label} remaining lien sum overflow"))
+            })?;
+            if remaining == 0 {
+                break;
             }
-            let before = economic_snapshot(&env);
-            env.crank(WINNERS[pair], 2, observations.clone())
-                .map_err(|error| {
-                    format!("{label} pair {pair} release step {step} rejected: {error}")
-                })?;
-            if economic_snapshot(&env) == before {
+            let mut progressed = false;
+            for pair in actor_order {
+                if counterparty_lien_backing(&env, WINNERS[pair], source_domain) == 0 {
+                    continue;
+                }
+                let before = economic_snapshot(&env);
+                env.crank(WINNERS[pair], 2, observations.clone())
+                    .map_err(|error| {
+                        format!("{label} pair {pair} release step {step} rejected: {error}")
+                    })?;
+                if economic_snapshot(&env) == before {
+                    return Err(format!(
+                        "{label} pair {pair} release step {step} committed a no-op"
+                    ));
+                }
+                progressed = true;
+                release_steps += 1;
+                assert_inv_031_censuses(&format!("{label} release step {step} pair {pair}"), &env)?;
+            }
+            if !progressed {
                 return Err(format!(
-                    "{label} pair {pair} release step {step} committed a no-op"
+                    "{label} retained {remaining} backing atoms without a progressing release"
                 ));
             }
-            progressed = true;
-            release_steps += 1;
-            assert_inv_031_censuses(&format!("{label} release step {step} pair {pair}"), &env)?;
         }
-        if !progressed {
-            return Err(format!(
-                "{label} retained {remaining} backing atoms without a progressing release"
-            ));
-        }
-    }
 
-    let final_local_total = WINNERS.iter().try_fold(0u128, |sum, winner| {
-        sum.checked_add(counterparty_lien_backing(&env, *winner, source_domain))
-            .ok_or_else(|| format!("{label} final lien sum overflow"))
-    })?;
-    let (_, released) = env.primary_market_state();
-    if release_steps < 2
-        || final_local_total != 0
-        || released.source_credit[source_domain].valid_liened_backing_num != 0
-        || released.source_backing_buckets[source_domain].valid_liened_backing_num != 0
-        || released.source_backing_buckets[source_domain].fresh_unliened_backing_num
-            != backing_before_reservations
-        || released.source_backing_buckets[source_domain].status != BackingBucketStatusV16::Fresh
-    {
-        return Err(format!(
+        let final_local_total = WINNERS.iter().try_fold(0u128, |sum, winner| {
+            sum.checked_add(counterparty_lien_backing(&env, *winner, source_domain))
+                .ok_or_else(|| format!("{label} final lien sum overflow"))
+        })?;
+        let (_, released) = env.primary_market_state();
+        if release_steps < 2
+            || final_local_total != 0
+            || released.source_credit[source_domain].valid_liened_backing_num != 0
+            || released.source_backing_buckets[source_domain].valid_liened_backing_num != 0
+            || released.source_backing_buckets[source_domain].fresh_unliened_backing_num
+                != backing_before_reservations
+            || released.source_backing_buckets[source_domain].status
+                != BackingBucketStatusV16::Fresh
+        {
+            return Err(format!(
             "{label} did not release the exact shared backing ownership: steps={release_steps}, local={final_local_total}, source={:?}, bucket={:?}",
             released.source_credit[source_domain],
             released.source_backing_buckets[source_domain]
         ));
-    }
-    assert_inv_031_censuses(&format!("{label} after concurrent release"), &env)?;
+        }
+        assert_inv_031_censuses(&format!("{label} after concurrent release"), &env)?;
+        0
+    };
     if env.token_supply_observed() != supply_before {
         return Err(format!("{label} changed SPL token supply"));
     }
@@ -752,10 +773,10 @@ fn verify_two_account_concurrent_lien_ownership(
         .validate_public_execution()
         .map_err(|error| format!("{label} invalid public trace: {error}"))?;
     if trace.out_of_band_economic_mutations != 0
-        || trace.steps.iter().filter(|step| !step.succeeded).count() != 2
+        || trace.steps.iter().filter(|step| !step.succeeded).count() != 2 + extra_rejections
     {
         return Err(format!(
-            "{label} did not isolate the two exact shared-frontier rejections: {trace:?}"
+            "{label} did not isolate the expected shared-frontier/history rejections: {trace:?}"
         ));
     }
     Ok(())
@@ -771,8 +792,402 @@ fn v16_program_two_accounts_cannot_reserve_the_same_source_backing_atoms() {
     ] {
         for reverse_order in [false, true] {
             for winner_long in [false, true] {
-                verify_two_account_concurrent_lien_ownership(route, reverse_order, winner_long)
-                    .unwrap_or_else(|error| panic!("{error}"));
+                verify_two_account_concurrent_lien_ownership(
+                    route,
+                    reverse_order,
+                    winner_long,
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{error}"));
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SharedLienOwnerValue {
+    capital: u128,
+    pnl: i128,
+    destination: u64,
+    face: u128,
+    lien: u128,
+}
+
+fn shared_lien_owner_values(
+    env: &V16Svm,
+    domain: usize,
+) -> [SharedLienOwnerValue; PRIMARY_ACTOR_COUNT] {
+    std::array::from_fn(|actor| {
+        let account = env.primary_portfolio(actor);
+        let local = account
+            .source_domains
+            .iter()
+            .find(|entry| entry.is_occupied() && entry.domain.get() as usize == domain);
+        SharedLienOwnerValue {
+            capital: account.capital.get(),
+            pnl: account.pnl.get(),
+            destination: env.token_amount(env.actors[actor].destination_token),
+            face: local
+                .map(|entry| entry.source_claim_bound_num.get())
+                .unwrap_or(0),
+            lien: counterparty_lien_backing(env, actor, domain),
+        }
+    })
+}
+
+struct SharedLienSuffixOracle {
+    domain: usize,
+    capital: [u128; PRIMARY_ACTOR_COUNT],
+    pnl: [i128; PRIMARY_ACTOR_COUNT],
+    paid: [u64; PRIMARY_ACTOR_COUNT],
+    liens: [u128; 2],
+    fresh: u128,
+    spent: u128,
+    receivable: u128,
+    refill: u64,
+    source_tokens: [u64; PRIMARY_ACTOR_COUNT],
+    destination_tokens: [u64; PRIMARY_ACTOR_COUNT],
+    provider_tokens: u64,
+    vault: u64,
+    foreign_market: Vec<u8>,
+    foreign_portfolio: Vec<u8>,
+    unrelated_portfolio: Vec<u8>,
+    untouched_owner: (usize, Vec<u8>),
+}
+
+impl SharedLienSuffixOracle {
+    fn owners_match(&self, observed: &[SharedLienOwnerValue; PRIMARY_ACTOR_COUNT]) -> bool {
+        observed.iter().enumerate().all(|(actor, value)| {
+            *value
+                == SharedLienOwnerValue {
+                    capital: self.capital[actor],
+                    pnl: self.pnl[actor],
+                    destination: self.destination_tokens[actor] + self.paid[actor],
+                    face: if actor < 2 {
+                        self.pnl[actor] as u128 * percolator::BOUND_SCALE
+                    } else {
+                        0
+                    },
+                    lien: if actor < 2 { self.liens[actor] } else { 0 },
+                }
+        })
+    }
+
+    fn check(&self, label: &str, env: &V16Svm) -> Result<(), String> {
+        use percolator::BOUND_SCALE;
+        let group = env.primary_market_state().1;
+        let source = group.source_credit[self.domain];
+        let bucket = group.source_backing_buckets[self.domain];
+        let owners = shared_lien_owner_values(env, self.domain);
+        if !self.owners_match(&owners) {
+            return Err(format!(
+                "{label} owner claim/lien/value attribution: {owners:?}"
+            ));
+        }
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            if env.token_amount(env.actors[actor].source_token) != self.source_tokens[actor] {
+                return Err(format!("{label} actor {actor} source tokens changed"));
+            }
+        }
+        let lien_total: u128 = self.liens.iter().sum();
+        let face = (self.pnl[0] + self.pnl[1]) as u128 * BOUND_SCALE;
+        if source.positive_claim_bound_num != face
+            || source.exact_positive_claim_num != face
+            || source.fresh_reserved_backing_num != self.fresh * BOUND_SCALE
+            || source.spent_backing_num != self.spent * BOUND_SCALE
+            || source.provider_receivable_num != self.receivable * BOUND_SCALE
+            || source.valid_liened_backing_num != lien_total
+            || bucket.valid_liened_backing_num != lien_total
+            || bucket.fresh_unliened_backing_num != self.fresh * BOUND_SCALE - lien_total
+            || bucket.consumed_liened_backing_num != self.receivable * BOUND_SCALE
+            || source.impaired_liened_backing_num != 0
+            || bucket.impaired_liened_backing_num != 0
+            || source.insurance_credit_reserved_num != 0
+            || source.valid_liened_insurance_num != 0
+            || source.impaired_liened_insurance_num != 0
+            || self.fresh + self.spent != 212 + u128::from(self.refill)
+        {
+            return Err(format!(
+                "{label} shared backing attribution: {source:?}, {bucket:?}"
+            ));
+        }
+        let paid: u64 = self.paid.iter().sum();
+        if env.token_amount(env.provider_source_token) != self.provider_tokens - self.refill
+            || env.token_amount(env.vault) != self.vault + self.refill - paid
+            || group.vault != u128::from(self.vault + self.refill - paid)
+            || env.market_data(true) != self.foreign_market
+            || env.foreign_portfolio_data() != self.foreign_portfolio
+            || env.primary_portfolio_data(4) != self.unrelated_portfolio
+            || env.primary_portfolio_data(self.untouched_owner.0) != self.untouched_owner.1
+        {
+            return Err(format!("{label} custody/provider/unrelated frame changed"));
+        }
+        assert_inv_031_censuses(label, env)
+    }
+}
+
+fn shared_lien_suffix_step(
+    label: &str,
+    env: &mut V16Svm,
+    expected_error: Option<u32>,
+    action: impl FnOnce(&mut V16Svm) -> Result<TxSuccess, String>,
+) -> Result<(), String> {
+    let before = economic_snapshot(env);
+    let before_group = env.primary_market_state().1;
+    match (action(env), expected_error) {
+        (Ok(_), None) => {
+            if economic_snapshot(env) == before {
+                return Err(format!("{label} successful suffix transaction was a no-op"));
+            }
+        }
+        (Err(error), Some(code)) if error.contains(&format!("Custom({code})")) => {
+            if economic_snapshot(env) != before {
+                return Err(format!(
+                    "{label} rejection did not restore every economic account"
+                ));
+            }
+        }
+        (result, expected) => {
+            return Err(format!(
+                "{label} expected error {expected:?}, got {result:?}"
+            ));
+        }
+    }
+    let group = env.primary_market_state().1;
+    assert_inv_031_censuses(label, env)?;
+    assert_source_credit_rates(label, &group)?;
+    assert_source_credit_rate_transition(label, &before_group, &group)
+}
+
+fn release_shared_lien_owner(
+    label: &str,
+    env: &mut V16Svm,
+    oracle: &mut SharedLienSuffixOracle,
+    actor: usize,
+    winner_long: bool,
+    accepted_increments: u128,
+) -> Result<usize, String> {
+    let direction = if winner_long { 1 } else { -1 };
+    let winning_mark = if winner_long { 105 } else { 95 };
+    let adverse_mark = if winner_long { 95 } else { 105 };
+    let adverse_q = 10 * POS_SCALE as i128 + accepted_increments as i128 * (POS_SCALE / 10) as i128;
+    for (asset, size, price) in [
+        (1 + actor as u16, adverse_q, adverse_mark),
+        (0, 20 * POS_SCALE as i128, winning_mark),
+    ] {
+        shared_lien_suffix_step(label, env, None, |env| {
+            execute_trade_route(
+                env,
+                TradeRoute::NoCpi,
+                actor,
+                actor + 2,
+                asset,
+                -direction * size,
+                price,
+                0,
+            )
+        })?;
+        oracle.check(label, env)?;
+    }
+    if !percolator::active_bitmap_is_empty(
+        env.primary_portfolio(actor).active_bitmap.map(|w| w.get()),
+    ) {
+        return Err(format!(
+            "{label} owner {actor} did not flatten before release"
+        ));
+    }
+    let mut steps = 2;
+    for _ in 0..8 {
+        if oracle.liens[actor] == 0 && portfolio_certificate_is_current(env, actor) {
+            return Ok(steps);
+        }
+        shared_lien_suffix_step(label, env, None, |env| env.crank(actor, 2, vec![]))?;
+        steps += 1;
+        // The bounded selector may refresh before releasing. Only complete release of this
+        // flat owner's checkpoint lien is allowed; the sibling's ledger remains unchanged.
+        let remaining = counterparty_lien_backing(env, actor, oracle.domain);
+        if remaining != 0 && remaining != oracle.liens[actor] {
+            return Err(format!(
+                "{label} owner {actor} released an inexact lien amount"
+            ));
+        }
+        if remaining == 0 {
+            oracle.liens[actor] = 0;
+        }
+        oracle.check(label, env)?;
+    }
+    Err(format!(
+        "{label} owner {actor} failed bounded release/recertification"
+    ))
+}
+
+fn verify_shared_lien_partial_consumption_suffix(
+    label: &str,
+    env: &mut V16Svm,
+    winner_long: bool,
+    actor_order: [usize; 2],
+    accepted_increments: [u128; 2],
+    split_refill: bool,
+) -> Result<(), String> {
+    let domain = usize::from(winner_long);
+    // The public prefix earns each winner 100 and debits 50 of disjoint principal.
+    // Counterparties each pay 100 of principal and retain a separate 50-atom claim.
+    // Thus the shared source owns 12 provider + 200 counterparty backing atoms.
+    let mut oracle = SharedLienSuffixOracle {
+        domain,
+        capital: [313, 313, 900, 900, 1],
+        pnl: [100, 100, 50, 50, 0],
+        paid: [0; PRIMARY_ACTOR_COUNT],
+        liens: [0, 1].map(|actor| counterparty_lien_backing(env, actor, domain)),
+        fresh: 212,
+        spent: 0,
+        receivable: 0,
+        refill: 0,
+        source_tokens: std::array::from_fn(|actor| {
+            env.token_amount(env.actors[actor].source_token)
+        }),
+        destination_tokens: std::array::from_fn(|actor| {
+            env.token_amount(env.actors[actor].destination_token)
+        }),
+        provider_tokens: env.token_amount(env.provider_source_token),
+        vault: env.token_amount(env.vault),
+        foreign_market: env.market_data(true),
+        foreign_portfolio: env.foreign_portfolio_data(),
+        unrelated_portfolio: env.primary_portfolio_data(4),
+        untouched_owner: (actor_order[1], env.primary_portfolio_data(actor_order[1])),
+    };
+    oracle.check(label, env)?;
+    let [first, sibling] = actor_order;
+    let mut steps = release_shared_lien_owner(
+        label,
+        env,
+        &mut oracle,
+        first,
+        winner_long,
+        accepted_increments[first],
+    )?;
+    let retained_before_refill = env.build_retained_convert_released_pnl(first, 100);
+    let retained_after_refill = env.build_retained_convert_released_pnl(first, 100);
+    assert_ne!(
+        retained_before_refill.signatures,
+        retained_after_refill.signatures
+    );
+    shared_lien_suffix_step(label, env, None, |env| env.convert_released_pnl(first, 100))?;
+    oracle.capital[first] += 100;
+    oracle.pnl[first] = 0;
+    oracle.fresh -= 100;
+    oracle.spent += 100;
+    oracle.receivable += 100;
+    oracle.check(label, env)?;
+    shared_lien_suffix_step(label, env, None, |env| env.withdraw_primary(first, 413))?;
+    oracle.capital[first] = 0;
+    oracle.paid[first] = 413;
+    oracle.check(label, env)?;
+    // Mutate observations only, never program state. Each wrong-owner control conserves
+    // aggregate value or encumbrance, so a stock-only oracle would miss the attribution error.
+    let observed = shared_lien_owner_values(env, domain);
+    let mut wrong = observed;
+    wrong[sibling].capital -= 1;
+    wrong[first].capital += 1;
+    assert!(
+        !oracle.owners_match(&wrong),
+        "{label} accepted wrong-owner capital"
+    );
+    wrong = observed;
+    wrong[first].destination -= 1;
+    wrong[sibling].destination += 1;
+    assert!(
+        !oracle.owners_match(&wrong),
+        "{label} accepted wrong-owner payout"
+    );
+    wrong = observed;
+    wrong[first].lien = wrong[sibling].lien;
+    wrong[sibling].lien = 0;
+    assert!(
+        !oracle.owners_match(&wrong),
+        "{label} accepted wrong-owner lien"
+    );
+    shared_lien_suffix_step(label, env, Some(16), |env| {
+        env.land_retained(retained_before_refill)
+    })?;
+    oracle.check(label, env)?;
+    steps += 3;
+
+    let parts: &[u128] = if split_refill { &[17, 20] } else { &[37] };
+    for &amount in parts {
+        shared_lien_suffix_step(label, env, None, |env| {
+            env.top_up_backing_bucket(domain as u16, amount, 100)
+        })?;
+        oracle.fresh += amount;
+        oracle.receivable -= amount;
+        oracle.refill += amount as u64;
+        oracle.check(label, env)?;
+        steps += 1;
+    }
+    shared_lien_suffix_step(label, env, Some(16), |env| {
+        env.land_retained(retained_after_refill)
+    })?;
+    oracle.check(label, env)?;
+    steps += 1;
+    if oracle.liens[sibling] == 0 {
+        return Err(format!(
+            "{label} first owner/refill/retries changed the live sibling"
+        ));
+    }
+
+    oracle.untouched_owner = (first, env.primary_portfolio_data(first));
+    steps += release_shared_lien_owner(
+        label,
+        env,
+        &mut oracle,
+        sibling,
+        winner_long,
+        accepted_increments[sibling],
+    )?;
+    shared_lien_suffix_step(label, env, Some(21), |env| {
+        env.convert_released_pnl(sibling, 99)
+    })?;
+    oracle.check(label, env)?;
+    shared_lien_suffix_step(label, env, None, |env| {
+        env.convert_released_pnl(sibling, 100)
+    })?;
+    oracle.capital[sibling] += 100;
+    oracle.pnl[sibling] = 0;
+    oracle.fresh -= 100;
+    oracle.spent += 100;
+    oracle.receivable += 100;
+    oracle.check(label, env)?;
+    shared_lien_suffix_step(label, env, None, |env| env.withdraw_primary(sibling, 413))?;
+    oracle.capital[sibling] = 0;
+    oracle.paid[sibling] = 413;
+    oracle.check(label, env)?;
+    steps += 3;
+    if oracle.liens != [0, 0]
+        || oracle.fresh != 49
+        || oracle.spent != 200
+        || oracle.receivable != 163
+        || oracle.paid[..2] != [413, 413]
+    {
+        return Err(format!(
+            "{label} shared consumption history did not complete"
+        ));
+    }
+    eprintln!("{label}: {steps} checked suffix transactions, 3 exact rejections, 2 owner payouts");
+    Ok(())
+}
+
+#[test]
+fn v16_program_shared_lien_partial_consumption_retries_preserve_sibling_claim() {
+    for reverse_order in [false, true] {
+        for winner_long in [false, true] {
+            for split_refill in [false, true] {
+                verify_two_account_concurrent_lien_ownership(
+                    TradeRoute::NoCpi,
+                    reverse_order,
+                    winner_long,
+                    Some(split_refill),
+                )
+                .unwrap_or_else(|error| panic!("{error}"));
             }
         }
     }
