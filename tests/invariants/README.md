@@ -5184,6 +5184,37 @@ checkpoint helpers are `setup_max_source_live_pair` and `terminal_accrual_attemp
 of another required continuation. Full-shape force close, maximum-work B, combined occupancy and
 the remaining owner-window/lien partitions above stay open.
 
+Additional no-reward maintenance evidence, 2026-09-08:
+[`v16_program_public_full_shape_maintenance_has_bounded_continuation`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
+publicly constructs fourteen active legs on both portfolios and twenty-eight value-bearing,
+unliened source records on the LP. `SyncMaintenanceFee` without a reward recipient charges **24
+then 1 atoms**, each in **1,253,143 CU**, retaining all legs, source records, PnL, counterparty,
+keeper and SPL custody. The corresponding public one-hint accrual schedules consume independent
+pending-slot ranks **236 -> 0** and **14 -> 0**; every accepted crank reduces its rank by one,
+at no more than **46,797 CU**. Each round authenticates fourteen unchanged-price marks at no more
+than 6,068 CU each. A readonly-payer variant returns exact `ExpectedWritable` in 1,195 CU with
+market/portfolio/keeper/vault/mint rollback. Deferred fee attempts (at most 458,140 CU) and same-slot
+retries (458,126 CU) preserve the same complete account frames. The 285 measured suffix calls
+include one rejection, 250 accruals, 28 marks, two charges, two deferrals and two retries; fixture
+construction is excluded. Both charges pass the 1,375,000 guardrail under the ordinary 1,400,000
+transaction ceiling. This covers fee currentness at the active/source caps, not rewarded
+maintenance, maximum-N/feed/backlog products, simultaneous liens or a terminal owner drain.
+
+The exact test passes from wrapper base `311030b6` / engine `495a5590`, using private copies of the
+existing default-feature SBF `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`
+and auth matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Production sources, Cargo manifests/lock and matcher sources match their recorded `7d6d4cfb`
+baseline; no rebuild, engine proof or status promotion is claimed.
+
+Non-merged full-shape force-close attempt from the same base/artifacts: both portfolios retained
+fourteen legs, with twenty-eight value-bearing LP sources and none on its counterparty. Asset 13
+entered Recovery at slot 29 with a five-slot delay. The slot-33 call rejected with exact
+`EngineLockActive` rollback; the first valid half-position close at slot 34 exhausted **1,400,000
+transaction CU** (`ProgramFailedToComplete`, program log 1,399,676 of 1,399,700 CU, exceeded meter).
+It committed no successful force-close progress, so the prototype was removed. This is a precise
+readiness limit for that call, not a persistent-DoS finding or proof that no bounded alternative
+exists. Full-shape force close and rewarded maintenance remain open alongside the other gaps above.
+
 ### INV-082 implementation-readiness
 
 Finding-blind review, 2026-09-07: the next liveness increment is a bounded environmental product,

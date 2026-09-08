@@ -42,6 +42,9 @@
 //! Direct `CloseResolved` separately measures the public 14-leg/28-source product after the
 //! owner window, with both claimant orders, strict first-leg progress, and bounded continuation
 //! to exact per-owner SPL payouts and empty portfolios.
+//! No-reward `SyncMaintenanceFee` retains that full active/source shape across two nonzero charges:
+//! public per-asset accrual consumes a strict pending-slot rank, while invalid account roles,
+//! deferred fee attempts, and same-slot retries preserve exact account frames.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -4673,6 +4676,216 @@ fn v16_attack_max_source_maintenance_sync_stays_bounded() {
     );
     assert_eq!(env.token_amount(env.vault), custody_before);
     assert_eq!(group_after.vault as u64, custody_before);
+}
+
+#[test]
+fn v16_program_public_full_shape_maintenance_has_bounded_continuation() {
+    const FEE_PER_SLOT: u128 = 1;
+    const LIMIT: u64 = 1_375_000;
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    assert_certified_engine_pin("full-shape public maintenance");
+    let (mut env, taker_owner, lp_owner, taker, lp, slot) =
+        setup_max_source_live_pair(FEE_PER_SLOT, ACTIVE_CAP);
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.maintenance_fee_per_slot, FEE_PER_SLOT);
+    assert_eq!(group.config.max_portfolio_assets, ACTIVE_CAP);
+    assert_eq!(group.config.max_accrual_dt_slots, 1);
+    for portfolio in [taker, lp] {
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(portfolio))),
+            u32::from(ACTIVE_CAP)
+        );
+    }
+    let initial = env.portfolio_state(lp);
+    assert_eq!(
+        initial
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied() && source.source_claim_bound_num.get() > 0)
+            .count(),
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+    );
+    assert!(initial
+        .source_domains
+        .iter()
+        .all(|source| source.source_claim_liened_num.get() == 0));
+    assert!(env
+        .portfolio_state(taker)
+        .source_domains
+        .iter()
+        .all(|source| !source.is_occupied()));
+
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&keeper_owner, keeper, 1_000);
+    assert_ne!(env.payer.pubkey(), taker_owner.pubkey());
+    assert_ne!(env.payer.pubkey(), lp_owner.pubkey());
+    let keys = [env.market, taker, lp, keeper, env.vault, env.mint];
+    let foreign_keys = [taker, env.vault, env.mint];
+    let foreign_before = foreign_keys.map(|key| env.svm.get_account(&key).unwrap());
+    let custody = env.token_amount(env.vault);
+
+    env.svm.warp_to_slot(slot + 1);
+    env.svm.expire_blockhash();
+    let rollback_before = keys.map(|key| env.svm.get_account(&key).unwrap());
+    let invalid = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(lp, false),
+        ],
+        data: ProgInstruction::SyncMaintenanceFee { now_slot: slot + 1 }.encode(),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), invalid],
+        Some(&env.payer.pubkey()),
+        &[&env.payer],
+        env.svm.latest_blockhash(),
+    );
+    let rejected = env
+        .svm
+        .send_transaction(tx)
+        .expect_err("maintenance requires a writable payer portfolio");
+    assert_eq!(
+        rejected.err,
+        solana_sdk::transaction::TransactionError::InstructionError(
+            2,
+            solana_sdk::instruction::InstructionError::Custom(
+                PercolatorError::ExpectedWritable as u32
+            )
+        )
+    );
+    let reject_cu = rejected.meta.compute_units_consumed;
+    assert_cu_within("full-shape maintenance role rejection", reject_cu, LIMIT);
+    assert_eq!(
+        keys.map(|key| env.svm.get_account(&key).unwrap()),
+        rollback_before
+    );
+
+    for charge_slot in [slot + 1, slot + 2] {
+        env.svm.warp_to_slot(charge_slot);
+        env.svm.expire_blockhash();
+        let deferred_before = keys.map(|key| env.svm.get_account(&key).unwrap());
+        let deferred_cu = env.sync_maintenance_fee_with_cu(lp, None, charge_slot);
+        assert_cu_within("full-shape deferred maintenance", deferred_cu, LIMIT);
+        assert_eq!(
+            keys.map(|key| env.svm.get_account(&key).unwrap()),
+            deferred_before
+        );
+
+        // Count unaccrued exposed-asset slots, independently of the crank's selector/certificate.
+        let rank = |env: &V16CuEnv| -> u64 {
+            env.market_state().1.assets[..usize::from(ACTIVE_CAP)]
+                .iter()
+                .map(|asset| {
+                    charge_slot
+                        .checked_sub(asset.slot_last)
+                        .expect("accrual cannot pass the Clock")
+                })
+                .sum()
+        };
+        let initial_rank = rank(&env);
+        assert!(initial_rank >= u64::from(ACTIVE_CAP));
+        let checkpoint_keys = [taker, lp, env.vault, env.mint];
+        let checkpoint_before = checkpoint_keys.map(|key| env.svm.get_account(&key).unwrap());
+        let mut checkpoint_calls = 0u64;
+        let mut max_checkpoint_cu = 0;
+        let mut max_mark_cu = 0;
+        for asset in 0..ACTIVE_CAP {
+            let mark_cu = env.push_auth_mark_for_asset_as_admin(asset, charge_slot, 100);
+            assert_cu_within("full-shape maintenance authenticated mark", mark_cu, LIMIT);
+            max_mark_cu = max_mark_cu.max(mark_cu);
+            assert_eq!(
+                checkpoint_keys.map(|key| env.svm.get_account(&key).unwrap()),
+                checkpoint_before
+            );
+            for _ in 0..env.terminal_accrual_attempt_bound(asset, charge_slot) {
+                if env.market_state().1.assets[usize::from(asset)].slot_last == charge_slot {
+                    break;
+                }
+                let before_rank = rank(&env);
+                let cu = env
+                    .crank_if_actionable(
+                        keeper,
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot: charge_slot,
+                            observations: crank_observations(asset),
+                        },
+                    )
+                    .expect("an unaccrued asset must have a public continuation");
+                assert_cu_within("full-shape maintenance prerequisite", cu, LIMIT);
+                assert_eq!(
+                    rank(&env),
+                    before_rank - 1,
+                    "each crank must consume one pending slot"
+                );
+                assert_eq!(
+                    checkpoint_keys.map(|key| env.svm.get_account(&key).unwrap()),
+                    checkpoint_before
+                );
+                checkpoint_calls += 1;
+                max_checkpoint_cu = max_checkpoint_cu.max(cu);
+            }
+            assert_eq!(
+                env.market_state().1.assets[usize::from(asset)].slot_last,
+                charge_slot
+            );
+        }
+        assert_eq!(rank(&env), 0);
+        assert_eq!(checkpoint_calls, initial_rank);
+
+        let before = env.portfolio_state(lp);
+        assert_eq!(active_bitmap(&before), active_bitmap(&initial));
+        assert_eq!(before.source_domains, initial.source_domains);
+        let group_before = env.market_state().1;
+        let keeper_before = env.svm.get_account(&keeper).unwrap();
+        let charged = FEE_PER_SLOT * u128::from(charge_slot - before.last_fee_slot.get());
+        assert!(charged > 0 && before.capital.get() > charged);
+        env.svm.expire_blockhash();
+        let cu = env.sync_maintenance_fee_with_cu(lp, None, charge_slot);
+        assert_cu_within("full-shape nonzero maintenance", cu, LIMIT);
+        let after = env.portfolio_state(lp);
+        let group_after = env.market_state().1;
+        assert_eq!(before.capital.get() - after.capital.get(), charged);
+        assert_eq!(after.last_fee_slot.get(), charge_slot);
+        assert_eq!(group_before.c_tot - group_after.c_tot, charged);
+        assert_eq!(group_after.insurance - group_before.insurance, charged);
+        assert_eq!(after.legs, before.legs);
+        assert_eq!(active_bitmap(&after), active_bitmap(&initial));
+        assert_eq!(after.source_domains, initial.source_domains);
+        assert_eq!(after.pnl, before.pnl);
+        assert_eq!(after.reserved_pnl, before.reserved_pnl);
+        for asset in 0..usize::from(ACTIVE_CAP) {
+            assert_eq!(
+                group_after.assets[asset].oi_eff_long_q,
+                group_before.assets[asset].oi_eff_long_q
+            );
+            assert_eq!(
+                group_after.assets[asset].oi_eff_short_q,
+                group_before.assets[asset].oi_eff_short_q
+            );
+        }
+        assert_eq!(env.svm.get_account(&keeper).unwrap(), keeper_before);
+        assert_eq!(
+            foreign_keys.map(|key| env.svm.get_account(&key).unwrap()),
+            foreign_before
+        );
+        assert_eq!(group_after.vault, u128::from(custody));
+        assert_eq!(group_after.vault, group_before.vault);
+        assert!(group_after.vault >= group_after.c_tot + group_after.insurance);
+
+        env.svm.expire_blockhash();
+        let retry_before = keys.map(|key| env.svm.get_account(&key).unwrap());
+        let retry_cu = env.sync_maintenance_fee_with_cu(lp, None, charge_slot);
+        assert_cu_within("full-shape same-slot maintenance retry", retry_cu, LIMIT);
+        assert_eq!(
+            keys.map(|key| env.svm.get_account(&key).unwrap()),
+            retry_before
+        );
+        println!(
+            "INV-077 14-leg/28-source no-reward maintenance: slot={charge_slot}, reject={reject_cu}, deferred={deferred_cu}, marks={ACTIVE_CAP}/{max_mark_cu}, rank={initial_rank}->0, checkpoints={checkpoint_calls}/{max_checkpoint_cu}, charge={charged}/{cu}, retry={retry_cu}"
+        );
+    }
 }
 
 #[test]
