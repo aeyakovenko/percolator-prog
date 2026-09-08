@@ -20,6 +20,375 @@
 
 use super::*;
 
+fn inv018_initialize_token_account(env: &mut V16CuEnv, account: &Keypair, owner: Pubkey) {
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        account,
+        TokenAccount::LEN,
+        spl_token::ID,
+    );
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::initialize_account3(
+            &spl_token::ID,
+            &account.pubkey(),
+            &env.mint,
+            &owner,
+        )
+        .unwrap(),
+        &[],
+    )
+    .expect("SPL initializes the source account");
+}
+
+#[test]
+fn v16_deposit_revalidates_retained_source_across_spl_account_lifecycle() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const AMOUNT: u64 = 37;
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let foreign_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.ensure_signer_account(foreign_owner.pubkey());
+    let reserve = env.token_account(owner.pubkey(), AMOUNT);
+    let source = Keypair::new();
+    inv018_initialize_token_account(&mut env, &source, owner.pubkey());
+    let fund_source = spl_token::instruction::transfer(
+        &spl_token::ID,
+        &reserve,
+        &source.pubkey(),
+        &owner.pubkey(),
+        &[],
+        AMOUNT,
+    )
+    .unwrap();
+    send_raw_tx(&mut env.svm, &env.payer, fund_source.clone(), &[&owner]).unwrap();
+
+    // Keep the wire bytes and role metas fixed across external account lifecycle changes.
+    let deposit = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source.pubkey(), false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: env.deposit_ix(portfolio, AMOUNT as u128).encode(),
+    };
+    let signed_deposit = |env: &V16CuEnv| {
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), deposit.clone()],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &owner],
+            env.svm.latest_blockhash(),
+        )
+    };
+    env.svm
+        .simulate_transaction(signed_deposit(&env).into())
+        .expect("the original funded source authorizes the retained deposit");
+    let sequence_before = env.portfolio_matcher_sequence(portfolio);
+    let frame_keys = [
+        env.market,
+        portfolio,
+        source.pubkey(),
+        reserve,
+        env.vault,
+        env.mint,
+        owner.pubkey(),
+        foreign_owner.pubkey(),
+    ];
+    let frame = |env: &V16CuEnv| frame_keys.map(|key| env.svm.get_account(&key));
+    let reject = |env: &mut V16CuEnv, label: &str| {
+        let before = frame(env);
+        env.svm.expire_blockhash();
+        let error = env
+            .svm
+            .send_transaction(signed_deposit(env))
+            .expect_err(label);
+        assert_eq!(
+            error.err,
+            TransactionError::InstructionError(
+                2,
+                InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32),
+            ),
+            "{label}: wrapper token validation must supply the error",
+        );
+        assert_eq!(frame(env), before, "{label}: complete non-fee-payer frame");
+        assert_eq!(env.portfolio_matcher_sequence(portfolio), sequence_before);
+    };
+
+    let drain_source = spl_token::instruction::transfer(
+        &spl_token::ID,
+        &source.pubkey(),
+        &reserve,
+        &owner.pubkey(),
+        &[],
+        AMOUNT,
+    )
+    .unwrap();
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            drain_source.clone(),
+            spl_token::instruction::close_account(
+                &spl_token::ID,
+                &source.pubkey(),
+                &owner.pubkey(),
+                &owner.pubkey(),
+                &[],
+            )
+            .unwrap(),
+            system_instruction::transfer(&owner.pubkey(), &source.pubkey(), 1_000_000_000),
+        ],
+        &[&owner],
+    )
+    .expect("SPL closes the source and System refunds its address");
+    let closed = env.svm.get_account(&source.pubkey()).unwrap();
+    assert_eq!(closed.owner, solana_sdk::system_program::ID);
+    assert!(closed.data.is_empty());
+    reject(&mut env, "closed source is not a token account");
+
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            system_instruction::allocate(&source.pubkey(), TokenAccount::LEN as u64),
+            system_instruction::assign(&source.pubkey(), &spl_token::ID),
+        ],
+        &[&source],
+    )
+    .expect("System allocates and assigns the same address back to SPL");
+    let uninitialized = env.svm.get_account(&source.pubkey()).unwrap();
+    assert_eq!(uninitialized.owner, spl_token::ID);
+    assert_eq!(uninitialized.data, vec![0; TokenAccount::LEN]);
+    reject(
+        &mut env,
+        "SPL ownership and exact length alone do not initialize the source",
+    );
+
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            spl_token::instruction::initialize_account3(
+                &spl_token::ID,
+                &source.pubkey(),
+                &env.mint,
+                &foreign_owner.pubkey(),
+            )
+            .unwrap(),
+            fund_source,
+            spl_token::instruction::approve(
+                &spl_token::ID,
+                &source.pubkey(),
+                &owner.pubkey(),
+                &foreign_owner.pubkey(),
+                &[],
+                AMOUNT,
+            )
+            .unwrap(),
+        ],
+        &[&owner, &foreign_owner],
+    )
+    .expect("SPL reinitializes the source under a different owner and grants a delegate");
+    let delegated =
+        TokenAccount::unpack(&env.svm.get_account(&source.pubkey()).unwrap().data).unwrap();
+    assert_eq!(delegated.owner, foreign_owner.pubkey());
+    assert_eq!(delegated.delegate, COption::Some(owner.pubkey()));
+    assert_eq!(delegated.delegated_amount, AMOUNT);
+    let delegated_transfer = Transaction::new_signed_with_payer(
+        &[drain_source],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &owner],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .simulate_transaction(delegated_transfer.into())
+        .expect("the same signer really can debit this source through SPL delegation");
+    reject(
+        &mut env,
+        "SPL delegation cannot substitute for the configured user-token owner",
+    );
+
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &source.pubkey(),
+            Some(&owner.pubkey()),
+            spl_token::instruction::AuthorityType::AccountOwner,
+            &foreign_owner.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&foreign_owner],
+    )
+    .expect("SPL restores the expected source owner");
+    env.svm.expire_blockhash();
+    env.svm
+        .send_transaction(signed_deposit(&env))
+        .expect("the unchanged deposit remains live after every validation rejection");
+    assert_eq!(env.token_amount(source.pubkey()), 0);
+    assert_eq!(env.token_amount(reserve), 0);
+    assert_eq!(env.token_amount(env.vault), AMOUNT);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), AMOUNT as u128);
+    assert_eq!(
+        env.portfolio_matcher_sequence(portfolio),
+        sequence_before + 1
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, AMOUNT as u128);
+    assert_eq!(group.c_tot, AMOUNT as u128);
+}
+
+#[test]
+fn v16_deposit_propagates_real_spl_multisig_error_without_committing_credit() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+    use spl_token::state::Multisig;
+
+    const AMOUNT: u64 = 41;
+    let mut env = V16CuEnv::new();
+    let authority = Keypair::new();
+    let member_a = Keypair::new();
+    let member_b = Keypair::new();
+    let portfolio = env.create_portfolio(&authority);
+    env.ensure_signer_account(member_a.pubkey());
+    env.ensure_signer_account(member_b.pubkey());
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            system_instruction::allocate(&authority.pubkey(), Multisig::LEN as u64),
+            system_instruction::assign(&authority.pubkey(), &spl_token::ID),
+            spl_token::instruction::initialize_multisig2(
+                &spl_token::ID,
+                &authority.pubkey(),
+                &[&member_a.pubkey(), &member_b.pubkey()],
+                2,
+            )
+            .unwrap(),
+        ],
+        &[&authority],
+    )
+    .expect("System and SPL initialize a real two-of-two multisig authority");
+    let multisig =
+        Multisig::unpack(&env.svm.get_account(&authority.pubkey()).unwrap().data).unwrap();
+    assert!(multisig.is_initialized);
+    assert_eq!((multisig.m, multisig.n), (2, 2));
+    let source = Keypair::new();
+    inv018_initialize_token_account(&mut env, &source, authority.pubkey());
+    let reserve = env.token_account(member_a.pubkey(), AMOUNT);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::transfer(
+            &spl_token::ID,
+            &reserve,
+            &source.pubkey(),
+            &member_a.pubkey(),
+            &[],
+            AMOUNT,
+        )
+        .unwrap(),
+        &[&member_a],
+    )
+    .unwrap();
+    let deposit = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source.pubkey(), false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: env.deposit_ix(portfolio, AMOUNT as u128).encode(),
+    };
+    let keys = [
+        env.market,
+        portfolio,
+        source.pubkey(),
+        reserve,
+        env.vault,
+        env.mint,
+        authority.pubkey(),
+        member_a.pubkey(),
+        member_b.pubkey(),
+    ];
+    let frame = |env: &V16CuEnv| keys.map(|key| env.svm.get_account(&key));
+    let before = frame(&env);
+    for include_member_tail in [false, true] {
+        let mut ix = deposit.clone();
+        let mut signers = vec![&env.payer, &authority];
+        if include_member_tail {
+            ix.accounts.extend([
+                AccountMeta::new_readonly(member_a.pubkey(), true),
+                AccountMeta::new_readonly(member_b.pubkey(), true),
+            ]);
+            signers.extend([&member_a, &member_b]);
+        }
+        env.svm.expire_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), ix],
+            Some(&env.payer.pubkey()),
+            &signers,
+            env.svm.latest_blockhash(),
+        );
+        let error = env.svm.send_transaction(tx).expect_err(
+            "the wrapper's single-authority token CPI cannot authorize a multisig transfer",
+        );
+        assert_eq!(
+            error.err,
+            TransactionError::InstructionError(2, InstructionError::MissingRequiredSignature),
+            "the actual SPL error must propagate, member tail={include_member_tail}",
+        );
+        assert!(
+            error
+                .meta
+                .logs
+                .contains(&format!("Program {} invoke [2]", spl_token::ID)),
+            "the failure must reach SPL after wrapper admission: {:?}",
+            error.meta.logs,
+        );
+        assert_eq!(
+            frame(&env),
+            before,
+            "SPL failure rolls back every non-fee-payer account"
+        );
+    }
+
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::transfer(
+            &spl_token::ID,
+            &source.pubkey(),
+            &reserve,
+            &authority.pubkey(),
+            &[&member_a.pubkey(), &member_b.pubkey()],
+            AMOUNT,
+        )
+        .unwrap(),
+        &[&member_a, &member_b],
+    )
+    .expect("the funded source is live when SPL receives the real member signatures");
+    assert_eq!(env.token_amount(source.pubkey()), 0);
+    assert_eq!(env.token_amount(reserve), AMOUNT);
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+}
+
 #[test]
 fn v16_program_spl_account_parser_is_single_gateway_and_reuses_validated_state() {
     let source = include_str!("../../../src/v16_program.rs");

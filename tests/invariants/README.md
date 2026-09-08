@@ -3,6 +3,62 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## Wrapper custody checkpoint (2026-09-08)
+
+Finding-blind additions based on `origin/codex/invariant-fidelity-reopen-20260904` at
+`9e70f07930dbea3f8675dbf18c4ef94af2fa275b`. No GitHub PR diffs or issues were inspected;
+production code and engine proofs are unchanged. Two new LiteSVM histories in
+[`cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs`](cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs)
+cover wrapper/SPL composition for INV-015/017/018/080:
+
+- `v16_deposit_revalidates_retained_source_across_spl_account_lifecycle` keeps the same
+  deposit bytes and account metas through real SPL drain/close, System reallocation/assignment,
+  SPL reinitialization under a different owner, delegation, and owner restoration. A funded
+  initial simulation succeeds. Closed and uninitialized sources reject with the exact wrapper
+  token-account error. A real SPL delegated-transfer simulation succeeds, but that delegation
+  cannot replace the wrapper's source-owner binding. The unchanged deposit succeeds after owner
+  restoration, advancing its sequence once and crediting exactly the 37 atoms received by SPL.
+- `v16_deposit_propagates_real_spl_multisig_error_without_committing_credit` initializes an
+  actual two-of-two SPL multisig at a keypair-signable authority address and funds its source
+  using SPL. The wrapper owner signs, with and without both signed member accounts in the
+  instruction tail. The wrapper's single-authority CPI reaches SPL and propagates the exact
+  `MissingRequiredSignature` error; tail signatures are not implicitly forwarded as multisig
+  members. All wrapper, authority/member, source/reserve/vault, and mint snapshots remain exact.
+  A subsequent direct SPL transfer with both members moves all 41 atoms, establishing that the
+  source is funded and spendable, not malformed or stranded.
+
+Both tests compare full affected account snapshots, including bytes, lamports, owner, executable,
+and rent fields. The distinct fee payer is excluded because transaction fees persist on failure.
+The existing `V16CuEnv` supplies initial market, vault, mint, and external reserve fixtures;
+the tested source account layouts and authority changes are created by System/SPL instructions,
+not account-byte edits. These are bounded custody histories, not an all-public bootstrap claim,
+a multisig-support requirement, an engine proof, or an invariant-status promotion.
+
+Duplicate-candidate review: no extra static owner/length substitutions, role-flag permutations,
+matcher-return spoof matrices, or matcher clock-expiry boundary tests were retained. INV-015/017
+already own the first two; INV-019's current-invocation/nested-return matrices and the existing
+INV-012 clock-bound single/batch expiry test own the latter two (with INV-020's authenticated-slot
+route tests). Repeating those partitions would be marginal. No existing tests were deleted, and
+no new production counterexample or qualifying public-route LoF/DoS/CU finding was observed.
+INV-019/020 receive no new coverage claim from this checkpoint.
+
+Focused verification uses the default-feature SBF rebuilt from this worktree with platform-tools
+v1.52, SHA-256 `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr427-wrapper-boundary-20260908-target
+export CARGO_BUILD_JOBS=4
+cargo build-sbf --tools-version v1.52 --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_deposit_revalidates_retained_source_across_spl_account_lifecycle -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_deposit_propagates_real_spl_multisig_error_without_committing_credit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs
+git diff --check
+```
+
 ## Current goal
 
 The requirements below are targets, not achieved verdicts. `invariant_status.tsv` currently
