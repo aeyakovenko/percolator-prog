@@ -9,6 +9,9 @@
 
 use super::*;
 
+#[path = "inv_024_recycled_reward_terminal_history.rs"]
+mod recycled_reward_terminal_history;
+
 #[test]
 fn v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim() {
     use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::{
