@@ -1043,6 +1043,17 @@ finding-blind invariant suite first, then evaluate it against the holdout roster
 counts as independently covered only when a generic invariant-owned generator and oracle discover
 the same public-interface violation without consuming finding metadata. PR- or issue-named tests
 remain useful direct regressions, but they cannot satisfy independent-discovery or invariant-
+coverage completion by themselves.
+
+Current red witness to keep out of PR135 until fixed: the generic
+`inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_resolved_close_order_preserves_pending_obligation_attribution`
+selector from local commit `5744d1f2` still fails on PR135 head `387ef9ef` with the cached SBF.
+The two public resolved-close orders both terminate and conserve aggregate custody, but normalize
+to different owner payouts and terminal vault state: pending-owner-first yields
+`([0, 10, 1000, 1000], vault=3, insurance=1)` while opposing-debtor-first yields
+`([0, 8, 1000, 1000], vault=5, insurance=1)`. Treat this as an uncovered INV-039/076
+order-attribution gap requiring a fix plus the unchanged red/green test; do not weaken it into
+aggregate-conservation evidence.
 closure claims. Any holdout miss is evidence of a missing normative oracle or a missing route,
 state, ordering, boundary, account-shape, or environmental partition and must reopen the owning
 invariant.
