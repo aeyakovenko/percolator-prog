@@ -5261,12 +5261,96 @@ observer for extending this bounded slice. Fresh booking after the denominator c
 side/chunk/order schedules, generated mixed-route histories, residue-origin observation during
 initialization/mark submission and nonzero funding, arbitrary-length ratio/top-up episodes,
 funding/receipt interleavings, multi-claimant residue ownership, additional assets and maximum shapes remain unclaimed. The
-receipt slice fixes the live prefix, two expiry events, one claimant and fully reserved backing;
-it does not vary authenticated expiry order, source allocation policy, trade transports or terminal drain.
+original receipt-cadence slice fixes the live prefix, two expiry events, one claimant and fully
+reserved backing; it does not vary authenticated expiry order, source allocation policy or trade
+transports. Its generated terminal-drain extension is separately owned by INV-068 below.
 Neither slice produces new cash-residue classification
 evidence: the broader oracle must still attribute cash residue only to `SettlementRoundingResidue`
 or `UnallocatedProtocolSurplus`. Reuse INV-010/052/085; do not repeat their partition products or
 arithmetic proofs. Reordered authenticated events require explicit noncommuting envelopes.
+
+### INV-066/067/068 generated receipt terminal drains
+
+`stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs` now owns
+`v16_program_generated_receipt_histories_preserve_terminal_drain`. It extends the existing
+INV-038 `run_receipt_rounding_history` and public INV-086 receipt checkpoint, without changing
+the shared seed, engine pin or production code. This is a generated history/terminal-suffix
+product, not another fixed receipt-identity matrix, claimant permutation proof, or length-two
+receipt-conflict frontier.
+
+Three fixed boundary cases and eight shrinkable ChaCha cases (`[0x68; 32]`) vary two provider
+amounts in `1..=199`, expiry spacing in `1..=4`, and claim/close/crank words of length `1..=6`.
+Each case crosses eager payment at both releases versus deferring both top-ups until terminal
+continuation, with forward/reverse owner and guaranteed-continuation order: **44 worlds**.
+Each sweep appends all three payout routes to the generated word for each of five owners;
+eight sweeps are the convergence bound. Both authenticated expiry events keep their original
+order. `PERCOLATOR_INV068_RECEIPT_CASES` controls the tail, with 64 default shrink iterations and
+failure-only persistence in `proptest-regressions/inv_068_receipt_terminal_history.txt`.
+
+`ReceiptHistoryOracle` still checks each release against its generated provider amount plus
+250/40 known counterparty-capital atoms. `drain_receipt_history` freezes the same residual and
+claim bound, the checkpoint's senior capital and prior payouts, and the two public prefix faces
+of 1,000 and 1,200. With both sources expired, bounded source cleanup must preserve those faces
+and cannot convert them into senior capital. Independent full-width floor arithmetic determines
+each owner's cumulative entitlement, not observed post-state payout rates or SPL deltas.
+Every suffix attempt checks owner-local capital/PnL and SPL balances, receipt face/prior-bound
+identity, monotone payment, source attribution and terminal bound, custody, stock/encumbrance censuses,
+and unrelated accounts. A receipt may clear only when all unreceipted bound is gone and its
+exact terminal entitlement is paid; it cannot reappear. Conserved wrong-owner and overpayment
+observations are rejected. This remains a checkpoint-relative oracle, not a complete live-prefix
+entitlement model.
+
+The drain must reach an exact byte fixed point, pay both winners, and clear all five portfolios'
+economic obligations. Five freshly signed duplicate claims land with exact no-op frames. All
+five owner-signed portfolio closes then succeed with exact rent transfer, unchanged tokens and
+only the materialized-count decrement in decoded market state. Each subsequent stale claim
+against the publicly closed portfolio rejects with an exact full tracked account frame. The
+frame includes account data, owner/executable/rent metadata, economic lamports and absent-account
+state, excluding only the transaction fee payer. Every public trace is validated with zero
+out-of-band economic mutations and exact attempt/rejection counts. All four variants must end
+with identical tracked account state, including destination tokens and economic lamports, with
+no endpoint normalization.
+
+At rebased base `61c96c23` / engine `495a5590`, the default exact test passes **4,792 suffix
+attempts, 2,770 exact rejections, 110 value-moving payouts, 220 portfolio closes and 220 stale
+claims**. Seed construction is excluded. Fresh same-worktree default-feature SBF `230b6db1` and
+matcher `50e53226` are used. The existing INV-038 cadence test and fixed INV-068 identity/top-up
+owner remain separate regression controls. All three exact tests and all six metadata/status
+guards below pass individually (one test each); no engine proof or status promotion is claimed.
+
+Exact validation commands (from the isolated worktree unless otherwise noted):
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/inv066-068-terminal-history-20260908-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+mkdir -p "$TMPDIR"
+cargo build-sbf --tools-version v1.52 --offline
+# Working directory: tests/fixtures/auth_matcher
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir /tmp/codex-agent-worktrees/inv066-068-terminal-history-20260908/tests/fixtures/auth_matcher/target/deploy
+# Working directory: worktree root
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_generated_receipt_histories_preserve_terminal_drain -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_038_rounding_and_ratio_conservation::v16_program_generated_receipt_histories_preserve_deferred_rounding -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_program_invariant_harnesses_are_test_free_roots -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_038_rounding_and_ratio_conservation.rs tests/invariants/stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs
+git diff --check
+awk -F '\t' '!/^#/ && NF != 8 {print NR, NF; bad=1} END {exit bad}' tests/invariants/traceability_gaps.tsv
+git diff --exit-code 61c96c23 -- Cargo.toml Cargo.lock src tests/support kani tests/invariants/kani tests/invariants/invariant_status.tsv tests/invariants/special_method_coverage.tsv tests/invariants/stateful/inv_027_protected_principal_seniority.rs
+```
+
+**Remaining gaps:** reordered authenticated expiries, within-history backing-policy changes,
+additional/generated claimant faces, arbitrary-length histories, alternate trade transports,
+live-prefix entitlement attribution, mixed Recovery/insurance histories and supported maxima.
+The terminal boundary here is five owner-signed portfolio closes, not signer-free retirement,
+asset/provider cleanup, residual-vault classification or `CloseSlab`. Reuse the fixed INV-066
+release/claim and unequal-claimant products, INV-068 identity lifecycle and INV-086 receipt-conflict
+frontier for their existing obligations; do not duplicate their engine proofs.
 
 ### INV-059 executing evidence and F plan
 

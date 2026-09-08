@@ -18,6 +18,12 @@
 //! The shared route oracle also requires receipt face/prior-bound identity to remain immutable,
 //! cumulative paid value to be monotonic, every claim delta to equal its external token delta, and
 //! engine/SPL vault custody to reconcile after every successful instruction.
+//!
+//! The generated terminal-drain product extends INV-038's checkpoint history rather than
+//! rebuilding the fixed lifecycle or INV-086's length-two receipt-conflict frontier. Generated
+//! provider amounts, expiry spacing and route words cross eager/terminal-only claimant payment
+//! with both owner/continuation orders. Every suffix step checks exact owner-local entitlement;
+//! all five portfolios dematerialize and subsequent stale claims roll back exactly.
 
 use super::*;
 
@@ -45,4 +51,9 @@ fn v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries(
     assert_eq!(evidence.exact_noop_retries, 3);
     assert_eq!(evidence.terminal_actor_count, 5);
     assert_eq!(evidence.final_engine_vault, evidence.final_spl_vault);
+}
+
+#[test]
+fn v16_program_generated_receipt_histories_preserve_terminal_drain() {
+    super::inv_038_rounding_and_ratio_conservation::verify_generated_receipt_terminal_drain_histories();
 }
