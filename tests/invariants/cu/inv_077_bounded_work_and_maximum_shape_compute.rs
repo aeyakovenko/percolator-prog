@@ -3844,6 +3844,94 @@ fn v16_bpf_10m_flat_user_withdraw_and_close_stay_bounded() {
 }
 
 #[test]
+fn v16_bpf_10m_market_last_domain_backing_principal_withdraw_stays_bounded() {
+    const N: usize = MAX_10M_MARKET_SLOTS;
+    const LAST_DOMAIN: usize = 2 * N - 1;
+    const PRINCIPAL: u128 = 123;
+    const OTHER_PRINCIPAL: u128 = 17;
+
+    let mut env = V16CuEnv::new();
+    // Reuse the synthetic maximum-capacity fixture; funding and withdrawal use public routes.
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, N - 1, 100);
+    env.top_up_backing_bucket(0, OTHER_PRINCIPAL, 10_000);
+    let (destination, top_up_cu) =
+        env.top_up_backing_bucket_with_cu(LAST_DOMAIN as u16, PRINCIPAL, 10_000);
+    assert_cu_within(
+        "10MiB last-domain backing top-up",
+        top_up_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let before = env.market_state().1;
+    assert_eq!(before.source_backing_buckets.len(), LAST_DOMAIN + 1);
+    assert_eq!(before.mode, MarketModeV16::Live);
+    assert_eq!(before.vault, PRINCIPAL + OTHER_PRINCIPAL);
+    assert_eq!(env.token_amount(env.vault), before.vault as u64);
+    assert_eq!(env.token_amount(destination), 0);
+    assert_eq!(
+        before.source_backing_buckets[LAST_DOMAIN].fresh_unliened_backing_num,
+        PRINCIPAL * BOUND_SCALE
+    );
+    assert_eq!(
+        before.source_credit[LAST_DOMAIN].fresh_reserved_backing_num,
+        PRINCIPAL * BOUND_SCALE
+    );
+
+    env.svm.expire_blockhash();
+    let withdraw_cu = env.withdraw_backing_bucket_to_admin_token_with_cu(
+        destination,
+        LAST_DOMAIN as u16,
+        PRINCIPAL,
+    );
+    assert_cu_within(
+        "10MiB last-domain WithdrawBackingBucket",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let after = env.market_state().1;
+    assert_eq!(env.token_amount(destination), PRINCIPAL as u64);
+    assert_eq!(env.token_amount(env.vault), OTHER_PRINCIPAL as u64);
+    assert_eq!(after.vault, OTHER_PRINCIPAL);
+    assert_eq!(after.c_tot, before.c_tot);
+    assert_eq!(after.insurance, before.insurance);
+    assert_eq!(after.mode, MarketModeV16::Live);
+    assert_eq!(
+        after.source_backing_buckets[LAST_DOMAIN].fresh_unliened_backing_num,
+        0
+    );
+    assert_eq!(
+        after.source_credit[LAST_DOMAIN].fresh_reserved_backing_num,
+        0
+    );
+    assert_eq!(
+        after.source_backing_buckets[..LAST_DOMAIN],
+        before.source_backing_buckets[..LAST_DOMAIN]
+    );
+    assert_eq!(
+        after.source_credit[..LAST_DOMAIN],
+        before.source_credit[..LAST_DOMAIN]
+    );
+    assert_eq!(after.assets, before.assets);
+    assert_eq!(
+        after.insurance_domain_budget,
+        before.insurance_domain_budget
+    );
+    assert_eq!(after.insurance_domain_spent, before.insurance_domain_spent);
+    let market_account = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(market_account.data.len(), account_len);
+    assert_eq!(
+        market_group_header_bytes(&market_account.data)
+            .source_fresh_backing_total_num
+            .get(),
+        OTHER_PRINCIPAL * BOUND_SCALE
+    );
+    println!(
+        "INV-077 10MiB backing principal exit: assets={N}, domain={LAST_DOMAIN}, account_len={account_len}, top_up={top_up_cu}, withdraw={withdraw_cu}"
+    );
+}
+
+#[test]
 fn v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded() {
     const N: u16 = 10;
     const LOW: u64 = 100;
