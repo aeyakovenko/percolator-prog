@@ -24,12 +24,17 @@
 //! with a proportional-fee partial liquidation, an authenticated reward tail, and two owner-exit
 //! routes. An input-driven ledger separates principal, fees, rewards and SPL custody at each
 //! prefix; wrong-owner reward tails and healthy retries frame exactly. Marked PnL remains zero.
+//! A shrinkable funded-flat maintenance generator compares split and unsplit episodes under the
+//! same authenticated schedule, crossing reward routes, error/retry placement and resolved close.
+//! It checks prefix attribution and terminal payouts without claiming randomized liquidation F.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 
 fn liquidation_fee_oracle(
     closed_q: u128,
@@ -1949,5 +1954,456 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
             ctx_before,
             "active-stale BatchTradeCpi rejection never gives the hostile matcher a writable context"
         );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MaintenanceRewardRoute {
+    Insurance,
+    SelfReward,
+    Keeper(usize),
+}
+
+#[derive(Clone, Debug)]
+struct MaintenanceFeeFragment {
+    slots: u64,
+    route: MaintenanceRewardRoute,
+    retries: u8,
+    abort_after_fee: Option<bool>,
+}
+
+fn maintenance_reward_route() -> impl Strategy<Value = MaintenanceRewardRoute> {
+    prop_oneof![
+        Just(MaintenanceRewardRoute::Insurance),
+        Just(MaintenanceRewardRoute::SelfReward),
+        Just(MaintenanceRewardRoute::Keeper(0)),
+        Just(MaintenanceRewardRoute::Keeper(1)),
+    ]
+}
+
+fn maintenance_fee_fragment() -> impl Strategy<Value = MaintenanceFeeFragment> {
+    (
+        1u64..=31,
+        maintenance_reward_route(),
+        0u8..=2,
+        proptest::option::of(any::<bool>()),
+    )
+        .prop_map(
+            |(slots, route, retries, abort_after_fee)| MaintenanceFeeFragment {
+                slots,
+                route,
+                retries,
+                abort_after_fee,
+            },
+        )
+}
+
+#[derive(Default)]
+struct MaintenanceFeeOracle {
+    gross: u128,
+    retained: u128,
+    self_reward: u128,
+    keeper_rewards: [u128; 2],
+    rewarded_gross: u128,
+    rewarded_fragments: u128,
+}
+
+impl MaintenanceFeeOracle {
+    // Inputs come only from the generated authenticated schedule and public policy.
+    // Do not infer charges from account deltas or call engine fee helpers here.
+    fn charge(&mut self, slots: u64, rate: u128, share: u16, route: MaintenanceRewardRoute) {
+        let gross = u128::from(slots) * rate;
+        let reward = match route {
+            MaintenanceRewardRoute::Insurance => 0,
+            _ => gross * u128::from(share) / 10_000,
+        };
+        self.gross += gross;
+        self.retained += gross - reward;
+        match route {
+            MaintenanceRewardRoute::Insurance => (),
+            MaintenanceRewardRoute::SelfReward => self.self_reward += reward,
+            MaintenanceRewardRoute::Keeper(index) => self.keeper_rewards[index] += reward,
+        }
+        if !matches!(route, MaintenanceRewardRoute::Insurance) {
+            self.rewarded_gross += gross;
+            self.rewarded_fragments += 1;
+        }
+    }
+
+    fn rewards(&self) -> u128 {
+        self.self_reward + self.keeper_rewards.iter().sum::<u128>()
+    }
+}
+
+struct MaintenanceFeeEpisode {
+    env: V16CuEnv,
+    owner: Keypair,
+    split: Pubkey,
+    whole: Pubkey,
+    keepers: [Pubkey; 2],
+    split_dest: Pubkey,
+    whole_dest: Pubkey,
+    bad_dest: Pubkey,
+    deposit: u128,
+    stationary_accounts: [(Pubkey, Account); 7],
+}
+
+impl MaintenanceFeeEpisode {
+    fn new(rate: u128, share: u16, deposit: u128) -> Self {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            maintenance_fee_per_slot: rate,
+            ..V16CuMarketParams::default()
+        });
+        env.update_maintenance_fee_policy_with_cu(share);
+        let owner = Keypair::new();
+        let split = env.create_portfolio(&owner);
+        let whole = env.create_portfolio(&owner);
+        let keeper_owners = [Keypair::new(), Keypair::new()];
+        let keepers = keeper_owners
+            .each_ref()
+            .map(|owner| env.create_portfolio(owner));
+        let sources = [
+            env.deposit(&owner, split, deposit),
+            env.deposit(&owner, whole, deposit),
+        ];
+        let split_dest = env.token_account(owner.pubkey(), 0);
+        let whole_dest = env.token_account(owner.pubkey(), 0);
+        let bad_dest = env.token_account(Pubkey::new_unique(), 0);
+        let stationary_accounts = [
+            env.mint,
+            owner.pubkey(),
+            env.admin.pubkey(),
+            keeper_owners[0].pubkey(),
+            keeper_owners[1].pubkey(),
+            sources[0],
+            sources[1],
+        ]
+        .map(|key| (key, env.svm.get_account(&key).unwrap()));
+        assert_eq!(env.portfolio_state(split).last_fee_slot.get(), 0);
+        assert_eq!(env.portfolio_state(whole).last_fee_slot.get(), 0);
+        Self {
+            env,
+            owner,
+            split,
+            whole,
+            keepers,
+            split_dest,
+            whole_dest,
+            bad_dest,
+            deposit,
+            stationary_accounts,
+        }
+    }
+
+    fn snapshot(&self) -> Vec<Option<Account>> {
+        [
+            self.env.market,
+            self.split,
+            self.whole,
+            self.keepers[0],
+            self.keepers[1],
+            self.env.vault,
+            self.split_dest,
+            self.whole_dest,
+            self.bad_dest,
+        ]
+        .into_iter()
+        .chain(self.stationary_accounts.iter().map(|(key, _)| *key))
+        .map(|key| self.env.svm.get_account(&key))
+        .collect()
+    }
+
+    fn sync_instruction(&self, route: MaintenanceRewardRoute, slot_hint: u64) -> Instruction {
+        let mut accounts = vec![
+            AccountMeta::new(self.env.market, false),
+            AccountMeta::new(self.split, false),
+        ];
+        match route {
+            MaintenanceRewardRoute::Insurance => (),
+            MaintenanceRewardRoute::SelfReward => {
+                accounts.push(AccountMeta::new(self.split, false))
+            }
+            MaintenanceRewardRoute::Keeper(index) => {
+                accounts.push(AccountMeta::new(self.keepers[index], false));
+            }
+        }
+        Instruction {
+            program_id: self.env.program_id,
+            accounts,
+            data: ProgInstruction::SyncMaintenanceFee {
+                now_slot: slot_hint,
+            }
+            .encode(),
+        }
+    }
+
+    fn sync(
+        &mut self,
+        route: MaintenanceRewardRoute,
+        slot_hint: u64,
+        abort_after_fee: Option<bool>,
+    ) {
+        let mut instructions = vec![heap_ix(), cu_ix()];
+        let fee = self.sync_instruction(route, slot_hint);
+        let sequences = self.env.control_sequences(0);
+        // A known-invalid public policy update makes either ordering abort. When
+        // last, it checks transaction rollback after an otherwise payable fee.
+        let invalid = Instruction {
+            program_id: self.env.program_id,
+            accounts: vec![
+                AccountMeta::new(self.env.admin.pubkey(), true),
+                AccountMeta::new(self.env.market, false),
+            ],
+            data: ProgInstruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps: 10_001,
+                policy_sequence: next_control_sequence(sequences.maintenance_fee),
+                authority_epoch: sequences.authority_epoch,
+            }
+            .encode(),
+        };
+        match abort_after_fee {
+            Some(false) => instructions.extend([invalid, fee]),
+            Some(true) => instructions.extend([fee, invalid]),
+            None => instructions.push(fee),
+        }
+        let before = self.snapshot();
+        self.env.svm.expire_blockhash();
+        let mut signers = vec![&self.env.payer];
+        if abort_after_fee.is_some() {
+            signers.push(&self.env.admin);
+        }
+        let tx = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&self.env.payer.pubkey()),
+            &signers,
+            self.env.svm.latest_blockhash(),
+        );
+        let result = self.env.svm.send_transaction(tx);
+        if let Some(after) = abort_after_fee {
+            let error = result.expect_err("injected invalid policy must abort the transaction");
+            assert_eq!(
+                error.err,
+                solana_sdk::transaction::TransactionError::InstructionError(
+                    if after { 3 } else { 2 },
+                    solana_sdk::instruction::InstructionError::Custom(
+                        PercolatorError::InvalidInstruction as u32,
+                    ),
+                ),
+                "failure must occur at the injected instruction, not at the fee instruction"
+            );
+            assert_eq!(self.snapshot(), before, "aborted fragment must be atomic");
+        } else {
+            let metadata = result.expect("valid public fee fragment must succeed");
+            assert_cu_within(
+                "INV-059 maintenance history sync",
+                metadata.compute_units_consumed,
+                CUSTODY_CU_LIMIT,
+            );
+        }
+    }
+
+    fn close(&mut self, portfolio: Pubkey, dest: Pubkey, rate_hint: u128) -> Result<u64, String> {
+        self.env.svm.expire_blockhash();
+        self.env
+            .send(
+                ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: rate_hint,
+                },
+                vec![
+                    AccountMeta::new_readonly(self.owner.pubkey(), false),
+                    AccountMeta::new(self.env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(self.env.vault, false),
+                    AccountMeta::new_readonly(self.env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            )
+            .map(|cu| {
+                assert_cu_within("INV-059 maintenance history close", cu, CUSTODY_CU_LIMIT);
+                cu
+            })
+    }
+
+    fn assert_prefix(&self, expected: &MaintenanceFeeOracle, anchor: u64) {
+        let split = self.env.portfolio_state(self.split);
+        let whole = self.env.portfolio_state(self.whole);
+        assert_eq!(
+            split.capital.get(),
+            self.deposit - expected.gross + expected.self_reward,
+            "split payer is charged only the elapsed fee, net of its own reward"
+        );
+        assert_eq!(split.last_fee_slot.get(), anchor);
+        assert_eq!(whole.capital.get(), self.deposit);
+        assert_eq!(
+            whole.last_fee_slot.get(),
+            0,
+            "control remains unsynchronized"
+        );
+        self.assert_accounting(expected, 0, false);
+    }
+
+    fn assert_accounting(&self, expected: &MaintenanceFeeOracle, whole_fee: u128, closed: bool) {
+        for (key, before) in &self.stationary_accounts {
+            assert_eq!(self.env.svm.get_account(key).as_ref(), Some(before));
+        }
+        let group = self.env.market_state().1;
+        let rewards: u128 = self
+            .keepers
+            .iter()
+            .zip(expected.keeper_rewards)
+            .map(|(&key, reward)| {
+                assert_eq!(self.env.portfolio_state(key).capital.get(), reward);
+                reward
+            })
+            .sum();
+        assert_eq!(group.insurance, expected.retained + whole_fee);
+        assert_eq!(
+            group.insurance_domain_budget_remaining_total, group.insurance,
+            "every retained fee must remain in domain budgets across route changes"
+        );
+        assert_domain_budget_remaining_total_consistent(&group, "INV-059 fee history");
+        assert_eq!(
+            group.c_tot,
+            if closed {
+                rewards
+            } else {
+                2 * self.deposit - expected.gross + expected.rewards()
+            }
+        );
+        assert_eq!(group.vault, group.c_tot + group.insurance);
+        assert_eq!(
+            group.vault,
+            u128::from(self.env.token_amount(self.env.vault))
+        );
+        assert_eq!(
+            group.vault
+                + u128::from(self.env.token_amount(self.split_dest))
+                + u128::from(self.env.token_amount(self.whole_dest)),
+            2 * self.deposit,
+            "fees and payouts conserve actual custody"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 32,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/inv_059_maintenance_episode_fragmentation.txt",
+        ))),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_public_maintenance_episode_fragmentation(
+        rate in 1u128..=257,
+        share in prop_oneof![
+            Just(0u16), Just(1u16), Just(3_333u16), Just(5_000u16),
+            Just(9_999u16), Just(10_000u16), 0u16..=10_000,
+        ],
+        first_slots in 1u64..=31,
+        second_slots in 1u64..=31,
+        rest in proptest::collection::vec(maintenance_fee_fragment(), 0..7),
+        tail_slots in 1u64..=31,
+        terminal_delay in 1u64..=31,
+        terminal_sync in proptest::option::of(maintenance_reward_route()),
+        slot_hint in prop_oneof![Just(0u64), Just(u64::MAX), any::<u64>()],
+        rate_hint in prop_oneof![Just(0u128), Just(u128::MAX), any::<u128>()],
+    ) {
+        // Shrinking retains two positive fragments, a route change, an abort after
+        // a payable fee, and a positive unpaid tail crossing into CloseResolved.
+        let mut fragments = vec![
+            MaintenanceFeeFragment {
+                slots: first_slots,
+                route: MaintenanceRewardRoute::SelfReward,
+                abort_after_fee: Some(true),
+                retries: 1,
+            },
+            MaintenanceFeeFragment {
+                slots: second_slots,
+                route: MaintenanceRewardRoute::Keeper(0),
+                abort_after_fee: Some(false),
+                retries: 0,
+            },
+        ];
+        fragments.extend(rest);
+        let resolved_slot = fragments.iter().map(|part| part.slots).sum::<u64>() + tail_slots;
+        let whole_fee = rate * u128::from(resolved_slot);
+        let mut episode = MaintenanceFeeEpisode::new(rate, share, whole_fee + 10_000);
+        let mut expected = MaintenanceFeeOracle::default();
+        let mut slot = 0;
+        episode.assert_prefix(&expected, slot);
+
+        for part in &fragments {
+            slot += part.slots;
+            episode.env.svm.warp_to_slot(slot);
+            if let Some(after) = part.abort_after_fee {
+                episode.sync(part.route, slot_hint, Some(after));
+                episode.assert_prefix(&expected, slot - part.slots);
+            }
+            episode.sync(part.route, slot_hint, None);
+            expected.charge(part.slots, rate, share, part.route);
+            episode.assert_prefix(&expected, slot);
+            for retry in 0..part.retries {
+                // Distinct blockhashes and a different reward tail ensure these
+                // reach the wrapper, rather than just hitting AlreadyProcessed.
+                let before = episode.snapshot();
+                let retry_route = if retry == 0 {
+                    MaintenanceRewardRoute::Keeper(1)
+                } else {
+                    MaintenanceRewardRoute::Insurance
+                };
+                episode.sync(retry_route, slot_hint, None);
+                assert_eq!(episode.snapshot(), before, "same-slot route change must not rebill");
+            }
+        }
+
+        episode.env.svm.warp_to_slot(resolved_slot);
+        episode.env.resolve();
+        assert_eq!(episode.env.market_state().1.resolved_slot, resolved_slot);
+        episode.env.svm.warp_to_slot(resolved_slot + terminal_delay);
+        let before = episode.snapshot();
+        let error = episode.close(episode.split, episode.bad_dest, rate_hint)
+            .expect_err("wrong-owner destination must reject after terminal fee accounting");
+        assert!(error.contains(&format!(
+            "Custom({})",
+            PercolatorError::InvalidTokenAccount as u32,
+        )), "close must reach destination validation: {error}");
+        assert_eq!(episode.snapshot(), before, "failed close cannot consume the unpaid fee tail");
+
+        if let Some(route) = terminal_sync {
+            episode.sync(route, slot_hint, None);
+            expected.charge(tail_slots, rate, share, route);
+            episode.assert_prefix(&expected, resolved_slot);
+        } else {
+            expected.charge(tail_slots, rate, share, MaintenanceRewardRoute::Insurance);
+        }
+
+        episode.close(episode.split, episode.split_dest, rate_hint)
+            .expect("repaired split close must pay out");
+        episode.close(episode.whole, episode.whole_dest, rate_hint)
+            .expect("unsplit control closes under the same authenticated schedule");
+        episode.assert_accounting(&expected, whole_fee, true);
+        assert_eq!(expected.gross, whole_fee, "gross fee fragmentation has zero slack");
+        let split_payout = u128::from(episode.env.token_amount(episode.split_dest));
+        let whole_payout = u128::from(episode.env.token_amount(episode.whole_dest));
+        assert_eq!(whole_payout, episode.deposit - whole_fee);
+        assert_eq!(split_payout - expected.self_reward, whole_payout);
+        assert_eq!(expected.retained + expected.rewards(), whole_fee);
+
+        // Reward rounding is the only partition allowance, not a fresh fee on
+        // retry or CloseResolved. Normalize for fragments with no reward route.
+        let unsplit_reward = expected.rewarded_gross * u128::from(share) / 10_000;
+        assert!(expected.rewards() <= unsplit_reward);
+        assert!(unsplit_reward - expected.rewards() < expected.rewarded_fragments);
+        let before = episode.snapshot();
+        episode.env.svm.warp_to_slot(resolved_slot + terminal_delay + 31);
+        episode.sync(MaintenanceRewardRoute::Keeper(1), u64::MAX, None);
+        let error = episode.close(episode.split, episode.split_dest, u128::MAX)
+            .expect_err("completed close must select no action, not another payout");
+        assert!(is_engine_non_progress_error(&error), "terminal retry: {error}");
+        assert_eq!(episode.snapshot(), before, "terminal route retries neither rebill nor repay");
     }
 }

@@ -6360,12 +6360,13 @@ Traceability review, 2026-09-07: the INV-059 M row in `special_method_coverage.t
 link repair, not a new SBF/Kani run or status promotion. The registry indexes M/R/C, not F; its
 unchanged `COVERED` M cell does not discharge the episode-history F gap.
 
-| Executing entrypoint | Finite domain and assertion owner |
+| Executing entrypoint | Scoped domain and assertion owner |
 | --- | --- |
 | `v16_program_healthy_partial_liquidation_retries_cannot_multiply_fees` | One single-asset public world with an engine-selected nonzero-fee partial close restoring certified health, followed by sixteen same-state retries. `liquidation_fee_oracle` checks the charge; each retry checks explicit NonProgress and exact market, target-portfolio, and SPL-vault account frames. |
 | `v16_program_new_liquidation_fee_episode_requires_new_authenticated_deficit` | `RepeatedLiquidationRoute::ALL` rebuilds four worlds: TradeNoCpi, TradeCpi, BatchTradeNoCpi, and BatchTradeCpi. `run_new_liquidation_fee_episode` checks two fee-bearing deficit episodes, an intervening same-state retry and rejected discovery input, then a fresh owner reduction. Opening and reduction use the same transport in each world; liquidation always uses PermissionlessCrank. This is not a cross-route history product. |
 | `v16_program_minimum_fee_episode_histories_match_aggregate_close` | Forty public worlds: both signs, four `(bps, minimum, cap)` profiles, and an aggregate owner-reduction control versus four rotating cross-transport split schedules. Each reaches one engine-selected full liquidation with exactly one nonzero minimum fee within the configured cap, then withdraws the target's exact remaining capital. The split histories include 64 duplicate-discovery rejections and 96 healthy retries, each with exact tracked rollback. |
 | `v16_program_liquidation_mixed_cashflows_preserve_reward_attribution_and_owner_exit` | Sixteen INV-059/061 public histories cross both signs, RebalanceReduce/bilateral TradeNoCpi owner exits, deposits and insurance top-ups before/after liquidation, and amounts 1/17. A separate input-driven ledger checks proportional fees, floor-rounded rewards, principal, zero marked PnL and fixed-endowment SPL custody after each economic prefix. Wrong-owner reward tails and healthy retries frame fourteen accounts exactly; every world withdraws both target and keeper capital and closes both portfolios. |
+| `v16_program_public_maintenance_episode_fragmentation` | Shrinkable, bounded funded-flat maintenance histories compare a split payer with an unsplit control under the same authenticated clock and resolution slot. Two to eight live fragments vary slot partitions, reward tails, rounding policy, and transaction-error/retry placement before a positive terminal fee tail. An input-only ledger checks every live prefix, sixteen-account rollback, and normalized SPL payouts across SyncMaintenanceFee/CloseResolved. This is maintenance history evidence, not randomized liquidation episode closure. |
 
 The first two campaigns fix one asset, the liquidated short side, fee rate 100 bps, minimum zero, and cap
 10 atoms. They do not generate fee profiles, episode counts, retry placements, or arbitrary
@@ -6472,6 +6473,100 @@ declared normalization; noncommuting schedules need a separately justified outco
 Require a bounded fresh public continuation after the generated retries. This planned generator
 must observe engine-selected closes, not request partitions, inject state, add finding-specific
 adapters, or duplicate engine proofs. No implementation or method closure is claimed here.
+
+#### Funded-flat maintenance history increment
+
+The maintenance entrypoint above is owned directly by
+[`cu/inv_059_fee_fragmentation_bound.rs`](cu/inv_059_fee_fragmentation_bound.rs). It adds a
+shrinkable public-history slice alongside the planned liquidation generator, not a replacement
+for that plan. INV-052's `v16_program_maintenance_fee_cadence_is_conservative_and_value_exact`
+already checks three fixed cadences at one rate/share and recipient. INV-040's
+`v16_program_clipped_maintenance_refill_retries_cannot_recharge_or_redirect` owns clipped-fee
+refill and reward-tail replay. Neither generates funded partition/error schedules through
+resolution or compares terminal fee routes with an unsplit control. Those existing owners are
+not moved or duplicated, and no invariant or method status is promoted.
+
+The new strategy generates fee rates 1..=257 atoms/slot, two to eight positive live fragments
+with 1..=31-slot advances, all valid reward shares with extra weight on 0/1/3333/5000/9999/10000,
+and reward routes to insurance alone, the payer alias, or either of two keeper portfolios.
+Optional fragments vary failure placement and zero to two same-slot retries. Every shrink
+retains two positive fragments, a self-to-keeper route change, both error orderings, a fresh
+successful retry, and a positive unpaid terminal tail. The known-invalid policy instruction
+uses the current authority epoch and next policy sequence; the error must identify that
+instruction, not the otherwise payable fee instruction. Fresh blockhashes ensure successful
+retries actually reach the wrapper rather than transaction deduplication.
+
+At resolution, a wrong-owner destination must reject after terminal fee accounting with exact
+rollback. Repair either closes directly or first synchronizes the remaining maintenance fee
+through a generated reward route. Both payers then close under the same authenticated schedule.
+A delayed terminal SyncMaintenanceFee succeeds without another charge, while a completed
+CloseResolved retry must return the current branch's EngineNonProgress and frame exactly.
+Arbitrary caller slot/rate hints cannot replace the authenticated clock/configured fee rate.
+
+`MaintenanceFeeOracle` reads only generated intervals, rate and share, never observed charge
+deltas or engine fee helpers. Every live prefix checks both payers, both keepers, fee anchor,
+aggregate capital, retained insurance, domain-budget reconciliation, and actual SPL custody.
+The rollback frame includes market, four portfolios, vault, three destinations, mint, two
+deposit sources and four authority wallets; only the network-fee payer and clock/blockhash
+sysvars are excluded. The mint, sources and authority wallets also stay unchanged at accepted
+prefixes. Initialization/deposits use the existing public wrapper fixture; no initialized
+engine account bytes are seeded or mutated. Successful syncs/closes must stay within 300,000 CU.
+
+Gross episode fees equal `rate * resolved_slot` for both payers. After subtracting the intended
+self reward, split and control owner payouts match. For rewarded gross amount `G`, configured
+share `b`, summed rewards `R`, and `n` rewarded fragments, the only partition allowance is
+`0 <= floor(G*b/10000) - R < n`. Retained insurance plus all rewards equals the gross fee;
+the differential oracle does not demand equal net fees for routes that intentionally rebate
+the payer. Deposits exceed the full scheduled fee, keeping every terminal payout positive.
+
+The default is 32 cases, overridable by `PROPTEST_CASES` and `PROPTEST_RNG_SEED`; persisted
+failures belong in `proptest-regressions/inv_059_maintenance_episode_fragmentation.txt`.
+Liquidation minima/caps, trading minimum fees, nonflat loss-currentness, exhausted capital,
+policy changes during an episode, provider/support attribution, arbitrary-length histories,
+multi-asset/lifecycle schedules and the full INV-059 F gap remain outside this increment.
+
+Verification uses a fresh worktree based on PR427 branch
+`codex/invariant-fidelity-reopen-20260904` at `0c4fb36bb77af10d9f5f62582016e423567c3fa1`.
+The existing `program_path()` honors `PERCOLATOR_FUZZ_SBF`; no harness change, symlink,
+production change or SBF rebuild is needed. The supplied default-feature SBF has SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+No evidence from the superseded legacy-entrypoint run is carried forward.
+
+Final verification, 2026-09-08, from
+`/home/anatoly/pr427-inv059-public-history-revised-20260908`: both property commands below
+passed one exact test with 128 cases each (256 histories total), zero failures, and 984 tests
+filtered out. Test execution took 54.15s and 54.89s, respectively. The first attempt at seed
+590427 stopped before execution with host-build `No space left on device`; the identical
+command passed after an inactive cached host test binary was removed. No SBF was rebuilt or
+replaced. A one-case setup check also passed (0.41s); it is not included in the 256-history total.
+
+```bash
+env PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 PROPTEST_RNG_SEED=427059 PROPTEST_CASES=128 cargo test --locked --offline --test v16_cu inv_059_fee_fragmentation_bound::v16_program_public_maintenance_episode_fragmentation -- --exact --nocapture
+env PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 PROPTEST_RNG_SEED=590427 PROPTEST_CASES=128 cargo test --locked --offline --test v16_cu inv_059_fee_fragmentation_bound::v16_program_public_maintenance_episode_fragmentation -- --exact --nocapture
+```
+
+Four exact neighboring regressions passed with one test, zero failures and 984 filtered out
+per command; execution times were 1.08s, 0.38s, 0.35s and 0.44s, respectively:
+
+```bash
+env PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked --offline --test v16_cu inv_052_split_merge_invariance::v16_program_maintenance_fee_cadence_is_conservative_and_value_exact -- --exact --nocapture
+env PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked --offline --test v16_cu inv_040_no_fee_seniority::v16_program_clipped_maintenance_refill_retries_cannot_recharge_or_redirect -- --exact --nocapture
+env PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_audit_resolved_maintenance_fee_insurance_stays_recoverable -- --exact --nocapture
+env PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked --offline --test v16_cu inv_059_fee_fragmentation_bound::v16_program_healthy_partial_liquidation_retries_cannot_multiply_fees -- --exact --nocapture
+```
+
+Formatting and diff hygiene passed (exit 0, no output):
+
+```bash
+rustfmt --edition 2021 --check tests/invariants/cu/inv_059_fee_fragmentation_bound.rs
+git diff --check
+git diff --cached --check
+git diff --exit-code HEAD -- src tests/v16_cu.rs tests/support Cargo.toml Cargo.lock
+```
+
+The successful test commands used default Cargo features and emitted only the existing
+`solana-client v1.18.26` future-incompatibility warning. No full suite or engine proofs were run.
+No GitHub PR/issue diffs or holdout branches were inspected for this increment.
 
 ### INV-071 progress-class proof traceability
 
