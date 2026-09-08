@@ -71,6 +71,10 @@
 //! drain every funded account at the exact public deadline. This composes stale-account refresh
 //! with terminal disposition; it does not add an engine selector model, a receipt/resource-failure
 //! topology, or a supported-maximum claim.
+//!
+//! The partial-receipt rank witness reuses the shared public receipt seed. A keeper-only expiry
+//! release lowers account-referenced fresh-backing work, then a partial top-up lowers only unpaid
+//! value. The receipt remains nonterminal, and admitted duplicate claims remain exact no-ops.
 
 use super::*;
 use crate::support::fuzz_model::{
@@ -811,6 +815,7 @@ fn inv082_economically_terminal(env: &V16Svm, actor: usize) -> bool {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Inv082TerminalRank {
     active_legs: u64,
+    fresh_backed_sources: u64,
     occupied_sources: u64,
     nonzero_pnl_accounts: u64,
     unfinished_receipts: u64,
@@ -819,7 +824,8 @@ struct Inv082TerminalRank {
 }
 
 fn inv082_terminal_rank(env: &V16Svm) -> Inv082TerminalRank {
-    assert_eq!(env.primary_market_state().1.mode, MarketModeV16::Resolved);
+    let market = env.primary_market_state().1;
+    assert_eq!(market.mode, MarketModeV16::Resolved);
     let mut rank = Inv082TerminalRank::default();
     for actor in 0..PRIMARY_ACTOR_COUNT {
         let account = env.primary_portfolio(actor);
@@ -829,11 +835,21 @@ fn inv082_terminal_rank(env: &V16Svm) -> Inv082TerminalRank {
             .filter_map(|leg| leg.try_to_runtime().ok())
             .filter(|leg| leg.active)
             .count() as u64;
-        rank.occupied_sources += account
+        for source in account
             .source_domains
             .iter()
             .filter(|source| source.is_occupied())
-            .count() as u64;
+        {
+            rank.occupied_sources += 1;
+            let bucket = &market.source_backing_buckets[source.domain.get() as usize];
+            // Expiry can release backing without removing its account source or paying a claim.
+            // Count only account-referenced backing, not signer-gated provider cleanup.
+            rank.fresh_backed_sources += u64::from(
+                bucket.status == percolator::BackingBucketStatusV16::Fresh
+                    && (bucket.fresh_unliened_backing_num != 0
+                        || bucket.valid_liened_backing_num != 0),
+            );
+        }
         rank.nonzero_pnl_accounts += u64::from(account.pnl.get() != 0);
         if let Ok(receipt) = account.resolved_payout_receipt.try_to_runtime() {
             if receipt.present && !receipt.finalized {
@@ -861,6 +877,135 @@ fn inv082_terminal_rank(env: &V16Svm) -> Inv082TerminalRank {
         }
     }
     rank
+}
+
+#[test]
+fn v16_program_partial_receipt_topup_decreases_only_outstanding_value_rank() {
+    const CLAIMANT: usize = 0;
+    const BACKED_OWNER: usize = 2;
+    let mut env = crate::support::fuzz_model::public_resolved_receipt_seed([100, 100], 14).unwrap();
+    let receipt = |env: &V16Svm| {
+        env.primary_portfolio(CLAIMANT)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .unwrap()
+    };
+    let initial = receipt(&env);
+    assert!(initial.present && !initial.finalized);
+    assert!(initial.paid_effective < initial.terminal_positive_claim_face);
+    assert!(!inv082_economically_terminal(&env, CLAIMANT));
+    let supply_before = env.token_supply_observed();
+    let unavailable: BTreeSet<_> = env
+        .actors
+        .iter()
+        .map(|actor| actor.signer.pubkey())
+        .chain(std::iter::once(Pubkey::new_from_array(
+            env.primary_market_state().0.marketauth,
+        )))
+        .collect();
+    env.begin_public_trace();
+
+    let waiting = inv082_terminal_rank(&env);
+    assert_eq!(waiting.fresh_backed_sources, 2);
+    let frame = inv082_account_frame(&env);
+    env.claim_resolved_payout_topup_primary(CLAIMANT)
+        .expect("a currently exhausted claim is an admitted no-op");
+    inv082_assert_frame(&env, &frame, &[]);
+    assert_eq!(inv082_terminal_rank(&env), waiting);
+    assert_ne!(waiting, Inv082TerminalRank::default());
+
+    // Reuse the receipt owner's public expiry prerequisite, without its owner signature.
+    assert_eq!(env.current_slot(), 12);
+    env.warp_to_slot(13);
+    assert_eq!(inv082_terminal_rank(&env), waiting);
+    let frame = inv082_account_frame(&env);
+    env.close_resolved_primary(BACKED_OWNER)
+        .expect("keeper releases the first expired backing domain");
+    inv082_assert_frame(
+        &env,
+        &frame,
+        &[env.market, env.actors[BACKED_OWNER].portfolio],
+    );
+    let released = inv082_terminal_rank(&env);
+    assert_eq!(
+        released,
+        Inv082TerminalRank {
+            fresh_backed_sources: 1,
+            ..waiting
+        }
+    );
+    assert!(released < waiting);
+    assert_eq!(receipt(&env), initial);
+    assert_public_stock_census("INV-082 receipt backing release", &env).unwrap();
+    assert_public_encumbrance_census("INV-082 receipt backing release", &env).unwrap();
+
+    let before = inv082_terminal_rank(&env);
+    let frame = inv082_account_frame(&env);
+    let destination = env.actors[CLAIMANT].destination_token;
+    let destination_before = env.token_amount(destination);
+    let vault_before = env.primary_market_state().1.vault;
+    env.claim_resolved_payout_topup_primary(CLAIMANT)
+        .expect("keeper receives the newly payable partial claim");
+    let paid = u128::from(
+        env.token_amount(destination)
+            .checked_sub(destination_before)
+            .unwrap(),
+    );
+    let partial = receipt(&env);
+    assert!(paid > 0);
+    assert!(partial.present && !partial.finalized);
+    assert_eq!(
+        partial.terminal_positive_claim_face,
+        initial.terminal_positive_claim_face
+    );
+    assert_eq!(partial.paid_effective, initial.paid_effective + paid);
+    assert!(partial.paid_effective < partial.terminal_positive_claim_face);
+    let after = inv082_terminal_rank(&env);
+    assert_eq!(
+        after,
+        Inv082TerminalRank {
+            outstanding_value: before.outstanding_value.checked_sub(paid).unwrap(),
+            ..before
+        },
+        "partial payout must consume only the value lane, without clearing a receipt or account"
+    );
+    assert!(after < before);
+    assert!(!inv082_economically_terminal(&env, CLAIMANT));
+    assert_ne!(after, Inv082TerminalRank::default());
+    assert_eq!(env.primary_market_state().1.vault, vault_before - paid);
+    assert_eq!(u128::from(env.token_amount(env.vault)), vault_before - paid);
+    inv082_assert_frame(
+        &env,
+        &frame,
+        &[
+            env.market,
+            env.actors[CLAIMANT].portfolio,
+            destination,
+            env.vault,
+        ],
+    );
+    assert_public_stock_census("INV-082 partial receipt rank progress", &env).unwrap();
+    assert_public_encumbrance_census("INV-082 partial receipt rank progress", &env).unwrap();
+
+    let frame = inv082_account_frame(&env);
+    env.claim_resolved_payout_topup_primary(CLAIMANT)
+        .expect("same-Clock paid-rate retry is an admitted no-op, not another rank edge");
+    inv082_assert_frame(&env, &frame, &[]);
+    assert_eq!(inv082_terminal_rank(&env), after);
+    assert!(!inv082_economically_terminal(&env, CLAIMANT));
+    assert_eq!(env.token_supply_observed(), supply_before);
+    assert_eq!(
+        env.primary_market_state().1.materialized_portfolio_count,
+        PRIMARY_ACTOR_COUNT as u64
+    );
+    let trace = env.finish_public_trace();
+    trace.validate_public_execution().unwrap();
+    assert_eq!(trace.steps.len(), 4);
+    for step in &trace.steps {
+        assert!(step.succeeded && inv082_keeper_only(step, &unavailable));
+        assert!(step.compute_units.unwrap() < TX_CU_LIMIT);
+    }
+    eprintln!("INV-082 partial receipt: keeper_calls=4 rank_edges=2 exact_noops=2 paid={paid} remaining_claim={}", partial.terminal_positive_claim_face - partial.paid_effective);
 }
 
 #[derive(Clone, Copy, Debug)]

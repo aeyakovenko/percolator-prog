@@ -4193,6 +4193,9 @@ These untested coverage gaps are not findings and receive no severity/impact lab
    INV-063/071/073/078; one failed candidate or a working escape must not become a DoS claim.
    The [implementation-readiness slice](#inv-082-implementation-readiness) below specifies the
    next bounded increment without promoting the existing method or invariant statuses.
+   The focused `v16_program_partial_receipt_topup_decreases_only_outstanding_value_rank` witness
+   now reuses the public receipt seed to rank backing normalization followed by a value-only
+   decrement while a junior receipt remains nonterminal; it does not supply the missing product.
 
 3. **INV-012: retained capability lifecycle.** Owner:
    [`stateful/inv_012_capability_and_delegate_scope.rs`](stateful/inv_012_capability_and_delegate_scope.rs).
@@ -6824,6 +6827,32 @@ failure, arbitrary environmental histories, administrative restart, and supporte
 open. Five economically terminal portfolios remain materialized, so signer-gated deletion is not
 claimed as permissionless progress. Whole-transition classifier fidelity and engine rank proofs
 remain delegated to their existing owners; no proof is duplicated and no status is promoted.
+
+The focused partial-receipt rank partition is covered by [SF-082]
+`v16_program_partial_receipt_topup_decreases_only_outstanding_value_rank` (base `faddff5f`,
+2026-09-08). It reuses `public_resolved_receipt_seed([100, 100], 14)` without a new constructor or
+selector model. After a one-slot authenticated wait, a keeper-only `CloseResolved` releases the
+first expired backing domain. The prior rank incorrectly treated this prerequisite as unchanged;
+the rank now also counts fresh nonzero backing referenced by occupied account sources, excluding
+unrelated provider cleanup. Normalization strictly lowers only that count, from two to one.
+Then `ClaimResolvedPayoutTopup` pays a strictly positive but still partial claim. The decoded rank
+must decrease by exactly the SPL payout in its outstanding-value lane while every structural lane
+remains unchanged. The receipt and account remain nonterminal;
+receipt creation or partial payment cannot be mistaken for completion. Same-Clock claims before
+release and after payment are exact admitted no-ops, not progress edges. Account frames, stock and
+encumbrance censuses, custody, supply, and compiled keeper-only signatures constrain the suffix.
+
+Focused validation passes four keeper-only calls: two strict rank edges and two exact admitted
+no-ops. The top-up pays 160 atoms and leaves a 745-atom partial claim. The existing eight-world
+stale-exposure test using the extended rank also passes, as do `cargo fmt --check` and
+`git diff --check`. The cached default-feature SBF `230b6db1` and matcher `50e53226` were reused;
+no program rebuild or engine proof run is claimed.
+
+This adds the previously unexercised value-only partition of INV-082's current-state rank, not a
+new receipt arithmetic, claimant-order, or full terminal-drain matrix; those remain owned by
+INV-038/068/086. The test stops at a partial receipt with five materialized portfolios and does not
+claim full economic completion, signer-free deletion, a general environmental generator, an engine
+proof, or a status promotion.
 
 ### INV-086 generator and oracle boundaries
 
