@@ -32,6 +32,441 @@ use super::*;
 mod mixed_maturity;
 
 #[test]
+fn v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition() {
+    use super::inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market;
+    use crate::support::fuzz_model::{
+        assert_market_stock_census, assert_reservation_encumbrance_census,
+    };
+
+    const CAPITAL: u64 = 1_009;
+    const SURPLUS: u64 = 17;
+    const UNSYNCED: u64 = 19;
+    const STEP_CU_LIMIT: u64 = 150_000;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum Stage {
+        Funded,
+        Deposited,
+        Resolved,
+        Paid,
+        Dematerialized,
+        Synced,
+        Closed,
+    }
+
+    for sync_before_close in [false, true] {
+        let mut env = inv081_public_native_market();
+        let admin = env.admin.insecure_clone();
+        let owner = Keypair::new();
+        env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let mut peak_cu = 0;
+        let mut check_cu = |label, cu| {
+            assert_cu_within(label, cu, STEP_CU_LIMIT);
+            peak_cu = peak_cu.max(cu);
+        };
+        check_cu("native InitMarket", env.init_market_cu);
+        let portfolio_key = Keypair::new();
+        check_cu(
+            "native portfolio System creation",
+            system_create_account_for_test(
+                &mut env.svm,
+                &env.payer,
+                &portfolio_key,
+                env.portfolio_account_len,
+                env.program_id,
+            ),
+        );
+        let portfolio = portfolio_key.pubkey();
+        let portfolio_accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ];
+        check_cu(
+            "native InitPortfolio",
+            env.send(
+                ProgInstruction::InitPortfolio,
+                portfolio_accounts,
+                &[&owner],
+            )
+            .unwrap(),
+        );
+        env.portfolios.push(portfolio);
+        let user_token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+        let admin_token = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+        let token_rent = env
+            .svm
+            .minimum_balance_for_rent_exemption(TokenAccount::LEN);
+        let token_keys = [user_token, admin_token, env.vault];
+        let empty_tokens = token_keys.map(|key| env.svm.get_account(&key).unwrap());
+        for (account, wallet) in
+            empty_tokens
+                .iter()
+                .zip([owner.pubkey(), admin.pubkey(), env.vault_authority])
+        {
+            let token = TokenAccount::unpack(&account.data).unwrap();
+            assert_eq!(account.owner, spl_token::ID);
+            assert_eq!(account.lamports, token_rent);
+            assert_eq!(token.mint, spl_token::native_mint::ID);
+            assert_eq!(token.owner, wallet);
+            assert_eq!(token.amount, 0);
+            assert_eq!(token.is_native, COption::Some(token_rent));
+            assert_eq!(token.state, AccountState::Initialized);
+            assert_eq!(token.delegate, COption::None);
+            assert_eq!(token.close_authority, COption::None);
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+        check_cu(
+            "native public funding and raw vault donation",
+            send_raw_ixs(
+                &mut env.svm,
+                &env.payer,
+                vec![
+                    ComputeBudgetInstruction::set_compute_unit_limit(STEP_CU_LIMIT as u32),
+                    system_instruction::transfer(&owner.pubkey(), &user_token, CAPITAL),
+                    spl_token::instruction::sync_native(&spl_token::ID, &user_token).unwrap(),
+                    system_instruction::transfer(&admin.pubkey(), &env.vault, SURPLUS),
+                    spl_token::instruction::sync_native(&spl_token::ID, &env.vault).unwrap(),
+                    system_instruction::transfer(&admin.pubkey(), &env.vault, UNSYNCED),
+                ],
+                &[&owner, &admin],
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market),
+            Some(market_before.clone())
+        );
+        assert_eq!(
+            env.svm.get_account(&portfolio),
+            Some(portfolio_before.clone())
+        );
+
+        let cfg_before = env.market_state().0;
+        assert_eq!(
+            cfg_before.collateral_mint,
+            spl_token::native_mint::ID.to_bytes()
+        );
+        assert_eq!(cfg_before.secondary_collateral_mint, [0; 32]);
+        assert_eq!(
+            env.vault,
+            canonical_vault_ata(env.vault_authority, env.mint)
+        );
+        let portfolio_id = env.portfolio_id(portfolio);
+        let mint_before = env.svm.get_account(&env.mint);
+        let authority_before = env.svm.get_account(&env.vault_authority);
+        let owner_before = env.svm.get_account(&owner.pubkey());
+        let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+        let tombstone_rent = env
+            .svm
+            .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
+        let tracked = [
+            env.market,
+            portfolio,
+            env.vault,
+            user_token,
+            admin_token,
+            env.mint,
+            env.vault_authority,
+            owner.pubkey(),
+            admin.pubkey(),
+        ];
+        let lamport_sum = |env: &V16CuEnv| {
+            tracked
+                .iter()
+                .filter_map(|key| env.svm.get_account(key))
+                .map(|account| account.lamports)
+                .sum::<u64>()
+        };
+        let total_lamports = lamport_sum(&env);
+
+        // Inputs and the completed public stage determine every stock. Native mint supply
+        // does not count wrapped SOL; backing lamports and token amounts must be reconciled.
+        let check = |env: &V16CuEnv, stage: Stage| {
+            let capital = if matches!(stage, Stage::Deposited | Stage::Resolved) {
+                CAPITAL
+            } else {
+                0
+            };
+            let closed = stage == Stage::Closed;
+            let materialized = stage < Stage::Dematerialized;
+            let synced = sync_before_close && stage >= Stage::Synced;
+            let raw_surplus = SURPLUS + if synced { UNSYNCED } else { 0 };
+            let raw_lamports = if synced { 0 } else { UNSYNCED };
+            let amounts = [
+                CAPITAL - capital,
+                if closed { raw_surplus } else { 0 },
+                capital + raw_surplus,
+            ];
+            for (index, key) in token_keys.iter().enumerate() {
+                if closed && index == 2 {
+                    assert!(env.svm.get_account(key).is_none_or(|account| {
+                        account.lamports == 0 && account.data.iter().all(|byte| *byte == 0)
+                    }));
+                    continue;
+                }
+                let mut expected = empty_tokens[index].clone();
+                let mut token = TokenAccount::unpack(&expected.data).unwrap();
+                token.amount = amounts[index];
+                TokenAccount::pack(token, &mut expected.data).unwrap();
+                expected.lamports += amounts[index] + if index == 2 { raw_lamports } else { 0 };
+                assert_eq!(
+                    env.svm.get_account(key),
+                    Some(expected),
+                    "{stage:?}: native token frame {key}"
+                );
+            }
+            assert_eq!(env.svm.get_account(&env.mint), mint_before);
+            assert_eq!(env.svm.get_account(&env.vault_authority), authority_before);
+            assert_eq!(env.svm.get_account(&owner.pubkey()), owner_before);
+            let mut expected_admin = admin_before.clone();
+            if closed {
+                expected_admin.lamports +=
+                    market_before.lamports + portfolio_before.lamports + token_rent + raw_lamports
+                        - tombstone_rent;
+            }
+            assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+            assert_eq!(
+                lamport_sum(env),
+                total_lamports,
+                "{stage:?}: exact lamport conservation excluding the separate fee payer"
+            );
+            let market = env.svm.get_account(&env.market).unwrap();
+            assert_eq!(market.owner, market_before.owner);
+            assert_eq!(market.executable, market_before.executable);
+            assert_eq!(market.rent_epoch, market_before.rent_epoch);
+            assert_eq!(
+                market.lamports,
+                if closed {
+                    tombstone_rent
+                } else {
+                    market_before.lamports
+                        + if materialized {
+                            0
+                        } else {
+                            portfolio_before.lamports
+                        }
+                }
+            );
+            let portfolios = if materialized {
+                let account = env.svm.get_account(&portfolio).unwrap();
+                assert_eq!(account.lamports, portfolio_before.lamports);
+                assert_eq!(account.owner, portfolio_before.owner);
+                assert_eq!(account.executable, portfolio_before.executable);
+                assert_eq!(account.rent_epoch, portfolio_before.rent_epoch);
+                assert_eq!(env.portfolio_id(portfolio), portfolio_id);
+                let state = env.portfolio_state(portfolio);
+                assert_eq!(state.owner, owner.pubkey().to_bytes());
+                assert_eq!(state.capital.get(), capital.into());
+                vec![state]
+            } else {
+                assert!(env
+                    .svm
+                    .get_account(&portfolio)
+                    .is_none_or(|account| { account.lamports == 0 && account.data.is_empty() }));
+                Vec::new()
+            };
+            if closed {
+                assert_eq!(capital, 0);
+                assert_closed_market_tombstone(&market);
+            } else {
+                let (cfg, group) = state::read_market(&market.data).unwrap();
+                assert_eq!(cfg, cfg_before);
+                assert_eq!(
+                    group.mode,
+                    if stage >= Stage::Resolved {
+                        MarketModeV16::Resolved
+                    } else {
+                        MarketModeV16::Live
+                    }
+                );
+                assert_eq!(
+                    (group.vault, group.c_tot, group.insurance),
+                    (capital.into(), capital.into(), 0)
+                );
+                // The census owns booked stock. Remove only the independently fixed raw
+                // donation from actual SPL custody, never a surplus inferred from the engine.
+                let booked = env
+                    .token_amount(env.vault)
+                    .checked_sub(raw_surplus)
+                    .unwrap();
+                assert_eq!(booked, capital);
+                assert_market_stock_census(
+                    "INV-070 native terminal",
+                    &group,
+                    &market.data,
+                    &portfolios,
+                    booked.into(),
+                )
+                .unwrap();
+                assert_reservation_encumbrance_census(
+                    "INV-070 native terminal",
+                    &group,
+                    &portfolios,
+                )
+                .unwrap();
+                let mut data = market.data.clone();
+                let (_, view) = state::market_view_mut(&mut data).unwrap();
+                view.validate_shape().unwrap();
+                if materialized {
+                    let mut data = env.svm.get_account(&portfolio).unwrap().data;
+                    state::portfolio_view_mut_for_market_slots(&mut data, 1)
+                        .unwrap()
+                        .validate_with_market(&view.as_view())
+                        .unwrap();
+                }
+            }
+        };
+        check(&env, Stage::Funded);
+        check_cu(
+            "native Deposit",
+            env.send(
+                env.deposit_ix(portfolio, CAPITAL.into()),
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(user_token, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owner],
+            )
+            .unwrap(),
+        );
+        check(&env, Stage::Deposited);
+        let funded_portfolio = env.svm.get_account(&portfolio);
+        check_cu(
+            "native ResolveMarket",
+            env.send(
+                ProgInstruction::ResolveMarket {
+                    asset_generation_frontier: 0,
+                    authority_epoch: env.control_sequences(0).authority_epoch,
+                },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                &[&admin],
+            )
+            .unwrap(),
+        );
+        assert_eq!(env.svm.get_account(&portfolio), funded_portfolio);
+        check(&env, Stage::Resolved);
+        check_cu(
+            "native permissionless CloseResolved",
+            env.send(
+                ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                },
+                vec![
+                    AccountMeta::new_readonly(owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(user_token, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            )
+            .unwrap(),
+        );
+        check(&env, Stage::Paid);
+        check_cu(
+            "native ClosePortfolio",
+            env.close_portfolio_with_cu(&owner, portfolio),
+        );
+        check(&env, Stage::Dematerialized);
+        if sync_before_close {
+            let frame = [env.market, portfolio].map(|key| env.svm.get_account(&key));
+            env.svm.expire_blockhash();
+            check_cu(
+                "terminal vault SyncNative",
+                send_raw_tx(
+                    &mut env.svm,
+                    &env.payer,
+                    spl_token::instruction::sync_native(&spl_token::ID, &env.vault).unwrap(),
+                    &[],
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                [env.market, portfolio].map(|key| env.svm.get_account(&key)),
+                frame
+            );
+            check(&env, Stage::Synced);
+        }
+        check_cu(
+            "native CloseSlab",
+            env.send(
+                ProgInstruction::CloseSlab {
+                    authority_epoch: env.control_sequences(0).authority_epoch,
+                },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new(admin_token, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&admin],
+            )
+            .unwrap(),
+        );
+        check(&env, Stage::Closed);
+
+        for (token, wallet, amount) in [
+            (user_token, &owner, CAPITAL),
+            (
+                admin_token,
+                &admin,
+                SURPLUS + if sync_before_close { UNSYNCED } else { 0 },
+            ),
+        ] {
+            let frame = tracked.map(|key| (key, env.svm.get_account(&key)));
+            check_cu(
+                "terminal native owner redemption",
+                send_raw_tx(
+                    &mut env.svm,
+                    &env.payer,
+                    spl_token::instruction::close_account(
+                        &spl_token::ID,
+                        &token,
+                        &wallet.pubkey(),
+                        &wallet.pubkey(),
+                        &[],
+                    )
+                    .unwrap(),
+                    &[wallet],
+                )
+                .unwrap(),
+            );
+            for (key, mut expected) in frame {
+                if key == token {
+                    assert!(env.svm.get_account(&key).is_none_or(|account| {
+                        account.lamports == 0 && account.data.iter().all(|byte| *byte == 0)
+                    }));
+                    continue;
+                }
+                if key == wallet.pubkey() {
+                    expected.as_mut().unwrap().lamports += token_rent + amount;
+                }
+                assert_eq!(
+                    env.svm.get_account(&key),
+                    expected,
+                    "redemption frame {key}"
+                );
+            }
+            assert_eq!(lamport_sum(&env), total_lamports);
+        }
+        println!("INV-070 native terminal: sync={sync_before_close}, user={CAPITAL}, raw_tokens={SURPLUS}, raw_lamports={UNSYNCED}, peak_CU={peak_cu}; exact tombstone and both owner redemptions");
+    }
+}
+
+#[test]
 fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent() {
     use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::{
         inv018_create_public_spl_mint, inv018_public_spl_market,

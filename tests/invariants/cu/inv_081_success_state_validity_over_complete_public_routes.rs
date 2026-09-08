@@ -361,16 +361,8 @@ fn v16_program_public_route_oracle_checks_success_and_reject_frames_fixed_case()
     );
 }
 
-#[test]
-fn v16_program_native_quote_roundtrip_preserves_lamports_rent_and_unsynced_value() {
+pub(super) fn inv081_public_native_market() -> super::V16CuEnv {
     use super::*;
-    use crate::support::fuzz_model::{
-        assert_market_stock_census, assert_reservation_encumbrance_census,
-    };
-
-    const WRAPPED: u64 = 137;
-    const UNSYNCED: u64 = 19;
-    const PARTIAL: u64 = 37;
 
     let mut svm = LiteSVM::new();
     let program_id = percolator_prog::id();
@@ -386,10 +378,8 @@ fn v16_program_native_quote_roundtrip_preserves_lamports_rent_and_unsynced_value
     }
     let payer = Keypair::new();
     let admin = Keypair::new();
-    let owner = Keypair::new();
     svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
     svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
-    svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
 
     // LiteSVM omits the native mint genesis account. All subsequent accounts and economic
     // transitions are created through System, ATA, SPL, or the public wrapper, never byte edits.
@@ -430,7 +420,7 @@ fn v16_program_native_quote_roundtrip_preserves_lamports_rent_and_unsynced_value
         &[&admin],
     )
     .expect("public native-quote market initialization");
-    let mut env = V16CuEnv {
+    V16CuEnv {
         svm,
         program_id,
         payer,
@@ -442,7 +432,26 @@ fn v16_program_native_quote_roundtrip_preserves_lamports_rent_and_unsynced_value
         vault_authority,
         portfolio_account_len: state::portfolio_account_len_for_market_slots(1).unwrap(),
         portfolios: Vec::new(),
+    }
+}
+
+#[test]
+fn v16_program_native_quote_roundtrip_preserves_lamports_rent_and_unsynced_value() {
+    use super::*;
+    use crate::support::fuzz_model::{
+        assert_market_stock_census, assert_reservation_encumbrance_census,
     };
+
+    const WRAPPED: u64 = 137;
+    const UNSYNCED: u64 = 19;
+    const PARTIAL: u64 = 37;
+
+    let mut env = inv081_public_native_market();
+    let owner = Keypair::new();
+    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    let mint = env.mint;
+    let vault = env.vault;
+    let vault_authority = env.vault_authority;
     let portfolio = Keypair::new();
     system_create_account_for_test(
         &mut env.svm,

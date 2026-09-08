@@ -107,6 +107,53 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## Row 418 native-quote terminal disposition (2026-09-08)
+
+[`cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs`](cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs)
+adds `v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition`.
+One public LiteSVM test runs two native-mint terminal schedules: deposit 1,009 atoms,
+resolve, permissionlessly `CloseResolved` for exactly 1,009 atoms, owner `ClosePortfolio`,
+then `CloseSlab` with 17 raw token atoms and 19 unsynchronized vault lamports remaining.
+Without `SyncNative`, the 17 atoms move to the authority's native token account and the
+19 lamports join the vault-rent refund to its wallet. With a permissionless terminal
+`SyncNative`, all 36 atoms move to that token account and only rent remains for vault close.
+Neither raw stock nor token rent becomes portfolio capital, insurance, or another claim.
+
+The oracle checks exact SPL amounts, native token and unrelated account frames,
+market/portfolio metadata and configuration, stock/encumbrance censuses, and tracked lamport
+conservation with a separate fee payer. Only input-derived raw surplus is excluded from the
+booked-stock census. Both schedules retain canonical tombstone rent, return all portfolio
+lamports through the market, and redeem both native token accounts with exact wallet payouts.
+The existing INV-081 bootstrap supplies only LiteSVM's missing native mint genesis fixture;
+account creation, funding and transitions otherwise use public System/ATA/SPL/wrapper calls.
+
+Unlike INV-081's live withdrawal roundtrip, this owns resolved payout and native vault/slab
+destruction, including the sync-dependent token-versus-lamport terminal disposition. It
+reduces row 418 for INV-070 and its custody/rent/stock/bounded-progress dependencies, but
+leaves row 418 OPEN and invariant verdicts unchanged. Native burn-based retirement,
+native secondary rails, mutable/freeze-authority mints, trades/PnL, receipts, insurance/backing history,
+maximum shapes, late-abort rollback and arbitrary histories remain outside this witness.
+
+The new selector and retained INV-081 selector passed 2/2 against the cached fixed-engine
+SBF (SHA-256 `77997b7e862c6734bf061cb52b957d1f8caf5a470c02d0f3d08710137bc0c7d7`),
+without rebuilding it. A final combined run passed all six focused selectors; the new test's
+observed peak was 86,362 CU, below its asserted 150,000-CU step bound.
+Exact command from the isolated worktree:
+
+```sh
+PERCOLATOR_FUZZ_SBF=/tmp/pr135-side-oi-sbf/percolator_prog.so \
+CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 \
+CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition \
+  inv_081_success_state_validity_over_complete_public_routes::v16_program_native_quote_roundtrip_preserves_lamports_rent_and_unsynced_value
+```
+
+Four neighboring dual-quote/rent/bootstrap/decimal selectors also pass. Two broader INV-079
+checks fail identically on untouched base `10658f7c`: `v16_every_public_trace_consumer_validates_reachability_evidence`
+counts 98 consumers against 97, and `v16_machine_invariant_status_is_authoritative_and_nonoverclaiming`
+finds a stale INV-058/427 projection. Those unrelated registries are unchanged.
+
 ## INV-081 native-quote success-state boundary (2026-09-08)
 
 [`cu/inv_081_success_state_validity_over_complete_public_routes.rs`](cu/inv_081_success_state_validity_over_complete_public_routes.rs)
