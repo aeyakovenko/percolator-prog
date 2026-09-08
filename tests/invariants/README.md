@@ -3775,14 +3775,14 @@ These untested coverage gaps are not findings and receive no severity/impact lab
 3. **INV-012: retained capability lifecycle.** Owner:
    [`stateful/inv_012_capability_and_delegate_scope.rs`](stateful/inv_012_capability_and_delegate_scope.rs).
    Route family: matcher grants and both CPI transports, composed with position/lifecycle writers.
-   Gap: the explicit disable/re-enable matrix and CU writer cases do not supply a reusable retained
-   authorization generator across all automatic and explicit invalidation families.
-   TODO: own writer family, capability scope/incarnation, and expiry partitions together, with an
-   independent authorization-history oracle and fresh-authorized liveness controls. Keep rejection
+   Gap: the bounded one-writer, ordered-grant and canonical context/delegate replacement histories
+   do not cover all automatic invalidation families or matcher/domain substitutions.
+   TODO: extend their independent authorization-history oracle across those writer/scope/expiry
+   partitions, retaining fresh-authorized liveness controls. Keep rejection
    or stale-acceptance evidence separate from attributed economic harm; share with INV-004/005.
    The [implementation-readiness slice](#inv-012-implementation-readiness) below links the existing
-   component evidence and specifies the smallest next history product; the reusable F owner remains
-   missing in [`traceability_gaps.tsv`](traceability_gaps.tsv).
+   component evidence and executing increments; the broader F product remains open in
+   [`traceability_gaps.tsv`](traceability_gaps.tsv).
 
 4. **INV-056: favorable-action observation completeness.** Owner:
    [`cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs`](cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs).
@@ -3819,11 +3819,12 @@ coverage ownership must not stop there. No new issue-specific adapter satisfies 
 
 ### INV-012 implementation-readiness
 
-Finding-blind traceability review of `6b0100c3` (2026-09-07). The boundary is
+Initial finding-blind traceability review of `6b0100c3` (2026-09-07). The boundary is
 [INV-012](../../INVARIANTS.md#inv-012---capability-and-delegate-scope), with position writers owned by
-INV-004 and authority incarnation/containment owned by INV-005. This is an evidence-link and
-implementation plan only: no new F, SBF, or proof result, no production change, and no status
-promotion. Issue-labeled reproduction bodies were not inspected or used to design this slice.
+INV-004 and authority incarnation/containment owned by INV-005. That review was an implementation
+plan only; the executing increments below record subsequent bounded SBF evidence. Neither adds
+production/engine-proof changes or promotes status. The initial plan did not use issue-labeled
+reproduction bodies; the increments are invariant-scoped, not finding adapters.
 
 **Existing links and limits.** The following are separate component owners, not one reusable
 retained authorization-history oracle:
@@ -3852,10 +3853,11 @@ INV-022 owns matcher sequence/config wire binding; INV-016 owns delegate PDA dom
 local predicate/layout obligations, not a history induction or newly executed proof result. Reuse
 the engine contracts pinned by `Cargo.toml`; do not duplicate engine position/liquidation proofs.
 
-**Smallest next generator.** Add one typed, shrinkable public-history entrypoint,
-`v16_program_retained_capability_histories_preserve_authorization_scope`, in the existing INV-012
-stateful module. Start with bounded public checkpoints and one writer transition per history,
-including a no-op/rejected-writer control; longer writer words are a follow-on. Cross these axes:
+**Original generator contract and remaining axes.**
+`v16_program_retained_capability_histories_preserve_authorization_scope` now supplies the bounded
+one-writer prototype, including no-op/rejected-writer controls. The ordered-grant and
+[matcher-scope replacement histories](#inv-012-matcher-scope-replacement-histories) extend it;
+they do not exhaust the original planned axes below:
 
 - Writer family: explicit owner grant/revoke/renewal; single/batch no-CPI position changes;
   configured single/batch CPI fills; owner position/recovery/close changes; permissionless
@@ -3940,6 +3942,97 @@ or worst-case CU claim. The focused command is:
 
 ```bash
 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_program_ordered_grant_histories_bind_retained_cpi_disposition -- --exact --nocapture
+```
+
+### INV-012 matcher-scope replacement histories
+
+`v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers` in the
+[stateful owner](stateful/inv_012_capability_and_delegate_scope.rs) adds a finite product at base
+`ff262c38`: both CPI consumers, both position signs, `A -> B` / `A -> B -> A` grants and
+authenticated slots `expiry-1`, `expiry`, `expiry+1`. Unlike the earlier fixed-tuple products,
+A and B are distinct initialized matcher contexts with their canonical delegates for the same
+LP, owner, market and matcher program. A System create/fund transaction invokes the existing
+authenticated matcher initializer under the LP owner's signature. No wrapper state or matcher
+data is patched; the existing economic frame and history are checked around external setup.
+
+The extended append-only `AuthorizationHistory` records the tuple supplied by each successful
+grant. Both live and superseded tuples remain in the exact account snapshot, even after returning
+to A. Requests are signed from this event-derived scope, sequence and episode state; the LP owner
+does not sign consumers. Every wrapper call uses the existing single-step public trace check.
+An unchanged original request must reject as `EngineStale`, with both position episodes still
+current. Before expiry, a current-sequence request selecting the displaced canonical pair must
+reject as `Unauthorized`, so neither stale request epochs nor PDA errors can mask scope admission.
+A separately retained current-scope request crosses the Clock boundary without reauthorization.
+Each history ends with a future-dated grant and a fresh nonzero authorized fill, with exact signed
+positions and the displaced context/delegate unchanged.
+
+The focused run passes **24 histories, 180 wrapper transactions and 24 external-setup
+transactions** after standard fixture construction. Consumer counts are **24 stale, 24 scope
+mismatch, 16 expired and 32 live** (8 pre-expiry plus 24 fresh continuations). All 64 rejected
+consumers preserve tracked account data/metadata, current and superseded matcher/delegate
+accounts, SPL mint/custody/supply and economic lamports exactly, excluding network fee-payer
+charges. Distinct transaction fee nonces exclude duplicate-signature rejection. The pure oracle
+control also rejects a displaced tuple at the current sequence and exact-expiry admission after
+replacement. This is pre-CPI admission rollback, not post-CPI-write rollback or economic-harm
+evidence.
+
+The product is one asset, one-leg batches, zero trade/backing fees and one fixed matcher program.
+Context and delegate change together because the delegate PDA includes the context: this is not
+an isolated wrong-PDA test or exhaustive one-field substitution coverage. Alternate matcher
+programs, market/portfolio/owner domains, lifecycle/keeper interleavings, longer words, arbitrary
+limits, multiple legs and supported maxima remain open. No engine proof is duplicated and no
+invariant or method status is promoted.
+
+Fresh same-worktree default-feature SBF and matcher builds use platform-tools v1.52 and unchanged
+engine `495a5590`. SHA-256: wrapper
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`, matcher
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Focused commands use the private worktree `/tmp/codex-agent-worktrees/inv012-capability-history-20260908`
+and private build directory below; output-log redirection is omitted:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/inv012-capability-history-20260908-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+cargo build-sbf --tools-version v1.52 --offline -- --locked
+# Working directory: tests/fixtures/auth_matcher
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir /tmp/codex-agent-worktrees/inv012-capability-history-20260908/tests/fixtures/auth_matcher/target/deploy -- --locked
+# Working directory: worktree root
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers -- --exact --list
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_program_retained_capability_histories_preserve_authorization_scope -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_program_ordered_grant_histories_bind_retained_cpi_disposition -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_program_cpi_trades_bind_matcher_capability_incarnation -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::v16_program_matcher_capability_route_roster_binds_every_current_scope -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_012_capability_and_delegate_scope.rs
+awk -F '\t' '!/^#/ && NF { if (NF != 8) { print "invalid columns at line", NR; bad=1 } rows++; if ($1 == "INV-012") inv012++ } END { if (bad || inv012 != 1) exit 1; printf "traceability TSV: %d eight-column rows; one INV-012 row\n", rows }' tests/invariants/traceability_gaps.tsv
+git diff --check ff262c38
+git diff --exit-code ff262c38 -- Cargo.toml Cargo.lock src kani tests/invariants/kani tests/invariants/invariant_status.tsv tests/invariants/special_method_coverage.tsv
+```
+
+All five exact INV-012 stateful tests pass: the new 24 histories, existing 324 finite + 12
+seeded histories, existing 432 ordered histories / 3,888 transactions, oracle controls and fixed
+grant-incarnation matrix. The INV-012 source roster and all four status/index/summary/method guards
+pass, as do formatting, eight-column TSV shape and unchanged-production/proof/status checks.
+Host compilation reports existing dead-code warnings and the Solana-client future-compatibility
+notice. No full-suite or Kani execution is claimed.
+
+The public-trace consumer census guard fails at its final count: **78 actual versus 77 expected**.
+All per-consumer validation checks pass before that count assertion. The same exact command fails
+identically on a clean detached `ff262c38` worktree; this edit adds no trace-consumer callsite and
+leaves the unrelated census guard unchanged. Baseline comparison commands (same environment):
+
+```bash
+git worktree add --detach /tmp/codex-agent-worktrees/inv012-capability-history-20260908-baseline ff262c38
+# Working directory: /tmp/codex-agent-worktrees/inv012-capability-history-20260908-baseline
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence -- --exact --nocapture
+git status --short --branch
 ```
 
 ### INV-024 implementation-readiness
@@ -4335,7 +4428,7 @@ charter.
 | INV-009 | P + SVM/CU + M + F gap | `cu/inv_009_partial_fill_and_retry_accounting.rs` owns fixed public partial/retry matrices; `kani/inv_009_partial_fill_and_retry_accounting.rs` owns local exact-fill batch admission, not history accounting. The repeated-partition matrix now owns the M registry row with executing quantity, fee, epoch, rollback, custody, and conservative-rounding checks. A successful single-CPI partial consumes the whole one-shot authorization; an owner must sign a new residual request against the advanced episodes. Batch CPI is exact-fill-only and rejects uniform or asymmetric partials atomically. Randomized partial partitions with failure/retry schedules remain unowned in the inspected generic owners; INV-008 replay fuzzing and source-composition gates do not discharge that F obligation. Persistent remaining authorization or durable-nonce economic consent reopens this row. |
 | INV-010 | Independent + P + SVM/CU + M + R | The public products exhaust all `3!` matcher/control/trade and value/control orders, both deposit/reduction orders, all 48 authority/policy worlds, both funded and underfunded authority/resolve orders, and all 144 policy/boundary/handoff/resolve terminal cells. `kani/inv_010_out_of_order_safety.rs` proves exact current-sequence admission and strict one-step consumption over full `u64`; `cu/inv_010_out_of_order_safety.rs` source-composes that induction with every retained family, delayed-control lane, identity/authority binding, successful attributed delta, and exact rollback. Every finite landing permutation is a repetition of this checked serial step. INV-008/009/011/059 own the current one-shot and aggregate trade bounds. A retained route, binding lane, rollback disposition, signed field, detached authorization, or durable-nonce economic-intent change reopens this row. |
 | INV-011 | P + SVM/CU + M + F gap | `cu/inv_011_signed_aggregate_economic_bounds.rs` owns executing single/per-leg price-limit and two-leg batch-CPI aggregate quote-cap witnesses, plus a separate source-composition drift guard. `stateful/inv_052_split_merge_invariance.rs` is the explicit conversion secondary owner for generated strict-sub-cap attempts, exact complete conversion, and exhausted-claim rollback. The M registry now points at the executing aggregate-cap boundary test. Existing wrapper Kani owns cap direction/accumulation and wire preservation; it does not supply a generic signed-leg/trade-cap-history F strategy, which remains unowned in the inspected owners. No evidence or invariant status is promoted. |
-| INV-012 | P + Static roster + SVM/CU + Cross-invariant composition | `cu/inv_012_capability_and_delegate_scope.rs`, `stateful/inv_012_capability_and_delegate_scope.rs`, `kani/inv_004_position_episode_binding.rs`, `kani/inv_012_capability_and_delegate_scope.rs`, and `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` prove the exact enabled/program/context/delegate/sequence/expiry predicate over full symbolic keys and control words and bind it to both production CPI handlers. Public partial liquidation, force-close/reuse, no-CPI mutation, and expiry at or after the authenticated Clock slot invalidate; configured CPI fills preserve only the participating LP; old-grant single and batch CPI requests reject after identical disable/re-enable with exact rollback; and fresh current-sequence pre-expiry requests install real exposure. Prior-layout accounts read the appended expiry lane as disabled before zero-initialized growth. INV-016 exhausts the delegate PDA domain, while INV-002/003/004 bind asset generation, portfolio incarnation, and position episode. These component owners do not supply the reusable retained authorization-history F oracle; the [readiness slice](#inv-012-implementation-readiness) and `traceability_gaps.tsv` keep the writer/scope/expiry product explicit. A new capability operation, scope, consumer, time source, or layout reopens this row. |
+| INV-012 | P + Static roster + SVM/CU + Cross-invariant composition | `cu/inv_012_capability_and_delegate_scope.rs`, `stateful/inv_012_capability_and_delegate_scope.rs`, `kani/inv_004_position_episode_binding.rs`, `kani/inv_012_capability_and_delegate_scope.rs`, and `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` prove the exact enabled/program/context/delegate/sequence/expiry predicate over full symbolic keys and control words and bind it to both production CPI handlers. Public partial liquidation, force-close/reuse, no-CPI mutation, and expiry at or after the authenticated Clock slot invalidate; configured CPI fills preserve only the participating LP; old-grant single and batch CPI requests reject after identical disable/re-enable with exact rollback; and fresh current-sequence pre-expiry requests install real exposure. Prior-layout accounts read the appended expiry lane as disabled before zero-initialized growth. INV-016 exhausts the delegate PDA domain, while INV-002/003/004 bind asset generation, portfolio incarnation, and position episode. The stateful owner now adds bounded one-writer, ordered-grant and [canonical matcher-scope replacement histories](#inv-012-matcher-scope-replacement-histories), with event-derived grant disposition, exact rollback and fresh liveness. The [readiness slice](#inv-012-implementation-readiness) and `traceability_gaps.tsv` retain the broader lifecycle/domain/writer product as an explicit F gap. A new capability operation, scope, consumer, time source, or layout reopens this row. |
 | INV-013 | P + F + SVM/CU + source composition | `public_sbf/inv_013_destructive_consent_scope.rs`, `stateful/inv_013_destructive_consent_scope.rs`, `kani/inv_013_destructive_consent_scope.rs`, and `cu/inv_013_destructive_consent_scope.rs` cover delayed close across later funding, generated empty-state ABA, failed-deposit rollback, fresh-close liveness, exact close binding, and stale reduction rollback. INV-004 source-locks all five retained portfolio/episode families and adds Recovery forfeit, released-PnL conversion, and close/cure episodes; INV-002 owns every asset-generation shutdown/resolve field and guard; INV-005 classifies all 29 configured-authority routes with no open epoch gap; INV-006 binds the signed program/market/kind/schema transaction; and INV-001/007 make market-address retirement permanent. `CloseSlab` binds the current live market authority and epoch, dispatches that epoch unchanged, and writes the typed tombstone. Permissionless liquidation, abandoned close, reset finalization, claims, and terminal continuations derive from current state rather than retained consent. A new retained destructive route, authority route, close path, or account-reuse mechanism reopens this current-surface closure. |
 | INV-014 | Independent + Direct + P + F + SVM/CU + M + source composition | `public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`, and `kani/inv_014_delayed_policy_and_policy_epoch_safety.rs` cover strict sequence monotonicity, exact stale rollback, and all fifteen semantic delayed-control families in both payload directions. A production-derived gate owns all seven policy-sequence variants, all six observation-sequence variants, matcher configuration, their authority/portfolio incarnation checks, and every sequence-advancing handler. The newly discovered Recovery-restart partition requires stale rollback followed by exact global-frontier consumption, one-step frontier advance, an empty Active post-state, and no SPL movement. Fee-consent, provider-principal, fee-redirection terminal-value, and resolve-policy bounded-liveness oracles retain their independent economic checks. INV-005 owns every configured-authority epoch route and INV-001/007 prohibit whole-market address reuse. A new sequence field, handler, policy lane, authority scope, or detached control format reopens this current-surface closure. |
 | INV-015 | P + SVM/CU | `kani/inv_015_account_ownership_layout_discriminator_and_length_validity.rs`, `public_sbf/inv_015_account_ownership_layout_discriminator_and_length_validity.rs`, and `cu/inv_015_account_ownership_layout_discriminator_and_length_validity.rs` prove the exact header predicate and every short length, then compose owner, canonical minimum/maximum length, type, alignment, all 40 engine byte domains, all six wrapper-config domains, fourteen auxiliary-ledger cases, and six oracle-profile domains through their real consuming routes. Every route has a mutating valid control and every malformed case returns an instruction error with exact persistent rollback. Public System Program creation proves `InitPortfolio` normalizes oversized uninitialized storage to the canonical wrapper length; auxiliary ledgers initialize exactly and reject overlong or malformed nonzero first use. Matcher context remains opaque external-program data and no public layout migration exists. A new account kind, persisted byte domain, migration, or alignment requirement reopens this current-surface closure. |

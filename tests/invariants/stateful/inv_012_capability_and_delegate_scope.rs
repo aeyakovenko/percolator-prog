@@ -10,10 +10,17 @@
 //! requires the old transaction to reject with exact program-account, matcher,
 //! token-supply, and lamport rollback. A transaction built after re-enable must
 //! still execute, excluding an always-rejecting fix.
+//! The event-history products also separate request freshness from grant scope
+//! and authenticated expiry, including replacement with a second canonical
+//! matcher context/delegate pair and return to the original pair.
 
-use crate::support::v16_svm::{MarketConfig, TxSuccess, V16Svm};
+use crate::support::v16_svm::{MarketConfig, TxSuccess, V16Svm, TX_CU_LIMIT};
 use percolator::POS_SCALE;
-use percolator_prog::{error::PercolatorError, ix::Instruction as ProgInstruction, state};
+use percolator_prog::{
+    error::PercolatorError,
+    ix::{BatchTradeCpiLeg, Instruction as ProgInstruction},
+    state,
+};
 use proptest::{
     prelude::*,
     test_runner::{Config, RngAlgorithm, TestRng, TestRunner},
@@ -23,7 +30,8 @@ use solana_sdk::{
     compute_budget::ComputeBudgetInstruction,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    signature::Signer,
+    signature::{Keypair, SeedDerivable, Signer},
+    system_instruction,
     transaction::Transaction,
 };
 
@@ -212,6 +220,7 @@ enum AuthorizationEvent {
         actor: usize,
         cap: Option<u16>,
         expiry: u64,
+        matcher_scope: [Pubkey; 3],
     },
     Fill {
         taker: usize,
@@ -260,6 +269,11 @@ impl AuthorizationHistory {
                         actor,
                         cap: Some(10_000),
                         expiry: u64::MAX,
+                        matcher_scope: [
+                            env.matcher_program,
+                            env.actors[actor].matcher_context,
+                            env.actors[actor].matcher_delegate,
+                        ],
                     },
                     AuthorizationEvent::Deposit { actor },
                 ]
@@ -273,12 +287,18 @@ impl AuthorizationHistory {
         for event in &self.accepted {
             match *event {
                 AuthorizationEvent::Deposit { actor } => grants[actor].sequence += 1,
-                AuthorizationEvent::Grant { actor, cap, expiry } => {
+                AuthorizationEvent::Grant {
+                    actor,
+                    cap,
+                    expiry,
+                    matcher_scope,
+                } => {
                     let grant = &mut grants[actor];
                     grant.sequence += 1;
                     grant.enabled = cap.is_some();
                     grant.cap = cap.unwrap_or(0);
                     grant.expiry = expiry;
+                    grant.scope[4..].copy_from_slice(&matcher_scope);
                 }
                 AuthorizationEvent::Fill {
                     taker,
@@ -346,7 +366,7 @@ impl AuthorizationHistory {
     }
 }
 
-fn capability_frame(env: &V16Svm) -> Vec<(Pubkey, Account)> {
+fn capability_frame(env: &V16Svm, history: &AuthorizationHistory) -> Vec<(Pubkey, Account)> {
     let mut keys: Vec<_> = env
         .all_economic_account_lamports()
         .into_iter()
@@ -354,6 +374,12 @@ fn capability_frame(env: &V16Svm) -> Vec<(Pubkey, Account)> {
         .collect();
     // Actor 4 pays only for locally constructed grants; network fees are separate.
     keys.extend(env.actors[..4].iter().map(|actor| actor.signer.pubkey()));
+    // Keep superseded matcher accounts in the frame, including after A -> B -> A.
+    for event in &history.accepted {
+        if let AuthorizationEvent::Grant { matcher_scope, .. } = event {
+            keys.extend(matcher_scope);
+        }
+    }
     keys.sort_unstable();
     keys.dedup();
     keys.into_iter()
@@ -369,7 +395,7 @@ fn capability_step(
     execute: impl FnOnce(&mut V16Svm) -> Result<TxSuccess, String>,
 ) -> Option<String> {
     history.assert_prefix(env);
-    let before = capability_frame(env);
+    let before = capability_frame(env, history);
     env.begin_public_trace();
     let result = execute(env);
     let trace = env.finish_public_trace();
@@ -388,7 +414,7 @@ fn capability_step(
         }
     } else {
         assert!(
-            capability_frame(env) == before,
+            capability_frame(env, history) == before,
             "exact account/metadata/CPI/SPL/economic-lamport rollback"
         );
         assert!(
@@ -407,6 +433,18 @@ fn grant_capability(
     cap: Option<u16>,
     expiry: u64,
 ) {
+    let matcher_scope = history.replay()[actor].scope[4..].try_into().unwrap();
+    grant_capability_with_scope(env, history, actor, cap, expiry, matcher_scope);
+}
+
+fn grant_capability_with_scope(
+    env: &mut V16Svm,
+    history: &mut AuthorizationHistory,
+    actor: usize,
+    cap: Option<u16>,
+    expiry: u64,
+    matcher_scope: [Pubkey; 3],
+) {
     let grant = history.replay()[actor];
     let owner = &env.actors[actor].signer;
     let payer = &env.actors[4].signer;
@@ -417,7 +455,7 @@ fn grant_capability(
     ];
     if cap.is_some() {
         accounts.extend(
-            grant.scope[4..]
+            matcher_scope
                 .iter()
                 .map(|key| AccountMeta::new_readonly(*key, false)),
         );
@@ -448,7 +486,12 @@ fn grant_capability(
         env,
         history,
         succeeds,
-        Some(AuthorizationEvent::Grant { actor, cap, expiry }),
+        Some(AuthorizationEvent::Grant {
+            actor,
+            cap,
+            expiry,
+            matcher_scope,
+        }),
         |env| env.land_retained(tx),
     );
 }
@@ -673,6 +716,7 @@ fn v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes(
             actor: 1,
             cap: Some(1),
             expiry: 4,
+            matcher_scope: created.scope[4..].try_into().unwrap(),
         }],
     };
     let live = history.replay()[1];
@@ -713,6 +757,260 @@ fn v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes(
         invalidated, live,
         "dropping the writer cannot preserve the expected history"
     );
+    let replacement = [created.scope[4], created.scope[0], created.scope[1]];
+    history.accepted.push(AuthorizationEvent::Grant {
+        actor: 1,
+        cap: Some(1),
+        expiry: 6,
+        matcher_scope: replacement,
+    });
+    let rebound = history.replay()[1];
+    assert_eq!(&rebound.scope[4..], &replacement);
+    assert!(rebound.authorizes(rebound.scope, live.sequence + 1, 5));
+    assert!(!rebound.authorizes(live.scope, rebound.sequence, 5));
+    assert!(!rebound.authorizes(rebound.scope, live.sequence, 5));
+    assert!(!rebound.authorizes(rebound.scope, rebound.sequence, 6));
+    assert_eq!(history.accepted.len(), 3, "regrant retains prior events");
+}
+
+#[test]
+fn v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers() {
+    const LP: usize = 1;
+    const EXPIRY: u64 = 4;
+
+    fn request(
+        env: &V16Svm,
+        route: CpiRoute,
+        grants: &[GrantOracle],
+        size: i128,
+        nonce: u64,
+    ) -> Transaction {
+        let a = grants[0];
+        let b = grants[LP];
+        let market_id = env.primary_market_state().1.assets[0].market_id;
+        let ix = match route {
+            CpiRoute::Single => ProgInstruction::TradeCpi {
+                account_a_portfolio_id: a.portfolio_id,
+                account_a_position_epoch: a.epoch,
+                account_b_portfolio_id: b.portfolio_id,
+                account_b_position_epoch: b.epoch,
+                account_b_matcher_sequence: b.sequence,
+                asset_index: 0,
+                market_id,
+                size_q: size,
+                fee_bps: 0,
+                limit_price: 0,
+                backing_fee_cap_bps: 0,
+            },
+            CpiRoute::Batch => ProgInstruction::BatchTradeCpi {
+                account_a_portfolio_id: a.portfolio_id,
+                account_a_position_epoch: a.epoch,
+                account_b_portfolio_id: b.portfolio_id,
+                account_b_position_epoch: b.epoch,
+                account_b_matcher_sequence: b.sequence,
+                max_slippage_atoms: u128::MAX,
+                max_fee_atoms: u128::MAX,
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    market_id,
+                    size_q: size,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        };
+        let payer = &env.actors[4].signer;
+        let taker = &env.actors[0].signer;
+        Transaction::new_signed_with_payer(
+            &[
+                ComputeBudgetInstruction::set_compute_unit_limit(TX_CU_LIMIT as u32),
+                ComputeBudgetInstruction::set_compute_unit_price(nonce),
+                Instruction {
+                    program_id: a.scope[0],
+                    accounts: vec![
+                        AccountMeta::new(taker.pubkey(), true),
+                        AccountMeta::new(a.scope[1], false),
+                        AccountMeta::new(a.scope[2], false),
+                        AccountMeta::new(b.scope[2], false),
+                        AccountMeta::new_readonly(b.scope[4], false),
+                        AccountMeta::new(b.scope[5], false),
+                        AccountMeta::new_readonly(b.scope[6], false),
+                    ],
+                    data: ix.encode(),
+                },
+            ],
+            Some(&payer.pubkey()),
+            &[payer, taker],
+            env.svm.latest_blockhash(),
+        )
+    }
+
+    fn run_case(route: CpiRoute, aba: bool, slot: u64, sign: i128) -> usize {
+        let mut env = V16Svm::new(
+            [0x1d; 32],
+            MarketConfig {
+                initial_price: 100,
+                actor_deposits: [1_000_000; 5],
+                actor_token_balances: [2_000_000; 5],
+                ..MarketConfig::default()
+            },
+        );
+        let mut history = AuthorizationHistory::new(&env);
+        let setup_events = history.accepted.len();
+        let original: [Pubkey; 3] = history.replay()[LP].scope[4..].try_into().unwrap();
+        let context = Keypair::from_seed(&[0x2d; 32]).unwrap();
+        let owner = &env.actors[LP].signer;
+        let payer = &env.actors[4].signer;
+        let delegate = Pubkey::find_program_address(
+            &[
+                b"matcher",
+                env.market.as_ref(),
+                env.actors[LP].portfolio.as_ref(),
+                owner.pubkey().as_ref(),
+                env.matcher_program.as_ref(),
+                context.pubkey().as_ref(),
+            ],
+            &env.program_id,
+        )
+        .0;
+        let alternate = [env.matcher_program, context.pubkey(), delegate];
+        let context_len = env.svm.get_account(&original[1]).unwrap().data.len();
+        // Only external fixture construction: System creates/funds the canonical
+        // pair, then the authenticated matcher initializes it with the LP owner.
+        let setup = Transaction::new_signed_with_payer(
+            &[
+                system_instruction::create_account(
+                    &payer.pubkey(),
+                    &context.pubkey(),
+                    env.svm.minimum_balance_for_rent_exemption(context_len),
+                    context_len as u64,
+                    &env.matcher_program,
+                ),
+                system_instruction::transfer(
+                    &payer.pubkey(),
+                    &delegate,
+                    env.svm.minimum_balance_for_rent_exemption(0),
+                ),
+                Instruction {
+                    program_id: env.matcher_program,
+                    accounts: vec![
+                        AccountMeta::new_readonly(owner.pubkey(), true),
+                        AccountMeta::new_readonly(delegate, false),
+                        AccountMeta::new(context.pubkey(), false),
+                        AccountMeta::new_readonly(env.program_id, false),
+                        AccountMeta::new_readonly(env.market, false),
+                        AccountMeta::new_readonly(env.actors[LP].portfolio, false),
+                    ],
+                    data: vec![2],
+                },
+            ],
+            Some(&payer.pubkey()),
+            &[payer, owner, &context],
+            env.svm.latest_blockhash(),
+        );
+        history.assert_prefix(&env);
+        let before = capability_frame(&env, &history);
+        env.land_retained(setup)
+            .expect("public alternate matcher initialization");
+        assert!(capability_frame(&env, &history) == before);
+        history.assert_prefix(&env);
+
+        grant_capability(&mut env, &mut history, LP, Some(1), EXPIRY);
+        let retained_grants = history.replay();
+        let size = sign * POS_SCALE as i128;
+        let retained = request(&env, route, &retained_grants, size, 1);
+        grant_capability_with_scope(&mut env, &mut history, LP, Some(1), EXPIRY, alternate);
+        if aba {
+            grant_capability_with_scope(&mut env, &mut history, LP, Some(1), EXPIRY, original);
+        }
+        let current = history.replay();
+        for actor in [0, LP] {
+            assert_eq!(
+                current[actor].epoch, retained_grants[actor].epoch,
+                "no episode masking"
+            );
+        }
+        assert_ne!(current[LP].sequence, retained_grants[LP].sequence);
+        land_capability_trade(&mut env, &mut history, retained, &retained_grants, size);
+
+        // Repair only request freshness, selecting a previously valid canonical
+        // pair that the current grant no longer authorizes. PDA checks must pass.
+        let displaced = if aba { alternate } else { original };
+        let mut wrong_scope = current.clone();
+        wrong_scope[LP].scope[4..].copy_from_slice(&displaced);
+        assert_ne!(wrong_scope[LP].scope, current[LP].scope);
+        assert_eq!(wrong_scope[LP].sequence, current[LP].sequence);
+        assert!(
+            env.current_slot() < current[LP].expiry,
+            "scope rejection precedes expiry"
+        );
+        let wrong = request(&env, route, &wrong_scope, size, 2);
+        land_capability_trade(&mut env, &mut history, wrong, &wrong_scope, size);
+
+        let displaced_before = displaced[1..]
+            .iter()
+            .map(|key| env.svm.get_account(key).unwrap())
+            .collect::<Vec<_>>();
+        let at_boundary = request(&env, route, &current, size, 3);
+        env.warp_to_slot(slot);
+        assert_eq!(env.current_slot(), slot, "authenticated Clock boundary");
+        assert_eq!(
+            current[LP].authorizes(current[LP].scope, current[LP].sequence, slot),
+            slot < EXPIRY
+        );
+        land_capability_trade(&mut env, &mut history, at_boundary, &current, size);
+
+        grant_capability(&mut env, &mut history, LP, Some(1), slot + 2);
+        let fresh_grants = history.replay();
+        assert!(fresh_grants[LP].authorizes(
+            fresh_grants[LP].scope,
+            fresh_grants[LP].sequence,
+            slot
+        ));
+        let fresh = request(&env, route, &fresh_grants, size, 4);
+        land_capability_trade(&mut env, &mut history, fresh, &fresh_grants, size);
+        let expected_position = size * if slot < EXPIRY { 2 } else { 1 };
+        assert_eq!(
+            env.primary_portfolio(0).legs[0].basis_pos_q.get(),
+            expected_position
+        );
+        assert_eq!(
+            env.primary_portfolio(LP).legs[0].basis_pos_q.get(),
+            -expected_position
+        );
+        assert_eq!(
+            displaced[1..]
+                .iter()
+                .map(|key| env.svm.get_account(key).unwrap())
+                .collect::<Vec<_>>(),
+            displaced_before,
+            "authorized fills cannot touch the displaced context/delegate",
+        );
+        history.accepted.len() - setup_events
+    }
+
+    let mut histories = 0;
+    let mut successes = 0;
+    let mut consumers = [0; 4]; // stale, scope mismatch, expired, live
+    for route in [CpiRoute::Single, CpiRoute::Batch] {
+        for aba in [false, true] {
+            for slot in [EXPIRY - 1, EXPIRY, EXPIRY + 1] {
+                for sign in [-1, 1] {
+                    successes += std::panic::catch_unwind(|| run_case(route, aba, slot, sign))
+                        .unwrap_or_else(|_| panic!("scope history failed: {route:?}, aba={aba}, slot={slot}, sign={sign}"));
+                    histories += 1;
+                    consumers[0] += 1;
+                    consumers[1] += 1;
+                    consumers[if slot < EXPIRY { 3 } else { 2 }] += 1;
+                    consumers[3] += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(histories, 24);
+    assert_eq!(consumers, [24, 24, 16, 32]);
+    assert_eq!(successes, 116);
+    eprintln!("INV-012 scope replacement: {histories} histories, 180 wrapper transactions, 24 public external-setup transactions; consumers [stale, scope, expired, live]={consumers:?}; gaps: alternate matcher programs/domains, lifecycle writers, multi-leg/max shapes");
 }
 
 // Ordered grant-only words extend the one-writer prototype above. No position
@@ -831,7 +1129,12 @@ fn v16_program_ordered_grant_histories_bind_retained_cpi_disposition() {
             env,
             history,
             evidence,
-            Some(AuthorizationEvent::Grant { actor, cap, expiry }),
+            Some(AuthorizationEvent::Grant {
+                actor,
+                cap,
+                expiry,
+                matcher_scope: grant.scope[4..].try_into().unwrap(),
+            }),
             (!valid).then_some(PercolatorError::InvalidInstruction),
             |env| env.land_retained(tx),
         );
