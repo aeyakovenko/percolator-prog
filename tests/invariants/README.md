@@ -6455,6 +6455,32 @@ three shared feeds, the two-chunk backlog product passes at most two hints per c
 withdrawals occur after active/source work is cleared, and host-shaped 10 MiB benchmarks are SBF
 boundary controls rather than public dense-market reachability.
 
+Additional maximum-hint/full-portfolio evidence, 2026-09-08:
+[`v16_bpf_full_14_leg_16_hint_three_feed_refresh_is_bounded`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
+combines fourteen publicly opened, funded legs with all sixteen distinct observation hints and
+forty-eight references to three shared Pyth feed accounts. Two assets with no portfolio exposure
+bracket the owned legs in the hint order. One unsigned-owner `PermissionlessCrank` advances all
+sixteen assets from slot 16 to 17, authenticates their 100-to-95 price move, and completes portfolio
+recertification in **958,090 CU**, below the 1,375,000 guardrail and ordinary 1,400,000 transaction
+ceiling. Exactly seventy loss atoms leave both owner capital and aggregate principal; active legs,
+basis quantities, OI, PnL, reserved PnL, insurance, engine vault, counterparty account, SPL vault,
+mint, and the supplied feed accounts retain their asserted frames. Construction is excluded from
+the measured crank.
+
+This composed shape is distinct from the existing sixteen-hint observation-only empty-portfolio
+control and fourteen-hint/forty-two-reference portfolio refresh. It does not cover forty-eight
+distinct feed accounts, maximum-N, source-record/lien saturation, accrual backlog, or terminal exit.
+No invariant status is promoted. The exact test and both neighboring controls pass on base
+`c3b315eff6da79490579b772d242d6963e70e4b1`, using an isolated worktree, offline cached dependencies,
+and a private copy of the recorded default-feature SBF SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`; no SBF rebuild is claimed.
+
+```sh
+CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::v16_bpf_full_14_leg_16_hint_three_feed_refresh_is_bounded -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs
+git diff --check
+```
+
 Net-new direct-route evidence, 2026-09-07:
 [`v16_program_direct_close_resolved_at_14_leg_28_source_shape_is_bounded`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
 uses the existing public trade construction with fourteen AuthMark assets. At direct entry the LP

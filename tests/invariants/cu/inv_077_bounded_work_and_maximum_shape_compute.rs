@@ -3470,6 +3470,194 @@ fn v16_bpf_permissionless_crank_16_observation_decode_cap_is_under_tx_limit() {
 }
 
 #[test]
+fn v16_bpf_full_14_leg_16_hint_three_feed_refresh_is_bounded() {
+    const PORTFOLIO_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const OBSERVATION_CAP: u16 = 16;
+    const START_SLOT: u64 = OBSERVATION_CAP as u64;
+    const MARK: u64 = 100;
+    const MOVED_MARK: u64 = 95;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: PORTFOLIO_CAP,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        },
+        OBSERVATION_CAP as usize,
+    );
+    for asset_index in PORTFOLIO_CAP..OBSERVATION_CAP {
+        env.activate_asset(asset_index, u64::from(asset_index) + 1, MARK);
+    }
+    set_test_clock(&mut env, START_SLOT, 100);
+    let feeds = [[0xc1; 32], [0xc2; 32], [0xc3; 32]];
+    let oracles = [
+        env.set_pyth_price(&feeds[0], 3_000_000, -6, 100),
+        env.set_pyth_price(&feeds[1], 150_000_000, -6, 100),
+        env.set_pyth_price(&feeds[2], 200_000_000, -6, 100),
+    ];
+    for asset_index in 0..OBSERVATION_CAP {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            asset_index,
+            3,
+            ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            feeds,
+            &oracles,
+            START_SLOT,
+            100,
+            0,
+            0,
+            3,
+            500,
+        )
+        .expect("configure all sixteen three-feed observation assets");
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000_000);
+    env.deposit(&short_owner, short, 10_000_000);
+    env.send(
+        env.batch_trade_no_cpi_ix(
+            long,
+            short,
+            (0..PORTFOLIO_CAP)
+                .map(|asset_index| BatchTradeLeg {
+                    asset_index,
+                    market_id: first_generation_market_id(asset_index),
+                    size_q: POS_SCALE as i128,
+                    exec_price: MARK,
+                    fee_bps: 0,
+                })
+                .collect(),
+        ),
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(short_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+            AccountMeta::new(short, false),
+        ],
+        &[&long_owner, &short_owner],
+    )
+    .expect("open fourteen funded legs before the maximum-hint refresh");
+    let before = env.portfolio_state(long);
+    let before_group = env.market_state().1;
+    assert_eq!(before_group.config.max_market_slots, OBSERVATION_CAP as u32);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&before)),
+        PORTFOLIO_CAP as u32
+    );
+    assert!(before_group.assets[..OBSERVATION_CAP as usize]
+        .iter()
+        .all(|asset| asset.slot_last == START_SLOT && asset.effective_price == MARK));
+
+    set_test_clock(&mut env, START_SLOT + 1, 101);
+    let moved_oracles = [
+        env.set_pyth_price(&feeds[0], 2_850_000, -6, 101),
+        env.set_pyth_price(&feeds[1], 150_000_000, -6, 101),
+        env.set_pyth_price(&feeds[2], 200_000_000, -6, 101),
+    ];
+    let framed_keys = [
+        short,
+        env.vault,
+        env.mint,
+        moved_oracles[0],
+        moved_oracles[1],
+        moved_oracles[2],
+    ];
+    let frames_before = framed_keys.map(|key| env.svm.get_account(&key).unwrap());
+
+    // Non-portfolio assets bracket the owned legs at the decoder's first and last positions.
+    let observations: Vec<_> = std::iter::once(PORTFOLIO_CAP)
+        .chain(0..PORTFOLIO_CAP)
+        .chain(std::iter::once(OBSERVATION_CAP - 1))
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: 3,
+        })
+        .collect();
+    assert_eq!(observations.len(), OBSERVATION_CAP as usize);
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(long, false),
+    ];
+    for _ in &observations {
+        accounts.extend(
+            moved_oracles
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+    }
+    assert_eq!(accounts.len() - 3, 48);
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: START_SLOT + 1,
+                observations,
+            },
+            accounts,
+            &[],
+        )
+        .expect("maximum hints and feed references must finish real full-portfolio refresh");
+    assert_cu_within(
+        "14-leg 16-hint 48-reference PermissionlessCrank",
+        cu,
+        1_375_000,
+    );
+
+    let after = env.portfolio_state(long);
+    let after_group = env.market_state().1;
+    let settled_loss = u128::from(PORTFOLIO_CAP) * u128::from(MARK - MOVED_MARK);
+    assert_eq!(before.capital.get() - after.capital.get(), settled_loss);
+    assert_eq!(before_group.c_tot - after_group.c_tot, settled_loss);
+    assert_eq!(after.pnl, before.pnl);
+    assert_eq!(after.reserved_pnl, before.reserved_pnl);
+    assert_eq!(active_bitmap(&after), active_bitmap(&before));
+    for asset_index in 0..OBSERVATION_CAP as usize {
+        let old_asset = &before_group.assets[asset_index];
+        let asset = &after_group.assets[asset_index];
+        assert_eq!(
+            asset.slot_last,
+            START_SLOT + 1,
+            "asset {asset_index} must finish accrual"
+        );
+        assert_eq!(asset.effective_price, MOVED_MARK);
+        assert_eq!(asset.oi_eff_long_q, old_asset.oi_eff_long_q);
+        assert_eq!(asset.oi_eff_short_q, old_asset.oi_eff_short_q);
+        if asset_index < PORTFOLIO_CAP as usize {
+            assert_eq!(
+                active_leg_for_asset(&after, asset_index).basis_pos_q,
+                active_leg_for_asset(&before, asset_index).basis_pos_q
+            );
+        } else {
+            assert_eq!(asset.oi_eff_long_q, 0);
+            assert_eq!(asset.oi_eff_short_q, 0);
+        }
+    }
+    assert_eq!(
+        health_cert(&after).cert_oracle_epoch,
+        after_group.oracle_epoch
+    );
+    assert_eq!(
+        health_cert(&after).cert_funding_epoch,
+        after_group.funding_epoch
+    );
+    assert_eq!(after_group.insurance, before_group.insurance);
+    assert_eq!(after_group.vault, before_group.vault);
+    for (key, frame) in framed_keys.into_iter().zip(frames_before) {
+        assert_eq!(env.svm.get_account(&key).unwrap(), frame);
+    }
+    println!("INV-077 14-leg/16-hint/48-reference refresh CU: {cu}");
+}
+
+#[test]
 fn v16_bpf_public_stale_7_leg_tradenocpi_boundary_is_bounded() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(7, 1_000, 1_000, 500);
     env.svm.warp_to_slot(1);
