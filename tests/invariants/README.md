@@ -367,6 +367,68 @@ limit-enforcement conformance gap, not currently a proven LoF, persistent DoS, o
 `coverage_reopenings.tsv` registers it as row 427; INV-058 remains reopened until a production
 side-OI cap fix and generic disjoint-owner regression land.
 
+### INV-058 recreated-counterparty witness (2026-09-08)
+
+Tests/docs-only increment from coordination head `24d018cdb3c1b2986d8ebd4fbeb7a8f503275a42`.
+The new selector in `cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs`
+is `v16_program_recreated_counterparty_preserves_post_transition_cumulative_limits`.
+Existing same-pair split-fill and cross-zero tests remain unchanged.
+
+Eight worlds cross both position signs with all four public trade transports. Split fills move
+one counterleg into a third portfolio; its original owner withdraws, closes, funds, reinitializes
+the same address with a new portfolio ID, and deposits existing SPL tokens. The other owner's
+capped position survives byte-for-byte. Fresh instructions reject cap-plus-one in both account
+roles across every transport with `EngineInvalidLeg`, exact economic snapshots, and complete
+writable-account rollback excluding only the separate transaction fee payer. Two-asset batches
+put a valid auxiliary leg before the over-cap leg, with matching successful batch controls after
+capacity is released. Two one-atom refills consume exactly two released atoms; a later cross-zero
+and opposite-cap refill bind the replacement's own exposure before all legs exit to zero.
+
+An input-derived ledger checks every accepted/rejected trade's net positions, per-side OI, checked
+ceil notionals, certificate risk notional, capital, zero PnL, SPL custody, and stock/encumbrance
+censuses. Unit ADL indices and current leg epochs are asserted explicitly. The shared fixture
+bootstraps zeroed storage and funded SPL accounts; all subsequent economic transitions use public
+wrapper/System instructions, with no program-owned byte mutation or engine refresh oracle.
+
+Verification reused the supplied wrapper SBF, SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`, and authenticated matcher
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`. The matcher source matches
+this worktree; its ignored local artifact path is symlinked to
+`/home/anatoly/percolator-prog-pr427-conformance-20260908/tests/fixtures/auth_matcher/target/deploy/auth_matcher.so`.
+
+```sh
+export PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+module=inv_058_cumulative_position_oi_notional_and_rate_limit_integrity
+selector=${module}::v16_program_recreated_counterparty_preserves_post_transition_cumulative_limits
+touch tests/v16_cu.rs tests/invariants/cu/${module}.rs
+cargo test --locked --offline --test v16_cu "$selector" -- --exact --list
+touch tests/v16_cu.rs tests/invariants/cu/${module}.rs
+cargo test --locked --offline --test v16_cu "$selector" -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/${module}.rs
+git diff --check
+```
+
+Exact collection: **1 test**. Exact execution: **1 passed**, eight worlds, **250 public
+transactions / 80 exact rejections**. Peak successful transaction CU by history transport, taking
+the maximum across signs: NoCpi **164,989**, Cpi **163,042**, BatchNoCpi **203,457**, BatchCpi
+**223,441**. Each history also uses its next transport for continuation; these are history maxima,
+not per-instruction route benchmarks. All are below the 1,400,000-CU transaction ceiling.
+The adjacent exact selectors
+`v16_program_split_fills_cannot_cross_position_or_side_oi_cap_on_any_route_pair` and
+`v16_program_post_transition_caps_match_across_reduction_and_cross_zero_histories` each passed
+under the same module/environment and `cargo test --locked --offline --test v16_cu` command
+with `-- --exact --nocapture`, touching the root/module before each run. Scoped rustfmt and
+`git diff --check` passed. The existing Solana 1.18 future-compatibility warning remains.
+
+Limits: fixed mark 100, zero trading/funding/maintenance fees, no elapsed slots, ADL/reset, arbitrary
+partitions, maximum-price notional boundary, or separate rate-limit coverage. Side OI is reconciled
+in every state, but rejection also exceeds an account cap, so this does not discharge independent
+aggregate side-OI enforcement or change INV-058's reopened status. LiteSVM's retained closed-account
+storage models same-address reinitialization; runtime account purge is not exercised. Rejection CU
+is not retained by this harness. No full-suite run, SBF rebuild, production, Cargo, or verdict edit.
+
 ## Domain allocation conformance checkpoint (2026-09-08)
 
 Finding-blind tests/docs increment from
