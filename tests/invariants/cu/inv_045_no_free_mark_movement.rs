@@ -18,12 +18,17 @@
 //! current wrapper surface by inventorying every mark writer, proving all four trade variants use
 //! one of two shared normalization chains, and binding arithmetic, fee, sequencing, lifecycle,
 //! oracle-failure, and maximum-shape evidence to those chains.
+//! The `accepted_price_reward` child adds fresh-feed lag/catchup composition with
+//! independent per-actor fee/PnL attribution and exact keeper SPL withdrawal.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[path = "inv_045_accepted_price_reward.rs"]
+mod accepted_price_reward;
 
 #[test]
 fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
