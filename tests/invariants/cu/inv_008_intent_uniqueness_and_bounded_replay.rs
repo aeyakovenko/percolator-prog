@@ -7,6 +7,12 @@
 //! no-growth zero-copy layout used by those routes. The replay-disposition roster also classifies
 //! every public instruction and requires all retry/supersession generator kinds to retain a
 //! production route, so adding a public variant cannot silently bypass an explicit replay owner.
+//! A public history also rolls back a successful top-up on a later SPL error, consumes that intent
+//! through the alternate insurance route, then rejects the retained instruction and failed bundle
+//! both before and after a fresh intent. This complements the same-route failed-CPI retry probes
+//! and the duplicate-intent bundles; no account repair or instruction rebinding supplies recovery.
+//! This is bounded asset-0 evidence using fresh blockhash envelopes around retained instruction
+//! bytes, not detached-signature, durable-nonce, or arbitrary-history coverage.
 
 use super::*;
 use crate::support::invariant_discovery::{RetryIntentKind, SupersededIntentKind};
@@ -317,4 +323,199 @@ fn v16_top_up_sequences_reuse_the_existing_zero_copy_tail_without_growth() {
     assert_eq!(sequences.insurance_top_up, 10);
     assert_eq!(sequences.backing_top_up, 11);
     state::validate_asset_control_sequences(&sequences).expect("all u64 watermarks are canonical");
+}
+
+#[test]
+fn v16_insurance_failed_bundle_retry_stays_consumed_after_alternate_route() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const AMOUNT: u64 = 100;
+    const FUNDING: u64 = 3 * AMOUNT;
+
+    for failed_direct in [true, false] {
+        let mut env = V16CuEnv::new();
+        let ledger = env.insurance_ledger_account();
+        let source = env.token_account(env.admin.pubkey(), FUNDING);
+        let destination = env.token_account(env.admin.pubkey(), 0);
+        let sequences_before = env.control_sequences(0);
+        let intent_id = next_control_sequence(sequences_before.insurance_top_up);
+        let market_id = env.asset_market_id(0);
+        let program_id = env.program_id;
+        let accounts = vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ];
+        let top_up = |direct: bool, intent_id| Instruction {
+            program_id,
+            accounts: accounts.clone(),
+            data: if direct {
+                ProgInstruction::TopUpInsurance {
+                    authority_epoch: sequences_before.authority_epoch,
+                    intent_id,
+                    market_id,
+                    amount: AMOUNT as u128,
+                }
+            } else {
+                ProgInstruction::TopUpInsuranceDomain {
+                    authority_epoch: sequences_before.authority_epoch,
+                    intent_id,
+                    market_id,
+                    domain: 1,
+                    amount: AMOUNT as u128,
+                }
+            }
+            .encode(),
+        };
+        let retained = top_up(failed_direct, intent_id);
+        let alternate = top_up(!failed_direct, intent_id);
+        let failed_bundle = vec![
+            retained.clone(),
+            spl_token::instruction::transfer(
+                &spl_token::ID,
+                &source,
+                &destination,
+                &env.admin.pubkey(),
+                &[],
+                FUNDING,
+            )
+            .unwrap(),
+        ];
+
+        // All economic accounts, including non-payer lamports; only network fees are excluded.
+        let frame_keys = [
+            env.market,
+            ledger,
+            source,
+            destination,
+            env.vault,
+            env.mint,
+            env.admin.pubkey(),
+        ];
+        let frame = |env: &V16CuEnv| {
+            frame_keys.map(|key| env.svm.get_account(&key).expect("fixture account"))
+        };
+        let mint_before = env.svm.get_account(&env.mint).unwrap();
+        let mut signatures = BTreeSet::new();
+        let mut max_cu = 0;
+        let mut execute = |env: &mut V16CuEnv, instructions: Vec<Instruction>| {
+            // Keep retained instruction bytes intact, without send_tx's current-guard rebinding.
+            env.svm.expire_blockhash();
+            let mut message = vec![heap_ix(), cu_ix()];
+            message.extend(instructions);
+            let tx = Transaction::new_signed_with_payer(
+                &message,
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &env.admin],
+                env.svm.latest_blockhash(),
+            );
+            tx.verify()
+                .expect("valid independent transaction signature");
+            assert!(signatures.insert(tx.signatures[0].to_string()));
+            let result = env.svm.send_transaction(tx);
+            let meta = match &result {
+                Ok(meta) => meta,
+                Err(error) => &error.meta,
+            };
+            assert!(meta.compute_units_consumed > 0);
+            assert_cu_within(
+                "insurance late-error/alternate-route replay",
+                meta.compute_units_consumed,
+                CUSTODY_CU_LIMIT,
+            );
+            max_cu = max_cu.max(meta.compute_units_consumed);
+            result
+        };
+
+        let before_failure = frame(&env);
+        let error = execute(&mut env, failed_bundle.clone())
+            .expect_err("the trailing transfer must fail after the top-up debits its source");
+        assert_eq!(
+            error.err,
+            TransactionError::InstructionError(
+                3,
+                InstructionError::Custom(spl_token::error::TokenError::InsufficientFunds as u32),
+            )
+        );
+        for program in [program_id, spl_token::ID] {
+            assert!(
+                error
+                    .meta
+                    .logs
+                    .iter()
+                    .any(|line| line == &format!("Program {program} success")),
+                "the wrapper and its SPL debit must succeed before the trailing error: {error:?}"
+            );
+        }
+        assert_eq!(frame(&env), before_failure);
+        assert_eq!(env.control_sequences(0), sequences_before);
+
+        execute(&mut env, vec![alternate])
+            .expect("rollback must leave the same intent executable through the alternate route");
+        for completed in 1..=2u64 {
+            assert_eq!(
+                env.control_sequences(0).insurance_top_up,
+                intent_id + completed - 1
+            );
+            assert_eq!(env.token_amount(source), FUNDING - completed * AMOUNT);
+            assert!(env.token_amount(source) >= AMOUNT, "replay remains funded");
+            assert_eq!(env.token_amount(env.vault), completed * AMOUNT);
+            assert_eq!(env.token_amount(destination), 0);
+            assert_eq!(
+                env.token_amount(source)
+                    + env.token_amount(env.vault)
+                    + env.token_amount(destination),
+                FUNDING
+            );
+            assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
+            let (_, group) = env.market_state();
+            let total = (completed * AMOUNT) as u128;
+            let long = if completed == 1 && failed_direct {
+                0
+            } else {
+                (AMOUNT / 2) as u128
+            };
+            assert_eq!(group.vault, total);
+            assert_eq!(group.insurance, total);
+            assert_eq!(group.c_tot, 0);
+            assert_eq!(group.insurance_domain_budget[0], long);
+            assert_eq!(group.insurance_domain_budget[1], total - long);
+            assert_eq!(group.insurance_domain_budget_remaining_total, total);
+
+            for retry in [vec![retained.clone()], failed_bundle.clone()] {
+                let before_retry = frame(&env);
+                let error = execute(&mut env, retry)
+                    .expect_err("alternate-route consumption must invalidate every old retry");
+                assert_eq!(
+                    error.err,
+                    TransactionError::InstructionError(
+                        2,
+                        InstructionError::Custom(PercolatorError::EngineStale as u32),
+                    ),
+                    "retry must stop at the wrapper intent guard, not the trailing SPL error"
+                );
+                assert!(
+                    !error.meta.logs.iter().any(|line| {
+                        line.starts_with(&format!("Program {} invoke", spl_token::ID))
+                    }),
+                    "consumed retries must not reach either token transfer"
+                );
+                assert_eq!(frame(&env), before_retry);
+            }
+
+            if completed == 1 {
+                execute(&mut env, vec![top_up(failed_direct, intent_id + 1)])
+                    .expect("stale retries must not block a fresh intent on the original route");
+            }
+        }
+        assert_eq!(
+            signatures.len(),
+            7,
+            "no transaction-cache rejection witness"
+        );
+        eprintln!("insurance failed_direct={failed_direct}: 7 transactions, max CU={max_cu}");
+    }
 }
