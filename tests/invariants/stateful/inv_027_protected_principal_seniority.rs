@@ -77,6 +77,8 @@
 //! A second bounded product deposits and partially withdraws senior principal before the losing
 //! cohort settles, then places the remaining exit before conversion or after junior payout.
 //! Its failed conversion/payout attempts leave the same five-owner history and tracked bytes intact.
+//! Alternate quarter-/three-quarter-backed histories vary only the original debtor's public
+//! deposit, preserving this per-transaction attribution through the same senior exits and retries.
 //!
 //! Secondary coverage: INV-039. The same trace proves that novation cannot erase or transfer a
 //! pre-existing cohort's pending loss obligation, while INV-027 owns principal attribution.
@@ -429,6 +431,7 @@ const INV027_HISTORY_PRINCIPAL: u128 = 1_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Inv027SeniorityHistory {
+    loser_principal: u128,
     face: u128,
     converted: u128,
     haircut: u128,
@@ -451,9 +454,9 @@ impl Inv027SeniorityHistory {
                 self.paid[1],
             ),
             if self.loser_settled {
-                (0, INV027_HISTORY_PRINCIPAL as i128 - self.face as i128, 0)
+                (0, self.loser_principal as i128 - self.face as i128, 0)
             } else {
-                (INV027_HISTORY_PRINCIPAL, 0, 0)
+                (self.loser_principal, 0, 0)
             },
             (INV027_HISTORY_PRINCIPAL, 0, 0),
             (INV027_HISTORY_PRINCIPAL, 0, 0),
@@ -495,6 +498,7 @@ fn inv027_run_principal_interleaving(
     route: TradeRoute,
     extra: u128,
     timing: Inv027PrincipalTiming,
+    loser_principal: u128,
 ) -> Result<([u128; 2], usize, usize), String> {
     use solana_sdk::signature::Signer;
     use support::fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census};
@@ -508,10 +512,12 @@ fn inv027_run_principal_interleaving(
     const END: u64 = 150;
     const UNITS: u128 = 40;
     const FACE: u128 = UNITS * (END - START) as u128;
-    const SUPPORT: u128 = INV027_HISTORY_PRINCIPAL;
     const OWNERS: [usize; 5] = [WINNER, SENIOR, LOSER, REPLACEMENT, 4];
 
-    let mut tokens = [INV027_HISTORY_PRINCIPAL as u64; 5];
+    assert!(loser_principal > 0 && loser_principal < FACE);
+    let mut deposits = [INV027_HISTORY_PRINCIPAL; 5];
+    deposits[LOSER] = loser_principal;
+    let mut tokens = deposits.map(|amount| u64::try_from(amount).expect("bounded initial deposit"));
     tokens[SENIOR] += extra as u64;
     let mut env = V16Svm::new(
         [0x27; 32],
@@ -524,13 +530,16 @@ fn inv027_run_principal_interleaving(
             max_abs_funding_e9_per_slot: 0,
             min_funding_lifetime_slots: 1,
             maintenance_fee_per_slot: 0,
-            actor_deposits: [INV027_HISTORY_PRINCIPAL; 5],
+            actor_deposits: deposits,
             actor_token_balances: tokens,
             ..MarketConfig::default()
         },
     );
     // Public setup deposits are inputs to the ledger; no observed capital seeds it.
-    let mut history = Inv027SeniorityHistory::default();
+    let mut history = Inv027SeniorityHistory {
+        loser_principal,
+        ..Inv027SeniorityHistory::default()
+    };
     let supply = env.token_supply_observed();
     let identities = OWNERS.map(|actor| env.primary_portfolio_id(actor));
     let fixed_portfolio = env.primary_portfolio_data(4);
@@ -588,8 +597,8 @@ fn inv027_run_principal_interleaving(
             }
         }
         let (_, group) = env.primary_market_state();
-        let expected_vault =
-            5 * INV027_HISTORY_PRINCIPAL + h.senior_extra - h.paid.iter().sum::<u128>();
+        let expected_vault = 4 * INV027_HISTORY_PRINCIPAL + h.loser_principal + h.senior_extra
+            - h.paid.iter().sum::<u128>();
         if group.vault != expected_vault
             || u128::from(env.token_amount(env.vault)) != expected_vault
             || group.insurance != 0
@@ -601,7 +610,11 @@ fn inv027_run_principal_interleaving(
             return Err("external principal, insurance, or custody drift".into());
         }
         let source = group.source_credit[DOMAIN];
-        let residual = if h.loser_settled { SUPPORT } else { 0 } - h.converted;
+        let residual = if h.loser_settled {
+            h.loser_principal
+        } else {
+            0
+        } - h.converted;
         if source.positive_claim_bound_num != (h.face - h.converted - h.haircut) * BOUND_SCALE
             || source.fresh_reserved_backing_num != residual * BOUND_SCALE
             || source.spent_backing_num != h.converted * BOUND_SCALE
@@ -709,7 +722,7 @@ fn inv027_run_principal_interleaving(
         ),
         {}
     );
-    // Reuse INV-031's public half-backed cohort construction, not its retry oracle.
+    // Reuse INV-031's public cohort construction, varying only the original debtor's deposit.
     for (offset, mark) in (105..=END).step_by(5).enumerate() {
         let slot = 2 + offset as u64;
         env.warp_to_slot(slot);
@@ -728,7 +741,7 @@ fn inv027_run_principal_interleaving(
                 history.face += UNITS * 5;
             }
         );
-        if timing.has_unsettled_prefix() && history.face == SUPPORT {
+        if timing.has_unsettled_prefix() && history.face == FACE / 2 {
             assert!(!history.loser_settled);
             assert_eq!(
                 env.primary_market_state().1.assets[0].stale_account_count_short,
@@ -780,7 +793,7 @@ fn inv027_run_principal_interleaving(
         {}
     );
     assert_eq!(history.face, FACE);
-    assert!(SUPPORT < FACE, "the junior haircut must be nonzero");
+    assert!(loser_principal < FACE, "the junior haircut must be nonzero");
     if !timing.has_unsettled_prefix() && !matches!(timing, Inv027PrincipalTiming::AfterPayout) {
         deposit_senior!();
     }
@@ -790,7 +803,7 @@ fn inv027_run_principal_interleaving(
         // INV-031 owns the cap boundary itself; here the retry spans a senior exit.
         step!(
             "bounded conversion rejection",
-            env.convert_released_pnl(WINNER, SUPPORT - 1),
+            env.convert_released_pnl(WINNER, loser_principal - 1),
             Some("Custom(21)"),
             {}
         );
@@ -804,10 +817,10 @@ fn inv027_run_principal_interleaving(
     }
     step!(
         "full haircut conversion",
-        env.convert_released_pnl(WINNER, SUPPORT),
+        env.convert_released_pnl(WINNER, loser_principal),
         {
-            history.converted = SUPPORT;
-            history.haircut = FACE - SUPPORT;
+            history.converted = loser_principal;
+            history.haircut = FACE - loser_principal;
         }
     );
     // Mutate only oracle observations: shifting a capital atom preserves every aggregate.
@@ -822,16 +835,16 @@ fn inv027_run_principal_interleaving(
         assert!(inv027_check_seniority_observation(history, wrong_debtor).is_err());
         step!(
             "bounded payout rejection",
-            env.withdraw_primary(WINNER, INV027_HISTORY_PRINCIPAL + SUPPORT + 1),
+            env.withdraw_primary(WINNER, INV027_HISTORY_PRINCIPAL + loser_principal + 1),
             Some("Custom(21)"),
             {}
         );
     }
     step!(
         "claimant exit",
-        env.withdraw_primary(WINNER, INV027_HISTORY_PRINCIPAL + SUPPORT),
+        env.withdraw_primary(WINNER, INV027_HISTORY_PRINCIPAL + loser_principal),
         {
-            history.paid[0] += INV027_HISTORY_PRINCIPAL + SUPPORT;
+            history.paid[0] += INV027_HISTORY_PRINCIPAL + loser_principal;
         }
     );
     if matches!(timing, Inv027PrincipalTiming::AfterPayout) {
@@ -873,10 +886,15 @@ fn v16_program_unrelated_principal_histories_do_not_reprice_underbacked_claims()
                 Inv027PrincipalTiming::AcrossConversion,
                 Inv027PrincipalTiming::AfterPayout,
             ] {
-                let (paid, steps, rejections) =
-                    inv027_run_principal_interleaving(route, extra, timing).unwrap_or_else(
-                        |error| panic!("INV-027 {route:?} extra={extra} {timing:?}: {error}"),
-                    );
+                let (paid, steps, rejections) = inv027_run_principal_interleaving(
+                    route,
+                    extra,
+                    timing,
+                    INV027_HISTORY_PRINCIPAL,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("INV-027 {route:?} extra={extra} {timing:?}: {error}")
+                });
                 assert_eq!(
                     paid,
                     [2 * INV027_HISTORY_PRINCIPAL, INV027_HISTORY_PRINCIPAL]
@@ -913,10 +931,15 @@ fn v16_program_unsettled_principal_prefixes_preserve_entitlement_through_retries
                 Inv027PrincipalTiming::BeforeSettlementExitBeforeConversion,
                 Inv027PrincipalTiming::BeforeSettlementExitAfterPayout,
             ] {
-                let (paid, steps, rejections) =
-                    inv027_run_principal_interleaving(route, extra, timing).unwrap_or_else(
-                        |error| panic!("INV-024/027 {route:?} extra={extra} {timing:?}: {error}"),
-                    );
+                let (paid, steps, rejections) = inv027_run_principal_interleaving(
+                    route,
+                    extra,
+                    timing,
+                    INV027_HISTORY_PRINCIPAL,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("INV-024/027 {route:?} extra={extra} {timing:?}: {error}")
+                });
                 assert_eq!(
                     paid,
                     [2 * INV027_HISTORY_PRINCIPAL, INV027_HISTORY_PRINCIPAL]
@@ -932,6 +955,57 @@ fn v16_program_unsettled_principal_prefixes_preserve_entitlement_through_retries
     assert_eq!(worlds, 16);
     assert_eq!(rejected, 32);
     eprintln!("INV-024/027: {worlds} unsettled-prefix histories, {attempts} checked attempts, {rejected} exact rejections");
+}
+
+#[test]
+fn v16_program_alternate_backing_ratios_preserve_entitlement_through_retries() {
+    let mut worlds = 0;
+    let mut attempts = 0;
+    let mut rejected = 0;
+    // A 2,000-atom face is quarter- or three-quarter-backed using only losing principal.
+    // The existing unsettled-prefix test separately retains the half-backed control.
+    for loser_principal in [500, 1_500] {
+        let mut reference = None;
+        for route in [
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ] {
+            for extra in [1, 5_000_003] {
+                for timing in [
+                    Inv027PrincipalTiming::BeforeSettlementExitBeforeConversion,
+                    Inv027PrincipalTiming::BeforeSettlementExitAfterPayout,
+                ] {
+                    let (paid, steps, rejections) =
+                        inv027_run_principal_interleaving(route, extra, timing, loser_principal)
+                            .unwrap_or_else(|error| {
+                                panic!("INV-024/027 {route:?} backing={loser_principal}/2000 extra={extra} {timing:?}: {error}")
+                            });
+                    assert_eq!(
+                        paid,
+                        [
+                            INV027_HISTORY_PRINCIPAL + loser_principal,
+                            INV027_HISTORY_PRINCIPAL
+                        ]
+                    );
+                    assert_eq!(
+                        *reference.get_or_insert(paid),
+                        paid,
+                        "senior timing, amount or transport repriced the junior entitlement"
+                    );
+                    assert_eq!(rejections, 2);
+                    worlds += 1;
+                    attempts += steps;
+                    rejected += rejections;
+                }
+            }
+        }
+    }
+    assert_eq!(worlds, 32);
+    assert_eq!(attempts, 992);
+    assert_eq!(rejected, 64);
+    eprintln!("INV-024/027: {worlds} alternate-ratio histories, {attempts} checked attempts, {rejected} exact rejections");
 }
 
 proptest! {

@@ -4277,6 +4277,98 @@ rustfmt --edition 2021 --check tests/invariants/stateful/inv_027_protected_princ
 git diff --check 3c5c4092c26cf14bf26abcbeffa43eaae192d700
 ```
 
+### INV-027 alternate backing-ratio histories
+
+The 2026-09-08 increment, rebased onto `c6d2f9970372611ca473eb2a40a029a42567d94c`,
+adds `v16_program_alternate_backing_ratios_preserve_entitlement_through_retries` in the
+[existing stateful owner](stateful/inv_027_protected_principal_seniority.rs). This narrows the
+documented alternate-ratio gap without another fixture, public-trace consumer, or engine proof.
+INV-031's `v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing` owns the fixed
+half-backed conversion/replacement-backing boundary. INV-052's
+`v16_program_public_resolved_claim_split_is_conservatively_rounded` owns multi-claimant resolved
+partitions and payout orders. INV-063's newly integrated
+`v16_program_expiry_refill_source_sides_and_ratios_preserve_attribution` varies provider-funded
+expiry/refills, not the original debtor's finite principal with senior entry before losing-cohort
+settlement. These owners do not supply this Live-market ratio/principal/retry product; the existing
+two half-backed INV-027 histories remain controls, without duplicating their unsettled prefix.
+
+**Executing boundary.** The new 32 worlds cross debtor deposits of 500 and 1,500 atoms, all four
+same-transport open/close routes, unrelated senior deposits of one and 5,000,003 atoms, and both
+existing unsettled-prefix exit timings. Only the debtor's normal public setup deposit changes:
+the same 2,000-atom face is now quarter- or three-quarter-backed. The senior deposit and one-atom
+partial withdrawal still land halfway through winner settlement, before any losing-cohort
+settlement or source backing. The remaining senior exit lands either between rejected conversion
+and successful retry, or after junior payout. Each world uses a fixed ratio; no provider-driven
+ratio changes within one history are claimed.
+
+`Inv027SeniorityHistory` now takes the original debtor's principal as an input. Its existing
+observer checks all five owners' separate capital, PnL, source-claim face/domain and actual SPL
+payouts after every attempted transaction, including explicit matcher grants and individual
+mark/crank steps. Junior support and the debtor's residual negative PnL derive only from that
+debtor's deposit; unrelated principal cannot change either. Exact source fresh/spent backing,
+custody/residual, supply, source debits, identities, unrelated frames and INV-025 censuses remain
+checked. Both cap/over-entitlement failures must be `Custom(21)` and preserve the unchanged
+history plus every previously tracked economic byte and lamport, excluding SVM payer fees.
+Conserved wrong-owner capital, negative-PnL and payout observations still fail the same oracle.
+
+The new exact test passes **992 checked attempts: 928 successes and 64 exact rejections** across
+32 histories. Every claimant withdraws its 1,000-atom principal plus exactly 500 or 1,500 backed
+atoms; each unrelated senior withdraws its complete principal. The other 1,500 or 500 claim atoms
+are retired as a haircut, not a second payout. The market remains Live, with the original debtor
+and replacement position outstanding; successful claimant/senior exits do not imply their terminal
+completion or portfolio retirement. Initialization deposits precede the checked history count.
+
+**Validation commands.** Both artifacts were freshly built from this isolated worktree with
+default wrapper features, platform-tools v1.52 and unchanged engine `495a5590`. Wrapper SHA-256 is
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`; authenticated matcher SHA-256 is
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Working directory is `/tmp/codex-agent-worktrees/inv024-027-multi-claimant-20260908`, except the
+matcher build. Logs are in the private target directory; redirection is omitted below.
+
+On the rebased head, both existing exact controls pass: **16 histories / 496 attempts / 32
+rejections** for unsettled prefixes and **24 histories / 672 successes** for post-settlement
+principal interleavings. All eight listed source-roster/metadata/status guards pass individually
+(1/1 each), including the now-current 79-consumer trace census; the older baseline failure above
+is not a failure of this head. The new entrypoint is listed once. Focused formatting, TSV field
+counts and base-relative whitespace checks pass. Exact comparisons preserve the integrated
+INV-063 README subsection, traceability row and stateful file. No full-suite run is claimed.
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/inv024-027-multi-claimant-20260908-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=6 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+mkdir -p "$TMPDIR"
+cargo build-sbf --tools-version v1.52
+# Working directory: tests/fixtures/auth_matcher
+cargo build-sbf --tools-version v1.52 --sbf-out-dir /tmp/codex-agent-worktrees/inv024-027-multi-claimant-20260908/tests/fixtures/auth_matcher/target/deploy
+# Working directory: worktree root
+cargo test --locked --test v16_program_stateful_fuzz inv_027_protected_principal_seniority::v16_program_alternate_backing_ratios_preserve_entitlement_through_retries -- --exact --list
+cargo test --locked --test v16_program_stateful_fuzz inv_027_protected_principal_seniority::v16_program_alternate_backing_ratios_preserve_entitlement_through_retries -- --exact --nocapture
+cargo test --locked --test v16_program_stateful_fuzz inv_027_protected_principal_seniority::v16_program_unsettled_principal_prefixes_preserve_entitlement_through_retries -- --exact --nocapture
+cargo test --locked --test v16_program_stateful_fuzz inv_027_protected_principal_seniority::v16_program_unrelated_principal_histories_do_not_reprice_underbacked_claims -- --exact --nocapture
+cargo test --locked --test v16_cu inv_024_attributed_quote_value_conservation::v16_program_entitlement_effect_roster_is_source_complete -- --exact --nocapture
+cargo test --locked --test v16_cu inv_027_protected_principal_seniority::v16_program_loss_stale_economic_routes_have_a_complete_seniority_disposition -- --exact --nocapture
+cargo test --locked --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence -- --exact --nocapture
+cargo test --locked --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo test --locked --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter -- --exact --nocapture
+cargo test --locked --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row -- --exact --nocapture
+cargo test --locked --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_program_invariant_harnesses_are_test_free_roots -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_027_protected_principal_seniority.rs
+git diff --check c6d2f9970372611ca473eb2a40a029a42567d94c
+awk -F '\t' '!/^#/ && NF != 8 {print NR, NF; bad=1} END {exit bad}' tests/invariants/traceability_gaps.tsv
+diff -u <(git show c6d2f997:tests/invariants/README.md | awk '/^### / {keep=($0=="### INV-063 expiry/refill failure histories")} keep') <(awk '/^### / {keep=($0=="### INV-063 expiry/refill failure histories")} keep' tests/invariants/README.md)
+diff -u <(git show c6d2f997:tests/invariants/traceability_gaps.tsv | awk -F '\t' '$1=="INV-063"') <(awk -F '\t' '$1=="INV-063"' tests/invariants/traceability_gaps.tsv)
+git diff --exit-code c6d2f997 -- Cargo.toml Cargo.lock src tests/support tests/invariants/stateful/inv_063_backing_expiry_normalization.rs tests/invariants/invariant_status.tsv tests/invariants/special_method_coverage.tsv
+```
+
+**Remaining gap.** Multiple live junior claimants, non-exact-credit ratios/rounding residues,
+alternate source sides, within-history ratio changes, arbitrary principal partitions and retry
+words, close switching, provider/insurance, expiry/impairment, fees/funding, risk, Recovery/receipts,
+terminal debtor clearance, recreation, maximum shapes and shared INV-081/086 history adapters
+remain outside this bounded product. No randomized F completion, status promotion, engine-proof
+execution or production change is claimed.
+
 ## Recorded PR135 inventory
 
 This is an artifact inventory with historical fixed-pin evidence descriptions, not a current
