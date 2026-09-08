@@ -8789,6 +8789,9 @@ mod inv_027_protected_principal_seniority;
 #[path = "invariants/cu/inv_028_source_domain_realizability_cap.rs"]
 mod inv_028_source_domain_realizability_cap;
 
+#[path = "invariants/cu/inv_028_consumed_backing_cap.rs"]
+mod inv_028_consumed_backing_cap;
+
 #[path = "invariants/cu/inv_029_positive_claim_bounds_never_understate.rs"]
 mod inv_029_positive_claim_bounds_never_understate;
 
