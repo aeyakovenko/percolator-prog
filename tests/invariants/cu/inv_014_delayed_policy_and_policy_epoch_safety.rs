@@ -14,12 +14,18 @@
 //! Retained CPI price-limit coverage instead changes the oracle mode after the
 //! economic request is signed: adverse repricing rolls back a funded prefix and
 //! matcher writes, while favorable repricing and fresh bounded consent stay live.
+//! Retained activation-fee coverage crosses a market-authority handoff with append
+//! and retired-slot reuse, exact signed fee ceilings, funded-prefix rollback, and
+//! canonical insurance attribution under the successor's stricter/looser policy.
 //!
 //! Guarantee boundary: these tests cover supersession within one live market
 //! incarnation. Market recreation and authority A -> B -> A require persistent
 //! incarnation identifiers and are tracked by INV-001 and INV-005.
 
 use super::*;
+
+#[path = "inv_014_retained_activation_fee.rs"]
+mod retained_activation_fee;
 
 fn send_admin_control(env: &mut V16CuEnv, instruction: ProgInstruction) -> Result<u64, String> {
     send_tx(
