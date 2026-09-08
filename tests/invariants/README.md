@@ -4982,6 +4982,46 @@ rank classes have reducing edges and a bounded path to zero. The base graph and 
 frontiers use public wrapper construction and honest authenticated inputs; they do not establish
 public reachability of every symbolic engine fixture or summary-flag combination.
 
+#### Concrete Recovery/Resolved continuation increment
+
+Executable assertion upgrade on wrapper `8e8e932d`, 2026-09-08, without adding a duplicate
+construction or selector proof: [CU-071]
+`v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_progress` now continues
+past its former B-disposed stopping point. The existing two-asset/four-funded-portfolio public
+fixture retains an expired close and a separate B-stale leg on one target. The older loop required
+only persistent mutation; it did not require each Resolved success to lower concrete work or
+complete that target's economic disposition.
+
+The upgraded witness checks the entire expected serialized Recovery-to-Resolved market account:
+only mode, authenticated current/resolution slots and the loss-stale flag change. Every portfolio,
+the mint, SPL vault, destinations and tracked nonpayer authorities are byte-framed. With no owner
+signature, a crank at the force-close deadline minus one returns `ExpectedSigner` and rolls back
+exactly despite a future caller slot; empty-hint cranks at the exact Clock deadline succeed despite
+a stale caller slot. The fixed-Clock lexicographic rank reads market mode, lapsed backing attached
+to retained legs, the frozen B target/snapshot and stale flag, close residual, retained legs,
+occupied source domains and economic nonterminality. It calls no engine selector or modeled
+continuation. Clock advancement itself is not credited as a reducing transaction.
+
+Eight target continuations each strictly decrease that concrete rank, including one exact
+retained-backing expiry and one B completion composed with one close-booked atom. Target custody
+never moves; the target reaches zero actionable rank and economic disposition. A funded peer's
+one-unit short opened at 100 and froze at 400, with zero fees/funding, so its public continuation
+must pay exactly `1,000 - 300 = 700` SPL atoms. Full token-account comparisons permit only those
+amount deltas; aggregate capital falls by exactly that peer's original 1,000 atoms. Both terminal
+retries return `EngineNonProgress` with exact tracked rollback. All suffix calls use only the
+keeper fee payer, with no extra signers; payer transaction fees are outside the economic frame.
+
+The exact test passes with eleven successful suffix calls, three exact rejections and maximum
+observed 257,839 CU under the existing 325,000 limit, using a private copy of unchanged
+default-feature SBF `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+This is not a fresh SBF build or a maximum-shape result. Only two of the four portfolios are
+economically completed; the other two are framed, not drained, and all four remain materialized.
+Malformed/stale hint matrices stay with the existing [CU-056] dispatch witness. Other recovery
+reasons, claimant orders, partial/junior payouts, changing oracle/resource schedules, supported
+maxima and arbitrary retained histories remain open. The general concrete classifier/continuation
+implication and the missing engine `FinalizeRecovery` rank-proof link below remain unproven;
+this finite wrapper witness does not promote any status or imply permissionless retirement.
+
 #### Pinned engine definitions by class
 
 These are exact source-definition links, not proof-result links. The class association is the
