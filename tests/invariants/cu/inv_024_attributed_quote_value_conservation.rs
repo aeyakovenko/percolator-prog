@@ -318,6 +318,295 @@ fn v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim() {
 }
 
 #[test]
+fn v16_program_shutdown_cleanup_preserves_reserve_beneficiaries() {
+    const PRINCIPAL: u64 = 401;
+    const CLEANUP: u128 = 137;
+
+    let mut svm = LiteSVM::new();
+    let program_id = percolator_prog::id();
+    svm.add_program(
+        program_id,
+        &std::fs::read(program_path()).expect("read BPF"),
+    );
+    svm.add_program(
+        spl_token::ID,
+        &std::fs::read(spl_token_program_path()).expect("read token BPF"),
+    );
+    svm.add_program(
+        associated_token_program_id(),
+        &std::fs::read(associated_token_program_path()).expect("read ATA BPF"),
+    );
+
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+    svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
+
+    let mint = Keypair::new();
+    send_raw_ixs(
+        &mut svm,
+        &payer,
+        vec![
+            system_instruction::create_account(
+                &payer.pubkey(),
+                &mint.pubkey(),
+                1_000_000_000,
+                Mint::LEN as u64,
+                &spl_token::ID,
+            ),
+            spl_token::instruction::initialize_mint(
+                &spl_token::ID,
+                &mint.pubkey(),
+                &admin.pubkey(),
+                None,
+                0,
+            )
+            .unwrap(),
+        ],
+        &[&mint],
+    )
+    .expect("create public SPL mint");
+
+    let params = V16CuMarketParams {
+        max_portfolio_assets: 2,
+        ..V16CuMarketParams::default()
+    };
+    let market = Keypair::new();
+    system_create_account_for_test(
+        &mut svm,
+        &payer,
+        &market,
+        state::market_account_len_for_capacity(2).unwrap(),
+        program_id,
+    );
+    let vault_authority =
+        Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
+    let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint.pubkey());
+    let init_market_cu = send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new_readonly(mint.pubkey(), false),
+        ],
+        &[&admin],
+    )
+    .expect("initialize market through the wrapper");
+    let mut env = V16CuEnv {
+        svm,
+        program_id,
+        payer,
+        admin,
+        init_market_cu,
+        market: market.pubkey(),
+        mint: mint.pubkey(),
+        vault,
+        vault_authority,
+        portfolio_account_len: state::portfolio_account_len_for_market_slots(2).unwrap(),
+        portfolios: Vec::new(),
+    };
+
+    let admin = env.admin.insecure_clone();
+    let reserve_authority = Keypair::new();
+    let insurance_beneficiary = Keypair::new();
+    for (kind, authority) in [
+        (processor::ASSET_AUTH_INSURANCE, &reserve_authority),
+        (
+            processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            &insurance_beneficiary,
+        ),
+        (processor::ASSET_AUTH_BACKING_BUCKET, &reserve_authority),
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(authority),
+            1,
+            kind,
+            authority.pubkey().to_bytes(),
+        )
+        .expect("configure independent reserve beneficiary");
+    }
+
+    let reserve_token = create_ata_for_test(
+        &mut env.svm,
+        &env.payer,
+        reserve_authority.pubkey(),
+        env.mint,
+    );
+    let insurance_destination = create_ata_for_test(
+        &mut env.svm,
+        &env.payer,
+        insurance_beneficiary.pubkey(),
+        env.mint,
+    );
+    let admin_destination = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &env.mint,
+            &reserve_token,
+            &admin.pubkey(),
+            &[],
+            PRINCIPAL * 2,
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .expect("mint reserve principal");
+
+    let insurance_ledger = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &insurance_ledger,
+        state::insurance_ledger_account_len(),
+        env.program_id,
+    );
+    let backing_ledger = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &backing_ledger,
+        state::backing_domain_ledger_account_len(),
+        env.program_id,
+    );
+    let market_id = env.asset_market_id(1);
+    let authority_epoch = env.control_sequences(1).authority_epoch;
+    env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 2,
+            market_id,
+            authority_epoch,
+            intent_id: 0,
+            amount: PRINCIPAL.into(),
+        },
+        vec![
+            AccountMeta::new(reserve_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(reserve_token, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger.pubkey(), false),
+        ],
+        &[&reserve_authority],
+    )
+    .expect("fund attributed insurance reserve");
+    env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 2,
+            market_id,
+            authority_epoch,
+            intent_id: 0,
+            backing_fee_bps: 0,
+            insurance_share_bps: 0,
+            amount: PRINCIPAL.into(),
+            expiry_slot: 100,
+        },
+        vec![
+            AccountMeta::new(reserve_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(reserve_token, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger.pubkey(), false),
+        ],
+        &[&reserve_authority],
+    )
+    .expect("fund attributed backing reserve");
+    assert_eq!(env.token_amount(reserve_token), 0);
+    assert_eq!(env.token_amount(env.vault), PRINCIPAL * 2);
+
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 1, 2, 0);
+    env.svm.warp_to_slot(7);
+
+    let withdrawal =
+        |env: &V16CuEnv, insurance: bool, destination: Pubkey, ledger: Option<Pubkey>| {
+            let authority_epoch = env.withdrawal_authority_epoch(admin.pubkey(), 1, insurance);
+            let instruction = if insurance {
+                ProgInstruction::WithdrawInsuranceAsset {
+                    asset_index: 1,
+                    market_id,
+                    authority_epoch,
+                    amount: CLEANUP,
+                }
+            } else {
+                ProgInstruction::WithdrawBackingBucket {
+                    domain: 2,
+                    market_id,
+                    authority_epoch,
+                    amount: CLEANUP,
+                }
+            };
+            let mut accounts = vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ];
+            accounts.extend(ledger.map(|key| AccountMeta::new(key, false)));
+            (instruction, accounts)
+        };
+
+    for insurance in [false, true] {
+        let before =
+            [env.market, env.vault, admin_destination].map(|key| env.svm.get_account(&key));
+        let (instruction, accounts) = withdrawal(&env, insurance, admin_destination, None);
+        assert!(
+            env.send(instruction, accounts, &[&admin]).is_err(),
+            "market authority cannot redirect shutdown cleanup"
+        );
+        assert_eq!(
+            [env.market, env.vault, admin_destination].map(|key| env.svm.get_account(&key)),
+            before,
+            "wrong-beneficiary rejection must roll back"
+        );
+    }
+
+    for (insurance, destination, ledger) in [
+        (false, reserve_token, backing_ledger.pubkey()),
+        (true, insurance_destination, insurance_ledger.pubkey()),
+    ] {
+        let (instruction, accounts) = withdrawal(&env, insurance, destination, Some(ledger));
+        env.send(instruction, accounts, &[&admin])
+            .expect("market authority submits beneficiary-directed cleanup");
+    }
+
+    assert_eq!(env.token_amount(admin_destination), 0);
+    assert_eq!(env.token_amount(reserve_token), CLEANUP as u64);
+    assert_eq!(env.token_amount(insurance_destination), CLEANUP as u64);
+    let insurance_ledger = state::read_insurance_ledger(
+        &env.svm
+            .get_account(&insurance_ledger.pubkey())
+            .unwrap()
+            .data,
+    )
+    .unwrap();
+    assert_eq!(
+        insurance_ledger.authority,
+        reserve_authority.pubkey().to_bytes()
+    );
+    assert_eq!(insurance_ledger.total_withdrawn_atoms, CLEANUP);
+    let backing_ledger = state::read_backing_domain_ledger(
+        &env.svm.get_account(&backing_ledger.pubkey()).unwrap().data,
+    )
+    .unwrap();
+    assert_eq!(
+        backing_ledger.authority,
+        reserve_authority.pubkey().to_bytes()
+    );
+    assert_eq!(backing_ledger.total_principal_withdrawn_atoms, CLEANUP);
+}
+
+#[test]
 fn v16_program_entitlement_effect_roster_is_source_complete() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let public_rows = include_str!("../public_instruction_coverage.tsv")
