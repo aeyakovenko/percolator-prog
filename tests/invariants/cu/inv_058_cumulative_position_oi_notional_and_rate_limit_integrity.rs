@@ -15,6 +15,9 @@
 //! shared account/side-OI cap by splitting `max - 1` and one atom, rejects one
 //! more atom through every transport with a complete economic snapshot, and
 //! then closes the exact-maximum position through a public route.
+//! A same-pair history table compares direct open, reduction, cross-zero, and
+//! split close/reopen near the cap, then reuses released capacity across routes
+//! while reconciling post-state OI, positions, and cached risk notional.
 //!
 //! Guarantee boundary: `MAX_TRADE_SIZE_Q`, `MAX_POSITION_ABS_Q`, and
 //! `MAX_OI_SIDE_Q` are currently one shared bound, while the exact maximum
@@ -198,6 +201,171 @@ fn v16_program_split_fills_cannot_cross_position_or_side_oi_cap_on_any_route_pai
                 .expect("split-cap route preserves independent stock reconciliation");
             assert_public_encumbrance_census("INV-058 split-cap terminal", &env)
                 .expect("split-cap route preserves independent encumbrance reconciliation");
+        }
+    }
+}
+
+#[test]
+fn v16_program_post_transition_caps_match_across_reduction_and_cross_zero_histories() {
+    const PRICE: u64 = 100;
+
+    fn assert_limits(env: &V16Svm, expected_q: i128) -> ([u128; 2], [u128; 2]) {
+        let (_, group) = env.primary_market_state();
+        let asset = &group.assets[0];
+        assert_eq!(asset.effective_price, PRICE);
+        assert_eq!(asset.raw_oracle_target_price, PRICE);
+        let mut recomputed_oi = [0u128; 2];
+        let mut notionals = [0u128; 2];
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            let account = env.primary_portfolio(actor);
+            let expected = match actor {
+                0 => expected_q,
+                1 => -expected_q,
+                _ => 0,
+            };
+            assert_eq!(
+                percolator::active_bitmap_count_ones(active_bitmap(&account)),
+                u32::from(expected != 0),
+                "actor {actor} active count"
+            );
+            let mut notional = 0;
+            for encoded in &account.legs {
+                let leg = encoded.try_to_runtime().expect("decode public leg");
+                if !leg.active {
+                    continue;
+                }
+                assert_eq!(leg.asset_index, 0);
+                assert_eq!(leg.market_id, asset.market_id);
+                assert_eq!(leg.basis_pos_q, expected, "actor {actor} position");
+                let (side, current_a, epoch, mode) = match leg.side {
+                    SideV16::Long => (0, asset.a_long, asset.epoch_long, asset.mode_long),
+                    SideV16::Short => (1, asset.a_short, asset.epoch_short, asset.mode_short),
+                };
+                assert_eq!(side, usize::from(expected < 0));
+                assert_eq!(mode, SideModeV16::Normal);
+                assert_eq!(leg.epoch_snap, epoch);
+                // These fixed-price bilateral histories have no ADL or reset.
+                assert_eq!(current_a, ADL_ONE);
+                assert_eq!(leg.a_basis, current_a);
+                let abs_q = leg.basis_pos_q.unsigned_abs();
+                assert!(abs_q <= percolator::MAX_POSITION_ABS_Q);
+                recomputed_oi[side] = recomputed_oi[side].checked_add(abs_q).unwrap();
+                let product = abs_q.checked_mul(u128::from(PRICE)).unwrap();
+                notional += product / POS_SCALE + u128::from(product % POS_SCALE != 0);
+            }
+            assert!(notional <= percolator::MAX_ACCOUNT_NOTIONAL);
+            if actor < 2 {
+                let cert = health_cert(&account);
+                assert!(cert.valid);
+                assert_eq!(
+                    cert.certified_worst_case_loss, notional,
+                    "actor {actor} notional"
+                );
+                notionals[actor] = cert.certified_worst_case_loss;
+            }
+        }
+        let maintained_oi = [asset.oi_eff_long_q, asset.oi_eff_short_q];
+        assert_eq!(maintained_oi, recomputed_oi);
+        assert_eq!(recomputed_oi, [expected_q.unsigned_abs(); 2]);
+        assert!(maintained_oi
+            .into_iter()
+            .all(|q| q <= percolator::MAX_OI_SIDE_Q));
+        assert_public_stock_census("INV-058 post-transition limits", env)
+            .expect("stocks reconcile after every accepted transition");
+        (maintained_oi, notionals)
+    }
+
+    let max_q = i128::try_from(percolator::MAX_POSITION_ABS_Q).unwrap();
+    let unit_q = i128::try_from(POS_SCALE).unwrap();
+    assert!(max_q > unit_q + 1);
+    let histories = [
+        ("direct", vec![(TradeRoute::NoCpi, -(max_q - unit_q))]),
+        (
+            "reduce",
+            vec![(TradeRoute::BatchCpi, -max_q), (TradeRoute::NoCpi, unit_q)],
+        ),
+        (
+            "cross-zero",
+            vec![(TradeRoute::NoCpi, unit_q), (TradeRoute::BatchCpi, -max_q)],
+        ),
+        (
+            "split-close-reopen",
+            vec![
+                (TradeRoute::NoCpi, unit_q),
+                (TradeRoute::Cpi, -unit_q),
+                (TradeRoute::BatchNoCpi, -(max_q - unit_q)),
+            ],
+        ),
+    ];
+    for direction in [-1i128, 1] {
+        let mut reference_outcomes = None;
+        for (history, prefix) in &histories {
+            let mut env = V16Svm::new([0x58; 32], inv_058_max_position_config());
+            env.begin_public_trace();
+            let mut expected_q = 0i128;
+            for &(route, size_q) in prefix {
+                let result =
+                    execute_trade_route(&mut env, route, 0, 1, 0, direction * size_q, PRICE, 0)
+                        .unwrap_or_else(|error| {
+                            panic!("{history} direction={direction} {route:?}: {error}")
+                        });
+                assert!(result.compute_units < TX_CU_LIMIT);
+                expected_q += direction * size_q;
+                assert_limits(&env, expected_q);
+            }
+            assert_eq!(expected_q, -direction * (max_q - unit_q));
+            let mut outcomes = vec![assert_limits(&env, expected_q)];
+
+            // Fill the released headroom, reduce it again, and retry at the same cap.
+            for (route, size_q, accepted) in [
+                (TradeRoute::Cpi, -(unit_q + 1), false),
+                (TradeRoute::BatchNoCpi, -unit_q, true),
+                (TradeRoute::BatchCpi, -1, false),
+                (TradeRoute::Cpi, unit_q, true),
+                (TradeRoute::NoCpi, -(unit_q + 1), false),
+                (TradeRoute::BatchCpi, -unit_q, true),
+                (TradeRoute::NoCpi, max_q, true),
+            ] {
+                assert!(size_q.unsigned_abs() <= percolator::MAX_TRADE_SIZE_Q);
+                if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+                    env.ensure_primary_matcher_enabled(1)
+                        .expect("prepare CPI capability before rollback snapshot");
+                }
+                let before = inv_058_economic_snapshot(&env);
+                let result =
+                    execute_trade_route(&mut env, route, 0, 1, 0, direction * size_q, PRICE, 0);
+                let label = format!("{history} direction={direction} {route:?} size={size_q}");
+                if accepted {
+                    let success = result.unwrap_or_else(|error| panic!("{label}: {error}"));
+                    assert!(success.compute_units < TX_CU_LIMIT, "{label}");
+                    expected_q += direction * size_q;
+                } else {
+                    assert_eq!(
+                        (expected_q + direction * size_q).unsigned_abs(),
+                        percolator::MAX_POSITION_ABS_Q + 1
+                    );
+                    let error = result.expect_err("cumulative cap+1 must reject");
+                    assert!(
+                        error.contains("Custom(18)")
+                            || error.contains("custom program error: 0x12"),
+                        "{label}: {error}"
+                    );
+                    assert_eq!(inv_058_economic_snapshot(&env), before, "{label} rollback");
+                }
+                outcomes.push(assert_limits(&env, expected_q));
+            }
+            assert_eq!(expected_q, 0);
+            if let Some(reference) = &reference_outcomes {
+                assert_eq!(
+                    &outcomes, reference,
+                    "{history} post-transition limits differ"
+                );
+            } else {
+                reference_outcomes = Some(outcomes);
+            }
+            env.finish_public_trace()
+                .validate_public_execution()
+                .expect("all position transitions must execute through public instructions");
         }
     }
 }
