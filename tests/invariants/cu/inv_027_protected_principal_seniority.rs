@@ -16,6 +16,10 @@
 //! The recovery-forfeit sibling separates an already booked junior claim from a later unrefreshed
 //! gain: owner forfeiture may discard only the latter, while every senior principal atom exits
 //! independently of whether an unrelated depositor withdraws before or after recovery cleanup.
+//! The maintenance-terminal sibling orders a live senior withdrawal against another owner's fee
+//! accrual and resolution. Live withdrawal and terminal payout return the same independently
+//! computed principal, and exact-rollback insurance probes enforce user disposition before fees
+//! leave custody, including the zero-capital, still-materialized-portfolio boundary.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -25,6 +29,9 @@ use super::*;
 
 #[path = "inv_027_recovery_forfeit_seniority.rs"]
 mod recovery_forfeit_seniority;
+
+#[path = "inv_027_maintenance_terminal_seniority.rs"]
+mod maintenance_terminal_seniority;
 
 const ISSUE408_FEE_PER_SLOT: u128 = 1_000;
 const ISSUE408_AGED_SLOT: u64 = 500;
