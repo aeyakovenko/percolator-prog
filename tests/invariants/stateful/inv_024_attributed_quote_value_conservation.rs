@@ -10,12 +10,16 @@
 //! A separate bounded solvent history checks each transaction across early/end-only
 //! and split/whole withdrawals, carrying payouts through later losses and deposits.
 //! Both loser-first and winner-first settlement retain that per-owner history.
+//! Seeded splits place a stale withdrawal before a freshly signed continuation in
+//! either round; rejection preserves the ledger and rejection-free terminal payouts.
 //! Conversion is atomic; this does not model partial conversion or impaired claims.
 //! The terminal extension keeps that ledger across resolution, including prior live
 //! payouts, a later loss, and unrelated fresh principal. It compares fully converted
 //! capital with an unconverted final profit, then retries and deletes paid portfolios.
 
 use super::*;
+use rand::{Rng, SeedableRng};
+use rand_xorshift::XorShiftRng;
 use solana_sdk::signature::Signer;
 use support::fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census};
 use support::v16_svm::{MarketConfig, V16Svm};
@@ -76,8 +80,11 @@ fn inv024_run_payout_prefix_history(
     withdrawal_order: [usize; 2],
     exit: Inv024PayoutExit,
     winner_settles_first: bool,
-) -> Result<([u128; 2], usize, usize), String> {
+    split_seed: Option<u64>,
+    retry_round: Option<usize>,
+) -> Result<([u128; 2], usize, usize, usize), String> {
     use percolator::POS_SCALE;
+    use percolator_prog::error::PercolatorError;
     use percolator_prog::ix::CrankObservationHint;
     use support::fuzz_model::execute_trade_route;
 
@@ -85,6 +92,14 @@ fn inv024_run_payout_prefix_history(
     const EXTRA: u128 = 17_003;
     const SENIOR_EXTRA: u128 = 37_009;
     const PRICES: [u64; 3] = [1_000_000, 1_100_001, 1_160_004];
+    if retry_round
+        .is_some_and(|round| round >= 2 || payout_schedule != 2 || exit != Inv024PayoutExit::Live)
+    {
+        return Err(
+            "withdrawal retry requires a live split payout in one of the two rounds".into(),
+        );
+    }
+    let mut split_rng = split_seed.map(XorShiftRng::seed_from_u64);
     let endowments = [
         (DEPOSIT + EXTRA) as u64,
         (DEPOSIT + EXTRA) as u64,
@@ -242,6 +257,7 @@ fn inv024_run_payout_prefix_history(
     };
     let mut checked_steps = 0;
     let mut early_payouts = 0;
+    let mut rejected_steps = 0;
     macro_rules! step {
         ($label:expr, $call:expr, $update:block) => {{
             env.begin_public_trace();
@@ -381,12 +397,46 @@ fn inv024_run_payout_prefix_history(
         let chunks = match schedule {
             0 => vec![],
             1 => vec![gain],
-            2 => vec![1, gain - 1],
+            2 => {
+                let first = split_rng
+                    .as_mut()
+                    .map_or(1, |rng| rng.gen_range(2..gain - 1));
+                vec![first, gain - first]
+            }
             _ => return Err("unsupported payout schedule".into()),
         };
-        for amount in chunks {
+        // Retain the second chunk before the first consumes the owner's sequence.
+        let mut retained =
+            (retry_round == Some(round)).then(|| env.build_retained_withdrawal(winner, chunks[1]));
+        for (chunk, amount) in chunks.into_iter().enumerate() {
             if amount > history[winner].remaining() || amount > history[winner].observation().0 {
                 return Err("requested payout exceeds independently modeled claim/capital".into());
+            }
+            if chunk == 1 {
+                if let Some(retained) = retained.take() {
+                    step!(
+                        "stale second withdrawal chunk",
+                        match env.land_retained(retained) {
+                            Err(error)
+                                if error.contains(&format!(
+                                    "Custom({})",
+                                    PercolatorError::EngineStale as u32
+                                )) =>
+                                Ok(()),
+                            Err(error) => Err(format!("unexpected withdrawal rejection: {error}")),
+                            Ok(_) => Err("stale withdrawal unexpectedly succeeded".into()),
+                        },
+                        {}
+                    );
+                    rejected_steps += 1;
+                    let mut paid_on_error = history;
+                    paid_on_error[winner].paid += amount;
+                    assert!(
+                        inv024_check_payout_observation(&paid_on_error, &observe(&env, &history))
+                            .is_err(),
+                        "a rejected attempt must not advance cumulative owner payouts"
+                    );
+                }
             }
             step!("early withdrawal", env.withdraw_primary(winner, amount), {
                 history[winner].paid += amount;
@@ -555,6 +605,7 @@ fn inv024_run_payout_prefix_history(
         [history[0].paid, history[1].paid],
         checked_steps,
         early_payouts,
+        rejected_steps,
     ))
 }
 
@@ -582,13 +633,14 @@ fn v16_program_payout_prefix_histories_preserve_each_owners_entitlement() {
             for withdrawal_order in [[0, 1], [1, 0]] {
                 for winner_settles_first in [false, true] {
                     for schedule in 0..3 {
-                        let (paid, steps, early) = inv024_run_payout_prefix_history(
+                        let (paid, steps, early, rejected) = inv024_run_payout_prefix_history(
                             routes, first_winner, schedule, withdrawal_order,
-                            Inv024PayoutExit::Live, winner_settles_first,
+                            Inv024PayoutExit::Live, winner_settles_first, None, None,
                         ).unwrap_or_else(|error| panic!(
                             "INV-024 routes={routes:?} first_winner={first_winner} schedule={schedule} order={withdrawal_order:?} winner_settles_first={winner_settles_first}: {error}"
                         ));
                         assert_eq!(early, [0, 2, 4][schedule]);
+                        assert_eq!(rejected, 0);
                         assert_eq!(
                             *end_only_outcomes[first_winner].get_or_insert(paid),
                             paid,
@@ -634,12 +686,13 @@ fn v16_program_live_payout_histories_preserve_entitlement_through_resolution() {
                         Inv024PayoutExit::ResolvedCapital,
                         Inv024PayoutExit::ResolvedPnl,
                     ] {
-                        let (paid, steps, early) = inv024_run_payout_prefix_history(
-                            routes, first_winner, schedule, order, exit, false,
+                        let (paid, steps, early, rejected) = inv024_run_payout_prefix_history(
+                            routes, first_winner, schedule, order, exit, false, None, None,
                         ).unwrap_or_else(|error| panic!(
                             "INV-024/027/066/067 routes={routes:?} first_winner={first_winner} schedule={schedule} order={order:?} exit={exit:?}: {error}"
                         ));
                         assert_eq!(early, schedule);
+                        assert_eq!(rejected, 0);
                         assert_eq!(
                             *outcomes[first_winner].get_or_insert(paid), paid,
                             "prior live payouts, conversion, transport or terminal order changed entitlement"
@@ -655,6 +708,54 @@ fn v16_program_live_payout_histories_preserve_entitlement_through_resolution() {
     assert_eq!(worlds, 48);
     assert_eq!(early_payouts, 48);
     eprintln!("INV-024/027/066/067: {worlds} worlds, {checked_steps} checked transactions, {early_payouts} live payouts, {} terminal payouts and portfolio closes", worlds * 5);
+}
+
+#[test]
+fn v16_program_seeded_withdrawal_retries_preserve_payout_prefix_entitlement() {
+    let routes = [
+        TradeRoute::NoCpi,
+        TradeRoute::BatchCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+    ];
+    let mut worlds = 0;
+    let mut checked_steps = 0;
+    let mut rejected_steps = 0;
+    for seed in [0x24_u64, 0x427, 0x2026_0908] {
+        for first_winner in 0..2 {
+            let mut control = None;
+            for retry_round in [None, Some(0), Some(1)] {
+                let (paid, steps, early, rejected) = inv024_run_payout_prefix_history(
+                    routes,
+                    first_winner,
+                    2,
+                    [1 - first_winner, first_winner],
+                    Inv024PayoutExit::Live,
+                    false,
+                    Some(seed),
+                    retry_round,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "INV-024 seed={seed:#x} first_winner={first_winner} retry_round={retry_round:?}: {error}"
+                    )
+                });
+                assert_eq!(early, 4);
+                assert_eq!(rejected, usize::from(retry_round.is_some()));
+                assert_eq!(
+                    *control.get_or_insert((paid, steps - rejected)),
+                    (paid, steps - rejected),
+                    "rejected withdrawal changed owner entitlement or successful continuation"
+                );
+                worlds += 1;
+                checked_steps += steps;
+                rejected_steps += rejected;
+            }
+        }
+    }
+    assert_eq!(worlds, 18);
+    assert_eq!(rejected_steps, 12);
+    eprintln!("INV-024 seeded retries: {worlds} worlds, {checked_steps} checked transactions, {rejected_steps} rejected withdrawals");
 }
 
 #[test]

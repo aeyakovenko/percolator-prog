@@ -4598,7 +4598,7 @@ after full conversion; it does not duplicate that rejection matrix or count it a
 | `PushAuthMark` (63), `PermissionlessCrank` (5) | Attribute each authenticated price/quantity settlement once to the correct owner and round, checking every actor after each individual crank in loser-first and winner-first schedules. Publishing a mark is not itself portfolio realization. This slice covers funded accrual/settlement only, not the crank's liquidation, reward, or terminal branches. |
 | `ConvertReleasedPnl` (28) | Bound one full conversion per round by independently modeled claim and unconverted PnL. Move claim to the same owner's capital without new principal or external payout. |
 | `Withdraw` (4) | Compare end-only withdrawal with early `Q` and `[1, Q-1]` gain payouts. Bound requests by modeled claim and flat settled capital; compare cumulative destination SPL balances after each transaction and retain prior payments through the next round and final withdrawal. |
-| Matcher reauthorization and individual cranks | Execute `SetMatcherConfig` (68) explicitly before each CPI trade and observe each crank separately. Every checked call must produce exactly one successful authority-attributed public trace step. Unexpected errors fail the test; generic error/retry schedules remain deferred. |
+| Matcher reauthorization and individual cranks | Execute `SetMatcherConfig` (68) explicitly before each CPI trade and observe each crank separately. Every checked call in the original 24-world matrix must produce exactly one successful authority-attributed public trace step. Unexpected errors fail the test; the maintenance increment below adds one explicitly expected withdrawal rejection. |
 
 **Oracle boundary.** `Inv024PayoutHistory` and `inv024_check_payout_observation` keep generator intent
 and observed SBF results separate:
@@ -4619,22 +4619,69 @@ and observed SBF results separate:
   counters fail the same pure comparison after every early withdrawal. These are oracle-input
   mutations only, never injected program state or claimed public findings.
 
-**Next non-duplicative increment.** Add bounded seeded amount/withdrawal partitions and explicit
-retry/error placement to this executing solvent owner, checking exact rollback without advancing
-the ledger on error. Equal/even gains, no-deposit controls, other split points, independent per-round
-settlement orders and per-owner observation cursors beyond the fixed two-round schedule remain absent.
+**Maintenance increment: seeded withdrawal retry placement (2026-09-08).**
+`v16_program_seeded_withdrawal_retries_preserve_payout_prefix_entitlement` extends the same runner,
+not the engine proofs or shared trace oracle. Three fixed XorShift seeds (`0x24`, `0x427`,
+`0x20260908`) select two positive withdrawal chunks per round, each at least two atoms. Its 18
+public worlds cross both first-winner orientations with a rejection-free control and a retained
+second-chunk rejection in either round. The second chunk is signed before the first consumes the
+owner's sequence; it remains independently affordable when submitted but must return the exact
+`EngineStale` application error. Runtime or unrelated application errors do not qualify.
+
+The existing public-trace validator requires exact writable-account rollback (except transaction
+fees), no program lamport movement, and zero SPL balance/supply deltas. The same independent owner
+ledger and stock/frame checks then run with no ledger update. An observation-only mutation that
+counts the rejected amount as paid must fail. A freshly signed second chunk must succeed and be
+counted once; both owners' final payouts and successful-step counts must equal the matching control.
+Round-one placement retains those payouts through the inter-round deposit, later loss, and fees;
+round-two placement checks the other winner after that prior history. The original 24-world
+end-only/whole/one-atom-split matrix remains unchanged.
+
+INV-008 already owns generic retained-withdrawal replay rejection, and INV-080 owns standalone
+withdrawal rollback. The net-new obligation here is their composition with transaction-indexed,
+recipient-specific payout-prefix entitlement and a successful continuation, not a new rejection
+rule. Only one four-transport order and one final withdrawal order per orientation are used in
+this increment. Deposits, gains, fees, full conversion, and settlement order remain fixed; there
+are no failed deposit/trade, late CPI failure, impaired-claim, or arbitrary error-history claims.
+
+**Next non-duplicative increment.** Extend bounded seeded amounts beyond these withdrawal splits
+and place other explicitly typed deposit/trade errors without advancing the ledger. Equal/even
+gains, no-deposit controls, independent per-round settlement orders and per-owner observation
+cursors beyond the fixed two-round schedule remain absent. Exhaustive withdrawal partitions also
+remain open.
 Generalizing to other value effects requires typed event adapters and shared snapshot observation;
 `PublicTraceEvidence` alone has no portfolio claim snapshots. Do not wire this partial model into
 every INV-081/086 action or treat unsupported effects as no-ops.
 
-Build the default wrapper and authenticated matcher SBF artifacts from this same worktree using
-the [build instructions](../../README.md#build--test), with the pinned dependency above. Do not use
-another worktree's `PERCOLATOR_FUZZ_SBF` or `CARGO_TARGET_DIR` artifact. Narrow gates:
+The original increment used default wrapper and authenticated matcher SBF artifacts built from
+its same worktree using the [build instructions](../../README.md#build--test), with the pinned
+dependency above. Its original narrow gates were:
 
 ```bash
 cargo test --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation -- --list
 cargo test --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation::v16_program_payout_prefix_histories_preserve_each_owners_entitlement -- --exact --nocapture
 cargo test --test v16_cu inv_024_attributed_quote_value_conservation::v16_program_entitlement_effect_roster_is_source_complete -- --exact --nocapture
+git diff --check
+```
+
+The tests-only maintenance lane uses the explicitly supplied cached wrapper SBF at
+`/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so` and the same target
+directory for host dependencies, with debug information and incremental compilation disabled.
+Wrapper SHA-256 is `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`;
+the cached authenticated matcher is `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Both match the wrapper arithmetic conformance checkpoint above. Production source, engine pin,
+route/effect roster, and invariant/method status are unchanged.
+
+The exact new test passes: 18 worlds, 462 checked transactions, and 12 rejected withdrawals.
+The exact affected original test also passes: 24 worlds, 552 checked transactions, and 48 early
+payouts. `cargo fmt --check` and `git diff --check` pass. Only those two tests were executed; no
+broader suite, metadata/source roster, engine proof, or SBF rebuild is claimed for this lane.
+Commands from the isolated maintenance worktree:
+
+```bash
+env PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test --locked --offline --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation::v16_program_seeded_withdrawal_retries_preserve_payout_prefix_entitlement -- --exact --nocapture
+env PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test --locked --offline --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation::v16_program_payout_prefix_histories_preserve_each_owners_entitlement -- --exact --nocapture
+cargo fmt --check
 git diff --check
 ```
 
