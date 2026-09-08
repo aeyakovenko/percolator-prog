@@ -22,6 +22,9 @@
 //! Both retained CPI routes bind the persisted matcher-config incarnation and an authenticated,
 //! owner-selected expiry. Expiry is strict (`current_slot < expiry_slot`), uses the Clock sysvar,
 //! and is cleared with the capability on every unsynchronized position mutation.
+//! A full 14-leg public batch exit also binds that incarnation: same-tuple reauthorization must
+//! reject the retained exit before matcher CPI within the preflight budget, without moving value
+//! or preventing the identical exit under the fresh grant.
 
 use super::*;
 
@@ -288,6 +291,240 @@ fn inv012_matcher_capability_expiry_case(batch: bool) {
 fn v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes() {
     inv012_matcher_capability_expiry_case(false);
     inv012_matcher_capability_expiry_case(true);
+}
+
+#[test]
+fn v16_program_full_portfolio_retained_capability_rejects_before_cpi_and_fresh_exit_fits() {
+    const LEG_COUNT: u16 = 14;
+    const DEPOSIT: u128 = 1_000_000;
+    const EXPIRY_SLOT: u64 = 100;
+    const EXIT_CU_LIMIT: u64 = 1_400_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(LEG_COUNT, 1_000, 1_000, 500);
+    for asset_index in 0..LEG_COUNT {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, 100);
+    }
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    let taker_source = env.deposit(&taker_owner, taker, DEPOSIT);
+    let lp_source = env.deposit(&lp_owner, lp, DEPOSIT);
+    let (context, delegate, _) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &lp_owner, lp);
+    env.try_set_matcher_config_with_trade_fee_cap_and_expiry(
+        matcher_program,
+        &lp_owner,
+        lp,
+        context,
+        delegate,
+        1,
+        0,
+        EXPIRY_SLOT,
+    )
+    .expect("owner installs the bounded zero-fee grant");
+
+    let accounts = vec![
+        AccountMeta::new(taker_owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(taker, false),
+        AccountMeta::new(lp, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(context, false),
+        AccountMeta::new_readonly(delegate, false),
+    ];
+    let open_legs: Vec<_> = (0..LEG_COUNT)
+        .map(|asset_index| BatchTradeCpiLeg {
+            asset_index,
+            market_id: env.asset_market_id(asset_index),
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 100,
+        })
+        .collect();
+    let open_cu = env
+        .send(
+            env.batch_trade_cpi_ix_with_caps(taker, lp, open_legs.clone(), 0, 0),
+            accounts.clone(),
+            &[&taker_owner],
+        )
+        .expect("public matcher batch opens all fourteen real positions");
+    assert_cu_within("full-portfolio capability setup", open_cu, EXIT_CU_LIMIT);
+    assert_eq!(env.market_state().1.config.max_portfolio_assets, LEG_COUNT);
+    for portfolio in [taker, lp] {
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(portfolio))),
+            u32::from(LEG_COUNT),
+            "the retained route starts with both portfolios fully occupied"
+        );
+    }
+    let exit_legs = open_legs
+        .into_iter()
+        .map(|leg| BatchTradeCpiLeg {
+            size_q: -leg.size_q,
+            ..leg
+        })
+        .collect();
+    let retained_ix = env.batch_trade_cpi_ix_with_caps(taker, lp, exit_legs, 0, 0);
+    let transaction = |env: &V16CuEnv, instruction: &ProgInstruction| {
+        Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                cu_ix(),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: accounts.clone(),
+                    data: instruction.encode(),
+                },
+            ],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &taker_owner],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let retained = transaction(&env, &retained_ix);
+    assert!(
+        bincode::serialized_size(&retained).unwrap() <= solana_sdk::packet::PACKET_DATA_SIZE as u64,
+        "the retained fourteen-leg transaction must fit the public packet limit"
+    );
+    let frame_keys = [
+        env.market,
+        taker,
+        lp,
+        context,
+        env.vault,
+        env.mint,
+        taker_source,
+        lp_source,
+        taker_owner.pubkey(),
+        lp_owner.pubkey(),
+    ];
+    // The distinct network payer is excluded; all economic accounts include data and lamports.
+    let snapshot = |env: &V16CuEnv| frame_keys.map(|key| env.svm.get_account(&key).unwrap());
+    let before_simulation = snapshot(&env);
+    let live = env
+        .svm
+        .simulate_transaction(retained.clone().into())
+        .expect("the exact retained exit is executable under its original grant");
+    assert_cu_within(
+        "live retained full-portfolio exit",
+        live.compute_units_consumed,
+        EXIT_CU_LIMIT,
+    );
+    assert_eq!(snapshot(&env), before_simulation);
+    let original_config = env.portfolio_matcher_config(lp);
+    let original_sequence = env.portfolio_matcher_sequence(lp);
+    let position_epochs = [taker, lp].map(|portfolio| env.portfolio_position_epoch(portfolio));
+
+    env.set_matcher_config(matcher_program, &lp_owner, lp, context, delegate, 0);
+    env.try_set_matcher_config_with_trade_fee_cap_and_expiry(
+        matcher_program,
+        &lp_owner,
+        lp,
+        context,
+        delegate,
+        1,
+        0,
+        EXPIRY_SLOT,
+    )
+    .expect("owner restores the identical tuple, fee cap, and expiry");
+    assert_eq!(env.portfolio_matcher_config(lp), original_config);
+    assert_eq!(env.portfolio_matcher_expiry(lp), EXPIRY_SLOT);
+    assert_eq!(env.portfolio_matcher_sequence(lp), original_sequence + 2);
+    assert_eq!(
+        [taker, lp].map(|portfolio| env.portfolio_position_epoch(portfolio)),
+        position_epochs,
+        "no position writer may mask the grant-incarnation rejection"
+    );
+
+    let before_rejection = snapshot(&env);
+    let rejected = env
+        .svm
+        .send_transaction(retained)
+        .expect_err("the old grant cannot authorize a full-portfolio exit after re-enable");
+    assert_eq!(
+        rejected.err,
+        solana_sdk::transaction::TransactionError::InstructionError(
+            2,
+            solana_sdk::instruction::InstructionError::Custom(PercolatorError::EngineStale as u32)
+        )
+    );
+    assert!(
+        rejected
+            .meta
+            .logs
+            .iter()
+            .all(|line| !line.starts_with(&format!("Program {matcher_program} invoke"))),
+        "stale authorization must reject before matcher work, not merely roll it back"
+    );
+    let reject_cu = rejected.meta.compute_units_consumed;
+    assert_cu_within(
+        "full-portfolio stale capability preflight",
+        reject_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        snapshot(&env),
+        before_rejection,
+        "complete stale-grant rollback"
+    );
+
+    // Refresh only the grant sequence; retain every position, asset, and economic bound verbatim.
+    let mut fresh_ix = retained_ix;
+    match &mut fresh_ix {
+        ProgInstruction::BatchTradeCpi {
+            account_b_matcher_sequence,
+            ..
+        } => {
+            *account_b_matcher_sequence = env.portfolio_matcher_sequence(lp);
+        }
+        _ => unreachable!(),
+    }
+    let fresh = transaction(&env, &fresh_ix);
+    let fresh = env
+        .svm
+        .send_transaction(fresh)
+        .expect("a stale-grant rejection must not block the same exit under the fresh grant");
+    assert_cu_within(
+        "fresh full-portfolio capability exit",
+        fresh.compute_units_consumed,
+        EXIT_CU_LIMIT,
+    );
+    assert!(fresh
+        .logs
+        .iter()
+        .any(|line| line == &format!("Program {matcher_program} success")));
+    for portfolio in [taker, lp] {
+        let account = env.portfolio_state(portfolio);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&account)),
+            0
+        );
+        assert_eq!(account.capital.get(), DEPOSIT);
+        assert_eq!(account.pnl.get(), 0);
+    }
+    let group = env.market_state().1;
+    for asset_index in 0..usize::from(LEG_COUNT) {
+        assert_eq!(group.assets[asset_index].oi_eff_long_q, 0);
+        assert_eq!(group.assets[asset_index].oi_eff_short_q, 0);
+    }
+    assert_eq!(group.c_tot, 2 * DEPOSIT);
+    assert_eq!(group.vault, 2 * DEPOSIT);
+    assert_eq!(env.token_amount(env.vault), (2 * DEPOSIT) as u64);
+    for key in [env.vault, env.mint, taker_source, lp_source] {
+        let index = frame_keys
+            .iter()
+            .position(|candidate| *candidate == key)
+            .unwrap();
+        assert_eq!(env.svm.get_account(&key).unwrap(), before_rejection[index]);
+    }
+    println!(
+        "INV-012 full-portfolio retained exit CU: open={open_cu}, live={}, stale={reject_cu}, fresh={}",
+        live.compute_units_consumed, fresh.compute_units_consumed
+    );
 }
 
 fn issue406_signed_trade_invalidates_both_matchers(batch: bool) {
