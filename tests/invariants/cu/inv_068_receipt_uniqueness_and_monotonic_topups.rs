@@ -7,8 +7,413 @@
 //! burn the pending receipt or move custody. Public lifecycle tests remain the
 //! primary reachability evidence; state-seeded terminal probes are narrower
 //! receipt-preservation checks.
+//! The shared-owner history below keeps two unequal embedded receipts independent even
+//! when their claimant and SPL destination are identical, including after one owner exit.
 
 use super::*;
+
+#[test]
+fn v16_program_same_owner_receipts_keep_independent_topups_and_terminal_replays() {
+    use super::inv_067_terminal_payout_completeness_and_exact_once_settlement::late_expiry::World;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const FACES: [u128; 5] = [14 * 50, 0, 20 * 50, 0, 26 * 50];
+    const CAPITAL: [u128; 5] = [1_000, 0, 1_000, 0, 1_000];
+    const TOTAL_FACE: u128 = 3_000;
+    const INITIAL_RESIDUAL: u128 = 501;
+    const FINAL_RESIDUAL: u128 = 851;
+
+    fn entitlement(actor: usize, residual: u128) -> u128 {
+        FACES[actor] * residual / TOTAL_FACE
+    }
+
+    fn step(
+        world: &mut World,
+        actor: usize,
+        instruction: Instruction,
+        paid: &mut [u128; 5],
+    ) -> Option<u128> {
+        let before = world.frame();
+        let token = world.actors[actor].token;
+        let tokens_before = world.env.token_amount(token);
+        let vault_before = world.env.market_state().1.vault;
+        let receipt_before = world.receipt(actor);
+        let result = world.land(&[instruction], false);
+        let meta = match &result {
+            Ok(meta) => meta,
+            Err(failure) => &failure.meta,
+        };
+        assert_cu_within(
+            "shared-owner receipt step",
+            meta.compute_units_consumed,
+            CUSTODY_CU_LIMIT,
+        );
+        match result {
+            Ok(_) => {
+                let delta = u128::from(
+                    world
+                        .env
+                        .token_amount(token)
+                        .checked_sub(tokens_before)
+                        .unwrap(),
+                );
+                paid[actor] += delta;
+                assert_eq!(
+                    vault_before.checked_sub(world.env.market_state().1.vault),
+                    Some(delta)
+                );
+                if receipt_before.present {
+                    let receipt_after = world.receipt(actor);
+                    if receipt_after.present {
+                        let mut expected = receipt_before;
+                        expected.paid_effective += delta;
+                        expected.finalized = receipt_after.finalized;
+                        assert_eq!(
+                            receipt_after, expected,
+                            "only paid value and finalization may change"
+                        );
+                        assert!(receipt_after.paid_effective <= entitlement(actor, FINAL_RESIDUAL));
+                        assert!(!receipt_before.finalized || receipt_after.finalized);
+                    }
+                    if !receipt_after.present || receipt_after.finalized {
+                        assert_eq!(
+                            paid[actor],
+                            CAPITAL[actor] + entitlement(actor, FINAL_RESIDUAL)
+                        );
+                        assert_eq!(
+                            world
+                                .env
+                                .market_state()
+                                .1
+                                .resolved_payout_ledger
+                                .terminal_claim_bound_unreceipted_num,
+                            0
+                        );
+                    }
+                }
+                world.assert_frame_except(
+                    &before,
+                    &[
+                        world.env.market,
+                        world.env.vault,
+                        world.actors[actor].portfolio,
+                        token,
+                    ],
+                );
+                for index in 0..5 {
+                    assert!(paid[index] <= CAPITAL[index] + entitlement(index, FINAL_RESIDUAL));
+                    let expected = if index == 0 || index == 4 {
+                        paid[0] + paid[4]
+                    } else {
+                        paid[index]
+                    };
+                    assert_eq!(
+                        u128::from(world.env.token_amount(world.actors[index].token)),
+                        expected
+                    );
+                }
+                world.custody();
+                Some(delta)
+            }
+            Err(failure) => {
+                assert_eq!(
+                    failure.err,
+                    TransactionError::InstructionError(
+                        2,
+                        InstructionError::Custom(PercolatorError::EngineNonProgress as u32),
+                    )
+                );
+                assert_eq!(
+                    world.frame(),
+                    before,
+                    "nonprogress must roll back every tracked account"
+                );
+                world.custody();
+                None
+            }
+        }
+    }
+
+    fn finish(world: &mut World, actor: usize, paid: &mut [u128; 5]) {
+        for _ in 0..8 {
+            if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
+                break;
+            }
+            let instruction = world.payout(actor, false);
+            step(world, actor, instruction, paid);
+        }
+        assert!(resolved_portfolio_is_terminal(
+            &world.env,
+            world.actors[actor].portfolio
+        ));
+        assert_eq!(
+            paid[actor],
+            CAPITAL[actor] + entitlement(actor, FINAL_RESIDUAL)
+        );
+        assert!(
+            !world.receipt(actor).present,
+            "terminal drain must clear the embedded receipt"
+        );
+    }
+
+    fn close(world: &mut World, actor: usize) {
+        let before = world.frame();
+        let portfolio = world.actors[actor].portfolio;
+        let mut closed_account = world.env.svm.get_account(&portfolio).unwrap();
+        let rent = closed_account.lamports;
+        let market_rent = world
+            .env
+            .svm
+            .get_account(&world.env.market)
+            .unwrap()
+            .lamports;
+        let count = world.env.market_state().1.materialized_portfolio_count;
+        let cu = world
+            .env
+            .close_portfolio_with_cu(&world.actors[actor].owner, portfolio);
+        assert_cu_within("shared-owner portfolio close", cu, CUSTODY_CU_LIMIT);
+        world.peak_cu = world.peak_cu.max(cu);
+        closed_account.lamports = 0;
+        closed_account.data.clear();
+        assert_eq!(world.env.svm.get_account(&portfolio), Some(closed_account));
+        assert_eq!(
+            world
+                .env
+                .svm
+                .get_account(&world.env.market)
+                .unwrap()
+                .lamports,
+            market_rent + rent
+        );
+        assert_eq!(
+            world.env.market_state().1.materialized_portfolio_count + 1,
+            count
+        );
+        world.assert_frame_except(&before, &[world.env.market, portfolio]);
+        world.custody();
+    }
+
+    fn reject_stale(world: &mut World, instruction: Instruction) {
+        let before = world.frame();
+        let failure = world
+            .land(&[instruction], false)
+            .expect_err("dematerialized portfolio cannot claim");
+        assert_eq!(
+            failure.err,
+            TransactionError::InstructionError(
+                2,
+                InstructionError::Custom(PercolatorError::NotInitialized as u32),
+            )
+        );
+        assert_cu_within(
+            "shared-owner stale claim",
+            failure.meta.compute_units_consumed,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(
+            world.frame(),
+            before,
+            "stale claim cannot revive a receipt or consume its sibling"
+        );
+        world.custody();
+    }
+
+    let initial_shared = entitlement(0, INITIAL_RESIDUAL) + entitlement(4, INITIAL_RESIDUAL);
+    let final_shared = entitlement(0, FINAL_RESIDUAL) + entitlement(4, FINAL_RESIDUAL);
+    assert_eq!((initial_shared, final_shared), (333, 566));
+    assert_eq!(
+        (FACES[0] + FACES[4]) * FINAL_RESIDUAL / TOTAL_FACE,
+        final_shared + 1,
+        "merging co-owned faces would overpay one atom"
+    );
+    let mut peak_cu = 0;
+    let identity = |world: &World, actor: usize| {
+        let portfolio = world.actors[actor].portfolio;
+        (
+            world.env.portfolio_id(portfolio),
+            world.env.portfolio_position_epoch(portfolio),
+            state::read_portfolio_owner_preflight(
+                &world.env.svm.get_account(&portfolio).unwrap().data,
+            )
+            .unwrap(),
+        )
+    };
+    for claim_route in [false, true] {
+        for first in [0, 4] {
+            let sibling = 4 - first;
+            let owner = Keypair::new();
+            let owners = [Keypair::from_bytes(&owner.to_bytes()).unwrap(), owner];
+            let mut world = World::before_receipts_with_claimant_owners(owners);
+            assert_eq!(
+                world.actors[0].owner.pubkey(),
+                world.actors[4].owner.pubkey()
+            );
+            assert_eq!(world.actors[0].token, world.actors[4].token);
+            assert_ne!(world.actors[0].portfolio, world.actors[4].portfolio);
+            assert_ne!(
+                world.env.portfolio_id(world.actors[0].portfolio),
+                world.env.portfolio_id(world.actors[4].portfolio)
+            );
+            let identities = [0, 4].map(|actor| identity(&world, actor));
+            let mut paid = [0; 5];
+            assert!(world
+                .actors
+                .iter()
+                .all(|actor| world.env.token_amount(actor.token) == 0));
+            for actor in [first, sibling] {
+                for _ in 0..8 {
+                    if world.receipt(actor).present {
+                        break;
+                    }
+                    let instruction = world.payout(actor, false);
+                    step(&mut world, actor, instruction, &mut paid)
+                        .expect("public receipt creation must progress");
+                }
+                let receipt = world.receipt(actor);
+                assert!(receipt.present && !receipt.finalized);
+                assert_eq!(receipt.terminal_positive_claim_face, FACES[actor]);
+                assert_eq!(
+                    receipt.prior_bound_contribution_num,
+                    FACES[actor] * BOUND_SCALE
+                );
+                assert_eq!(receipt.live_released_face_at_receipt, 0);
+                assert_eq!(receipt.paid_effective, entitlement(actor, INITIAL_RESIDUAL));
+                assert_eq!(paid[actor], CAPITAL[actor] + receipt.paid_effective);
+            }
+            let snapshot = world.env.market_state().1.resolved_payout_ledger;
+            assert_eq!(snapshot.snapshot_slot, 12);
+            assert_eq!(snapshot.snapshot_residual, INITIAL_RESIDUAL);
+            assert_eq!(
+                snapshot.current_payout_rate_num,
+                INITIAL_RESIDUAL * BOUND_SCALE
+            );
+            assert_eq!(snapshot.current_payout_rate_den, TOTAL_FACE * BOUND_SCALE);
+            let originals = [world.receipt(first), world.receipt(sibling)];
+            let retained = world.payout(first, claim_route);
+            // This one-field substitution is valid: the owner and destination are shared.
+            // It must select the sibling's own face, not reject or reuse the first receipt.
+            let mut retargeted = retained.clone();
+            retargeted.accounts[2].pubkey = world.actors[sibling].portfolio;
+            assert_eq!(retargeted, world.payout(sibling, claim_route));
+            world.env.svm.warp_to_slot(13);
+            let release = world.payout(2, false);
+            assert_eq!(step(&mut world, 2, release, &mut paid), Some(0));
+            assert_eq!([world.receipt(first), world.receipt(sibling)], originals);
+            let ledger = world.env.market_state().1.resolved_payout_ledger;
+            assert_eq!(ledger.snapshot_slot, snapshot.snapshot_slot);
+            assert_eq!(ledger.snapshot_residual, FINAL_RESIDUAL);
+            assert_eq!(ledger.current_payout_rate_num, FINAL_RESIDUAL * BOUND_SCALE);
+            assert_eq!(ledger.current_payout_rate_den, TOTAL_FACE * BOUND_SCALE);
+            assert_eq!(
+                ledger.terminal_claim_exact_receipts_num,
+                (FACES[0] + FACES[4]) * BOUND_SCALE
+            );
+            assert_eq!(
+                ledger.terminal_claim_bound_unreceipted_num,
+                FACES[2] * BOUND_SCALE
+            );
+
+            let due = entitlement(first, FINAL_RESIDUAL) - originals[0].paid_effective;
+            assert!(due > 0);
+            assert_eq!(
+                step(&mut world, first, retained.clone(), &mut paid),
+                Some(due)
+            );
+            let mut expected_receipt = originals[0];
+            expected_receipt.paid_effective += due;
+            assert_eq!(world.receipt(first), expected_receipt);
+            assert_eq!(world.receipt(sibling), originals[1]);
+            assert_eq!(world.env.market_state().1.resolved_payout_ledger, ledger);
+            for (index, actor) in [0, 4].into_iter().enumerate() {
+                assert_eq!(identity(&world, actor), identities[index]);
+            }
+            for route in [false, true] {
+                let before = world.frame();
+                let replay = world.payout(first, route);
+                assert!(matches!(
+                    step(&mut world, first, replay, &mut paid),
+                    Some(0) | None
+                ));
+                assert_eq!(
+                    world.frame(),
+                    before,
+                    "shared destination does not make a paid receipt due again"
+                );
+            }
+
+            // Remove the remaining bound, then retire only the paid co-owned portfolio.
+            // Its sibling must remain a live, partially paid receipt throughout the drain.
+            finish(&mut world, 2, &mut paid);
+            assert_eq!(
+                world
+                    .env
+                    .market_state()
+                    .1
+                    .resolved_payout_ledger
+                    .terminal_claim_bound_unreceipted_num,
+                0
+            );
+            finish(&mut world, first, &mut paid);
+            assert_eq!(world.receipt(sibling), originals[1]);
+            close(&mut world, first);
+            for route in [false, true] {
+                let stale = world.payout(first, route);
+                reject_stale(&mut world, stale);
+            }
+            assert_eq!(world.receipt(sibling), originals[1]);
+            let sibling_due = entitlement(sibling, FINAL_RESIDUAL) - originals[1].paid_effective;
+            assert!(sibling_due > 0 && sibling_due != due);
+            assert_eq!(
+                step(&mut world, sibling, retargeted, &mut paid),
+                Some(sibling_due)
+            );
+            assert_eq!(
+                identity(&world, sibling),
+                identities[usize::from(sibling == 4)]
+            );
+            assert_eq!(
+                world.env.token_amount(world.actors[sibling].token) as u128,
+                CAPITAL[0] + CAPITAL[4] + final_shared
+            );
+            for actor in [sibling, 1, 2, 3] {
+                finish(&mut world, actor, &mut paid);
+                close(&mut world, actor);
+            }
+            for actor in [first, sibling] {
+                for route in [false, true] {
+                    let stale = world.payout(actor, route);
+                    reject_stale(&mut world, stale);
+                }
+            }
+            assert_eq!(
+                paid,
+                std::array::from_fn(|actor| CAPITAL[actor] + entitlement(actor, FINAL_RESIDUAL))
+            );
+            let group = world.env.market_state().1;
+            assert_eq!(group.materialized_portfolio_count, 0);
+            assert_eq!(
+                [
+                    group.c_tot,
+                    group.pnl_pos_tot,
+                    group.source_claim_bound_total_num,
+                    group.insurance
+                ],
+                [0; 4]
+            );
+            assert_eq!(
+                group.vault,
+                FINAL_RESIDUAL
+                    - (0..5)
+                        .map(|actor| entitlement(actor, FINAL_RESIDUAL))
+                        .sum::<u128>()
+            );
+            assert_eq!(group.vault, 2);
+            world.custody();
+            peak_cu = peak_cu.max(world.peak_cu);
+        }
+    }
+    println!("INV-068 shared owner: 4 worlds, 8 independent positive top-ups, 8 exact live retries, 24 stale rollbacks; shared claim 566 (not merged 567); peak CU {peak_cu}");
+}
 
 #[test]
 fn v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail() {

@@ -31,6 +31,10 @@ pub(crate) struct World {
 impl World {
     // INV-066 varies receipt creation across expiry; new() retains INV-067's original seed.
     pub(crate) fn before_receipts() -> Self {
+        Self::before_receipts_with_claimant_owners([Keypair::new(), Keypair::new()])
+    }
+
+    pub(crate) fn before_receipts_with_claimant_owners(claimant_owners: [Keypair; 2]) -> Self {
         // Allocate and initialize through System/SPL/wrapper instructions, including the
         // initial collateral endowment. LiteSVM only supplies programs, clock and signer SOL.
         let params = V16CuMarketParams {
@@ -109,10 +113,21 @@ impl World {
             portfolio_account_len: state::portfolio_account_len_for_market_slots(2).unwrap(),
             portfolios: Vec::new(),
         };
-        let mut actors = Vec::new();
-        for deposit in DEPOSITS {
-            let owner = Keypair::new();
-            env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let mut actors: Vec<Actor> = Vec::new();
+        let mut claimant_owners = claimant_owners.into_iter();
+        for (index, deposit) in DEPOSITS.into_iter().enumerate() {
+            let owner = if index == 0 || index == 4 {
+                claimant_owners.next().unwrap()
+            } else {
+                Keypair::new()
+            };
+            env.svm.expire_blockhash();
+            if actors
+                .iter()
+                .all(|actor| actor.owner.pubkey() != owner.pubkey())
+            {
+                env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+            }
             let portfolio = Keypair::new();
             system_create_account_for_test(
                 &mut env.svm,
@@ -132,7 +147,13 @@ impl World {
             )
             .unwrap();
             env.portfolios.push(portfolio.pubkey());
-            let token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+            let token = actors
+                .iter()
+                .find(|actor| actor.owner.pubkey() == owner.pubkey())
+                .map(|actor| actor.token)
+                .unwrap_or_else(|| {
+                    create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint)
+                });
             Self::mint(&mut env, token, deposit);
             env.send(
                 env.deposit_ix(portfolio.pubkey(), deposit),
@@ -411,7 +432,10 @@ impl World {
             + self
                 .actors
                 .iter()
-                .map(|actor| self.env.token_amount(actor.token) as u128)
+                .map(|actor| actor.token)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|token| self.env.token_amount(token) as u128)
                 .sum::<u128>();
         let supply = DEPOSITS.iter().sum::<u128>() + BACKING + 2;
         assert_eq!(total, supply);

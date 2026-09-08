@@ -3,6 +3,99 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-068 shared-owner receipts (2026-09-08)
+
+Tests/docs-only increment initially created from
+`origin/codex/invariant-fidelity-reopen-20260904` at
+`6abf756f322f92d39236ba92a14179401fd725ce`, then rebased before committing onto that
+origin branch at `5ddc4e84175e49cece183fb49c9ab0dc7c8ec449`. Developed in
+`/tmp/codex-agent-worktrees/agent-inv068-receipt-topup-20260908T172231Z` on
+`codex/agent-inv068-receipt-topup-20260908T172231Z`. The original checkout, production
+code, dependency files, invariant verdicts and reopening statuses are unchanged.
+Only current code/tests/docs/status files were inspected; no GitHub PR/issue diffs or
+holdout branches were used.
+
+[`cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs`](cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs)
+adds one selector, `v16_program_same_owner_receipts_keep_independent_topups_and_terminal_replays`.
+Four public LiteSVM worlds cross both payout handlers with either co-owned portfolio paid
+and closed first. The existing INV-067 `World::before_receipts` seed gains a constructor
+accepting its two junior claimant owners; the original constructor still supplies distinct
+owners. Reused owners share one publicly created ATA and receive signer SOL only once.
+Fresh construction blockhashes avoid duplicate SPL funding signatures; the mint-supply
+census counts unique token accounts, not actor references. Every market/portfolio/token
+allocation, initialization, deposit, trade, mark, backing release and payout uses public
+System/SPL/ATA/wrapper instructions. No program-owned state is injected.
+
+The new boundary is valid same-owner portfolio selection, not the existing six-field
+wrong-owner/account rejection matrix, INV-066 late materialization, or INV-067 atomic
+payout/close retry. Two distinct portfolio incarnations earn immutable faces 700 and 1,300
+against a 3,000 total face, but share both claimant and payout destination. Their initial
+receipt-local floors are 116 and 217 atoms; the authenticated release raises them to 198
+and 368, producing independent top-ups of 82 and 151. Their final sum is **566**, whereas
+flooring a merged co-owned face would incorrectly pay **567**. An instruction retained
+before the release is also retargeted by changing only the portfolio account; because
+the owner is shared, this is valid and must pay the sibling's own due, never the first
+receipt's face or paid counter.
+
+Each suffix attempt checks exact receipt/SPL/vault deltas, per-portfolio cumulative
+payment limits, the shared ATA sum, whole-account unrelated frames, and total SPL supply.
+Receipt face/prior bound and portfolio/owner/episode provenance remain fixed; snapshot
+slot 12 and the independently derived rate/denominator are checked across the release.
+Eight immediate cross-handler retries are exact no-ops or exact `EngineNonProgress`
+rollbacks. Once the remaining claim bound is removed, the first portfolio drains and
+closes while its sibling remains a live partial receipt. Retained claims on the cleared
+account reject with exactly `NotInitialized`, including rollback of attempted account
+growth; the sibling then receives its exact remaining top-up. All five portfolios close
+with exact rent-to-market transfers and no extra SPL payout. Six stale claims per world,
+including after the final drain, preserve full account data, metadata and lamports.
+Final user claims leave exactly two independently calculated rounding atoms in the vault.
+The separate network-fee payer and runtime sysvars are excluded from account frames.
+
+On the rebased head, the exact standalone new selector is collected and passes **1/1**
+(1,019 filtered), covering four worlds, eight positive top-ups, eight exact live retries
+and 24 stale rollbacks in 4.28 seconds, with peak checked CU **148,801**
+(enforced per-instruction ceiling 300,000). Early local iterations corrected fixture
+airdrop deduplication and the actual zero-length account close/header-error expectations;
+none was a production invariant failure. The cached default-feature SBF was reused without
+rebuilding: SHA-256 `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+
+Exact verification commands from the isolated worktree:
+
+```sh
+export PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_same_owner_receipts_keep_independent_topups_and_terminal_replays -- --exact --nocapture
+cargo test --locked --offline --test v16_cu \
+  inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_same_owner_receipts_keep_independent_topups_and_terminal_replays \
+  -- --exact --nocapture \
+  inv_066_resolved_payout_fairness_and_order_independence::v16_program_late_receipt_materialization_preserves_snapshot_entitlements \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::late_expiry::v16_program_retained_claim_identity_survives_late_expiry_recipient_rotation_and_atomic_retry \
+  inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail
+rustfmt --edition 2021 --check tests/invariants/cu/inv_067_terminal_claim_late_expiry.rs tests/invariants/cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+The rebased combined invocation passes **5/5** exact selectors (1,015 filtered) in 4.51
+seconds; the new test's peak in that run was 138,261 CU. It includes all three existing consumers
+of the shared INV-067 fixture and the existing INV-068 public replay selector. Two interim
+individual regression runs are not credited: a concurrent worktree replaced the shared
+Cargo target binary, detected by its missing new selector. After rebase, the standalone
+invocation rebuilt from this worktree and the combined invocation executed all five tests
+in that binary, including the unique new selector. Scoped rustfmt,
+working/staged diff whitespace checks, and the committed HEAD whitespace check pass.
+Only the existing `solana-client v1.18.26` future-compatibility warning was emitted.
+
+This is bounded wrapper-public-route evidence: two fixed co-owned faces, one authenticated
+release, one collateral mint, two assets, five portfolios, and NoCpi trade construction.
+It does not establish arbitrary histories, additional receipt slots, transferable receipts,
+Recovery reuse, other transports, maximum shapes or market/provider/asset/slab retirement.
+No fresh SBF build, broad suite or engine proof is claimed; INV-068 remains OPEN_EVIDENCE
+and row 417 remains OPEN.
+
 ## Dual-quote terminal stock checkpoint (2026-09-08)
 
 Tests/docs-only increment based on the invariant charter and public instruction interface, from
