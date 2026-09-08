@@ -512,6 +512,247 @@ impl World {
     }
 }
 
+pub(super) fn verify_receipt_payout_and_portfolio_close_retry() {
+    // Existing tests reject close after a committed partial payment. Here close rejects
+    // in the same transaction, so the positive payment must roll back with the receipt.
+    for claim_route in [true, false] {
+        let mut world = World::new();
+        let claimant = 0;
+        let portfolio = world.actors[claimant].portfolio;
+        let token = world.actors[claimant].token;
+        let retained_payout = world.payout(claimant, claim_route);
+        let retained_close = Instruction {
+            program_id: world.env.program_id,
+            accounts: vec![
+                AccountMeta::new(world.actors[claimant].owner.pubkey(), true),
+                AccountMeta::new(world.env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            data: world.env.close_portfolio_ix(portfolio).encode(),
+        };
+        let original_receipt = world.receipt(claimant);
+        world.env.svm.warp_to_slot(EXPIRY);
+        world.land(&[world.payout(2, false)], false).unwrap();
+        assert_eq!(world.receipt(claimant), original_receipt);
+        let expected_paid = World::entitlement(claimant, INITIAL_RESIDUAL + LATE_RELEASE);
+        let due = expected_paid
+            .checked_sub(original_receipt.paid_effective)
+            .unwrap();
+        assert!(due > 0 && expected_paid < original_receipt.terminal_positive_claim_face);
+        let pending_frame = world.frame();
+
+        for payout_first in [true, false] {
+            let instructions = if payout_first {
+                [retained_payout.clone(), retained_close.clone()]
+            } else {
+                [retained_close.clone(), retained_payout.clone()]
+            };
+            world.env.svm.expire_blockhash();
+            let tx = Transaction::new_signed_with_payer(
+                &[
+                    heap_ix(),
+                    cu_ix(),
+                    instructions[0].clone(),
+                    instructions[1].clone(),
+                ],
+                Some(&world.env.payer.pubkey()),
+                &[&world.env.payer, &world.actors[claimant].owner],
+                world.env.svm.latest_blockhash(),
+            );
+            let mut expected_payer = world
+                .env
+                .svm
+                .get_account(&world.env.payer.pubkey())
+                .unwrap();
+            expected_payer.lamports -= solana_sdk::fee::FeeStructure::default()
+                .lamports_per_signature
+                * u64::from(tx.message.header.num_required_signatures);
+            let failure = world
+                .env
+                .svm
+                .send_transaction(tx)
+                .expect_err("nonfinal receipt blocks close");
+            assert_eq!(
+                failure.err,
+                TransactionError::InstructionError(
+                    if payout_first { 3 } else { 2 },
+                    InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+                ),
+            );
+            for program in [world.env.program_id, spl_token::ID] {
+                let success = format!("Program {program} success");
+                assert_eq!(
+                    failure
+                        .meta
+                        .logs
+                        .iter()
+                        .filter(|line| **line == success)
+                        .count(),
+                    usize::from(payout_first),
+                    "payout-first must execute the wrapper and SPL transfer before close rejects",
+                );
+            }
+            assert_cu_within(
+                "partial payout/close rollback",
+                failure.meta.compute_units_consumed,
+                300_000,
+            );
+            assert_eq!(
+                world.frame(),
+                pending_frame,
+                "receipt, token, rent and peer rollback"
+            );
+            assert_eq!(
+                world
+                    .env
+                    .svm
+                    .get_account(&world.env.payer.pubkey())
+                    .unwrap(),
+                expected_payer
+            );
+            world.custody();
+        }
+
+        // The other permissionless payout handler must still discharge exactly the same due.
+        let alternate_payout = world.payout(claimant, !claim_route);
+        let tokens_before = world.env.token_amount(token);
+        let vault_before = world.env.token_amount(world.env.vault);
+        world.land(&[alternate_payout.clone()], false).unwrap();
+        assert_eq!(
+            world.env.token_amount(token) as u128,
+            tokens_before as u128 + due
+        );
+        assert_eq!(
+            world.env.token_amount(world.env.vault) as u128,
+            vault_before as u128 - due
+        );
+        let mut paid_receipt = original_receipt;
+        paid_receipt.paid_effective = expected_paid;
+        assert_eq!(
+            world.receipt(claimant),
+            paid_receipt,
+            "only cumulative paid value changes"
+        );
+        world.assert_frame_except(
+            &pending_frame,
+            &[world.env.market, world.env.vault, portfolio, token],
+        );
+        world.custody();
+        for replay in [retained_payout, alternate_payout] {
+            let before = world.frame();
+            match world.land(&[replay], false) {
+                Ok(_) => {}
+                Err(failure) => assert_eq!(
+                    failure.err,
+                    TransactionError::InstructionError(
+                        2,
+                        InstructionError::Custom(PercolatorError::EngineNonProgress as u32)
+                    ),
+                ),
+            }
+            assert_eq!(
+                world.frame(),
+                before,
+                "neither payout handler can consume the receipt twice"
+            );
+            world.custody();
+        }
+
+        let expected: [u128; 5] = std::array::from_fn(|actor| {
+            if FACES[actor] == 0 {
+                0
+            } else {
+                DEPOSITS[actor] + World::entitlement(actor, INITIAL_RESIDUAL + LATE_RELEASE)
+            }
+        });
+        for _ in 0..16 {
+            for actor in [2, 4, 0, 1, 3] {
+                if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
+                    continue;
+                }
+                let before = world.frame();
+                match world.land(&[world.payout(actor, false)], false) {
+                    Ok(_) => assert_ne!(world.frame(), before, "remaining close must progress"),
+                    Err(failure) => {
+                        assert_eq!(
+                            failure.err,
+                            TransactionError::InstructionError(
+                                2,
+                                InstructionError::Custom(PercolatorError::EngineNonProgress as u32)
+                            )
+                        );
+                        assert_eq!(world.frame(), before);
+                    }
+                }
+                world.custody();
+                for (actor, limit) in expected.into_iter().enumerate() {
+                    assert!(world.env.token_amount(world.actors[actor].token) as u128 <= limit);
+                }
+            }
+            if world
+                .actors
+                .iter()
+                .all(|actor| resolved_portfolio_is_terminal(&world.env, actor.portfolio))
+            {
+                break;
+            }
+        }
+        for (actor, entitlement) in expected.into_iter().enumerate() {
+            let portfolio = world.actors[actor].portfolio;
+            assert!(resolved_portfolio_is_terminal(&world.env, portfolio));
+            assert_eq!(
+                world.env.token_amount(world.actors[actor].token) as u128,
+                entitlement
+            );
+            let before = world.frame();
+            world.land(&[world.payout(actor, true)], false).unwrap();
+            assert_eq!(world.frame(), before, "terminal receipt replay");
+            let rent = world.env.svm.get_account(&portfolio).unwrap().lamports;
+            let market_lamports = world
+                .env
+                .svm
+                .get_account(&world.env.market)
+                .unwrap()
+                .lamports;
+            world
+                .env
+                .close_portfolio_with_cu(&world.actors[actor].owner, portfolio);
+            assert_eq!(
+                world
+                    .env
+                    .svm
+                    .get_account(&portfolio)
+                    .map_or(0, |account| account.lamports),
+                0
+            );
+            assert_eq!(
+                world
+                    .env
+                    .svm
+                    .get_account(&world.env.market)
+                    .unwrap()
+                    .lamports,
+                market_lamports + rent
+            );
+            world.assert_frame_except(&before, &[world.env.market, portfolio]);
+        }
+        let group = world.env.market_state().1;
+        assert_eq!(group.materialized_portfolio_count, 0);
+        assert_eq!(group.source_claim_bound_total_num, 0);
+        assert_eq!(group.c_tot, 0);
+        assert_eq!(group.pnl_pos_tot, 0);
+        assert_eq!(group.insurance, 0);
+        let rounding_residue = INITIAL_RESIDUAL + LATE_RELEASE
+            - [0, 2, 4]
+                .into_iter()
+                .map(|actor| World::entitlement(actor, INITIAL_RESIDUAL + LATE_RELEASE))
+                .sum::<u128>();
+        assert_eq!(group.vault, rounding_residue);
+        assert_eq!(world.env.token_amount(world.provider_token), 1);
+        world.custody();
+    }
+}
+
 #[test]
 fn v16_program_retained_claim_identity_survives_late_expiry_recipient_rotation_and_atomic_retry() {
     let mut peak_cu = 0;

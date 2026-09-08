@@ -14,6 +14,9 @@
 //! `v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_floor` lands a
 //! retained forfeit after a real B haircut and proves the predecessor still pays at least the
 //! complete earlier claim.
+//! `v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once` composes a positive
+//! partial-receipt payout with a same-transaction rejected portfolio close, then proves exact
+//! rollback, alternate-handler retry, replay idempotence, and every claimant's public exit.
 //!
 //! Guarantee boundary: this is one adversarial public lifecycle matrix, not an exhaustive proof of
 //! every terminal residual partition.
@@ -22,6 +25,11 @@ use super::*;
 
 #[path = "inv_067_terminal_claim_late_expiry.rs"]
 mod late_expiry;
+
+#[test]
+fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {
+    late_expiry::verify_receipt_payout_and_portfolio_close_retry();
+}
 
 #[test]
 fn v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_floor() {
