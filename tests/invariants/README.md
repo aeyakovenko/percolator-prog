@@ -4251,6 +4251,94 @@ replacement must not duplicate a claim. Preserve INV-024's current status until 
 have generic executable owners. A discrepancy in this slice is an oracle/coverage failure pending
 public economic evidence under `scripts/loop.md`, not by itself a LoF classification.
 
+### INV-024/027/066/067 live-to-resolved entitlement histories
+
+Finding-blind increment from `origin/codex/invariant-fidelity-reopen-20260904` at
+`26c31d07892f703ef6e237c92d8a7538a7f3806d` (2026-09-08), engine `495a5590`. The new
+`v16_program_live_payout_histories_preserve_entitlement_through_resolution` in the
+[existing INV-024 owner](stateful/inv_024_attributed_quote_value_conservation.rs) extends the
+solvent payout-prefix history above, rather than starting a new ledger at resolution.
+
+Its 48 worlds cross two four-transport orders, both changing-winner orientations, no/whole/split
+first-round profit withdrawals, two terminal claimant orders, and conversion of the final profit
+versus direct settlement from PnL. After the later loss/fee-bearing round, an unrelated owner
+deposits 37,009 atoms beside the still-unconverted profit. That senior exits before both traders
+in one terminal order and after them in the other. The fixed fully funded price/quantity schedule
+and fee assumptions are unchanged from the live-prefix owner. Final-round live withdrawals are
+deferred in both terminal variants so their resolution-boundary claims are economically equal.
+
+The same input-driven `Inv024PayoutHistory` now observes all five owners after every transaction.
+Principal, realized gains, attributed losses, signed fees and earlier SPL payouts survive the
+mode change unchanged. Live conversion and terminal PnL disposition are separate counters;
+remaining claim is still `principal + gains - losses - fees - paid`. Immediately before resolution,
+the unconverted input-derived face must equal both the source-claim bound and the vault residual
+after senior capital and fees. Each terminal payment must equal that owner's entire remaining
+claim, not an amount inferred from a receipt, rate, observed capital or token delta.
+
+Every step checks owner/incarnation binding, separate capital/PnL/payout observations, exact
+source-token debits and destination balances, fee insurance, engine/SPL custody, stock and
+encumbrance censuses, and unrelated token/foreign-market frames. Each of the five payouts is
+followed by fresh transactions through both payout rails: completed close rejects exactly with
+`EngineNonProgress`; an absent-receipt top-up rejects exactly with `EngineLockActive`, while a
+retained finalized receipt permits a no-op. Every retry must preserve full tracked account
+snapshots including bytes, owner, lamports, executable and rent fields. The fee payer is separate
+and excluded. All five owner-signed portfolio closes then preserve SPL balances, remove the
+account and transfer its exact rent to the market slab. Conserving wrong-owner payout observations
+and forgetting a prior live payout fail the same pure oracle; no program-state mutations are used.
+
+Observed result: **48 worlds, 1,992 checked transactions, 48 live payouts, 240 terminal payouts,
+480 terminal retry attempts and 240 portfolio closes**. Five owners reach zero remaining claim
+and zero materialized portfolios in every world; the vault retains exactly the modeled fee
+insurance. This is economic payout completion plus signer-dependent portfolio deletion, not
+insurance withdrawal, asset/provider retirement or `CloseSlab` coverage.
+
+Construction uses `V16Svm::new`'s preallocated zeroed wrapper storage and valid prefunded external
+SPL/mint fixtures, followed by public wrapper initialization and real SPL deposit transfers. The
+ledger is seeded with the configured one-atom setup deposits, never observed capital. Every later
+economic change is a single captured public transaction; Clock warps are the only environmental
+changes. This is not an all-System/SPL bootstrap or arbitrary-history claim. Fresh default-feature
+wrapper and matcher SBF artifacts were built in this isolated worktree with platform-tools v1.52:
+wrapper SHA-256 `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`, matcher
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+**Duplicate review and limits.** No second five-factorial terminal-order sweep, standalone receipt
+floor/rate oracle, generated receipt-release campaign or alternate underbacking-ratio matrix was
+added: INV-066, INV-038/068 and INV-027 already own those partitions. Only their missing composition
+with the continuing live owner ledger is retained. No existing test was deleted. INV-027 gains a
+fully funded senior-principal composition control, not new underfunded coverage. Keep variable
+amounts/partitions, underfunded or impaired claims, partial receipts/top-ups, support/provider
+ownership, Recovery/forfeits, unsettled exposure at resolution, funding/maintenance/liquidation,
+multi-asset or partial-fill batches, close/recreation and supported maxima open. No production
+code, shared support, engine proofs, invariant status or special-method verdict is changed.
+
+Exact verification (root commands below; build the matcher in `tests/fixtures/auth_matcher` with
+`CARGO_TARGET_DIR` unset using `cargo build-sbf --tools-version v1.52 --offline -- --locked`):
+
+```sh
+unset PERCOLATOR_FUZZ_SBF
+export CARGO_TARGET_DIR=/dev/shm/pr427-owner-terminal-conformance-20260908T044330Z-target
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+cargo build-sbf --tools-version v1.52 --offline -- --locked
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation::v16_program_live_payout_histories_preserve_entitlement_through_resolution -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation::v16_program_payout_prefix_histories_preserve_each_owners_entitlement -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation::v16_program_all_trade_route_pairs_preserve_realized_pnl_owner_attribution -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation::v16_program_multi_episode_history_enforces_each_owners_exact_entitlement -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation::v16_program_public_trace_enforces_authority_attributed_quote_flow -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_public_instruction_coverage_registry_matches_production_roster -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_program_invariant_harnesses_are_test_free_roots -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::v16_program_entitlement_effect_roster_is_source_complete -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_024_attributed_quote_value_conservation.rs
+git diff --check
+```
+
+No failing public conformance trace was observed. During harness development an absent-receipt
+top-up was initially expected to succeed; the final test requires its exact lifecycle rejection
+and full rollback, without changing any entitlement expectation.
+
 ### INV-027 principal-interleaving histories
 
 The 2026-09-07 increment from wrapper base `e6e5bdb0da2e69681dce08e21c25b3bbeb5a2b4d`
