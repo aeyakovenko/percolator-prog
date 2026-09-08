@@ -31,6 +31,9 @@
 //! Mark-derived faces and checkpoint custody/senior stocks independently determine entitlement.
 //! Per-mint custody, both-rail retries and fixed terminal continuation join INV-066/067 without
 //! repeating their claimant-order campaigns. This is not a full setup-history entitlement oracle.
+//! Its retained-payout extension composes positive-payout rollback, later raw custody,
+//! recipient rejection, and signature-distinct retries without increasing the original face.
+//! The same stock/owner oracle separates donated tokens from attributed backing releases.
 
 use super::*;
 
@@ -281,6 +284,42 @@ mod collateral_rails {
         }
     }
 
+    fn payout_instruction(
+        env: &V16Svm,
+        reserve: &Reserve,
+        actor: usize,
+        secondary: bool,
+        close: bool,
+    ) -> Instruction {
+        let instruction = if close {
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            }
+        } else {
+            ProgInstruction::ClaimResolvedPayoutTopup
+        };
+        Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(env.actors[actor].signer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.actors[actor].portfolio, false),
+                AccountMeta::new(
+                    if secondary {
+                        reserve.destinations[actor]
+                    } else {
+                        env.actors[actor].destination_token
+                    },
+                    false,
+                ),
+                AccountMeta::new(if secondary { reserve.vault } else { env.vault }, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: instruction.encode(),
+        }
+    }
+
     fn payout(
         env: &mut V16Svm,
         reserve: &Reserve,
@@ -289,37 +328,8 @@ mod collateral_rails {
         close: bool,
     ) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata>
     {
-        let instruction = if close {
-            ProgInstruction::CloseResolved {
-                fee_rate_per_slot: 0,
-            }
-        } else {
-            ProgInstruction::ClaimResolvedPayoutTopup
-        };
-        send(
-            env,
-            vec![Instruction {
-                program_id: env.program_id,
-                accounts: vec![
-                    AccountMeta::new_readonly(env.actors[actor].signer.pubkey(), false),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(env.actors[actor].portfolio, false),
-                    AccountMeta::new(
-                        if secondary {
-                            reserve.destinations[actor]
-                        } else {
-                            env.actors[actor].destination_token
-                        },
-                        false,
-                    ),
-                    AccountMeta::new(if secondary { reserve.vault } else { env.vault }, false),
-                    AccountMeta::new_readonly(env.vault_authority, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ],
-                data: instruction.encode(),
-            }],
-            &[],
-        )
+        let instruction = payout_instruction(env, reserve, actor, secondary, close);
+        send(env, vec![instruction], &[])
     }
 
     struct Oracle {
@@ -330,6 +340,8 @@ mod collateral_rails {
         primary_destinations: [u128; 5],
         paid: [u128; 5],
         cleared: [bool; 5],
+        primary_supplier: u128,
+        donated: u128,
     }
 
     impl Oracle {
@@ -367,6 +379,8 @@ mod collateral_rails {
                 }),
                 paid: [receipt.paid_effective, 0, 0, 0, 0],
                 cleared: [false; 5],
+                primary_supplier: u128::from(env.token_amount(env.actors[4].source_token)),
+                donated: 0,
             };
             assert_eq!(out.target(0), receipt.paid_effective);
             assert!(out.target(0) < FACES[0]);
@@ -425,6 +439,10 @@ mod collateral_rails {
                     self.target(actor)
                 };
                 assert!(self.paid[actor] <= paid && paid <= self.target(actor));
+                assert!(
+                    paid <= FACES[actor],
+                    "later stock enlarged owner {actor}'s face"
+                );
                 self.paid[actor] = paid;
                 let expected = self.capitals[actor] - account.capital.get() + paid
                     - if actor == 0 {
@@ -451,7 +469,11 @@ mod collateral_rails {
             assert_eq!(group.vault, self.initial_vault - total);
             assert_eq!(
                 u128::from(env.token_amount(env.vault)),
-                self.initial_vault - total + secondary_paid
+                self.initial_vault - total + secondary_paid + self.donated
+            );
+            assert_eq!(
+                u128::from(env.token_amount(env.actors[4].source_token)),
+                self.primary_supplier - self.donated
             );
             assert_eq!(
                 u128::from(env.token_amount(reserve.vault)),
@@ -477,6 +499,24 @@ mod collateral_rails {
                 u128::from(mint.supply)
             );
         }
+
+        fn donate(&mut self, env: &mut V16Svm, reserve: &Reserve, amount: u64) {
+            let before = frame(env, reserve);
+            let source = env.actors[4].source_token;
+            let instruction = spl_token::instruction::transfer(
+                &spl_token::ID,
+                &source,
+                &env.vault,
+                &env.actors[4].signer.pubkey(),
+                &[],
+                amount,
+            )
+            .unwrap();
+            send(env, vec![instruction], &[]).expect("public primary vault replenishment");
+            self.donated += u128::from(amount);
+            assert_frame_except(&before, env, &[source, env.vault]);
+            self.check(env, reserve);
+        }
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -488,13 +528,15 @@ mod collateral_rails {
         reserve_supplier: u64,
     }
 
-    fn run(rails: [bool; 2], close: bool) -> Outcome {
+    fn run(rails: [bool; 2], close: bool, replenishment: Option<u64>) -> Outcome {
         let mut env =
             public_resolved_receipt_seed_with_setup([97, 103], 14, Some(install_secondary))
                 .unwrap();
         let mut reserve = Reserve::new(&mut env);
         let mut oracle = Oracle::new(&env);
         oracle.check(&env, &reserve);
+        let retained_before_releases =
+            replenishment.map(|_| payout_instruction(&env, &reserve, 0, false, close));
         for (index, domain) in [3, 5].into_iter().enumerate() {
             env.warp_to_slot(13 + index as u64);
             let released = [97 + 250, 103 + 2 * 5 * 4][index];
@@ -538,9 +580,64 @@ mod collateral_rails {
                 reserve.fund(&mut env, 1);
                 oracle.check(&env, &reserve);
             }
+            let retained = retained_before_releases
+                .clone()
+                .unwrap_or_else(|| payout_instruction(&env, &reserve, 0, rails[index], close));
+            if let Some(amount) = replenishment {
+                assert!(!rails[index], "primary-custody interference history");
+                let suffix = spl_token::instruction::transfer(
+                    &spl_token::ID,
+                    &reserve.source,
+                    &reserve.vault,
+                    &env.actors[4].signer.pubkey(),
+                    &[],
+                    env.token_amount(reserve.source).checked_add(1).unwrap(),
+                )
+                .unwrap();
+                let before = frame(&env, &reserve);
+                let error = send(&mut env, vec![retained.clone(), suffix], &[])
+                    .expect_err("late SPL failure after positive receipt payout");
+                assert_eq!(
+                    error.err,
+                    TransactionError::InstructionError(
+                        2,
+                        InstructionError::Custom(
+                            spl_token::error::TokenError::InsufficientFunds as u32
+                        )
+                    )
+                );
+                for program in [env.program_id, spl_token::ID] {
+                    assert!(error
+                        .meta
+                        .logs
+                        .contains(&format!("Program {program} success")));
+                }
+                assert_eq!(frame(&env, &reserve), before, "bundle-wide payout rollback");
+                oracle.check(&env, &reserve);
+                oracle.donate(&mut env, &reserve, amount);
+
+                let mut wrong_recipient = retained.clone();
+                wrong_recipient.accounts[3] =
+                    AccountMeta::new(env.actors[1].destination_token, false);
+                let before = frame(&env, &reserve);
+                let error = send(&mut env, vec![wrong_recipient], &[])
+                    .expect_err("new custody cannot authorize a different recipient");
+                assert_eq!(
+                    error.err,
+                    TransactionError::InstructionError(
+                        1,
+                        InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32)
+                    )
+                );
+                assert_eq!(
+                    frame(&env, &reserve),
+                    before,
+                    "recipient-rejection rollback"
+                );
+                oracle.check(&env, &reserve);
+            }
             let before = frame(&env, &reserve);
-            payout(&mut env, &reserve, 0, rails[index], close)
-                .expect("exact top-up on selected rail");
+            send(&mut env, vec![retained], &[]).expect("exact retained top-up on selected rail");
             assert_frame_except(
                 &before,
                 &env,
@@ -619,6 +716,9 @@ mod collateral_rails {
                 oracle.check(&env, &reserve);
             }
         }
+        if let Some(amount) = replenishment {
+            oracle.donate(&mut env, &reserve, amount);
+        }
         for actor in 0..5 {
             assert_eq!(oracle.paid[actor], oracle.target(actor));
             let account = env.primary_portfolio(actor);
@@ -643,7 +743,8 @@ mod collateral_rails {
             portfolios: env.all_primary_portfolio_data(),
             paid: oracle.paid,
             combined_custody: u128::from(env.token_amount(env.vault))
-                + u128::from(env.token_amount(reserve.vault)),
+                + u128::from(env.token_amount(reserve.vault))
+                - oracle.donated,
             reserve_supplier: env.token_amount(reserve.source),
         }
     }
@@ -653,7 +754,7 @@ mod collateral_rails {
         let mut baseline = None;
         for close in [false, true] {
             for rails in [[false, false], [false, true], [true, false], [true, true]] {
-                let outcome = run(rails, close);
+                let outcome = run(rails, close, None);
                 if let Some(expected) = &baseline {
                     assert_eq!(&outcome, expected, "rail schedule {rails:?}, close={close}");
                 } else {
@@ -664,6 +765,26 @@ mod collateral_rails {
         eprintln!(
             "INV-066/067/068 collateral rails: 8 worlds, 16 positive partial top-ups, \
             8 exact liquidity rejections, 32 partial and 80 terminal cross-rail no-op retries"
+        );
+    }
+
+    #[test]
+    fn v16_program_retained_receipt_retry_cannot_absorb_later_vault_stock() {
+        let baseline = run([false, false], false, None);
+        for close in [false, true] {
+            for replenishment in [0, 1, 731] {
+                let outcome = run([false, false], close, Some(replenishment));
+                assert_eq!(
+                    outcome, baseline,
+                    "new raw custody changed entitlement: refill={replenishment}, close={close}"
+                );
+            }
+        }
+        eprintln!(
+            "INV-024/068 retained receipt replenishment: 6 histories + rejection-free control, \
+            12 positive payouts rolled back \
+            after wrapper/SPL success, 12 recipient rejections, 18 public custody transfers, \
+            12 exact retained retries, 24 partial and 60 terminal cross-rail no-op retries"
         );
     }
 }

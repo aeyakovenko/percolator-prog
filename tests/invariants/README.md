@@ -6431,6 +6431,66 @@ Reuse the default-feature SBF via `PERCOLATOR_FUZZ_SBF`; no SBF rebuild is neede
 The unchanged matcher artifact SHA-256 is
 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
 
+### INV-024/068 retained payout, replenishment, and retry
+
+The PR427 revision on `codex/invariant-fidelity-reopen-20260904` adds one test under
+`stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs`:
+`collateral_rails::v16_program_retained_receipt_retry_cannot_absorb_later_vault_stock`.
+INV-068 owns this equivalent value-moving intent because the durable authorization is the
+resolved receipt, not a new signed withdrawal schema. The test reuses `V16Svm`, the public
+partial-receipt prefix, and the existing collateral-rail transaction, account-frame, stock,
+and owner-attribution helpers. Only payout instruction construction is factored for retention;
+there is no standalone harness, injected economic state, or production change. The existing
+zeroed-wrapper/SPL fixture bootstrap is unchanged; this is not an all-System allocation proof.
+
+Six histories cross `ClaimResolvedPayoutTopup`/`CloseResolved` with raw primary-vault
+replenishment of 0/1/731 atoms, compared against a rejection-free control. A payload retained
+before two public backing releases is attempted at each positive partial payment. A later SPL
+instruction fails with insufficient funds after the wrapper and its SPL CPI report success.
+Exact account rollback preserves the pending receipt, both markets, portfolios, backing ledger,
+matcher accounts, mints, and all tracked token accounts, including metadata and lamports; only
+the network-fee payer is excluded. Public SPL replenishment follows that failure. A valid token
+account belonging to another owner still rejects exactly, then the unchanged retained payout
+payload pays only its original receipt's remaining current entitlement. Fresh blockhashes keep
+the retries distinct from Solana signature-cache rejection.
+
+The existing independent oracle derives faces 1000/1200 from quantities and marks, and derives
+the residual from checkpoint custody and disjoint senior stocks. Known backing releases may
+legitimately improve the payout rate; raw SPL donations do not. The extension separately debits
+the external primary supplier, tracks donated custody outside engine liabilities, bounds each
+owner's cumulative receipt payment by the original face, and reconciles both mint supplies.
+All six endpoints match the control's market/portfolio bytes and owner payouts after subtracting
+only the explicitly attributed donations from custody. Another replenishment after terminal
+receipt cleanup cannot revive payment on either rail. The six histories exercise 12 late-failed
+positive payouts, 12 recipient rejections, 18 public custody transfers, 12 retained positive
+retries, 24 partial no-op retries, and 60 terminal no-op retries.
+
+This closes the missing late-transaction-rollback plus later-custody composition beyond the
+existing INV-008 insurance replenishment/stale-retry registry and INV-068 short-reserve funding
+tests. It is narrow wrapper evidence relevant to INV-008/010/011/024/031/064 and reopening row
+415, not closure of that row: signed partial-withdrawal budgets, arbitrary stock reclassification,
+other withdrawal families, and unbounded histories remain open. No engine proof, status cell,
+coverage-reopening disposition, or claim of a frozen payout rate is added.
+
+Verification uses only the cached default-feature wrapper SBF and the matching cached matcher
+whose hashes are recorded in the preceding section; neither SBF is rebuilt. From the isolated
+worktree, the focused test and its shared-helper regression owners are run with:
+
+```bash
+env PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so \
+  CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 \
+  CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test --locked --offline --test v16_program_stateful_fuzz \
+  inv_068_receipt_uniqueness_and_monotonic_topups:: -- --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs
+git diff --check
+```
+
+All four INV-068 tests passed on 2026-09-08, including the new seven-world test, the
+eight-world rail product, split top-ups, and generated terminal drains. Formatting and
+whitespace checks passed. Only existing dead-code and dependency-compatibility warnings
+were emitted; this is focused conformance evidence, not a full-suite certification.
+
 ### INV-059 executing evidence and F plan
 
 Traceability review, 2026-09-07: the INV-059 M row in `special_method_coverage.tsv` now selects
