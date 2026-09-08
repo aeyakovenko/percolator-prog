@@ -5825,6 +5825,51 @@ asset/provider cleanup, residual-vault classification or `CloseSlab`. Reuse the 
 release/claim and unequal-claimant products, INV-068 identity lifecycle and INV-086 receipt-conflict
 frontier for their existing obligations; do not duplicate their engine proofs.
 
+### INV-066/067/068 collateral-rail receipt payments
+
+PR 427 defensive coverage on base `b5bf06540b07ec4fca253f733e17283c432f267a`:
+`stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs` adds
+`collateral_rails::v16_program_partial_receipt_topups_are_collateral_rail_independent`.
+Eight public LiteSVM worlds cross four primary/secondary two-top-up schedules with
+`ClaimResolvedPayoutTopup` and `CloseResolved`. They execute 16 positive partial payments,
+eight one-atom-short secondary-reserve rejections with exact tracked rollback, 32 partial
+cross-rail no-op retries, and 80 terminal cross-rail no-op retries. A fixed continuation pays
+all five owners and clears their receipts. Endpoints require byte-identical market and portfolio
+state, identical owner-local normalized entitlements, equal supplier balances and combined custody.
+
+The optional empty-market setup hook in `tests/support/fuzz_model.rs` reuses the existing receipt
+prefix and its original deposits. The secondary mint, ATAs, supply, and reserve transfers use
+System/SPL/ATA instructions, with no added account-state injection. Faces `1000/1200` come from
+the prefix's quantities and marks; checkpoint custody minus disjoint senior stocks, plus the
+already paid receipt, determines the residual. Known backing releases determine subsequent
+entitlements using independent quotient/remainder arithmetic, never the deployed rate helper.
+Every suffix step reconciles owner-local payments, both mint supplies, selected-rail custody,
+and the external reserve funding separately from engine liabilities. Tracked unrelated accounts
+retain bytes, metadata and lamports; the network-fee payer is excluded from that account frame.
+
+This is net-new relative to the CU test's injected secondary reserve and already-exhausted
+receipt, and to the existing primary-only generated drains and claimant-order products. It is
+checkpoint-relative evidence, not a full live-prefix entitlement oracle, new engine proof,
+status promotion, portfolio-dematerialization product or `CloseSlab` residue classification.
+
+Focused validation uses `cargo test --locked --offline --test v16_program_stateful_fuzz`
+with each exact name below followed by `-- --exact --nocapture`:
+
+```text
+inv_068_receipt_uniqueness_and_monotonic_topups::collateral_rails::v16_program_partial_receipt_topups_are_collateral_rail_independent
+inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries
+inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_generated_receipt_histories_preserve_terminal_drain
+inv_066_resolved_payout_fairness_and_order_independence::v16_program_recovery_and_partial_receipt_orders_are_economically_invariant
+```
+
+All four exact tests passed on 2026-09-08, as did `rustfmt --check` on both changed Rust
+files and `git diff --check`. No current-pin public conformance failure was observed in these runs.
+
+Reuse the default-feature SBF via `PERCOLATOR_FUZZ_SBF`; no SBF rebuild is needed:
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+The unchanged matcher artifact SHA-256 is
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
 ### INV-059 executing evidence and F plan
 
 Traceability review, 2026-09-07: the INV-059 M row in `special_method_coverage.tsv` now selects

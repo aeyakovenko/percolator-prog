@@ -14182,6 +14182,7 @@ fn build_underfunded_live_reference_prefix(
         trade_route,
         backing_plan,
         UnderfundedAuxiliaryExit::BilateralTrade,
+        None,
     )
 }
 
@@ -14267,6 +14268,7 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
     trade_route: TradeRoute,
     backing_plan: UnderfundedBackingPlan,
     auxiliary_exit: UnderfundedAuxiliaryExit,
+    empty_market_setup: Option<fn(&mut V16Svm) -> Result<(), String>>,
 ) -> Result<ScenarioRunner, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
@@ -14286,25 +14288,40 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
     const SNAPSHOT_SLOT: u64 = 12;
     const EXPIRY_SLOT: u64 = 13;
 
+    let config = MarketConfig {
+        initial_price: INITIAL_PRICE,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        actor_deposits: [
+            1_000,
+            250,
+            1_000,
+            250,
+            UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL,
+        ],
+        ..MarketConfig::default()
+    };
     let mut runner = ScenarioRunner::new_unprefixed_with_market_config(
         seed,
         MarketConfig {
-            initial_price: INITIAL_PRICE,
-            maintenance_margin_bps: 1_000,
-            initial_margin_bps: 1_000,
-            max_price_move_bps_per_slot: 500,
-            max_accrual_dt_slots: 1,
-            min_funding_lifetime_slots: 1,
-            actor_deposits: [
-                1_000,
-                250,
-                1_000,
-                250,
-                UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL,
-            ],
-            ..MarketConfig::default()
+            actor_deposits: if empty_market_setup.is_some() {
+                [0; PRIMARY_ACTOR_COUNT]
+            } else {
+                config.actor_deposits
+            },
+            ..config
         },
     )?;
+    if let Some(setup) = empty_market_setup {
+        setup(&mut runner.env)?;
+        for (actor, amount) in config.actor_deposits.into_iter().enumerate() {
+            runner.env.deposit_primary(actor, amount)?;
+        }
+        runner.assert_global_invariants()?;
+    }
     if bridge_disposition == UnderfundedBridgeDisposition::UnattributedLossLiquidation {
         runner.run_safety_prefix(&[Action::ConfigurePermissionlessResolve {
             stale_slots: 1,
@@ -14725,6 +14742,7 @@ fn build_underfunded_resolved_reference_seed(
         authority_plan,
         backing_plan,
         UnderfundedAuxiliaryExit::BilateralTrade,
+        None,
     )
 }
 
@@ -14735,6 +14753,7 @@ fn build_underfunded_resolved_reference_seed_with_auxiliary_exit(
     authority_plan: Option<UnderfundedAuthorityPlan>,
     backing_plan: UnderfundedBackingPlan,
     auxiliary_exit: UnderfundedAuxiliaryExit,
+    empty_market_setup: Option<fn(&mut V16Svm) -> Result<(), String>>,
 ) -> Result<UnderfundedResolvedSeed, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
@@ -14755,6 +14774,7 @@ fn build_underfunded_resolved_reference_seed_with_auxiliary_exit(
         TradeRoute::NoCpi,
         backing_plan,
         auxiliary_exit,
+        empty_market_setup,
     )?;
 
     let before_resolution = runner.env.primary_market_state().1;
@@ -16040,6 +16060,15 @@ pub fn public_resolved_receipt_seed(
     backing_atoms: [u128; 2],
     second_expiry: u64,
 ) -> Result<V16Svm, String> {
+    public_resolved_receipt_seed_with_setup(backing_atoms, second_expiry, None)
+}
+
+/// Optional public setup runs before the unchanged seed's initial deposits.
+pub fn public_resolved_receipt_seed_with_setup(
+    backing_atoms: [u128; 2],
+    second_expiry: u64,
+    empty_market_setup: Option<fn(&mut V16Svm) -> Result<(), String>>,
+) -> Result<V16Svm, String> {
     if backing_atoms
         .iter()
         .any(|amount| !(1..=199).contains(amount))
@@ -16049,17 +16078,20 @@ pub fn public_resolved_receipt_seed(
             "receipt seed requires two partial backing amounts and ordered expiries".into(),
         );
     }
-    let UnderfundedResolvedSeed { runner, .. } = build_underfunded_resolved_reference_seed(
-        BoundedExpiryLanding::Before,
-        false,
-        true,
-        None,
-        UnderfundedBackingPlan {
-            backed_atoms: backing_atoms[0],
-            extra_backing: Some((5, backing_atoms[1], second_expiry)),
-            extra_backed_trade: true,
-        },
-    )?;
+    let UnderfundedResolvedSeed { runner, .. } =
+        build_underfunded_resolved_reference_seed_with_auxiliary_exit(
+            BoundedExpiryLanding::Before,
+            false,
+            true,
+            None,
+            UnderfundedBackingPlan {
+                backed_atoms: backing_atoms[0],
+                extra_backing: Some((5, backing_atoms[1], second_expiry)),
+                extra_backed_trade: true,
+            },
+            UnderfundedAuxiliaryExit::BilateralTrade,
+            empty_market_setup,
+        )?;
     runner.assert_global_invariants()?;
     Ok(runner.env)
 }
@@ -16757,6 +16789,7 @@ pub fn verify_recovery_to_resolved_receipt_order_matrix(
                     None,
                     recovery_backing_plan,
                     UnderfundedAuxiliaryExit::Recovery { winner_first },
+                    None,
                 )?;
             let initial_receipt = runner
                 .env
