@@ -319,7 +319,7 @@ git diff --check
 ## Current goal
 
 The requirements below are targets, not achieved verdicts. `invariant_status.tsv` currently
-projects to **60 REOPENED, 27 CONDITIONAL, 2 N/A, and 0 PROVEN** invariants.
+projects to **61 REOPENED, 26 CONDITIONAL, 2 N/A, and 0 PROVEN** invariants.
 
 Finding acceptance follows [`../../scripts/loop.md`](../../scripts/loop.md), independently of
 coverage status. LoF requires publicly reachable net-extractable loss to an independent user or
@@ -435,11 +435,16 @@ explicitly enumerated trusted-computing base.
 
 ## Current checkpoint
 
-Updated 2026-09-04. PR135 is merged at wrapper commit `d5e2ec6f`. Seventeen post-hoc holdout
-misses, PRs 410 through 426, were absent from its dated holdout and invalidate 60 audit
-rows. They are registered as `missing` in `open_findings.tsv` and decomposed by omitted
-cross-product in `coverage_reopenings.tsv`. This is the active coverage-repair queue. None may be
-called an independent discovery because it was added after inspecting the findings.
+Updated 2026-09-08. PR135 is merged at wrapper commit `d5e2ec6f`. The 2026-09-04 checkpoint
+recorded seventeen post-hoc holdout misses, PRs 410 through 426, absent from its dated holdout and
+affecting 60 audit rows. They are registered as `missing` in `open_findings.tsv` and decomposed by
+omitted cross-product in `coverage_reopenings.tsv`. None of those seventeen may be called an
+independent discovery because they were added after inspecting the findings.
+
+The active coverage-repair queue in `coverage_reopenings.tsv` now also includes the INV-058
+conformance miss recorded as row 427 on 2026-09-08: **18 OPEN entries affecting 61 audit rows**.
+Row 427 remains `Conformance` / `LIMIT`, not a proven LoF, persistent DoS, or CU failure. This
+coverage-ledger addition does not promote or add an independent-discovery benchmark row.
 
 Promotion requires a post-hoc but finding-general generator. Each generator must vary at least
 three dimensions, use only public account construction and instructions, apply an economic or
@@ -5281,7 +5286,7 @@ charter.
 
 ## Exhaustiveness audit
 
-Status last reconciled: 2026-09-04; wording audited: 2026-09-07. No invariant is currently certified
+Status last reconciled: 2026-09-08; wording audited: 2026-09-07. No invariant is currently certified
 as a full-domain theorem of the deployed transition system. The rows below pair current verdicts
 with recorded evidence and its known gaps; they are not closure certificates. The audit reads the
 normative `Required tests` clause and the bodies of owned and cross-referenced tests/proofs.
