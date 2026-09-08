@@ -6239,15 +6239,50 @@ and 180 completed owner payouts. Maximum observed CU is 103,125, not a supported
 The fresh default-feature SBF built with platform-tools v1.52 matches the recorded
 `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20` artifact.
 
-The broader proposed checkpoint product above is still unimplemented: this test constructs no
-exposure, stale-account refresh, pending close/reset overlap, Recovery, or junior claims. Backing
-expiry/impairment, insurance depletion, B saturation, source/domain locks, partial receipts,
-unavailable feeds, arbitrary interleavings, trade transports, administrative restart, and supported
-maxima remain gaps. The next non-duplicative slice should retain a publicly constructed stale-account
-checkpoint, vary authenticated observation readiness at a fixed Clock boundary, and require a
-concrete refresh postcondition followed by the same independently paid terminal disposition.
-Whole-transition classifier/continuation fidelity and the concrete `FinalizeRecovery` proof link
-remain open as documented in the INV-071 index.
+The stale-exposure slice is now executable in [SF-082]
+`v16_program_stale_exposure_refresh_retains_keeper_only_terminal_progress` (base `26c31d07`,
+2026-09-08). Eight public worlds cross all four trade transports with forward/reverse claimant
+orders. A target position and an independent matched position are funded through ordinary trade
+instructions. An independent authenticated mark and crank advance the market oracle epoch; the
+target then retains a stale certificate and pending authenticated favorable mark at a fixed Clock.
+Empty, unrelated-only, duplicate, and out-of-range hint words all reject with exact account, SPL,
+and economic-lamport rollback. A canonical hint consumes the mark and refreshes the certificate;
+the three exposed peers are then publicly recertified at the same Clock so stale resolution has no
+hidden owner prerequisite.
+
+This is joint wrapper evidence for INV-071 strict progress, INV-072 hint immunity, INV-073 funded
+terminal disposition, INV-078 stale-oracle terminal recovery, and INV-082 reachable-state rank.
+It extends the existing stale-refresh owner with a terminal suffix rather than duplicating its
+trade-admission endpoint or any engine selector proof.
+
+The refresh oracle independently decodes mark distance, selected-asset Clock distance, account
+stale/lock flags, and all certificate epochs. Every successful refresh strictly lowers that rank,
+and the target reaches an exact current fixed point at the favorable mark. After public stale
+resolution, both unsigned terminal entrypoints reject with `ExpectedSigner` one slot before the
+configured owner-window deadline. At the exact deadline, a bounded 16-sweep schedule alternates
+the successful rail across worlds and presents empty, duplicate, out-of-range, and unrelated hint
+words. Each accepted `PermissionlessCrank` or `CloseResolved` call strictly lowers an independently
+decoded leg/source/PnL/receipt/nonterminal/value rank. Stock and encumbrance censuses run after every
+accepted refresh and terminal continuation.
+
+Focused validation passes **8 worlds and 216 traced suffix transactions**: **32 refresh
+continuations, 8 stale resolutions, 48 terminal continuations, and 128 exact rejections**. Both
+terminal rails contribute 24 successful calls, all four adversarial terminal hint words admit
+progress somewhere in the matrix, and maximum observed cost is **217,757 CU**. Every world pays
+the exact 4,017 deposited atoms, preserves SPL supply, drains engine and SPL vaults, gives the
+favorably marked target strictly more than its counterparty, and reaches the same payouts across
+transport and order. All terminal retries reject with exact `EngineNonProgress` rollback. The
+compiled trace allows only keeper fee-payer signatures after the stale checkpoint. The unchanged
+default-feature SBF `230b6db1` and matcher `50e53226` were reused; no program rebuild is evidence.
+
+This closes only the named stale-exposure-to-terminal checkpoint slice. It uses two assets, one leg
+per exposed account, zero trade/funding/maintenance fees, AuthMark observations with no external
+oracle accounts, fixed marks, and a configured stale/owner-window policy. Pending close/reset
+overlap, Recovery/`FinalizeRecovery`, junior or partial receipts, backing/insurance/resource
+failure, arbitrary environmental histories, administrative restart, and supported maxima remain
+open. Five economically terminal portfolios remain materialized, so signer-gated deletion is not
+claimed as permissionless progress. Whole-transition classifier fidelity and engine rank proofs
+remain delegated to their existing owners; no proof is duplicated and no status is promoted.
 
 ### INV-086 generator and oracle boundaries
 

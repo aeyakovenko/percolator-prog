@@ -61,9 +61,20 @@
 //! economic completion leaves the materialized, signer-gated administrative tail.
 //! This finite environment slice does not cover exposure, junior claims, Recovery,
 //! overlapping close/reset work, unavailable feeds, or maximum account shapes.
+//!
+//! The stale-exposure continuation matrix adds the next concrete wrapper slice for
+//! INV-071/072/073/078/082. Each public trade transport leaves a funded position behind an
+//! independently advanced oracle epoch and a pending authenticated mark. Empty, incomplete,
+//! duplicate, and out-of-range hint words reject with a full economic frame before a canonical
+//! same-Clock retry consumes a decoded refresh rank. After stale resolution, both terminal rails
+//! reject atomically inside the owner window, then keeper-only calls with adversarial hint words
+//! drain every funded account at the exact public deadline. This composes stale-account refresh
+//! with terminal disposition; it does not add an engine selector model, a receipt/resource-failure
+//! topology, or a supported-maximum claim.
 
 use super::*;
 use crate::support::fuzz_model::{
+    assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
     run_bounded_public_liveness_graph, run_close_recovery_overlap_probe,
     run_close_reset_overlap_probe, run_multileg_loss_stale_progress_regression,
 };
@@ -718,4 +729,630 @@ fn v16_program_recovery_only_stale_certificate_retains_owner_exit() {
     let (_, after) = env.primary_market_state();
     assert_eq!(after.assets[0].oi_eff_long_q, 0);
     assert_eq!(after.assets[0].oi_eff_short_q, 0);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Inv082RefreshRank {
+    mark_distance: u64,
+    selected_asset_clock_distance: u64,
+    stale_account_flags: u64,
+    stale_certificate: u8,
+}
+
+fn inv082_certificate_is_current(env: &V16Svm, actor: usize) -> bool {
+    let account = env.primary_portfolio(actor);
+    let Ok(cert) = account.health_cert.try_to_runtime() else {
+        return false;
+    };
+    let group = env.primary_market_state().1;
+    cert.valid
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch
+        && cert.active_bitmap_at_cert == account.active_bitmap.map(|word| word.get())
+}
+
+fn inv082_refresh_rank(env: &V16Svm, actor: usize, asset: usize) -> Inv082RefreshRank {
+    let account = env.primary_portfolio(actor);
+    let group = env.primary_market_state().1;
+    let engine_asset = group.assets[asset];
+    let profile = env.primary_profile(asset);
+    let mark_distance = engine_asset
+        .raw_oracle_target_price
+        .abs_diff(engine_asset.effective_price)
+        .max(profile.mark_ewma_e6.abs_diff(engine_asset.effective_price));
+    let stale_certificate = u8::from(!inv082_certificate_is_current(env, actor));
+    Inv082RefreshRank {
+        mark_distance,
+        selected_asset_clock_distance: if stale_certificate != 0 {
+            env.current_slot().saturating_sub(engine_asset.slot_last)
+        } else {
+            0
+        },
+        stale_account_flags: u64::from(account.stale_state)
+            + u64::from(account.b_stale_state)
+            + u64::from(account.liquidation_lock)
+            + u64::from(account.rebalance_lock),
+        stale_certificate,
+    }
+}
+
+fn inv082_economically_terminal(env: &V16Svm, actor: usize) -> bool {
+    let account = env.primary_portfolio(actor);
+    let group = env.primary_market_state().1;
+    let Ok(receipt) = account.resolved_payout_receipt.try_to_runtime() else {
+        return false;
+    };
+    let Ok(close) = account.close_progress.try_to_runtime() else {
+        return false;
+    };
+    group.mode == MarketModeV16::Resolved
+        && account.capital.get() == 0
+        && account.pnl.get() == 0
+        && account.reserved_pnl.get() == 0
+        && account.fee_credits.get() == 0
+        && account.cancel_deposit_escrow.get() == 0
+        && account.stale_state == 0
+        && account.b_stale_state == 0
+        && account.rebalance_lock == 0
+        && account.liquidation_lock == 0
+        && account.last_fee_slot.get() == group.resolved_slot
+        && account.health_cert.valid == 0
+        && active_bitmap_is_empty(account.active_bitmap.map(|word| word.get()))
+        && account
+            .source_domains
+            .iter()
+            .all(|source| !source.is_occupied())
+        && (!receipt.present || receipt.finalized)
+        && (!close.active || (close.finalized && close.residual_remaining == 0))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Inv082TerminalRank {
+    active_legs: u64,
+    occupied_sources: u64,
+    nonzero_pnl_accounts: u64,
+    unfinished_receipts: u64,
+    nonterminal_accounts: u64,
+    outstanding_value: u128,
+}
+
+fn inv082_terminal_rank(env: &V16Svm) -> Inv082TerminalRank {
+    assert_eq!(env.primary_market_state().1.mode, MarketModeV16::Resolved);
+    let mut rank = Inv082TerminalRank::default();
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let account = env.primary_portfolio(actor);
+        rank.active_legs += account
+            .legs
+            .iter()
+            .filter_map(|leg| leg.try_to_runtime().ok())
+            .filter(|leg| leg.active)
+            .count() as u64;
+        rank.occupied_sources += account
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count() as u64;
+        rank.nonzero_pnl_accounts += u64::from(account.pnl.get() != 0);
+        if let Ok(receipt) = account.resolved_payout_receipt.try_to_runtime() {
+            if receipt.present && !receipt.finalized {
+                rank.unfinished_receipts += 1;
+                let unpaid_claim = receipt
+                    .terminal_positive_claim_face
+                    .checked_sub(receipt.paid_effective)
+                    .expect("terminal receipt paid beyond its face value");
+                rank.outstanding_value = rank
+                    .outstanding_value
+                    .checked_add(unpaid_claim)
+                    .expect("terminal rank overflowed");
+            }
+        }
+        rank.nonterminal_accounts += u64::from(!inv082_economically_terminal(env, actor));
+        for amount in [
+            account.capital.get(),
+            account.pnl.get().unsigned_abs(),
+            account.reserved_pnl.get(),
+        ] {
+            rank.outstanding_value = rank
+                .outstanding_value
+                .checked_add(amount)
+                .expect("terminal rank overflowed");
+        }
+    }
+    rank
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Inv082TerminalRail {
+    Crank,
+    Close,
+}
+
+fn inv082_terminal_hints(word: usize) -> Vec<CrankObservationHint> {
+    match word % 4 {
+        0 => vec![],
+        1 => vec![
+            CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            },
+            CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            },
+        ],
+        2 => vec![CrankObservationHint {
+            asset_index: u16::MAX,
+            oracle_accounts: u8::MAX,
+        }],
+        _ => vec![CrankObservationHint {
+            asset_index: 1,
+            oracle_accounts: u8::MAX,
+        }],
+    }
+}
+
+#[test]
+fn v16_program_stale_exposure_refresh_retains_keeper_only_terminal_progress() {
+    const TARGET: usize = 0;
+    const TARGET_COUNTERPARTY: usize = 1;
+    const ORACLE_ACTOR: usize = 2;
+    const ORACLE_COUNTERPARTY: usize = 3;
+    const TARGET_ASSET: u16 = 0;
+    const ORACLE_ASSET: u16 = 1;
+    const PRICE: u64 = 100;
+    const FAVORABLE_MARK: u64 = 105;
+    const INDEPENDENT_MARK: u64 = 95;
+    const STALE_SLOTS: u64 = 4;
+    const OWNER_WINDOW: u64 = 3;
+    const REFRESH_SLOT: u64 = 3;
+    const SWEEP_BOUND: usize = 16;
+    const DEPOSITS: [u128; PRIMARY_ACTOR_COUNT] = [1_000, 1_000, 1_000, 1_000, 17];
+
+    let routes = [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ];
+    let favorable_delta = u128::from(FAVORABLE_MARK - PRICE);
+    let independent_delta = u128::from(PRICE - INDEPENDENT_MARK);
+    let expected_payouts = [
+        u64::try_from(DEPOSITS[TARGET].checked_add(favorable_delta).unwrap()).unwrap(),
+        u64::try_from(
+            DEPOSITS[TARGET_COUNTERPARTY]
+                .checked_sub(favorable_delta)
+                .unwrap(),
+        )
+        .unwrap(),
+        u64::try_from(
+            DEPOSITS[ORACLE_ACTOR]
+                .checked_sub(independent_delta)
+                .unwrap(),
+        )
+        .unwrap(),
+        u64::try_from(
+            DEPOSITS[ORACLE_COUNTERPARTY]
+                .checked_add(independent_delta)
+                .unwrap(),
+        )
+        .unwrap(),
+        u64::try_from(DEPOSITS[4]).unwrap(),
+    ];
+    let mut worlds = 0usize;
+    let mut refresh_progress = 0usize;
+    let mut refresh_rejections = 0usize;
+    let mut terminal_progress = 0usize;
+    let mut terminal_rejections = 0usize;
+    let mut rail_successes = [0usize; 2];
+    let mut successful_hint_words = BTreeSet::new();
+    let mut max_cu = 0u64;
+
+    for (route_index, route) in routes.into_iter().enumerate() {
+        for reverse in [false, true] {
+            let mut seed = [0x82; 32];
+            seed[0] ^= route_index as u8;
+            seed[1] ^= u8::from(reverse);
+            let mut env = V16Svm::new(
+                seed,
+                MarketConfig {
+                    initial_price: PRICE,
+                    max_price_move_bps_per_slot: 500,
+                    max_accrual_dt_slots: 4,
+                    max_abs_funding_e9_per_slot: 0,
+                    maintenance_fee_per_slot: 0,
+                    actor_deposits: DEPOSITS,
+                    ..MarketConfig::default()
+                },
+            );
+            env.configure_permissionless_resolve(STALE_SLOTS, OWNER_WINDOW)
+                .expect("configure public stale-resolution policy");
+            let destinations_before: [u64; PRIMARY_ACTOR_COUNT] =
+                std::array::from_fn(|actor| env.token_amount(env.actors[actor].destination_token));
+            let supply_before = env.token_supply_observed();
+
+            execute_trade_route(
+                &mut env,
+                route,
+                TARGET,
+                TARGET_COUNTERPARTY,
+                TARGET_ASSET,
+                POS_SCALE as i128,
+                PRICE,
+                0,
+            )
+            .unwrap_or_else(|error| panic!("{route:?}/{reverse}: target trade: {error}"));
+            env.trade_no_cpi(
+                ORACLE_ACTOR,
+                ORACLE_COUNTERPARTY,
+                ORACLE_ASSET,
+                POS_SCALE as i128,
+                PRICE,
+                0,
+            )
+            .unwrap_or_else(|error| panic!("{route:?}/{reverse}: independent trade: {error}"));
+
+            env.warp_to_slot(1);
+            env.push_auth_mark(ORACLE_ASSET, 1, INDEPENDENT_MARK)
+                .expect("publish independent authenticated mark");
+            env.crank(
+                ORACLE_ACTOR,
+                1,
+                vec![CrankObservationHint {
+                    asset_index: ORACLE_ASSET,
+                    oracle_accounts: 0,
+                }],
+            )
+            .expect("advance an independent oracle epoch");
+            let stale_market = env.primary_market_state().1;
+            assert!(
+                !inv082_certificate_is_current(&env, TARGET)
+                    && env
+                        .primary_portfolio(TARGET)
+                        .health_cert
+                        .cert_oracle_epoch
+                        .get()
+                        < stale_market.oracle_epoch,
+                "{route:?}/{reverse}: target checkpoint must be stale before its own mark"
+            );
+
+            env.warp_to_slot(2);
+            env.push_auth_mark(TARGET_ASSET, 2, FAVORABLE_MARK)
+                .expect("publish target authenticated mark");
+            env.warp_to_slot(REFRESH_SLOT);
+            let stale_rank = inv082_refresh_rank(&env, TARGET, TARGET_ASSET as usize);
+            assert!(stale_rank.mark_distance > 0 && stale_rank.stale_certificate != 0);
+            assert_public_stock_census("INV-082 stale exposure checkpoint", &env).unwrap();
+            assert_public_encumbrance_census("INV-082 stale exposure checkpoint", &env).unwrap();
+
+            env.begin_public_trace();
+            let incomplete_words = [
+                (vec![], PercolatorError::EngineNonProgress),
+                (
+                    vec![CrankObservationHint {
+                        asset_index: ORACLE_ASSET,
+                        oracle_accounts: 0,
+                    }],
+                    PercolatorError::EngineNonProgress,
+                ),
+                (
+                    vec![
+                        CrankObservationHint {
+                            asset_index: TARGET_ASSET,
+                            oracle_accounts: 0,
+                        },
+                        CrankObservationHint {
+                            asset_index: TARGET_ASSET,
+                            oracle_accounts: 0,
+                        },
+                    ],
+                    PercolatorError::InvalidInstruction,
+                ),
+                (
+                    vec![CrankObservationHint {
+                        asset_index: u16::MAX,
+                        oracle_accounts: 0,
+                    }],
+                    PercolatorError::InvalidInstruction,
+                ),
+            ];
+            for (hints, expected_error) in incomplete_words {
+                let frame = inv082_account_frame(&env);
+                let error = env
+                    .crank(TARGET, REFRESH_SLOT, hints)
+                    .expect_err("incomplete or malformed Live hint word must reject");
+                inv082_assert_rejected(error, expected_error);
+                inv082_assert_frame(&env, &frame, &[]);
+                assert_eq!(
+                    inv082_refresh_rank(&env, TARGET, TARGET_ASSET as usize),
+                    stale_rank,
+                    "{route:?}/{reverse}: rejected hint word changed refresh rank"
+                );
+                refresh_rejections += 1;
+            }
+
+            for step in 0..4 {
+                if inv082_certificate_is_current(&env, TARGET)
+                    && inv082_refresh_rank(&env, TARGET, TARGET_ASSET as usize).mark_distance == 0
+                {
+                    break;
+                }
+                let before = inv082_refresh_rank(&env, TARGET, TARGET_ASSET as usize);
+                let frame = inv082_account_frame(&env);
+                let success = env
+                    .crank(
+                        TARGET,
+                        REFRESH_SLOT,
+                        vec![CrankObservationHint {
+                            asset_index: TARGET_ASSET,
+                            oracle_accounts: 0,
+                        }],
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{route:?}/{reverse}: canonical refresh step {step}: {error}")
+                    });
+                max_cu = max_cu.max(success.compute_units);
+                let after = inv082_refresh_rank(&env, TARGET, TARGET_ASSET as usize);
+                assert!(
+                    after < before,
+                    "{route:?}/{reverse}: successful refresh did not lower decoded rank: {before:?} -> {after:?}"
+                );
+                inv082_assert_frame(&env, &frame, &[env.market, env.actors[TARGET].portfolio]);
+                assert_public_stock_census("INV-082 canonical stale refresh", &env).unwrap();
+                assert_public_encumbrance_census("INV-082 canonical stale refresh", &env).unwrap();
+                refresh_progress += 1;
+            }
+            let refreshed_rank = inv082_refresh_rank(&env, TARGET, TARGET_ASSET as usize);
+            assert_eq!(
+                refreshed_rank,
+                Inv082RefreshRank {
+                    mark_distance: 0,
+                    selected_asset_clock_distance: 0,
+                    stale_account_flags: 0,
+                    stale_certificate: 0,
+                },
+                "{route:?}/{reverse}: canonical retry did not reach a current fixed point"
+            );
+            assert_eq!(
+                env.primary_market_state().1.assets[TARGET_ASSET as usize].effective_price,
+                FAVORABLE_MARK
+            );
+
+            // Resolution may snapshot only after every exposed counterparty has consumed the
+            // already-authenticated mark epochs. Keep that prerequisite permissionless and at the
+            // same Clock rather than using an owner action or relying on terminal-mode magic.
+            for (actor, asset) in [
+                (TARGET_COUNTERPARTY, TARGET_ASSET),
+                (ORACLE_ACTOR, ORACLE_ASSET),
+                (ORACLE_COUNTERPARTY, ORACLE_ASSET),
+            ] {
+                for step in 0..4 {
+                    if inv082_certificate_is_current(&env, actor) {
+                        break;
+                    }
+                    let before = inv082_refresh_rank(&env, actor, asset as usize);
+                    let frame = inv082_account_frame(&env);
+                    let success = env
+                        .crank(
+                            actor,
+                            REFRESH_SLOT,
+                            vec![CrankObservationHint {
+                                asset_index: asset,
+                                oracle_accounts: 0,
+                            }],
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "{route:?}/{reverse}: exposed peer {actor} refresh step {step}: {error}"
+                            )
+                        });
+                    let after = inv082_refresh_rank(&env, actor, asset as usize);
+                    assert!(
+                        after < before,
+                        "{route:?}/{reverse}: peer {actor} refresh did not lower rank: {before:?} -> {after:?}"
+                    );
+                    inv082_assert_frame(&env, &frame, &[env.market, env.actors[actor].portfolio]);
+                    assert_public_stock_census("INV-082 stale peer refresh", &env).unwrap();
+                    assert_public_encumbrance_census("INV-082 stale peer refresh", &env).unwrap();
+                    max_cu = max_cu.max(success.compute_units);
+                    refresh_progress += 1;
+                }
+                assert!(
+                    inv082_certificate_is_current(&env, actor),
+                    "{route:?}/{reverse}: exposed peer {actor} did not become current"
+                );
+            }
+
+            let resolution_maturity =
+                env.primary_market_state().0.last_good_oracle_slot + STALE_SLOTS;
+            let resolution = env
+                .resolve_stale_permissionless(resolution_maturity)
+                .unwrap_or_else(|error| {
+                    panic!("{route:?}/{reverse}: stale resolution at maturity: {error}")
+                });
+            max_cu = max_cu.max(resolution.compute_units);
+            let resolved = env.primary_market_state().1;
+            assert_eq!(resolved.mode, MarketModeV16::Resolved);
+            let payout_maturity = resolved.resolved_slot + OWNER_WINDOW;
+
+            env.warp_to_slot(payout_maturity - 1);
+            for rail in [Inv082TerminalRail::Crank, Inv082TerminalRail::Close] {
+                let frame = inv082_account_frame(&env);
+                let result = match rail {
+                    Inv082TerminalRail::Crank => env.crank(
+                        TARGET,
+                        env.current_slot(),
+                        inv082_terminal_hints(route_index),
+                    ),
+                    Inv082TerminalRail::Close => env.close_resolved_primary(TARGET),
+                };
+                inv082_assert_rejected(
+                    result.expect_err("owner window must reject an unsigned terminal rail"),
+                    PercolatorError::ExpectedSigner,
+                );
+                inv082_assert_frame(&env, &frame, &[]);
+                terminal_rejections += 1;
+            }
+
+            env.warp_to_slot(payout_maturity);
+            let actor_order = if reverse {
+                [4usize, 3, 2, 1, 0]
+            } else {
+                [0usize, 1, 2, 3, 4]
+            };
+            let mut reached_terminal = false;
+            for sweep in 0..SWEEP_BOUND {
+                if inv082_terminal_rank(&env) == Inv082TerminalRank::default() {
+                    reached_terminal = true;
+                    break;
+                }
+                let mut sweep_progress = 0usize;
+                for (position, actor) in actor_order.into_iter().enumerate() {
+                    if inv082_economically_terminal(&env, actor) {
+                        continue;
+                    }
+                    let rail = if (route_index + usize::from(reverse)) % 2 == 0 {
+                        Inv082TerminalRail::Crank
+                    } else {
+                        Inv082TerminalRail::Close
+                    };
+                    let hint_word = sweep * PRIMARY_ACTOR_COUNT + position;
+                    let before_rank = inv082_terminal_rank(&env);
+                    let frame = inv082_account_frame(&env);
+                    let result = match rail {
+                        Inv082TerminalRail::Crank => {
+                            env.crank(actor, env.current_slot(), inv082_terminal_hints(hint_word))
+                        }
+                        Inv082TerminalRail::Close => env.close_resolved_primary(actor),
+                    };
+                    match result {
+                        Ok(success) => {
+                            let after_rank = inv082_terminal_rank(&env);
+                            assert!(
+                                after_rank < before_rank,
+                                "{route:?}/{reverse}: successful {rail:?} did not lower terminal rank: {before_rank:?} -> {after_rank:?}"
+                            );
+                            inv082_assert_frame(
+                                &env,
+                                &frame,
+                                &[
+                                    env.market,
+                                    env.actors[actor].portfolio,
+                                    env.actors[actor].destination_token,
+                                    env.vault,
+                                ],
+                            );
+                            assert_public_stock_census("INV-082 terminal exposure progress", &env)
+                                .unwrap();
+                            assert_public_encumbrance_census(
+                                "INV-082 terminal exposure progress",
+                                &env,
+                            )
+                            .unwrap();
+                            max_cu = max_cu.max(success.compute_units);
+                            rail_successes
+                                [usize::from(matches!(rail, Inv082TerminalRail::Close))] += 1;
+                            if matches!(rail, Inv082TerminalRail::Crank) {
+                                successful_hint_words.insert(hint_word % 4);
+                            }
+                            terminal_progress += 1;
+                            sweep_progress += 1;
+                        }
+                        Err(_) => {
+                            inv082_assert_frame(&env, &frame, &[]);
+                            terminal_rejections += 1;
+                        }
+                    }
+                }
+                assert!(
+                    sweep_progress != 0
+                        || inv082_terminal_rank(&env) == Inv082TerminalRank::default(),
+                    "{route:?}/{reverse}: terminal schedule reached a nonterminal fixed point"
+                );
+            }
+            if inv082_terminal_rank(&env) == Inv082TerminalRank::default() {
+                reached_terminal = true;
+            }
+            assert!(
+                reached_terminal,
+                "{route:?}/{reverse}: terminal schedule exceeded {SWEEP_BOUND} sweeps"
+            );
+
+            let payouts: [u64; PRIMARY_ACTOR_COUNT] = std::array::from_fn(|actor| {
+                env.token_amount(env.actors[actor].destination_token) - destinations_before[actor]
+            });
+            assert_eq!(
+                payouts, expected_payouts,
+                "{route:?}/{reverse}: terminal payout disagrees with public mark deltas"
+            );
+            assert_eq!(
+                payouts
+                    .iter()
+                    .map(|amount| u128::from(*amount))
+                    .sum::<u128>(),
+                DEPOSITS.iter().sum::<u128>(),
+                "{route:?}/{reverse}: terminal payouts lost funded value"
+            );
+            assert_eq!(env.primary_market_state().1.c_tot, 0);
+            assert_eq!(env.primary_market_state().1.vault, 0);
+            assert_eq!(env.token_amount(env.vault), 0);
+            assert_eq!(env.token_supply_observed(), supply_before);
+            assert_eq!(
+                env.primary_market_state().1.materialized_portfolio_count,
+                PRIMARY_ACTOR_COUNT as u64,
+                "economic completion must not be conflated with signer-gated deletion"
+            );
+
+            for actor in actor_order {
+                for rail in [Inv082TerminalRail::Crank, Inv082TerminalRail::Close] {
+                    let frame = inv082_account_frame(&env);
+                    let result = match rail {
+                        Inv082TerminalRail::Crank => {
+                            env.crank(actor, env.current_slot(), inv082_terminal_hints(actor))
+                        }
+                        Inv082TerminalRail::Close => env.close_resolved_primary(actor),
+                    };
+                    inv082_assert_rejected(
+                        result.expect_err("terminal rail must not report progress twice"),
+                        PercolatorError::EngineNonProgress,
+                    );
+                    inv082_assert_frame(&env, &frame, &[]);
+                    terminal_rejections += 1;
+                }
+            }
+
+            let unavailable: BTreeSet<_> = env
+                .actors
+                .iter()
+                .map(|actor| actor.signer.pubkey())
+                .chain(std::iter::once(Pubkey::new_from_array(
+                    env.primary_market_state().0.marketauth,
+                )))
+                .collect();
+            let trace = env.finish_public_trace();
+            trace
+                .validate_public_execution()
+                .expect("stale refresh and terminal suffix must be public and rollback-exact");
+            for step in &trace.steps {
+                assert!(
+                    inv082_keeper_only(step, &unavailable),
+                    "{route:?}/{reverse}: suffix used an owner or admin shortcut: {step:?}"
+                );
+            }
+            worlds += 1;
+        }
+    }
+
+    assert_eq!(worlds, 8);
+    assert_eq!(refresh_progress, worlds * 4);
+    assert_eq!(refresh_rejections, worlds * 4);
+    assert_eq!(terminal_progress, worlds * (PRIMARY_ACTOR_COUNT + 1));
+    assert_eq!(terminal_rejections, worlds * (2 + 2 * PRIMARY_ACTOR_COUNT));
+    assert!(rail_successes.into_iter().all(|count| count != 0));
+    assert_eq!(successful_hint_words, BTreeSet::from([0, 1, 2, 3]));
+    assert!(max_cu < TX_CU_LIMIT);
+    eprintln!(
+        "INV-071/072/073/078/082 stale-exposure continuation: worlds={worlds} refresh_progress={refresh_progress} refresh_rejections={refresh_rejections} terminal_progress={terminal_progress} terminal_rejections={terminal_rejections} rail_successes={rail_successes:?} hint_words={successful_hint_words:?} max_cu={max_cu}"
+    );
 }
