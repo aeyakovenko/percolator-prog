@@ -7270,6 +7270,67 @@ oracle tails, retained capabilities/generations, arbitrary histories, and maximu
 outside this increment. Validation uses the baseline default-feature SBF `230b6db1` and matcher
 `50e53226`; the build-sbf invocation was cache-fresh, not a clean rebuild.
 
+#### Mixed external-observation boundary
+
+[`v16_bpf_inv056_mixed_observations_preserve_full_refresh_trade_boundary`](cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs)
+adds the mixed AuthMark/Pyth observation product excluded by the AuthMark-only matrix above.
+An AuthMark long and a Hybrid/Pyth short each lose 50 atoms. Independent integer arithmetic
+requires equity 210 and gross initial margin 200. Through both `TradeNoCpi` and single-leg
+`BatchTradeNoCpi`, the same margin-211 request is admissible before the losses; afterward,
+full observation refresh, empty-hint refresh, and trade-time refresh all admit margin 210
+and reject margin 211 with `EngineInvalidConfig`. All six successful outcomes compare complete,
+unnormalized Account values with the full-refresh reference, alongside independent PnL,
+certificate, open-interest, and SPL vault-stock checks. Snapshots fork only captured public
+histories; the test does not synthesize engine state or call engine transitions as its oracle.
+
+The shared prefix repeats empty and partial hints while AuthMark is pending, then supplies a
+valid AuthMark observation before a regressed Pyth tail. These reject with `EngineNonProgress`
+and `OracleStale`, respectively, with exact account rollback including oracle inputs and SPL
+custody; the fee payer loses exactly the runtime signature fee. Cranks carry `now_slot = u64::MAX`,
+but authenticated Clock keeps the resulting market at slot 2. Successful-history equivalence
+excludes transaction fees. This adds external-observation/admission composition and a one-atom
+boundary, not another isolated omitted-hint or oracle-replay assertion.
+
+Verification on `codex/invariant-fidelity-reopen-20260904` at `0c4fb36b` / engine `495a5590`
+uses the supplied default-feature SBF directly, without rebuilding or replacing it. Its SHA-256
+before and after testing is
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+The standalone new test passed all six variants. The exact combined verification command was:
+
+```sh
+env CARGO_INCREMENTAL=0 \
+  PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so \
+  CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 \
+  cargo test --locked --test v16_cu -- --exact --nocapture \
+  inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::v16_bpf_inv056_mixed_observations_preserve_full_refresh_trade_boundary \
+  inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::v16_program_discovery_hint_surface_is_permissionless_crank_only \
+  inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::v16_program_no_hint_favorable_route_roster_is_source_complete \
+  inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::v16_program_external_oracle_hint_and_account_order_is_normalized_or_atomic \
+  inv_053_full_health_recertification_equivalence::v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::v16_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::v16_bpf_configure_hybrid_oracle_uses_authenticated_unix_time_not_caller_time \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::v16_bpf_hybrid_fresh_oracle_trade_opens_and_closes \
+  inv_047_equivalent_route_semantics::v16_bpf_batch_trade_executes_mixed_direction_spread \
+  inv_024_attributed_quote_value_conservation::v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger
+```
+
+Result: **10 passed, 0 failed**, 975 filtered out. The new test accounts for one test and six
+differential variants. Formatting and whitespace verification also passed:
+
+```sh
+rustfmt --edition 2021 --check tests/invariants/cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs
+git diff --check
+```
+
+An earlier host compilation ran out of disk before executing
+the new test; removing only the earlier isolated worktree's rebuildable output and disabling
+host incremental compilation resolved that environment failure. The complete suite was not run.
+
+Coverage only for INV-056/020/053/054: no status promotion, production change, new harness
+plumbing, or engine proof. Mixed external observations with CPI/matcher routes, nonzero
+funding/fees, source-credit stress, B-stale/reset/liquidation, and larger active-leg sets remain
+outside this increment. The test and note live only in their existing invariant-owned files.
+
 ### INV-053 multi-leg batch recertification
 
 [`v16_program_multileg_batch_certificates_refresh_untouched_stale_leg`](stateful/inv_053_full_health_recertification_equivalence.rs)

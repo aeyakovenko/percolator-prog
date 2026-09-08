@@ -24,6 +24,9 @@
 //! rollback.
 //! INV-053 owns the single-leg TradeNoCpi/TradeCpi variants and every single-omitted max-shape
 //! refresh case.
+//! A mixed AuthMark/Pyth history compares full, empty-hint, and trade-time refresh through
+//! both no-CPI trade transports at a one-atom margin boundary. Independent stock arithmetic,
+//! exact account equality, and rejection frames bind the observations to favorable admission.
 
 use super::*;
 
@@ -1128,4 +1131,349 @@ fn run_batch_route_with_stale_related_leg(route: Inv056BatchRoute) {
 fn v16_program_batch_routes_refresh_stale_related_legs_before_favorable_trade() {
     run_batch_route_with_stale_related_leg(Inv056BatchRoute::NoCpi);
     run_batch_route_with_stale_related_leg(Inv056BatchRoute::Cpi);
+}
+
+fn inv056_boundary_frame(env: &V16CuEnv, keys: &[Pubkey]) -> Vec<(Pubkey, Account)> {
+    keys.iter()
+        .map(|key| (*key, env.svm.get_account(key).unwrap()))
+        .collect()
+}
+
+fn inv056_assert_boundary_frame(env: &V16CuEnv, expected: &[(Pubkey, Account)], label: &str) {
+    for (key, account) in expected {
+        let actual = env.svm.get_account(key).unwrap();
+        assert!(
+            actual == *account,
+            "{label}: account frame changed: {key}, first data difference: {:?}",
+            actual
+                .data
+                .iter()
+                .zip(&account.data)
+                .position(|(a, b)| a != b),
+        );
+    }
+}
+
+fn inv056_assert_boundary_reject(
+    env: &mut V16CuEnv,
+    keys: &[Pubkey],
+    signatures: u64,
+    expected: PercolatorError,
+    action: impl FnOnce(&mut V16CuEnv) -> Result<u64, String>,
+) {
+    let before = inv056_boundary_frame(env, keys);
+    let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    env.svm.expire_blockhash();
+    let err = action(env).expect_err("incomplete observations must not improve admission");
+    assert!(
+        err.contains(&format!("Custom({})", expected as u32)),
+        "{err}"
+    );
+    inv056_assert_boundary_frame(env, &before, "rejection rollback");
+    payer.lamports -= signatures * solana_sdk::fee::FeeStructure::default().lamports_per_signature;
+    assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+}
+
+fn inv056_boundary_crank(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    observations: Vec<CrankObservationHint>,
+    oracles: &[Pubkey],
+) -> Result<u64, String> {
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+    ];
+    accounts.extend(
+        oracles
+            .iter()
+            .map(|key| AccountMeta::new_readonly(*key, false)),
+    );
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: u64::MAX,
+            observations,
+        },
+        accounts,
+        &[],
+    )
+}
+
+fn inv056_boundary_full_observations() -> Vec<CrankObservationHint> {
+    vec![
+        CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        },
+        CrankObservationHint {
+            asset_index: 1,
+            oracle_accounts: 1,
+        },
+        CrankObservationHint {
+            asset_index: 2,
+            oracle_accounts: 0,
+        },
+    ]
+}
+
+#[test]
+fn v16_bpf_inv056_mixed_observations_preserve_full_refresh_trade_boundary() {
+    // INV-056 / INV-020 / INV-053 / INV-054: compare wrapper histories, not an
+    // engine refresh implementation. All economic state comes from public SBF routes.
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(3, 1_000, 1_000, 500);
+    set_test_clock(&mut env, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(2, 1, 100);
+    let feed = [0x56; 32];
+    let old_oracle = env.set_pyth_price(&feed, 100, -6, 100);
+    env.try_configure_hybrid_asset_with_cu(
+        1,
+        1,
+        0,
+        [feed, [0; 32], [0; 32]],
+        &[old_oracle],
+        1,
+        100,
+        0,
+        0,
+        3,
+    )
+    .unwrap();
+
+    let trader = Keypair::new();
+    let counterparty = Keypair::new();
+    let keeper = Keypair::new();
+    let trader_account = env.create_portfolio(&trader);
+    let counterparty_account = env.create_portfolio(&counterparty);
+    let keeper_account = env.create_portfolio(&keeper);
+    let trader_tokens = env.deposit(&trader, trader_account, 310);
+    let counterparty_tokens = env.deposit(&counterparty, counterparty_account, 10_000);
+    for (asset, sign) in [(0, 1), (1, -1)] {
+        env.trade_asset_with_cu(
+            asset,
+            &trader,
+            trader_account,
+            &counterparty,
+            counterparty_account,
+            sign * (10 * POS_SCALE) as i128,
+            100,
+            0,
+        );
+    }
+    let original_cert = health_cert(&env.portfolio_state(trader_account));
+    assert_eq!(original_cert.certified_equity, 310);
+    assert_eq!(original_cert.certified_initial_req, 200);
+
+    let trade = |env: &mut V16CuEnv, batch: bool, size_q: i128| {
+        let ix = if batch {
+            env.batch_trade_no_cpi_ix(
+                trader_account,
+                counterparty_account,
+                vec![BatchTradeLeg {
+                    asset_index: 2,
+                    market_id: env.asset_market_id(2),
+                    size_q,
+                    exec_price: 100,
+                    fee_bps: 0,
+                }],
+            )
+        } else {
+            env.trade_no_cpi_ix(trader_account, counterparty_account, 2, size_q, 100, 0)
+        };
+        env.svm.expire_blockhash();
+        env.send(
+            ix,
+            vec![
+                AccountMeta::new(trader.pubkey(), true),
+                AccountMeta::new(counterparty.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(trader_account, false),
+                AccountMeta::new(counterparty_account, false),
+            ],
+            &[&trader, &counterparty],
+        )
+    };
+    let mut keys = vec![
+        env.market,
+        trader_account,
+        counterparty_account,
+        keeper_account,
+        env.vault,
+        env.mint,
+        trader_tokens,
+        counterparty_tokens,
+        trader.pubkey(),
+        counterparty.pubkey(),
+        keeper.pubkey(),
+        env.admin.pubkey(),
+        old_oracle,
+    ];
+    let before_losses = inv056_boundary_frame(&env, &keys);
+    for batch in [false, true] {
+        trade(&mut env, batch, (POS_SCALE + POS_SCALE / 10) as i128)
+            .expect("same over-boundary request is admissible before the losses");
+        let cert = health_cert(&env.portfolio_state(trader_account));
+        assert_eq!(cert.certified_equity, 310);
+        assert_eq!(cert.certified_initial_req, 211);
+        for (key, account) in &before_losses {
+            env.svm.set_account(*key, account.clone()).unwrap();
+        }
+    }
+
+    set_test_clock(&mut env, 2, 101);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 95);
+    let fresh_oracle = env.set_pyth_price(&feed, 105, -6, 101);
+    keys.push(fresh_oracle);
+    inv056_boundary_crank(
+        &mut env,
+        keeper_account,
+        crank_observations_with_accounts(1, 1),
+        &[fresh_oracle],
+    )
+    .unwrap();
+    let (_, partial_market) = env.market_state();
+    assert_eq!(partial_market.assets[0].effective_price, 100);
+    assert_eq!(partial_market.assets[1].effective_price, 105);
+    assert!(original_cert.cert_oracle_epoch < partial_market.oracle_epoch);
+    assert_eq!(env.portfolio_state(trader_account).capital.get(), 310);
+
+    // Repeat omissions against the same live history. The valid first observation
+    // in the replay case would advance AuthMark before the regressed Pyth tail fails.
+    for _ in 0..2 {
+        inv056_assert_boundary_reject(
+            &mut env,
+            &keys,
+            1,
+            PercolatorError::EngineNonProgress,
+            |env| inv056_boundary_crank(env, trader_account, vec![], &[]),
+        );
+        inv056_assert_boundary_reject(
+            &mut env,
+            &keys,
+            1,
+            PercolatorError::EngineNonProgress,
+            |env| {
+                inv056_boundary_crank(
+                    env,
+                    trader_account,
+                    crank_observations_with_accounts(1, 1),
+                    &[fresh_oracle],
+                )
+            },
+        );
+    }
+    inv056_assert_boundary_reject(&mut env, &keys, 1, PercolatorError::OracleStale, |env| {
+        inv056_boundary_crank(
+            env,
+            trader_account,
+            inv056_boundary_full_observations(),
+            &[old_oracle],
+        )
+    });
+    inv056_boundary_crank(
+        &mut env,
+        keeper_account,
+        inv056_boundary_full_observations(),
+        &[fresh_oracle],
+    )
+    .unwrap();
+    let (_, observed_market) = env.market_state();
+    assert_eq!(observed_market.current_slot, 2);
+    assert_eq!(observed_market.assets[0].effective_price, 95);
+    assert_eq!(observed_market.assets[1].effective_price, 105);
+    assert_eq!(observed_market.assets[2].effective_price, 100);
+    assert_eq!(
+        health_cert(&env.portfolio_state(trader_account)),
+        original_cert
+    );
+    let stale_checkpoint = inv056_boundary_frame(&env, &keys);
+
+    // Two losses of 50 leave equity 210. Gross initial margin is 95 + 105 = 200;
+    // opening one unit on asset 2 costs 10, and another tenth costs one more atom.
+    // The old certificate would admit both, making the negative control material.
+    let expected_equity = 310 + 10 * (95 - 100) - 10 * (105 - 100);
+    let expected_req = (10 * 95 + 10 * 105) / 10;
+    assert_eq!(expected_equity, 210);
+    assert_eq!(expected_req, 200);
+    assert!(original_cert.certified_equity > expected_req + 11);
+    let mut route_reference: Option<Vec<(Pubkey, Account)>> = None;
+    for batch in [false, true] {
+        let mut full_reference: Option<Vec<(Pubkey, Account)>> = None;
+        for refresh in ["full", "empty-hints", "on-demand"] {
+            // Restore only captured public account bytes to replay an identical
+            // prefix. No synthetic engine fields or direct engine transitions.
+            for (key, account) in &stale_checkpoint {
+                env.svm.set_account(*key, account.clone()).unwrap();
+            }
+            if refresh != "on-demand" {
+                for account in [trader_account, counterparty_account] {
+                    let (observations, oracles) = if refresh == "full" {
+                        (inv056_boundary_full_observations(), vec![fresh_oracle])
+                    } else {
+                        (vec![], vec![])
+                    };
+                    inv056_boundary_crank(&mut env, account, observations, &oracles).unwrap();
+                }
+                let current = health_cert(&env.portfolio_state(trader_account));
+                assert!(current.valid);
+                assert_eq!(current.cert_oracle_epoch, env.market_state().1.oracle_epoch);
+                assert_eq!(current.certified_equity, expected_equity);
+                assert_eq!(current.certified_initial_req, expected_req as u128);
+            }
+            inv056_assert_boundary_reject(
+                &mut env,
+                &keys,
+                3,
+                PercolatorError::EngineInvalidConfig,
+                |env| trade(env, batch, (POS_SCALE + POS_SCALE / 10) as i128),
+            );
+            trade(&mut env, batch, POS_SCALE as i128).unwrap();
+
+            let a = env.portfolio_state(trader_account);
+            let b = env.portfolio_state(counterparty_account);
+            let (_, group) = env.market_state();
+            let cert = health_cert(&a);
+            assert!(cert.valid);
+            assert_eq!(cert.cert_oracle_epoch, group.oracle_epoch);
+            assert_eq!(cert.certified_equity, expected_equity);
+            assert_eq!(cert.certified_initial_req, (expected_req + 10) as u128);
+            assert_eq!(a.capital.get() as i128 + a.pnl.get(), expected_equity);
+            assert_eq!(b.capital.get() as i128 + b.pnl.get(), 10_100);
+            assert_eq!(group.vault, 10_310);
+            assert_eq!(
+                TokenAccount::unpack(&env.svm.get_account(&env.vault).unwrap().data)
+                    .unwrap()
+                    .amount,
+                10_310
+            );
+            assert_eq!(group.insurance, 0);
+            for asset in 0..3 {
+                let size = if asset == 2 {
+                    POS_SCALE
+                } else {
+                    10 * POS_SCALE
+                };
+                assert_eq!(group.assets[asset].oi_eff_long_q, size);
+                assert_eq!(group.assets[asset].oi_eff_short_q, size);
+            }
+            let outcome = inv056_boundary_frame(&env, &keys);
+            if let Some(reference) = &full_reference {
+                inv056_assert_boundary_frame(
+                    &env,
+                    reference,
+                    &format!("batch={batch}, refresh={refresh}"),
+                );
+            } else {
+                full_reference = Some(outcome);
+            }
+            println!("INV-056 mixed observations: batch={batch}, refresh={refresh}, equity=210, margin=210; +1 margin rejected");
+        }
+        if let Some(reference) = &route_reference {
+            inv056_assert_boundary_frame(&env, reference, "single/batch route equivalence");
+        } else {
+            route_reference = full_reference;
+        }
+    }
 }
