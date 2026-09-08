@@ -22,6 +22,9 @@
 //! resolved detach must carry the claim forward without payout, a waiting retry rejects exactly,
 //! and permissionless debtor settlement unlocks the exact original entitlement once. Bankruptcy
 //! residuals, ADL, and nonzero funding/fees across that resolved boundary remain outside this test.
+//! The `close_reopen` sibling instead creates a bankruptcy residual by matched reduction and
+//! deletes/recreates the debtor before the flat holder settles B. A composed bystander payout
+//! must roll back before booking; recreation after booking preserves the holder's exact debit.
 
 #[test]
 fn v16_program_pending_obligation_blocks_close_then_releases() {
@@ -33,6 +36,9 @@ use super::*;
 
 #[path = "inv_039_pending_loss_transfer_route.rs"]
 mod transfer_route;
+
+#[path = "inv_039_pending_loss_close_reopen.rs"]
+mod close_reopen;
 
 const ATTRIBUTION_DEPOSITS: [u128; 5] = [200_000, 180_000, 300_000, 250_000, 777];
 const ATTRIBUTION_PRICE_MOVES: [i128; 2] = [30_000, 20_000];
@@ -57,6 +63,10 @@ impl AttributionWorld {
             liquidation_fee_bps: 0,
             ..production_risk_params()
         };
+        Self::new_with_params(reverse_sides, params)
+    }
+
+    fn new_with_params(reverse_sides: bool, params: V16CuMarketParams) -> Self {
         let mut svm = LiteSVM::new();
         let program_id = percolator_prog::id();
         for (id, path) in [
