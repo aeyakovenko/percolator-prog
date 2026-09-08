@@ -4310,6 +4310,30 @@ or worst-case CU claim. The focused command is:
 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_program_ordered_grant_histories_bind_retained_cpi_disposition -- --exact --nocapture
 ```
 
+### INV-012 retained-taker writer isolation
+
+`v16_program_retained_taker_writers_preserve_untouched_lp_capability` in the
+[stateful owner](stateful/inv_012_capability_and_delegate_scope.rs) covers a distinct participant
+scope: the retained taker trades with a third portfolio, leaving the retained LP untouched.
+The earlier one-writer trade pairs change the retained LP (as either taker or LP), or a disjoint
+pair; they do not change the retained taker. This test crosses all four trade writers, both roles
+for that taker, both CPI consumers and both position signs: 32 histories.
+
+The shared event oracle checks each public step. The writer advances only the participating
+episodes, and the retained LP portfolio/context/delegate accounts remain byte- and metadata-exact.
+The original request must reject as `EngineStale` with exact tracked-account rollback while the
+LP grant remains live. A current-episode request then fills without renewing that grant, with
+exact nonzero positions for all three portfolios. This is one-asset, one-leg, zero-fee coverage;
+lifecycle writers, alternate domains and maximum shapes remain outside the test. No status is
+promoted.
+
+The exact test passes on fresh same-worktree wrapper and authenticated-matcher SBF artifacts
+built offline with platform-tools v1.52. Formatting and `git diff --check` pass. Focused command:
+
+```bash
+CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_program_retained_taker_writers_preserve_untouched_lp_capability -- --exact --nocapture
+```
+
 ### INV-012 matcher-scope replacement histories
 
 `v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers` in the

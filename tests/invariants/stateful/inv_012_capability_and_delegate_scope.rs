@@ -699,6 +699,125 @@ fn v16_program_retained_capability_histories_preserve_authorization_scope() {
 }
 
 #[test]
+fn v16_program_retained_taker_writers_preserve_untouched_lp_capability() {
+    const TAKER: usize = 0;
+    const LP: usize = 1;
+    const OTHER: usize = 2;
+
+    fn run_case(writer: CapabilityWriter, taker: usize, lp: usize, route: CpiRoute, sign: i128) {
+        let mut env = V16Svm::new(
+            [0x1e; 32],
+            MarketConfig {
+                initial_price: 100,
+                actor_deposits: [1_000_000; 5],
+                actor_token_balances: [2_000_000; 5],
+                ..MarketConfig::default()
+            },
+        );
+        let mut history = AuthorizationHistory::new(&env);
+        grant_capability(&mut env, &mut history, LP, Some(1), 4);
+        let request = history.replay();
+        let writer_size = sign * POS_SCALE as i128;
+        let size = if taker == TAKER {
+            writer_size
+        } else {
+            -writer_size
+        };
+        let retained = retained_capability_trade(&mut env, route, size);
+        let lp_keys = [
+            env.actors[LP].portfolio,
+            env.actors[LP].matcher_context,
+            env.actors[LP].matcher_delegate,
+        ];
+        let lp_before = lp_keys.map(|key| env.svm.get_account(&key).unwrap());
+
+        let cpi = matches!(
+            writer,
+            CapabilityWriter::SingleCpi | CapabilityWriter::BatchCpi
+        );
+        let tx = match writer {
+            CapabilityWriter::SingleNoCpi => {
+                env.build_retained_no_cpi_trade(taker, lp, 0, writer_size, 100)
+            }
+            CapabilityWriter::BatchNoCpi => {
+                env.build_retained_batch_no_cpi_trade(taker, lp, 0, writer_size, 100)
+            }
+            CapabilityWriter::SingleCpi => {
+                env.build_retained_cpi_trade(taker, lp, 0, writer_size, 0)
+            }
+            CapabilityWriter::BatchCpi => {
+                env.build_retained_batch_cpi_trade(taker, lp, 0, writer_size, 0)
+            }
+            _ => unreachable!(),
+        };
+        capability_step(
+            &mut env,
+            &mut history,
+            true,
+            Some(AuthorizationEvent::Fill {
+                taker,
+                lp,
+                size: writer_size,
+                cpi,
+            }),
+            |env| env.land_retained(tx),
+        );
+        assert!(
+            lp_keys.map(|key| env.svm.get_account(&key).unwrap()) == lp_before,
+            "the other trade cannot touch the retained LP or its matcher accounts"
+        );
+        let current = history.replay();
+        assert_eq!(current[TAKER].epoch, request[TAKER].epoch + 1);
+        assert_eq!(current[TAKER].position, size);
+        assert_eq!(current[TAKER].enabled, cpi && lp == TAKER);
+        assert_eq!(current[LP], request[LP], "untouched LP authorization scope");
+        assert!(current[LP].authorizes(
+            request[LP].scope,
+            request[LP].sequence,
+            env.current_slot()
+        ));
+
+        // Only the taker episode is stale; rejection cannot imply LP revocation.
+        land_capability_trade(&mut env, &mut history, retained, &request, size);
+        let fresh = retained_capability_trade(&mut env, route, size);
+        land_capability_trade(&mut env, &mut history, fresh, &current, size);
+        assert_eq!(
+            env.primary_portfolio(TAKER).legs[0].basis_pos_q.get(),
+            2 * size
+        );
+        assert_eq!(env.primary_portfolio(LP).legs[0].basis_pos_q.get(), -size);
+        assert_eq!(
+            env.primary_portfolio(OTHER).legs[0].basis_pos_q.get(),
+            -size
+        );
+        assert_eq!(
+            history.accepted.len(),
+            2 * env.actors.len() + 3,
+            "one explicit grant and two fills, with no hidden reauthorization"
+        );
+    }
+
+    let mut histories = 0;
+    for writer in [
+        CapabilityWriter::SingleNoCpi,
+        CapabilityWriter::BatchNoCpi,
+        CapabilityWriter::SingleCpi,
+        CapabilityWriter::BatchCpi,
+    ] {
+        for (taker, lp) in [(TAKER, OTHER), (OTHER, TAKER)] {
+            for route in [CpiRoute::Single, CpiRoute::Batch] {
+                for sign in [-1, 1] {
+                    std::panic::catch_unwind(|| run_case(writer, taker, lp, route, sign))
+                        .unwrap_or_else(|_| panic!("taker writer failed: {writer:?}, pair=({taker},{lp}), consumer={route:?}, sign={sign}"));
+                    histories += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(histories, 32);
+}
+
+#[test]
 fn v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes() {
     let created = GrantOracle {
         scope: std::array::from_fn(|i| Pubkey::new_from_array([i as u8; 32])),
