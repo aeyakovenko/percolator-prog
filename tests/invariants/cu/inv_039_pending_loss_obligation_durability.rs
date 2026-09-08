@@ -17,8 +17,11 @@
 //! The independent two-domain matrix below crosses mirrored sides, debtor settlement order,
 //! and payout order. It checks a still-unpaid domain while another domain is fully settled,
 //! including late transaction rejection after staged debtor settlement. All construction uses
-//! System/SPL/ATA and wrapper instructions. Resolution occurs after both obligations release;
-//! resolution with opposing debt still pending, bankruptcy residuals, and ADL remain open.
+//! System/SPL/ATA and wrapper instructions. That matrix resolves after both obligations release.
+//! The final test instead resolves with a zero-basis obligation and unbooked opposing debt:
+//! resolved detach must carry the claim forward without payout, a waiting retry rejects exactly,
+//! and permissionless debtor settlement unlocks the exact original entitlement once. Bankruptcy
+//! residuals, ADL, and nonzero funding/fees across that resolved boundary remain outside this test.
 
 #[test]
 fn v16_program_pending_obligation_blocks_close_then_releases() {
@@ -602,4 +605,217 @@ fn v16_program_pending_obligations_release_only_the_settled_domain_across_payout
         }
     }
     println!("INV-039: 8 worlds, 16 staged-settlement rollbacks, 16 domain-local releases, 40 exact payouts and terminal deletions");
+}
+
+#[test]
+fn v16_program_resolve_with_pending_obligation_defers_claim_until_debtor_settles() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut peak_close_cu = 0;
+    let mut close = |world: &mut AttributionWorld, actor: usize| {
+        world.env.svm.expire_blockhash();
+        let a = &world.actors[actor];
+        let ix = Instruction {
+            program_id: world.env.program_id,
+            data: ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            }
+            .encode(),
+            accounts: vec![
+                AccountMeta::new_readonly(a.owner.pubkey(), false),
+                AccountMeta::new(world.env.market, false),
+                AccountMeta::new(a.portfolio, false),
+                AccountMeta::new(a.token, false),
+                AccountMeta::new(world.env.vault, false),
+                AccountMeta::new_readonly(world.env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+        };
+        // Only the independent fee payer signs, including the debtor's loss settlement.
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), ix],
+            Some(&world.env.payer.pubkey()),
+            &[&world.env.payer],
+            world.env.svm.latest_blockhash(),
+        );
+        let result = world.env.svm.send_transaction(tx);
+        let meta = match &result {
+            Ok(meta) => meta,
+            Err(failure) => &failure.meta,
+        };
+        peak_close_cu = peak_close_cu.max(meta.compute_units_consumed);
+        assert_cu_within(
+            "INV-039 pending-obligation resolved continuation",
+            meta.compute_units_consumed,
+            CUSTODY_CU_LIMIT,
+        );
+        result
+    };
+
+    for reverse_sides in [false, true] {
+        let mut world = AttributionWorld::new(reverse_sides);
+        let creditor = world.actors[0].portfolio;
+        let debtor = world.actors[1].portfolio;
+        let q = world.quantities[0];
+        let debt = world.debt(0);
+        assert_eq!(debt, 30_000);
+        let cu = world.env.trade_asset_with_cu(
+            1,
+            &world.actors[0].owner,
+            creditor,
+            &world.actors[1].owner,
+            debtor,
+            q,
+            1_000_000,
+            0,
+        );
+        assert_cu_within("INV-039 pending-obligation opening", cu, TRADE_CU_LIMIT);
+        let debtor_unsettled = world.env.svm.get_account(&debtor);
+        world.env.svm.warp_to_slot(20);
+        let mark = (1_000_000 + ATTRIBUTION_PRICE_MOVES[0] * q.signum()) as u64;
+        world.env.push_auth_mark_for_asset_as_admin(1, 20, mark);
+        for portfolio in [world.actors[4].portfolio, creditor] {
+            let cu = world.env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 20,
+                    observations: crank_observations(1),
+                },
+            );
+            assert_cu_within("INV-039 creditor-only accrual", cu, CRANK_CU_LIMIT);
+        }
+        assert_eq!(world.env.market_state().1.assets[1].effective_price, mark);
+        let cu = world.env.update_asset_lifecycle_as_admin_with_cu(
+            processor::ASSET_ACTION_SHUTDOWN,
+            1,
+            20,
+            0,
+        );
+        assert_cu_within("INV-039 pending-obligation shutdown", cu, CRANK_CU_LIMIT);
+        world.forfeit(0);
+        world.check([0, -q, 0, 0], [true, false, false, false]);
+        let retained = world.env.portfolio_state(creditor);
+        assert_eq!(retained.capital.get(), ATTRIBUTION_DEPOSITS[0]);
+        assert_eq!(retained.pnl.get(), debt as i128);
+        assert_eq!(world.env.svm.get_account(&debtor), debtor_unsettled);
+        assert_eq!(world.env.portfolio_state(debtor).pnl.get(), 0);
+        assert_eq!(
+            world.env.portfolio_state(debtor).capital.get(),
+            ATTRIBUTION_DEPOSITS[1]
+        );
+
+        let before_resolve = world.frame();
+        let asset_before = world.env.market_state().1.assets[1];
+        let cu = send_tx(
+            &mut world.env.svm,
+            world.env.program_id,
+            &world.env.payer,
+            ProgInstruction::ResolveMarket {
+                asset_generation_frontier: 0,
+                authority_epoch: 0,
+            },
+            vec![
+                AccountMeta::new(world.env.admin.pubkey(), true),
+                AccountMeta::new(world.env.market, false),
+            ],
+            &[&world.env.admin],
+        )
+        .expect("resolve must preserve the still-unsettled cohort");
+        assert_cu_within(
+            "INV-039 resolve with retained obligation",
+            cu,
+            CRANK_CU_LIMIT,
+        );
+        let resolved = world.env.market_state().1;
+        assert_eq!(resolved.mode, MarketModeV16::Resolved);
+        assert_eq!(resolved.assets[1], asset_before);
+        for (key, account) in &before_resolve {
+            if *key != world.env.market {
+                assert_eq!(world.env.svm.get_account(key), *account);
+            }
+        }
+        world.check([0, -q, 0, 0], [true, false, false, false]);
+        world.env.svm.warp_to_slot(25);
+
+        // Detaching the zero-basis leg is not payment or forgiveness of its cohort's debt.
+        close(&mut world, 0).expect("bounded resolved obligation detach");
+        world.check([0, -q, 0, 0], [false; 4]);
+        let waiting = world.env.portfolio_state(creditor);
+        assert_eq!(waiting.capital, retained.capital);
+        assert_eq!(waiting.pnl, retained.pnl);
+        assert_eq!(waiting.source_domains, retained.source_domains);
+        assert!(!resolved_receipt(&waiting).present);
+        assert!(!world.env.market_state().1.payout_snapshot_captured);
+        assert_eq!(world.env.token_amount(world.actors[0].token), 0);
+        assert_eq!(world.env.svm.get_account(&debtor), debtor_unsettled);
+        let before_retry = world.frame();
+        let failure = close(&mut world, 0).expect_err("unbooked debt must defer claimant payout");
+        assert_eq!(
+            failure.err,
+            TransactionError::InstructionError(
+                2,
+                InstructionError::Custom(PercolatorError::EngineNonProgress as u32)
+            )
+        );
+        assert_eq!(
+            world.frame(),
+            before_retry,
+            "waiting retry must roll back exactly"
+        );
+
+        close(&mut world, 1).expect("permissionless debtor settlement remains available");
+        world.check([0; 4], [false; 4]);
+        assert!(resolved_portfolio_is_terminal(&world.env, debtor));
+        assert_eq!(
+            world.env.token_amount(world.actors[1].token) as u128,
+            ATTRIBUTION_DEPOSITS[1] - debt,
+            "the original debtor pays its loss exactly once"
+        );
+        assert_eq!(world.env.portfolio_state(creditor).pnl.get(), debt as i128);
+        close(&mut world, 0).expect("settled opposing debt unlocks the retained claim");
+        world.check([0; 4], [false; 4]);
+        assert!(resolved_portfolio_is_terminal(&world.env, creditor));
+        assert_eq!(
+            world.env.token_amount(world.actors[0].token) as u128,
+            ATTRIBUTION_DEPOSITS[0] + debt,
+            "resolved detach neither loses nor duplicates the original claim"
+        );
+
+        for actor in 0..2 {
+            let before = world.frame();
+            let failure = close(&mut world, actor).expect_err("paid cohort cannot settle twice");
+            assert_eq!(
+                failure.err,
+                TransactionError::InstructionError(
+                    2,
+                    InstructionError::Custom(PercolatorError::EngineNonProgress as u32)
+                )
+            );
+            assert_eq!(world.frame(), before);
+        }
+        for actor in &world.actors[2..] {
+            for key in [actor.owner.pubkey(), actor.portfolio, actor.token] {
+                let before = before_resolve.iter().find(|(k, _)| *k == key).unwrap();
+                assert_eq!(world.env.svm.get_account(&key), before.1);
+            }
+        }
+        for actor in 2..world.actors.len() {
+            close(&mut world, actor).expect("unrelated senior principal remains fully payable");
+            assert_eq!(
+                world.env.token_amount(world.actors[actor].token) as u128,
+                ATTRIBUTION_DEPOSITS[actor]
+            );
+            world.check([0; 4], [false; 4]);
+        }
+        assert_eq!(world.env.market_state().1.vault, 0);
+        for actor in &world.actors {
+            assert!(resolved_portfolio_is_terminal(&world.env, actor.portfolio));
+            let cu = world
+                .env
+                .close_portfolio_with_cu(&actor.owner, actor.portfolio);
+            assert_cu_within("INV-039 settled cohort deletion", cu, CUSTODY_CU_LIMIT);
+        }
+        assert_eq!(world.env.market_state().1.materialized_portfolio_count, 0);
+    }
+    println!("INV-039: 2 pending-obligation resolve worlds; peak resolved continuation {peak_close_cu} CU");
 }
