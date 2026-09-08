@@ -12,6 +12,10 @@
 //! * after accounting is fully drained, final raw vault dust can be swept only
 //!   to the current authority's correct quote-token destination, with wrong
 //!   destinations rejected before the vault or market slab changes.
+//! `v16_program_close_slab_refunds_exact_vault_and_market_excess_rent_after_normal_exit` adds the
+//! corresponding lamport-side postcondition for a normal public deposit, withdrawal, portfolio
+//! close, and market resolution: the typed market tombstone retains exactly its canonical rent,
+//! the SPL vault is closed, and every other lamport reaches the current market authority.
 //! `v16_program_recovery_force_close_reaches_zero_residue_and_close_slab` composes the final path
 //! with a publicly reached Recovery episode and permissionless force-close. It proves terminal
 //! normalization does not rely on a market that stayed Active throughout its lifetime.
@@ -231,6 +235,105 @@ fn v16_program_close_slab_rejects_until_market_has_zero_terminal_residue() {
     );
     let closed_market = env.svm.get_account(&market).unwrap();
     assert_closed_market_tombstone(&closed_market);
+}
+
+#[test]
+fn v16_program_close_slab_refunds_exact_vault_and_market_excess_rent_after_normal_exit() {
+    const PRINCIPAL: u128 = 321;
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, PRINCIPAL);
+    let owner_destination = env.withdraw(&owner, portfolio, PRINCIPAL);
+    assert_eq!(env.token_amount(owner_destination), PRINCIPAL as u64);
+    env.close_portfolio_with_cu(&owner, portfolio);
+    env.resolve();
+
+    let terminal = env.market_state().1;
+    assert_eq!(
+        (
+            terminal.vault,
+            terminal.insurance,
+            terminal.c_tot,
+            terminal.materialized_portfolio_count,
+            env.token_amount(env.vault),
+        ),
+        (0, 0, 0, 0, 0),
+        "normal owner exit must leave no token or accounting stock before CloseSlab",
+    );
+
+    let admin = env.admin.insecure_clone();
+    let destination = env.token_account(admin.pubkey(), 0);
+    let authority_epoch = env.control_sequences(0).authority_epoch;
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+    let retained_market_rent = env
+        .svm
+        .get_sysvar::<solana_sdk::rent::Rent>()
+        .minimum_balance(percolator_prog::constants::HEADER_LEN);
+    let expected_refund = market_before
+        .lamports
+        .checked_sub(retained_market_rent)
+        .and_then(|excess| excess.checked_add(vault_before.lamports))
+        .expect("bounded fixture lamport refund");
+    let tracked_lamports_before = admin_before
+        .lamports
+        .checked_add(market_before.lamports)
+        .and_then(|amount| amount.checked_add(vault_before.lamports))
+        .expect("bounded fixture lamport stock");
+
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseSlab { authority_epoch },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("normal-exit CloseSlab");
+    assert_cu_within(
+        "normal-exit CloseSlab exact rent refund",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let market_after = env.svm.get_account(&env.market).unwrap();
+    let admin_after = env.svm.get_account(&admin.pubkey()).unwrap();
+    let vault_after_lamports = env
+        .svm
+        .get_account(&env.vault)
+        .map_or(0, |account| account.lamports);
+    let actual_refund = admin_after
+        .lamports
+        .checked_sub(admin_before.lamports)
+        .expect("CloseSlab must not debit the current market authority");
+    assert_closed_market_tombstone(&market_after);
+    assert_eq!(market_after.lamports, retained_market_rent);
+    assert_eq!(env.token_amount(destination), 0);
+    assert_eq!(
+        vault_after_lamports, 0,
+        "the closed SPL vault retains no rent"
+    );
+    assert_eq!(
+        actual_refund, expected_refund,
+        "CloseSlab refunds exactly the primary vault rent plus market excess rent",
+    );
+    assert_eq!(
+        admin_after.lamports + market_after.lamports + vault_after_lamports,
+        tracked_lamports_before,
+        "successful CloseSlab neither creates nor strands tracked lamports",
+    );
+    println!(
+        "INV-070 normal CloseSlab: CU={close_cu}, refund={actual_refund}, retained={retained_market_rent}"
+    );
 }
 
 #[test]
@@ -764,6 +867,7 @@ fn v16_program_terminal_stock_and_close_slab_composition_is_source_complete() {
                 "v16_program_close_slab_account_roles_are_exhaustive",
                 "v16_attack_close_slab_rejects_foreign_market_vaults",
                 "v16_attack_close_slab_requires_secondary_vault_recovery",
+                "v16_program_close_slab_refunds_exact_vault_and_market_excess_rent_after_normal_exit",
             ],
         },
     ];
