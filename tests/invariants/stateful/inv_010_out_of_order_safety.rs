@@ -15,6 +15,11 @@
 //! checks that winner's capital/SPL delta, exact rollback of both stale followers, and a fresh full
 //! owner withdrawal, so sequencing cannot turn out-of-order delivery into value duplication or an
 //! exit lock.
+//! `v16_program_retained_unequal_withdrawals_are_portfolio_local_in_both_orders` retains two
+//! unequal withdrawals against either one owner's sequence or two independent owner sequences.
+//! Across three amount boundaries, each prefix pays only its original signed amount and stale
+//! same-owner followers roll back exactly. Independent owners converge over the full economic
+//! snapshot despite debiting the same vault; no economic fields are masked for comparison.
 //! `v16_program_deposit_and_owner_reduction_commute_across_independent_bindings` then proves a
 //! retained capital-sequence mutation and a retained position-episode mutation both land in either
 //! order and converge economically. The only raw-state difference is the health-certificate cache:
@@ -637,6 +642,107 @@ fn v16_program_portfolio_value_and_control_requests_exhaust_all_landing_orders()
     for amount in [1, 1_000, USER_DEPOSIT - 1] {
         for order in PortfolioLandingOperation::PERMUTATIONS {
             run_portfolio_value_control_landing_order(order, amount);
+        }
+    }
+}
+
+#[test]
+fn v16_program_retained_unequal_withdrawals_are_portfolio_local_in_both_orders() {
+    for amounts in [
+        [1, 37],
+        [37, USER_DEPOSIT / 2],
+        [USER_DEPOSIT - 1, USER_DEPOSIT],
+    ] {
+        for owners in [[LP, LP], [LP, TAKER]] {
+            let mut endpoints = Vec::new();
+            for order in [[0, 1], [1, 0]] {
+                let mut env = V16Svm::new([0xd2; 32], MarketConfig::default());
+                let initial = snapshot(&env);
+                let initial_group = env.primary_market_state().1;
+                let initial_vault = u128::from(env.token_amount(env.vault));
+                let supply = env.token_supply_observed();
+                let balances: [_; PRIMARY_ACTOR_COUNT] = core::array::from_fn(|actor| {
+                    (
+                        env.primary_portfolio(actor).capital.get(),
+                        u128::from(env.token_amount(env.actors[actor].destination_token)),
+                        env.token_amount(env.actors[actor].source_token),
+                        env.primary_portfolio_matcher_sequence(actor),
+                    )
+                });
+                for (actor, amount) in owners.into_iter().zip(amounts) {
+                    assert!(amount > 0 && amount <= balances[actor].0);
+                }
+                // Both owners sign before either request can change a sequence or shared custody.
+                let requests = [
+                    env.build_retained_withdrawal(owners[0], amounts[0]),
+                    env.build_retained_withdrawal(owners[1], amounts[1]),
+                ];
+                let mut paid = [0u128; PRIMARY_ACTOR_COUNT];
+                let mut committed = [false; PRIMARY_ACTOR_COUNT];
+                for index in order {
+                    let actor = owners[index];
+                    let context = format!(
+                        "owners={owners:?}, amounts={amounts:?}, order={order:?}, request={index}"
+                    );
+                    let before = snapshot(&env);
+                    let result = env.land_retained(requests[index].clone());
+                    if committed[actor] {
+                        result.expect_err("same-owner follower has a consumed sequence");
+                        assert_eq!(snapshot(&env), before, "stale rollback: {context}");
+                    } else {
+                        result.unwrap_or_else(|error| {
+                            panic!("unconsumed owner sequence must land: {context}: {error}")
+                        });
+                        committed[actor] = true;
+                        paid[actor] += amounts[index];
+                    }
+
+                    for subject in 0..PRIMARY_ACTOR_COUNT {
+                        let (capital, destination, source, sequence) = balances[subject];
+                        assert_eq!(
+                            env.primary_portfolio(subject).capital.get(),
+                            capital - paid[subject],
+                            "signed capital debit for owner {subject}: {context}"
+                        );
+                        assert_eq!(
+                            u128::from(env.token_amount(env.actors[subject].destination_token)),
+                            destination + paid[subject],
+                            "signed recipient credit for owner {subject}: {context}"
+                        );
+                        assert_eq!(env.token_amount(env.actors[subject].source_token), source);
+                        assert_eq!(
+                            env.primary_portfolio_matcher_sequence(subject),
+                            sequence + u64::from(committed[subject]),
+                            "owner-local sequence for {subject}: {context}"
+                        );
+                        if !committed[subject] {
+                            assert_eq!(
+                                env.primary_portfolio_data(subject),
+                                initial.portfolios[subject],
+                                "untouched portfolio {subject}: {context}"
+                            );
+                        }
+                    }
+                    let total_paid: u128 = paid.iter().sum();
+                    let group = env.primary_market_state().1;
+                    assert_eq!(group.c_tot, initial_group.c_tot - total_paid, "{context}");
+                    assert_eq!(group.vault, initial_group.vault - total_paid, "{context}");
+                    assert_eq!(group.insurance, initial_group.insurance, "{context}");
+                    assert_eq!(
+                        u128::from(env.token_amount(env.vault)),
+                        initial_vault - total_paid,
+                        "shared custody: {context}"
+                    );
+                    assert_eq!(env.token_supply_observed(), supply, "{context}");
+                }
+                endpoints.push(snapshot(&env));
+            }
+            if owners[0] != owners[1] {
+                assert_eq!(
+                    endpoints[0], endpoints[1],
+                    "independent signed withdrawals must converge: amounts={amounts:?}"
+                );
+            }
         }
     }
 }
