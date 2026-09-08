@@ -27,8 +27,343 @@
 //! sizing, fee, OI, residual, Recovery, and dispatch proofs to the sole public crank plus the
 //! maximum-shape CU witnesses. Caller-sized close partitions are source-excluded. A new engine pin,
 //! liquidation ingress, selector branch, supported shape, or witness reopens the invariant.
+//!
+//! The queued-liquidation ADL race below composes a previously certified deficit with an
+//! opposing owner's aggregate/split reduction before the keeper lands. Unlike the episode and
+//! owner-exit matrices, it requires recertification of the untouched target's conservative but
+//! epoch-current certificate: either one smaller fee-bearing close remains or an already cured
+//! account rejects atomically. Empty, selected-asset-omitting, and permuted hints must agree on
+//! quantity and fee attribution, and a subsequent owner reduction must remain available.
 
 use super::*;
+
+#[test]
+fn v16_program_queued_liquidation_recertifies_after_partitioned_opposing_adl() {
+    const ASSET: usize = 1;
+    const PRICE: u64 = 100;
+    const OPEN_Q: u128 = 10 * POS_SCALE;
+    const CAPITAL: u128 = 1_000;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Outcome {
+        effective_q: u128,
+        raw_q: [u128; 2],
+        adl_a: [u128; 2],
+        capital: [u128; 3],
+        insurance: u128,
+        domain_budget: Vec<u128>,
+        liquidation_q: u128,
+    }
+
+    fn assert_oi(env: &V16CuEnv, long: Pubkey, short: Pubkey, expected: u128) {
+        let group = env.market_state().1;
+        let asset = group.assets[ASSET];
+        assert_eq!([asset.oi_eff_long_q, asset.oi_eff_short_q], [expected; 2]);
+        for portfolio in [long, short] {
+            assert_eq!(
+                reference_current_epoch_effective_abs(
+                    &group,
+                    active_leg_for_asset(&env.portfolio_state(portfolio), ASSET),
+                ),
+                expected,
+                "one-owner-per-side effective leg census must equal pooled OI"
+            );
+        }
+    }
+
+    let run = |reduction_q: u128, split: bool, hints: &[u16]| {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            max_portfolio_assets: 2,
+            min_nonzero_mm_req: 10,
+            min_nonzero_im_req: 20,
+            liquidation_fee_bps: 100,
+            liquidation_fee_cap: 10,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        });
+        for asset in [0, 1] {
+            env.configure_auth_mark_for_asset_as_admin(asset, 0, PRICE);
+        }
+        env.update_liquidation_fee_policy_with_cu(5_000);
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let keeper_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        let keeper = env.create_portfolio(&keeper_owner);
+        env.deposit(&long_owner, long, 10_000);
+        env.deposit(&short_owner, short, CAPITAL);
+        env.trade_asset_with_cu(
+            ASSET as u16,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            OPEN_Q as i128,
+            PRICE,
+            0,
+        );
+
+        // Target-only lag supplies a deficit without PnL, funding, or social-loss rounding.
+        // The keeper is already entitled to liquidate before the opposing owner intervenes.
+        env.push_auth_mark_for_asset_as_admin(ASSET as u16, 0, 2 * PRICE);
+        let initial_refresh_cu = env.crank(
+            short,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: crank_observations(ASSET as u16),
+            },
+        );
+        assert_cu_within(
+            "INV-061 certify queued liquidation",
+            initial_refresh_cu,
+            CRANK_CU_LIMIT,
+        );
+        let queued_group = env.market_state().1;
+        let queued_short = env.svm.get_account(&short).unwrap();
+        let queued_cert = health_cert(&env.portfolio_state(short));
+        assert_eq!(queued_cert.certified_equity, CAPITAL as i128);
+        assert_eq!(queued_cert.certified_maintenance_req, 2 * CAPITAL);
+        assert_eq!(queued_cert.certified_liq_deficit, CAPITAL);
+        assert_eq!(queued_cert.cert_risk_epoch, queued_group.risk_epoch);
+        assert_eq!(queued_group.assets[ASSET].effective_price, PRICE);
+        assert_eq!(
+            queued_group.assets[ASSET].raw_oracle_target_price,
+            2 * PRICE
+        );
+        assert_oi(&env, long, short, OPEN_Q);
+        let custody_before = [env.vault, env.mint].map(|key| env.svm.get_account(&key).unwrap());
+        let keeper_before = env.svm.get_account(&keeper).unwrap();
+
+        let chunks = if split {
+            vec![reduction_q / 4, reduction_q - reduction_q / 4]
+        } else {
+            vec![reduction_q]
+        };
+        let mut effective_q = OPEN_Q;
+        let mut max_reduce_cu = 0;
+        for chunk in chunks {
+            let cu = env.rebalance_reduce_with_cu(&long_owner, long, ASSET as u16, chunk);
+            assert_cu_within("INV-061 opposing owner reduction", cu, CUSTODY_CU_LIMIT);
+            max_reduce_cu = max_reduce_cu.max(cu);
+            effective_q -= chunk;
+            assert_oi(&env, long, short, effective_q);
+            assert_eq!(env.svm.get_account(&short).unwrap(), queued_short);
+        }
+        let reduced_group = env.market_state().1;
+        assert!(reduced_group.assets[ASSET].a_short < ADL_ONE);
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(short), ASSET)
+                .basis_pos_q
+                .unsigned_abs(),
+            OPEN_Q,
+            "the queued target still has stale raw basis"
+        );
+        assert_eq!(queued_cert.cert_risk_epoch, reduced_group.risk_epoch);
+        assert_eq!(queued_cert.cert_oracle_epoch, reduced_group.oracle_epoch);
+        assert_eq!(queued_cert.cert_funding_epoch, reduced_group.funding_epoch);
+        assert_eq!(reduced_group.insurance, queued_group.insurance);
+        let long_after_reduction = env.svm.get_account(&long).unwrap();
+
+        // Send the actual public instruction, retaining failure metadata for rejected-path CU.
+        // The transaction payer's network fee is outside the economic rollback frame.
+        let crank = |env: &mut V16CuEnv, order: &[u16], expected_error: Option<PercolatorError>| {
+            let keys = [env.market, long, short, keeper, env.vault, env.mint];
+            let before = keys.map(|key| env.svm.get_account(&key).unwrap());
+            env.svm.expire_blockhash();
+            let tx = Transaction::new_signed_with_payer(
+                &[
+                    heap_ix(),
+                    cu_ix(),
+                    Instruction {
+                        program_id: env.program_id,
+                        accounts: vec![
+                            AccountMeta::new(keeper_owner.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(short, false),
+                            AccountMeta::new(keeper, false),
+                        ],
+                        data: ProgInstruction::PermissionlessCrank {
+                            now_slot: 0,
+                            observations: crank_observations_for_assets(order),
+                        }
+                        .encode(),
+                    },
+                ],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &keeper_owner],
+                env.svm.latest_blockhash(),
+            );
+            let result = env.svm.send_transaction(tx);
+            let cu = if let Some(error) = expected_error {
+                let failure = result.expect_err("queued liquidation variant must reject");
+                assert_eq!(
+                    failure.err,
+                    solana_sdk::transaction::TransactionError::InstructionError(
+                        2,
+                        solana_sdk::instruction::InstructionError::Custom(error as u32),
+                    ),
+                    "unexpected rejection: {failure:?}"
+                );
+                for (key, account) in keys.into_iter().zip(before) {
+                    assert_eq!(
+                        env.svm.get_account(&key).unwrap(),
+                        account,
+                        "rollback {key}"
+                    );
+                }
+                failure.meta.compute_units_consumed
+            } else {
+                let success = result.expect("queued liquidation must have bounded public progress");
+                assert_ne!(env.svm.get_account(&short).unwrap(), before[2]);
+                success.compute_units_consumed
+            };
+            assert_cu_within("INV-061 queued liquidation variant", cu, CRANK_CU_LIMIT);
+            cu
+        };
+
+        let bad_cu = crank(
+            &mut env,
+            &[0, 1, 0],
+            Some(PercolatorError::InvalidInstruction),
+        );
+        let cured = reduction_q == 5 * POS_SCALE;
+        let before_liquidation = env.market_state().1;
+        let target_leg = active_leg_for_asset(&env.portfolio_state(short), ASSET);
+        let liquidation_cu;
+        let (liquidation_q, fee) = if cured {
+            assert_eq!(2 * PRICE as u128 * effective_q / POS_SCALE, CAPITAL);
+            liquidation_cu = crank(&mut env, hints, Some(PercolatorError::EngineNonProgress));
+            assert_eq!(env.svm.get_account(&keeper).unwrap(), keeper_before);
+            (0, 0)
+        } else {
+            // At 100% MM plus 100-price adverse lag, risk is 2*ceil(100*q/POS_SCALE).
+            // A 4.03-unit close costs ceil(403/100)=5; 4.97 units leave risk 994 <= 995.
+            // One quantum less would leave risk 996 > 995, so this is the minimum close.
+            let retained_q = 497 * POS_SCALE / 100;
+            let close_q = effective_q - retained_q;
+            let notional = (close_q * PRICE as u128).div_ceil(POS_SCALE);
+            let fee = notional.div_ceil(100).min(10);
+            assert_eq!(fee, 5);
+            assert!(2 * (retained_q * PRICE as u128).div_ceil(POS_SCALE) <= CAPITAL - fee);
+            assert!(2 * ((retained_q + 1) * PRICE as u128).div_ceil(POS_SCALE) > CAPITAL - fee);
+            liquidation_cu = crank(&mut env, hints, None);
+            effective_q = retained_q;
+            (close_q, fee)
+        };
+        assert_oi(&env, long, short, effective_q);
+        let final_group = env.market_state().1;
+        let final_short = env.portfolio_state(short);
+        assert_eq!(
+            health_cert(&final_short).certified_liq_deficit,
+            if cured {
+                queued_cert.certified_liq_deficit
+            } else {
+                0
+            },
+            "a rejected cured liquidation also rolls back its internal recertification"
+        );
+        assert_eq!(final_short.capital.get(), CAPITAL - fee);
+        assert_eq!(final_short.pnl.get(), 0);
+        assert_eq!(
+            active_leg_for_asset(&final_short, ASSET)
+                .basis_pos_q
+                .unsigned_abs(),
+            reference_raw_basis_for_current_effective(&before_liquidation, target_leg, effective_q)
+        );
+        let reward = fee / 2;
+        let retained_fee = fee - reward;
+        assert_eq!(env.portfolio_state(keeper).capital.get(), reward);
+        assert_eq!(final_group.insurance - queued_group.insurance, retained_fee);
+        assert_eq!(
+            final_group.c_tot + final_group.insurance,
+            queued_group.c_tot + queued_group.insurance
+        );
+        assert_eq!(
+            final_group.insurance_domain_budget,
+            vec![0, 0, retained_fee / 2, retained_fee - retained_fee / 2]
+        );
+        assert_domain_budget_remaining_total_consistent(
+            &final_group,
+            "INV-061 selected fee domains",
+        );
+        assert_eq!(final_group.assets[0], queued_group.assets[0]);
+        assert_eq!(
+            final_group.source_backing_buckets,
+            queued_group.source_backing_buckets
+        );
+        assert_eq!(
+            final_group.assets[ASSET].b_long_num,
+            queued_group.assets[ASSET].b_long_num
+        );
+        assert_eq!(
+            final_group.assets[ASSET].b_short_num,
+            queued_group.assets[ASSET].b_short_num
+        );
+        assert_eq!(env.svm.get_account(&long).unwrap(), long_after_reduction);
+        assert_eq!(final_group.mode, MarketModeV16::Live);
+        assert_eq!(final_group.vault, queued_group.vault);
+        assert_eq!(final_group.vault as u64, env.token_amount(env.vault));
+        for (key, before) in [env.vault, env.mint].into_iter().zip(custody_before) {
+            assert_eq!(env.svm.get_account(&key).unwrap(), before);
+        }
+        let retry_cu = crank(&mut env, hints, Some(PercolatorError::EngineNonProgress));
+        // Even a conservative certificate left intact by rollback cannot block owner progress.
+        let owner_exit_cu =
+            env.rebalance_reduce_with_cu(&short_owner, short, ASSET as u16, POS_SCALE);
+        assert_cu_within(
+            "INV-061 post-queue owner reduction",
+            owner_exit_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        effective_q -= POS_SCALE;
+        assert_oi(&env, long, short, effective_q);
+        assert_eq!(
+            health_cert(&env.portfolio_state(short)).certified_liq_deficit,
+            0
+        );
+        assert_eq!(env.portfolio_state(short).capital.get(), CAPITAL - fee);
+        assert_eq!(env.portfolio_state(short).pnl.get(), 0);
+        assert_eq!(env.svm.get_account(&long).unwrap(), long_after_reduction);
+        let owner_after = env.market_state().1;
+        assert_eq!(owner_after.insurance, final_group.insurance);
+        assert_eq!(
+            owner_after.insurance_domain_budget,
+            final_group.insurance_domain_budget
+        );
+        assert_eq!(owner_after.vault, final_group.vault);
+        println!("INV-061 opposing-ADL queue: reduce={reduction_q}, split={split}, hints={hints:?}, close={liquidation_q}, fee={fee}, CU reduce={max_reduce_cu}, reject={bad_cu}, liquidate={liquidation_cu}, retry={retry_cu}, owner={owner_exit_cu}");
+        Outcome {
+            effective_q,
+            raw_q: [long, short].map(|key| {
+                active_leg_for_asset(&env.portfolio_state(key), ASSET)
+                    .basis_pos_q
+                    .unsigned_abs()
+            }),
+            adl_a: [
+                owner_after.assets[ASSET].a_long,
+                owner_after.assets[ASSET].a_short,
+            ],
+            capital: [long, short, keeper].map(|key| env.portfolio_state(key).capital.get()),
+            insurance: final_group.insurance,
+            domain_budget: final_group.insurance_domain_budget,
+            liquidation_q,
+        }
+    };
+
+    for reduction_q in [POS_SCALE, 5 * POS_SCALE] {
+        let control = run(reduction_q, false, &[]);
+        for split in [false, true] {
+            for hints in [&[][..], &[0][..], &[0, 1][..], &[1, 0][..]] {
+                if !split && hints.is_empty() {
+                    continue;
+                }
+                assert_eq!(run(reduction_q, split, hints), control,
+                    "partition/hint order changed recertified liquidation: reduction={reduction_q}, split={split}, hints={hints:?}");
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 struct PostAdlTransferOutcome {
