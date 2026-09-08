@@ -25,8 +25,16 @@
 //! A full 14-leg public batch exit also binds that incarnation: same-tuple reauthorization must
 //! reject the retained exit before matcher CPI within the preflight budget, without moving value
 //! or preventing the identical exit under the fresh grant.
+//! The sibling cross-asset episode witness retains an asset-0 exit while the same live grant
+//! opens and closes asset 1 against a third portfolio. Both CPI consumers reject the old LP
+//! episode before CPI even though the requested leg and grant are unchanged; refreshing only
+//! that episode restores the exit. This is sampled evidence for the remaining 412/414 scope
+//! obligations, not closure of generation/incarnation or arbitrary lifecycle histories.
 
 use super::*;
+
+#[path = "inv_012_retained_cross_asset_episode.rs"]
+mod retained_cross_asset_episode;
 
 fn issue406_matcher_inventory(data: &[u8]) -> i128 {
     i128::from_le_bytes(data[160..176].try_into().unwrap())
