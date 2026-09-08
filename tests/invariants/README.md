@@ -5721,14 +5721,32 @@ exact test at base `228afad2` passes 912 checked transactions, including 64 reje
 and pays all three funded owners in each world. Expiry and recertification each have an
 eight-call bound per phase.
 
-Scope remains one flat, unliened source claim, one source side/asset, fixed backing ratios and
-zero fees/funding/insurance; batch transports have one leg. Normalization precedes replacement
-funding. Impaired liens, insurance policy/consumption, implicit normalization by refill, arbitrary
-history lengths, partial receipts, Recovery and supported maxima remain open. Owner payouts are
-signed; this is not permissionless retirement or whole-state liveness. The test reuses wrapper
-oracles and the pinned engine contract, adds no engine proof, and promotes no status. Verification
-uses private copies of the existing default-feature SBF `230b6db1` and matcher `50e53226`, not a
-fresh SBF build.
+`v16_program_expiry_refill_source_sides_and_ratios_preserve_attribution` extends the same runner
+with 48 additional public worlds: both source sides, final backing of 37/100/137 atoms against
+the same 100-atom claim, exact/late expiry, aggregate/split refills and zero/two failed bundles
+per cycle. These new cells use `TradeNoCpi`; the original four-route matrix remains unchanged.
+The source side is determined by a mirrored signed position and authenticated 105/95 mark,
+not injected account state. Initial backing remains 150 atoms and the first refill 80 atoms.
+
+At every checked post-flattening prefix, history inputs determine the claimant's account-local
+source face and domain, every owner's capital/PnL and SPL payout, fresh/spent backing and the
+exact credit rate. Unused domains retain zero claim/backing counters. Conversion pays only
+`min(100, final_backing)`: the 37-atom surplus in the over-backed case stays fresh in its source
+bucket and in SPL custody after all owner exits. The cap in each rejected bundle is one atom
+below the available conversion, including at/above full backing; successful refill SPL CPI and
+claimant refresh must precede the exact `EngineLockActive` suffix error and full tracked rollback.
+A newly signed refill, fresh conversion and real withdrawals remain successful afterward.
+At base `23097434` / engine `495a5590`, the new exact test passes 1,368 checked transactions,
+including 96 rejected bundles and 144 owner payouts, without a status promotion.
+
+Scope remains one flat, unliened claim on one asset and zero fees/funding/insurance; batch
+transports in the original matrix have one leg. Normalization precedes replacement funding.
+Shared lien ownership/impairment, source-side/ratio products with other trade transports,
+insurance policy/consumption, implicit normalization by refill, arbitrary ratio/refill schedules
+and history lengths, partial receipts, Recovery and supported maxima remain open. Owner payouts
+are signed; this is not permissionless retirement or whole-state liveness. The tests reuse wrapper
+oracles and the pinned engine contract and add no engine proof. Verification uses private copies
+of the existing default-feature SBF `230b6db1` and matcher `50e53226`, not a fresh SBF build.
 
 ### INV-047/056 stale-liability hint/admission composition
 

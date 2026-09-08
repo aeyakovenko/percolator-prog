@@ -38,6 +38,10 @@
 //! successive expiry/refill cycles with aggregate/split refills and failed refill-plus-conversion
 //! transactions. Failed suffixes must restore the earlier token transfer, backing classification,
 //! intent sequence and claim; only the last fresh tranche may fund the eventual owner payout.
+//! `v16_program_expiry_refill_source_sides_and_ratios_preserve_attribution` reuses that history
+//! with both source sides and under/exact/over-backed final refills. Account-local claim ownership,
+//! unused-domain counters, history-derived rates and unspent surplus remain exact through expiry,
+//! rejected refill bundles, fresh conversion and all three owner payouts.
 //!
 //! Guarantee boundary: the trade, conversion, and retained-top-up consumers have fixed-pin bounded
 //! evidence over the generated route and expiry boundaries represented here.
@@ -51,7 +55,8 @@ use crate::support::{
     v16_svm::{MarketConfig, TxSuccess, V16Svm, TX_CU_LIMIT},
 };
 use percolator::{
-    active_bitmap_is_empty, BackingBucketStatusV16, MarketModeV16, BOUND_SCALE, POS_SCALE,
+    active_bitmap_is_empty, BackingBucketStatusV16, MarketModeV16, BOUND_SCALE, CREDIT_RATE_SCALE,
+    POS_SCALE,
 };
 use percolator_prog::ix::{CrankObservationHint, Instruction as ProgInstruction};
 use percolator_prog::state;
@@ -156,20 +161,32 @@ fn run_expiry_refill_failure_history(
     late: bool,
     split: bool,
     failed_attempts: usize,
+    winner_long: bool,
+    final_backing: u128,
 ) -> ([u64; 3], u128, usize) {
     const WINNER: usize = 0;
     const LOSER: usize = 1;
     const SENIOR: usize = 2;
-    const DOMAIN: usize = 1;
     const PRICE: u64 = 100;
-    const MARK: u64 = 105;
+    const PRICE_MOVE: u64 = 5;
     const SIZE: i128 = 20 * POS_SCALE as i128;
-    const CLAIM: u128 = (MARK - PRICE) as u128 * SIZE as u128 / POS_SCALE;
+    const CLAIM: u128 = PRICE_MOVE as u128 * SIZE as u128 / POS_SCALE;
     const INITIAL_BACKING: u128 = 150;
-    const FINAL_BACKING: u128 = 40;
     const DEPOSITS: [u128; 3] = [1_000, 1_000, 777];
 
-    let label = format!("INV-063 {route:?} late={late} split={split} failures={failed_attempts}");
+    let domain = if winner_long { 1 } else { 0 };
+    let mark = if winner_long {
+        PRICE + PRICE_MOVE
+    } else {
+        PRICE - PRICE_MOVE
+    };
+    let size = if winner_long { SIZE } else { -SIZE };
+    let conversion_atoms = CLAIM.min(final_backing);
+    let surplus = final_backing - conversion_atoms;
+    let label = format!(
+        "INV-063 {route:?} late={late} split={split} failures={failed_attempts} \
+         winner_long={winner_long} final_backing={final_backing}"
+    );
     let mut env = V16Svm::new(
         [0x6a; 32],
         MarketConfig {
@@ -192,7 +209,7 @@ fn run_expiry_refill_failure_history(
         std::array::from_fn(|actor| env.token_amount(env.actors[actor].destination_token));
     env.begin_public_trace();
     refill_history_step(&mut env, &label, |env| {
-        env.top_up_backing_bucket(DOMAIN as u16, INITIAL_BACKING, 5)
+        env.top_up_backing_bucket(domain as u16, INITIAL_BACKING, 5)
     })
     .expect("initial expiring backing");
     let prepare_matcher = |env: &mut V16Svm| {
@@ -207,11 +224,11 @@ fn run_expiry_refill_failure_history(
     };
     prepare_matcher(&mut env);
     refill_history_step(&mut env, &label, |env| {
-        execute_trade_route(env, route, WINNER, LOSER, 0, SIZE, PRICE, 0)
+        execute_trade_route(env, route, WINNER, LOSER, 0, size, PRICE, 0)
     })
     .expect("open claim-producing exposure");
     env.warp_to_slot(2);
-    refill_history_step(&mut env, &label, |env| env.push_auth_mark(0, 2, MARK))
+    refill_history_step(&mut env, &label, |env| env.push_auth_mark(0, 2, mark))
         .expect("authenticate winning mark");
     for actor in [LOSER, WINNER] {
         refill_history_step(&mut env, &label, |env| {
@@ -228,17 +245,26 @@ fn run_expiry_refill_failure_history(
     }
     prepare_matcher(&mut env);
     refill_history_step(&mut env, &label, |env| {
-        execute_trade_route(env, route, WINNER, LOSER, 0, -SIZE, MARK, 0)
+        execute_trade_route(env, route, WINNER, LOSER, 0, -size, mark, 0)
     })
     .expect("release the claimant's exposure");
 
     let check =
         |env: &V16Svm, fresh: u128, provider_debit: u128, converted: bool, paid: [u64; 3]| {
             let group = env.primary_market_state().1;
-            let source = group.source_credit[DOMAIN];
-            let bucket = group.source_backing_buckets[DOMAIN];
-            let converted_atoms = if converted { FINAL_BACKING } else { 0 };
+            let source = group.source_credit[domain];
+            let bucket = group.source_backing_buckets[domain];
+            let converted_atoms = if converted { conversion_atoms } else { 0 };
             let face = if converted { 0 } else { CLAIM };
+            let rate = if face == 0 {
+                CREDIT_RATE_SCALE
+            } else {
+                fresh.min(face) * CREDIT_RATE_SCALE / face
+            };
+            assert_eq!(
+                source.credit_rate_num, rate,
+                "{label}: history-derived rate"
+            );
             assert_eq!(
                 source.positive_claim_bound_num,
                 face * BOUND_SCALE,
@@ -266,6 +292,24 @@ fn run_expiry_refill_failure_history(
             );
             assert_eq!(source.valid_liened_backing_num, 0, "{label}");
             assert_eq!(source.impaired_liened_backing_num, 0, "{label}");
+            for (other_domain, other_source) in group.source_credit.iter().enumerate() {
+                if other_domain != domain {
+                    let other_bucket = group.source_backing_buckets[other_domain];
+                    assert_eq!(
+                        [
+                            other_source.positive_claim_bound_num,
+                            other_source.fresh_reserved_backing_num,
+                            other_source.spent_backing_num,
+                            other_source.valid_liened_backing_num,
+                            other_source.impaired_liened_backing_num,
+                            other_bucket.fresh_unliened_backing_num,
+                            other_bucket.consumed_liened_backing_num,
+                        ],
+                        [0; 7],
+                        "{label}: unrelated source domain {other_domain}"
+                    );
+                }
+            }
             let capitals = [
                 DEPOSITS[0] + converted_atoms,
                 DEPOSITS[1] - CLAIM,
@@ -273,6 +317,30 @@ fn run_expiry_refill_failure_history(
             ];
             for actor in [WINNER, LOSER, SENIOR] {
                 let portfolio = env.primary_portfolio(actor);
+                let mut account_claim = 0;
+                for account_source in portfolio.source_domains.iter().filter(|s| s.is_occupied()) {
+                    let attributed = account_source.source_claim_bound_num.get();
+                    if attributed != 0 {
+                        assert_eq!(account_source.domain.get() as usize, domain, "{label}");
+                    }
+                    account_claim += attributed;
+                    assert_eq!(account_source.source_claim_liened_num.get(), 0, "{label}");
+                    assert_eq!(account_source.source_claim_impaired_num.get(), 0, "{label}");
+                    assert_eq!(
+                        account_source.source_lien_counterparty_backing_num.get(),
+                        0,
+                        "{label}"
+                    );
+                }
+                assert_eq!(
+                    account_claim,
+                    if actor == WINNER {
+                        face * BOUND_SCALE
+                    } else {
+                        0
+                    },
+                    "{label}: actor {actor} claim attribution"
+                );
                 assert_eq!(
                     portfolio.capital.get(),
                     capitals[actor] - u128::from(paid[actor]),
@@ -320,18 +388,18 @@ fn run_expiry_refill_failure_history(
     let mut fresh = INITIAL_BACKING + CLAIM;
     check(&env, fresh, provider_debit, false, [0; 3]);
 
-    for (expiry, next_expiry, refill) in [(5, 9, 80u128), (9, 20, FINAL_BACKING)] {
+    for (expiry, next_expiry, refill) in [(5, 9, 80u128), (9, 20, final_backing)] {
         assert_eq!(
-            env.primary_market_state().1.source_backing_buckets[DOMAIN].expiry_slot,
+            env.primary_market_state().1.source_backing_buckets[domain].expiry_slot,
             expiry
         );
         let slot = expiry + u64::from(late);
         env.warp_to_slot(slot);
-        refill_history_step(&mut env, &label, |env| env.push_auth_mark(0, slot, MARK))
+        refill_history_step(&mut env, &label, |env| env.push_auth_mark(0, slot, mark))
             .expect("authenticate the unchanged mark at expiry");
         check(&env, fresh, provider_debit, false, [0; 3]);
         let mut normalization_steps = 0;
-        while env.primary_market_state().1.source_backing_buckets[DOMAIN].status
+        while env.primary_market_state().1.source_backing_buckets[domain].status
             == BackingBucketStatusV16::Fresh
         {
             assert!(
@@ -350,7 +418,7 @@ fn run_expiry_refill_failure_history(
             })
             .expect("permissionless expiry normalization");
             normalization_steps += 1;
-            if env.primary_market_state().1.source_backing_buckets[DOMAIN].status
+            if env.primary_market_state().1.source_backing_buckets[domain].status
                 == BackingBucketStatusV16::Expired
             {
                 fresh = 0;
@@ -362,7 +430,7 @@ fn run_expiry_refill_failure_history(
             "{label}: expiry must be nonvacuous"
         );
         assert_eq!(
-            env.primary_market_state().1.source_backing_buckets[DOMAIN].status,
+            env.primary_market_state().1.source_backing_buckets[domain].status,
             BackingBucketStatusV16::Expired
         );
         fresh = 0;
@@ -375,7 +443,7 @@ fn run_expiry_refill_failure_history(
         let first_part = if split { refill / 2 - 1 } else { 0 };
         if first_part != 0 {
             refill_history_step(&mut env, &label, |env| {
-                env.top_up_backing_bucket(DOMAIN as u16, first_part, next_expiry)
+                env.top_up_backing_bucket(domain as u16, first_part, next_expiry)
             })
             .expect("independent first refill partition");
             fresh += first_part;
@@ -385,7 +453,7 @@ fn run_expiry_refill_failure_history(
         let remainder = refill - first_part;
         for _ in 0..failed_attempts {
             let topup =
-                env.build_retained_backing_bucket_top_up(DOMAIN as u16, remainder, next_expiry);
+                env.build_retained_backing_bucket_top_up(domain as u16, remainder, next_expiry);
             let payer = topup.message.account_keys[0];
             let refresh = Transaction::new_with_payer(
                 &[Instruction {
@@ -406,7 +474,7 @@ fn run_expiry_refill_failure_history(
                 }],
                 Some(&payer),
             );
-            let conversion = env.build_retained_convert_released_pnl(WINNER, refill - 1);
+            let conversion = env.build_retained_convert_released_pnl(WINNER, refill.min(CLAIM) - 1);
             let bundle = env.bundle_retained_transactions(&[topup, refresh, conversion]);
             let signature = bundle.signatures[0];
             refill_history_step(&mut env, &label, |env| env.land_retained(bundle))
@@ -448,7 +516,7 @@ fn run_expiry_refill_failure_history(
             check(&env, fresh, provider_debit, false, [0; 3]);
         }
         refill_history_step(&mut env, &label, |env| {
-            env.top_up_backing_bucket(DOMAIN as u16, remainder, next_expiry)
+            env.top_up_backing_bucket(domain as u16, remainder, next_expiry)
         })
         .expect("honest refill after rejected bundles");
         fresh += remainder;
@@ -461,12 +529,12 @@ fn run_expiry_refill_failure_history(
     }
 
     refill_history_step(&mut env, &label, |env| {
-        env.convert_released_pnl(WINNER, FINAL_BACKING)
+        env.convert_released_pnl(WINNER, conversion_atoms)
     })
     .expect("only the last fresh tranche converts the released claim");
-    check(&env, 0, provider_debit, true, [0; 3]);
+    check(&env, surplus, provider_debit, true, [0; 3]);
     let expected_payouts = [
-        (DEPOSITS[0] + FINAL_BACKING) as u64,
+        (DEPOSITS[0] + conversion_atoms) as u64,
         (DEPOSITS[1] - CLAIM) as u64,
         DEPOSITS[2] as u64,
     ];
@@ -477,7 +545,7 @@ fn run_expiry_refill_failure_history(
         })
         .expect("funded owner exit after repeated expiry and refill");
         paid[actor] = expected_payouts[actor];
-        check(&env, 0, provider_debit, true, paid);
+        check(&env, surplus, provider_debit, true, paid);
     }
     let trace = env.finish_public_trace();
     trace
@@ -511,8 +579,14 @@ fn v16_program_expiry_refill_failure_histories_preserve_claim_and_senior_exit() 
         for late in [false, true] {
             for split in [false, true] {
                 for failed_attempts in [0, 2] {
-                    let (payouts, vault, steps) =
-                        run_expiry_refill_failure_history(route, late, split, failed_attempts);
+                    let (payouts, vault, steps) = run_expiry_refill_failure_history(
+                        route,
+                        late,
+                        split,
+                        failed_attempts,
+                        true,
+                        40,
+                    );
                     assert_eq!(payouts, [1_040, 900, 777]);
                     assert_eq!(
                         vault, 330,
@@ -526,6 +600,43 @@ fn v16_program_expiry_refill_failure_histories_preserve_claim_and_senior_exit() 
     }
     assert_eq!(worlds, 32);
     eprintln!("INV-063 refill histories: {worlds} worlds, {transactions} checked transactions");
+}
+
+#[test]
+fn v16_program_expiry_refill_source_sides_and_ratios_preserve_attribution() {
+    let mut worlds = 0;
+    let mut transactions = 0;
+    for final_backing in [37u128, 100, 137] {
+        let converted = final_backing.min(100);
+        for winner_long in [false, true] {
+            for late in [false, true] {
+                for split in [false, true] {
+                    for failed_attempts in [0, 2] {
+                        let (payouts, vault, steps) = run_expiry_refill_failure_history(
+                            TradeRoute::NoCpi,
+                            late,
+                            split,
+                            failed_attempts,
+                            winner_long,
+                            final_backing,
+                        );
+                        assert_eq!(payouts, [1_000 + converted as u64, 900, 777]);
+                        assert_eq!(
+                            vault,
+                            330 + final_backing - converted,
+                            "expired cohorts and fresh surplus must remain in custody"
+                        );
+                        worlds += 1;
+                        transactions += steps;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(worlds, 48);
+    eprintln!(
+        "INV-063 source/ratio histories: {worlds} worlds, {transactions} checked transactions"
+    );
 }
 
 fn assert_backing_expiry_trade_route_boundary(discovery: &ExpiredBackingTradeRouteDiscovery) {
