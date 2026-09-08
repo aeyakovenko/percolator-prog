@@ -19,6 +19,9 @@
 //! The `current_health_evidence` child crosses stale/future/skewed Hybrid reports with a pending
 //! AuthMark leg: failed refreshes roll back both assets and certificates, while timestamp-only
 //! correction permits full health refresh, owner reductions, and an exact custody debit.
+//! The `liquidation_observation_replay` child commits an adverse Hybrid update through another
+//! portfolio, then rejects still-wall-clock-fresh older/equivocating reports on the rewarded
+//! liquidation route before current evidence refreshes the target and reduces real exposure.
 //! An independent typed parser model covers 726 boundary words, 15,552 structural/semantic
 //! combinations, and 12,288 seeded valid layouts. An independent overflow-free confidence oracle
 //! compares all 65,536 basis-point settings across wide carry and overflow operands.
@@ -37,6 +40,9 @@ use rand_xorshift::XorShiftRng;
 
 #[path = "inv_020_current_health_evidence.rs"]
 mod current_health_evidence;
+
+#[path = "inv_020_liquidation_observation_replay.rs"]
+mod liquidation_observation_replay;
 
 #[test]
 fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
