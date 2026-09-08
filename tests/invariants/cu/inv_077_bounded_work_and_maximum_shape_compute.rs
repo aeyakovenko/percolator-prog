@@ -3951,6 +3951,81 @@ fn v16_bpf_permissionless_crank_16_observation_decode_cap_is_under_tx_limit() {
 }
 
 #[test]
+fn v16_bpf_permissionless_crank_17_observations_rejects_atomically_with_bounded_cu() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const PORTFOLIO_CAP: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+    const OBSERVATION_COUNT: usize = 17;
+    const NOW_SLOT: u64 = 40;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: PORTFOLIO_CAP as u16,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        OBSERVATION_COUNT,
+    );
+    for asset_index in PORTFOLIO_CAP..OBSERVATION_COUNT {
+        env.activate_asset(asset_index as u16, asset_index as u64 + 1, 100);
+    }
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.svm.warp_to_slot(NOW_SLOT);
+    let (_, group) = env.market_state();
+    assert_eq!(group.config.max_market_slots, OBSERVATION_COUNT as u32);
+    assert!(group.assets[..OBSERVATION_COUNT]
+        .iter()
+        .all(|asset| asset.slot_last < NOW_SLOT));
+    let keys = [env.market, portfolio, env.vault, env.mint];
+    let before = keys.map(|key| env.svm.get_account(&key).unwrap());
+
+    // Supply every declared hint and valid account role so only the vector cap is invalid.
+    let instruction = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        data: ProgInstruction::PermissionlessCrank {
+            now_slot: NOW_SLOT,
+            observations: (0..OBSERVATION_COUNT)
+                .map(|asset_index| CrankObservationHint {
+                    asset_index: asset_index as u16,
+                    oracle_accounts: 0,
+                })
+                .collect(),
+        }
+        .encode(),
+    };
+    env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), instruction],
+        Some(&env.payer.pubkey()),
+        &[&env.payer],
+        env.svm.latest_blockhash(),
+    );
+    let error = env
+        .svm
+        .send_transaction(tx)
+        .expect_err("a complete cap-plus-one observation vector must reject");
+    assert_eq!(
+        error.err,
+        TransactionError::InstructionError(2, InstructionError::InvalidInstructionData)
+    );
+    let rejection_cu = error.meta.compute_units_consumed;
+    assert_cu_within(
+        "17-observation decode-cap rejection",
+        rejection_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(keys.map(|key| env.svm.get_account(&key).unwrap()), before);
+    println!("INV-077 complete 17-observation crank rejection CU: {rejection_cu}");
+}
+
+#[test]
 fn v16_bpf_full_14_leg_16_hint_three_feed_refresh_is_bounded() {
     const PORTFOLIO_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
     const OBSERVATION_CAP: u16 = 16;

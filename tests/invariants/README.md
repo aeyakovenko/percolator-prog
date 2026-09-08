@@ -7563,6 +7563,16 @@ burn is not a persistent DoS under `scripts/loop.md`; a kept INV-077 result must
 bounded progress for a required owner/keeper continuation at the stated shape. Metadata repair and
 route indexing do not create fresh SBF measurements or promote the invariant status.
 
+Additional decode-cap rollback evidence, 2026-09-08:
+[`v16_bpf_permissionless_crank_17_observations_rejects_atomically_with_bounded_cu`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
+publicly configures seventeen market slots, activates the three slots beyond the portfolio cap, and
+submits a complete seventeen-observation `PermissionlessCrank` with valid market, portfolio, payer,
+vault, and mint accounts. The wrapper rejects at instruction decode with
+`InvalidInstructionData`, consumes **1,274 CU**, and leaves every tracked account byte-identical.
+This closes the complete-vector cap-plus-one boundary next to the sixteen-observation success and
+truncated oversized-header controls. It is rejection and rollback evidence only; it does not prove
+successful progress for the remaining maximum-shape continuations listed above.
+
 Additional owner-window evidence, 2026-09-07:
 [`v16_program_max_shape_owner_window_signature_has_bounded_public_progress`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
 adds one signature-bound continuation, not another resolved payout-order matrix. The public
