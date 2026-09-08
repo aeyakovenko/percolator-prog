@@ -39,6 +39,11 @@
 //! each settlement and same-state rejection is observed. Initialization and nonzero funding
 //! remain separately owned; this is not a mixed funding/receipt generator or a cash-residue
 //! classification proof.
+//! `v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbrance_attribution`
+//! then changes the eligible B denominator through an admitted owner reduction before creating a
+//! second close. The public history independently checks the fresh quotient/remainder, inherited
+//! carry, insurance spend, residual partition, stock, encumbrance, SPL custody, and unchanged value
+//! attribution across booking and settlement.
 //! `v16_program_generated_receipt_histories_preserve_deferred_rounding` compares eager and
 //! deferred claims across generated backing releases, expiry spacing and mixed claim/close/crank
 //! schedules. Every suffix transaction checks immutable-face entitlement, explicit floor residue,
@@ -133,10 +138,12 @@ fn b_account_value(account: &state::PortfolioAccountV16) -> i128 {
 /// One-asset observer reusable across public crank/reduction schedules after K/F settlement.
 /// The origin is the close's outstanding loss, not custody minus observed senior stocks.
 struct PublicBHistoryObserver {
+    inherited_outstanding_num: [u128; 2],
     booked: [u128; 2],
     allocated: [u128; 2],
     capital: Vec<u128>,
     values: Vec<i128>,
+    close_owner: usize,
     steps: usize,
     rejected: usize,
     bookings: usize,
@@ -145,9 +152,59 @@ struct PublicBHistoryObserver {
 }
 
 impl PublicBHistoryObserver {
-    fn new(env: &V16Svm) -> Self {
+    fn outstanding_num(snapshot: &BHistorySnapshot, side: usize) -> Result<u128, String> {
+        let (_, index, remainder, dust, explicit) = snapshot.side(side);
+        let explicit_num = explicit
+            .checked_mul(percolator::SOCIAL_LOSS_DEN)
+            .ok_or("B explicit-loss numerator overflow")?;
+        let mut outstanding = remainder
+            .checked_add(dust)
+            .and_then(|value| value.checked_add(explicit_num))
+            .ok_or("B market outstanding numerator overflow")?;
+        for actor in 0..snapshot.accounts.len() {
+            if let Some(leg) = snapshot.leg(actor).filter(|leg| b_side(leg.side) == side) {
+                if leg.b_rem >= percolator::SOCIAL_LOSS_DEN {
+                    return Err("B leg carry escaped its collateral-atom denominator".into());
+                }
+                let asset = snapshot.group.assets[0];
+                let (epoch, prior_index) = if side == 0 {
+                    (asset.epoch_long, asset.b_epoch_start_long_num)
+                } else {
+                    (asset.epoch_short, asset.b_epoch_start_short_num)
+                };
+                let target = if leg.b_epoch_snap == epoch {
+                    index
+                } else {
+                    if leg.b_epoch_snap.checked_add(1) != Some(epoch) {
+                        return Err(
+                            "B observer only admits current or immediate reset epochs".into()
+                        );
+                    }
+                    prior_index
+                };
+                let gap = target
+                    .checked_sub(leg.b_snap)
+                    .ok_or("B snapshot passed target")?;
+                let leg_outstanding = leg
+                    .loss_weight
+                    .checked_mul(gap)
+                    .and_then(|value| value.checked_add(leg.b_rem))
+                    .ok_or("B leg outstanding numerator overflow")?;
+                outstanding = outstanding
+                    .checked_add(leg_outstanding)
+                    .ok_or("B aggregate outstanding numerator overflow")?;
+            }
+        }
+        Ok(outstanding)
+    }
+
+    fn new(env: &V16Svm, close_owner: usize) -> Self {
         let snapshot = BHistorySnapshot::read(env);
         let out = Self {
+            inherited_outstanding_num: [
+                Self::outstanding_num(&snapshot, 0).expect("long-side B checkpoint"),
+                Self::outstanding_num(&snapshot, 1).expect("short-side B checkpoint"),
+            ],
             booked: [0; 2],
             allocated: [0; 2],
             capital: snapshot
@@ -156,13 +213,14 @@ impl PublicBHistoryObserver {
                 .map(|account| account.capital.get())
                 .collect(),
             values: snapshot.accounts.iter().map(b_account_value).collect(),
+            close_owner,
             steps: 0,
             rejected: 0,
             bookings: 0,
             settlements: 0,
             health_checks: 0,
         };
-        out.verify(&snapshot).expect("zero-B origin");
+        out.verify(&snapshot).expect("B checkpoint origin");
         out
     }
 
@@ -179,44 +237,26 @@ impl PublicBHistoryObserver {
             }
         }
         for side in 0..2 {
-            let (_, index, remainder, dust, explicit) = snapshot.side(side);
+            let (_, _, _, dust, _) = snapshot.side(side);
             if dust >= percolator::SOCIAL_LOSS_DEN {
                 return Err("B dust escaped its collateral-atom denominator".into());
             }
-            let mut outstanding = remainder + dust + explicit * percolator::SOCIAL_LOSS_DEN;
-            for actor in 0..snapshot.accounts.len() {
-                if let Some(leg) = snapshot.leg(actor).filter(|leg| b_side(leg.side) == side) {
-                    if leg.b_rem >= percolator::SOCIAL_LOSS_DEN {
-                        return Err("B leg carry escaped its collateral-atom denominator".into());
-                    }
-                    let asset = snapshot.group.assets[0];
-                    let (epoch, prior_index) = if side == 0 {
-                        (asset.epoch_long, asset.b_epoch_start_long_num)
-                    } else {
-                        (asset.epoch_short, asset.b_epoch_start_short_num)
-                    };
-                    let target = if leg.b_epoch_snap == epoch {
-                        index
-                    } else {
-                        if leg.b_epoch_snap.checked_add(1) != Some(epoch) {
-                            return Err(
-                                "B observer only admits current or immediate reset epochs".into()
-                            );
-                        }
-                        prior_index
-                    };
-                    let gap = target
-                        .checked_sub(leg.b_snap)
-                        .ok_or("B snapshot passed target")?;
-                    outstanding += leg.loss_weight * gap + leg.b_rem;
-                }
-            }
-            if self.booked[side] * percolator::SOCIAL_LOSS_DEN
-                != self.allocated[side] * percolator::SOCIAL_LOSS_DEN + outstanding
-            {
+            let outstanding = Self::outstanding_num(snapshot, side)?;
+            let source_num = self.inherited_outstanding_num[side]
+                .checked_add(
+                    self.booked[side]
+                        .checked_mul(percolator::SOCIAL_LOSS_DEN)
+                        .ok_or("B booked numerator overflow")?,
+                )
+                .ok_or("B source numerator overflow")?;
+            let attributed_num = self.allocated[side]
+                .checked_mul(percolator::SOCIAL_LOSS_DEN)
+                .and_then(|value| value.checked_add(outstanding))
+                .ok_or("B attributed numerator overflow")?;
+            if source_num != attributed_num {
                 return Err(format!(
-                    "B side {side}: origin={}, allocated={}, outstanding_num={outstanding}",
-                    self.booked[side], self.allocated[side]
+                    "B side {side}: inherited_num={}, booked={}, allocated={}, outstanding_num={outstanding}",
+                    self.inherited_outstanding_num[side], self.booked[side], self.allocated[side]
                 ));
             }
         }
@@ -291,8 +331,14 @@ impl PublicBHistoryObserver {
         );
         assert_eq!(&after.group.assets[1..], &before.group.assets[1..]);
 
-        let old_close = before.accounts[1].close_progress.try_to_runtime().unwrap();
-        let new_close = after.accounts[1].close_progress.try_to_runtime().unwrap();
+        let old_close = before.accounts[self.close_owner]
+            .close_progress
+            .try_to_runtime()
+            .unwrap();
+        let new_close = after.accounts[self.close_owner]
+            .close_progress
+            .try_to_runtime()
+            .unwrap();
         let booked = old_close
             .residual_remaining
             .checked_sub(new_close.residual_remaining)
@@ -313,11 +359,17 @@ impl PublicBHistoryObserver {
                 new_close.explicit_loss_assigned,
                 new_close.drift_consumed
             ),
-            (0, 0, 0, 0, 0)
+            (
+                old_close.support_consumed,
+                old_close.junior_face_burned,
+                old_close.insurance_spent,
+                old_close.explicit_loss_assigned,
+                old_close.drift_consumed
+            )
         );
         let loss_side = b_side(old_close.domain_side);
         if booked != 0 {
-            assert_eq!(actor, 1);
+            assert_eq!(actor, self.close_owner);
             assert_eq!(
                 booked,
                 old_close
@@ -336,9 +388,9 @@ impl PublicBHistoryObserver {
             assert_eq!(new_index - index, q + (r + carry) / weight);
             assert_eq!(new_carry, (r + carry) % weight);
             self.booked[loss_side] += booked;
-            self.values[1] += i128::try_from(booked).unwrap();
+            self.values[self.close_owner] += i128::try_from(booked).unwrap();
             assert!(
-                self.values[1] <= 0,
+                self.values[self.close_owner] <= 0,
                 "booking may clear the close's loss, not create a claim"
             );
             self.bookings += 1;
@@ -396,6 +448,7 @@ impl PublicBHistoryObserver {
             )
         });
         assert_public_stock_census("INV-038 B prefix", env).unwrap();
+        assert_public_encumbrance_census("INV-038 B prefix", env).unwrap();
         true
     }
 
@@ -586,7 +639,7 @@ fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
     eprintln!(
         "INV-038 pre-B K: steps=4, rejected=2, residue_nums={residues:?}, denominator={POS_SCALE}"
     );
-    let mut observer = PublicBHistoryObserver::new(&env);
+    let mut observer = PublicBHistoryObserver::new(&env, 1);
     assert!(observer.step(&mut env, 1, None));
     observer.settle(&mut env, &order);
     let before = BHistorySnapshot::read(&env);
@@ -683,6 +736,415 @@ fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
     assert_eq!(
         trace.steps.iter().filter(|step| !step.succeeded).count(),
         observer.rejected + 2
+    );
+}
+
+fn assert_inv038_attribution_censuses(label: &str, env: &V16Svm) {
+    assert_public_stock_census(label, env).unwrap_or_else(|error| panic!("{label}: {error}"));
+    assert_public_encumbrance_census(label, env).unwrap_or_else(|error| panic!("{label}: {error}"));
+}
+
+fn settle_inv038_actor(env: &mut V16Svm, actor: usize, label: &str) -> usize {
+    for step in 0..16 {
+        let landed = env
+            .crank_if_actionable(
+                actor,
+                env.current_slot(),
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .unwrap_or_else(|error| panic!("{label} actor {actor} step {step}: {error}"));
+        assert_inv038_attribution_censuses(&format!("{label} actor {actor} step {step}"), env);
+        if landed.is_none() {
+            return step;
+        }
+    }
+    panic!("{label} actor {actor} exceeded the 16-call bound")
+}
+
+fn assert_inv038_close_partition(label: &str, close: &percolator::CloseProgressLedgerV16) {
+    let left = close
+        .gross_loss_at_close_start
+        .checked_add(close.drift_consumed)
+        .expect("close partition left side");
+    let right = close
+        .support_consumed
+        .checked_add(close.insurance_spent)
+        .and_then(|value| value.checked_add(close.b_loss_booked))
+        .and_then(|value| value.checked_add(close.explicit_loss_assigned))
+        .and_then(|value| value.checked_add(close.residual_remaining))
+        .expect("close partition right side");
+    assert_eq!(left, right, "{label}: {close:?}");
+}
+
+#[test]
+fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbrance_attribution() {
+    use percolator::SideV16;
+
+    const COHORT_OWNER: usize = 2;
+    const SHARED_LOSER: usize = 3;
+    const FIRST_WINNER: usize = 0;
+    const FIRST_LOSER: usize = 1;
+    const SECOND_WINNER: usize = 4;
+    const LOSS_ASSET: u16 = 0;
+    const INSURANCE_DOMAIN: usize = 1;
+    const COHORT_Q: i128 = POS_SCALE as i128 / 2 + 3;
+    const COHORT_REDUCTION_Q: u128 = POS_SCALE / 7;
+    const CLOSE_Q: i128 = 3 * POS_SCALE as i128 / 4;
+    const B_CHUNK: u128 = 100_003;
+    const INSURANCE_ATOMS: u128 = 17;
+
+    let mut env = V16Svm::new(
+        [0x39; 32],
+        MarketConfig {
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 0,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            actor_deposits: [1_000_000, 161_600, 1_000_000, 700_000, 1_000_000],
+            actor_token_balances: [1_000_000, 161_600, 1_000_000, 700_000, 1_000_000],
+            public_b_chunk_atoms: B_CHUNK,
+            ..MarketConfig::default()
+        },
+    );
+    let supply = env.token_supply_observed();
+    env.begin_public_trace();
+    assert_inv038_attribution_censuses("INV-038 rebooking initial", &env);
+
+    execute_trade_route(
+        &mut env,
+        TradeRoute::NoCpi,
+        COHORT_OWNER,
+        SHARED_LOSER,
+        LOSS_ASSET,
+        -COHORT_Q,
+        INITIAL_PRICE,
+        0,
+    )
+    .expect("independent B cohort opens publicly");
+    let cohort_checkpoint = BHistorySnapshot::read(&env);
+    let cohort_leg = cohort_checkpoint
+        .leg(COHORT_OWNER)
+        .expect("independent cohort leg");
+    assert_eq!(cohort_leg.side, SideV16::Short);
+    assert_eq!(cohort_leg.basis_pos_q, -COHORT_Q);
+    assert_eq!(cohort_leg.loss_weight, COHORT_Q.unsigned_abs());
+    assert_eq!(
+        cohort_checkpoint.side(b_side(SideV16::Short)).0,
+        COHORT_Q.unsigned_abs()
+    );
+    assert_inv038_attribution_censuses("INV-038 independent cohort admission", &env);
+
+    for (winner, loser) in [(FIRST_WINNER, FIRST_LOSER), (SECOND_WINNER, SHARED_LOSER)] {
+        execute_trade_route(
+            &mut env,
+            TradeRoute::NoCpi,
+            winner,
+            loser,
+            LOSS_ASSET,
+            -CLOSE_Q,
+            INITIAL_PRICE,
+            0,
+        )
+        .unwrap_or_else(|error| panic!("close pair {winner}/{loser} admission: {error}"));
+        assert_inv038_attribution_censuses(
+            &format!("INV-038 pre-admitted close pair {winner}/{loser}"),
+            &env,
+        );
+    }
+
+    let mut loss_mark = INITIAL_PRICE;
+    for step in 0..20 {
+        let slot = env.current_slot() + 1;
+        loss_mark = loss_mark * 9_500 / 10_000;
+        env.warp_to_slot(slot);
+        env.push_auth_mark(LOSS_ASSET, slot, loss_mark)
+            .unwrap_or_else(|error| panic!("loss mark {step}: {error}"));
+        assert_inv038_attribution_censuses(&format!("INV-038 loss mark {step}"), &env);
+        env.crank(
+            FIRST_WINNER,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: LOSS_ASSET,
+                oracle_accounts: 0,
+            }],
+        )
+        .unwrap_or_else(|error| panic!("loss mark application {step}: {error}"));
+        assert_inv038_attribution_censuses(&format!("INV-038 loss mark application {step}"), &env);
+    }
+    assert_eq!(
+        env.primary_market_state().1.assets[LOSS_ASSET as usize].effective_price,
+        loss_mark
+    );
+    execute_trade_route(
+        &mut env,
+        TradeRoute::NoCpi,
+        FIRST_WINNER,
+        FIRST_LOSER,
+        LOSS_ASSET,
+        CLOSE_Q,
+        loss_mark,
+        0,
+    )
+    .expect("first pre-admitted winner closes publicly");
+    let first_close = env
+        .primary_portfolio(FIRST_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .unwrap();
+    assert!(first_close.active && !first_close.finalized && first_close.residual_remaining > 0);
+    assert_inv038_close_partition("INV-038 first close origin", &first_close);
+    assert_inv038_attribution_censuses("INV-038 first close origin", &env);
+
+    for actor in [COHORT_OWNER, SECOND_WINNER, FIRST_WINNER] {
+        settle_inv038_actor(&mut env, actor, "INV-038 first-close K/B preparation");
+    }
+    let mut first_observer = PublicBHistoryObserver::new(&env, FIRST_LOSER);
+    for step in 0..16 {
+        if env
+            .primary_portfolio(FIRST_LOSER)
+            .close_progress
+            .try_to_runtime()
+            .unwrap()
+            .finalized
+        {
+            break;
+        }
+        assert!(
+            first_observer.step(&mut env, FIRST_LOSER, None),
+            "first booking {step}"
+        );
+        first_observer.settle(&mut env, &[COHORT_OWNER, SECOND_WINNER, FIRST_WINNER]);
+    }
+    let first_final = env
+        .primary_portfolio(FIRST_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .unwrap();
+    assert!(first_final.finalized && first_final.b_loss_booked > 0);
+    assert_inv038_close_partition("INV-038 first close final", &first_final);
+
+    let before_reduction = BHistorySnapshot::read(&env);
+    let before_leg = before_reduction
+        .leg(COHORT_OWNER)
+        .expect("independent cohort leg");
+    assert!(first_observer.step(&mut env, COHORT_OWNER, Some(COHORT_REDUCTION_Q)));
+    let after_reduction = BHistorySnapshot::read(&env);
+    let after_leg = after_reduction
+        .leg(COHORT_OWNER)
+        .expect("reduced independent cohort leg");
+    assert_eq!(
+        before_leg.basis_pos_q.unsigned_abs() - after_leg.basis_pos_q.unsigned_abs(),
+        COHORT_REDUCTION_Q
+    );
+    let expected_weight = crate::support::reference_math::mul_div_ceil(
+        after_leg.basis_pos_q.unsigned_abs(),
+        percolator::SOCIAL_WEIGHT_SCALE,
+        after_leg.a_basis,
+    )
+    .unwrap();
+    assert_eq!(after_leg.loss_weight, expected_weight);
+    assert_eq!(
+        after_reduction.side(b_side(SideV16::Short)).0,
+        before_reduction.side(b_side(SideV16::Short)).0 - before_leg.loss_weight + expected_weight
+    );
+
+    let insurance_provider_before = env.token_amount(env.provider_source_token);
+    let insurance_vault_before = env.token_amount(env.vault);
+    let insurance_before = env.primary_market_state().1.insurance;
+    env.top_up_insurance_domain(INSURANCE_DOMAIN as u16, INSURANCE_ATOMS)
+        .expect("second close insurance is funded publicly");
+    let (_, after_insurance_top_up) = env.primary_market_state();
+    assert_eq!(
+        env.token_amount(env.provider_source_token),
+        insurance_provider_before - INSURANCE_ATOMS as u64
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        insurance_vault_before + INSURANCE_ATOMS as u64
+    );
+    assert_eq!(
+        after_insurance_top_up.insurance,
+        insurance_before + INSURANCE_ATOMS
+    );
+    assert_eq!(
+        after_insurance_top_up.insurance_domain_budget[INSURANCE_DOMAIN],
+        INSURANCE_ATOMS
+    );
+    assert_inv038_attribution_censuses("INV-038 second-close insurance top-up", &env);
+
+    execute_trade_route(
+        &mut env,
+        TradeRoute::NoCpi,
+        SECOND_WINNER,
+        SHARED_LOSER,
+        LOSS_ASSET,
+        CLOSE_Q,
+        loss_mark,
+        0,
+    )
+    .expect("second pre-admitted winner reduces publicly after the lock");
+    assert_inv038_attribution_censuses("INV-038 second winner exit", &env);
+    let initial_second_close = env
+        .primary_portfolio(SHARED_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .unwrap();
+    assert!(initial_second_close.is_empty());
+    let activation_tokens = env.all_token_account_data();
+    let mut activation_before = None;
+    let mut activation_steps = 0usize;
+    for step in 0..8 {
+        let before = BHistorySnapshot::read(&env);
+        let landed = env
+            .crank_if_actionable(
+                SHARED_LOSER,
+                env.current_slot(),
+                vec![CrankObservationHint {
+                    asset_index: LOSS_ASSET,
+                    oracle_accounts: 0,
+                }],
+            )
+            .unwrap_or_else(|error| panic!("second close setup {step}: {error}"));
+        assert!(
+            landed.is_some(),
+            "second close setup stalled at step {step}"
+        );
+        activation_steps += 1;
+        assert_inv038_attribution_censuses(&format!("INV-038 second close setup {step}"), &env);
+        let close = env
+            .primary_portfolio(SHARED_LOSER)
+            .close_progress
+            .try_to_runtime()
+            .unwrap();
+        if close.active {
+            activation_before = Some(before);
+            break;
+        }
+    }
+    let before_fresh_booking = activation_before.expect("second close activates boundedly");
+    let after_fresh_booking = BHistorySnapshot::read(&env);
+    let second_origin = after_fresh_booking.accounts[SHARED_LOSER]
+        .close_progress
+        .try_to_runtime()
+        .unwrap();
+    assert!(
+        second_origin.active && !second_origin.finalized && second_origin.residual_remaining > 0
+    );
+    assert_eq!(second_origin.domain_side, SideV16::Short);
+    assert_eq!(
+        (
+            second_origin.support_consumed,
+            second_origin.junior_face_burned,
+            second_origin.insurance_spent,
+            second_origin.explicit_loss_assigned,
+            second_origin.drift_consumed,
+        ),
+        (0, 0, INSURANCE_ATOMS, 0, 0)
+    );
+    let freshly_booked = second_origin.b_loss_booked;
+    assert_eq!(freshly_booked, B_CHUNK);
+    assert_eq!(
+        second_origin.gross_loss_at_close_start,
+        second_origin.insurance_spent
+            + second_origin.b_loss_booked
+            + second_origin.residual_remaining
+    );
+    assert_inv038_close_partition("INV-038 second close origin", &second_origin);
+    assert_eq!(after_fresh_booking.group.insurance, insurance_before);
+    assert_eq!(
+        after_fresh_booking.group.insurance_domain_spent[INSURANCE_DOMAIN],
+        INSURANCE_ATOMS
+    );
+    assert_eq!(
+        b_account_value(&after_fresh_booking.accounts[SHARED_LOSER]),
+        b_account_value(&before_fresh_booking.accounts[SHARED_LOSER])
+            + i128::try_from(INSURANCE_ATOMS + freshly_booked).unwrap()
+    );
+    assert_eq!(env.all_token_account_data(), activation_tokens);
+    assert_inv038_attribution_censuses("INV-038 attributed fresh B booking", &env);
+
+    let post_weight = before_fresh_booking.side(b_side(SideV16::Short)).0;
+    assert_eq!(
+        post_weight,
+        before_fresh_booking.leg(COHORT_OWNER).unwrap().loss_weight
+    );
+    assert_eq!(post_weight, expected_weight);
+    assert_eq!(
+        after_fresh_booking.side(b_side(SideV16::Short)).0,
+        post_weight
+    );
+    assert!(post_weight < before_reduction.side(b_side(SideV16::Short)).0);
+    let (expected_index_delta, expected_remainder) =
+        crate::support::reference_math::mul_div_floor_with_remainder(
+            freshly_booked,
+            percolator::SOCIAL_LOSS_DEN,
+            post_weight,
+        )
+        .unwrap();
+    let before_side = before_fresh_booking.side(b_side(SideV16::Short));
+    let after_side = after_fresh_booking.side(b_side(SideV16::Short));
+    assert_eq!(
+        after_side.1 - before_side.1,
+        expected_index_delta + (expected_remainder + before_side.2) / post_weight
+    );
+    assert_eq!(
+        after_side.2,
+        (expected_remainder + before_side.2) % post_weight
+    );
+    assert!(
+        after_side.2 > 0,
+        "fresh booking must retain a nonzero market carry"
+    );
+
+    let mut second_observer = PublicBHistoryObserver::new(&env, SHARED_LOSER);
+    assert!(
+        second_observer.step(&mut env, COHORT_OWNER, None),
+        "cohort owner settles the fresh booking"
+    );
+    assert!(
+        second_observer.step(&mut env, SHARED_LOSER, None),
+        "second close books its remaining residual"
+    );
+    let second_final = env
+        .primary_portfolio(SHARED_LOSER)
+        .close_progress
+        .try_to_runtime()
+        .unwrap();
+    assert!(second_final.finalized && second_final.b_loss_booked > 0);
+    assert_eq!(second_final.insurance_spent, INSURANCE_ATOMS);
+    assert_inv038_close_partition("INV-038 second close final", &second_final);
+    assert_eq!(env.token_supply_observed(), supply);
+    assert_inv038_attribution_censuses("INV-038 rebooking terminal", &env);
+
+    let terminal = BHistorySnapshot::read(&env);
+    let mut wrong = terminal.clone();
+    wrong.group.assets[LOSS_ASSET as usize].social_loss_remainder_short_num += 1;
+    assert!(second_observer.verify(&wrong).is_err());
+    let mut wrong = terminal;
+    wrong.accounts[COHORT_OWNER].pnl =
+        percolator::V16PodI128::new(wrong.accounts[COHORT_OWNER].pnl.get() + 1);
+    wrong.accounts[FIRST_WINNER].pnl =
+        percolator::V16PodI128::new(wrong.accounts[FIRST_WINNER].pnl.get() - 1);
+    assert!(second_observer.verify(&wrong).is_err());
+
+    let trace = env.finish_public_trace();
+    trace.validate_public_execution().unwrap();
+    assert_eq!(trace.out_of_band_economic_mutations, 0);
+    assert!(first_observer.bookings > 1);
+    assert!(second_observer.bookings > 0 && second_observer.settlements > 0);
+    eprintln!(
+        "INV-038 attributed rebooking: public_steps={}, rejected={}, activation_steps={activation_steps}, first_bookings={}, second_bookings={}, second_settlements={}",
+        trace.steps.len(),
+        trace.steps.iter().filter(|step| !step.succeeded).count(),
+        first_observer.bookings,
+        second_observer.bookings,
+        second_observer.settlements,
     );
 }
 
