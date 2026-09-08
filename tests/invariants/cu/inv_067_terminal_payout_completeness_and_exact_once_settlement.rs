@@ -36,6 +36,9 @@ pub(super) mod late_expiry;
 #[path = "inv_067_terminal_provider_insurance_retries.rs"]
 mod provider_insurance_retries;
 
+#[path = "inv_067_receipt_rail_liquidity.rs"]
+mod receipt_rail_liquidity;
+
 #[test]
 fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {
     late_expiry::verify_receipt_payout_and_portfolio_close_retry();

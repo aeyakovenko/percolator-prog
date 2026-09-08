@@ -470,6 +470,84 @@ metadata guards **6/6 passed** (117 filtered) in 0.06 seconds. The eight new his
 150,000/300,000 CU ceilings. Scoped rustfmt and `git diff --check` passed. Existing shared-test
 dead-code and Solana future-compatibility warnings remain. No broad suite or engine proof was run.
 
+## INV-067 shared secondary liquidity after late expiry (2026-09-08)
+
+Tests/docs-only coverage for reopening **417**, based on
+`origin/codex/invariant-fidelity-reopen-20260904` at `11f8c0ac860b6bffde406c78b96a76cf42ac10af`.
+Developed in `/tmp/codex-agent-worktrees/row417-inv067-receipt-expiry-order-20260908`, on
+`codex/row417-inv067-receipt-expiry-order-20260908`. The coordinator worktree was not changed.
+No open PR diffs, production changes, dependency updates, or engine-proof work are included.
+Row 417 stays **OPEN**; this is a PR135 coverage candidate, not a real-bug PR or closure evidence.
+
+[`cu/inv_067_receipt_rail_liquidity.rs`](cu/inv_067_receipt_rail_liquidity.rs) reuses the
+existing public late-expiry fixture with a setup hook that configures a second classic-SPL mint
+before deposits. System/SPL/ATA/wrapper instructions create and fund all accounts; only signer
+SOL, program loading, and Clock come from LiteSVM. Sixteen histories cross exact/late expiry,
+both unequal claimant orders, both assignments of CloseResolved/ClaimResolvedPayoutTopup,
+and one-atom replenishment versus a reversed mixed-rail continuation.
+
+The receipt faces are 700/1,300, initially paid 116/217. Late normalization releases 350 atoms
+and raises their independently calculated entitlements by 82/151. A secondary reserve holding
+232 atoms can pay either claimant alone, but cannot pay both. Each failed transaction first
+normalizes expiry and completes one wrapper/SPL payout, then rejects the second payout with
+exactly `InstructionError(4, InvalidTokenAccount)`. Complete tracked accounts, including both
+mints/vaults, receipts, recipients, suppliers, portfolio rent and economic signers, roll back.
+Only the separate network-fee payer and runtime accounts are excluded from that frame.
+
+Adding one SPL atom makes the unchanged three-instruction batch succeed. Without replenishment,
+reversing claimant order lets the other owner use the existing secondary liquidity and the first
+owner exit on the primary rail. Both continuations preserve the original receipt face, prior bound,
+snapshot and account identity; only cumulative paid value changes. Per-mint supply, per-owner
+combined payouts, unrelated account frames, exact custody deltas, and fresh-blockhash cross-rail
+retries are checked. All five portfolios settle and close with exact rent transfer. Engine custody
+ends at two independently derived rounding atoms; combined SPL custody also includes the explicitly
+unbooked secondary funding, which cannot become another receipt payment.
+
+This adds shared-liquidity competition between two claimants across rollback of expiry itself.
+INV-068's existing rail matrix has one claimant and rejects an individually underfunded reserve;
+INV-067's recipient-rotation matrix changes destination validity rather than exhausting a shared
+valid reserve. The new test does not re-prove payout arithmetic or claim arbitrary histories,
+claimant populations, multiple expiries, Recovery, maximum shapes, or terminal surplus sweeping.
+
+The exploratory unused-backing retirement probe was deleted: retirement in Resolved mode rejects
+with EngineLockActive before stock reclassification. That failed fixture expectation is not a
+production counterexample and is not retained as rejection-only coverage. An initial truncated
+private binary copy caused by disk pressure is not credited; the final private binary was recopied,
+matched to the compiled checksum, explicitly listed, and rerun. SHA-256:
+`9389cca401089fe14f9fedde59223b035ac8dc71c00649224233729633d23326`.
+
+Verification: **10/10 focused selectors passed** (1,050 filtered), including all 16 new histories,
+in 23.00 seconds. The new test peaked at **276,528 CU**, under its enforced 500,000-CU suffix bound.
+Scoped rustfmt and whitespace checks pass. No broad suite or engine proofs were run. The default
+SBF build from this worktree used platform-tools v1.52, with SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+
+```sh
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$PWD/target/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu --no-run
+cp "$CARGO_TARGET_DIR/debug/deps/v16_cu-8c7475d0975fcbd3" target/v16_cu-row417-reviewed
+sha256sum target/v16_cu-row417-reviewed "$CARGO_TARGET_DIR/debug/deps/v16_cu-8c7475d0975fcbd3"
+target/v16_cu-row417-reviewed inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_rail_liquidity::v16_program_late_expiry_claimant_orders_share_secondary_liquidity_without_losing_receipts --exact --list
+# Continue only when the copy succeeds, hashes match, and exactly one requested test is listed.
+target/v16_cu-row417-reviewed --exact --nocapture --test-threads=2 \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_rail_liquidity::v16_program_late_expiry_claimant_orders_share_secondary_liquidity_without_losing_receipts \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::late_expiry::v16_program_retained_claim_identity_survives_late_expiry_recipient_rotation_and_atomic_retry \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once \
+  inv_066_resolved_payout_fairness_and_order_independence::v16_program_late_receipt_materialization_preserves_snapshot_entitlements \
+  inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_same_owner_receipts_keep_independent_topups_and_terminal_replays \
+  inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail \
+  inv_063_backing_expiry_normalization::v16_program_post_snapshot_expiry_rejects_stale_trade_then_owner_progresses \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry \
+  inv_024_attributed_quote_value_conservation::v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim
+rustfmt --edition 2021 --check tests/invariants/cu/inv_067_receipt_rail_liquidity.rs tests/invariants/cu/inv_067_terminal_claim_late_expiry.rs
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs
+git diff --check
+```
+
 ## Terminal claim identity after late expiry (2026-09-08)
 
 One tests/docs-only increment on current branch commit

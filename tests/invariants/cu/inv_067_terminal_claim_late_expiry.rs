@@ -35,6 +35,17 @@ impl World {
     }
 
     pub(crate) fn before_receipts_with_claimant_owners(claimant_owners: [Keypair; 2]) -> Self {
+        Self::build_before_receipts(claimant_owners, None)
+    }
+
+    pub(super) fn before_receipts_with_setup(setup: fn(&mut V16CuEnv)) -> Self {
+        Self::build_before_receipts([Keypair::new(), Keypair::new()], Some(setup))
+    }
+
+    fn build_before_receipts(
+        claimant_owners: [Keypair; 2],
+        setup: Option<fn(&mut V16CuEnv)>,
+    ) -> Self {
         // Allocate and initialize through System/SPL/wrapper instructions, including the
         // initial collateral endowment. LiteSVM only supplies programs, clock and signer SOL.
         let params = V16CuMarketParams {
@@ -113,6 +124,9 @@ impl World {
             portfolio_account_len: state::portfolio_account_len_for_market_slots(2).unwrap(),
             portfolios: Vec::new(),
         };
+        if let Some(setup) = setup {
+            setup(&mut env);
+        }
         let mut actors: Vec<Actor> = Vec::new();
         let mut claimant_owners = claimant_owners.into_iter();
         for (index, deposit) in DEPOSITS.into_iter().enumerate() {
