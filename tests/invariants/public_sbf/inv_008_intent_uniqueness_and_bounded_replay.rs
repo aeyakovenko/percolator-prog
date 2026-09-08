@@ -10,7 +10,9 @@
 //! the eleven retained intents in one transaction. The retained-trade matrix additionally covers
 //! all sixteen ordered pairs of single/batch CPI/no-CPI routes from one pre-state. The route-set
 //! history retains two independently signed copies of every route together, rejecting one set
-//! before a fresh cross-route close and the other afterward. These prove whole-transaction
+//! before a fresh cross-route close and the other afterward. A mixed-family bundle proves a
+//! consumed trade rolls back a preceding deposit without consuming that deposit's retained
+//! sequence. These prove whole-transaction
 //! rollback, then prove exactly one standalone request can land; PR362 and the issue387/389 tests
 //! cover generation/position-bound activation, conversion, and reduction.
 //! These tests exercise the deployed public
@@ -217,6 +219,136 @@ fn v16_program_trade_route_retry_sets_remain_consumed_across_fresh_episode() {
             assert_eq!(step.rejected_no_program_lamport_delta, Some(true));
             assert!(step.token_deltas.iter().all(|(_, delta)| *delta == 0));
         }
+    }
+}
+
+#[test]
+fn v16_program_stale_trade_bundle_preserves_unconsumed_deposit_intent() {
+    const DEPOSITOR: usize = 2;
+    const AMOUNT: u128 = 37;
+    const SIZE_Q: i128 = POS_SCALE as i128 / 4;
+
+    for (route_index, route) in DiscoveryTradeRoute::ALL.into_iter().enumerate() {
+        let mut seed = [0x6e; 32];
+        seed[0] ^= u8::try_from(route_index).expect("four routes fit u8");
+        let mut env = V16Svm::new(seed, MarketConfig::default());
+        let depositor_before = env.primary_portfolio_data(DEPOSITOR);
+        let sequence_before = env.primary_portfolio_matcher_sequence(DEPOSITOR);
+        let epochs_before = [
+            env.primary_portfolio_position_epoch(0),
+            env.primary_portfolio_position_epoch(1),
+        ];
+        let supply_before = env.token_supply_observed();
+        let winner = build_retained_trade_message(&mut env, route, SIZE_Q);
+        let stale_trade = build_retained_trade_message(&mut env, route, SIZE_Q);
+        let deposit = env.build_retained_deposit(DEPOSITOR, AMOUNT);
+        let deposit_retry = env.build_retained_deposit(DEPOSITOR, AMOUNT);
+        let bundle = env.bundle_retained_transactions(&[deposit.clone(), stale_trade.clone()]);
+
+        let mut signatures = BTreeSet::new();
+        let mut messages = BTreeSet::new();
+        for transaction in [&winner, &stale_trade, &deposit, &deposit_retry, &bundle] {
+            transaction.verify().expect("valid retained signature");
+            assert!(signatures.insert(transaction.signatures[0].to_string()));
+            assert!(messages.insert(transaction.message_data()));
+        }
+
+        let stale_index = bundle
+            .message
+            .instructions
+            .iter()
+            .rposition(|instruction| {
+                bundle.message.account_keys[instruction.program_id_index as usize]
+                    == percolator_prog::id()
+            })
+            .expect("bundle has a trailing wrapper instruction");
+        // Only the network fee payer is excluded from the complete transaction account frame.
+        let account_keys = bundle.message.account_keys[1..].to_vec();
+        let account_frame = |env: &V16Svm| {
+            account_keys
+                .iter()
+                .map(|key| (*key, env.svm.get_account(key)))
+                .collect::<Vec<_>>()
+        };
+
+        env.land_retained(winner)
+            .unwrap_or_else(|error| panic!("{route:?} initial trade rejected: {error}"));
+        for (actor, epoch) in epochs_before.into_iter().enumerate() {
+            assert!(env.primary_portfolio_position_epoch(actor) > epoch);
+        }
+        assert_eq!(env.primary_portfolio_data(DEPOSITOR), depositor_before);
+        let (_, group_before) = env.primary_market_state();
+        assert_eq!(group_before.assets[0].oi_eff_long_q, SIZE_Q as u128);
+        assert_eq!(group_before.assets[0].oi_eff_short_q, SIZE_Q as u128);
+
+        let before_bundle = RetainedTradeSnapshot::capture(&env);
+        let frame_before_bundle = account_frame(&env);
+        let error = env
+            .land_retained(bundle)
+            .expect_err("the consumed trade must abort the otherwise current deposit bundle");
+        assert!(
+            error.contains(&format!("InstructionError({stale_index}, Custom(19))")),
+            "{route:?} bundle must fail at the trailing stale trade: {error}"
+        );
+        for program in [percolator_prog::id(), spl_token::ID] {
+            assert!(
+                error.contains(&format!("Program {program} success")),
+                "{route:?} deposit and SPL transfer must execute before rollback: {error}"
+            );
+        }
+        assert_eq!(RetainedTradeSnapshot::capture(&env), before_bundle);
+        assert_eq!(account_frame(&env), frame_before_bundle);
+        assert_eq!(
+            env.primary_portfolio_matcher_sequence(DEPOSITOR),
+            sequence_before,
+            "aborting an unrelated stale intent must not consume the deposit sequence"
+        );
+
+        let capital_before = env.primary_portfolio(DEPOSITOR).capital.get();
+        let source_before = env.token_amount(env.actors[DEPOSITOR].source_token);
+        let vault_before = env.token_amount(env.vault);
+        let trade_portfolios_before =
+            [env.primary_portfolio_data(0), env.primary_portfolio_data(1)];
+        let success = env
+            .land_retained(deposit)
+            .expect("the original signed deposit must remain executable after bundle rollback");
+        assert!(success.compute_units > 0 && success.compute_units < 1_400_000);
+        assert_eq!(
+            env.primary_portfolio_matcher_sequence(DEPOSITOR),
+            sequence_before + 1
+        );
+        assert_eq!(
+            env.primary_portfolio(DEPOSITOR).capital.get(),
+            capital_before + AMOUNT
+        );
+        assert_eq!(
+            env.token_amount(env.actors[DEPOSITOR].source_token),
+            source_before - AMOUNT as u64
+        );
+        assert_eq!(env.token_amount(env.vault), vault_before + AMOUNT as u64);
+        let (_, group_after) = env.primary_market_state();
+        assert_eq!(group_after.c_tot, group_before.c_tot + AMOUNT);
+        assert_eq!(group_after.vault, group_before.vault + AMOUNT);
+        assert_eq!(group_after.insurance, group_before.insurance);
+        assert_eq!(group_after.assets[0].oi_eff_long_q, SIZE_Q as u128);
+        assert_eq!(group_after.assets[0].oi_eff_short_q, SIZE_Q as u128);
+        assert_eq!(
+            [env.primary_portfolio_data(0), env.primary_portfolio_data(1)],
+            trade_portfolios_before
+        );
+        assert_eq!(env.token_supply_observed(), supply_before);
+
+        let before_retry = RetainedTradeSnapshot::capture(&env);
+        let frame_before_retry = account_frame(&env);
+        let error = env
+            .land_retained(deposit_retry)
+            .expect_err("the standalone deposit must consume its independently signed duplicate");
+        assert!(
+            error.contains("Custom(19)") || error.contains("custom program error: 0x13"),
+            "{route:?} deposit retry rejected for the wrong reason: {error}"
+        );
+        assert_eq!(RetainedTradeSnapshot::capture(&env), before_retry);
+        assert_eq!(account_frame(&env), frame_before_retry);
     }
 }
 

@@ -260,6 +260,43 @@ Exact tests covered the accepted history, the neighboring INV-001/002/003/005/00
 lifecycle matrices, the existing INV-008 ordered route-pair matrix, and all six invariant
 metadata guards. `rustfmt --check` and `git diff --check` complete the checkpoint.
 
+### INV-008 unconsumed deposit after stale-trade rollback
+
+`v16_program_stale_trade_bundle_preserves_unconsumed_deposit_intent` in
+[`public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs`](public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs)
+adds four public worlds, one per single/batch CPI/no-CPI trade route. Each retains a trade winner,
+its duplicate, an unrelated owner's 37-atom deposit, the deposit's duplicate, and a
+deposit-then-trade-duplicate bundle before any landing. All five messages and payer signatures are
+distinct and verified. After the winner consumes both position episodes, the bundle must reject
+at its trailing trade with `StaleIncarnation`; runtime success logs require the preceding deposit
+and SPL transfer to have executed. Market, portfolio, matcher and SPL data roll back exactly,
+as does every compiled transaction account's complete state except the network fee payer.
+
+The original retained deposit then lands without rebuilding or re-signing, advances its sequence
+exactly once, and moves exactly 37 atoms through owner capital, market capital, accounting vault,
+SPL source and vault custody. The trader portfolios, OI and insurance stay unchanged, and SPL
+supply is conserved. Only this successful standalone deposit consumes its independently signed
+duplicate, which must also reject with exact account rollback.
+
+Unlike the existing same-intent duplicate bundles, this starts the failed bundle with one already
+consumed trade episode and a separate unconsumed deposit sequence. Unlike INV-011's funded cap
+failures, rejection comes from retained-intent consumption and the exact original prefix
+authorization must remain usable. This is bounded INV-008 evidence for one asset, fixed price,
+zero fees and one mixed-family prefix, not new partial-fill, expiry, arbitrary-history, runtime
+rollback-proof or invariant-status coverage. No production or support helpers change.
+
+Verification rebuilt default-feature wrapper and matcher SBF offline with platform-tools v1.52;
+both hashes match the preceding checkpoint. The exact test passed all four worlds. From the
+isolated worktree, with local build artifacts:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_008_intent_uniqueness_and_bounded_replay::v16_program_stale_trade_bundle_preserves_unconsumed_deposit_intent -- --exact --nocapture
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs
+git diff --check
+```
+
 ## Wrapper custody checkpoint (2026-09-08)
 
 Finding-blind additions based on `origin/codex/invariant-fidelity-reopen-20260904` at
