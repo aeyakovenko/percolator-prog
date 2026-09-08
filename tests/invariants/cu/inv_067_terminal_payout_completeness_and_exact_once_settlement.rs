@@ -24,7 +24,7 @@
 use super::*;
 
 #[path = "inv_067_terminal_claim_late_expiry.rs"]
-mod late_expiry;
+pub(super) mod late_expiry;
 
 #[test]
 fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {

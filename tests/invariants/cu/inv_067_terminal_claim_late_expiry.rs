@@ -14,22 +14,23 @@ const EXPIRY: u64 = 13;
 const INITIAL_RESIDUAL: u128 = DEPOSITS[1] + 1;
 const LATE_RELEASE: u128 = BACKING + DEPOSITS[3];
 
-struct Actor {
-    owner: Keypair,
-    portfolio: Pubkey,
-    token: Pubkey,
+pub(crate) struct Actor {
+    pub(crate) owner: Keypair,
+    pub(crate) portfolio: Pubkey,
+    pub(crate) token: Pubkey,
 }
 
-struct World {
-    env: V16CuEnv,
-    actors: Vec<Actor>,
-    provider_token: Pubkey,
+pub(crate) struct World {
+    pub(crate) env: V16CuEnv,
+    pub(crate) actors: Vec<Actor>,
+    pub(crate) provider_token: Pubkey,
     late_backing_topup: Instruction,
-    peak_cu: u64,
+    pub(crate) peak_cu: u64,
 }
 
 impl World {
-    fn new() -> Self {
+    // INV-066 varies receipt creation across expiry; new() retains INV-067's original seed.
+    pub(crate) fn before_receipts() -> Self {
         // Allocate and initialize through System/SPL/wrapper instructions, including the
         // initial collateral endowment. LiteSVM only supplies programs, clock and signer SOL.
         let params = V16CuMarketParams {
@@ -244,6 +245,12 @@ impl World {
                 world.actors[actor].portfolio
             ));
         }
+        world.custody();
+        world
+    }
+
+    fn new() -> Self {
+        let mut world = Self::before_receipts();
         for actor in [0, 4] {
             for _ in 0..8 {
                 if world.receipt(actor).present {
@@ -325,7 +332,7 @@ impl World {
             .unwrap();
     }
 
-    fn payout(&self, actor: usize, claim: bool) -> Instruction {
+    pub(crate) fn payout(&self, actor: usize, claim: bool) -> Instruction {
         let actor = &self.actors[actor];
         Instruction {
             program_id: self.env.program_id,
@@ -349,7 +356,7 @@ impl World {
         }
     }
 
-    fn land(
+    pub(crate) fn land(
         &mut self,
         instructions: &[Instruction],
         admin: bool,
@@ -378,7 +385,7 @@ impl World {
         result
     }
 
-    fn frame(&self) -> Vec<(Pubkey, Option<Account>)> {
+    pub(crate) fn frame(&self) -> Vec<(Pubkey, Option<Account>)> {
         // Only the separate network-fee payer and runtime sysvars are excluded.
         let mut keys = vec![
             self.env.market,
@@ -396,7 +403,7 @@ impl World {
             .collect()
     }
 
-    fn custody(&self) {
+    pub(crate) fn custody(&self) {
         let vault = self.env.token_amount(self.env.vault) as u128;
         assert_eq!(self.env.market_state().1.vault, vault);
         let total = vault
@@ -416,7 +423,11 @@ impl World {
         );
     }
 
-    fn assert_frame_except(&self, before: &[(Pubkey, Option<Account>)], allowed: &[Pubkey]) {
+    pub(crate) fn assert_frame_except(
+        &self,
+        before: &[(Pubkey, Option<Account>)],
+        allowed: &[Pubkey],
+    ) {
         for (key, account) in before {
             if !allowed.contains(key) {
                 assert_eq!(
@@ -428,7 +439,7 @@ impl World {
         }
     }
 
-    fn receipt(&self, actor: usize) -> ResolvedPayoutReceiptV16 {
+    pub(crate) fn receipt(&self, actor: usize) -> ResolvedPayoutReceiptV16 {
         resolved_receipt(&self.env.portfolio_state(self.actors[actor].portfolio))
     }
 
