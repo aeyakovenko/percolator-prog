@@ -16,6 +16,9 @@
 //! controls.
 //! An unchanged-report versus newer-same-price report matrix crosses public crank into funded
 //! withdrawal: settlement progress and caller slot hints cannot renew the oracle liveness epoch.
+//! The `current_health_evidence` child crosses stale/future/skewed Hybrid reports with a pending
+//! AuthMark leg: failed refreshes roll back both assets and certificates, while timestamp-only
+//! correction permits full health refresh, owner reductions, and an exact custody debit.
 //! An independent typed parser model covers 726 boundary words, 15,552 structural/semantic
 //! combinations, and 12,288 seeded valid layouts. An independent overflow-free confidence oracle
 //! compares all 65,536 basis-point settings across wide carry and overflow operands.
@@ -31,6 +34,9 @@ use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use rand::{Rng, SeedableRng};
 use rand_xorshift::XorShiftRng;
+
+#[path = "inv_020_current_health_evidence.rs"]
+mod current_health_evidence;
 
 #[test]
 fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
