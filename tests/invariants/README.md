@@ -7629,6 +7629,79 @@ INV-038/068/086. The test stops at a partial receipt with five materialized port
 claim full economic completion, signer-free deletion, a general environmental generator, an engine
 proof, or a status promotion.
 
+### INV-082 mixed Recovery/Active terminal accrual
+
+`cu/inv_082_state_indexed_liveness_theorem.rs::v16_program_mixed_recovery_active_terminal_accrual_has_bounded_public_exit`
+adds one bounded cross-lifecycle slice. Two public no-CPI worlds put the Recovery asset at index 0
+or 1, with the Active asset at the other index. The same two funded portfolios retain both legs:
+one asset has committed a 100-to-105 mark and is publicly shut down at slot 2; the other retains
+an authenticated 100-to-150 target at slot 3. Three unequal, positive capital-only peers remain
+funded. At authenticated slot 9, the market is still Live and every portfolio is nonterminal.
+
+The concrete lexicographic rank has mode, unfinished Active accrual slots, owner-window wait,
+active legs, occupied sources, nonzero-PnL accounts, unfinished receipts, nonterminal accounts,
+and actual unpaid SPL entitlement lanes. The frozen Recovery slot is not future accrual work,
+but its retained exposure and claim remain in the economic lanes. The oracle calls no engine
+selector or modeled transition. Premature resolution rejects exactly with `EngineStale`.
+Active-only hints and a deliberately stale caller slot then produce six strict rank-decreasing
+cranks at the same authenticated Clock. Every call frames the decoded Recovery asset and oracle
+profile and byte-frames every portfolio, SPL custody, and unrelated economic accounts. The completed
+Active endpoint enables public stale resolution with another strict mode-rank decrease.
+
+The two-slot owner window is a named finite wait, separate from successful instructions. Its
+penultimate slot rejects unsigned `CloseResolved` with exact `ExpectedSigner` rollback. At the
+deadline, an eight-sweep public schedule requires every success to lower the decoded rank and
+every nonterminal sweep to construct progress; only exact-rollback `EngineNonProgress` is an
+admissible rejection. The independent stock/encumbrance censuses and per-owner payout ceilings
+run after each continuation. Final payouts must equal **[1055, 1045, 1, 17, 123]**, including the
+frozen five-atom gain, with zero engine/SPL vault, unchanged supply, zero OI, and strict economic
+terminal predicates for all five owners. Every completed-account retry rejects exactly. Compiled
+trace validation excludes out-of-band economic mutation and any owner/admin signature or fee payer.
+
+Net-new coverage is the lifecycle-dependent accrual prerequisite while real Recovery exposure
+survives into resolved settlement. INV-071's completed-hint witness has two Active assets and stops
+at resolution; INV-073's reserve-owner terminal exit starts from settled DrainOnly exposure;
+INV-078's resource-failure suffix starts after owner forfeits clear the legs. Existing INV-082
+Recovery-only recertification ends in an owner-signed reduction, and its stale-exposure terminal
+matrix has no frozen Recovery leg. None supplies this mixed-lifecycle frozen-state frame plus
+keeper-only, exact-value terminal continuation in both base/non-base placements.
+
+Limits: two fixed AuthMark exposures, one no-CPI opening route, one claimant/close-rail schedule,
+zero funding/fees, no backing/insurance failure, no close/reset overlap, no partial receipt, and
+no supported-maximum claim. Asset Recovery is not market `Recovery`/`FinalizeRecovery`. Five
+portfolios remain materialized and the asset remains Recovery; deletion, provider cleanup,
+retirement/restart, arbitrary histories and whole-transition classifier fidelity stay open.
+No engine proof is run or invariant/method status promoted.
+
+Validation uses the supplied cached default-feature SBF `230b6db1` and the README-documented
+deployed matcher `50e53226`, linked only at the ignored fixture artifact path. No SBF is rebuilt.
+Preliminary runs exposed test API mismatches and missing/unstripped matcher setup, not a production
+failure. Exact verification commands from the isolated worktree:
+
+```sh
+export PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p tests/fixtures/auth_matcher/target/deploy
+ln -sfn /home/anatoly/percolator-prog-pr427-conformance-20260908/tests/fixtures/auth_matcher/target/deploy/auth_matcher.so tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu inv_082_state_indexed_liveness_theorem::v16_program_mixed_recovery_active_terminal_accrual_has_bounded_public_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_082_state_indexed_liveness_theorem::v16_program_public_liveness_survives_bad_hints_retained_route_and_substitutions -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_071_crank_progress::v16_program_completed_terminal_hint_replay_preserves_remaining_crank_rank -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_drain_only_stale_exit_does_not_require_reserve_or_counterparty_signers -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_082_state_indexed_liveness_theorem.rs
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+Results on wrapper base `4c892dad` / engine `495a5590`: the new selector is collected and passes
+**1/1**, with **2 worlds, 46 suffix transactions, 32 strict progress calls, 14 exact rejections,
+10 economically completed portfolios, and 197,910 maximum suffix CU**. Each world uses six accrual
+calls, one resolution and nine resolved continuations. All three listed existing selectors pass
+individually **1/1**. Scoped rustfmt, unstaged/staged whitespace checks and the final commit check
+pass. The fixture's construction is outside the reported suffix CU maximum; no broad suite,
+SBF rebuild, engine proof or status promotion is claimed.
+
 ### INV-086 generator and oracle boundaries
 
 Traceability only: INV-086 remains `OPEN_EVIDENCE` / `SAMPLED`, audit `REOPENED`, and M/R
