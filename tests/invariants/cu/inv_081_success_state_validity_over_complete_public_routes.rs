@@ -30,6 +30,9 @@ use crate::support::fuzz_model::{
     run_scenario, Action, HintMode, Scenario, SmallMarketConfig, TradeRoute,
 };
 
+#[path = "inv_081_fee_resolution_atomicity.rs"]
+mod fee_resolution_atomicity;
+
 #[derive(Clone, Copy)]
 struct Inv081CompositionOwner {
     layer: &'static str,

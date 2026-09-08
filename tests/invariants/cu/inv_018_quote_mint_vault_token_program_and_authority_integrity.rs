@@ -5220,6 +5220,13 @@ pub(super) fn inv018_create_public_spl_mint(
 }
 
 pub(super) fn inv018_public_spl_market(decimals: u8) -> V16CuEnv {
+    inv018_public_spl_market_with_params(decimals, V16CuMarketParams::default())
+}
+
+pub(super) fn inv018_public_spl_market_with_params(
+    decimals: u8,
+    params: V16CuMarketParams,
+) -> V16CuEnv {
     let mut svm = LiteSVM::new();
     let program_id = percolator_prog::id();
     svm.add_program(
@@ -5243,7 +5250,6 @@ pub(super) fn inv018_public_spl_market(decimals: u8) -> V16CuEnv {
     let mint = inv018_create_public_spl_mint(&mut svm, &payer, admin.pubkey(), decimals);
 
     let market = Keypair::new();
-    let params = V16CuMarketParams::default();
     system_create_account_for_test(
         &mut svm,
         &payer,

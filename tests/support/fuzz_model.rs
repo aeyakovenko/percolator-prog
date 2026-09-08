@@ -1894,7 +1894,7 @@ fn assert_source_claim_bound_attribution(
     Ok(())
 }
 
-fn assert_reservation_encumbrance_census(
+pub(crate) fn assert_reservation_encumbrance_census(
     label: &str,
     group: &MarketGroupV16,
     portfolios: &[PortfolioAccountV16],
@@ -2213,7 +2213,7 @@ fn bound_num_to_atoms_ceil(value: u128, label: &str) -> Result<u128, String> {
     }
 }
 
-fn assert_market_stock_census(
+pub(crate) fn assert_market_stock_census(
     label: &str,
     group: &MarketGroupV16,
     market_data: &[u8],
