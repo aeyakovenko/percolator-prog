@@ -5205,8 +5205,8 @@ or simultaneous source-lien maxima. The `CloseResolved` CU registry pointer now 
 the ordinary custody witness above remains separate evidence. Invariant status is unchanged.
 
 Cells still lacking successful maximum-shape evidence include full-shape abandoned-asset force
-close, rewarded maintenance at full active/source shape, maximum-work B settlement, and combined
-maximum-N/feed/backlog/terminal occupancy, plus the remaining direct-close partitions. The
+close, rewarded maintenance at full active/source shape, remaining B work/budget products, and
+combined maximum-N/feed/backlog/terminal occupancy, plus the remaining direct-close partitions. The
 owner-window increment below narrows only its named signature boundary. A reverted CU
 burn is not a persistent DoS under `scripts/loop.md`; a kept INV-077 result must show successful
 bounded progress for a required owner/keeper continuation at the stated shape. Metadata repair and
@@ -5235,8 +5235,8 @@ rejection-only coverage. The next wrapper/CU owner is
 `cu/inv_077_bounded_work_and_maximum_shape_compute.rs`; the existing public construction and
 checkpoint helpers are `setup_max_source_live_pair` and `terminal_accrual_attempt_bound` in
 `tests/v16_cu.rs`. This reverted call alone establishes neither a persistent DoS nor the absence
-of another required continuation. Full-shape force close, maximum-work B, combined occupancy and
-the remaining owner-window/lien partitions above stay open.
+of another required continuation. Full-shape force close, unmeasured B work/budget products,
+combined occupancy and the remaining owner-window/lien partitions above stay open.
 
 Additional no-reward maintenance evidence, 2026-09-08:
 [`v16_program_public_full_shape_maintenance_has_bounded_continuation`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
@@ -5268,6 +5268,35 @@ transaction CU** (`ProgramFailedToComplete`, program log 1,399,676 of 1,399,700 
 It committed no successful force-close progress, so the prototype was removed. This is a precise
 readiness limit for that call, not a persistent-DoS finding or proof that no bounded alternative
 exists. Full-shape force close and rewarded maintenance remain open alongside the other gaps above.
+
+Additional full-shape B-settlement evidence, 2026-09-08:
+[`v16_program_public_full_shape_b_backlog_has_bounded_settlement`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
+constructs fourteen active long legs and twenty-eight value-bearing, unliened source records through
+public matched trades and authenticated marks. Source-local Recovery disposition leaves two B loss
+atoms pending on **every** leg at once; all fourteen assets are frozen in Recovery while the market
+remains Live. Twenty-eight hint-free `PermissionlessCrank` calls without an owner signature
+discharge that backlog at **470,575 CU maximum**, below the 1,375,000 guardrail and ordinary
+1,400,000 transaction ceiling. Construction is excluded from that suffix maximum.
+
+Each call strictly reduces the independently decoded B-index rank, changes exactly one leg's B
+snapshot/remainder/stale fields, and settles exactly one loss atom from the persisted weight/index
+equation. The corresponding source record loses exactly one claim atom; unrelated records remain
+byte-identical. All fourteen active legs and twenty-eight positive source records remain occupied
+throughout. PnL falls from **70 to 42 atoms** while capital stays at **10,000**; market asset state,
+aggregate capital, insurance, vault accounting, all counterparties/checkpoint accounts, mint and
+SPL vault are framed exactly. All B targets are reached in 28 calls and B-stale state/count clear.
+This is required settlement progress, not a terminal payout or a rejection-only CU measurement.
+
+The exact test passes on rebased wrapper `baeabe01` / engine `495a5590`, preserving the INV-054
+and INV-071 additions, using a private copy of the existing default-feature SBF
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+Production sources and Cargo manifests/lock still match its recorded `7d6d4cfb` baseline.
+Host tests are compiled from this worktree with read-only cached dependencies; no SBF rebuild,
+engine proof or status promotion is claimed. This narrows B coverage to the full active/source caps
+with fourteen simultaneous long-side obligations and a one-atom public budget. Opposite-side,
+larger-budget/amount, simultaneous-lien, maximum-N, live-feed/accrual-backlog and terminal-occupancy
+products remain unmeasured here, as do the separate rewarded-maintenance and full-shape force-close
+gaps above.
 
 ### INV-082 implementation-readiness
 

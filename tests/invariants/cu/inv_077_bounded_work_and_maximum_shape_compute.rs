@@ -45,6 +45,9 @@
 //! No-reward `SyncMaintenanceFee` retains that full active/source shape across two nonzero charges:
 //! public per-asset accrual consumes a strict pending-slot rank, while invalid account roles,
 //! deferred fee attempts, and same-slot retries preserve exact account frames.
+//! A separate public B history retains fourteen active legs and twenty-eight value-bearing
+//! source records while all fourteen legs owe two loss atoms each. Twenty-eight one-atom,
+//! hint-free cranks strictly consume that backlog without changing exposure or custody.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -5154,6 +5157,338 @@ fn v16_program_permissionless_settle_b_is_bounded_and_live() {
     assert!(
         g_after_first.vault >= g_after_first.c_tot + g_after_first.insurance,
         "senior conservation after permissionless B settlement"
+    );
+}
+
+#[test]
+fn v16_program_public_full_shape_b_backlog_has_bounded_settlement() {
+    const ASSETS: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const LIMIT: u64 = 1_375_000;
+    const CAPITAL: u128 = 10_000;
+    const SIZE_Q: i128 = (POS_SCALE / 50) as i128;
+    assert_certified_engine_pin("public full-shape B backlog");
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: ASSETS,
+        public_b_chunk_atoms: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.svm.warp_to_slot(1);
+    for asset in 0..ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(asset, 1, 100);
+    }
+    let owner = Keypair::new();
+    let target = env.create_portfolio(&owner);
+    env.deposit(&owner, target, CAPITAL);
+    let checkpoint_owner = Keypair::new();
+    let checkpoint = env.create_portfolio(&checkpoint_owner);
+    let checkpoint_marks = |env: &mut V16CuEnv, slot: u64, price: u64| {
+        env.svm.warp_to_slot(slot);
+        for asset in 0..ASSETS {
+            env.push_auth_mark_for_asset_as_admin(asset, slot, price);
+            env.crank(
+                checkpoint,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(asset),
+                },
+            );
+        }
+    };
+
+    // A completed short episode leaves the opposite fourteen value-bearing source records.
+    let peer_owner = Keypair::new();
+    let peer = env.create_portfolio(&peer_owner);
+    env.deposit(&peer_owner, peer, CAPITAL);
+    for asset in 0..ASSETS {
+        env.try_trade_asset_with_cu(asset, &owner, target, &peer_owner, peer, -SIZE_Q, 100, 0)
+            .unwrap_or_else(|error| panic!("historical short open {asset}: {error}"));
+    }
+    checkpoint_marks(&mut env, 2, 50);
+    let cert_current = |env: &V16CuEnv, portfolio: Pubkey| {
+        let group = env.market_state().1;
+        let account = env.portfolio_state(portfolio);
+        let cert = health_cert(&account);
+        cert.valid
+            && cert.cert_oracle_epoch == group.oracle_epoch
+            && cert.cert_funding_epoch == group.funding_epoch
+            && cert.cert_risk_epoch == group.risk_epoch
+            && cert.cert_asset_set_epoch == group.asset_set_epoch
+            && cert.active_bitmap_at_cert == active_bitmap(&account)
+    };
+    for _ in 0..2 * usize::from(ASSETS) + 2 {
+        if [target, peer]
+            .into_iter()
+            .all(|key| cert_current(&env, key))
+        {
+            break;
+        }
+        for portfolio in [target, peer] {
+            if !cert_current(&env, portfolio) {
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 2,
+                        observations: vec![],
+                    },
+                );
+            }
+        }
+    }
+    assert!([target, peer]
+        .into_iter()
+        .all(|key| cert_current(&env, key)));
+    for asset in 0..ASSETS {
+        env.try_trade_asset_with_cu(asset, &owner, target, &peer_owner, peer, SIZE_Q, 50, 0)
+            .unwrap_or_else(|error| panic!("historical short exit {asset}: {error}"));
+    }
+    let historical = env.portfolio_state(target);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &historical
+    )));
+    assert_eq!(historical.pnl.get(), i128::from(ASSETS));
+    assert_eq!(
+        historical
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        usize::from(ASSETS)
+    );
+    checkpoint_marks(&mut env, 3, 100);
+
+    let mut counterparties = Vec::new();
+    for asset in 0..ASSETS {
+        let loss_owner = Keypair::new();
+        let loss = env.create_portfolio(&loss_owner);
+        env.deposit(&loss_owner, loss, 2);
+        env.try_trade_asset_with_cu(asset, &owner, target, &loss_owner, loss, SIZE_Q, 100, 0)
+            .unwrap_or_else(|error| panic!("B cohort long open {asset}: {error}"));
+        counterparties.push((loss_owner, loss));
+    }
+    for (slot, price) in [(4, 200), (5, 300)] {
+        checkpoint_marks(&mut env, slot, price);
+        env.crank(
+            target,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: vec![],
+            },
+        );
+    }
+    assert_eq!(
+        env.portfolio_state(target).pnl.get(),
+        5 * i128::from(ASSETS)
+    );
+    for (asset, (_, loss)) in counterparties.iter().enumerate() {
+        env.crank(
+            *loss,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 5,
+                observations: crank_observations(asset as u16),
+            },
+        );
+    }
+
+    env.svm.warp_to_slot(6);
+    let admin = env.admin.insecure_clone();
+    for (asset, (loss_owner, loss)) in counterparties.iter().enumerate() {
+        env.try_shutdown_asset_with_authority(&admin, asset as u16, 6)
+            .expect("public shutdown before side-local residual disposition");
+        let cu = env.forfeit_recovery_leg_with_cu(loss_owner, *loss, asset as u16, 1);
+        assert_cu_within("all-leg B public first booking", cu, LIMIT);
+        assert_eq!(
+            close_progress(&env.portfolio_state(*loss)).residual_remaining,
+            1
+        );
+        let cu = env
+            .crank_if_actionable(
+                *loss,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 6,
+                    observations: vec![],
+                },
+            )
+            .expect("public close continuation must book the second loss atom");
+        assert_cu_within("all-leg B public second booking", cu, LIMIT);
+        assert_eq!(
+            close_progress(&env.portfolio_state(*loss)).residual_remaining,
+            0
+        );
+    }
+
+    let before = env.portfolio_state(target);
+    let group_before = env.market_state().1;
+    assert_eq!(group_before.mode, MarketModeV16::Live);
+    assert_eq!(group_before.config.max_portfolio_assets, ASSETS);
+    assert_eq!(group_before.config.public_b_chunk_atoms, 1);
+    assert_eq!(
+        env.portfolio_state(peer).capital.get(),
+        CAPITAL - u128::from(ASSETS)
+    );
+    let source_count = |account: &PortfolioAccountV16| {
+        account
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied() && source.source_claim_bound_num.get() > 0)
+            .count()
+    };
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&before)),
+        u32::from(ASSETS)
+    );
+    assert_eq!(
+        source_count(&before),
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+    );
+    assert!(before
+        .source_domains
+        .iter()
+        .all(|source| source.source_claim_liened_num.get() == 0));
+    let targets: Vec<_> = (0..ASSETS)
+        .map(|asset| group_before.assets[usize::from(asset)].b_long_num)
+        .collect();
+    let rank = |env: &V16CuEnv| -> u128 {
+        let state = env.portfolio_state(target);
+        (0..ASSETS)
+            .map(|asset| {
+                targets[usize::from(asset)]
+                    .checked_sub(active_leg_for_asset(&state, usize::from(asset)).b_snap)
+                    .expect("B settlement cannot exceed its committed target")
+            })
+            .sum()
+    };
+    for asset in 0..ASSETS {
+        let leg = active_leg_for_asset(&before, usize::from(asset));
+        assert_eq!(
+            group_before.assets[usize::from(asset)].lifecycle,
+            AssetLifecycleV16::Recovery
+        );
+        assert_eq!(leg.side, SideV16::Long);
+        assert_eq!(leg.basis_pos_q, SIZE_Q);
+        assert!(targets[usize::from(asset)] > leg.b_snap);
+        let pending_num = (targets[usize::from(asset)] - leg.b_snap)
+            .checked_mul(leg.loss_weight)
+            .and_then(|value| value.checked_add(leg.b_rem))
+            .expect("bounded public B liability numerator");
+        assert_eq!(pending_num / percolator::SOCIAL_LOSS_DEN, 2);
+        assert_eq!(pending_num % percolator::SOCIAL_LOSS_DEN, 0);
+    }
+    let initial_rank = rank(&env);
+    let framed_keys: Vec<_> = counterparties
+        .iter()
+        .map(|(_, key)| *key)
+        .chain([peer, checkpoint, env.vault, env.mint])
+        .collect();
+    let frames: Vec<_> = framed_keys
+        .iter()
+        .map(|key| env.svm.get_account(key).unwrap())
+        .collect();
+    let mut calls = 0;
+    let mut max_cu = 0;
+    assert_ne!(env.payer.pubkey(), owner.pubkey());
+    while rank(&env) != 0 && calls < 2 * usize::from(ASSETS) {
+        let old_rank = rank(&env);
+        let old = env.portfolio_state(target);
+        let cu = env
+            .crank_if_actionable(
+                target,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 6,
+                    observations: vec![],
+                },
+            )
+            .expect("every pending B obligation must have a public continuation");
+        assert_cu_within("all-leg public B settlement", cu, LIMIT);
+        assert!(rank(&env) < old_rank, "every call must consume B work");
+        let after = env.portfolio_state(target);
+        assert_eq!(active_bitmap(&after), active_bitmap(&before));
+        assert_eq!(after.capital, before.capital);
+        assert_eq!(source_count(&after), source_count(&before));
+        assert_eq!(old.pnl.get() - after.pnl.get(), 1);
+        let mut changed_asset = None;
+        for asset in 0..ASSETS {
+            let old_leg = active_leg_for_asset(&old, usize::from(asset));
+            let new_leg = active_leg_for_asset(&after, usize::from(asset));
+            if old_leg == new_leg {
+                continue;
+            }
+            assert!(
+                changed_asset.replace(asset).is_none(),
+                "one bounded B leg per call"
+            );
+            let delta = new_leg.b_snap.checked_sub(old_leg.b_snap).unwrap();
+            assert!(delta > 0);
+            let settled_num = old_leg
+                .loss_weight
+                .checked_mul(delta)
+                .and_then(|value| value.checked_add(old_leg.b_rem))
+                .unwrap();
+            assert_eq!(settled_num / percolator::SOCIAL_LOSS_DEN, 1);
+            assert_eq!(new_leg.b_rem, settled_num % percolator::SOCIAL_LOSS_DEN);
+            assert_eq!(
+                new_leg.b_stale,
+                new_leg.b_snap < targets[usize::from(asset)]
+            );
+            let mut expected = old_leg;
+            expected.b_snap = new_leg.b_snap;
+            expected.b_rem = new_leg.b_rem;
+            expected.b_stale = new_leg.b_stale;
+            assert_eq!(
+                new_leg, expected,
+                "B settlement must frame exposure and K/F"
+            );
+        }
+        let charged_domain = 2 * u32::from(changed_asset.expect("one B snapshot must advance")) + 1;
+        for (old_source, new_source) in old.source_domains.iter().zip(&after.source_domains) {
+            if old_source.domain.get() != charged_domain {
+                assert_eq!(
+                    new_source, old_source,
+                    "unrelated source record must be framed"
+                );
+            } else {
+                let mut expected = *old_source;
+                expected.source_claim_bound_num = percolator::V16PodU128::new(
+                    old_source
+                        .source_claim_bound_num
+                        .get()
+                        .checked_sub(BOUND_SCALE)
+                        .unwrap(),
+                );
+                assert_eq!(
+                    *new_source, expected,
+                    "exactly one source-claim atom is consumed"
+                );
+            }
+        }
+        let group_after = env.market_state().1;
+        assert_eq!(group_after.mode, group_before.mode);
+        assert_eq!(group_after.assets, group_before.assets);
+        assert_eq!(group_after.c_tot, group_before.c_tot);
+        assert_eq!(group_after.insurance, group_before.insurance);
+        assert_eq!(group_after.vault, group_before.vault);
+        assert_eq!(group_after.vault, u128::from(env.token_amount(env.vault)));
+        assert!(group_after.vault >= group_after.c_tot + group_after.insurance);
+        assert_eq!(
+            framed_keys
+                .iter()
+                .map(|key| env.svm.get_account(key).unwrap())
+                .collect::<Vec<_>>(),
+            frames
+        );
+        calls += 1;
+        max_cu = max_cu.max(cu);
+    }
+    assert_eq!(rank(&env), 0, "all fourteen B obligations must terminate");
+    assert_eq!(calls, 2 * usize::from(ASSETS));
+    let after = env.portfolio_state(target);
+    assert_eq!(after.pnl.get(), 3 * i128::from(ASSETS));
+    assert_eq!(after.capital.get(), CAPITAL);
+    assert_eq!(after.b_stale_state, 0);
+    assert_eq!(env.market_state().1.b_stale_account_count, 0);
+    println!(
+        "INV-077 public full-shape B: legs={ASSETS}, sources={}, loss_atoms={}->0, rank={initial_rank}->0, calls={calls}, max_cu={max_cu}",
+        source_count(&before), 2 * ASSETS
     );
 }
 
