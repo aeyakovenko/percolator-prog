@@ -5426,6 +5426,40 @@ larger-budget/amount, simultaneous-lien, maximum-N, live-feed/accrual-backlog an
 products remain unmeasured here, as do the separate rewarded-maintenance and full-shape force-close
 gaps above.
 
+### INV-078 resource-failure economic completion
+
+The existing [SF-078] `v16_program_recovery_resource_failure_lattice_preserves_public_exit`
+now extends its four absent/expired-backing x absent/insufficient-insurance worlds past leg
+cleanup. The public price, bankruptcy, asset-Recovery and owner-forfeit prefix is retained, not
+duplicated. From each resulting funded checkpoint, `ResolveStalePermissionless` succeeds at the
+authenticated stale deadline; both unsigned payout entrypoints reject exactly during the owner
+window. At the exact permissionless payout deadline, alternating empty-hint `PermissionlessCrank`
+and `CloseResolved` calls economically complete all five originally funded portfolios in one call
+each. Both entrypoints then reject every completed account with exact rollback.
+
+The suffix oracle freezes each checkpoint's capital with zero PnL/reserved PnL. Every payout
+prefix checks every owner's remaining capital and actual destination SPL balance against that
+frozen claim, including the bankrupt zero-payout account and three untouched funded peers. The
+independent stock/encumbrance census, exact engine/SPL vault balance and unchanged supply compose
+the original resource-partition checks. Terminal accounts have no financial balance, active leg,
+occupied source record, unfinished close/receipt or stale/lock work. Compiled trace validation
+checks writable-account/economic-lamport rollback and excludes out-of-band economic mutation;
+only a keeper fee payer signs the suffix, with no owner or market-authority signature.
+
+At rebased base `ff262c38` / engine `495a5590`, the exact affected test passes **4 worlds, 72 suffix
+transactions, 24 successes and 48 rejections**, with **20 terminal account dispositions** and a
+maximum suffix cost of **184,747 CU**. Host tests use read-only cached dependencies and private
+copies of the existing default-feature SBF `230b6db1` and matcher `50e53226`; no SBF rebuild or
+engine proof is claimed. Each world retains five materialized portfolios and 5-7 vault atoms
+outside the completed account claims. Portfolio deletion, residue classification/drain, and
+asset/market retirement are not claimed as permissionless economic progress.
+
+This is a bounded post-forfeit completion witness, not a setup-to-exit entitlement oracle or
+signer-free recovery from the earlier exposed state. Owner consent to the existing forfeits and
+the configured authenticated Clock waits remain prerequisites. Independent claimant/route orders,
+other sides, overlapping lifecycle failures, junior/partial receipts, arbitrary resource histories
+and maximum shapes remain open. No invariant or verification-method status is promoted.
+
 ### INV-082 implementation-readiness
 
 Finding-blind review, 2026-09-07: the next liveness increment is a bounded environmental product,
