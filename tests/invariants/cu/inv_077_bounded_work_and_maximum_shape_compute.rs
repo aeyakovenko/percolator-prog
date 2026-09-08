@@ -52,12 +52,150 @@
 //! bounded matched exits, complete claim conversion, and successful same-portfolio readmission.
 //! A fresh claim in a previously unused domain then settles through strict accrual/economic
 //! rank descent and reaches exact owner payouts without reviving the old source credits.
+//! The active-leg-cap AuthMark refresh witness opens every supported portfolio leg, stages a
+//! pending authenticated mark on every active asset, and requires bounded public cranks with a
+//! complete observation tail to apply every mark and certify the account below the transaction
+//! ceiling.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_active_leg_cap_pending_auth_marks_refresh_with_bounded_public_crank() {
+    const N: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+    const MARK: u64 = 1_000_000;
+    const NEXT_MARK: u64 = 1_010_000;
+    const OPEN_SLOT: u64 = 1;
+    const CRANK_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N as u16, 10_000, 10_000, 10_000);
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index as u16, OPEN_SLOT, MARK);
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000_000);
+    for asset_index in 0..N {
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            asset_index as u16,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            POS_SCALE as i128,
+            MARK,
+            0,
+        );
+    }
+    let long_before = env.portfolio_state(long_account);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&long_before)),
+        N as u32,
+        "setup must publicly open every supported portfolio leg"
+    );
+
+    env.svm.warp_to_slot(CRANK_SLOT);
+    for asset_index in 0..N {
+        env.push_auth_mark_for_asset_as_admin(asset_index as u16, CRANK_SLOT, NEXT_MARK);
+    }
+    let (_, pending_group) = env.market_state();
+    for asset_index in 0..N {
+        assert_eq!(
+            pending_group.assets[asset_index].effective_price, MARK,
+            "PushAuthMark stages asset {asset_index} without applying it"
+        );
+        assert!(
+            pending_group.assets[asset_index].slot_last < CRANK_SLOT,
+            "asset {asset_index} has pending authenticated mark work"
+        );
+    }
+
+    let observations: Vec<_> = (0..N)
+        .map(|asset_index| CrankObservationHint {
+            asset_index: asset_index as u16,
+            oracle_accounts: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: CRANK_SLOT,
+                observations,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+            ],
+            &[],
+        )
+        .expect("all-pending AuthMark observations must refresh at the active-leg cap");
+    const ALL_PENDING_AUTH_MARK_REFRESH_CU_LIMIT: u64 = 900_000;
+    assert!(
+        refresh_cu <= ALL_PENDING_AUTH_MARK_REFRESH_CU_LIMIT,
+        "all-active pending AuthMark refresh CU {refresh_cu} exceeded limit \
+         {ALL_PENDING_AUTH_MARK_REFRESH_CU_LIMIT}"
+    );
+
+    let (_, refreshed_group) = env.market_state();
+    for asset_index in 0..N {
+        assert_eq!(
+            refreshed_group.assets[asset_index].effective_price, NEXT_MARK,
+            "public crank applied pending mark for asset {asset_index}"
+        );
+    }
+    assert_eq!(
+        health_cert(&env.portfolio_state(long_account)).cert_oracle_epoch,
+        0,
+        "the first selected crank step is market catch-up, not account certification"
+    );
+
+    let observations: Vec<_> = (0..N)
+        .map(|asset_index| CrankObservationHint {
+            asset_index: asset_index as u16,
+            oracle_accounts: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let certify_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: CRANK_SLOT,
+                observations,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+            ],
+            &[],
+        )
+        .expect("fresh max-shape account certification must remain bounded");
+    assert_cu_within(
+        "active-leg-cap account certification",
+        certify_cu,
+        1_375_000,
+    );
+    let (_, certified_group) = env.market_state();
+    assert_eq!(certified_group.oracle_epoch, refreshed_group.oracle_epoch);
+    assert_eq!(
+        health_cert(&env.portfolio_state(long_account)).cert_oracle_epoch,
+        certified_group.oracle_epoch,
+        "max-shape account certifies after every active pending mark is observed"
+    );
+    println!(
+        "INV-077 active-leg-cap AuthMark refresh: assets={N}, refresh={refresh_cu}, certify={certify_cu}"
+    );
+}
 
 #[test]
 fn v16_program_max_source_conversion_and_owner_exit_are_bounded() {
