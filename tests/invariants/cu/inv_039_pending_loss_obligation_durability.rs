@@ -31,6 +31,9 @@ fn v16_program_pending_obligation_blocks_close_then_releases() {
 
 use super::*;
 
+#[path = "inv_039_pending_loss_transfer_route.rs"]
+mod transfer_route;
+
 const ATTRIBUTION_DEPOSITS: [u128; 5] = [200_000, 180_000, 300_000, 250_000, 777];
 const ATTRIBUTION_PRICE_MOVES: [i128; 2] = [30_000, 20_000];
 
