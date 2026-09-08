@@ -4096,10 +4096,93 @@ git diff --check
 
 This is bounded public-SBF/metamorphic evidence, not status promotion, generic randomized F,
 or another engine proof. The market remains Live with zero funding, maintenance and trade fees;
-the original debtor and replacement position are not claimed economically terminal. Other source
-ratios/sides, principal timing before cohort settlement, multiple junior owners, provider and
-insurance flows, source expiry/impairment, risk admission, failed-call schedules, Recovery/receipts,
-portfolio recreation, multi-asset/max-shape products and shared history adapters remain open.
+the original debtor and replacement position are not claimed economically terminal. The bounded
+pre-settlement timing/retry gap is reduced by the addition below. Other source ratios/sides,
+multiple junior owners, provider and insurance flows, source expiry/impairment, risk admission,
+generic failed-call schedules, Recovery/receipts, portfolio recreation, multi-asset/max-shape
+products and shared history adapters remain open.
+
+### INV-027 unsettled principal prefixes
+
+The 2026-09-08 addition, rebased onto `3c5c4092c26cf14bf26abcbeffa43eaae192d700`, adds
+`v16_program_unsettled_principal_prefixes_preserve_entitlement_through_retries` in the same
+[stateful owner](stateful/inv_027_protected_principal_seniority.rs). This is a bounded public
+INV-024/027 history, not another engine proof or a status promotion. It reuses the existing
+half-backed fixture and its transaction observer instead of copying INV-031's conversion setup.
+
+The **16 histories** cross all four same-transport opening/closing routes, both existing senior
+deposit sizes, and two exit timings. Senior principal enters and a one-atom partial withdrawal
+lands with one original losing owner still in the stale cohort and zero source backing. Further
+winner settlements and the original loser's settlement then create the same half-backed claim.
+The remaining senior capital exits either between a rejected bounded conversion and its successful
+retry, or after junior payout. A rejected over-entitlement payout also precedes the exact payout.
+The existing 24-history owner begins its moving-principal schedules only after cohort settlement;
+INV-031 owns the cap-rejection boundary but keeps unrelated principal fixed. Neither checks this
+pending-cohort prefix and cross-owner retry relation. INV-024's solvent payout-prefix owner is
+unchanged.
+
+The shared history oracle now checks **all five owners** after every attempted transaction:
+separate capital, PnL, actual destination SPL totals, owner/incarnation, and owner-local source-claim
+face/domain. It attributes the original debtor's remaining negative PnL to that debtor only.
+Source face/fresh/spent backing and custody residual are checked before as well as after losing
+settlement. External source debits, engine/SPL custody, token supply, unrelated byte frames and
+INV-025 stock/encumbrance censuses remain enforced. Capital, payout and negative-PnL observation
+transfers preserve their respective sums but fail the owner oracle; no program state is injected.
+
+Every expected rejection must be the named wrapper error, contain exactly one public trace step,
+and preserve the unchanged history plus both markets, all primary/foreign portfolios, backing
+ledger, token accounts, matcher contexts and economic-account lamports. The public trace also
+requires exact writable-account rollback and zero program/token deltas, excluding only SVM payer
+fees. A valid conversion/payout follows each rejection without resetting or reseeding the ledger.
+Public fixture initialization deposits are inputs and remain outside the checked history count.
+
+This reduces only the fixed pre-settlement deposit/split-exit and two-error schedule gap. It does
+not cover arbitrary deposit/withdrawal partitions, multiple junior claimants, alternate source
+ratios/sides, withdrawal/close switching, fees/funding, provider/insurance flows, source expiry or
+impairment, Recovery/receipts, terminal debtor clearance or shared INV-081/086 history adapters.
+The existing `invariant_status.tsv` and special-method gates are unchanged.
+
+**Focused validation.** Same-worktree default-feature wrapper and authenticated matcher SBF
+builds pass with platform-tools v1.52 and engine `495a5590`. Their SHA-256 values are respectively
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20` and
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The new test passes **496 checked attempts: 464 successes and 32 exact rejections**, across all
+16 histories. The strengthened existing control passes **24 histories / 672 successes**. Both
+source-roster guards and the authoritative-status guard pass; the new entrypoint is listed exactly
+once. The focused Rust formatting and base-relative whitespace checks pass.
+
+The trace-consumer guard is **not green**: it observes 78 consumers against a stored count of 77.
+The exact same command fails identically in a clean detached worktree at `3c5c4092`, after all
+consumer-validation windows pass. This increment reuses its existing two consumer callsites and
+does not adjust the unrelated inventory guard. The baseline comparison worktree is
+`/tmp/codex-agent-worktrees/inv024-027-owner-interleaving-20260908T004724Z-baseline`.
+An initial host compile caught and corrected an asset-local counter field path before execution;
+the final runtime tests have no failures. No full-suite or engine-proof execution is claimed.
+
+Exact focused commands, with output-log redirection omitted. The working directory is
+`/tmp/codex-agent-worktrees/inv024-027-owner-interleaving-20260908T004724Z`; only the matcher build
+uses `tests/fixtures/auth_matcher` as its working directory. The private host package was cleaned
+after the baseline comparison so final binaries bind this worktree's sources.
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/inv024-027-owner-interleaving-20260908T004724Z-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=6 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+cargo clean --package percolator-prog --profile dev
+cargo build-sbf --tools-version v1.52
+# Working directory: tests/fixtures/auth_matcher
+cargo build-sbf --tools-version v1.52 --sbf-out-dir /tmp/codex-agent-worktrees/inv024-027-owner-interleaving-20260908T004724Z/tests/fixtures/auth_matcher/target/deploy
+# Working directory: worktree root
+cargo test --locked --test v16_program_stateful_fuzz inv_027_protected_principal_seniority::v16_program_unsettled_principal_prefixes_preserve_entitlement_through_retries -- --exact --list
+cargo test --locked --test v16_program_stateful_fuzz inv_027_protected_principal_seniority::v16_program_unsettled_principal_prefixes_preserve_entitlement_through_retries -- --exact --nocapture
+cargo test --locked --test v16_program_stateful_fuzz inv_027_protected_principal_seniority::v16_program_unrelated_principal_histories_do_not_reprice_underbacked_claims -- --exact --nocapture
+cargo test --locked --test v16_cu inv_024_attributed_quote_value_conservation::v16_program_entitlement_effect_roster_is_source_complete -- --exact --nocapture
+cargo test --locked --test v16_cu inv_027_protected_principal_seniority::v16_program_loss_stale_economic_routes_have_a_complete_seniority_disposition -- --exact --nocapture
+cargo test --locked --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence -- --exact --nocapture
+cargo test --locked --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_027_protected_principal_seniority.rs
+git diff --check 3c5c4092c26cf14bf26abcbeffa43eaae192d700
+```
 
 ## Recorded PR135 inventory
 
