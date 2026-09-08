@@ -5623,6 +5623,35 @@ fixed-mark, zero-fee/funding case with quantity `POS_SCALE + 1`, not a new gener
 cross-transport raw-byte equivalence claim. Maker deposits, changing policies/oracles, claims,
 maximum shapes and invariant-status promotion remain outside this increment.
 
+### INV-010/014/036 retained fee terms under policy relaxation
+
+`v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_orders` in
+`stateful/inv_010_out_of_order_safety.rs` retains a bilaterally signed 500-bps trade and a
+500-to-100-bps base-policy reduction from the same prestate. Single and batch no-CPI routes
+cross both landing orders, giving four public worlds. Both requests must land: the lower policy
+does not invalidate the retained trade or replace its explicitly signed fee with the new floor.
+
+Each prefix independently checks the policy sequence, both position epochs and signed positions,
+matched OI, exact per-owner capital, both insurance-domain credits, unchanged SPL custody, and
+token supply. At one `POS_SCALE` and a 1,000,000 price, the retained trade charges each owner
+50,000 atoms. A fresh same-route close signed at 100 bps charges another 10,000 atoms; each owner
+withdraws exactly 99,940,000 atoms and each insurance domain retains 60,000 atoms. All five traced
+suffix instructions succeed in each world, and terminal economic snapshots converge byte-for-byte
+between landing orders within each route, without cache normalization.
+
+This is the successful lower-policy counterpart to the existing retained fee-increase rejection
+and bidirectional stale-control overwrite matrices. It adds one fixed-price, funded Live-market
+test, not CPI coverage, a general fee-history proof, or an invariant-status promotion.
+Verification rebuilt default-feature wrapper SBF `230b6db1` and matcher `50e53226` offline with
+platform-tools v1.52 in the isolated worktree; no production code changed.
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=4 \
+  cargo test --locked --offline --test v16_program_stateful_fuzz inv_010_out_of_order_safety::v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_orders -- --exact --nocapture
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/stateful/inv_010_out_of_order_safety.rs
+git diff --check
+```
+
 ### INV-011 aggregate-cap evidence and F plan
 
 Traceability review, 2026-09-07: the INV-011 M registry now selects

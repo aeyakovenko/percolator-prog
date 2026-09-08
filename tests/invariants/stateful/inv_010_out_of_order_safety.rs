@@ -26,6 +26,11 @@
 //! checks owner capital, positions, authorization epochs, OI, and SPL custody. Only the taker's
 //! documented health-certificate cache is normalized at the open endpoint; a fresh matched close
 //! and both owner withdrawals then converge byte-for-byte within each transport.
+//! `v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_orders` retains a trade and
+//! a lower base-fee policy from the same prestate on single/batch no-CPI routes. Both orders land;
+//! the trade pays its original bilaterally signed fee. Exact capital, insurance-domain, custody,
+//! position, and full owner-exit checks prove the policy reduction neither invalidates retained
+//! consent nor changes its authorized charge. Terminal economic snapshots converge within each route.
 //! `v16_program_authority_handoff_and_retained_policy_obey_both_landing_orders` crosses a retained
 //! market-authority handoff with all eight market/asset-0 policy lanes at low, midpoint, and maximum
 //! valid values. Policy-first permits both authorized requests; handoff-first makes the old
@@ -897,6 +902,160 @@ fn v16_program_taker_deposit_and_retained_trade_commute_across_public_routes() {
                 } else {
                     reference = Some(outcome);
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_orders() {
+    const SIGNED_FEE_BPS: u64 = 500;
+    const LOWER_FEE_BPS: u64 = 100;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+
+    for route in [TradeRoute::NoCpi, TradeRoute::BatchNoCpi] {
+        let mut reference = None;
+        for policy_first in [false, true] {
+            let config = MarketConfig::default();
+            let mut env = V16Svm::new([0xf4; 32], config);
+            env.update_trade_fee_policy(SIGNED_FEE_BPS)
+                .expect("install the policy authorized by both traders");
+            let initial = snapshot(&env);
+            let initial_group = env.primary_market_state().1;
+            let policy_sequence = env.primary_control_sequences(0).trade_fee;
+            let position_epochs =
+                [TAKER, LP].map(|actor| env.primary_portfolio_position_epoch(actor));
+            let supply = env.token_supply_observed();
+            let fee_atoms = |bps: u64| u128::from(config.initial_price) * u128::from(bps) / 10_000;
+            let build_trade = |env: &mut V16Svm, quantity, signed_fee_bps| match route {
+                TradeRoute::NoCpi => env.build_retained_no_cpi_trade_with_fee(
+                    TAKER,
+                    LP,
+                    0,
+                    quantity,
+                    config.initial_price,
+                    signed_fee_bps,
+                ),
+                TradeRoute::BatchNoCpi => env.build_retained_batch_no_cpi_trade_with_fee(
+                    TAKER,
+                    LP,
+                    0,
+                    quantity,
+                    config.initial_price,
+                    signed_fee_bps,
+                ),
+                _ => unreachable!(),
+            };
+            // Retain both signed transactions before either policy or position changes.
+            let trade = build_trade(&mut env, SIZE_Q, SIGNED_FEE_BPS);
+            let policy = env.build_retained_trade_fee_policy(LOWER_FEE_BPS);
+            let requests = if policy_first {
+                [(true, policy), (false, trade)]
+            } else {
+                [(false, trade), (true, policy)]
+            };
+            let mut live_fee_bps = SIGNED_FEE_BPS;
+            let mut charged = 0;
+            let mut traded = false;
+            let mut policy_landed = false;
+            env.begin_public_trace();
+            for (is_policy, request) in requests {
+                env.land_retained(request).unwrap_or_else(|error| {
+                    panic!("{route:?}, policy_first={policy_first}, policy={is_policy}: {error}")
+                });
+                if is_policy {
+                    live_fee_bps = LOWER_FEE_BPS;
+                    policy_landed = true;
+                } else {
+                    charged = fee_atoms(SIGNED_FEE_BPS);
+                    traded = true;
+                    assert!(charged > fee_atoms(LOWER_FEE_BPS));
+                }
+                let (cfg, group) = env.primary_market_state();
+                assert_eq!(cfg.trade_fee_base_bps, live_fee_bps);
+                assert_eq!(
+                    env.primary_control_sequences(0).trade_fee,
+                    policy_sequence + u64::from(policy_landed)
+                );
+                let position = if traded { SIZE_Q } else { 0 };
+                for (index, actor) in [TAKER, LP].into_iter().enumerate() {
+                    let account = env.primary_portfolio(actor);
+                    assert_eq!(
+                        account.capital.get(),
+                        config.actor_deposits[actor] - charged
+                    );
+                    assert_eq!(account.pnl.get(), 0);
+                    assert_eq!(
+                        account.legs[0].basis_pos_q.get(),
+                        if actor == TAKER { position } else { -position }
+                    );
+                    assert_eq!(
+                        env.primary_portfolio_position_epoch(actor),
+                        position_epochs[index] + u64::from(traded)
+                    );
+                }
+                assert_eq!(group.assets[0].oi_eff_long_q, position.unsigned_abs());
+                assert_eq!(group.assets[0].oi_eff_short_q, position.unsigned_abs());
+                assert_eq!(group.c_tot, initial_group.c_tot - 2 * charged);
+                assert_eq!(group.insurance, initial_group.insurance + 2 * charged);
+                for domain in 0..2 {
+                    assert_eq!(
+                        group.insurance_domain_budget[domain],
+                        initial_group.insurance_domain_budget[domain] + charged
+                    );
+                }
+                assert_eq!(group.vault, initial_group.vault);
+                assert_eq!(env.all_token_account_data(), initial.tokens);
+                assert_eq!(env.token_supply_observed(), supply);
+            }
+
+            let close = build_trade(&mut env, -SIZE_Q, LOWER_FEE_BPS);
+            env.land_retained(close)
+                .expect("fresh matched close remains live under the lower fee");
+            let total_fee = charged + fee_atoms(LOWER_FEE_BPS);
+            for actor in [TAKER, LP] {
+                let payout = config.actor_deposits[actor] - total_fee;
+                assert_eq!(env.primary_portfolio(actor).capital.get(), payout);
+                assert_eq!(env.primary_portfolio(actor).legs[0].basis_pos_q.get(), 0);
+                env.withdraw_primary(actor, payout)
+                    .expect("both owners retain their complete fee-adjusted SPL exit");
+                assert_eq!(env.primary_portfolio(actor).capital.get(), 0);
+                assert_eq!(
+                    u128::from(env.token_amount(env.actors[actor].destination_token)),
+                    payout
+                );
+            }
+            let group = env.primary_market_state().1;
+            assert_eq!(group.assets[0].oi_eff_long_q, 0);
+            assert_eq!(group.assets[0].oi_eff_short_q, 0);
+            assert_eq!(group.c_tot, initial_group.c_tot - 2 * USER_DEPOSIT);
+            assert_eq!(group.insurance, initial_group.insurance + 2 * total_fee);
+            for domain in 0..2 {
+                assert_eq!(
+                    group.insurance_domain_budget[domain],
+                    initial_group.insurance_domain_budget[domain] + total_fee
+                );
+            }
+            assert_eq!(
+                group.vault,
+                initial_group.vault - 2 * (USER_DEPOSIT - total_fee)
+            );
+            assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+            assert_eq!(env.token_supply_observed(), supply);
+            let trace = env.finish_public_trace();
+            trace
+                .validate_public_execution()
+                .expect("public fee-policy history");
+            assert_eq!(trace.steps.len(), 5);
+            assert!(trace.steps.iter().all(|step| step.succeeded));
+            let terminal = snapshot(&env);
+            if let Some(expected) = &reference {
+                assert_eq!(
+                    &terminal, expected,
+                    "{route:?}: fee-policy orders must converge"
+                );
+            } else {
+                reference = Some(terminal);
             }
         }
     }
