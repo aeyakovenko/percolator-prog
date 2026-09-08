@@ -4661,6 +4661,32 @@ rejection masks. The test independently prices every signed leg, checks per-pref
 OI, market-insurance, vault/SPL custody and exact rollback for limit-price/fee-cap rejections and
 consumed retries. It is substantive bounded coverage, not a production fix or a randomized F claim.
 
+`v16_program_funded_signed_leg_prefixes_preserve_original_aggregate_limits` adds a distinct
+40-history transaction-prefix product: residual batch lengths 1/3/5, forward/reverse leg order
+(one order for one leg), both alternating-sign orientations, and quantity multipliers at one
+quantum and `POS_SCALE - 1`, `POS_SCALE`, `POS_SCALE + 1`. A signed SPL-backed Deposit and single
+TradeCpi precede each capped batch. Both tightened-cap attempts fail at the final instruction;
+runtime success logs prove the deposit, preceding fill and suffix matcher executed. All 80 rejects
+restore the complete 16-account frame, excluding only the network-fee payer, including actual SPL
+custody, matcher state and wrapper accounts. This extends rollback across earlier instructions,
+not just across the batch's own CPI.
+
+Each history then commits the funded single and a freshly signed full residual batch, whose bytes
+match the originally planned suffix and whose caps are the original aggregate less the observed
+prefix. Independent integer ceilings/floors price signed inputs and decoded matcher fills; each
+committed prefix checks exact quantity/OI, matcher buy-quote ceilings and sell-proceeds floors,
+cumulative slippage/fees, actual per-actor capital debits, insurance/c_tot/vault and complete SPL
+account frames. Dust cases distinguish per-leg rounding from rounding the aggregate once. The
+exact default-feature SBF run passed 80 committed transactions and 176 signed legs; maximum CU
+for rejection/funded-single/residual was 838,551/582,098/269,395 (one residual leg),
+979,311/577,565/422,386 (three), and 1,078,534/571,919/535,246 (five), below the 1,375,000 guardrail.
+This is a finite wrapper coverage increment, not an observed production regression or status
+promotion. Prices stay at manual mark 100, matcher spread at 500 bps, and policy/signed fee at
+100 bps: matcher quote/slippage bounds are not SPL trade transfers or mark-movement claims.
+The residual contains untouched full legs, not a retained partial-fill authorization. Other leg
+counts/permutations, maximum shape, variable marks/fees/backing, environmental interleavings and
+typed randomized/shrinkable histories remain outside this witness.
+
 The remaining F owner should stay in `cu/inv_011_signed_aggregate_economic_bounds.rs`: generalize
 the bounded witness into typed, shrinkable signed-leg/cap histories across supported leg counts and
 orders, quantity/rounding/cap boundaries, residual signatures, collateral/PnL-credit spending
