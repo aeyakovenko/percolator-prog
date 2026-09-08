@@ -7465,6 +7465,92 @@ larger-budget/amount, simultaneous-lien, maximum-N, live-feed/accrual-backlog an
 products remain unmeasured here, as do the separate rewarded-maintenance and full-shape force-close
 gaps above.
 
+### INV-077 source-capacity reclamation
+
+Additional bounded evidence, 2026-09-08:
+[`v16_program_max_source_capacity_reclamation_restores_funded_exit`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
+connects a full historical source table to **successful same-portfolio capacity reuse and funded
+exit**. The public fixture configures fifteen AuthMark assets and starts both funded portfolios
+at fourteen active legs, with twenty-eight value-bearing, unliened LP source records. Fourteen
+matched exits each remove exactly one leg while preserving historical claims, capital, PnL and
+custody. New-asset admission rejects with exact `InvalidInstruction` and complete
+market/portfolio/vault/mint rollback at thirteen legs and again when flat. Thus the rejection is
+not the independent active-leg cap, and flattening alone does not reclaim the source table.
+
+One `ConvertReleasedPnl` consumes the history-derived 28,000-atom claim and clears all twenty-eight
+source slots. The same economic admission, on the same live portfolios with current generation
+guards, then succeeds. A 100-to-101 authenticated mark creates exactly seven new claim atoms in
+previously unused domain 29, not an old historical domain. Thirty public cranks without owner
+signatures consume the spare asset's accrual backlog and settle that value; each call strictly
+decreases pending accrual slots plus distance to the input-derived owner capital/PnL endpoint.
+Old market source-credit records remain unchanged after reclamation. The new leg closes, its
+claim converts, and the two owners withdraw exactly **1,971,993 / 2,028,007 atoms** and delete their
+portfolios. Source occupancy is **28 -> 0 -> 1 -> 0**; final OI, principal, insurance, engine/SPL
+vault balance and materialized portfolio count are zero, with the mint account unchanged.
+
+Net-new coverage is this admission/cleanup/reuse/settlement/exit continuation. Existing INV-077
+cap rejection, flat max-source conversion and full-shape matched exits test the components
+separately; INV-021's ordinary source-claim reuse closes and reinitializes the portfolio instead.
+Here the failed admission becomes executable only after a bounded public disposition, and new
+value reaches a real payout without account replacement or populated program-state injection.
+Every successful suffix call fits the 1,375,000 guardrail under the ordinary 1,400,000 transaction
+ceiling. This is a successful bounded escape for the stated history, not rejection-only or
+universal persistent-DoS evidence.
+
+| Measured suffix route | Calls | Maximum CU |
+| --- | ---: | ---: |
+| Historical matched exit | 14 | 802,258 |
+| Full-table claim conversion/reclamation | 1 | 712,074 |
+| Previously rejected admission | 1 | 120,757 |
+| Authenticated mark | 1 | 6,064 |
+| Strictly progressing settlement crank | 30 | 102,871 |
+| New matched exit | 1 | 157,168 |
+| New claim conversion | 1 | 73,432 |
+| Owner withdrawal | 2 | 43,455 |
+| Portfolio close | 2 | 26,540 |
+
+There are 53 measured successful suffix transactions and two exact rejected admissions.
+The shared construction is excluded from these CU maxima. The rejection sender preserves exact
+economic account frames and excludes CU-exhaustion errors, but does not expose rejection CU as a
+typed return value. **INV-077 and evidence 423 remain OPEN.** Reuse materializes only one new domain
+after full reclamation; this does not prove future-domain reservation safety while other history
+is still growing, a second complete table refill, simultaneous liens, native quote/418,
+maximum-N/feed products, Recovery/receipts, or arbitrary schedules. Fees and funding are zero;
+matched exits, conversion, withdrawal and deletion require the cooperating owners' signatures.
+
+Verification is on rebased base `79597fc6847d15736398a4341e6b0da6a2696179`, engine `495a5590`, using
+the requested cached default-feature program SBF SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20` and a private copy of the existing
+auth matcher SHA-256 `397cdded3ba64b5e03ea54498a160878dcc81dc844222f3ffbdc4e6210dd2936`.
+Neither artifact was rebuilt. The original checkout, production sources and Cargo manifests/lock
+are unchanged; `tests/v16_cu.rs` was touched for host recompilation only, without a content change.
+
+All commands below use this exact environment (passed with `env` on each Cargo invocation):
+
+```sh
+export PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+touch tests/v16_cu.rs tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::v16_program_max_source_capacity_reclamation_restores_funded_exit -- --exact --nocapture --list
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::v16_program_max_source_capacity_reclamation_restores_funded_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::v16_program_max_source_conversion_and_owner_exit_are_bounded -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::v16_attack_source_domain_growth_past_wrapper_bound_rejects_at_admission_atomically -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::v16_attack_public_14_leg_28_source_domain_exit_stays_bounded -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk -- --exact --nocapture
+rustfmt --edition 2021 --check --config skip_children=true tests/v16_cu.rs tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+Collection reports `1 test, 0 benchmarks`; each of the five execution selectors reports
+`1 passed; 0 failed; 0 ignored` after the rebase. The existing conversion control reports
+712,072 / 43,454 / 26,540 CU for conversion/withdrawal/close; the existing full-shape matched-exit
+control peaks at 802,256 CU. The test target emits the existing `solana-client v1.18.26`
+future-incompatibility warning. Formatting and Git whitespace checks pass. The traceability TSV
+retains eight columns and records only this bounded coverage, with no status promotion.
+
 ### INV-078 resource-failure economic completion
 
 The existing [SF-078] `v16_program_recovery_resource_failure_lattice_preserves_public_exit`

@@ -48,6 +48,10 @@
 //! A separate public B history retains fourteen active legs and twenty-eight value-bearing
 //! source records while all fourteen legs owe two loss atoms each. Twenty-eight one-atom,
 //! hint-free cranks strictly consume that backlog without changing exposure or custody.
+//! Source-capacity recovery separately connects full-table admission rejection to fourteen
+//! bounded matched exits, complete claim conversion, and successful same-portfolio readmission.
+//! A fresh claim in a previously unused domain then settles through strict accrual/economic
+//! rank descent and reaches exact owner payouts without reviving the old source credits.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -171,6 +175,345 @@ fn v16_program_max_source_conversion_and_owner_exit_are_bounded() {
     assert!(terminal.vault >= terminal.c_tot + terminal.insurance);
     println!(
         "INV-077 28-source exit CU: convert={convert_cu}, withdraw={withdraw_cu}, close={close_cu}"
+    );
+}
+
+#[test]
+fn v16_program_max_source_capacity_reclamation_restores_funded_exit() {
+    const CU_LIMIT: u64 = 1_375_000;
+    const DEPOSIT: u128 = 2_000_000;
+    const NEW_UNITS: i128 = 7;
+    const PRICE: u64 = 100;
+    const NEXT_ASSET: u16 = MAX_SOURCE_LIVE_ASSETS;
+    let historical_gain = u128::from(MAX_SOURCE_LIVE_ASSETS) * 2 * 1_000;
+    assert_certified_engine_pin("INV-077 source-capacity reclamation and reuse");
+    let (mut env, taker_owner, lp_owner, taker, lp, slot) =
+        setup_max_source_live_pair_with_spare_auth_mark_asset(0, MAX_SOURCE_LIVE_ASSETS);
+    let source_count = |portfolio: &PortfolioAccountV16| {
+        portfolio
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count()
+    };
+    let full = env.portfolio_state(lp);
+    assert_eq!(
+        source_count(&full),
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+    );
+    assert_eq!(
+        full.source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() != 0)
+            .count(),
+        source_count(&full)
+    );
+    assert!(full.source_domains.iter().all(|source| {
+        source.source_claim_liened_num.get() == 0 && source.domain.get() < u32::from(NEXT_ASSET) * 2
+    }));
+    assert_eq!(full.capital.get(), DEPOSIT);
+    assert_eq!(full.pnl.get(), historical_gain as i128);
+    assert_eq!(full.reserved_pnl.get(), 0);
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let mint_before = env.svm.get_account(&env.mint).unwrap();
+    let mut max_exit_cu = 0;
+
+    for asset_index in (0..MAX_SOURCE_LIVE_ASSETS).rev() {
+        for portfolio in [taker, lp] {
+            assert_eq!(
+                percolator::active_bitmap_count_ones(active_bitmap(
+                    &env.portfolio_state(portfolio)
+                )),
+                u32::from(asset_index) + 1
+            );
+        }
+        env.svm.expire_blockhash();
+        let cu = env.trade_asset_with_cu(
+            asset_index,
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            -MAX_SOURCE_LIVE_SIZE_Q,
+            PRICE,
+            0,
+        );
+        assert_cu_within("capacity-reclamation matched exit", cu, CU_LIMIT);
+        max_exit_cu = max_exit_cu.max(cu);
+        for portfolio in [taker, lp] {
+            let after = env.portfolio_state(portfolio);
+            assert_eq!(
+                percolator::active_bitmap_count_ones(active_bitmap(&after)),
+                u32::from(asset_index),
+                "each exit must consume exactly one retained leg"
+            );
+            assert!(!has_active_leg_for_asset(&after, usize::from(asset_index)));
+            assert_eq!(
+                after.capital.get(),
+                if portfolio == lp {
+                    DEPOSIT
+                } else {
+                    DEPOSIT - historical_gain
+                }
+            );
+            assert_eq!(
+                after.pnl.get(),
+                if portfolio == lp {
+                    historical_gain as i128
+                } else {
+                    0
+                }
+            );
+        }
+        assert_eq!(env.portfolio_state(lp).source_domains, full.source_domains);
+        let group = env.market_state().1;
+        assert_eq!(group.c_tot, 2 * DEPOSIT - historical_gain);
+        assert_eq!((group.vault, group.insurance), (2 * DEPOSIT, 0));
+        assert_eq!(
+            (
+                group.assets[asset_index as usize].oi_eff_long_q,
+                group.assets[asset_index as usize].oi_eff_short_q
+            ),
+            (0, 0)
+        );
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+        // Leave an active-leg slot free: the failing admission must be the source cap,
+        // not the independent fourteen-leg cap. Repeat at the flat conversion frontier.
+        if asset_index == MAX_SOURCE_LIVE_ASSETS - 1 || asset_index == 0 {
+            let keys = [env.market, taker, lp, env.vault, env.mint];
+            let before = keys.map(|key| env.svm.get_account(&key));
+            env.svm.expire_blockhash();
+            let error = env
+                .try_trade_asset_with_cu(
+                    NEXT_ASSET,
+                    &taker_owner,
+                    taker,
+                    &lp_owner,
+                    lp,
+                    -NEW_UNITS * POS_SCALE as i128,
+                    PRICE,
+                    0,
+                )
+                .expect_err("historical claims still occupy every source slot");
+            assert!(
+                error.contains(&format!(
+                    "Custom({})",
+                    PercolatorError::InvalidInstruction as u32
+                )) && !error.contains("ProgramFailedToComplete")
+                    && !error.contains("ComputationalBudgetExceeded")
+                    && !error.contains("exceeded CUs"),
+                "capacity rejection must precede CU exhaustion: {error}"
+            );
+            assert_eq!(keys.map(|key| env.svm.get_account(&key)), before);
+        }
+    }
+
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    env.svm.expire_blockhash();
+    let reclaim_cu = env.convert_released_pnl_with_cu(&lp_owner, lp, historical_gain);
+    assert_cu_within(
+        "full-table source-capacity reclamation",
+        reclaim_cu,
+        CU_LIMIT,
+    );
+    let reclaimed = env.portfolio_state(lp);
+    assert_eq!(source_count(&reclaimed), 0);
+    assert_eq!((reclaimed.pnl.get(), reclaimed.reserved_pnl.get()), (0, 0));
+    assert_eq!(reclaimed.capital.get(), DEPOSIT + historical_gain);
+    assert_eq!(env.market_state().1.c_tot, 2 * DEPOSIT);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let retired_sources = env.market_state().1.source_credit;
+
+    // Retry the same economic admission on the same accounts, with current public
+    // generation guards. The new claim must use a previously unseen source domain.
+    env.svm.expire_blockhash();
+    let admission_cu = env.trade_asset_with_cu(
+        NEXT_ASSET,
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        -NEW_UNITS * POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    assert_cu_within(
+        "admission after source-capacity reclamation",
+        admission_cu,
+        CU_LIMIT,
+    );
+    assert_eq!(
+        source_count(&env.portfolio_state(lp)),
+        0,
+        "new risk starts with latent domains"
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(lp), NEXT_ASSET as usize).basis_pos_q,
+        NEW_UNITS * POS_SCALE as i128
+    );
+    assert_eq!(
+        env.portfolio_state(lp).capital.get(),
+        DEPOSIT + historical_gain
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.warp_to_slot(slot + 1);
+    let mark_cu = env.push_auth_mark_for_asset_as_admin(NEXT_ASSET, slot + 1, PRICE + 1);
+    assert_cu_within("reused-capacity authenticated mark", mark_cu, CU_LIMIT);
+    let mut max_settle_cu = 0;
+    let mut settle_calls = 0;
+    for portfolio in [taker, lp] {
+        let expected_capital = if portfolio == lp {
+            DEPOSIT + historical_gain
+        } else {
+            DEPOSIT - historical_gain - NEW_UNITS as u128
+        };
+        let expected_pnl = if portfolio == lp { NEW_UNITS } else { 0 };
+        let rank = |env: &V16CuEnv| {
+            let current = env.portfolio_state(portfolio);
+            u128::from(slot + 1 - env.market_state().1.assets[NEXT_ASSET as usize].slot_last)
+                + current.capital.get().abs_diff(expected_capital)
+                + current.pnl.get().abs_diff(expected_pnl)
+        };
+        for _ in 0..=slot + 1 {
+            let before_rank = rank(&env);
+            if before_rank == 0 {
+                break;
+            }
+            let cu = env
+                .crank_if_actionable(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot + 1,
+                        observations: crank_observations(NEXT_ASSET),
+                    },
+                )
+                .expect("newly admitted exposure must have a bounded settlement step");
+            assert_cu_within("reused-capacity claim settlement", cu, CU_LIMIT);
+            max_settle_cu = max_settle_cu.max(cu);
+            settle_calls += 1;
+            assert!(
+                rank(&env) < before_rank,
+                "each crank must consume pending accrual or settle new value"
+            );
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+            assert_eq!(
+                active_leg_for_asset(&env.portfolio_state(portfolio), NEXT_ASSET as usize)
+                    .basis_pos_q,
+                if portfolio == lp {
+                    NEW_UNITS
+                } else {
+                    -NEW_UNITS
+                } * POS_SCALE as i128
+            );
+            assert_eq!(
+                &env.market_state().1.source_credit[..usize::from(NEXT_ASSET) * 2],
+                &retired_sources[..usize::from(NEXT_ASSET) * 2]
+            );
+        }
+        assert_eq!(
+            rank(&env),
+            0,
+            "settlement must reach the input-derived economic endpoint in a bounded schedule"
+        );
+    }
+    let settled = env.portfolio_state(lp);
+    assert_eq!(source_count(&settled), 1);
+    assert_eq!(settled.pnl.get(), NEW_UNITS);
+    assert_eq!(settled.capital.get(), DEPOSIT + historical_gain);
+    let new_source = settled
+        .source_domains
+        .iter()
+        .find(|source| source.is_occupied())
+        .unwrap();
+    assert_eq!(new_source.domain.get(), u32::from(NEXT_ASSET) * 2 + 1);
+    assert_eq!(
+        new_source.source_claim_bound_num.get(),
+        NEW_UNITS as u128 * BOUND_SCALE
+    );
+    assert_eq!(new_source.source_claim_liened_num.get(), 0);
+    assert_eq!(
+        env.portfolio_state(taker).capital.get(),
+        DEPOSIT - historical_gain - NEW_UNITS as u128
+    );
+    assert_eq!(env.portfolio_state(taker).pnl.get(), 0);
+    assert_eq!(
+        &env.market_state().1.source_credit[..usize::from(NEXT_ASSET) * 2],
+        &retired_sources[..usize::from(NEXT_ASSET) * 2],
+        "new source materialization cannot reuse old source backing"
+    );
+
+    env.svm.expire_blockhash();
+    let final_exit_cu = env.trade_asset_with_cu(
+        NEXT_ASSET,
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        NEW_UNITS * POS_SCALE as i128,
+        PRICE + 1,
+        0,
+    );
+    assert_cu_within("reused-capacity matched exit", final_exit_cu, CU_LIMIT);
+    env.svm.expire_blockhash();
+    let convert_cu = env.convert_released_pnl_with_cu(&lp_owner, lp, NEW_UNITS as u128);
+    assert_cu_within("reused-capacity claim conversion", convert_cu, CU_LIMIT);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let payouts = [
+        DEPOSIT - historical_gain - NEW_UNITS as u128,
+        DEPOSIT + historical_gain + NEW_UNITS as u128,
+    ];
+    let mut max_withdraw_cu = 0;
+    let mut max_close_cu = 0;
+    for ((owner, portfolio), expected) in [(&taker_owner, taker), (&lp_owner, lp)]
+        .into_iter()
+        .zip(payouts)
+    {
+        let before = env.portfolio_state(portfolio);
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(&before)));
+        assert_eq!(source_count(&before), 0);
+        assert_eq!((before.pnl.get(), before.reserved_pnl.get()), (0, 0));
+        assert_eq!(before.capital.get(), expected);
+        let other = if portfolio == taker { lp } else { taker };
+        let other_before = env.svm.get_account(&other);
+        env.svm.expire_blockhash();
+        let (destination, cu) = env.withdraw_with_cu(owner, portfolio, expected);
+        assert_cu_within("reclaimed-capacity owner payout", cu, CUSTODY_CU_LIMIT);
+        max_withdraw_cu = max_withdraw_cu.max(cu);
+        assert_eq!(env.token_amount(destination) as u128, expected);
+        env.svm.expire_blockhash();
+        let cu = env.close_portfolio_with_cu(owner, portfolio);
+        assert_cu_within(
+            "reclaimed-capacity portfolio deletion",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+        max_close_cu = max_close_cu.max(cu);
+        assert_eq!(env.svm.get_account(&other), other_before);
+    }
+    let terminal = env.market_state().1;
+    assert_eq!(
+        (terminal.c_tot, terminal.vault, terminal.insurance),
+        (0, 0, 0)
+    );
+    assert_eq!(terminal.materialized_portfolio_count, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
+    assert!(terminal
+        .assets
+        .iter()
+        .all(|asset| asset.oi_eff_long_q == 0 && asset.oi_eff_short_q == 0));
+    assert_eq!(
+        &terminal.source_credit[..usize::from(NEXT_ASSET) * 2],
+        &retired_sources[..usize::from(NEXT_ASSET) * 2]
+    );
+    println!(
+        "INV-077 source-capacity reclamation: exits={max_exit_cu}, reclaim={reclaim_cu}, \
+         readmit={admission_cu}, mark={mark_cu}, settle={settle_calls}/{max_settle_cu}, \
+         new_exit={final_exit_cu}, convert={convert_cu}, withdraw={max_withdraw_cu}, \
+         close={max_close_cu}, sources=28->0->1->0, payouts={payouts:?}"
     );
 }
 
