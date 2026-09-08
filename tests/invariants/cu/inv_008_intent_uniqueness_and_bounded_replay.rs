@@ -11,6 +11,10 @@
 //! through the alternate insurance route, then rejects the retained instruction and failed bundle
 //! both before and after a fresh intent. This complements the same-route failed-CPI retry probes
 //! and the duplicate-intent bundles; no account repair or instruction rebinding supplies recovery.
+//! The refund history pairs consumed top-ups with a live insurance withdrawal in both instruction
+//! orders, then returns the exact deposited tokens to the source. Restoring the original custody
+//! and insurance balances must not restore consent: both retained routes stay stale, while a
+//! fresh alternate-route intent remains live. This is not a terminal payout or partial-fill probe.
 //! This is bounded asset-0 evidence using fresh blockhash envelopes around retained instruction
 //! bytes, not detached-signature, durable-nonce, or arbitrary-history coverage.
 
@@ -517,5 +521,233 @@ fn v16_insurance_failed_bundle_retry_stays_consumed_after_alternate_route() {
             "no transaction-cache rejection witness"
         );
         eprintln!("insurance failed_direct={failed_direct}: 7 transactions, max CU={max_cu}");
+    }
+}
+
+#[test]
+fn v16_insurance_refund_does_not_revive_consumed_cross_route_intent() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const AMOUNT: u64 = 100;
+    const FUNDING: u64 = 3 * AMOUNT;
+
+    for direct_first in [true, false] {
+        let mut env = V16CuEnv::new();
+        let source = env.token_account(env.admin.pubkey(), FUNDING);
+        let sequences_before = env.control_sequences(0);
+        let intent_id = next_control_sequence(sequences_before.insurance_top_up);
+        let program_id = env.program_id;
+        let market_id = env.asset_market_id(0);
+        let accounts = vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        let top_up = |direct: bool, intent_id| Instruction {
+            program_id,
+            accounts: accounts.clone(),
+            data: if direct {
+                ProgInstruction::TopUpInsurance {
+                    authority_epoch: sequences_before.authority_epoch,
+                    intent_id,
+                    market_id,
+                    amount: AMOUNT as u128,
+                }
+            } else {
+                ProgInstruction::TopUpInsuranceDomain {
+                    authority_epoch: sequences_before.authority_epoch,
+                    intent_id,
+                    market_id,
+                    domain: 1,
+                    amount: AMOUNT as u128,
+                }
+            }
+            .encode(),
+        };
+        let retained = [
+            top_up(direct_first, intent_id),
+            top_up(!direct_first, intent_id),
+        ];
+        let fresh = top_up(!direct_first, next_control_sequence(intent_id));
+        let refund = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: env
+                .withdraw_insurance_asset_instruction(env.admin.pubkey(), 0, AMOUNT as u128)
+                .encode(),
+        };
+
+        // Snapshot full accounts, including non-payer lamports and absent PDA accounts.
+        let frame_keys = [
+            env.market,
+            source,
+            env.vault,
+            env.mint,
+            env.admin.pubkey(),
+            env.vault_authority,
+            program_id,
+            spl_token::ID,
+        ];
+        let frame = |env: &V16CuEnv| frame_keys.map(|key| (key, env.svm.get_account(&key)));
+        let custody = |env: &V16CuEnv| {
+            [source, env.vault, env.mint].map(|key| env.svm.get_account(&key).unwrap())
+        };
+        let custody_before = custody(&env);
+        let mut signatures = BTreeSet::new();
+        let mut max_cu = 0;
+        let mut execute = |env: &mut V16CuEnv, instructions: Vec<Instruction>| {
+            // Retain every instruction byte/account meta; only the signed envelope is renewed.
+            env.svm.expire_blockhash();
+            let mut message = vec![heap_ix(), cu_ix()];
+            message.extend(instructions);
+            let tx = Transaction::new_signed_with_payer(
+                &message,
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &env.admin],
+                env.svm.latest_blockhash(),
+            );
+            tx.verify()
+                .expect("valid independent transaction signature");
+            assert!(signatures.insert(tx.signatures[0].to_string()));
+            let result = env.svm.send_transaction(tx);
+            let meta = match &result {
+                Ok(meta) => meta,
+                Err(error) => &error.meta,
+            };
+            assert!(meta.compute_units_consumed > 0);
+            assert_cu_within(
+                "insurance refund/cross-route intent replay",
+                meta.compute_units_consumed,
+                CUSTODY_CU_LIMIT,
+            );
+            max_cu = max_cu.max(meta.compute_units_consumed);
+            result
+        };
+        let assert_insurance = |env: &V16CuEnv, total: u128, long: u128, intent| {
+            let (_, group) = env.market_state();
+            assert_eq!(group.mode, MarketModeV16::Live);
+            assert_eq!(group.vault, total);
+            assert_eq!(group.insurance, total);
+            assert_eq!(group.c_tot, 0);
+            assert_eq!(group.insurance_domain_budget[0], long);
+            assert_eq!(group.insurance_domain_budget[1], total - long);
+            assert_eq!(group.insurance_domain_budget.iter().sum::<u128>(), total);
+            assert_eq!(group.insurance_domain_budget_remaining_total, total);
+            assert_eq!(env.token_amount(env.vault) as u128, total);
+            assert_eq!(env.token_amount(source) as u128, FUNDING as u128 - total);
+            let mut expected_sequences = sequences_before;
+            expected_sequences.insurance_top_up = intent;
+            assert_eq!(env.control_sequences(0), expected_sequences);
+            assert_eq!(group.assets[0].market_id, market_id);
+            assert_eq!(env.svm.get_account(&env.mint).unwrap(), custody_before[2]);
+        };
+
+        assert_insurance(&env, 0, 0, sequences_before.insurance_top_up);
+        execute(&mut env, vec![retained[0].clone()]).expect("first retained top-up lands");
+        let initial_long = if direct_first { AMOUNT / 2 } else { 0 };
+        assert_insurance(&env, AMOUNT as u128, initial_long as u128, intent_id);
+
+        // Unlike the existing duplicate-top-up bundles, the other operation here reverses
+        // the original debit. Neither instruction order may erase its consumed watermark.
+        for retry in &retained {
+            for refund_first in [false, true] {
+                let before = frame(&env);
+                let bundle = if refund_first {
+                    vec![refund.clone(), retry.clone()]
+                } else {
+                    vec![retry.clone(), refund.clone()]
+                };
+                let error = execute(&mut env, bundle).expect_err("consumed intent aborts bundle");
+                assert_eq!(
+                    error.err,
+                    TransactionError::InstructionError(
+                        if refund_first { 3 } else { 2 },
+                        InstructionError::Custom(PercolatorError::EngineStale as u32),
+                    ),
+                    "direct_first={direct_first}, refund_first={refund_first}"
+                );
+                for program in [program_id, spl_token::ID] {
+                    assert_eq!(
+                        error
+                            .meta
+                            .logs
+                            .iter()
+                            .filter(|line| { *line == &format!("Program {program} success") })
+                            .count(),
+                        usize::from(refund_first),
+                        "only a preceding refund and its SPL transfer may complete"
+                    );
+                }
+                assert_eq!(
+                    frame(&env),
+                    before,
+                    "refund/retry bundle must roll back exactly"
+                );
+            }
+        }
+
+        execute(&mut env, vec![refund]).expect("unchanged refund stays live after aborted bundles");
+        assert_eq!(
+            custody(&env),
+            custody_before,
+            "public refund restores original token accounts"
+        );
+        assert_insurance(&env, 0, 0, intent_id);
+
+        for after_fresh in [false, true] {
+            if after_fresh {
+                execute(&mut env, vec![fresh.clone()])
+                    .expect("fresh alternate-route intent lands against the restored balances");
+                let fresh_long = if direct_first { 0 } else { AMOUNT / 2 };
+                assert_insurance(
+                    &env,
+                    AMOUNT as u128,
+                    fresh_long as u128,
+                    next_control_sequence(intent_id),
+                );
+            }
+            for retry in &retained {
+                assert!(
+                    env.token_amount(source) >= AMOUNT,
+                    "retry remains fully funded"
+                );
+                let before = frame(&env);
+                let error = execute(&mut env, vec![retry.clone()])
+                    .expect_err("refunding source tokens cannot resurrect either retained route");
+                assert_eq!(
+                    error.err,
+                    TransactionError::InstructionError(
+                        2,
+                        InstructionError::Custom(PercolatorError::EngineStale as u32),
+                    )
+                );
+                assert!(
+                    !error.meta.logs.iter().any(|line| {
+                        line.starts_with(&format!("Program {} invoke", spl_token::ID))
+                    }),
+                    "stale top-up must stop before token CPI"
+                );
+                assert_eq!(
+                    frame(&env),
+                    before,
+                    "funded stale retry must leave every account intact"
+                );
+            }
+        }
+        assert_eq!(
+            signatures.len(),
+            11,
+            "no transaction-cache rejection witness"
+        );
+        eprintln!("insurance refund direct_first={direct_first}: 11 transactions, max CU={max_cu}");
     }
 }
