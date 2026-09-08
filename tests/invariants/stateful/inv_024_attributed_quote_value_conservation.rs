@@ -9,6 +9,7 @@
 //! account frames at each economically distinct stage.
 //! A separate bounded solvent history checks each transaction across early/end-only
 //! and split/whole withdrawals, carrying payouts through later losses and deposits.
+//! Both loser-first and winner-first settlement retain that per-owner history.
 //! Conversion is atomic; this does not model partial conversion or impaired claims.
 //! The terminal extension keeps that ledger across resolution, including prior live
 //! payouts, a later loss, and unrelated fresh principal. It compares fully converted
@@ -74,6 +75,7 @@ fn inv024_run_payout_prefix_history(
     payout_schedule: usize,
     withdrawal_order: [usize; 2],
     exit: Inv024PayoutExit,
+    winner_settles_first: bool,
 ) -> Result<([u128; 2], usize, usize), String> {
     use percolator::POS_SCALE;
     use percolator_prog::ix::CrankObservationHint;
@@ -337,7 +339,12 @@ fn inv024_run_payout_prefix_history(
             if env.primary_market_state().1.assets[0].slot_last != slot {
                 return Err("market did not reach the authenticated settlement slot".into());
             }
-            for actor in [loser, winner] {
+            let settlement_order = if winner_settles_first {
+                [winner, loser]
+            } else {
+                [loser, winner]
+            };
+            for actor in settlement_order {
                 step!("account settlement", env.crank(actor, slot, vec![]), {
                     if actor == winner {
                         history[actor].gains += gain;
@@ -573,27 +580,30 @@ fn v16_program_payout_prefix_histories_preserve_each_owners_entitlement() {
     ] {
         for first_winner in 0..2 {
             for withdrawal_order in [[0, 1], [1, 0]] {
-                for schedule in 0..3 {
-                    let (paid, steps, early) = inv024_run_payout_prefix_history(
-                        routes, first_winner, schedule, withdrawal_order, Inv024PayoutExit::Live,
-                    ).unwrap_or_else(|error| panic!(
-                        "INV-024 routes={routes:?} first_winner={first_winner} schedule={schedule} order={withdrawal_order:?}: {error}"
-                    ));
-                    assert_eq!(early, [0, 2, 4][schedule]);
-                    assert_eq!(
-                        *end_only_outcomes[first_winner].get_or_insert(paid),
-                        paid,
-                        "transport, withdrawal timing, partition, or owner order changed total entitlement"
-                    );
-                    worlds += 1;
-                    checked_steps += steps;
-                    early_payouts += early;
+                for winner_settles_first in [false, true] {
+                    for schedule in 0..3 {
+                        let (paid, steps, early) = inv024_run_payout_prefix_history(
+                            routes, first_winner, schedule, withdrawal_order,
+                            Inv024PayoutExit::Live, winner_settles_first,
+                        ).unwrap_or_else(|error| panic!(
+                            "INV-024 routes={routes:?} first_winner={first_winner} schedule={schedule} order={withdrawal_order:?} winner_settles_first={winner_settles_first}: {error}"
+                        ));
+                        assert_eq!(early, [0, 2, 4][schedule]);
+                        assert_eq!(
+                            *end_only_outcomes[first_winner].get_or_insert(paid),
+                            paid,
+                            "transport, settlement order, withdrawal timing, partition, or owner order changed total entitlement"
+                        );
+                        worlds += 1;
+                        checked_steps += steps;
+                        early_payouts += early;
+                    }
                 }
             }
         }
     }
-    assert_eq!(worlds, 24);
-    assert_eq!(early_payouts, 48);
+    assert_eq!(worlds, 48);
+    assert_eq!(early_payouts, 96);
     eprintln!("INV-024: {worlds} worlds, {checked_steps} checked transactions, {early_payouts} early payouts");
 }
 
@@ -625,7 +635,7 @@ fn v16_program_live_payout_histories_preserve_entitlement_through_resolution() {
                         Inv024PayoutExit::ResolvedPnl,
                     ] {
                         let (paid, steps, early) = inv024_run_payout_prefix_history(
-                            routes, first_winner, schedule, order, exit,
+                            routes, first_winner, schedule, order, exit, false,
                         ).unwrap_or_else(|error| panic!(
                             "INV-024/027/066/067 routes={routes:?} first_winner={first_winner} schedule={schedule} order={order:?} exit={exit:?}: {error}"
                         ));

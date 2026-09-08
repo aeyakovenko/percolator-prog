@@ -4178,6 +4178,9 @@ These untested coverage gaps are not findings and receive no severity/impact lab
    and reconcile external payouts. Reuse it in INV-081/086 instead of substituting stock equality.
    The [implementation-readiness slice](#inv-024-implementation-readiness) below specifies the
    smallest next increment; it does not close this broader TODO.
+   The 2026-09-08 maintenance increment crosses loser-first/winner-first public settlement in
+   the solvent payout-prefix owner, retaining each owner's earlier payouts through later losses.
+   This adds only the bounded settlement-order composition, not an all-effects history oracle.
 
 2. **INV-082: environment-aware permissionless completion.** Owner:
    [`stateful/inv_082_state_indexed_liveness_theorem.rs`](stateful/inv_082_state_indexed_liveness_theorem.rs).
@@ -4501,11 +4504,34 @@ that each effect updates this history ledger. Leave that roster unchanged until 
 **Executing increment: solvent payout prefixes.**
 `v16_program_payout_prefix_histories_preserve_each_owners_entitlement` in the existing
 [stateful owner](stateful/inv_024_attributed_quote_value_conservation.rs) adds recipient-specific
-checks before later losses, fees, or deposits can obscure a bad early credit. Its 24 worlds cross
-two four-transport orders, both first-winner orientations, end-only/early-whole/early-split payouts,
-and both final owner withdrawal orders. The fresh same-worktree default-feature SBF run checks
+checks before later losses, fees, or deposits can obscure a bad early credit. Its original 24 worlds
+cross two four-transport orders, both first-winner orientations, end-only/early-whole/early-split payouts,
+and both final owner withdrawal orders. The original same-worktree default-feature SBF run checks
 552 transactions and 48 early payouts, with nonzero signed bilateral fees and complete owner exits
 in every world. Final per-owner SPL totals agree across the transport and payout schedules.
+
+The 2026-09-08 maintenance increment at wrapper base `1ab9a137` reuses that generator and oracle
+with both loser-first and winner-first account settlement in each round: **48 worlds, 1,104 checked
+transactions and 96 early payouts** pass. The same order choice applies to both rounds; independent
+per-round order words remain outside this product. Every intermediate public crank checks all five
+owners' capital, PnL and cumulative SPL payouts, including the new prefix where the current winner
+has realized its gain but the loser has not yet paid that round's loss. The prior round's payouts,
+fees and inter-round principal are not reset. Final per-owner payouts must also agree across the
+two settlement schedules. The earlier roundtrip/two-episode helpers settle loser-first; INV-027's
+unsettled-principal and INV-031's shared-claim histories do not carry this changing-winner solvent
+payout ledger. No new test entrypoint, engine proof or invariant-status promotion is added.
+
+Only the existing live test and its shared-helper terminal-history caller are affected. The latter
+retains its loser-first schedule and passes 48 worlds / 1,992 checked transactions. Validation uses
+the explicitly supplied cached default-feature
+`PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so`
+(SHA-256 `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`) and cached authenticated
+matcher (`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`), matching the artifacts
+recorded below; no SBF rebuild or broad test rerun is claimed. The two exact named tests
+`v16_program_payout_prefix_histories_preserve_each_owners_entitlement` and
+`v16_program_live_payout_histories_preserve_entitlement_through_resolution` under
+`v16_program_stateful_fuzz` / `inv_024_attributed_quote_value_conservation` both pass, as do
+`cargo fmt --check` and `git diff --check`. General value-effect adapters and the ranked TODO remain open.
 
 The bounded profile has two independent owners, one traded Active asset (the other two fixture
 assets remain unused), honest AuthMark observations, full fills of one `POS_SCALE` unit, zero
@@ -4523,10 +4549,10 @@ after full conversion; it does not duplicate that rejection matrix or count it a
 
 | Route partition | Executed generator/oracle obligation |
 | --- | --- |
-| `InitMarket` (0), `InitPortfolio` (1), fixed oracle/matcher setup | Reuse public fixture initialization and its successful one-atom owner deposits; initialization is outside the 552 observed transactions. Bind portfolio incarnation, market, owner and SPL authority thereafter. Starting principal is a setup-deposit input, not observed capital or token balances. No generated initialization/policy-change claim. |
+| `InitMarket` (0), `InitPortfolio` (1), fixed oracle/matcher setup | Reuse public fixture initialization and its successful one-atom owner deposits; initialization is outside the 1,104 observed transactions in the extended settlement-order product. Bind portfolio incarnation, market, owner and SPL authority thereafter. Starting principal is a setup-deposit input, not observed capital or token balances. No generated initialization/policy-change claim. |
 | `Deposit` (3) | Check both subsequent funding deposits and one positive inter-round deposit from prefunded source tokens. Credit only that owner's external principal and preserve prior payouts. |
 | `TradeNoCpi` (6), `TradeCpi` (10), `BatchTradeNoCpi` (66), `BatchTradeCpi` (67) | Execute both existing four-transport orders and both first-winner orientations with unequal changing-winner gains. Batches are single-leg; the separate 32-world route-pair test remains the exhaustive finite route-pair owner. |
-| `PushAuthMark` (63), `PermissionlessCrank` (5) | Attribute each authenticated price/quantity settlement once to the correct owner and round. Publishing a mark is not itself portfolio realization. This slice covers funded accrual/settlement only, not the crank's liquidation, reward, or terminal branches. |
+| `PushAuthMark` (63), `PermissionlessCrank` (5) | Attribute each authenticated price/quantity settlement once to the correct owner and round, checking every actor after each individual crank in loser-first and winner-first schedules. Publishing a mark is not itself portfolio realization. This slice covers funded accrual/settlement only, not the crank's liquidation, reward, or terminal branches. |
 | `ConvertReleasedPnl` (28) | Bound one full conversion per round by independently modeled claim and unconverted PnL. Move claim to the same owner's capital without new principal or external payout. |
 | `Withdraw` (4) | Compare end-only withdrawal with early `Q` and `[1, Q-1]` gain payouts. Bound requests by modeled claim and flat settled capital; compare cumulative destination SPL balances after each transaction and retain prior payments through the next round and final withdrawal. |
 | Matcher reauthorization and individual cranks | Execute `SetMatcherConfig` (68) explicitly before each CPI trade and observe each crank separately. Every checked call must produce exactly one successful authority-attributed public trace step. Unexpected errors fail the test; generic error/retry schedules remain deferred. |
@@ -4552,8 +4578,8 @@ and observed SBF results separate:
 
 **Next non-duplicative increment.** Add bounded seeded amount/withdrawal partitions and explicit
 retry/error placement to this executing solvent owner, checking exact rollback without advancing
-the ledger on error. Equal/even gains, no-deposit controls, other split points, alternate settlement
-orders and per-owner observation cursors beyond the fixed two-round schedule remain absent.
+the ledger on error. Equal/even gains, no-deposit controls, other split points, independent per-round
+settlement orders and per-owner observation cursors beyond the fixed two-round schedule remain absent.
 Generalizing to other value effects requires typed event adapters and shared snapshot observation;
 `PublicTraceEvidence` alone has no portfolio claim snapshots. Do not wire this partial model into
 every INV-081/086 action or treat unsupported effects as no-ops.
