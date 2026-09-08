@@ -17,10 +17,221 @@
 //! reward rounding, self/separate-recipient credit, automatic close disposition,
 //! and real SPL exits in 70 boundary worlds. It consumes engine validators and
 //! does not add an engine arithmetic proof or a maximum-shape claim.
+//! A public custody witness binds literal little-endian instruction words to
+//! SPL atoms at byte/word carries and above binary64's exact-integer range,
+//! including whole/split transfer equivalence across mint decimal metadata.
 
 use super::*;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
+
+#[test]
+fn v16_program_public_sbf_custody_encoding_preserves_atom_carries_and_partitions() {
+    use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+
+    let funded = u64::try_from(percolator::MAX_VAULT_TVL).unwrap();
+    let amounts = [
+        (1u64 << 8) - 1,
+        1u64 << 8,
+        (1u64 << 8) + 1,
+        (1u64 << 16) - 1,
+        1u64 << 16,
+        (1u64 << 16) + 1,
+        u64::from(u32::MAX),
+        1u64 << 32,
+        (1u64 << 32) + 1,
+        (1u64 << 53) - 1,
+        1u64 << 53,
+        (1u64 << 53) + 1,
+        0x0012_3456_789a_bcde,
+        funded,
+    ];
+    let mut transfers = 0;
+    let mut peak_deposit_cu = 0;
+    let mut peak_withdraw_cu = 0;
+    for decimals in [0, 6, 9, 18, u8::MAX] {
+        let mut env = inv018_public_spl_market(decimals);
+        let owner = Keypair::new();
+        env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let portfolio_key = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &portfolio_key,
+            env.portfolio_account_len,
+            env.program_id,
+        );
+        let portfolio = portfolio_key.pubkey();
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&owner],
+        )
+        .unwrap();
+        env.portfolios.push(portfolio);
+        let wallet = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &wallet,
+                &env.admin.pubkey(),
+                &[],
+                funded,
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .unwrap();
+        let mint_before = env.svm.get_account(&env.mint).unwrap();
+        let mint = Mint::unpack(&mint_before.data).unwrap();
+        assert_eq!((mint.decimals, mint.supply), (decimals, funded));
+        assert_eq!(env.market_state().0.maintenance_fee_per_slot, 0);
+
+        let snapshot = |env: &V16CuEnv, expected: u128, label: &str| {
+            let account = env.portfolio_state(portfolio);
+            let (_, group) = env.market_state();
+            let actual = (
+                account.capital.get(),
+                group.c_tot,
+                group.vault,
+                u128::from(env.token_amount(env.vault)),
+                u128::from(env.token_amount(wallet)),
+            );
+            assert_eq!(
+                actual,
+                (
+                    expected,
+                    expected,
+                    expected,
+                    expected,
+                    u128::from(funded) - expected
+                ),
+                "{label}: serialized amount, persisted capital and real SPL atoms agree",
+            );
+            assert_eq!(account.pnl.get(), 0, "{label}");
+            assert_eq!(group.insurance, 0, "{label}");
+            assert_eq!(
+                env.svm.get_account(&env.mint).unwrap(),
+                mint_before,
+                "{label}"
+            );
+            actual
+        };
+        for amount in amounts {
+            assert!(amount >= 3 && amount <= funded);
+            let mut whole_checkpoint = None;
+            // Splitting off two atoms forces both carry and borrow prefixes; the odd
+            // 2^53 + 1 total must survive without a UI-token or floating-point round trip.
+            for chunks in [vec![amount], vec![amount - 2, 1, 1]] {
+                let label = format!("decimals={decimals}, amount={amount}, chunks={chunks:?}");
+                let initial = snapshot(&env, 0, &label);
+                let mut expected = 0u128;
+                for depositing in [true, false] {
+                    let ordered: Vec<u64> = if depositing {
+                        chunks.clone()
+                    } else {
+                        chunks.iter().rev().copied().collect()
+                    };
+                    for atoms in ordered {
+                        let amount = u128::from(atoms);
+                        let portfolio_id = env.portfolio_id(portfolio);
+                        let expected_sequence = env.portfolio_matcher_sequence(portfolio);
+                        let ix = if depositing {
+                            env.deposit_ix(portfolio, amount)
+                        } else {
+                            env.withdraw_ix(portfolio, amount)
+                        };
+                        // Independent public wire layout: tag, two u64 guards, u128 atoms.
+                        // Send these exact bytes, bypassing harness guard rebinding.
+                        let mut wire = vec![if depositing { 3 } else { 4 }];
+                        wire.extend_from_slice(&portfolio_id.to_le_bytes());
+                        wire.extend_from_slice(&expected_sequence.to_le_bytes());
+                        wire.extend_from_slice(&amount.to_le_bytes());
+                        assert_eq!(ix.encode(), wire, "{label}: host encoding");
+                        let decoded = match ProgInstruction::decode(&wire).unwrap() {
+                            ProgInstruction::Deposit {
+                                portfolio_id,
+                                expected_sequence,
+                                amount,
+                            } if depositing => (portfolio_id, expected_sequence, amount),
+                            ProgInstruction::Withdraw {
+                                portfolio_id,
+                                expected_sequence,
+                                amount,
+                            } if !depositing => (portfolio_id, expected_sequence, amount),
+                            _ => panic!("{label}: wrong decoded custody instruction"),
+                        };
+                        assert_eq!(
+                            decoded,
+                            (portfolio_id, expected_sequence, amount),
+                            "{label}"
+                        );
+                        let mut accounts = vec![
+                            AccountMeta::new(owner.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(portfolio, false),
+                            AccountMeta::new(wallet, false),
+                            AccountMeta::new(env.vault, false),
+                        ];
+                        if !depositing {
+                            accounts.push(AccountMeta::new_readonly(env.vault_authority, false));
+                        }
+                        accounts.push(AccountMeta::new_readonly(spl_token::ID, false));
+                        let cu = send_raw_tx(
+                            &mut env.svm,
+                            &env.payer,
+                            Instruction {
+                                program_id: env.program_id,
+                                accounts,
+                                data: wire,
+                            },
+                            &[&owner],
+                        )
+                        .unwrap_or_else(|err| {
+                            panic!("{label}, depositing={depositing}, atoms={atoms}: {err}")
+                        });
+                        if depositing {
+                            expected = expected.checked_add(amount).unwrap();
+                            peak_deposit_cu = peak_deposit_cu.max(cu);
+                        } else {
+                            expected = expected.checked_sub(amount).unwrap();
+                            peak_withdraw_cu = peak_withdraw_cu.max(cu);
+                        }
+                        transfers += 1;
+                        snapshot(&env, expected, &label);
+                        assert_eq!(
+                            env.portfolio_matcher_sequence(portfolio),
+                            expected_sequence + 1,
+                            "{label}"
+                        );
+                    }
+                    if depositing {
+                        let checkpoint = snapshot(&env, u128::from(amount), &label);
+                        if let Some(whole) = whole_checkpoint {
+                            assert_eq!(checkpoint, whole, "{label}: partition-invariant deposit");
+                        } else {
+                            whole_checkpoint = Some(checkpoint);
+                        }
+                    }
+                }
+                assert_eq!(
+                    snapshot(&env, 0, &label),
+                    initial,
+                    "{label}: exact round trip"
+                );
+            }
+        }
+    }
+    assert_eq!(transfers, 5 * amounts.len() * 8);
+    println!("INV-085 custody encoding: transfers={transfers}, deposit_peak={peak_deposit_cu}, withdraw_peak={peak_withdraw_cu}");
+}
 
 fn inv_085_big_to_u128(value: BigUint) -> Option<u128> {
     value.to_u128()
