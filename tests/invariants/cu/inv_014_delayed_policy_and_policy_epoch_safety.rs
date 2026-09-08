@@ -11,6 +11,9 @@
 //! silently charge either trader beyond the signed fee. The second covers cross-mode oracle supersession: EWMA,
 //! authenticated mark, and hybrid configuration all consume one observation
 //! lane, so switching instruction variants cannot revive stale consent.
+//! Retained CPI price-limit coverage instead changes the oracle mode after the
+//! economic request is signed: adverse repricing rolls back a funded prefix and
+//! matcher writes, while favorable repricing and fresh bounded consent stay live.
 //!
 //! Guarantee boundary: these tests cover supersession within one live market
 //! incarnation. Market recreation and authority A -> B -> A require persistent
@@ -293,5 +296,296 @@ fn v16_program_trade_requires_signed_base_fee_consent() {
         g1.vault,
         g1.c_tot + g1.insurance,
         "exact conservation after the consented base-fee trade"
+    );
+}
+
+#[test]
+fn v16_retained_cpi_price_limit_survives_oracle_policy_change() {
+    use percolator_prog::matcher_abi::read_matcher_return;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const DEPOSIT: u64 = 10_000;
+    const PREFIX: u64 = 17;
+    const SIGNED_PRICE: u64 = 100;
+    const QUANTITY: u128 = 10 * POS_SCALE;
+    const BUNDLE_CU_LIMIT: u64 = 400_000;
+
+    // Permit isolated worktrees to reuse the built fixture without changing tests/fixtures.
+    let matcher_path = std::env::var_os("PERCOLATOR_AUTH_MATCHER_SBF")
+        .map(PathBuf::from)
+        .unwrap_or_else(auth_matcher_program_path);
+    let matcher_bytes = std::fs::read(matcher_path).expect("read authenticated matcher SBF");
+    let mut peak_cu = 0;
+    for direction in [-1i128, 1] {
+        for adverse in [false, true] {
+            let mut env =
+                inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market(6);
+            let owners = [Keypair::new(), Keypair::new()];
+            let mut portfolios = Vec::new();
+            let mut sources = Vec::new();
+            for owner in &owners {
+                send_raw_tx(
+                    &mut env.svm,
+                    &env.payer,
+                    system_instruction::transfer(&env.payer.pubkey(), &owner.pubkey(), 1_000_000),
+                    &[],
+                )
+                .unwrap();
+                let portfolio = Keypair::new();
+                system_create_account_for_test(
+                    &mut env.svm,
+                    &env.payer,
+                    &portfolio,
+                    env.portfolio_account_len,
+                    env.program_id,
+                );
+                env.send(
+                    ProgInstruction::InitPortfolio,
+                    vec![
+                        AccountMeta::new(owner.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio.pubkey(), false),
+                    ],
+                    &[owner],
+                )
+                .unwrap();
+                let source =
+                    create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+                send_raw_tx(
+                    &mut env.svm,
+                    &env.payer,
+                    spl_token::instruction::mint_to(
+                        &spl_token::ID,
+                        &env.mint,
+                        &source,
+                        &env.admin.pubkey(),
+                        &[],
+                        DEPOSIT + PREFIX,
+                    )
+                    .unwrap(),
+                    &[&env.admin],
+                )
+                .unwrap();
+                env.send(
+                    env.deposit_ix(portfolio.pubkey(), DEPOSIT.into()),
+                    vec![
+                        AccountMeta::new(owner.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio.pubkey(), false),
+                        AccountMeta::new(source, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[owner],
+                )
+                .unwrap();
+                portfolios.push(portfolio.pubkey());
+                sources.push(source);
+            }
+            let (taker, lp) = (portfolios[0], portfolios[1]);
+            set_test_clock(&mut env, 1, 100);
+            env.configure_auth_mark_with_cu(1, SIGNED_PRICE);
+            let matcher = Pubkey::new_unique();
+            env.svm.add_program(matcher, &matcher_bytes);
+            let (context, delegate, _) =
+                env.init_auth_matcher_context_via_system_create(matcher, &owners[1], lp);
+            let size = direction * QUANTITY as i128;
+            let retained_instruction = env.trade_cpi_ix(taker, lp, 0, size, 0, SIGNED_PRICE);
+            let prefix = Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(owners[0].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker, false),
+                    AccountMeta::new(sources[0], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                data: env.deposit_ix(taker, PREFIX.into()).encode(),
+            };
+            let transaction = |env: &V16CuEnv, instruction: &ProgInstruction| {
+                Transaction::new_signed_with_payer(
+                    &[
+                        heap_ix(),
+                        cu_ix(),
+                        prefix.clone(),
+                        Instruction {
+                            program_id: env.program_id,
+                            accounts: vec![
+                                AccountMeta::new(owners[0].pubkey(), true),
+                                AccountMeta::new(env.market, false),
+                                AccountMeta::new(taker, false),
+                                AccountMeta::new(lp, false),
+                                AccountMeta::new_readonly(matcher, false),
+                                AccountMeta::new(context, false),
+                                AccountMeta::new_readonly(delegate, false),
+                            ],
+                            data: instruction.encode(),
+                        },
+                    ],
+                    Some(&env.payer.pubkey()),
+                    &[&env.payer, &owners[0]],
+                    env.svm.latest_blockhash(),
+                )
+            };
+            let retained = transaction(&env, &retained_instruction);
+            retained.verify().unwrap();
+            let signed_bytes = bincode::serialize(&retained).unwrap();
+            assert!(signed_bytes.len() <= solana_sdk::packet::PACKET_DATA_SIZE);
+            let frame_keys = [
+                env.market,
+                taker,
+                lp,
+                context,
+                delegate,
+                env.vault,
+                env.mint,
+                sources[0],
+                sources[1],
+                owners[0].pubkey(),
+                owners[1].pubkey(),
+                env.admin.pubkey(),
+                matcher,
+                env.program_id,
+                spl_token::ID,
+            ];
+            let frame = |env: &V16CuEnv| frame_keys.map(|key| env.svm.get_account(&key));
+            let before = frame(&env);
+            env.svm
+                .simulate_transaction(retained.clone().into())
+                .expect("the signed bundle is executable under the original oracle policy");
+            assert_eq!(
+                frame(&env),
+                before,
+                "simulation cannot consume the prefix or fill"
+            );
+
+            let price_delta = direction * if adverse { 10 } else { -10 };
+            let landing_price = (SIGNED_PRICE as i128 + price_delta) as u64;
+            let old_sequence = env.control_sequences(0).oracle_observation;
+            // No blockhash expiry or re-signing: only the authorized oracle policy changes.
+            env.configure_ewma_mark_with_cu(1, landing_price, 1, 0);
+            assert_eq!(
+                env.control_sequences(0).oracle_observation,
+                old_sequence + 1
+            );
+            assert_eq!(
+                env.market_state().0.oracle_mode,
+                percolator_prog::constants::ORACLE_MODE_EWMA_MARK
+            );
+            assert_eq!(
+                env.market_state().1.assets[0].effective_price,
+                landing_price
+            );
+            assert_eq!(transaction(&env, &retained_instruction), retained);
+            assert_eq!(bincode::serialize(&retained).unwrap(), signed_bytes);
+
+            let before = frame(&env);
+            let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+            let network_fee = FeeStructure::default().lamports_per_signature
+                * u64::from(retained.message.header.num_required_signatures);
+            let result = env.svm.send_transaction(retained);
+            let accepted = if adverse {
+                let error =
+                    result.expect_err("new oracle policy cannot relax the signed price limit");
+                assert_eq!(
+                    error.err,
+                    TransactionError::InstructionError(
+                        3,
+                        InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
+                    ),
+                );
+                assert!(error
+                    .meta
+                    .logs
+                    .contains(&format!("Program {} success", spl_token::ID)));
+                assert!(error
+                    .meta
+                    .logs
+                    .contains(&format!("Program {} success", env.program_id)));
+                assert!(error
+                    .meta
+                    .logs
+                    .contains(&format!("Program {matcher} success")));
+                assert_eq!(
+                    frame(&env),
+                    before,
+                    "deposit, custody, matcher response and all wrapper bytes roll back"
+                );
+                expected_payer.lamports -= network_fee;
+                assert_eq!(
+                    env.svm.get_account(&env.payer.pubkey()).unwrap(),
+                    expected_payer
+                );
+                assert_cu_within(
+                    "retained oracle-policy rejection",
+                    error.meta.compute_units_consumed,
+                    BUNDLE_CU_LIMIT,
+                );
+                peak_cu = peak_cu.max(error.meta.compute_units_consumed);
+
+                // Only the price limit changes; rejected prefix/position/matcher sequences remain usable.
+                let mut fresh = retained_instruction.clone();
+                let ProgInstruction::TradeCpi { limit_price, .. } = &mut fresh else {
+                    unreachable!()
+                };
+                *limit_price = landing_price;
+                env.svm
+                    .send_transaction(transaction(&env, &fresh))
+                    .expect("fresh exact-price consent executes immediately after stale rejection")
+            } else {
+                result.expect("a newer favorable oracle policy need not invalidate bounded consent")
+            };
+            assert_cu_within(
+                "oracle-policy bounded bundle",
+                accepted.compute_units_consumed,
+                BUNDLE_CU_LIMIT,
+            );
+            peak_cu = peak_cu.max(accepted.compute_units_consumed);
+            expected_payer.lamports -= network_fee;
+            assert_eq!(
+                env.svm.get_account(&env.payer.pubkey()).unwrap(),
+                expected_payer
+            );
+            let context_account = env.svm.get_account(&context).unwrap();
+            let fill = read_matcher_return(&context_account.data).unwrap();
+            assert_eq!(fill.exec_price_e6, landing_price);
+            assert_eq!(fill.oracle_price_e6, landing_price);
+            assert_eq!(fill.exec_size, size);
+            let accepted_limit = if adverse { landing_price } else { SIGNED_PRICE };
+            assert!(direction * (fill.exec_price_e6 as i128 - accepted_limit as i128) <= 0);
+            let (_, group) = env.market_state();
+            assert_eq!(group.assets[0].oi_eff_long_q, QUANTITY);
+            assert_eq!(group.assets[0].oi_eff_short_q, QUANTITY);
+            assert_eq!(group.insurance, 0);
+            assert_eq!(group.c_tot, u128::from(2 * DEPOSIT + PREFIX));
+            assert_eq!(group.vault, group.c_tot);
+            assert_eq!(env.token_amount(env.vault), 2 * DEPOSIT + PREFIX);
+            assert_eq!(env.token_amount(sources[0]), 0);
+            assert_eq!(env.token_amount(sources[1]), PREFIX);
+            assert_eq!(
+                Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+                    .unwrap()
+                    .supply,
+                2 * (DEPOSIT + PREFIX)
+            );
+            for (index, portfolio) in portfolios.iter().copied().enumerate() {
+                let account = env.portfolio_state(portfolio);
+                assert_eq!(
+                    account.capital.get(),
+                    u128::from(DEPOSIT + if index == 0 { PREFIX } else { 0 })
+                );
+                assert_eq!(account.pnl.get(), 0);
+                assert_eq!(
+                    account.legs[0].basis_pos_q.get(),
+                    if index == 0 { size } else { -size }
+                );
+            }
+        }
+    }
+    eprintln!(
+        "INV-014 retained oracle policy: 4 histories, 2 exact rollbacks, peak bundle CU {peak_cu}"
     );
 }
