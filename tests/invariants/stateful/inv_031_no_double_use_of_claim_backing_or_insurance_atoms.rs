@@ -27,6 +27,10 @@
 //! Its suffix ledger checks both owners separately while the sibling still owns a live lien,
 //! then requires its exact claim conversion and payout. This is eight no-CPI histories, not
 //! expiry/impairment, arbitrary histories, insurance-lien reachability or engine-proof closure.
+//! `v16_program_unequal_shared_claims_preserve_owner_local_entitlement` runs the same retained
+//! shared-pool history with independently derived 100- and 110-atom claims. Each conversion and
+//! payout must consume only that owner's claim while the sibling's unequal claim and lien remain
+//! exact; aggregate and split replacement backing must produce the same custody endpoint.
 //! `v16_program_shared_lien_expiry_refill_preserves_owner_attribution` crosses the same public
 //! shared-lien frontier with authenticated exact/late expiry. The old valid total must become
 //! impaired exactly once, each owner must release only its own amount while the sibling remains
@@ -451,8 +455,14 @@ fn v16_program_live_source_lien_route_pairs_preserve_single_backing_ownership() 
 #[derive(Clone, Copy, Debug)]
 enum ConcurrentLienSuffix {
     ReleaseOnly,
-    PartialConsumption { split_refill: bool },
-    ExpiryRefill { late: bool, split_refill: bool },
+    PartialConsumption {
+        split_refill: bool,
+        unequal_claims: bool,
+    },
+    ExpiryRefill {
+        late: bool,
+        split_refill: bool,
+    },
 }
 
 fn verify_two_account_concurrent_lien_ownership(
@@ -467,7 +477,6 @@ fn verify_two_account_concurrent_lien_ownership(
     const ADVERSE_ASSETS: [u16; 2] = [1, 2];
     const MARKET_CRANKER: usize = 4;
     const START_PRICE: u64 = 100;
-    const WINNING_SIZE_Q: i128 = 20 * POS_SCALE as i128;
     const ADVERSE_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const RISK_INCREMENT_Q: i128 = (POS_SCALE / 10) as i128;
     const BACKING_ATOMS: u128 = 12;
@@ -478,6 +487,18 @@ fn verify_two_account_concurrent_lien_ownership(
     let adverse_mark = if winner_long { 95 } else { 105 };
     let source_domain = if winner_long { 1usize } else { 0usize };
     let actor_order = if reverse_order { [1usize, 0] } else { [0, 1] };
+    let unequal_claims = matches!(
+        suffix,
+        ConcurrentLienSuffix::PartialConsumption {
+            unequal_claims: true,
+            ..
+        }
+    );
+    let winning_sizes_q = match (unequal_claims, winner_long) {
+        (true, false) => [20 * POS_SCALE as i128, 22 * POS_SCALE as i128],
+        (true, true) => [22 * POS_SCALE as i128, 20 * POS_SCALE as i128],
+        _ => [20 * POS_SCALE as i128; 2],
+    };
     let route_index = match route {
         TradeRoute::NoCpi => 0u8,
         TradeRoute::Cpi => 1,
@@ -490,6 +511,7 @@ fn verify_two_account_concurrent_lien_ownership(
     let mut seed = [0x31; 32];
     seed[0] ^= 0xa0 | route_index;
     seed[1] ^= u8::from(reverse_order) | (u8::from(winner_long) << 1);
+    seed[2] ^= u8::from(unequal_claims);
     let mut env = V16Svm::new(
         seed,
         MarketConfig {
@@ -529,7 +551,7 @@ fn verify_two_account_concurrent_lien_ownership(
             WINNERS[pair],
             COUNTERPARTIES[pair],
             WINNING_ASSET,
-            direction * WINNING_SIZE_Q,
+            direction * winning_sizes_q[pair],
             START_PRICE,
             0,
         )
@@ -571,24 +593,31 @@ fn verify_two_account_concurrent_lien_ownership(
         env.crank(actor, 2, observations.clone())
             .map_err(|error| format!("{label} settle actor {actor}: {error}"))?;
     }
-    let expected_claim = (WINNING_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
-        .checked_mul(u128::from(START_PRICE.abs_diff(winning_mark)))
-        .ok_or_else(|| format!("{label} winning PnL oracle overflow"))?;
+    let claim_for = |size_q: i128| {
+        (size_q.unsigned_abs() / POS_SCALE as u128)
+            .checked_mul(u128::from(START_PRICE.abs_diff(winning_mark)))
+            .ok_or_else(|| format!("{label} winning PnL oracle overflow"))
+    };
+    let expected_claims = [
+        claim_for(winning_sizes_q[0])?,
+        claim_for(winning_sizes_q[1])?,
+    ];
     let expected_loss = (ADVERSE_SIZE_Q.unsigned_abs() / POS_SCALE as u128)
         .checked_mul(u128::from(START_PRICE.abs_diff(adverse_mark)))
         .ok_or_else(|| format!("{label} adverse PnL oracle overflow"))?;
-    let expected_claim_i128 = i128::try_from(expected_claim)
-        .map_err(|_| format!("{label} source claim does not fit i128"))?;
     let expected_capital = WINNER_DEPOSIT
         .checked_sub(expected_loss)
         .ok_or_else(|| format!("{label} adverse loss exceeds funded capital"))?;
-    for winner in WINNERS {
+    for (pair, winner) in WINNERS.into_iter().enumerate() {
+        let expected_claim_i128 = i128::try_from(expected_claims[pair])
+            .map_err(|_| format!("{label} source claim does not fit i128"))?;
         let account = env.primary_portfolio(winner);
         if account.pnl.get() != expected_claim_i128 || account.capital.get() != expected_capital {
             return Err(format!(
-                "{label} winner {winner} did not preserve gross source claim and disjoint capital loss: capital={}, pnl={}, expected_capital={expected_capital}, expected_claim={expected_claim}",
+                "{label} winner {winner} did not preserve gross source claim and disjoint capital loss: capital={}, pnl={}, expected_capital={expected_capital}, expected_claim={}",
                 account.capital.get(),
                 account.pnl.get(),
+                expected_claims[pair],
             ));
         }
     }
@@ -669,9 +698,19 @@ fn verify_two_account_concurrent_lien_ownership(
         .checked_add(local_liens[1])
         .ok_or_else(|| format!("{label} frontier lien sum overflow"))?;
     let (_, frontier_group) = env.primary_market_state();
+    let lien_shape_is_nonvacuous = if unequal_claims {
+        local_total != 0
+    } else {
+        local_liens.iter().all(|lien| *lien != 0)
+    };
+    let growth_shape_is_nonvacuous = if unequal_claims {
+        accepted_increments.iter().any(|count| *count != 0)
+    } else {
+        accepted_increments.iter().all(|count| *count != 0)
+    };
     if frontier_reached != [true; 2]
-        || accepted_increments.iter().any(|count| *count == 0)
-        || local_liens.iter().any(|lien| *lien == 0)
+        || !growth_shape_is_nonvacuous
+        || !lien_shape_is_nonvacuous
         || frontier_group.source_credit[source_domain].valid_liened_backing_num != local_total
         || frontier_group.source_backing_buckets[source_domain].valid_liened_backing_num
             != local_total
@@ -683,7 +722,9 @@ fn verify_two_account_concurrent_lien_ownership(
         ));
     }
 
-    let extra_rejections = if let ConcurrentLienSuffix::PartialConsumption { split_refill } = suffix
+    let extra_rejections = if let ConcurrentLienSuffix::PartialConsumption {
+        split_refill, ..
+    } = suffix
     {
         verify_shared_lien_partial_consumption_suffix(
             &label,
@@ -691,6 +732,8 @@ fn verify_two_account_concurrent_lien_ownership(
             winner_long,
             actor_order,
             accepted_increments,
+            winning_sizes_q,
+            expected_claims,
             split_refill,
         )?;
         3
@@ -729,7 +772,7 @@ fn verify_two_account_concurrent_lien_ownership(
                 WINNERS[pair],
                 COUNTERPARTIES[pair],
                 WINNING_ASSET,
-                -direction * WINNING_SIZE_Q,
+                -direction * winning_sizes_q[pair],
                 winning_mark,
                 0,
             )
@@ -1098,6 +1141,7 @@ struct SharedLienSuffixOracle {
     fresh: u128,
     spent: u128,
     receivable: u128,
+    initial_fresh: u128,
     refill: u64,
     source_tokens: [u64; PRIMARY_ACTOR_COUNT],
     destination_tokens: [u64; PRIMARY_ACTOR_COUNT],
@@ -1159,7 +1203,7 @@ impl SharedLienSuffixOracle {
             || source.insurance_credit_reserved_num != 0
             || source.valid_liened_insurance_num != 0
             || source.impaired_liened_insurance_num != 0
-            || self.fresh + self.spent != 212 + u128::from(self.refill)
+            || self.fresh + self.spent != self.initial_fresh + u128::from(self.refill)
         {
             return Err(format!(
                 "{label} shared backing attribution: {source:?}, {bucket:?}"
@@ -1220,6 +1264,7 @@ fn release_shared_lien_owner(
     actor: usize,
     winner_long: bool,
     accepted_increments: u128,
+    winning_size_q: i128,
 ) -> Result<usize, String> {
     let direction = if winner_long { 1 } else { -1 };
     let winning_mark = if winner_long { 105 } else { 95 };
@@ -1227,7 +1272,7 @@ fn release_shared_lien_owner(
     let adverse_q = 10 * POS_SCALE as i128 + accepted_increments as i128 * (POS_SCALE / 10) as i128;
     for (asset, size, price) in [
         (1 + actor as u16, adverse_q, adverse_mark),
-        (0, 20 * POS_SCALE as i128, winning_mark),
+        (0, winning_size_q, winning_mark),
     ] {
         shared_lien_suffix_step(label, env, None, |env| {
             execute_trade_route(
@@ -1281,21 +1326,30 @@ fn verify_shared_lien_partial_consumption_suffix(
     winner_long: bool,
     actor_order: [usize; 2],
     accepted_increments: [u128; 2],
+    winning_sizes_q: [i128; 2],
+    claim_atoms: [u128; 2],
     split_refill: bool,
 ) -> Result<(), String> {
     let domain = usize::from(winner_long);
-    // The public prefix earns each winner 100 and debits 50 of disjoint principal.
-    // Counterparties each pay 100 of principal and retain a separate 50-atom claim.
-    // Thus the shared source owns 12 provider + 200 counterparty backing atoms.
+    let initial_fresh = 12 + claim_atoms.iter().sum::<u128>();
+    let winner_capital = 313;
+    let counterparty_capital = claim_atoms.map(|claim| 1_000 - claim);
     let mut oracle = SharedLienSuffixOracle {
         domain,
-        capital: [313, 313, 900, 900, 1],
-        pnl: [100, 100, 50, 50, 0],
+        capital: [
+            winner_capital,
+            winner_capital,
+            counterparty_capital[0],
+            counterparty_capital[1],
+            1,
+        ],
+        pnl: [claim_atoms[0] as i128, claim_atoms[1] as i128, 50, 50, 0],
         paid: [0; PRIMARY_ACTOR_COUNT],
         liens: [0, 1].map(|actor| counterparty_lien_backing(env, actor, domain)),
-        fresh: 212,
+        fresh: initial_fresh,
         spent: 0,
         receivable: 0,
+        initial_fresh,
         refill: 0,
         source_tokens: std::array::from_fn(|actor| {
             env.token_amount(env.actors[actor].source_token)
@@ -1319,23 +1373,30 @@ fn verify_shared_lien_partial_consumption_suffix(
         first,
         winner_long,
         accepted_increments[first],
+        winning_sizes_q[first],
     )?;
-    let retained_before_refill = env.build_retained_convert_released_pnl(first, 100);
-    let retained_after_refill = env.build_retained_convert_released_pnl(first, 100);
+    let first_claim = claim_atoms[first];
+    let first_payout = winner_capital + first_claim;
+    let retained_before_refill = env.build_retained_convert_released_pnl(first, first_claim);
+    let retained_after_refill = env.build_retained_convert_released_pnl(first, first_claim);
     assert_ne!(
         retained_before_refill.signatures,
         retained_after_refill.signatures
     );
-    shared_lien_suffix_step(label, env, None, |env| env.convert_released_pnl(first, 100))?;
-    oracle.capital[first] += 100;
+    shared_lien_suffix_step(label, env, None, |env| {
+        env.convert_released_pnl(first, first_claim)
+    })?;
+    oracle.capital[first] += first_claim;
     oracle.pnl[first] = 0;
-    oracle.fresh -= 100;
-    oracle.spent += 100;
-    oracle.receivable += 100;
+    oracle.fresh -= first_claim;
+    oracle.spent += first_claim;
+    oracle.receivable += first_claim;
     oracle.check(label, env)?;
-    shared_lien_suffix_step(label, env, None, |env| env.withdraw_primary(first, 413))?;
+    shared_lien_suffix_step(label, env, None, |env| {
+        env.withdraw_primary(first, first_payout)
+    })?;
     oracle.capital[first] = 0;
-    oracle.paid[first] = 413;
+    oracle.paid[first] = u64::try_from(first_payout).expect("bounded shared-lien payout");
     oracle.check(label, env)?;
     // Mutate observations only, never program state. Each wrong-owner control conserves
     // aggregate value or encumbrance, so a stock-only oracle would miss the attribution error.
@@ -1355,12 +1416,21 @@ fn verify_shared_lien_partial_consumption_suffix(
         "{label} accepted wrong-owner payout"
     );
     wrong = observed;
-    wrong[first].lien = wrong[sibling].lien;
-    wrong[sibling].lien = 0;
+    wrong[first].face += percolator::BOUND_SCALE;
+    wrong[sibling].face -= percolator::BOUND_SCALE;
     assert!(
         !oracle.owners_match(&wrong),
-        "{label} accepted wrong-owner lien"
+        "{label} accepted wrong-owner claim face"
     );
+    if observed[sibling].lien != 0 {
+        wrong = observed;
+        wrong[first].lien = wrong[sibling].lien;
+        wrong[sibling].lien = 0;
+        assert!(
+            !oracle.owners_match(&wrong),
+            "{label} accepted wrong-owner lien"
+        );
+    }
     shared_lien_suffix_step(label, env, Some(16), |env| {
         env.land_retained(retained_before_refill)
     })?;
@@ -1383,9 +1453,9 @@ fn verify_shared_lien_partial_consumption_suffix(
     })?;
     oracle.check(label, env)?;
     steps += 1;
-    if oracle.liens[sibling] == 0 {
+    if oracle.pnl[sibling] != claim_atoms[sibling] as i128 {
         return Err(format!(
-            "{label} first owner/refill/retries changed the live sibling"
+            "{label} first owner/refill/retries changed the sibling claim"
         ));
     }
 
@@ -1397,30 +1467,38 @@ fn verify_shared_lien_partial_consumption_suffix(
         sibling,
         winner_long,
         accepted_increments[sibling],
+        winning_sizes_q[sibling],
     )?;
+    let sibling_claim = claim_atoms[sibling];
+    let sibling_payout = winner_capital + sibling_claim;
     shared_lien_suffix_step(label, env, Some(21), |env| {
-        env.convert_released_pnl(sibling, 99)
+        env.convert_released_pnl(sibling, sibling_claim - 1)
     })?;
     oracle.check(label, env)?;
     shared_lien_suffix_step(label, env, None, |env| {
-        env.convert_released_pnl(sibling, 100)
+        env.convert_released_pnl(sibling, sibling_claim)
     })?;
-    oracle.capital[sibling] += 100;
+    oracle.capital[sibling] += sibling_claim;
     oracle.pnl[sibling] = 0;
-    oracle.fresh -= 100;
-    oracle.spent += 100;
-    oracle.receivable += 100;
+    oracle.fresh -= sibling_claim;
+    oracle.spent += sibling_claim;
+    oracle.receivable += sibling_claim;
     oracle.check(label, env)?;
-    shared_lien_suffix_step(label, env, None, |env| env.withdraw_primary(sibling, 413))?;
+    shared_lien_suffix_step(label, env, None, |env| {
+        env.withdraw_primary(sibling, sibling_payout)
+    })?;
     oracle.capital[sibling] = 0;
-    oracle.paid[sibling] = 413;
+    oracle.paid[sibling] = u64::try_from(sibling_payout).expect("bounded shared-lien payout");
     oracle.check(label, env)?;
     steps += 3;
+    let expected_paid = claim_atoms
+        .map(|claim| u64::try_from(winner_capital + claim).expect("bounded shared-lien payout"));
+    let total_claims = claim_atoms.iter().sum::<u128>();
     if oracle.liens != [0, 0]
         || oracle.fresh != 49
-        || oracle.spent != 200
-        || oracle.receivable != 163
-        || oracle.paid[..2] != [413, 413]
+        || oracle.spent != total_claims
+        || oracle.receivable != total_claims - 37
+        || oracle.paid[..2] != expected_paid
     {
         return Err(format!(
             "{label} shared consumption history did not complete"
@@ -1439,7 +1517,30 @@ fn v16_program_shared_lien_partial_consumption_retries_preserve_sibling_claim() 
                     TradeRoute::NoCpi,
                     reverse_order,
                     winner_long,
-                    ConcurrentLienSuffix::PartialConsumption { split_refill },
+                    ConcurrentLienSuffix::PartialConsumption {
+                        split_refill,
+                        unequal_claims: false,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{error}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn v16_program_unequal_shared_claims_preserve_owner_local_entitlement() {
+    for reverse_order in [false, true] {
+        for winner_long in [false, true] {
+            for split_refill in [false, true] {
+                verify_two_account_concurrent_lien_ownership(
+                    TradeRoute::NoCpi,
+                    reverse_order,
+                    winner_long,
+                    ConcurrentLienSuffix::PartialConsumption {
+                        split_refill,
+                        unequal_claims: true,
+                    },
                 )
                 .unwrap_or_else(|error| panic!("{error}"));
             }

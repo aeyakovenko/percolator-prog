@@ -4500,11 +4500,50 @@ diff -u <(git show 284650c5:tests/invariants/README.md) <(awk '/^### INV-031\/03
 
 **Remaining gap.** This is a fully backed, fixed-slot, zero-fee/funding suffix with one shared
 domain, two equal claims and disjoint adverse assets. Reservation and exit order are coupled;
-other retry placements, cross-transport suffixes, unequal claims/ratios, Recovery/receipts,
+other retry placements, cross-transport suffixes, wider claim/ratio products, Recovery/receipts,
 provider withdrawal, counterparty-claim terminal completion and maximum shapes remain open. The
 shared-lien expiry/refill slice is addressed separately below. INV-033 retains its existing public
 absence guard and pinned engine-owned contracts; no insurance-lien creation, engine proof rerun,
 generic F completion or invariant status promotion is claimed.
+
+### INV-024/027/031 unequal shared-claim entitlement histories
+
+`v16_program_unequal_shared_claims_preserve_owner_local_entitlement` extends the public
+shared-source history above from two fixed 100-atom claims to independently derived 100- and
+110-atom claims. Eight no-CPI worlds cross both source domains, both claim/exit orders, and a
+37-atom replacement top-up submitted as `37` or `17 + 20`. The claim amounts swap owner with the
+source-side orientation, so each amount is consumed both first and second. One orientation places
+one claimant at its admission frontier before an additional risk increment; that exact rejection
+is retained rather than treated as a lien. Every world still has two nonzero claims, at least one
+accepted risk-growth step, and a nonzero source lien. The equal-claim control remains responsible
+for proving two simultaneously nonzero account-local liens.
+
+The existing suffix oracle now takes claim sizes as independent inputs. After every public
+transaction it checks all five portfolios' exact capital, PnL, source-claim face, lien and SPL
+destination balance; source and bucket fresh/spent/receivable classes; provider and vault custody;
+token supply; unrelated frames; and the stock, encumbrance and source-rate oracles. The first
+claimant converts and withdraws exactly `313 + claim` while the sibling claim and portfolio bytes
+remain exact. Two retained consumed-episode requests and the second claimant's one-atom-short cap
+reject with complete economic rollback. Conserving wrong-owner capital, payout and claim-face
+observations fail the owner oracle without mutating program state.
+
+The exact selector passes **eight worlds, 108 suffix transactions, 24 suffix rejections and 16
+owner payouts**. Payouts are exactly `413` and `423`; the common endpoint has 49 fresh backing,
+210 spent backing and 173 provider-receivable atoms after the real 37-atom SPL top-up. The reused
+admission prefix also contains two exact frontier rejections per world. Existing equal-claim
+partial-consumption, release-only and expiry/refill selectors remain green after the fixture
+generalization. Verification used the unchanged PR 427 default-feature SBF `230b6db1` and matcher
+`50e53226` with engine `495a5590`.
+
+```bash
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_unequal_shared_claims_preserve_owner_local_entitlement -- --exact --nocapture
+```
+
+This closes only the bounded unequal-claim owner-attribution slice. Cross-transport suffixes,
+unequal claims through expiry/impairment, larger claim and backing-ratio products, independent
+retry words, Recovery/receipts, provider exit, terminal counterparty completion and maximum shapes
+remain open. No production change, engine proof, generic fuzz completion or status promotion is
+claimed.
 
 ### INV-031/032/063 shared-lien expiry/refill histories
 
