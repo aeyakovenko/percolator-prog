@@ -28,8 +28,364 @@
 //! owner-signed reduction and bilateral trade routes clear the leg, normalize the carry, remain
 //! below their CU ceilings, preserve custody, and return all senior capital. These bounded cells
 //! do not replace the remaining lifecycle reachability work required by the charter.
+//!
+//! `v16_program_drain_only_stale_exit_does_not_require_reserve_or_counterparty_signers`
+//! composes exposed DrainOnly risk, stale resolution, an owner-window waiting winner, and the
+//! exact permissionless timeout boundary with funded, nonparticipating reserve owners. Unlike
+//! the Live-only reserve-owner exit witness in INV-024, it disposes real terminal PnL and both
+//! positions. Provider and insurance stocks remain attributed; rows 420/421 and administrative
+//! retirement remain open, not permissionlessly closed by this user-exit witness.
 
 use super::*;
+
+#[test]
+fn v16_program_drain_only_stale_exit_does_not_require_reserve_or_counterparty_signers() {
+    const CAPITAL: u128 = 1_000;
+    const PRICE: u64 = 100;
+    const MARK: u64 = 110;
+    const PROFIT: u128 = (MARK - PRICE) as u128;
+    const BACKING: u128 = 37;
+    const INSURANCE: u128 = 53;
+    const STALE_SLOTS: u64 = 5;
+    const RESOLVE_SLOT: u64 = 1 + STALE_SLOTS;
+    const EXIT_DELAY: u64 = 5;
+
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(STALE_SLOTS, EXIT_DELAY);
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let admin = env.admin.insecure_clone();
+    let provider = Keypair::new();
+    let insurance_owner = Keypair::new();
+    for (kind, authority) in [
+        (processor::ASSET_AUTH_BACKING_BUCKET, &provider),
+        (processor::ASSET_AUTH_INSURANCE, &insurance_owner),
+        (processor::ASSET_AUTH_INSURANCE_OPERATOR, &insurance_owner),
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(authority),
+            0,
+            kind,
+            authority.pubkey().to_bytes(),
+        )
+        .expect("install independent reserve owners before funding");
+    }
+    let backing_source = env.top_up_backing_bucket_with_authority(&provider, 0, BACKING, 100);
+    let insurance_source =
+        env.top_up_insurance_domain_with_authority(&insurance_owner, 0, INSURANCE);
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    env.deposit(&winner_owner, winner, CAPITAL);
+    env.deposit(&loser_owner, loser, CAPITAL);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, MARK);
+    for portfolio in [loser, winner] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_DRAIN_ONLY, 0, 0, 0);
+    let staged = env.market_state().1;
+    assert_eq!(staged.mode, MarketModeV16::Live);
+    assert_eq!(staged.assets[0].lifecycle, AssetLifecycleV16::DrainOnly);
+    assert_eq!(staged.assets[0].effective_price, MARK);
+    assert_eq!(staged.assets[0].stored_pos_count_long, 1);
+    assert_eq!(staged.assets[0].stored_pos_count_short, 1);
+    assert_eq!(staged.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(staged.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(env.portfolio_state(winner).capital.get(), CAPITAL);
+    assert_eq!(env.portfolio_state(winner).pnl.get(), PROFIT as i128);
+    assert_eq!(env.portfolio_state(loser).capital.get(), CAPITAL - PROFIT);
+    assert_eq!(env.portfolio_state(loser).pnl.get(), 0);
+    assert_eq!(
+        staged.source_backing_buckets[0].fresh_unliened_backing_num,
+        BACKING * BOUND_SCALE
+    );
+    assert_eq!(staged.insurance_domain_budget[0], INSURANCE);
+    assert_eq!(staged.vault, 2 * CAPITAL + BACKING + INSURANCE);
+
+    let owners = [winner_owner.pubkey(), loser_owner.pubkey()];
+    let portfolios = [winner, loser];
+    let destinations = [
+        env.token_account(owners[0], 0),
+        env.token_account(owners[1], 0),
+    ];
+    let absent_signers = [
+        admin.pubkey(),
+        provider.pubkey(),
+        insurance_owner.pubkey(),
+        owners[1],
+    ];
+    let tracked = [
+        env.market,
+        env.vault,
+        env.mint,
+        winner,
+        loser,
+        destinations[0],
+        destinations[1],
+        backing_source,
+        insurance_source,
+        owners[0],
+        owners[1],
+        admin.pubkey(),
+        provider.pubkey(),
+        insurance_owner.pubkey(),
+    ];
+    // All subsequent economic calls use only the owner or fee payer. No reserve owner,
+    // market authority, oracle authority, or counterparty can assist this suffix.
+    drop(admin);
+    drop(provider);
+    drop(insurance_owner);
+    drop(loser_owner);
+    assert!(!absent_signers.contains(&env.payer.pubkey()));
+    assert!(!absent_signers.contains(&winner_owner.pubkey()));
+
+    env.svm.warp_to_slot(RESOLVE_SLOT);
+    let before: Vec<_> = tracked
+        .iter()
+        .map(|key| (*key, env.svm.get_account(key)))
+        .collect();
+    env.svm.expire_blockhash();
+    let resolve_cu = env
+        .send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: RESOLVE_SLOT,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect("DrainOnly exposure must retain an oracle-free public terminal route");
+    assert_cu_within(
+        "DrainOnly permissionless stale resolve",
+        resolve_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    for (key, account) in before {
+        if key != env.market {
+            assert_eq!(env.svm.get_account(&key), account, "resolution frame {key}");
+        }
+    }
+    let resolved = env.market_state().1;
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_eq!(resolved.resolved_slot, RESOLVE_SLOT);
+    assert_eq!(resolved.vault, staged.vault);
+    assert_eq!(
+        resolved.source_backing_buckets[0],
+        staged.source_backing_buckets[0]
+    );
+    assert_eq!(
+        resolved.insurance_domain_budget,
+        staged.insurance_domain_budget
+    );
+
+    // One owner-signed call detaches the winner but cannot pay ahead of the remaining
+    // counterparty. At the exact timeout, two unsigned calls finish both economic exits.
+    let steps = [
+        (RESOLVE_SLOT, 0, true, None, 0, [0, 1]),
+        (
+            RESOLVE_SLOT,
+            0,
+            true,
+            Some(PercolatorError::EngineNonProgress),
+            0,
+            [0, 1],
+        ),
+        (
+            RESOLVE_SLOT + EXIT_DELAY - 1,
+            1,
+            false,
+            Some(PercolatorError::ExpectedSigner),
+            0,
+            [0, 1],
+        ),
+        (
+            RESOLVE_SLOT + EXIT_DELAY,
+            1,
+            false,
+            None,
+            CAPITAL - PROFIT,
+            [0, 0],
+        ),
+        (
+            RESOLVE_SLOT + EXIT_DELAY,
+            0,
+            false,
+            None,
+            CAPITAL + PROFIT,
+            [0, 0],
+        ),
+    ];
+    let mut paid = [0u128; 2];
+    let mut max_cu = resolve_cu;
+    for (step, (slot, target, owner_signed, expected_error, payout, remaining_legs)) in
+        steps.into_iter().enumerate()
+    {
+        env.svm.warp_to_slot(slot);
+        let before: Vec<_> = tracked
+            .iter()
+            .map(|key| (*key, env.svm.get_account(key)))
+            .collect();
+        let accounts = vec![
+            AccountMeta::new_readonly(owners[target], owner_signed),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolios[target], false),
+            AccountMeta::new(destinations[target], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        assert!(accounts
+            .iter()
+            .all(|meta| !meta.is_signer || !absent_signers.contains(&meta.pubkey)));
+        let signers: Vec<&Keypair> = if owner_signed {
+            vec![&winner_owner]
+        } else {
+            vec![]
+        };
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            accounts,
+            &signers,
+        );
+        let succeeded = expected_error.is_none();
+        if let Some(expected_error) = expected_error {
+            let error =
+                result.expect_err("waiting or premature unsigned close must reject atomically");
+            assert!(
+                error.contains(&format!(
+                    "InstructionError(2, Custom({}))",
+                    expected_error as u32
+                )),
+                "step {step}: {error}"
+            );
+        } else {
+            let cu =
+                result.expect("the next bounded terminal step must not require an absent signer");
+            assert_cu_within("DrainOnly resolved exit", cu, CUSTODY_CU_LIMIT);
+            max_cu = max_cu.max(cu);
+        }
+        for (key, account) in before {
+            let may_change = succeeded
+                && (key == env.market
+                    || key == portfolios[target]
+                    || (payout != 0 && (key == env.vault || key == destinations[target])));
+            if may_change {
+                let after = env.svm.get_account(&key).unwrap();
+                let mut expected = account.unwrap();
+                expected.data = after.data.clone();
+                assert_eq!(
+                    after, expected,
+                    "step {step} must preserve metadata and rent {key}"
+                );
+            } else {
+                assert_eq!(
+                    env.svm.get_account(&key),
+                    account,
+                    "step {step} frame {key}"
+                );
+            }
+        }
+        paid[target] += payout;
+        let group = env.market_state().1;
+        assert_eq!(group.mode, MarketModeV16::Resolved);
+        assert_eq!(
+            group.source_backing_buckets[0],
+            staged.source_backing_buckets[0]
+        );
+        assert_eq!(group.insurance, INSURANCE);
+        assert_eq!(
+            group.insurance_domain_budget,
+            staged.insurance_domain_budget
+        );
+        assert_eq!(group.insurance_domain_budget_remaining_total, INSURANCE);
+        assert_eq!(
+            group.vault,
+            2 * CAPITAL + BACKING + INSURANCE - paid.iter().sum::<u128>()
+        );
+        assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+        assert_eq!(
+            group.assets[0].stored_pos_count_long,
+            remaining_legs[0] as u64
+        );
+        assert_eq!(
+            group.assets[0].stored_pos_count_short,
+            remaining_legs[1] as u64
+        );
+        assert_eq!(
+            group.assets[0].oi_eff_long_q,
+            remaining_legs[0] as u128 * POS_SCALE
+        );
+        assert_eq!(
+            group.assets[0].oi_eff_short_q,
+            remaining_legs[1] as u128 * POS_SCALE
+        );
+        let remaining_capital = [
+            if paid[0] == 0 { CAPITAL } else { 0 },
+            if paid[1] == 0 { CAPITAL - PROFIT } else { 0 },
+        ];
+        let remaining_profit = if paid[0] == 0 { PROFIT } else { 0 };
+        assert_eq!(group.c_tot, remaining_capital.iter().sum::<u128>());
+        assert_eq!(group.pnl_pos_tot, remaining_profit);
+        for target in 0..2 {
+            let account = env.portfolio_state(portfolios[target]);
+            assert_eq!(account.capital.get(), remaining_capital[target]);
+            assert_eq!(
+                account.pnl.get(),
+                if target == 0 {
+                    remaining_profit as i128
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                percolator::active_bitmap_count_ones(active_bitmap(&account)),
+                remaining_legs[target]
+            );
+            assert_eq!(
+                u128::from(env.token_amount(destinations[target])),
+                paid[target]
+            );
+        }
+        if step == 0 {
+            assert!(!resolved_receipt(&env.portfolio_state(winner)).present);
+        }
+    }
+    assert_eq!(paid, [CAPITAL + PROFIT, CAPITAL - PROFIT]);
+    assert!(resolved_portfolio_is_terminal(&env, winner));
+    assert!(resolved_portfolio_is_terminal(&env, loser));
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.pnl_pos_tot, 0);
+    assert_eq!(terminal.assets[0].oi_eff_long_q, 0);
+    assert_eq!(terminal.assets[0].oi_eff_short_q, 0);
+    assert_eq!(
+        terminal.materialized_portfolio_count, 2,
+        "user payout is not administrative deletion"
+    );
+    assert_eq!(terminal.vault, BACKING + INSURANCE);
+    eprintln!("INV-073 DrainOnly stale exit: progress_calls=3 exact_rejections=2 payouts={paid:?} retained_reserves={} max_cu={max_cu}", BACKING + INSURANCE);
+}
 
 #[test]
 fn v16_stateful_liveness_oracle_has_no_known_failure_quarantine() {
