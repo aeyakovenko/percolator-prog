@@ -5366,6 +5366,33 @@ oracles and the pinned engine contract, adds no engine proof, and promotes no st
 uses private copies of the existing default-feature SBF `230b6db1` and matcher `50e53226`, not a
 fresh SBF build.
 
+### INV-047/056 stale-liability hint/admission composition
+
+`stateful/inv_047_equivalent_route_semantics.rs` adds
+`v16_program_stale_liability_hint_histories_preserve_trade_route_admission`.
+Its 40 public LiteSVM worlds cross four trade transports, two liability directions, and five
+histories: canonical public refresh, direct trade refresh, omission of the losing leg from hints,
+reversed already-consumed hints, and duplicate benign hints followed by canonical retry. This is
+a hint-history/admission composition, not another fresh route pair or max-shape omission test.
+
+The negative control independently places the candidate inside the stale certificate's margin
+budget but outside full refresh after a 50-atom loss. All 40 underfunded trades reject exactly;
+40 real SPL deposits of 100 atoms make the same trades usable with identical disclosed fees.
+The bounded histories check 464 successful public transactions and 120 exact rejections (40
+admission failures, 16 duplicate-hint failures, and 64 fixed-point nonprogress results), with peak
+successful CU 604,832. Both committed certificates use the existing full-refresh oracle.
+Same-route histories compare complete unnormalized accounts; cross-route comparison normalizes
+only matcher request sequence, the single-CPI return cache, and the LP enabled/expiry fields.
+The enabled, expiry, and request-sequence postconditions are asserted before normalization. SPL
+custody includes the winner's unconverted 50-atom claim; unrelated accounts remain byte-exact.
+
+Coverage only: INV-047/056 statuses are unchanged, and no wrapper or engine code/proof changes.
+The fixture uses two active AuthMark legs followed by a third-asset trade, one fixed fee, no
+funding or maintenance fees, no backing liens, and no Recovery/terminal transitions. External
+oracle tails, retained capabilities/generations, arbitrary histories, and maximum shapes remain
+outside this increment. Validation uses the baseline default-feature SBF `230b6db1` and matcher
+`50e53226`; the build-sbf invocation was cache-fresh, not a clean rebuild.
+
 ## Commands
 
 ```bash
