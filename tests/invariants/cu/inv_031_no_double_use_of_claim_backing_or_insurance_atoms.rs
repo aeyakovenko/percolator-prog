@@ -5,6 +5,9 @@
 //! time. These public-route LiteSVM regressions exercise source backing,
 //! insurance, dual-mint rail, and PnL conversion paths to prove retrying or
 //! reclassifying the same atom cannot create a second spend.
+//! The liquidation-to-withdrawal history below distinguishes spent insurance
+//! from its still-recorded domain budget: a residual cure cannot also fund an
+//! operator payout, while the unspent remainder and a fresh top-up stay usable.
 //!
 //! The composition census at the end closes the current wrapper surface without
 //! duplicating engine internals. INV-026/031 own every reachable successful
@@ -415,6 +418,284 @@ fn v16_program_dual_mint_terminal_insurance_no_double_withdraw() {
         env.svm.get_account(&secondary_dest).unwrap(),
         secondary_dest_before,
         "rejected terminal double-withdraw pays no additional secondary tokens"
+    );
+}
+
+#[test]
+fn v16_program_liquidation_spent_insurance_cannot_be_withdrawn_again() {
+    const INSURANCE: u128 = 125;
+    const OTHER_INSURANCE: u128 = 137;
+    const SHORT_CAPITAL: u128 = 100;
+    const LONG_CAPITAL: u128 = 10_000;
+    const LOSS: u128 = 10 * (120 - 100);
+    const SPENT: u128 = LOSS - SHORT_CAPITAL;
+    const REMAINING: u128 = INSURANCE - SPENT;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    let admin = env.admin.insecure_clone();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, LONG_CAPITAL);
+    env.deposit(&short_owner, short, SHORT_CAPITAL);
+    // All top-ups use this finite source; no account is rewritten to refill insurance.
+    let source = env.token_account(admin.pubkey(), (INSURANCE + OTHER_INSURANCE + 1) as u64);
+    let destination = env.token_account(admin.pubkey(), 0);
+    let top_up = |env: &mut V16CuEnv, domain, amount| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TopUpInsuranceDomain {
+                market_id: 0,
+                authority_epoch: 0,
+                intent_id: 0,
+                domain,
+                amount,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("public insurance top-up from the finite source")
+    };
+    assert_cu_within(
+        "INV-031 insurance funding",
+        top_up(&mut env, 0, INSURANCE),
+        CUSTODY_CU_LIMIT,
+    );
+    assert_cu_within(
+        "INV-031 unrelated asset insurance funding",
+        top_up(&mut env, 2, OTHER_INSURANCE),
+        CUSTODY_CU_LIMIT,
+    );
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        10 * POS_SCALE as i128,
+        100,
+        0,
+    );
+    let funded_vault = LONG_CAPITAL + SHORT_CAPITAL + INSURANCE + OTHER_INSURANCE;
+    assert_eq!(u128::from(env.token_amount(env.vault)), funded_vault);
+    assert_eq!(env.token_amount(source), 1);
+
+    let mut max_crank_cu = 0;
+    for now_slot in 2..=5 {
+        env.svm.warp_to_slot(now_slot);
+        env.push_auth_mark_with_cu(now_slot, 120);
+        let cu = env.crank(
+            long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations: crank_observations(0),
+            },
+        );
+        assert_cu_within("INV-031 public mark advance", cu, CRANK_CU_LIMIT);
+        max_crank_cu = max_crank_cu.max(cu);
+    }
+    assert_eq!(env.market_state().1.assets[0].effective_price, 120);
+    for _ in 0..8 {
+        for portfolio in [long, short] {
+            if let Some(cu) = env.crank_if_actionable(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 5,
+                    observations: crank_observations(0),
+                },
+            ) {
+                assert_cu_within("INV-031 insurance-consuming crank", cu, CRANK_CU_LIMIT);
+                max_crank_cu = max_crank_cu.max(cu);
+            }
+        }
+        if close_progress(&env.portfolio_state(short)).finalized {
+            break;
+        }
+    }
+    let short_after = env.portfolio_state(short);
+    let close = close_progress(&short_after);
+    assert!(
+        close.finalized,
+        "insurance-covered liquidation must finish within eight rounds"
+    );
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &short_after
+    )));
+    assert_eq!((short_after.capital.get(), short_after.pnl.get()), (0, 0));
+    assert_eq!(close.insurance_spent, SPENT);
+    assert_eq!(close.residual_remaining, 0);
+    crate::support::fuzz_model::verify_close_residual_partition("INV-031 insurance spend", &close)
+        .expect("the residual cure must account for its insurance atoms exactly once");
+
+    let after_liquidation = env.market_state().1;
+    assert_eq!(after_liquidation.insurance_domain_budget[0], INSURANCE);
+    assert_eq!(after_liquidation.insurance_domain_spent[0], SPENT);
+    assert_eq!(after_liquidation.insurance_domain_budget[1], 0);
+    assert_eq!(after_liquidation.insurance, REMAINING + OTHER_INSURANCE);
+    assert_eq!(after_liquidation.c_tot, LONG_CAPITAL);
+    assert_eq!(after_liquidation.vault, funded_vault);
+    assert_eq!(u128::from(env.token_amount(env.vault)), funded_vault);
+
+    let withdraw = |env: &mut V16CuEnv, amount| {
+        env.svm.expire_blockhash();
+        let ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: env
+                .withdraw_insurance_asset_instruction(admin.pubkey(), 0, amount)
+                .encode(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                ComputeBudgetInstruction::set_compute_unit_limit(CUSTODY_CU_LIMIT as u32),
+                ix,
+            ],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &admin],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+    let protected_keys = [long, short, env.mint];
+    let protected_before = protected_keys.map(|key| env.svm.get_account(&key).unwrap());
+    let rollback_keys = [env.market, env.vault, source, destination, admin.pubkey()];
+    let mut max_withdraw_cu = 0;
+    let mut paid = 0u128;
+    // After each boundary rejection, the exact available amount succeeds in the same live market.
+    // Gross domain budget, aggregate insurance, and SPL custody can all pay the rejected request;
+    // only this asset's budget minus the prior liquidation spend makes it unavailable.
+    for (amount, accepted) in [(REMAINING + 1, false), (REMAINING, true), (1, false)] {
+        assert!(u128::from(env.token_amount(env.vault)) >= amount);
+        assert!(env.market_state().1.insurance >= amount);
+        assert!(env.market_state().1.insurance_domain_budget[0] >= amount);
+        let before = rollback_keys.map(|key| env.svm.get_account(&key).unwrap());
+        let result = withdraw(&mut env, amount);
+        let cu = if accepted {
+            paid += amount;
+            result
+                .expect("the unspent insurance remainder must stay withdrawable")
+                .compute_units_consumed
+        } else {
+            let error = result.expect_err("liquidation-spent insurance must not fund a second use");
+            assert_eq!(
+                error.err,
+                solana_sdk::transaction::TransactionError::InstructionError(
+                    2,
+                    solana_sdk::instruction::InstructionError::Custom(
+                        PercolatorError::EngineLockActive as u32,
+                    ),
+                ),
+                "the remaining insurance allowance must reject, not custody or compute exhaustion",
+            );
+            assert_eq!(
+                rollback_keys.map(|key| env.svm.get_account(&key).unwrap()),
+                before
+            );
+            error.meta.compute_units_consumed
+        };
+        assert_cu_within(
+            "INV-031 liquidation-to-withdrawal boundary",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+        max_withdraw_cu = max_withdraw_cu.max(cu);
+        let group = env.market_state().1;
+        assert_eq!(group.insurance_domain_budget[0], INSURANCE - paid);
+        assert_eq!(group.insurance_domain_spent[0], SPENT);
+        assert_eq!(
+            &group.insurance_domain_budget[1..4],
+            &[0, OTHER_INSURANCE, 0]
+        );
+        assert_eq!(&group.insurance_domain_spent[1..4], &[0, 0, 0]);
+        assert_eq!(group.insurance, REMAINING + OTHER_INSURANCE - paid);
+        assert_eq!(
+            group.insurance_domain_budget_remaining_total,
+            REMAINING + OTHER_INSURANCE - paid
+        );
+        assert_domain_budget_remaining_total_consistent(&group, "INV-031 once-only insurance");
+        assert_eq!(group.c_tot, LONG_CAPITAL);
+        assert_eq!(group.vault, funded_vault - paid);
+        assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+        assert_eq!(u128::from(env.token_amount(destination)), paid);
+        assert_eq!(env.token_amount(source), 1);
+        assert_eq!(
+            protected_keys.map(|key| env.svm.get_account(&key).unwrap()),
+            protected_before
+        );
+    }
+
+    let refill_cu = top_up(&mut env, 0, 1);
+    assert_cu_within(
+        "INV-031 fresh insurance refill",
+        refill_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let refilled = env.market_state().1;
+    assert_eq!(refilled.insurance_domain_budget[0], SPENT + 1);
+    assert_eq!(refilled.insurance_domain_spent[0], SPENT);
+    assert_eq!(refilled.insurance, OTHER_INSURANCE + 1);
+    assert_eq!(
+        refilled.insurance_domain_budget_remaining_total,
+        OTHER_INSURANCE + 1
+    );
+    assert_eq!(refilled.vault, funded_vault - REMAINING + 1);
+    assert_eq!(u128::from(env.token_amount(env.vault)), refilled.vault);
+    assert_eq!(env.token_amount(source), 0);
+    let fresh_cu = withdraw(&mut env, 1)
+        .expect("only the freshly transferred atom may fund another insurance withdrawal")
+        .compute_units_consumed;
+    assert_cu_within(
+        "INV-031 fresh insurance withdrawal",
+        fresh_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let final_group = env.market_state().1;
+    assert_eq!(final_group.insurance_domain_budget[0], SPENT);
+    assert_eq!(final_group.insurance_domain_spent[0], SPENT);
+    assert_eq!(
+        &final_group.insurance_domain_budget[1..4],
+        &[0, OTHER_INSURANCE, 0]
+    );
+    assert_eq!(&final_group.insurance_domain_spent[1..4], &[0, 0, 0]);
+    assert_eq!(final_group.insurance, OTHER_INSURANCE);
+    assert_eq!(
+        final_group.insurance_domain_budget_remaining_total,
+        OTHER_INSURANCE
+    );
+    assert_domain_budget_remaining_total_consistent(&final_group, "INV-031 after refill payout");
+    assert_eq!(final_group.c_tot, LONG_CAPITAL);
+    assert_eq!(final_group.vault, LONG_CAPITAL + LOSS + OTHER_INSURANCE);
+    assert_eq!(u128::from(env.token_amount(env.vault)), final_group.vault);
+    assert_eq!(u128::from(env.token_amount(destination)), REMAINING + 1);
+    assert_eq!(
+        SPENT + u128::from(env.token_amount(destination)),
+        INSURANCE + 1
+    );
+    assert_eq!(
+        protected_keys.map(|key| env.svm.get_account(&key).unwrap()),
+        protected_before
+    );
+    println!(
+        "INV-031: insurance cure={SPENT}, payout={}, max crank CU={max_crank_cu}, max withdrawal CU={}",
+        REMAINING + 1,
+        max_withdraw_cu.max(fresh_cu),
     );
 }
 
