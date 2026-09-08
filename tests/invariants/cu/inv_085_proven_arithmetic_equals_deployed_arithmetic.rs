@@ -13,6 +13,10 @@
 //! activation, fee-share, batch-rounding, and Hybrid quote results. Bigint
 //! references cover the canonical wrapper arithmetic and provider scaling;
 //! a universal symbolic relational provider-scale theorem remains open.
+//! The clipped-maintenance matrix binds the actual collected fee to deployed
+//! reward rounding, self/separate-recipient credit, automatic close disposition,
+//! and real SPL exits in 70 boundary worlds. It consumes engine validators and
+//! does not add an engine arithmetic proof or a maximum-shape claim.
 
 use super::*;
 use num_bigint::BigUint;
@@ -768,6 +772,230 @@ fn v16_program_two_sided_fee_rate_search_matches_exhaustive_generated_inputs() {
             "two-sided fee-rate search diverged at generated word {index}"
         );
     }
+}
+
+#[test]
+fn v16_program_public_sbf_clipped_maintenance_rewards_match_bigint_and_close_disposition() {
+    let cases = [
+        (3u128, 2u128, 1u64),
+        (3, 3, 1),
+        (3, 4, 1),
+        (10_001, 10_000, 1),
+        (10_001, 10_001, 1),
+        (10_001, 10_002, 1),
+        (
+            percolator::MAX_PROTOCOL_FEE_ABS,
+            percolator::MAX_VAULT_TVL - 1,
+            3,
+        ),
+    ];
+    let mut worlds = 0;
+    let mut max_sync_cu = 0;
+    let mut max_exit_cu = 0;
+    let mut automatic_closes = 0;
+    for (fee_per_slot, principal, now_slot) in cases {
+        for share_bps in [1u16, 3_333, 3_334, 9_999, 10_000] {
+            for self_reward in [false, true] {
+                let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+                    maintenance_fee_per_slot: fee_per_slot,
+                    ..V16CuMarketParams::default()
+                });
+                let owner = Keypair::new();
+                let payer = env.create_portfolio(&owner);
+                let source = env.deposit(&owner, payer, principal);
+                env.update_maintenance_fee_policy_with_cu(share_bps);
+                env.svm.warp_to_slot(now_slot);
+                let reward_owner = Keypair::new();
+                let recipient = if self_reward {
+                    payer
+                } else {
+                    env.create_portfolio(&reward_owner)
+                };
+                let before = env.portfolio_state(payer);
+                let group_before = env.market_state().1;
+                let payer_before = env.svm.get_account(&payer).unwrap();
+                let market_before = env.svm.get_account(&env.market).unwrap();
+                let frame_keys = [source, env.vault, env.mint, owner.pubkey()];
+                let frame_before = frame_keys.map(|key| env.svm.get_account(&key).unwrap());
+                assert_eq!(before.capital.get(), principal, "fixture principal");
+                assert_eq!(before.last_fee_slot.get(), 0, "fixture fee cursor");
+
+                let nominal = BigUint::from(fee_per_slot)
+                    * BigUint::from(now_slot - before.last_fee_slot.get());
+                let charged = nominal
+                    .clone()
+                    .min(BigUint::from(principal))
+                    .to_u128()
+                    .unwrap();
+                let reward = (BigUint::from(charged) * BigUint::from(share_bps)
+                    / BigUint::from(10_000u16))
+                .to_u128()
+                .unwrap();
+                assert_eq!(
+                    percolator_prog::policy_v16::fee_share_floor(charged, share_bps),
+                    Some(reward)
+                );
+                if fee_per_slot == percolator::MAX_PROTOCOL_FEE_ABS {
+                    assert!(nominal > BigUint::from(u64::MAX));
+                    assert!(
+                        BigUint::from(charged) * BigUint::from(share_bps) > BigUint::from(u64::MAX)
+                            || share_bps == 1
+                    );
+                }
+                let payer_remaining = principal - charged + if self_reward { reward } else { 0 };
+                let auto_closed = payer_remaining == 0;
+                let context = format!("fee={fee_per_slot}, principal={principal}, slot={now_slot}, bps={share_bps}, self={self_reward}");
+
+                let cu = env
+                    .try_sync_maintenance_fee_with_cu(payer, Some(recipient), now_slot)
+                    .unwrap_or_else(|error| panic!("{context}: {error}"));
+                assert_cu_within(&context, cu, CUSTODY_CU_LIMIT);
+                max_sync_cu = max_sync_cu.max(cu);
+                let group_after = env.market_state().1;
+                assert_eq!(group_after.c_tot, principal - charged + reward, "{context}");
+                assert_eq!(group_after.insurance, charged - reward, "{context}");
+                assert_eq!(group_after.vault, principal, "{context}");
+                assert_eq!(
+                    group_after.c_tot + group_after.insurance,
+                    principal,
+                    "{context}"
+                );
+                assert_domain_budget_remaining_total_consistent(&group_after, &context);
+                assert_eq!(
+                    frame_keys.map(|key| env.svm.get_account(&key).unwrap()),
+                    frame_before,
+                    "{context}"
+                );
+                assert_eq!(
+                    group_after.materialized_portfolio_count,
+                    group_before.materialized_portfolio_count - u64::from(auto_closed),
+                    "{context}"
+                );
+                assert_eq!(
+                    env.svm.get_account(&env.market).unwrap().lamports,
+                    market_before.lamports
+                        + if auto_closed {
+                            payer_before.lamports
+                        } else {
+                            0
+                        },
+                    "{context}"
+                );
+                if auto_closed {
+                    automatic_closes += 1;
+                    assert!(
+                        env.svm
+                            .get_account(&payer)
+                            .is_none_or(|account| account.lamports == 0 && account.data.is_empty()),
+                        "{context}"
+                    );
+                } else {
+                    let after = env.portfolio_state(payer);
+                    assert_eq!(after.capital.get(), payer_remaining, "{context}");
+                    assert_eq!(after.last_fee_slot.get(), now_slot, "{context}");
+                    assert_eq!(
+                        env.svm.get_account(&payer).unwrap().lamports,
+                        payer_before.lamports,
+                        "{context}"
+                    );
+                }
+                if !self_reward {
+                    assert_eq!(
+                        env.portfolio_state(recipient).capital.get(),
+                        reward,
+                        "{context}"
+                    );
+                }
+
+                let mut market_data = env.svm.get_account(&env.market).unwrap().data;
+                let (_, group) = state::market_view_mut(&mut market_data).unwrap();
+                group.validate_shape().unwrap();
+                let live_accounts: Vec<_> = if self_reward {
+                    if auto_closed {
+                        vec![]
+                    } else {
+                        vec![(payer, &owner, payer_remaining)]
+                    }
+                } else if auto_closed {
+                    vec![(recipient, &reward_owner, reward)]
+                } else {
+                    vec![
+                        (payer, &owner, payer_remaining),
+                        (recipient, &reward_owner, reward),
+                    ]
+                };
+                for (key, _, _) in &live_accounts {
+                    let mut data = env.svm.get_account(key).unwrap().data;
+                    state::portfolio_view_mut_for_market_slots(
+                        &mut data,
+                        group.header.config.max_market_slots.get() as usize,
+                    )
+                    .unwrap()
+                    .validate_with_market(&group.as_view())
+                    .unwrap();
+                }
+                let mut paid = 0u128;
+                let mut remaining_accounts = group_after.materialized_portfolio_count;
+                for (key, signer, balance) in live_accounts {
+                    assert_eq!(env.portfolio_state(key).capital.get(), balance, "{context}");
+                    if balance != 0 {
+                        let (destination, cu) = env.withdraw_with_cu(signer, key, balance);
+                        assert_cu_within(
+                            "clipped maintenance reward withdrawal",
+                            cu,
+                            CUSTODY_CU_LIMIT,
+                        );
+                        max_exit_cu = max_exit_cu.max(cu);
+                        assert_eq!(
+                            u128::from(env.token_amount(destination)),
+                            balance,
+                            "{context}"
+                        );
+                        assert_eq!(env.portfolio_state(key).capital.get(), 0, "{context}");
+                        paid += balance;
+                        let withdrawn = env.market_state().1;
+                        assert_eq!(
+                            withdrawn.c_tot,
+                            principal - charged + reward - paid,
+                            "{context}"
+                        );
+                        assert_eq!(withdrawn.insurance, charged - reward, "{context}");
+                        assert_eq!(withdrawn.vault, principal - paid, "{context}");
+                        assert_eq!(
+                            withdrawn.vault,
+                            u128::from(env.token_amount(env.vault)),
+                            "{context}"
+                        );
+                    }
+                    let cu = env.close_portfolio_with_cu(signer, key);
+                    assert_cu_within("clipped maintenance portfolio close", cu, CUSTODY_CU_LIMIT);
+                    max_exit_cu = max_exit_cu.max(cu);
+                    remaining_accounts -= 1;
+                    assert_eq!(
+                        env.market_state().1.materialized_portfolio_count,
+                        remaining_accounts,
+                        "{context}"
+                    );
+                }
+                let terminal = env.market_state().1;
+                assert_eq!(paid, principal - charged + reward, "{context}");
+                assert_eq!(terminal.materialized_portfolio_count, 0, "{context}");
+                assert_eq!(terminal.c_tot, 0, "{context}");
+                assert_eq!(terminal.insurance, charged - reward, "{context}");
+                assert_eq!(terminal.vault, charged - reward, "{context}");
+                assert_eq!(
+                    terminal.vault,
+                    u128::from(env.token_amount(env.vault)),
+                    "{context}"
+                );
+                assert_domain_budget_remaining_total_consistent(&terminal, &context);
+                worlds += 1;
+            }
+        }
+    }
+    assert_eq!(worlds, 70);
+    assert!(automatic_closes > 0 && automatic_closes < worlds);
+    println!("INV-085 clipped maintenance: worlds={worlds}, automatic_closes={automatic_closes}, sync_peak={max_sync_cu}, exit_peak={max_exit_cu}");
 }
 
 #[test]

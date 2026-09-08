@@ -3,6 +3,82 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## Wrapper arithmetic conformance checkpoint (2026-09-08)
+
+Finding-blind tests/docs increment from
+`origin/codex/invariant-fidelity-reopen-20260904` at
+`26c31d07892f703ef6e237c92d8a7538a7f3806d`, developed in an isolated worktree.
+No GitHub PR diffs/issues or holdout branches were inspected. Production code,
+engine proofs, invariant verdicts, and verification-method status are unchanged.
+
+`cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs` adds
+`v16_program_public_sbf_clipped_maintenance_rewards_match_bigint_and_close_disposition`.
+Its 70 LiteSVM worlds cross seven fee/capital/time boundaries, five reward rates,
+and self versus separate recipients. Capital sits immediately below, at, and above
+the fee due. Adjacent 3,333/3,334-bps rates cross a reward atom; 1-bps and
+9,999/10,000-bps cases cover dust and zero retained insurance. The maximum configured
+fee case has nominal debt above `u64::MAX`, available capital just below the public
+vault ceiling, and reward products wider than `u64`.
+
+A bigint oracle computes the collected fee and reward independently of the host
+policy. The host adapter and deployed SBF must agree with that oracle. Whole-route
+postconditions include exact payer/recipient capital, insurance, custody, fee cursor,
+materialized-account count, automatic-close rent destination, and unchanged source,
+vault, mint, and owner snapshots. Pinned engine shape/account validators are consumed
+as composition contracts, not reproved. Every remaining capital atom is withdrawn
+through real SPL CPI with per-withdrawal capital/custody checks, every remaining
+portfolio is closed, and only retained insurance remains in the vault. Thirty worlds
+automatically close the charged portfolio; the
+others retain exactly the modeled residual/reward capital. Observed peak CU across
+the focused runs is 117,035 for sync and 61,128 for withdrawal/close.
+
+This adds INV-085 wrapper arithmetic and bounded INV-081 success-disposition evidence.
+It is not a full-width relational proof, all-public bootstrap proof, whole-route
+induction, or permissionless market retirement theorem. `V16CuEnv` provides the initial
+market allocation, mint/vault and external SPL balance fixtures; the tested portfolio,
+fee, reward, withdrawal and close transitions use public instructions with no injected
+engine state. Active legs, source records/liens, stale observations, Recovery/resolution,
+and maximum account/tail/market shapes are outside this retained matrix.
+
+Duplicate review retained no additional pure fee-share corpus, engine-error mapping,
+dispatch/entrypoint source lock, or generic rollback suffix: existing INV-085 and
+INV-080 owners already cover those obligations. No new maximum-shape measurement or
+error-propagation coverage is claimed for INV-077/080 by this increment.
+
+Verification uses default-feature SBF rebuilt with platform-tools v1.52, SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+The existing maximum-shape baseline additionally uses the rebuilt auth matcher,
+SHA-256 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The focused commands below use exact selectors, including the invariant metadata guards:
+
+```sh
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=4
+export CARGO_PROFILE_DEV_DEBUG=0
+export CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --offline -- --locked
+# Auth matcher build runs from tests/fixtures/auth_matcher with this same environment:
+# cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$PWD/target/deploy" -- --locked
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_085_proven_arithmetic_equals_deployed_arithmetic::v16_program_public_sbf_clipped_maintenance_rewards_match_bigint_and_close_disposition \
+  inv_085_proven_arithmetic_equals_deployed_arithmetic::v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries \
+  inv_085_proven_arithmetic_equals_deployed_arithmetic::v16_program_policy_arithmetic_matches_independent_full_width_corpus \
+  inv_085_proven_arithmetic_equals_deployed_arithmetic::v16_program_public_sbf_arithmetic_evidence_roster_is_complete \
+  inv_085_proven_arithmetic_equals_deployed_arithmetic::v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned \
+  inv_077_bounded_work_and_maximum_shape_compute::v16_program_public_full_shape_maintenance_has_bounded_continuation \
+  inv_077_bounded_work_and_maximum_shape_compute::v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded \
+  inv_080_error_propagation_and_exact_rollback::v16_program_explicit_engine_error_dispositions_are_source_complete \
+  inv_080_error_propagation_and_exact_rollback::v16_program_dispatch_and_entrypoints_preserve_every_handler_error \
+  inv_081_success_state_validity_over_complete_public_routes::v16_program_success_state_validity_composition_is_source_complete
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row \
+  inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter
+rustfmt --edition 2021 --check tests/invariants/cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs
+git diff --check
+```
+
 ## Wrapper custody checkpoint (2026-09-08)
 
 Finding-blind additions based on `origin/codex/invariant-fidelity-reopen-20260904` at
