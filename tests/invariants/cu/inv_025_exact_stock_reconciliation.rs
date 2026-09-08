@@ -9,6 +9,561 @@
 
 use super::*;
 
+#[test]
+fn v16_program_fee_bearing_recovery_reconciles_raw_stocks_through_terminal_close() {
+    use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const DEPOSITS: [u128; 2] = [1_000, 1_700];
+    const INIT_FEE: u128 = 37;
+    const INSURANCE: u128 = 71;
+    const BACKING: [u128; 2] = [17, 29];
+    const PRICE: u64 = 100;
+    const LOTS: u128 = 3;
+    const FEE_BPS: u64 = 1_000;
+    const TRADE_FEE: u128 = LOTS * PRICE as u128 * FEE_BPS as u128 / 10_000;
+
+    // Unlike the active-market census's derived nonnegative residual, this history
+    // has a predetermined zero residual: no mark/funding change, lien or rounding.
+    // It carries funded reserves and nonzero fees through Recovery and real exits.
+    struct Stocks {
+        capital: [Option<u128>; 2],
+        insurance: [u128; 2],
+        backing: [u128; 4],
+        wallets: [u64; 3],
+        supply: u64,
+    }
+    let mut expected = Stocks {
+        capital: [None; 2],
+        insurance: [0; 2],
+        backing: [0; 4],
+        wallets: [0; 3],
+        supply: 0,
+    };
+    let mut env = inv018_public_spl_market(6);
+    let owners = [Keypair::new(), Keypair::new()];
+    let portfolio_keys = [Keypair::new(), Keypair::new()];
+    let portfolios = portfolio_keys.each_ref().map(|key| key.pubkey());
+    let admin = env.admin.insecure_clone();
+    let wallets = [owners[0].pubkey(), owners[1].pubkey(), admin.pubkey()];
+    let tokens =
+        wallets.map(|wallet| create_ata_for_test(&mut env.svm, &env.payer, wallet, env.mint));
+
+    let census = |env: &V16CuEnv, expected: &Stocks, label: &str| {
+        let market = env.svm.get_account(&env.market).unwrap();
+        let header = market_group_header_bytes(&market.data);
+        let (_, decoded) = state::read_market(&market.data).unwrap();
+        let mut capital = 0;
+        let mut materialized = 0;
+        for (index, amount) in expected.capital.iter().enumerate() {
+            if let Some(amount) = amount {
+                let account = env.portfolio_state(portfolios[index]);
+                assert_eq!(account.capital.get(), *amount, "{label}: owner {index}");
+                assert_eq!(account.pnl.get(), 0, "{label}: no mark or funding PnL");
+                assert_eq!(account.cancel_deposit_escrow.get(), 0, "{label}: escrow");
+                capital += account.capital.get();
+                materialized += 1;
+            }
+        }
+        let mut backing_num = 0;
+        let mut earnings = 0;
+        let mut insurance_budget = 0;
+        for asset in 0..state::market_slot_capacity(&market.data).unwrap() {
+            let slot = bytemuck::pod_read_unaligned::<percolator::EngineAssetSlotV16Account>(
+                market_engine_slot_bytes(&market.data, asset),
+            );
+            let budget = slot.insurance_domain_budget_long.get()
+                + slot.insurance_domain_budget_short.get()
+                - slot.insurance_domain_spent_long.get()
+                - slot.insurance_domain_spent_short.get();
+            assert_eq!(
+                budget, expected.insurance[asset],
+                "{label}: asset {asset} insurance"
+            );
+            insurance_budget += budget;
+            for (side, (bucket, source)) in [
+                (slot.backing_long, slot.source_credit_long),
+                (slot.backing_short, slot.source_credit_short),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let domain = 2 * asset + side;
+                let fresh = bucket.fresh_unliened_backing_num.get();
+                assert_eq!(
+                    fresh,
+                    expected.backing[domain] * BOUND_SCALE,
+                    "{label}: domain {domain}"
+                );
+                assert_eq!(
+                    source.fresh_reserved_backing_num.get(),
+                    fresh,
+                    "{label}: backing mirror"
+                );
+                for encumbrance in [
+                    bucket.valid_liened_backing_num.get(),
+                    bucket.impaired_liened_backing_num.get(),
+                    bucket.consumed_liened_backing_num.get(),
+                    source.positive_claim_bound_num.get(),
+                    source.exact_positive_claim_num.get(),
+                    source.spent_backing_num.get(),
+                    source.provider_receivable_num.get(),
+                    source.valid_liened_backing_num.get(),
+                    source.impaired_liened_backing_num.get(),
+                    source.insurance_credit_reserved_num.get(),
+                ] {
+                    assert_eq!(
+                        encumbrance, 0,
+                        "{label}: no hidden claim or lien in domain {domain}"
+                    );
+                }
+                backing_num += fresh;
+                earnings += bucket.utilization_fee_earnings.get();
+            }
+        }
+        assert_eq!(
+            earnings, 0,
+            "{label}: no utilization earnings without liens"
+        );
+        assert_eq!(
+            backing_num % BOUND_SCALE,
+            0,
+            "{label}: no fractional backing"
+        );
+        for (name, raw, decoded, scanned) in [
+            ("capital", header.c_tot.get(), decoded.c_tot, capital),
+            (
+                "insurance",
+                header.insurance.get(),
+                decoded.insurance,
+                insurance_budget,
+            ),
+            (
+                "earnings",
+                header.backing_provider_earnings_total.get(),
+                decoded.backing_provider_earnings_total,
+                earnings,
+            ),
+            (
+                "budget",
+                header.insurance_domain_budget_remaining_total.get(),
+                decoded.insurance_domain_budget_remaining_total,
+                insurance_budget,
+            ),
+            (
+                "claims",
+                header.source_claim_bound_total_num.get(),
+                decoded.source_claim_bound_total_num,
+                0,
+            ),
+            (
+                "insurance reservations",
+                header.source_insurance_credit_reserved_total_atoms.get(),
+                decoded.source_insurance_credit_reserved_total_atoms,
+                0,
+            ),
+            (
+                "positive PnL",
+                header.pnl_pos_tot.get(),
+                decoded.pnl_pos_tot,
+                0,
+            ),
+        ] {
+            assert_eq!((raw, decoded), (scanned, scanned), "{label}: {name} census");
+        }
+        assert_eq!(
+            header.materialized_portfolio_count.get(),
+            materialized,
+            "{label}: portfolios"
+        );
+        assert_eq!(
+            header.source_fresh_backing_total_num.get(),
+            backing_num,
+            "{label}: fresh total"
+        );
+        let stock = capital + insurance_budget + earnings + backing_num / BOUND_SCALE;
+        let vault = env.token_amount(env.vault);
+        assert_eq!(
+            (header.vault.get(), decoded.vault, u128::from(vault)),
+            (stock, stock, stock),
+            "{label}: exact partition, zero rounding residue and zero protocol surplus"
+        );
+        for (index, token) in tokens.iter().enumerate() {
+            assert_eq!(
+                env.token_amount(*token),
+                expected.wallets[index],
+                "{label}: wallet {index}"
+            );
+        }
+        let mint = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data).unwrap();
+        assert_eq!(mint.supply, expected.supply, "{label}: issued atoms");
+        assert_eq!(
+            vault + tokens.iter().map(|key| env.token_amount(*key)).sum::<u64>(),
+            mint.supply,
+            "{label}: every issued atom remains in the vault or its owner's wallet"
+        );
+    };
+    let mut steps = 0;
+    let mut peak_cu = 0;
+    macro_rules! step {
+        ($label:literal, $action:expr) => {{
+            let cu = $action;
+            assert_cu_within($label, cu, TRADE_CU_LIMIT);
+            peak_cu = peak_cu.max(cu);
+            steps += 1;
+            census(&env, &expected, $label);
+        }};
+    }
+    step!("public genesis", env.init_market_cu);
+    for (index, amount) in [
+        DEPOSITS[0] + INIT_FEE,
+        DEPOSITS[1],
+        INSURANCE + BACKING.iter().sum::<u128>(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        expected.wallets[index] = amount as u64;
+        expected.supply += amount as u64;
+        step!(
+            "public mint funding",
+            send_raw_ixs(
+                &mut env.svm,
+                &env.payer,
+                vec![spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &env.mint,
+                    &tokens[index],
+                    &admin.pubkey(),
+                    &[],
+                    amount as u64
+                )
+                .unwrap()],
+                &[&admin]
+            )
+            .unwrap()
+        );
+    }
+    for index in 0..2 {
+        step!(
+            "System portfolio allocation",
+            system_create_account_for_test(
+                &mut env.svm,
+                &env.payer,
+                &portfolio_keys[index],
+                env.portfolio_account_len,
+                env.program_id
+            )
+        );
+        expected.capital[index] = Some(0);
+        step!(
+            "InitPortfolio",
+            env.send(
+                ProgInstruction::InitPortfolio,
+                vec![
+                    AccountMeta::new(owners[index].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[index], false),
+                ],
+                &[&owners[index]]
+            )
+            .unwrap()
+        );
+        env.portfolios.push(portfolios[index]);
+        expected.capital[index] = Some(DEPOSITS[index]);
+        expected.wallets[index] -= DEPOSITS[index] as u64;
+        step!(
+            "Deposit",
+            env.send(
+                env.deposit_ix(portfolios[index], DEPOSITS[index]),
+                vec![
+                    AccountMeta::new(owners[index].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[index], false),
+                    AccountMeta::new(tokens[index], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owners[index]]
+            )
+            .unwrap()
+        );
+    }
+    expected.insurance[0] = INSURANCE;
+    expected.wallets[2] -= INSURANCE as u64;
+    step!(
+        "TopUpInsurance",
+        env.top_up_insurance_from_admin_token_with_cu(tokens[2], INSURANCE)
+    );
+    expected.backing[0] = BACKING[0];
+    expected.wallets[2] -= BACKING[0] as u64;
+    step!(
+        "asset-0 backing",
+        env.top_up_backing_bucket_from_admin_token_with_cu(tokens[2], 0, BACKING[0], 100)
+    );
+    step!(
+        "activation fee policy",
+        env.update_market_init_fee_policy_with_cu(INIT_FEE)
+    );
+    step!(
+        "Recovery timeout policy",
+        env.configure_permissionless_resolve_with_cu(100, 1)
+    );
+
+    env.svm.warp_to_slot(1);
+    expected.insurance[0] += INIT_FEE;
+    expected.wallets[0] -= INIT_FEE as u64;
+    step!(
+        "paid dynamic activation",
+        env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                market_id: env.market_state().1.next_market_id,
+                authority_epoch: 0,
+                now_slot: 1,
+                initial_price: PRICE,
+                max_init_fee: INIT_FEE,
+                insurance_authority: admin.pubkey().to_bytes(),
+                insurance_operator: admin.pubkey().to_bytes(),
+                backing_bucket_authority: admin.pubkey().to_bytes(),
+                oracle_authority: admin.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(owners[0].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(tokens[0], false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owners[0]]
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    expected.backing[3] = BACKING[1];
+    expected.wallets[2] -= BACKING[1] as u64;
+    step!(
+        "asset-1 backing",
+        env.top_up_backing_bucket_from_admin_token_with_cu(tokens[2], 3, BACKING[1], 100)
+    );
+    expected.capital = DEPOSITS.map(|amount| Some(amount - TRADE_FEE));
+    expected.insurance[1] = 2 * TRADE_FEE;
+    step!(
+        "fee-bearing TradeNoCpi",
+        env.trade_asset_with_cu(
+            1,
+            &owners[0],
+            portfolios[0],
+            &owners[1],
+            portfolios[1],
+            (LOTS * POS_SCALE) as i128,
+            PRICE,
+            FEE_BPS
+        )
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].oi_eff_long_q,
+        LOTS * POS_SCALE
+    );
+    step!(
+        "enter Recovery",
+        env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 1, 1, 0)
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    env.svm.warp_to_slot(2);
+    step!(
+        "permissionless Recovery force-close",
+        env.force_close_abandoned_asset_with_cu(
+            &owners[1],
+            portfolios[0],
+            portfolios[1],
+            1,
+            2,
+            LOTS * POS_SCALE
+        )
+    );
+    for portfolio in portfolios {
+        assert!(!has_active_leg_for_asset(
+            &env.portfolio_state(portfolio),
+            1
+        ));
+    }
+
+    // Insurance and both providers still own real vault atoms. A recovered owner
+    // cannot withdraw one of those atoms, and rejection must not poison its exit.
+    let withdrawal_accounts = vec![
+        AccountMeta::new(owners[0].pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolios[0], false),
+        AccountMeta::new(tokens[0], false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let capital = DEPOSITS[0] - TRADE_FEE;
+    env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: withdrawal_accounts.clone(),
+                data: env.withdraw_ix(portfolios[0], capital + 1).encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &owners[0]],
+        env.svm.latest_blockhash(),
+    );
+    let fee = u64::from(tx.message.header.num_required_signatures)
+        * FeeStructure::default().lamports_per_signature;
+    let mut keys = tx.message.account_keys.clone();
+    keys.extend(portfolios);
+    keys.extend(tokens);
+    keys.push(env.mint);
+    keys.sort_unstable();
+    keys.dedup();
+    let frame: Vec<_> = keys
+        .into_iter()
+        .map(|key| (key, env.svm.get_account(&key)))
+        .collect();
+    let failure = env
+        .svm
+        .send_transaction(tx)
+        .expect_err("one atom beyond owner capital must reject");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::EngineLockActive as u32)
+        )
+    );
+    assert_cu_within(
+        "recovered over-withdraw",
+        failure.meta.compute_units_consumed,
+        CUSTODY_CU_LIMIT,
+    );
+    for (key, mut before) in frame {
+        if key == env.payer.pubkey() {
+            before.as_mut().unwrap().lamports -= fee;
+        }
+        assert_eq!(
+            env.svm.get_account(&key),
+            before,
+            "exact rejected account frame: {key}"
+        );
+    }
+    census(&env, &expected, "rejected recovered over-withdraw");
+    env.svm.expire_blockhash();
+    expected.capital[0] = Some(0);
+    expected.wallets[0] += capital as u64;
+    step!(
+        "fresh exact-capital Withdraw",
+        env.send(
+            env.withdraw_ix(portfolios[0], capital),
+            withdrawal_accounts,
+            &[&owners[0]]
+        )
+        .unwrap()
+    );
+    step!("ResolveMarket", env.resolve());
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    expected.capital[1] = Some(0);
+    expected.wallets[1] += (DEPOSITS[1] - TRADE_FEE) as u64;
+    step!(
+        "signed CloseResolved",
+        env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0
+            },
+            vec![
+                AccountMeta::new(owners[1].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[1], false),
+                AccountMeta::new(tokens[1], false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owners[1]]
+        )
+        .unwrap()
+    );
+    for index in 0..2 {
+        expected.capital[index] = None;
+        step!(
+            "ClosePortfolio",
+            env.close_portfolio_with_cu(&owners[index], portfolios[index])
+        );
+        if let Some(account) = env.svm.get_account(&portfolios[index]) {
+            assert_eq!(account.lamports, 0);
+            assert!(account.data.is_empty());
+        }
+    }
+    for (domain, amount) in [(3, BACKING[1]), (0, BACKING[0])] {
+        expected.backing[domain] = 0;
+        expected.wallets[2] += amount as u64;
+        step!(
+            "terminal backing withdrawal",
+            env.withdraw_backing_bucket_to_admin_token_with_cu(tokens[2], domain as u16, amount)
+        );
+    }
+    for (asset, amount) in [(1, 2 * TRADE_FEE), (0, INSURANCE + INIT_FEE)] {
+        expected.insurance[asset] = 0;
+        expected.wallets[2] += amount as u64;
+        step!(
+            "terminal insurance withdrawal",
+            env.withdraw_insurance_domain_to_admin_token_with_cu(
+                tokens[2],
+                2 * asset as u16,
+                amount
+            )
+        );
+    }
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseSlab { authority_epoch: 0 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(tokens[2], false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("fully reconciled Recovery history must close");
+    assert_cu_within("CloseSlab", close_cu, CUSTODY_CU_LIMIT);
+    assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
+    if let Some(vault) = env.svm.get_account(&env.vault) {
+        assert_eq!(vault.lamports, 0);
+        assert!(vault.data.iter().all(|byte| *byte == 0));
+    }
+    for (index, token) in tokens.iter().enumerate() {
+        assert_eq!(env.token_amount(*token), expected.wallets[index]);
+    }
+    let supply = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+        .unwrap()
+        .supply;
+    assert_eq!(supply, expected.supply);
+    assert_eq!(
+        tokens.iter().map(|key| env.token_amount(*key)).sum::<u64>(),
+        supply
+    );
+    println!("INV-025: {steps} stock checkpoints, peak {peak_cu} CU; rollback {} CU; CloseSlab {close_cu} CU", failure.meta.compute_units_consumed);
+}
+
 fn fresh_backing_atoms(group: &MarketGroupV16) -> u128 {
     group
         .source_credit
