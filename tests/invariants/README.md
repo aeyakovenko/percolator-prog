@@ -4931,6 +4931,37 @@ shared-lien expiry/refill slice is addressed separately below. INV-033 retains i
 absence guard and pinned engine-owned contracts; no insurance-lien creation, engine proof rerun,
 generic F completion or invariant status promotion is claimed.
 
+### INV-031 CPI-created shared-lien consumption
+
+`v16_program_cpi_created_shared_liens_preserve_single_use_through_no_cpi_exit` adds one focused
+cross-transport subset of the shared-lien history gap above. Existing concurrent-reservation
+coverage releases liens using their original trade route; the retained partial-consumption
+history creates them only through no-CPI trades. This test instead creates both owners' nonzero
+liens through single or batch CPI, then uses the unchanged no-CPI reduction and consumption
+suffix across both source sides and both reservation/exit orders, with one 37-atom refill.
+
+The exact selector passes **eight worlds, 112 checked suffix transactions, 24 exact suffix
+rejections and 16 owner payouts**. The existing owner oracle requires the sibling's claim, lien
+and portfolio bytes to remain exact through the first owner's conversion, payout and retained
+retries before/after refill. Both owners receive exactly 413 atoms; every world ends with 49
+fresh, 200 spent and 163 provider-receivable backing atoms, without a residual shared lien or
+claim. Stock, encumbrance, source-rate, custody and public-trace checks remain unchanged.
+
+Validation from isolated base `a130e087` reuses a private copy of default-feature wrapper SBF
+`230b6db1` and rebuilds the authenticated matcher with platform-tools v1.52 to `50e53226`.
+The focused command, scoped rustfmt and `git diff --check` pass:
+
+```bash
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_cpi_created_shared_liens_preserve_single_use_through_no_cpi_exit -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs
+git diff --check
+```
+
+This adds only CPI-to-no-CPI equal-claim consumption coverage. CPI exit suffixes, unequal or
+impaired claims, additional refill/retry schedules, fees/funding, Recovery and maximum shapes
+remain outside this increment. No production/helper change, engine proof or status promotion
+is claimed.
+
 ### INV-024/027/031 unequal shared-claim entitlement histories
 
 `v16_program_unequal_shared_claims_preserve_owner_local_entitlement` extends the public

@@ -27,6 +27,10 @@
 //! Its suffix ledger checks both owners separately while the sibling still owns a live lien,
 //! then requires its exact claim conversion and payout. This is eight no-CPI histories, not
 //! expiry/impairment, arbitrary histories, insurance-lien reachability or engine-proof closure.
+//! `v16_program_cpi_created_shared_liens_preserve_single_use_through_no_cpi_exit` carries the
+//! same equal-claim suffix through single/batch CPI reservation prefixes, both source sides and
+//! both owner orders. No-CPI reductions must preserve the sibling's CPI-created lien while the
+//! first owner converts, withdraws and retries around one aggregate backing refill.
 //! `v16_program_unequal_shared_claims_preserve_owner_local_entitlement` runs the same retained
 //! shared-pool history with independently derived 100- and 110-atom claims. Each conversion and
 //! payout must consume only that owner's claim while the sibling's unequal claim and lien remain
@@ -1519,6 +1523,26 @@ fn v16_program_shared_lien_partial_consumption_retries_preserve_sibling_claim() 
                     winner_long,
                     ConcurrentLienSuffix::PartialConsumption {
                         split_refill,
+                        unequal_claims: false,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{error}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn v16_program_cpi_created_shared_liens_preserve_single_use_through_no_cpi_exit() {
+    for route in [TradeRoute::Cpi, TradeRoute::BatchCpi] {
+        for reverse_order in [false, true] {
+            for winner_long in [false, true] {
+                verify_two_account_concurrent_lien_ownership(
+                    route,
+                    reverse_order,
+                    winner_long,
+                    ConcurrentLienSuffix::PartialConsumption {
+                        split_refill: false,
                         unequal_claims: false,
                     },
                 )
