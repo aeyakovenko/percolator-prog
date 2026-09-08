@@ -624,6 +624,147 @@ fn v16_program_funded_close_rejects_exact_rollback_and_remains_withdrawable() {
 }
 
 #[test]
+fn v16_program_portfolio_growth_close_and_reuse_preserve_unrelated_claim_exit() {
+    let PublicReleasedPnlFixture {
+        mut env,
+        winner_owner,
+        winner,
+        loser,
+    } = public_released_pnl_fixture();
+    let (_, initial_market) = env.market_state();
+    let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+    let survivors = [winner, loser, env.mint].map(|key| (key, env.svm.get_account(&key).unwrap()));
+    assert!(initial_market.source_claim_bound_total_num > 0);
+    assert!(env
+        .portfolio_state(winner)
+        .source_domains
+        .iter()
+        .any(|source| source.is_occupied()));
+
+    let assert_surviving_claim =
+        |env: &V16CuEnv, live_siblings: u64, sibling_capital: u128, swept_lamports: u64| {
+            for (key, before) in &survivors {
+                assert_eq!(
+                    env.svm.get_account(key).as_ref(),
+                    Some(before),
+                    "unrelated lifecycle preserves claimant, counterparty, and mint accounts"
+                );
+            }
+            let (_, market) = env.market_state();
+            assert_eq!(
+                market.materialized_portfolio_count,
+                initial_market.materialized_portfolio_count + live_siblings
+            );
+            assert_eq!(market.c_tot, initial_market.c_tot + sibling_capital);
+            assert_eq!(market.pnl_pos_tot, initial_market.pnl_pos_tot);
+            assert_eq!(
+                market.source_claim_bound_total_num,
+                initial_market.source_claim_bound_total_num
+            );
+            assert_eq!(market.source_credit, initial_market.source_credit);
+            assert_eq!(market.vault, initial_market.vault + sibling_capital);
+            assert_eq!(env.token_amount(env.vault) as u128, market.vault);
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap().lamports,
+                market_lamports + swept_lamports,
+                "portfolio rent is not quote backing and goes only to the market slab"
+            );
+        };
+
+    let owner = Keypair::new();
+    let replacement_owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    let sibling = Keypair::new();
+    let portfolio = sibling.pubkey();
+    let required_len = env.portfolio_account_len;
+    let rent = env.svm.get_sysvar::<solana_sdk::rent::Rent>();
+    let exact_rent = rent.minimum_balance(required_len);
+    let create = system_instruction::create_account(
+        &env.payer.pubkey(),
+        &portfolio,
+        exact_rent,
+        (required_len / 3) as u64,
+        &env.program_id,
+    );
+    let init = inv021_init_portfolio_ix(&env, owner.pubkey(), portfolio);
+    env.svm.expire_blockhash();
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), create, init],
+        &[&sibling, &owner],
+    )
+    .expect("System-created undersized portfolio grows at exact final-size rent");
+
+    let old_portfolio_id = env.portfolio_id(portfolio);
+    let mut swept_lamports = 0;
+    for (generation, cycle_owner) in [&owner, &replacement_owner].into_iter().enumerate() {
+        let expected_rent = if generation == 0 {
+            exact_rent
+        } else {
+            inv021_reinitialize_closed_portfolio(
+                &mut env,
+                portfolio,
+                old_portfolio_id,
+                cycle_owner,
+            );
+            1_000_000_000
+        };
+        let account = env.svm.get_account(&portfolio).unwrap();
+        assert_eq!(account.data.len(), required_len);
+        assert_eq!(account.lamports, expected_rent);
+        assert!(rent.is_exempt(account.lamports, account.data.len()));
+        assert_surviving_claim(&env, 1, 0, swept_lamports);
+
+        let source = env.deposit(cycle_owner, portfolio, 7);
+        assert_eq!(env.token_amount(source), 0);
+        assert_surviving_claim(&env, 1, 7, swept_lamports);
+        let destination = env.withdraw(cycle_owner, portfolio, 7);
+        assert_eq!(env.token_amount(destination), 7);
+        assert_surviving_claim(&env, 1, 0, swept_lamports);
+
+        let owner_before_close = env.svm.get_account(&cycle_owner.pubkey()).unwrap();
+        env.close_portfolio_with_cu(cycle_owner, portfolio);
+        swept_lamports += expected_rent;
+        let closed = env.svm.get_account(&portfolio).unwrap();
+        assert_eq!(closed.lamports, 0);
+        assert!(closed.data.is_empty());
+        assert_eq!(
+            env.svm.get_account(&cycle_owner.pubkey()).unwrap(),
+            owner_before_close,
+            "neither incarnation's owner receives the portfolio rent"
+        );
+        assert_surviving_claim(&env, 0, 0, swept_lamports);
+    }
+
+    env.convert_released_pnl_with_cu(&winner_owner, winner, PUBLIC_RELEASED_PNL_FIXTURE_AMOUNT);
+    let expected_exit = 1_000_000 + PUBLIC_RELEASED_PNL_FIXTURE_AMOUNT;
+    assert_eq!(env.portfolio_state(winner).capital.get(), expected_exit);
+    let vault_before_exit = env.token_amount(env.vault);
+    let destination = env.withdraw(&winner_owner, winner, expected_exit);
+    assert_eq!(env.token_amount(destination) as u128, expected_exit);
+    assert_eq!(
+        (vault_before_exit - env.token_amount(env.vault)) as u128,
+        expected_exit,
+        "the surviving principal and backed claim both reach the owner's SPL account"
+    );
+    let exited = env.portfolio_state(winner);
+    assert_eq!(exited.capital.get(), 0);
+    assert_eq!(exited.pnl.get(), 0);
+    assert!(exited
+        .source_domains
+        .iter()
+        .all(|source| !source.is_occupied()));
+    let (_, market) = env.market_state();
+    assert_eq!(market.source_claim_bound_total_num, 0);
+    assert_eq!(market.vault, env.token_amount(env.vault) as u128);
+    assert_eq!(
+        market.materialized_portfolio_count,
+        initial_market.materialized_portfolio_count
+    );
+}
+
+#[test]
 fn v16_program_trade_and_source_claim_block_close_then_public_reuse_is_clean() {
     const INITIAL_PRICE: u64 = 100;
     const MARK_AFTER_MOVE: u64 = 105;
