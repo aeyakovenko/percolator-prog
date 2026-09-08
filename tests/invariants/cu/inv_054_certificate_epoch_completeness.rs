@@ -160,6 +160,179 @@ fn refresh_and_convert_public_claim(
 }
 
 #[test]
+fn v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom() {
+    const PRICE: u64 = 100;
+    const CAPITAL: u128 = 200;
+    const FEE: u128 = 37;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        maintenance_margin_bps: 5_000,
+        initial_margin_bps: 10_000,
+        maintenance_fee_per_slot: FEE,
+        max_price_move_bps_per_slot: 500,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, PRICE);
+    let owner = Keypair::new();
+    let peer_owner = Keypair::new();
+    let keeper_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let peer = env.create_portfolio(&peer_owner);
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&owner, portfolio, CAPITAL);
+    env.deposit(&peer_owner, peer, 1_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        portfolio,
+        &peer_owner,
+        peer,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    // Advance only the market's zero-move interval before isolating the account-local debit.
+    env.svm.warp_to_slot(2);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    let before = env.market_state().1;
+    let account_before = env.portfolio_state(portfolio);
+    let cert_before = health_cert(&account_before);
+    assert!(cert_is_current(&env, portfolio));
+    assert_eq!(account_before.last_fee_slot.get(), 1);
+    assert_eq!(account_before.capital.get(), CAPITAL);
+    assert_eq!(cert_before.certified_equity, CAPITAL as i128);
+    assert_eq!(cert_before.certified_initial_req, PRICE as u128);
+    assert_eq!(
+        cert_before.certified_equity - cert_before.certified_initial_req as i128,
+        PRICE as i128,
+        "the pre-debit certificate has exactly one additional unit of initial-margin headroom"
+    );
+    let peer_before = env.svm.get_account(&peer).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let sync_cu = env.sync_maintenance_fee_with_cu(portfolio, None, 2);
+    assert_cu_within(
+        "fee-only certificate invalidation",
+        sync_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let after = env.market_state().1;
+    let debited = env.portfolio_state(portfolio);
+    assert_eq!(after.oracle_epoch, before.oracle_epoch);
+    assert_eq!(after.funding_epoch, before.funding_epoch);
+    assert_eq!(after.risk_epoch, before.risk_epoch);
+    assert_eq!(after.asset_set_epoch, before.asset_set_epoch);
+    assert_eq!(active_bitmap(&debited), active_bitmap(&account_before));
+    assert_eq!(after.assets[0], before.assets[0]);
+    assert_eq!(debited.capital.get(), CAPITAL - FEE);
+    assert_eq!(debited.last_fee_slot.get(), 2);
+    assert_eq!(after.c_tot, before.c_tot - FEE);
+    assert_eq!(after.insurance, before.insurance + FEE);
+    assert_eq!(env.svm.get_account(&peer).unwrap(), peer_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert!(
+        !cert_is_current(&env, portfolio),
+        "the fee debit must invalidate the touched cache despite unchanged global epoch keys"
+    );
+
+    let tracked = [
+        env.market,
+        portfolio,
+        peer,
+        keeper,
+        env.vault,
+        owner.pubkey(),
+        peer_owner.pubkey(),
+    ];
+    let snapshot = tracked.map(|key| env.svm.get_account(&key));
+    env.svm.expire_blockhash();
+    let error = env
+        .try_trade_asset_with_cu(
+            0,
+            &owner,
+            portfolio,
+            &peer_owner,
+            peer,
+            POS_SCALE as i128,
+            PRICE,
+            0,
+        )
+        .expect_err("pre-debit headroom cannot authorize a post-debit risk increase");
+    assert!(
+        error.contains(&format!(
+            "Custom({})",
+            PercolatorError::EngineInvalidConfig as u32
+        )),
+        "the unaffordable increase must fail health admission: {error}"
+    );
+    for (key, expected) in tracked.into_iter().zip(snapshot) {
+        assert_eq!(
+            env.svm.get_account(&key),
+            expected,
+            "rejected increase changed {key}"
+        );
+    }
+
+    let refresh_cu = env.crank(
+        portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    assert_cu_within("public post-fee full refresh", refresh_cu, CRANK_CU_LIMIT);
+    assert!(cert_is_current(&env, portfolio));
+    let refreshed = health_cert(&env.portfolio_state(portfolio));
+    assert_eq!(refreshed.certified_equity, (CAPITAL - FEE) as i128);
+    assert_eq!(
+        refreshed.certified_initial_req,
+        cert_before.certified_initial_req
+    );
+    assert_eq!(
+        refreshed.certified_maintenance_req,
+        cert_before.certified_maintenance_req
+    );
+    assert_eq!(
+        refreshed.certified_worst_case_loss,
+        cert_before.certified_worst_case_loss
+    );
+    assert_eq!(refreshed.certified_liq_deficit, 0);
+
+    // A smaller increase remains affordable after the same debit and canonical refresh.
+    env.svm.expire_blockhash();
+    let trade_cu = env.trade_asset_with_cu(
+        0,
+        &owner,
+        portfolio,
+        &peer_owner,
+        peer,
+        (POS_SCALE / 2) as i128,
+        PRICE,
+        0,
+    );
+    assert_cu_within("affordable post-fee increase", trade_cu, TRADE_CU_LIMIT);
+    let live = env.portfolio_state(portfolio);
+    assert!(cert_is_current(&env, portfolio));
+    assert_eq!(
+        active_leg_for_asset(&live, 0).basis_pos_q,
+        (3 * POS_SCALE / 2) as i128
+    );
+    assert_eq!(live.capital.get(), CAPITAL - FEE);
+    assert_eq!(health_cert(&live).certified_equity, (CAPITAL - FEE) as i128);
+    assert_eq!(health_cert(&live).certified_initial_req, 150);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+}
+
+#[test]
 fn v16_attack_source_credit_risk_epoch_invalidates_public_released_pnl_cert() {
     let (mut env, owner, portfolio, protected_counterparty) =
         setup_public_released_pnl_certificate();

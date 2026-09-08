@@ -1350,8 +1350,22 @@ potentially identically wrong schedules.
 The shared INV-054 public released-PnL fixture now closes the certificate-stale seniority row across
 all seven value-bearing stale-mutation cases: after each stale favorable conversion rejects exactly,
 a permissionless refresh admits one exact 50,000-atom conversion from the claimant's source-backing
-lien, leaves its original counterparty byte-identical, and moves no SPL custody. The module's other
-two cases retain their distinct pending-obligation and target-lag obligations.
+lien, leaves its original counterparty byte-identical, and moves no SPL custody. The existing
+pending-obligation and target-lag cases retain their distinct obligations.
+
+INV-053/054 also have one fee-only public admission witness:
+[`v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom`](cu/inv_054_certificate_epoch_completeness.rs).
+A public `SyncMaintenanceFee` debit leaves every global epoch, the active bitmap, and asset state
+unchanged but invalidates the touched certificate. A `TradeNoCpi` increase affordable under the old
+certificate must reject at health admission with exact market, portfolio, peer, keeper, owner, and
+SPL-vault rollback (the transaction fee payer is excluded). A canonical public crank then certifies
+the exact post-debit equity; a smaller, still-affordable increase succeeds without moving custody.
+Unlike the existing INV-053 combined-fee/lag comparison and INV-060 lane decomposition, this checks
+admission immediately after fee settlement, before recertification and without an oracle change.
+This is one single-asset, unrewarded fee-debit history, not CPI/batch, rewarded/self-rewarded fee,
+fee-debt, multi-asset, or maximum-shape coverage. It adds no engine leaf proof or status promotion;
+INV-053 and INV-054 remain `OPEN_EVIDENCE`/`SAMPLED`.
+
 The existing INV-064 live-to-terminal lifecycle now closes the insurance-withdrawal seniority row:
 loss-stale live withdrawal preserves the market, vault, and both portfolios byte-for-byte; the two
 users then recover exactly 2,000 principal atoms before the authority receives only 100 residual
