@@ -977,6 +977,17 @@ Resolved exits, the unavailable-oracle frontier, activation/restart identity, an
 composition owned by INV-085, not a new CBMC proof of 128-bit division. A new writer, route,
 lifecycle mode, arithmetic owner, or supported shape reopens closure.
 
+Focused INV-045/046 maintenance adds
+`v16_program_zero_fee_ceiling_keeps_ordinary_trade_routes_live_without_mark_movement`
+in `stateful/inv_045_no_free_mark_movement.rs`. Sixteen public worlds cross EWMA and hybrid
+after-hours modes, both modest off-mark quote directions, and all four trade routes with a zero
+trading-fee ceiling. After a public clock catch-up, each route must open a nonzero position and
+close it again without moving the mark/engine target or collecting insurance fees. Stock and
+encumbrance censuses, exact token/foreign-market frames, and normalized route economics are
+checked. This adds ordinary-opening availability under zero fee support beyond the existing
+positive-ceiling partial-reduction matrices and local zero-support arithmetic proofs; it does not
+extend lifecycle or maximum-shape claims.
+
 The next finding-blind maximum-shape product crosses the same fourteen active legs and twenty-eight
 source domains with equal adverse risk on every leg. Four public worlds cover both persisted leg
 orders and both observation orders. Observation order changes nothing; persisted order selects
