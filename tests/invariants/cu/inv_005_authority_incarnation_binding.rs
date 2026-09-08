@@ -10,6 +10,9 @@
 //! `v16_program_authority_handoffs_share_one_incoming_key_validator` source-locks both authority
 //! handoff handlers to one validator: the market authority cannot be burned, while the asset-admin
 //! role retains its explicitly authorized burn path.
+//! `v16_program_oracle_authority_aba_is_asset_scoped_and_rolls_back_retained_prefix` retains
+//! same-key oracle requests for two assets across one asset's A-to-B-to-A rotation. It checks
+//! stale-epoch rollback, including an executed sibling prefix, and both scopes' live controls.
 //! `v16_program_adversarial_role_containment_matrix_is_source_complete` separately treats every
 //! correctly authorized role as economically hostile. It source-locks all configured, matcher,
 //! delegate, and permissionless callsites to explicit maximum/forbidden effects and independent
@@ -4223,6 +4226,188 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
         r_new.is_ok(),
         "the NEW oracle authority can push after rotation: {r_new:?}"
     );
+}
+
+#[test]
+fn v16_program_oracle_authority_aba_is_asset_scoped_and_rolls_back_retained_prefix() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    for asset_index in 0..2 {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, 100);
+    }
+    env.svm.warp_to_slot(2);
+    let authority_a = env.admin.insecure_clone();
+    let authority_b = Keypair::new();
+    env.ensure_signer_account(authority_b.pubkey());
+    let market_ids = [env.asset_market_id(0), env.asset_market_id(1)];
+    let sequences = [env.control_sequences(0), env.control_sequences(1)];
+    let marks = [110, 120];
+    let profile = |env: &V16CuEnv, asset_index| {
+        state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            asset_index,
+        )
+        .unwrap()
+    };
+    let push = |env: &V16CuEnv, asset_index: u16, authority_epoch| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(authority_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::PushAuthMark {
+            market_id: market_ids[asset_index as usize],
+            asset_index,
+            now_slot: 2,
+            mark_e6: marks[asset_index as usize],
+            observation_sequence: next_control_sequence(
+                sequences[asset_index as usize].oracle_observation,
+            ),
+            authority_epoch,
+        }
+        .encode(),
+    };
+    let sign = |env: &V16CuEnv, instructions: &[Instruction]| {
+        Transaction::new_signed_with_payer(
+            instructions,
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &authority_a],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let unrotated = push(&env, 0, sequences[0].authority_epoch);
+    let rotated = push(&env, 1, sequences[1].authority_epoch);
+    // Distinct signed envelopes retain identical control bytes before either handoff.
+    let retained_unrotated = sign(&env, &[heap_ix(), cu_ix(), unrotated.clone()]);
+    let retained_rotated = sign(&env, &[heap_ix(), cu_ix(), rotated.clone()]);
+    let retained_pair = sign(&env, &[heap_ix(), cu_ix(), unrotated, rotated]);
+    for tx in [&retained_unrotated, &retained_rotated, &retained_pair] {
+        tx.verify()
+            .expect("retained requests are signed before rotation");
+    }
+
+    for (step, from, to) in [
+        (1, &authority_a, &authority_b),
+        (2, &authority_b, &authority_a),
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            from,
+            Some(to),
+            1,
+            processor::ASSET_AUTH_ORACLE,
+            to.pubkey().to_bytes(),
+        )
+        .expect("co-signed asset-1 oracle handoff");
+        assert_eq!(profile(&env, 1).oracle_authority, to.pubkey().to_bytes());
+        for asset_index in 0..2 {
+            let current = env.control_sequences(asset_index);
+            assert_eq!(
+                current.authority_epoch,
+                sequences[asset_index].authority_epoch + if asset_index == 1 { step } else { 0 },
+                "only the rotated asset's authority epoch advances"
+            );
+            assert_eq!(
+                current.oracle_observation,
+                sequences[asset_index].oracle_observation
+            );
+            assert_eq!(
+                env.asset_market_id(asset_index as u16),
+                market_ids[asset_index]
+            );
+            assert_eq!(profile(&env, asset_index).mark_ewma_e6, 100);
+        }
+        assert_eq!(
+            profile(&env, 0).oracle_authority,
+            authority_a.pubkey().to_bytes()
+        );
+    }
+
+    let frame_keys = retained_pair
+        .message
+        .account_keys
+        .iter()
+        .copied()
+        .filter(|key| *key != env.payer.pubkey())
+        .chain([env.mint, env.vault, authority_b.pubkey()])
+        .collect::<Vec<_>>();
+    let frame = |env: &V16CuEnv| {
+        frame_keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>()
+    };
+    for (tx, failed_instruction) in [(retained_rotated, 2), (retained_pair, 3)] {
+        let before = frame(&env);
+        let mut payer_before = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        let fee = FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let rejected = env
+            .svm
+            .send_transaction(tx)
+            .expect_err("old epoch cannot revive at A");
+        assert_eq!(
+            rejected.err,
+            TransactionError::InstructionError(
+                failed_instruction,
+                InstructionError::Custom(PercolatorError::EngineStale as u32),
+            )
+        );
+        if failed_instruction == 3 {
+            assert!(
+                rejected
+                    .meta
+                    .logs
+                    .contains(&format!("Program {} success", env.program_id)),
+                "the untouched asset's retained prefix executes before the stale suffix rejects"
+            );
+        }
+        assert_eq!(
+            frame(&env),
+            before,
+            "rejection restores all non-payer accounts exactly"
+        );
+        payer_before.lamports -= fee;
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()).unwrap(),
+            payer_before,
+            "the network signature fee is the only permitted lamport delta"
+        );
+    }
+
+    env.svm
+        .send_transaction(retained_unrotated)
+        .expect("asset-0 consent survives asset-1 rotation and the rolled-back prefix");
+    assert_eq!(profile(&env, 0).mark_ewma_e6, marks[0]);
+    assert_eq!(profile(&env, 1).mark_ewma_e6, 100);
+    assert_eq!(
+        env.control_sequences(1).oracle_observation,
+        sequences[1].oracle_observation
+    );
+
+    // Only the epoch changes; generation, signer, observation sequence, slot and mark stay fixed.
+    let fresh = sign(
+        &env,
+        &[
+            heap_ix(),
+            cu_ix(),
+            push(&env, 1, env.control_sequences(1).authority_epoch),
+        ],
+    );
+    env.svm
+        .send_transaction(fresh)
+        .expect("current asset-1 consent remains executable");
+    for asset_index in 0..2 {
+        assert_eq!(profile(&env, asset_index).mark_ewma_e6, marks[asset_index]);
+        assert_eq!(
+            env.control_sequences(asset_index).oracle_observation,
+            next_control_sequence(sequences[asset_index].oracle_observation),
+            "each scope consumes exactly one successful observation"
+        );
+    }
 }
 
 // [from pr114]
