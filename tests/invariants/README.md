@@ -6884,6 +6884,41 @@ IDs for production sources, manifests/lock and matcher sources match the recorde
 baseline. No engine proof, invariant-status change, fee/funding/lien product or maximum-shape
 claim is added.
 
+### INV-050 asymmetric three-owner cross-zero accounting
+
+[`v16_program_one_sided_cross_zero_reconciles_three_owner_open_interest`](stateful/inv_050_cross_zero_decomposition.rs)
+adds sixteen public worlds: all four trade transports, both signed orientations, and either the
+taker or maker owning the crossing leg. A three-owner book moves from `[7, -10, 3]` lots to
+`[-2, -1, 3]` with one nine-lot fill: only one participant flips, and both OI lanes must fall from
+ten to three lots while the untouched third owner's portfolio stays byte-exact. Two further
+matched trades close every leg. Every prefix independently scans all portfolios for exact signed
+positions, at most one current-generation leg per owner, effective OI, and stored-leg counts; public stock,
+SPL-token, foreign-market, and unrelated-asset/account checks remain active.
+
+This adds asymmetric single-participant crossing to the indexed symmetric pair flips and
+pending-loss/ADL admission matrices. It uses unchanged marks, zero fees, and unit effective/basis
+ratios; it makes no new ADL-rounding, aggregate OI-cap, or invariant-status claim.
+
+The new test and the existing pending-loss barrier test each pass as exact focused runs.
+Both SBF artifacts were rebuilt offline in the isolated worktree with platform-tools v1.52:
+wrapper SHA-256 `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`,
+matcher SHA-256 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Scoped rustfmt and whitespace checks pass. The additional public-trace consumer guard exposed a
+stale inventory assertion: the base Rust file at `a1bee52c` yields 87 versus the expected 84
+consumers, and this test increases the observed count to 88. The integrated PR427 branch updates
+the guard to 88; the new trace validates public execution directly.
+
+Focused commands (Cargo runs use `CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0
+CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`):
+
+```bash
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_050_cross_zero_decomposition::v16_program_one_sided_cross_zero_reconciles_three_owner_open_interest -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_050_cross_zero_decomposition::v16_program_pending_loss_barrier_rejects_flips_but_preserves_all_route_exits -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_050_cross_zero_decomposition.rs
+git diff --check
+```
+
 ## Commands
 
 ```bash
