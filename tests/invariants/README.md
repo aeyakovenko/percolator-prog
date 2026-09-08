@@ -3,6 +3,71 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-014 retained delegated-fee exit product (row 411, 2026-09-08)
+
+[`stateful/inv_014_retained_delegated_fee_exit.rs`](stateful/inv_014_retained_delegated_fee_exit.rs)
+adds a tests-only candidate from integration base `10658f7c`, developed in the isolated
+`/tmp/codex-agent-worktrees/row411-inv014-fee-consent-routes-20260908` worktree. No production
+source, shared helper, engine proof, or reopening status changes. Row **411 remains OPEN**;
+this passing product is not a new LoF/DoS finding or vulnerable-parent/fixed-head evidence.
+
+The missing partition is the intersection of two distinct fee authorizations, not another
+taker aggregate-cap check. The existing retained-batch product deliberately gives the LP a
+permissive matcher cap. Here a real public zero-fee entry is followed by an LP-signed standing
+cap of 37 bps. While policy is 19 bps, all four alternative closes are signed with a separate,
+looser 503-bps taker/bilateral bound. Every alternative successfully simulates before policy
+changes, retains its exact signed bytes, and uses valid packet-sized transactions.
+
+The authorized admin raises policy to 38 bps. Both single and batch CPI closes reject before
+the matcher, with exact economic-account rollback. The LP's narrower standing consent cannot
+be replaced by the taker's larger cap. A retained bilateral single/batch close nevertheless
+remains executable under the unchanged restrictive policy: both owners explicitly signed its
+503-bps charge. Alternatively, lowering policy to 37 (exact LP cap) or 7 (below signing-time
+policy) lets a retained CPI close execute without renewing the LP grant or either transaction
+signature. Its actual debit must equal the lower current-policy fee, not the looser taker cap.
+
+The product crosses both assets, both signed directions, four successful exit transports, and
+the three policy outcomes: **24 worlds, 256 public transactions, 72 exact rejections, 24 closes,
+and 48 full owner withdrawals**. An input-only two-ceiling fee oracle checks each owner's
+capital and SPL payout, domain-local insurance, OI, zero PnL, custody, and passive owners after
+every wrapper step. The stock/encumbrance censuses and public trace also run; a late pre-signed
+cross-route alternative must reject against the consumed position episode. Single/batch SPL
+frames converge within each consent class, not across differently authorized fee amounts.
+
+Scope is one active leg (including one-leg batches), constant authenticated marks, zero matcher
+spread, no funding/maintenance/backing fees, and available pre-signed bilateral alternatives.
+Dynamic mark fees, source-lien fees, multi-leg aggregation, tighter taker-than-LP consent,
+arbitrary policy histories, and whole-route/maximum-shape liveness remain outside this increment.
+No duplicate or marginal probe was committed. The temporary module unmount used for the baseline
+comparison was restored; no existing test or oracle was weakened.
+
+Verification on the unchanged engine pin `394fd0bf2cb7d73df425eb3754dc3be1a0c44336` used a
+source-forced default-feature SBF rebuild with platform-tools v1.52 and cached dependencies,
+not a clean toolchain build. Program SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The in-worktree authenticated matcher was built offline (SHA-256
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`); the existing sibling
+matcher used by CU controls was `51f361c6fd00bdb91c685e98f081dea5a54665ef533a7f7b619916594aae6755`.
+Peak successful close/withdrawal cost was **150,232 CU**, a bounded witness, not a max-shape claim.
+
+Exact selectors below: the INV-014 pair passed **2/2**, and the INV-011/024/036 controls passed
+**3/3**. The final INV-047 selector failed at `Cpi diverged from NoCpi`, lots=1, long=true,
+fee_bps=1, both with the addition and with the module unmounted and `git diff --exit-code` clean
+at `10658f7c`. That pre-existing failure is reported, not repaired or classified as a row-411 bug.
+The new Rust file passes `rustfmt --edition 2021 --check`; `git diff --check` passes.
+
+```sh
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_014_delayed_policy_and_policy_epoch_safety::retained_delegated_fee_exit::v16_program_retained_lp_fee_cap_preserves_bilateral_and_delegated_exits -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_014_delayed_policy_and_policy_epoch_safety::v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_011_signed_aggregate_economic_bounds::v16_program_bounded_signed_cap_histories_preserve_cross_route_fee_budgets -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_036_fee_destination_and_policy_version_integrity::v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_047_equivalent_route_semantics::v16_program_nonzero_fee_trade_routes_are_byte_exact_after_transport_normalization -- --exact --nocapture
+```
+
 ## INV-020 chunked observation completeness (2026-09-08)
 
 Tests/docs-only coverage from `origin/codex/invariant-fidelity-reopen-20260904` at
