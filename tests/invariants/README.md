@@ -3,6 +3,87 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## Dual-quote terminal stock checkpoint (2026-09-08)
+
+Tests/docs-only increment based on the invariant charter and public instruction interface, from
+`origin/codex/invariant-fidelity-reopen-20260904` at
+`e0684166ca170ebe88f9c6698eb9730691151f92`,
+in `/tmp/codex-agent-worktrees/pr427-terminal-disposition-clean-20260908`. Production code,
+engine proofs, invariant verdicts, and verification-method statuses are unchanged.
+
+[`cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs`](cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs)
+adds `v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent`.
+Eight public LiteSVM histories cross classic SPL mint decimals `[0, 6, 9, 255]` with both
+resolved payout rails. Each uses public System account creation, wrapper/SPL initialization,
+and ATA creation of canonical vaults and destinations.
+The existing INV-018 System/SPL/ATA bootstrap is extracted into two shared helpers in its
+original invariant-owned file; its deposit/ledger baseline is retained. The test reuses
+`V16CuEnv`, existing instruction builders, and the typed-tombstone assertion, without another
+harness, new support files, or injected program/token state. Mint authorities are revoked
+through SPL instructions after funding; freeze authorities are absent.
+
+Each world deposits 1,200 primary atoms, funds 300 insurance atoms, donates 17 primary surplus
+atoms, and supplies 1,800 secondary reserve atoms. A live withdrawal pays 137 atoms through
+the opposite rail from the later resolved payout. An input-only oracle classifies every atom:
+with cumulative user payouts `U`, insurance payouts `I`, and secondary-rail payouts `S`, the
+remaining primary vault stock is `(1200 - U) + (300 - I) + (17 + S)` and secondary reserve is
+`1800 - S`. Thus primary backing discharged through the secondary rail becomes surplus, not
+another user claim. Exact SPL balances, fixed mint supply, decimals, authority/canonical-vault
+properties, and wrapper capital/insurance/vault summaries are checked after every economic
+step. There are no trades or accrued fees in this history.
+
+After resolution, a four-instruction terminal prefix performs `CloseResolved`, `ClosePortfolio`,
+`WithdrawInsuranceAsset`, and dual-vault `CloseSlab`. A deliberately unfunded ordinary SPL
+transfer at transaction instruction index 6 must then fail with exactly `InsufficientFunds`.
+The entire account frame, including market/portfolio reallocations, both vaults, both mints,
+destinations, owners, executable metadata, and lamports, must equal the pre-transaction frame
+apart from the exact network fee paid by the separate payer. The same terminal instructions
+then succeed as four bounded transactions, with stock checked after each one. Economic user
+payout needs only the unrelated fee payer's signature; portfolio deletion remains owner-signed,
+and reserve withdrawal/slab reclamation remain administrative. Both residual vault stocks
+reach the correct mint destinations, both vault rents and the portfolio rent are reclaimed,
+and the typed market tombstone retains exactly canonical `HEADER_LEN` rent. The exact remaining
+market, portfolio, and vault lamports reach the administrator; the user's wallet is unchanged.
+
+Net-new coverage is this funded dual-rail claim/reserve/surplus history composed with a full
+late-abort terminal frame and exact final token/rent disposition. Existing INV-018 raw-decimal
+roundtrips and INV-070 single-vault rent or secondary-vault validation paths do not own that
+composition. This adds bounded evidence for INV-018/021/025/069/070/073/077/078, not universal
+closure. Row 418 remains OPEN: native-mint rent/unsynced lamports, mutable/freeze-authority
+variants, nonflat PnL and haircut/top-up receipts, fee accrual, backing-principal and historical
+insurance retirement/burn paths, maximum shapes, and arbitrary histories are not established.
+
+Verification used only the requested cached default-feature program SBF, SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`; no SBF was rebuilt.
+Exact commands and environment (from the isolated worktree):
+
+```sh
+export PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_primary_mint_decimals_preserve_exact_raw_atom_accounting \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_close_slab_refunds_exact_vault_and_market_excess_rent_after_normal_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row \
+  inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter \
+  inv_079_public_reachability_evidence::v16_public_instruction_coverage_registry_matches_production_roster
+sha256sum /home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+rustfmt --edition 2021 --check tests/invariants/cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs
+git diff --check
+```
+
+Results on `e0684166`: focused SBF selectors **4/4 passed** (985 filtered) in 3.29 seconds;
+metadata guards **6/6 passed** (117 filtered) in 0.06 seconds. The eight new histories peaked at
+87,057 CU per checked step and 212,921 CU for the combined terminal rollback, below enforced
+150,000/300,000 CU ceilings. Scoped rustfmt and `git diff --check` passed. Existing shared-test
+dead-code and Solana future-compatibility warnings remain. No broad suite or engine proof was run.
+
 ## Retained batch authority/policy conformance (2026-09-08)
 
 Tests/docs-only increment from `codex/invariant-fidelity-reopen-20260904` at

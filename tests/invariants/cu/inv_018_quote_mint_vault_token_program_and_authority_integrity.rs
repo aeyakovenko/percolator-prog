@@ -5183,8 +5183,40 @@ fn v16_primary_mint_decimals_preserve_exact_raw_atom_accounting() {
     }
 }
 
-#[test]
-fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
+pub(super) fn inv018_create_public_spl_mint(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    authority: Pubkey,
+    decimals: u8,
+) -> Pubkey {
+    let mint = Keypair::new();
+    send_raw_ixs(
+        svm,
+        payer,
+        vec![
+            system_instruction::create_account(
+                &payer.pubkey(),
+                &mint.pubkey(),
+                1_000_000_000,
+                Mint::LEN as u64,
+                &spl_token::ID,
+            ),
+            spl_token::instruction::initialize_mint(
+                &spl_token::ID,
+                &mint.pubkey(),
+                &authority,
+                None,
+                decimals,
+            )
+            .unwrap(),
+        ],
+        &[&mint],
+    )
+    .expect("create and initialize mint");
+    mint.pubkey()
+}
+
+pub(super) fn inv018_public_spl_market(decimals: u8) -> V16CuEnv {
     let mut svm = LiteSVM::new();
     let program_id = percolator_prog::id();
     svm.add_program(
@@ -5202,35 +5234,10 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
 
     let payer = Keypair::new();
     let admin = Keypair::new();
-    let user = Keypair::new();
     svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
     svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
-    svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
 
-    let mint = Keypair::new();
-    send_raw_ixs(
-        &mut svm,
-        &payer,
-        vec![
-            system_instruction::create_account(
-                &payer.pubkey(),
-                &mint.pubkey(),
-                1_000_000_000,
-                Mint::LEN as u64,
-                &spl_token::ID,
-            ),
-            spl_token::instruction::initialize_mint(
-                &spl_token::ID,
-                &mint.pubkey(),
-                &admin.pubkey(),
-                None,
-                0,
-            )
-            .unwrap(),
-        ],
-        &[&mint],
-    )
-    .expect("create and initialize mint");
+    let mint = inv018_create_public_spl_mint(&mut svm, &payer, admin.pubkey(), decimals);
 
     let market = Keypair::new();
     let params = V16CuMarketParams::default();
@@ -5243,56 +5250,66 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     );
     let vault_authority =
         Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
-    let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint.pubkey());
+    let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint);
     assert_eq!(
         vault,
-        canonical_vault_ata(vault_authority, mint.pubkey()),
+        canonical_vault_ata(vault_authority, mint),
         "ATA program created the canonical vault account"
     );
-    send_tx(
+    let init_market_cu = send_tx(
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::InitMarket {
-            max_portfolio_assets: params.max_portfolio_assets,
-            h_min: params.h_min,
-            h_max: params.h_max,
-            initial_price: params.initial_price,
-            min_nonzero_mm_req: params.min_nonzero_mm_req,
-            min_nonzero_im_req: params.min_nonzero_im_req,
-            maintenance_margin_bps: params.maintenance_margin_bps,
-            initial_margin_bps: params.initial_margin_bps,
-            max_trading_fee_bps: params.max_trading_fee_bps,
-            trade_fee_base_bps: params.trade_fee_base_bps,
-            liquidation_fee_bps: params.liquidation_fee_bps,
-            liquidation_fee_cap: params.liquidation_fee_cap,
-            min_liquidation_abs: params.min_liquidation_abs,
-            max_price_move_bps_per_slot: params.max_price_move_bps_per_slot,
-            max_accrual_dt_slots: params.max_accrual_dt_slots,
-            max_abs_funding_e9_per_slot: params.max_abs_funding_e9_per_slot,
-            min_funding_lifetime_slots: params.min_funding_lifetime_slots,
-            max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
-            max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
-            max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: params.public_b_chunk_atoms,
-            maintenance_fee_per_slot: params.maintenance_fee_per_slot,
-        },
+        init_market_instruction(&params),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
-            AccountMeta::new_readonly(mint.pubkey(), false),
+            AccountMeta::new_readonly(mint, false),
         ],
         &[&admin],
     )
     .expect("init market from system-created account");
 
+    V16CuEnv {
+        svm,
+        program_id,
+        payer,
+        admin,
+        init_market_cu,
+        market: market.pubkey(),
+        mint,
+        vault,
+        vault_authority,
+        portfolio_account_len: state::portfolio_account_len_for_market_slots(
+            params.max_portfolio_assets as usize,
+        )
+        .unwrap(),
+        portfolios: Vec::new(),
+    }
+}
+
+#[test]
+fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
+    let V16CuEnv {
+        mut svm,
+        program_id,
+        payer,
+        admin,
+        market,
+        mint,
+        vault,
+        vault_authority,
+        portfolio_account_len,
+        ..
+    } = inv018_public_spl_market(0);
+    let user = Keypair::new();
+    svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
     let portfolio = Keypair::new();
     system_create_account_for_test(
         &mut svm,
         &payer,
         &portfolio,
-        state::portfolio_account_len_for_market_slots(params.max_portfolio_assets as usize)
-            .unwrap(),
+        portfolio_account_len,
         program_id,
     );
     send_tx(
@@ -5302,21 +5319,21 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         ProgInstruction::InitPortfolio,
         vec![
             AccountMeta::new(user.pubkey(), true),
-            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(market, false),
             AccountMeta::new(portfolio.pubkey(), false),
         ],
         &[&user],
     )
     .expect("init portfolio from system-created account");
 
-    let user_ata = create_ata_for_test(&mut svm, &payer, user.pubkey(), mint.pubkey());
-    let admin_ata = create_ata_for_test(&mut svm, &payer, admin.pubkey(), mint.pubkey());
+    let user_ata = create_ata_for_test(&mut svm, &payer, user.pubkey(), mint);
+    let admin_ata = create_ata_for_test(&mut svm, &payer, admin.pubkey(), mint);
     send_raw_tx(
         &mut svm,
         &payer,
         spl_token::instruction::mint_to(
             &spl_token::ID,
-            &mint.pubkey(),
+            &mint,
             &user_ata,
             &admin.pubkey(),
             &[],
@@ -5331,7 +5348,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         &payer,
         spl_token::instruction::mint_to(
             &spl_token::ID,
-            &mint.pubkey(),
+            &mint,
             &admin_ata,
             &admin.pubkey(),
             &[],
@@ -5356,7 +5373,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         },
         vec![
             AccountMeta::new(user.pubkey(), true),
-            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(market, false),
             AccountMeta::new(portfolio.pubkey(), false),
             AccountMeta::new(user_ata, false),
             AccountMeta::new(vault, false),
@@ -5390,7 +5407,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(market, false),
             AccountMeta::new(admin_ata, false),
             AccountMeta::new(vault, false),
             AccountMeta::new_readonly(spl_token::ID, false),
@@ -5406,7 +5423,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         ProgInstruction::SyncBackingDomainLedger { domain: 1 },
         vec![
             AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(market, false),
             AccountMeta::new(ledger.pubkey(), false),
         ],
         &[&admin],
@@ -5418,7 +5435,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         &payer,
         spl_token::instruction::mint_to(
             &spl_token::ID,
-            &mint.pubkey(),
+            &mint,
             &admin_ata,
             &admin.pubkey(),
             &[],
@@ -5448,7 +5465,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(market, false),
             AccountMeta::new(admin_ata, false),
             AccountMeta::new(vault, false),
             AccountMeta::new_readonly(spl_token::ID, false),
@@ -5464,7 +5481,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         ProgInstruction::SyncInsuranceLedger,
         vec![
             AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(market, false),
             AccountMeta::new(insurance_ledger.pubkey(), false),
         ],
         &[&admin],
@@ -5486,7 +5503,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         },
         vec![
             AccountMeta::new(user.pubkey(), true),
-            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(market, false),
             AccountMeta::new(portfolio.pubkey(), false),
             AccountMeta::new(user_ata, false),
             AccountMeta::new(vault, false),
@@ -5513,9 +5530,9 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         "canonical vault ATA reflects deposits, top-ups, and withdrawal"
     );
     assert_eq!(vault_token.owner, vault_authority);
-    assert_eq!(vault_token.mint, mint.pubkey());
+    assert_eq!(vault_token.mint, mint);
 
-    let (cfg, group) = state::read_market(&svm.get_account(&market.pubkey()).unwrap().data)
+    let (cfg, group) = state::read_market(&svm.get_account(&market).unwrap().data)
         .expect("read initialized market");
     let account = state::read_portfolio(&svm.get_account(&portfolio.pubkey()).unwrap().data)
         .expect("read initialized portfolio");
@@ -5525,7 +5542,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     let insurance_ledger_state =
         state::read_insurance_ledger(&svm.get_account(&insurance_ledger.pubkey()).unwrap().data)
             .expect("read initialized insurance ledger");
-    assert_eq!(cfg.collateral_mint, mint.pubkey().to_bytes());
+    assert_eq!(cfg.collateral_mint, mint.to_bytes());
     assert_eq!(group.vault, 210);
     assert_eq!(group.c_tot, 100);
     assert_eq!(group.insurance, 33);

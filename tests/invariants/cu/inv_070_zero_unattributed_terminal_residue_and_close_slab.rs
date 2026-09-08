@@ -29,6 +29,475 @@
 use super::*;
 
 #[test]
+fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent() {
+    use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::{
+        inv018_create_public_spl_mint, inv018_public_spl_market,
+    };
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const DEPOSIT: u64 = 1_200;
+    const WITHDRAW: u64 = 137;
+    const INSURANCE: u64 = 300;
+    const SURPLUS: u64 = 17;
+    const SECONDARY_RESERVE: u64 = 1_800;
+    const STEP_CU_LIMIT: u64 = 150_000;
+    const TERMINAL_CU_LIMIT: u64 = 300_000;
+
+    struct Rail {
+        mint: Pubkey,
+        vault: Pubkey,
+        user_token: Pubkey,
+        admin_token: Pubkey,
+        supply: u64,
+    }
+
+    for decimals in [0, 6, 9, u8::MAX] {
+        for payout_rail in 0..2 {
+            let mut env = inv018_public_spl_market(decimals);
+            let owner = Keypair::new();
+            env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+            let mut peak_step_cu = env.init_market_cu;
+            let mut check_step = |label, cu| {
+                assert_cu_within(label, cu, STEP_CU_LIMIT);
+                peak_step_cu = peak_step_cu.max(cu);
+            };
+            check_step("public InitMarket", env.init_market_cu);
+
+            let secondary_mint = inv018_create_public_spl_mint(
+                &mut env.svm,
+                &env.payer,
+                env.admin.pubkey(),
+                decimals,
+            );
+            check_step(
+                "public UpdateBaseUnitMints",
+                env.update_base_unit_mints_with_cu(env.mint, secondary_mint),
+            );
+            let portfolio_key = Keypair::new();
+            system_create_account_for_test(
+                &mut env.svm,
+                &env.payer,
+                &portfolio_key,
+                env.portfolio_account_len,
+                env.program_id,
+            );
+            let portfolio = portfolio_key.pubkey();
+            let portfolio_accounts = vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ];
+            check_step(
+                "public InitPortfolio",
+                env.send(
+                    ProgInstruction::InitPortfolio,
+                    portfolio_accounts.clone(),
+                    &[&owner],
+                )
+                .unwrap(),
+            );
+            env.portfolios.push(portfolio);
+
+            let mut rails = Vec::new();
+            for (rail, mint) in [env.mint, secondary_mint].into_iter().enumerate() {
+                let vault = if rail == 0 {
+                    env.vault
+                } else {
+                    create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, mint)
+                };
+                let user_token =
+                    create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), mint);
+                let admin_token =
+                    create_ata_for_test(&mut env.svm, &env.payer, env.admin.pubkey(), mint);
+                let mut funding = vec![spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &mint,
+                    &admin_token,
+                    &env.admin.pubkey(),
+                    &[],
+                    if rail == 0 {
+                        INSURANCE + SURPLUS
+                    } else {
+                        SECONDARY_RESERVE
+                    },
+                )
+                .unwrap()];
+                if rail == 0 {
+                    funding.push(
+                        spl_token::instruction::mint_to(
+                            &spl_token::ID,
+                            &mint,
+                            &user_token,
+                            &env.admin.pubkey(),
+                            &[],
+                            DEPOSIT,
+                        )
+                        .unwrap(),
+                    );
+                }
+                funding.push(
+                    spl_token::instruction::set_authority(
+                        &spl_token::ID,
+                        &mint,
+                        None,
+                        spl_token::instruction::AuthorityType::MintTokens,
+                        &env.admin.pubkey(),
+                        &[],
+                    )
+                    .unwrap(),
+                );
+                send_raw_ixs(&mut env.svm, &env.payer, funding, &[&env.admin]).unwrap();
+                rails.push(Rail {
+                    mint,
+                    vault,
+                    user_token,
+                    admin_token,
+                    supply: if rail == 0 {
+                        DEPOSIT + INSURANCE + SURPLUS
+                    } else {
+                        SECONDARY_RESERVE
+                    },
+                });
+            }
+
+            let wrap = |ix: ProgInstruction, accounts| Instruction {
+                program_id: percolator_prog::id(),
+                accounts,
+                data: ix.encode(),
+            };
+            let mut deposit_accounts = portfolio_accounts.clone();
+            deposit_accounts.extend([
+                AccountMeta::new(rails[0].user_token, false),
+                AccountMeta::new(rails[0].vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ]);
+            let top_up_accounts = vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(rails[0].admin_token, false),
+                AccountMeta::new(rails[0].vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ];
+            let mut top_up = ProgInstruction::TopUpInsurance {
+                market_id: 0,
+                intent_id: 0,
+                authority_epoch: 0,
+                amount: INSURANCE.into(),
+            };
+            bind_current_generation_guards(&env.svm, &top_up_accounts, &mut top_up);
+            let mut funding = vec![
+                heap_ix(),
+                ComputeBudgetInstruction::set_compute_unit_limit(STEP_CU_LIMIT as u32),
+                wrap(env.deposit_ix(portfolio, DEPOSIT.into()), deposit_accounts),
+                wrap(top_up, top_up_accounts),
+            ];
+            for (rail, accounts) in rails.iter().enumerate() {
+                funding.push(
+                    spl_token::instruction::transfer(
+                        &spl_token::ID,
+                        &accounts.admin_token,
+                        &accounts.vault,
+                        &env.admin.pubkey(),
+                        &[],
+                        if rail == 0 {
+                            SURPLUS
+                        } else {
+                            SECONDARY_RESERVE
+                        },
+                    )
+                    .unwrap(),
+                );
+            }
+            check_step(
+                "funded primary claims, insurance and both raw vault stocks",
+                send_raw_ixs(&mut env.svm, &env.payer, funding, &[&owner, &env.admin]).unwrap(),
+            );
+
+            // Only predetermined payments drive this oracle. In particular, primary
+            // backing discharged via the secondary rail becomes surplus, not a second claim.
+            let assert_stock = |env: &V16CuEnv,
+                                user_paid: [u64; 2],
+                                insurance_paid: [u64; 2],
+                                materialized: bool,
+                                closed: bool| {
+                let claim = DEPOSIT - user_paid.iter().sum::<u64>();
+                let insurance = INSURANCE - insurance_paid.iter().sum::<u64>();
+                let secondary_paid = user_paid[1] + insurance_paid[1];
+                let surplus = SURPLUS + secondary_paid;
+                let remaining = [
+                    claim + insurance + surplus,
+                    SECONDARY_RESERVE - secondary_paid,
+                ];
+                for (rail, accounts) in rails.iter().enumerate() {
+                    let mint_account = env.svm.get_account(&accounts.mint).unwrap();
+                    let mint = Mint::unpack(&mint_account.data).unwrap();
+                    assert_eq!(mint_account.owner, spl_token::ID);
+                    assert_eq!(mint.supply, accounts.supply);
+                    assert_eq!(mint.decimals, decimals);
+                    assert_eq!(mint.mint_authority, COption::None);
+                    assert_eq!(mint.freeze_authority, COption::None);
+                    let mut observed_supply = 0;
+                    for (key, wallet, expected) in [
+                        (accounts.user_token, owner.pubkey(), user_paid[rail]),
+                        (
+                            accounts.admin_token,
+                            env.admin.pubkey(),
+                            insurance_paid[rail] + if closed { remaining[rail] } else { 0 },
+                        ),
+                        (accounts.vault, env.vault_authority, remaining[rail]),
+                    ] {
+                        if closed && key == accounts.vault {
+                            if let Some(account) = env.svm.get_account(&key) {
+                                assert_eq!(
+                                    account.lamports, 0,
+                                    "canonical SPL vault rent reclaimed"
+                                );
+                                assert!(
+                                    account.data.iter().all(|byte| *byte == 0),
+                                    "SPL vault state cleared"
+                                );
+                            }
+                            continue;
+                        }
+                        let token_account = env.svm.get_account(&key).unwrap();
+                        let token = TokenAccount::unpack(&token_account.data).unwrap();
+                        assert_eq!(token_account.owner, spl_token::ID);
+                        assert_eq!(token.mint, accounts.mint);
+                        assert_eq!(token.owner, wallet);
+                        assert_eq!(token.state, AccountState::Initialized);
+                        assert_eq!(token.is_native, COption::None);
+                        assert_eq!(token.delegate, COption::None);
+                        assert_eq!(token.close_authority, COption::None);
+                        assert_eq!(token.amount, expected, "rail {rail}, account {key}");
+                        observed_supply += token.amount;
+                    }
+                    assert_eq!(
+                        observed_supply, accounts.supply,
+                        "every atom classified on rail {rail}"
+                    );
+                    assert_eq!(
+                        accounts.vault,
+                        canonical_vault_ata(env.vault_authority, accounts.mint)
+                    );
+                }
+                if closed {
+                    assert_eq!((claim, insurance), (0, 0));
+                    assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
+                } else {
+                    let (cfg, group) = env.market_state();
+                    assert_eq!(cfg.collateral_mint, rails[0].mint.to_bytes());
+                    assert_eq!(cfg.secondary_collateral_mint, rails[1].mint.to_bytes());
+                    assert_eq!(group.c_tot, claim.into());
+                    assert_eq!(group.insurance, insurance.into());
+                    assert_eq!(group.vault, u128::from(claim + insurance));
+                    assert_eq!(group.materialized_portfolio_count, u64::from(materialized));
+                }
+                if materialized {
+                    assert_eq!(env.portfolio_state(portfolio).capital.get(), claim.into());
+                } else {
+                    if let Some(account) = env.svm.get_account(&portfolio) {
+                        assert_eq!(account.lamports, 0, "portfolio rent reclaimed");
+                        assert!(account.data.is_empty(), "portfolio storage reclaimed");
+                    }
+                }
+            };
+            let mut user_paid = [0; 2];
+            let mut insurance_paid = [0; 2];
+            assert_stock(&env, user_paid, insurance_paid, true, false);
+
+            let payout_accounts = |rail: usize, signed: bool| {
+                vec![
+                    AccountMeta::new_readonly(owner.pubkey(), signed),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(rails[rail].user_token, false),
+                    AccountMeta::new(rails[rail].vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ]
+            };
+            let withdraw_rail = 1 - payout_rail;
+            let withdraw_accounts = payout_accounts(withdraw_rail, true);
+            let close_resolved_accounts = payout_accounts(payout_rail, false);
+            check_step(
+                "live cross-rail Withdraw",
+                env.send(
+                    env.withdraw_ix(portfolio, WITHDRAW.into()),
+                    withdraw_accounts,
+                    &[&owner],
+                )
+                .unwrap(),
+            );
+            user_paid[withdraw_rail] = WITHDRAW;
+            assert_stock(&env, user_paid, insurance_paid, true, false);
+            check_step("ResolveMarket", env.resolve());
+            assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+            assert_stock(&env, user_paid, insurance_paid, true, false);
+
+            let terminal = vec![
+                wrap(
+                    ProgInstruction::CloseResolved {
+                        fee_rate_per_slot: 0,
+                    },
+                    close_resolved_accounts,
+                ),
+                wrap(env.close_portfolio_ix(portfolio), portfolio_accounts),
+                wrap(
+                    env.withdraw_insurance_asset_instruction(
+                        env.admin.pubkey(),
+                        0,
+                        INSURANCE.into(),
+                    ),
+                    vec![
+                        AccountMeta::new(env.admin.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(rails[withdraw_rail].admin_token, false),
+                        AccountMeta::new(rails[withdraw_rail].vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                ),
+                wrap(
+                    ProgInstruction::CloseSlab {
+                        authority_epoch: env.control_sequences(0).authority_epoch,
+                    },
+                    vec![
+                        AccountMeta::new(env.admin.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(rails[0].vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new(rails[0].admin_token, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                        AccountMeta::new(rails[1].vault, false),
+                        AccountMeta::new(rails[1].admin_token, false),
+                    ],
+                ),
+            ];
+
+            // Abort after both SPL vault closes and the typed market tombstone write.
+            // The exact failing index distinguishes this from an earlier guard rejection.
+            let mut aborted = vec![
+                heap_ix(),
+                ComputeBudgetInstruction::set_compute_unit_limit(TERMINAL_CU_LIMIT as u32),
+            ];
+            aborted.extend(terminal.clone());
+            aborted.push(
+                spl_token::instruction::transfer(
+                    &spl_token::ID,
+                    &rails[0].user_token,
+                    &rails[0].admin_token,
+                    &owner.pubkey(),
+                    &[],
+                    rails[0].supply + 1,
+                )
+                .unwrap(),
+            );
+            env.svm.expire_blockhash();
+            let tx = Transaction::new_signed_with_payer(
+                &aborted,
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &env.admin, &owner],
+                env.svm.latest_blockhash(),
+            );
+            let fee = u64::from(tx.message.header.num_required_signatures)
+                * FeeStructure::default().lamports_per_signature;
+            let mut keys = tx.message.account_keys.clone();
+            keys.extend(rails.iter().map(|rail| rail.mint));
+            keys.sort_unstable();
+            keys.dedup();
+            let frame: Vec<_> = keys
+                .into_iter()
+                .map(|key| (key, env.svm.get_account(&key)))
+                .collect();
+            let failure = env
+                .svm
+                .send_transaction(tx)
+                .expect_err("late SPL suffix must reject");
+            assert_eq!(
+                failure.err,
+                TransactionError::InstructionError(
+                    6,
+                    InstructionError::Custom(
+                        spl_token::error::TokenError::InsufficientFunds as u32
+                    ),
+                )
+            );
+            assert_cu_within(
+                "complete terminal rollback",
+                failure.meta.compute_units_consumed,
+                TERMINAL_CU_LIMIT,
+            );
+            for (key, mut before) in frame {
+                if key == env.payer.pubkey() {
+                    before.as_mut().unwrap().lamports -= fee;
+                }
+                assert_eq!(
+                    env.svm.get_account(&key),
+                    before,
+                    "full account rollback for {key}"
+                );
+            }
+            assert_stock(&env, user_paid, insurance_paid, true, false);
+
+            let market_rent = env.svm.get_account(&env.market).unwrap().lamports;
+            let portfolio_rent = env.svm.get_account(&portfolio).unwrap().lamports;
+            let vault_rent: u64 = rails
+                .iter()
+                .map(|rail| env.svm.get_account(&rail.vault).unwrap().lamports)
+                .sum();
+            let admin_lamports = env.svm.get_account(&env.admin.pubkey()).unwrap().lamports;
+            let owner_lamports = env.svm.get_account(&owner.pubkey()).unwrap().lamports;
+            let mut materialized = true;
+            for (step, ix) in terminal.into_iter().enumerate() {
+                env.svm.expire_blockhash();
+                let signers: &[&Keypair] = match step {
+                    0 => &[], // The separate fee payer alone lands the economic user payout.
+                    1 => &[&owner],
+                    _ => &[&env.admin],
+                };
+                check_step(
+                    [
+                        "CloseResolved",
+                        "ClosePortfolio",
+                        "WithdrawInsuranceAsset",
+                        "CloseSlab",
+                    ][step],
+                    send_raw_tx(&mut env.svm, &env.payer, ix, signers).unwrap(),
+                );
+                match step {
+                    0 => user_paid[payout_rail] = DEPOSIT - WITHDRAW,
+                    1 => {
+                        materialized = false;
+                        assert_eq!(
+                            env.svm.get_account(&env.market).unwrap().lamports,
+                            market_rent + portfolio_rent
+                        );
+                    }
+                    2 => insurance_paid[withdraw_rail] = INSURANCE,
+                    3 => {}
+                    _ => unreachable!(),
+                }
+                assert_stock(&env, user_paid, insurance_paid, materialized, step == 3);
+            }
+            let tombstone_rent = solana_sdk::rent::Rent::default()
+                .minimum_balance(percolator_prog::constants::HEADER_LEN);
+            assert_eq!(
+                env.svm.get_account(&env.admin.pubkey()).unwrap().lamports,
+                admin_lamports + market_rent + portfolio_rent + vault_rent - tombstone_rent
+            );
+            assert_eq!(
+                env.svm.get_account(&owner.pubkey()).unwrap().lamports,
+                owner_lamports
+            );
+            println!("INV-070 decimals={decimals}, payout_rail={payout_rail}: peak step {peak_step_cu} CU, terminal rollback {} CU",
+                failure.meta.compute_units_consumed);
+        }
+    }
+}
+
+#[test]
 fn v16_program_recovery_force_close_reaches_zero_residue_and_close_slab() {
     const INITIAL_CAPITAL: u128 = 1_000_000;
     const OPEN_Q: u128 = 2 * POS_SCALE;
