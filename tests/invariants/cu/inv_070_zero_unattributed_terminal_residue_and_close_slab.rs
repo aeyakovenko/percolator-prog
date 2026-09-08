@@ -28,6 +28,9 @@
 
 use super::*;
 
+#[path = "inv_070_mixed_maturity_terminal_residue.rs"]
+mod mixed_maturity;
+
 #[test]
 fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent() {
     use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::{

@@ -3,6 +3,60 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-070 mixed-maturity terminal residue (2026-09-08)
+
+Tests/docs-only evidence from coordination head `2927fb973340439ebaae124d6748d265bb07129f`,
+developed in `/tmp/codex-agent-worktrees/pr135-inv070-terminal-residue-20260908-r1`.
+[`cu/inv_070_mixed_maturity_terminal_residue.rs`](cu/inv_070_mixed_maturity_terminal_residue.rs)
+is mounted by INV-070 and adds one public LiteSVM test. System/SPL/ATA/wrapper instructions
+create and fund every account; no program-owned bytes are injected or changed directly.
+
+After a permissionless 1,009-atom user payout and owner-signed portfolio close, two assets
+retain 401 atoms of live backing (domain 0, expiry 100), 307 atoms of lapsed backing
+(domain 3, expiry 5), and 203 atoms of funded, never-spent insurance (domain 2).
+The clock reaches slot 5 while the lapsed bucket still has its stored Fresh tag, so public
+normalization must discharge it. Another 17 SPL atoms are raw, unbooked surplus.
+`CloseSlab` first rejects with `EngineLockActive` at the earlier live bucket. A retained
+insurance withdrawal followed by the same close also rejects after exactly one successful
+SPL transfer. Both failures restore complete tracked accounts, including lamports, mint,
+portfolio deletion state and custody, except the independently calculated fee-payer debit.
+
+Two schedules withdraw backing then insurance, or insurance then backing. Each proves that
+the other residue class still blocks final cleanup. Once live backing is withdrawn, the
+same `CloseSlab` instruction normalizes the lapsed bucket without changing any custody
+account or mint supply. Final cleanup burns exactly the 307 now-claim-free booked atoms,
+sweeps only the 17 raw atoms, closes the vault, and retains exactly canonical tombstone rent.
+The input-only oracle checks every stock transition and the exact partition
+`1937 = 1009 user + 401 provider + 203 insurance + 307 burn + 17 sweep`, plus portfolio rent
+return, unchanged destination rents/owner wallet, and the final authority refund.
+
+This is distinct from INV-063's staggered-expiry asset-retirement test, INV-086's
+spent-insurance/recredit terminal composition, and
+`v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements`,
+which has live backing and allowance retries but no lapsed-backing burn/raw-surplus split.
+It does not close counterexample rows 417/418/420/421/424: receipts, native quote, unavailable
+authorities, spent insurance, persistent multi-chunk scan invalidation, trades, and arbitrary
+histories remain outside this two-asset witness. Invariant/reopening statuses are unchanged.
+
+Verification used the requested cached SBF, SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`, without rebuilding it.
+With the requested `PERCOLATOR_FUZZ_SBF`, `CARGO_TARGET_DIR`, jobs=2, incremental=0 and
+dev/test debug=0 environment, the exact selector below collected 1 test and passed 1/1
+(both orders). The shared target briefly required waiting for its build lock.
+
+```sh
+selector=inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry
+touch tests/v16_cu.rs tests/invariants/cu/inv_070_{zero_unattributed_terminal_residue_and_close_slab,mixed_maturity_terminal_residue}.rs
+cargo test --locked --offline --test v16_cu "$selector" -- --list --exact
+touch tests/v16_cu.rs tests/invariants/cu/inv_070_{zero_unattributed_terminal_residue_and_close_slab,mixed_maturity_terminal_residue}.rs
+cargo test --locked --offline --test v16_cu "$selector" -- --exact --nocapture
+```
+
+Observed CU for backing-first / insurance-first: early close 8,504 / 10,004;
+transfer-prefix rollback 33,386 / 37,886; backing withdrawal 26,405 / 27,905;
+insurance withdrawal 27,210 / 28,182; expiry 19,566 / 21,066; final close 31,585 / 33,085.
+`rustfmt --check` on the touched Rust files and `git diff --check` also pass.
+
 ## INV-068 shared-owner receipts (2026-09-08)
 
 Tests/docs-only increment initially created from
