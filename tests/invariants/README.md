@@ -6839,6 +6839,25 @@ oracle tails, retained capabilities/generations, arbitrary histories, and maximu
 outside this increment. Validation uses the baseline default-feature SBF `230b6db1` and matcher
 `50e53226`; the build-sbf invocation was cache-fresh, not a clean rebuild.
 
+### INV-053 multi-leg batch recertification
+
+[`v16_program_multileg_batch_certificates_refresh_untouched_stale_leg`](stateful/inv_053_full_health_recertification_equivalence.rs)
+adds four public worlds: both batch transports and both orders of a two-leg clear/cross-zero
+request. An independent authenticated mark/crank first leaves both participants with a stale
+oracle epoch and a genuinely unsettled K snapshot on a third, untraded asset. The batch must
+settle that leg, land both structural deltas, and commit exact full-refresh certificates for
+both participants, including every health lane, epoch key and final active bitmap. The existing
+independent/snapshot oracle runs nonvacuously eight times; unrelated portfolios and SPL custody
+remain byte-exact, and setup plus execution use validated public traces without economic injection.
+
+This combines stale unrelated-leg settlement with a genuine mixed-delta batch, beyond the
+existing one-leg INV-053 batch cells and separately indexed mixed-batch slot-map equivalence.
+At base `c3b315ef`, the exact test passes all four worlds. Validation uses private copies of the
+documented default-feature SBF `230b6db1` and matcher `50e53226`, not rebuilt artifacts; Git object
+IDs for production sources, manifests/lock and matcher sources match the recorded `7d6d4cfb`
+baseline. No engine proof, invariant-status change, fee/funding/lien product or maximum-shape
+claim is added.
+
 ## Commands
 
 ```bash

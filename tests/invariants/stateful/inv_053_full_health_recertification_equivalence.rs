@@ -15,6 +15,9 @@
 //! Finally, a 20-world differential compares the incremental certificate written by every public
 //! trade route across attach, resize, reduce, cross-zero, and clear against a subsequent public full
 //! refresh after an unrelated stale leg has been settled and the certificate epochs invalidated.
+//! A four-world two-leg batch case combines clear and cross-zero in both request orders through
+//! both batch transports. Both participants must settle an untouched stale K leg and commit the
+//! exact full-refresh certificate, including the final active bitmap and all epoch keys.
 //! An adjacent eight-world matrix publicly creates a nonunit ADL leg, then proves every admitted
 //! unrelated strict-reduction and clear route produces the same certificate as full recomputation.
 //! Risk-increasing deltas are intentionally excluded because the loss-stale ADL gate rejects them.
@@ -838,6 +841,172 @@ fn v16_program_incremental_trade_certificate_equals_public_full_refresh() {
                 .expect("incremental/full certificate trace must be public and rollback-exact");
             assert_eq!(trace.out_of_band_economic_mutations, 0);
             assert_eq!(trace.steps.len(), 3);
+            assert!(trace.steps.iter().all(|step| step.succeeded));
+        }
+    }
+}
+
+#[test]
+fn v16_program_multileg_batch_certificates_refresh_untouched_stale_leg() {
+    const PRICE: u64 = 100;
+    const MARK: u64 = 105;
+    const STALE_ASSET: u16 = 2;
+    let unit = POS_SCALE as i128;
+
+    for cpi in [false, true] {
+        for reverse in [false, true] {
+            let mut env = V16Svm::new(
+                [0x5b; 32],
+                MarketConfig {
+                    initial_price: PRICE,
+                    max_price_move_bps_per_slot: 500,
+                    ..MarketConfig::default()
+                },
+            );
+            env.warp_to_slot(1);
+            env.begin_public_trace();
+            env.configure_auth_mark(false, STALE_ASSET, 1, PRICE)
+                .expect("configure the untouched asset's authenticated mark");
+            for (asset, quantity) in [(0, 2 * unit), (1, 3 * unit), (STALE_ASSET, 3 * unit)] {
+                env.trade_no_cpi(0, 1, asset, quantity, PRICE, 0)
+                    .expect("open both participants' pre-batch legs");
+                env.trade_no_cpi(3, 4, asset, unit, PRICE, 0)
+                    .expect("keep independent OI across the batch clear and flip");
+            }
+            if cpi {
+                env.ensure_primary_matcher_enabled(1)
+                    .expect("enable the public batch matcher");
+            }
+
+            env.warp_to_slot(2);
+            env.push_auth_mark(STALE_ASSET, 2, MARK)
+                .expect("publish the untouched leg's mark");
+            env.crank(
+                3,
+                2,
+                vec![CrankObservationHint {
+                    asset_index: STALE_ASSET,
+                    oracle_accounts: 0,
+                }],
+            )
+            .expect("advance the market without refreshing either batch participant");
+            let (_, before_market) = env.primary_market_state();
+            assert_eq!(
+                before_market.assets[STALE_ASSET as usize].effective_price,
+                MARK
+            );
+            for actor in [0, 1] {
+                let before = env.primary_portfolio(actor);
+                assert!(before.health_cert.valid != 0);
+                assert!(before.health_cert.cert_oracle_epoch.get() < before_market.oracle_epoch);
+                let leg = leg_for_asset(before, u32::from(STALE_ASSET))
+                    .expect("both participants must retain the untouched leg");
+                let asset = before_market.assets[STALE_ASSET as usize];
+                let target = match leg.side {
+                    SideV16::Long => asset.k_long,
+                    SideV16::Short => asset.k_short,
+                };
+                assert_ne!(
+                    leg.k_snap, target,
+                    "actor {actor} must have real stale K work"
+                );
+            }
+            let peers_before = [2, 3, 4].map(|actor| env.primary_portfolio_data(actor));
+            let tokens_before = env.all_token_account_data();
+            let mut deltas = [(0u16, -2 * unit), (1u16, -5 * unit)];
+            if reverse {
+                deltas.reverse();
+            }
+            let result = if cpi {
+                env.batch_trade_cpi(
+                    0,
+                    1,
+                    deltas
+                        .iter()
+                        .map(|&(asset_index, size_q)| BatchTradeCpiLeg {
+                            asset_index,
+                            market_id: before_market.assets[asset_index as usize].market_id,
+                            size_q,
+                            fee_bps: 0,
+                            limit_price: 0,
+                        })
+                        .collect(),
+                )
+            } else {
+                env.batch_trade_no_cpi(
+                    0,
+                    1,
+                    deltas
+                        .iter()
+                        .map(|&(asset_index, size_q)| BatchTradeLeg {
+                            asset_index,
+                            market_id: before_market.assets[asset_index as usize].market_id,
+                            size_q,
+                            exec_price: PRICE,
+                            fee_bps: 0,
+                        })
+                        .collect(),
+                )
+            };
+            result.unwrap_or_else(|error| {
+                panic!("cpi={cpi}/reverse={reverse} mixed-delta batch must land: {error}")
+            });
+
+            let (_, after_market) = env.primary_market_state();
+            for (actor, sign) in [(0, 1i128), (1, -1i128)] {
+                let label = format!("cpi={cpi}/reverse={reverse}/actor={actor}");
+                let after = env.primary_portfolio(actor);
+                assert!(
+                    leg_for_asset(after, 0).is_none(),
+                    "{label}: clear must detach"
+                );
+                assert_eq!(
+                    leg_for_asset(after, 1)
+                        .expect("flipped leg must remain active")
+                        .basis_pos_q,
+                    -2 * unit * sign,
+                    "{label}: batch must commit the final flipped quantity"
+                );
+                let untouched = leg_for_asset(after, u32::from(STALE_ASSET))
+                    .expect("batch must retain the untouched leg");
+                assert_eq!(untouched.basis_pos_q, 3 * unit * sign);
+                let asset = after_market.assets[STALE_ASSET as usize];
+                assert_eq!(
+                    untouched.k_snap,
+                    match untouched.side {
+                        SideV16::Long => asset.k_long,
+                        SideV16::Short => asset.k_short,
+                    },
+                    "{label}: batch must settle the untouched leg"
+                );
+                assert!(
+                    crate::support::fuzz_model::assert_current_certificate_matches_snapshot_full_refresh(
+                        &label,
+                        &env.market_data(false),
+                        &env.primary_portfolio_data(actor),
+                    )
+                    .expect("batch certificate must satisfy the independent and snapshot oracles"),
+                    "{label}: the certificate comparison must be current and nonvacuous"
+                );
+                assert_eq!(
+                    after
+                        .health_cert
+                        .try_to_runtime()
+                        .expect("decode batch certificate"),
+                    snapshot_portfolio_full_refresh(&env, actor),
+                    "{label}: every final health lane, epoch and bitmap must match full refresh"
+                );
+            }
+            assert_eq!(env.all_token_account_data(), tokens_before);
+            assert_eq!(
+                [2, 3, 4].map(|actor| env.primary_portfolio_data(actor)),
+                peers_before
+            );
+            let trace = env.finish_public_trace();
+            trace
+                .validate_public_execution()
+                .expect("mixed batch setup and transition must use public exact execution");
+            assert_eq!(trace.out_of_band_economic_mutations, 0);
             assert!(trace.steps.iter().all(|step| step.succeeded));
         }
     }
