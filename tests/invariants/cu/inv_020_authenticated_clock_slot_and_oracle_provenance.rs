@@ -4458,6 +4458,124 @@ fn composite_epoch_provider_words() -> Vec<EpochMatrixCase> {
 }
 
 #[test]
+fn v16_program_hybrid_soft_stale_boundary_uses_clock_not_caller_slot() {
+    const INITIAL_SLOT: u64 = 10;
+    const SOFT_STALE_SLOTS: u64 = 3;
+    const INITIAL_PUBLISH_TIME: i64 = 100;
+    const STALE_PUBLISH_TIME: i64 = 101;
+    const NOW_UNIX: i64 = STALE_PUBLISH_TIME + 61;
+    const INITIAL_PRICE: u64 = 200_000;
+    const NEXT_PRICE: u64 = 210_000;
+
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, INITIAL_SLOT, INITIAL_PUBLISH_TIME);
+    let keeper = Keypair::new();
+    let portfolio = env.create_portfolio(&keeper);
+    env.deposit(&keeper, portfolio, 1_000_000);
+    let feed = [0xd4; 32];
+    let initial =
+        env.set_pyth_price_with_conf(&feed, INITIAL_PRICE as i64, -6, 0, INITIAL_PUBLISH_TIME);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0; 32], [0; 32]],
+        &[initial],
+        INITIAL_SLOT,
+        INITIAL_PUBLISH_TIME,
+        0,
+        0,
+        SOFT_STALE_SLOTS,
+        100,
+    )
+    .expect("configure the initial authenticated observation");
+    let initial_cfg = env.market_state().0;
+    assert_eq!(initial_cfg.max_staleness_secs, 60);
+    assert_eq!(initial_cfg.last_good_oracle_slot, INITIAL_SLOT);
+
+    // This report advances both price and publish time, but is still one second too old.
+    let stale = env.set_pyth_price_with_conf(&feed, NEXT_PRICE as i64, -6, 0, STALE_PUBLISH_TIME);
+    // Compare complete protocol/provider accounts; the transaction fee payer is excluded.
+    let tracked = [env.market, portfolio, stale, env.vault];
+    let before = tracked.map(|key| env.svm.get_account(&key).unwrap());
+    let fallback_slot = INITIAL_SLOT + SOFT_STALE_SLOTS + 1;
+    for real_slot in [fallback_slot - 2, fallback_slot - 1] {
+        set_test_clock(&mut env, real_slot, NOW_UNIX);
+        for caller_slot in [0, real_slot, fallback_slot, u64::MAX] {
+            let err = try_epoch_matrix_crank(&mut env, portfolio, caller_slot, &[stale])
+                .expect_err(
+                    "stale data must reject until the authenticated soft-stale bound expires",
+                );
+            assert!(
+                err.contains("Custom(27)"),
+                "real slot {real_slot}, caller slot {caller_slot} must return OracleStale: {err}"
+            );
+            assert_eq!(
+                tracked.map(|key| env.svm.get_account(&key).unwrap()),
+                before,
+                "real slot {real_slot}, caller slot {caller_slot} must roll back exactly"
+            );
+        }
+    }
+
+    // Fallback is legal only at age > soft_stale_slots, and must not refresh oracle provenance.
+    set_test_clock(&mut env, fallback_slot, NOW_UNIX);
+    for (step, caller_slot) in [0, INITIAL_SLOT, fallback_slot, u64::MAX]
+        .into_iter()
+        .enumerate()
+    {
+        let cu = try_epoch_matrix_crank(&mut env, portfolio, caller_slot, &[stale])
+            .expect("authenticated soft-stale maturity permits the committed fallback mark");
+        assert_cu_within("clock-bound Hybrid fallback", cu, CRANK_CU_LIMIT);
+        let (cfg, group) = env.market_state();
+        assert_eq!(group.current_slot, fallback_slot);
+        assert_eq!(
+            group.assets[0].slot_last,
+            INITIAL_SLOT + step as u64 + 1,
+            "fallback catch-up must respect the configured one-slot accrual cap"
+        );
+        assert_eq!(group.assets[0].effective_price, INITIAL_PRICE);
+        assert_eq!(group.assets[0].raw_oracle_target_price, INITIAL_PRICE);
+        assert_eq!(cfg.mark_ewma_e6, INITIAL_PRICE);
+        assert_eq!(cfg.oracle_target_price_e6, INITIAL_PRICE);
+        assert_eq!(cfg.last_good_oracle_slot, INITIAL_SLOT);
+        assert_eq!(cfg.oracle_target_publish_time, INITIAL_PUBLISH_TIME);
+        assert_eq!(
+            cfg.oracle_leg_publish_times,
+            initial_cfg.oracle_leg_publish_times
+        );
+        assert_eq!(cfg.oracle_leg_prices_e6, initial_cfg.oracle_leg_prices_e6);
+        assert_eq!(env.svm.get_account(&stale).unwrap(), before[2]);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), before[3]);
+    }
+
+    let fresh_slot = fallback_slot + 1;
+    let fresh_publish_time = NOW_UNIX + 1;
+    set_test_clock(&mut env, fresh_slot, fresh_publish_time);
+    let fresh = env.set_pyth_price_with_conf(&feed, NEXT_PRICE as i64, -6, 0, fresh_publish_time);
+    let cu = try_epoch_matrix_crank(&mut env, portfolio, 0, &[fresh])
+        .expect("a current authenticated report must progress despite a rewound caller slot");
+    assert_cu_within(
+        "fresh Hybrid observation after fallback",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(group.current_slot, fresh_slot);
+    assert_eq!(group.assets[0].slot_last, fresh_slot);
+    assert_eq!(group.assets[0].effective_price, NEXT_PRICE);
+    assert_eq!(group.assets[0].raw_oracle_target_price, NEXT_PRICE);
+    assert_eq!(cfg.mark_ewma_e6, NEXT_PRICE);
+    assert_eq!(cfg.oracle_target_price_e6, NEXT_PRICE);
+    assert_eq!(cfg.last_good_oracle_slot, fresh_slot);
+    assert_eq!(cfg.oracle_target_publish_time, fresh_publish_time);
+    assert_eq!(cfg.oracle_leg_publish_times[0], fresh_publish_time);
+    assert_eq!(cfg.oracle_leg_prices_e6[0], NEXT_PRICE);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 1_000_000);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), before[3]);
+}
+
+#[test]
 fn v16_program_composite_freshness_boundaries_cross_all_provider_orders() {
     const PRICES_E6: [u64; 3] = [6_000_000, 2_000_000, 3_000_000];
 
