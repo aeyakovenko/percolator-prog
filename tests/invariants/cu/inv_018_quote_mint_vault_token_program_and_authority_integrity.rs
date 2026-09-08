@@ -10,6 +10,9 @@
 //! extensions rejects at both mint-admission routes, and the executable Token-2022 program rejects
 //! on a live value route with exact rollback. Existing tests in this file exhaust canonical-vault,
 //! mint, owner, delegate, close-authority, frozen-account, and token-program substitutions.
+//! A public SPL approve/revoke history additionally distinguishes owner-authorized withdrawal from
+//! permissionless terminal payout to the same delegated destination, with exact rejection rollback
+//! and a bounded unchanged-request payout retry after revocation.
 //!
 //! The source-complete gateway guard additionally proves every handler receives only facts returned
 //! by one classic-SPL parser and reuses those validated facts for balance and permissionless-payout
@@ -5490,6 +5493,293 @@ fn v16_public_withdraw_rejects_identical_noncanonical_vault_then_retries() {
             "retry changes only expected token amounts at {key}"
         );
     }
+}
+
+#[test]
+fn v16_public_destination_delegation_is_route_scoped_and_revocation_restores_payout() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const DEPOSIT: u64 = 123;
+    const OWNER_WITHDRAW: u64 = 37;
+    let mut env = inv018_public_spl_market(6);
+    let owner = Keypair::new();
+    let delegate = Keypair::new();
+    for signer in [&owner, &delegate] {
+        env.svm.airdrop(&signer.pubkey(), 1_000_000_000).unwrap();
+    }
+    let portfolio_key = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &portfolio_key,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    let portfolio = portfolio_key.pubkey();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .expect("initialize a system-created portfolio through the wrapper");
+    let user_token = Keypair::new();
+    inv018_initialize_token_account(&mut env, &user_token, owner.pubkey());
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &env.mint,
+            &user_token.pubkey(),
+            &env.admin.pubkey(),
+            &[],
+            DEPOSIT,
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .expect("SPL funds the owner's account");
+    let deposit_cu = env
+        .send(
+            env.deposit_ix(portfolio, DEPOSIT.into()),
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(user_token.pubkey(), false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("deposit into canonical custody");
+    assert_cu_within("delegation history deposit", deposit_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(user_token.pubkey()), 0);
+
+    // SPL permits an allowance on an empty account. Only the owner opts into this destination.
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::approve(
+            &spl_token::ID,
+            &user_token.pubkey(),
+            &delegate.pubkey(),
+            &owner.pubkey(),
+            &[],
+            DEPOSIT,
+        )
+        .unwrap(),
+        &[&owner],
+    )
+    .expect("the owner grants a real SPL allowance on the destination");
+    let withdraw_cu = env
+        .send(
+            env.withdraw_ix(portfolio, OWNER_WITHDRAW.into()),
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(user_token.pubkey(), false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("owner-authorized withdrawal remains live with a delegated destination");
+    assert_cu_within(
+        "owner withdrawal to delegated destination",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let delegated_account = env.svm.get_account(&user_token.pubkey()).unwrap();
+    let delegated = TokenAccount::unpack(&delegated_account.data).unwrap();
+    assert_eq!(delegated_account.owner, spl_token::ID);
+    assert_eq!(delegated.mint, env.mint);
+    assert_eq!(delegated.owner, owner.pubkey());
+    assert_eq!(delegated.state, AccountState::Initialized);
+    assert_eq!(delegated.amount, OWNER_WITHDRAW);
+    assert_eq!(delegated.delegate, COption::Some(delegate.pubkey()));
+    assert_eq!(delegated.delegated_amount, DEPOSIT);
+    assert_eq!(delegated.close_authority, COption::None);
+    assert_eq!(
+        env.vault,
+        canonical_vault_ata(env.vault_authority, env.mint)
+    );
+    assert_eq!(
+        Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+            .unwrap()
+            .decimals,
+        6
+    );
+    let remaining = DEPOSIT - OWNER_WITHDRAW;
+    assert_eq!(env.token_amount(env.vault), remaining);
+    assert_eq!(
+        env.portfolio_state(portfolio).capital.get(),
+        u128::from(remaining)
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(
+        (group.vault, group.c_tot, group.insurance),
+        (remaining.into(), remaining.into(), 0)
+    );
+    let sequence = env.portfolio_matcher_sequence(portfolio);
+    assert_eq!(sequence, 2);
+    env.resolve();
+
+    let close = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(user_token.pubkey(), false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        }
+        .encode(),
+    };
+    let transaction = |env: &V16CuEnv| {
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), close.clone()],
+            Some(&env.payer.pubkey()),
+            &[&env.payer],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let frame_keys = [
+        env.market,
+        portfolio,
+        user_token.pubkey(),
+        env.vault,
+        env.mint,
+        owner.pubkey(),
+        delegate.pubkey(),
+        env.admin.pubkey(),
+        env.vault_authority,
+        spl_token::ID,
+        env.program_id,
+    ];
+    let frame = |env: &V16CuEnv| frame_keys.map(|key| env.svm.get_account(&key));
+    let before = frame(&env);
+    let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    let rejected_tx = transaction(&env);
+    assert_eq!(rejected_tx.message.header.num_required_signatures, 1);
+    let fee = FeeStructure::default().lamports_per_signature;
+    let error = env
+        .svm
+        .send_transaction(rejected_tx)
+        .expect_err("permissionless payout cannot select the owner's delegated destination");
+    assert_eq!(
+        error.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32),
+        ),
+    );
+    let rejection_cu = error.meta.compute_units_consumed;
+    assert_cu_within(
+        "delegated terminal destination rejection",
+        rejection_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(
+        !error
+            .meta
+            .logs
+            .contains(&format!("Program {} invoke [2]", spl_token::ID)),
+        "destination admission must reject before token CPI"
+    );
+    assert_eq!(
+        frame(&env),
+        before,
+        "late destination rejection rolls back the complete non-payer frame"
+    );
+    expected_payer.lamports -= fee;
+    assert_eq!(
+        env.svm.get_account(&env.payer.pubkey()).unwrap(),
+        expected_payer
+    );
+    assert_eq!(env.portfolio_matcher_sequence(portfolio), sequence);
+    assert!(!resolved_receipt(&env.portfolio_state(portfolio)).present);
+
+    // Change only SPL delegation, not the payout request, destination, or wrapper-owned state.
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::revoke(&spl_token::ID, &user_token.pubkey(), &owner.pubkey(), &[])
+            .unwrap(),
+        &[&owner],
+    )
+    .expect("the owner revokes the destination allowance through SPL");
+    let mut revoked_frame = before.clone();
+    let destination = revoked_frame[2].as_mut().unwrap();
+    let mut revoked = delegated;
+    revoked.delegate = COption::None;
+    revoked.delegated_amount = 0;
+    TokenAccount::pack(revoked, &mut destination.data).unwrap();
+    assert_eq!(
+        frame(&env),
+        revoked_frame,
+        "revocation changes only the SPL delegation fields"
+    );
+
+    env.svm.expire_blockhash();
+    let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    let retry = transaction(&env);
+    let accepted = env
+        .svm
+        .send_transaction(retry)
+        .expect("the unchanged permissionless close pays after SPL revocation");
+    assert_cu_within(
+        "terminal payout after revocation",
+        accepted.compute_units_consumed,
+        CUSTODY_CU_LIMIT,
+    );
+    expected_payer.lamports -= fee;
+    assert_eq!(
+        env.svm.get_account(&env.payer.pubkey()).unwrap(),
+        expected_payer
+    );
+    assert_eq!(env.portfolio_matcher_sequence(portfolio), sequence);
+    assert!(resolved_portfolio_is_terminal(&env, portfolio));
+    let (_, group) = env.market_state();
+    assert_eq!((group.vault, group.c_tot, group.insurance), (0, 0, 0));
+    let after = frame(&env);
+    for (index, key) in frame_keys.into_iter().enumerate() {
+        if key == env.market || key == portfolio {
+            continue;
+        }
+        let mut expected = revoked_frame[index].clone();
+        if key == user_token.pubkey() || key == env.vault {
+            let account = expected.as_mut().unwrap();
+            let mut token = TokenAccount::unpack(&account.data).unwrap();
+            token.amount = if key == user_token.pubkey() {
+                DEPOSIT
+            } else {
+                0
+            };
+            TokenAccount::pack(token, &mut account.data).unwrap();
+        }
+        assert_eq!(
+            after[index], expected,
+            "payout changes only the expected token amounts at {key}"
+        );
+    }
+    println!(
+        "INV-018 delegated destination CU: deposit={deposit_cu}, owner_withdraw={withdraw_cu}, reject={rejection_cu}, retry={} (limit={CUSTODY_CU_LIMIT})",
+        accepted.compute_units_consumed,
+    );
 }
 
 #[test]
