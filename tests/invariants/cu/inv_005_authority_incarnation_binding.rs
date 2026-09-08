@@ -13,6 +13,10 @@
 //! `v16_program_oracle_authority_aba_is_asset_scoped_and_rolls_back_retained_prefix` retains
 //! same-key oracle requests for two assets across one asset's A-to-B-to-A rotation. It checks
 //! stale-epoch rollback, including an executed sibling prefix, and both scopes' live controls.
+//! `v16_program_shutdown_insurance_withdrawal_retains_market_authority_epoch_across_aba`
+//! covers the non-base shutdown-drain fallback, not the matrix's local-operator withdrawal.
+//! A prevalidated signed request cannot revive after market-authority A-to-B-to-A even though
+//! the withdrawal asset's epoch is unchanged; an epoch-only replacement moves exact SPL value.
 //! `v16_program_adversarial_role_containment_matrix_is_source_complete` separately treats every
 //! correctly authorized role as economically hostile. It source-locks all configured, matcher,
 //! delegate, and permissionless callsites to explicit maximum/forbidden effects and independent
@@ -4408,6 +4412,242 @@ fn v16_program_oracle_authority_aba_is_asset_scoped_and_rolls_back_retained_pref
             "each scope consumes exactly one successful observation"
         );
     }
+}
+
+#[test]
+fn v16_program_shutdown_insurance_withdrawal_retains_market_authority_epoch_across_aba() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = 2;
+    const PRINCIPAL: u128 = 1_000;
+    const WITHDRAWAL: u128 = 400;
+    const OTHER_INSURANCE: u128 = 250;
+    let mut env = V16CuEnv::new();
+    let authority_a = env.admin.insecure_clone();
+    let authority_b = Keypair::new();
+    let local_authority = Keypair::new();
+    env.ensure_signer_account(authority_b.pubkey());
+    env.ensure_signer_account(local_authority.pubkey());
+    env.activate_asset_with_authorities(
+        ASSET,
+        1,
+        100,
+        local_authority.pubkey(),
+        local_authority.pubkey(),
+        local_authority.pubkey(),
+        local_authority.pubkey(),
+    );
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    let (source, _) =
+        env.top_up_insurance_domain_with_authority_and_cu(&local_authority, DOMAIN, PRINCIPAL);
+    let (other_source, _) =
+        env.top_up_insurance_domain_with_authority_and_cu(&authority_a, 0, OTHER_INSURANCE);
+    let destination = env.token_account(authority_a.pubkey(), 0);
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 2, 0);
+    env.svm.warp_to_slot(7);
+
+    let market_id = env.asset_market_id(ASSET);
+    let market_epoch = env.control_sequences(0).authority_epoch;
+    let local_sequences = env.control_sequences(ASSET as usize);
+    let profile = state::read_asset_oracle_profile(
+        &env.svm.get_account(&env.market).unwrap().data,
+        ASSET as usize,
+    )
+    .unwrap();
+    let (_, before_group) = env.market_state();
+    assert_eq!(before_group.mode, MarketModeV16::Live);
+    assert_eq!(
+        before_group.assets[ASSET as usize].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    assert_eq!(before_group.assets[ASSET as usize].oi_eff_long_q, 0);
+    assert_eq!(before_group.assets[ASSET as usize].oi_eff_short_q, 0);
+    assert_eq!(profile.last_good_oracle_slot, 2);
+    assert_eq!(
+        profile.insurance_operator,
+        local_authority.pubkey().to_bytes()
+    );
+    assert_eq!(
+        profile.insurance_authority,
+        local_authority.pubkey().to_bytes()
+    );
+    assert_ne!(authority_a.pubkey(), local_authority.pubkey());
+    assert_eq!(market_epoch, local_sequences.authority_epoch);
+    assert_eq!(before_group.insurance, PRINCIPAL + OTHER_INSURANCE);
+    assert_eq!(
+        before_group.insurance_domain_budget[DOMAIN as usize],
+        PRINCIPAL
+    );
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(other_source), 0);
+    assert_eq!(
+        env.token_amount(env.vault),
+        (PRINCIPAL + OTHER_INSURANCE) as u64
+    );
+
+    // Encode directly: current-state binding helpers must not refresh retained consent.
+    let withdrawal = |authority_epoch| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(authority_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET,
+            market_id,
+            authority_epoch,
+            amount: WITHDRAWAL,
+        }
+        .encode(),
+    };
+    let retained_ix = withdrawal(market_epoch);
+    let fresh_ix = withdrawal(market_epoch + 2);
+    let sign = |env: &V16CuEnv, ix: Instruction| {
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), ix],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &authority_a],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let retained = sign(&env, retained_ix);
+    retained
+        .verify()
+        .expect("consent is signed before either handoff");
+    let frame_keys = retained
+        .message
+        .account_keys
+        .iter()
+        .copied()
+        .filter(|key| *key != env.payer.pubkey())
+        .chain([
+            env.mint,
+            source,
+            other_source,
+            authority_b.pubkey(),
+            local_authority.pubkey(),
+        ])
+        .collect::<Vec<_>>();
+    let frame = |env: &V16CuEnv| {
+        frame_keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>()
+    };
+    let before_simulation = frame(&env);
+    let simulation = env
+        .svm
+        .simulate_transaction(retained.clone().into())
+        .expect("A's retained request is admissible through the matured shutdown fallback");
+    assert_eq!(frame(&env), before_simulation);
+
+    for (step, from, to) in [
+        (1, &authority_a, &authority_b),
+        (2, &authority_b, &authority_a),
+    ] {
+        let authority_epoch = env.control_sequences(0).authority_epoch;
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateAuthority {
+                authority_epoch,
+                new_pubkey: to.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(from.pubkey(), true),
+                AccountMeta::new(to.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[from, to],
+        )
+        .expect("co-signed market-authority handoff");
+        assert_eq!(env.market_state().0.marketauth, to.pubkey().to_bytes());
+        assert_eq!(
+            env.control_sequences(0).authority_epoch,
+            market_epoch + step
+        );
+        assert_eq!(env.control_sequences(ASSET as usize), local_sequences);
+        assert_eq!(env.asset_market_id(ASSET), market_id);
+        assert_eq!(
+            state::read_asset_oracle_profile(
+                &env.svm.get_account(&env.market).unwrap().data,
+                ASSET as usize,
+            )
+            .unwrap(),
+            profile
+        );
+    }
+
+    // The target asset still has the old epoch, but fallback consent belongs to asset 0.
+    assert_ne!(
+        env.control_sequences(0).authority_epoch,
+        local_sequences.authority_epoch
+    );
+    assert_eq!(
+        retained.message.recent_blockhash,
+        env.svm.latest_blockhash()
+    );
+    let before_rejection = frame(&env);
+    let mut payer_before = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    let fee = FeeStructure::default().lamports_per_signature
+        * u64::from(retained.message.header.num_required_signatures);
+    let rejected = env
+        .svm
+        .send_transaction(retained)
+        .expect_err("restoring A must not revive the old shutdown withdrawal");
+    assert_eq!(
+        rejected.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::EngineStale as u32),
+        )
+    );
+    assert_eq!(
+        frame(&env),
+        before_rejection,
+        "all non-payer accounts roll back exactly"
+    );
+    payer_before.lamports -= fee;
+    assert_eq!(
+        env.svm.get_account(&env.payer.pubkey()).unwrap(),
+        payer_before
+    );
+
+    // Only the epoch differs from the retained request: signer, generation and value are fixed.
+    let fresh = sign(&env, fresh_ix);
+    let success = env
+        .svm
+        .send_transaction(fresh)
+        .expect("current market-authority consent can withdraw through the shutdown fallback");
+    let (_, after_group) = env.market_state();
+    assert_eq!(env.token_amount(destination), WITHDRAWAL as u64);
+    assert_eq!(
+        env.token_amount(env.vault),
+        (PRINCIPAL + OTHER_INSURANCE - WITHDRAWAL) as u64
+    );
+    assert_eq!(after_group.vault, before_group.vault - WITHDRAWAL);
+    assert_eq!(after_group.insurance, before_group.insurance - WITHDRAWAL);
+    let mut expected_budgets = before_group.insurance_domain_budget;
+    expected_budgets[DOMAIN as usize] -= WITHDRAWAL;
+    assert_eq!(after_group.insurance_domain_budget, expected_budgets);
+    assert_eq!(env.control_sequences(ASSET as usize), local_sequences);
+    assert_eq!(env.control_sequences(0).authority_epoch, market_epoch + 2);
+    assert_eq!(env.asset_market_id(ASSET), market_id);
+    eprintln!(
+        "INV-005 shutdown insurance ABA CU: prevalidated={}, stale={}, fresh={}",
+        simulation.compute_units_consumed,
+        rejected.meta.compute_units_consumed,
+        success.compute_units_consumed,
+    );
 }
 
 // [from pr114]
