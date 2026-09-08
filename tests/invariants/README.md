@@ -4644,14 +4644,55 @@ fresh default-feature SBF passes 192 fills, 192 short-fill rejections and 384 st
 maximum successful fill is 467,951 CU. This is net-new failure-placement/delayed-retry composition,
 not randomized F coverage or a status promotion.
 
-The remaining F gap is a shrinkable partition/failure history generator. This bounded witness fixes
-one asset, one nonintegral total, two partial ratios, authenticated price 100, fee 100 bps, no
-funding/time movement, two rejections per selected prefix, and a batch-CPI final residual. Generated
-lengths/quantities/rounding/max boundaries, other residual transports, multi-leg atomic failure
-placement and environmental interleavings remain unowned by this increment. Keep the per-step
-accounting/rollback oracle and bounded fresh continuation when extending it. Successful partials
-consume the entire one-shot authorization; residuals require newly signed intents against the new
-episodes. No production change or duplicate engine proof is needed for the bounded witness.
+That bounded witness fixes one asset, one nonintegral total, two partial ratios, authenticated price
+100, fee 100 bps, no funding/time movement, two rejections per selected prefix, and a batch-CPI final
+residual. Its short-fill failure schedules remain the owner of that relation; the following
+increment adds variable partitions composed with signed economic bounds, not another copy of those
+schedules. Successful partials consume the entire one-shot authorization; residuals require newly
+signed intents against the new episodes.
+
+### INV-009 generated partial/residual budgets
+
+[`v16_program_generated_partial_residual_histories_preserve_signed_budget`](cu/inv_009_partial_fill_and_retry_accounting.rs)
+adds 24 mandatory sign / integral-neighbor / residual-transport cells and 32 seeded shrinkable
+histories. The mandatory totals are `255 * POS_SCALE - 1`, equal, and plus one; the generated tail
+uses 255..1024 units plus zero/one/half-unit/last-quantum residues, one-to-three partials, numerators
+1..254 over 255, zero-to-two rejected attempts at each prefix, and all four residual transports.
+The seed is ChaCha `[0x09; 32]`, with 128 shrink iterations and a local invariant regression path.
+
+An input-derived partition/price plan is independent of the decoded matcher-fill ledger. Every
+post-setup public transaction, including matcher capacity configuration and the final LP grant,
+checks signed quantity, epochs, per-owner capital/PnL, cumulative quote/fee/slippage, fee
+fragmentation, OI, insurance/c_tot/vault and exact mint/vault custody. Single partials reject tight
+price limits after matcher execution; residuals reject tight price, no-CPI fee ceilings or batch
+aggregate fee/slippage caps. Every error requires the exact wrapper error and restores the tracked
+13-account frame including economic lamports, excluding only the network-fee payer. Fresh
+blockhashes prevent transaction-cache errors from supplying evidence. The first consumed partial
+is retained across later partials; after the grant changes, only the just-consumed residual is
+retried so an old grant cannot mask its consumption check.
+
+The residual completes the **same partially filled leg**, with nonzero adverse-price slippage
+(105 for buys, 95 for sells). Batch-CPI caps are the original planned totals minus the independently
+observed partial debits. This plan is an off-chain history budget: the wrapper does not persist a
+multi-intent allowance, and singles/no-CPI routes do not gain native aggregate-atom caps. Matcher
+quote/slippage is not an SPL trade transfer; the authenticated mark remains 100 and fees 100 bps.
+Unlike INV-011's funded transaction-prefix owner, this test has no in-transaction deposit or
+preceding trade and does not complete untouched full legs.
+
+At integration base `3c5c4092`, the exact test passes 56 histories and 732 checked post-setup transactions:
+178 fills (122 partials, 56 residuals), 198 bound rejections, 178 consumed rejections and 178 public
+controls. It observes 22 integral fills, 156 residue fills and eight sub-unit residuals; maximum
+trade/rejection CU is 474,260 under a 1,375,000 ceiling. Validation reuses private copies of baseline
+default-feature wrapper SBF `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`
+and programmable matcher `e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`,
+plus read-only passive matcher `51f361c6fd00bdb91c685e98f081dea5a54665ef533a7f7b619916594aae6755`.
+No new SBF build, production change, engine proof or status promotion is claimed.
+
+This is sampled shrinkable wrapper evidence, not completion of generic INV-009/011 F coverage.
+Remaining products include longer histories, maximum quantities combined with failures, multi-leg
+residuals and atomic failures, nonzero-priced partials, variable marks/fees, backing/claim or
+collateral/PnL-credit allowances, funding/time movement and environmental interleavings. The
+existing fixed maximum-quantity and short-fill rejection owners are not replaced.
 
 ### INV-011 aggregate-cap evidence and F plan
 
@@ -4701,7 +4742,11 @@ The residual contains untouched full legs, not a retained partial-fill authoriza
 counts/permutations, maximum shape, variable marks/fees/backing, environmental interleavings and
 typed randomized/shrinkable histories remain outside this witness.
 
-The remaining F owner should stay in `cu/inv_011_signed_aggregate_economic_bounds.rs`: generalize
+The [shared partial/residual history](#inv-009-generated-partialresidual-budgets) supplies sampled
+variable-partition/residual-signature evidence for one asset; it does not replace the funded-prefix
+owner or supply general signed-leg vectors and aggregate spending allowances.
+
+The remaining general F owner should stay in `cu/inv_011_signed_aggregate_economic_bounds.rs`: generalize
 the bounded witness into typed, shrinkable signed-leg/cap histories across supported leg counts and
 orders, quantity/rounding/cap boundaries, residual signatures, collateral/PnL-credit spending
 allowances, variable claim/backing shapes and environmental interleavings. Reuse INV-006/008/009/

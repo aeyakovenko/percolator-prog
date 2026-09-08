@@ -20,6 +20,10 @@
 //! A bounded schedule product inserts repeated failures at every subset of three
 //! fill prefixes, retries unchanged unconsumed instructions, and delays consumed
 //! instruction replays across multiple partial-fill episodes.
+//! A separate seeded, shrinkable history composes variable partial partitions and
+//! signed-bound rejections with all four freshly signed residual transports. Its
+//! input-derived budget and decoded-fill ledger include adverse residual prices;
+//! public matcher controls and every accepted/rejected prefix retain the ledger.
 
 use super::*;
 
@@ -1217,6 +1221,498 @@ fn v16_program_bounded_partial_failure_retry_schedules_preserve_every_prefix() {
         "INV-009: {histories} bounded histories; 192 fills; 192 short-fill rejections; \
          384 stale rejections; max fill CU={max_cu}"
     );
+}
+
+#[derive(Clone, Debug)]
+struct PartialBudgetHistory {
+    total_q: i128,
+    partials: Vec<(u8, u8)>, // Ratio numerator / 255, rejected price-limit attempts.
+    residual_route: usize,
+    residual_rejections: u8,
+}
+
+fn run_partial_budget_history(history: &PartialBudgetHistory) -> [u64; 8] {
+    use percolator_prog::matcher_abi::{
+        read_matcher_return, FLAG_PARTIAL_OK, MATCHER_RETURN_BYTES,
+    };
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let (mut env, taker, lp, ta, la, matcher, ctx, delegate) = setup_hostile_partial_env(1);
+    let residual_matcher = Pubkey::new_unique();
+    env.svm.add_program(
+        residual_matcher,
+        &std::fs::read(matcher_program_path()).expect("read passive matcher SBF"),
+    );
+    let (residual_ctx, residual_delegate, _) =
+        env.init_matcher_context_with_passive_spread(residual_matcher, la, 500, 500);
+    let control = |env: &mut V16CuEnv, data: Vec<u8>| {
+        env.svm.expire_blockhash();
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            Instruction {
+                program_id: matcher,
+                accounts: vec![
+                    AccountMeta::new_readonly(lp.pubkey(), true),
+                    AccountMeta::new(ctx, false),
+                ],
+                data,
+            },
+            &[&lp],
+        )
+        .expect("public partial matcher configuration");
+    };
+    control(&mut env, vec![10]);
+
+    let route = PartialRetryRoute::ALL[history.residual_route];
+    let direction = history.total_q.signum();
+    let residual_price = if direction > 0 { 105 } else { 95 };
+    let ceil = |n: u128, d: u128| n / d + u128::from(n % d != 0);
+    // Quote and slippage describe matcher execution, not an SPL transfer or a moving manual mark.
+    // Fee basis remains the authenticated mark (100), including the adverse-price residual.
+    let economics = |q: i128, price: u64| {
+        let magnitude = q.unsigned_abs();
+        [
+            if q > 0 {
+                ceil(magnitude * u128::from(price), POS_SCALE)
+            } else {
+                magnitude * u128::from(price) / POS_SCALE
+            },
+            partial_retry_reference_fee(q) / 2,
+            ceil(magnitude * u128::from(price.abs_diff(100)), POS_SCALE),
+        ]
+    };
+    let mut remaining = history.total_q;
+    let mut plan = Vec::new();
+    for &(numerator, _) in &history.partials {
+        let filled = direction * (remaining.unsigned_abs() * u128::from(numerator) / 255) as i128;
+        assert!(filled != 0 && filled.unsigned_abs() < remaining.unsigned_abs());
+        plan.push((filled, 100));
+        remaining -= filled;
+    }
+    plan.push((remaining, residual_price));
+    let planned_prefix = |fills: usize| {
+        let mut quantity = 0;
+        let mut totals = [0u128; 3];
+        for &(q, price) in &plan[..fills] {
+            quantity += q;
+            for (sum, amount) in totals.iter_mut().zip(economics(q, price)) {
+                *sum += amount;
+            }
+        }
+        (quantity, totals)
+    };
+    let (_, original_budget) = planned_prefix(plan.len());
+    let initial_epochs = [ta, la].map(|key| env.portfolio_position_epoch(key));
+    let initial_market = env.market_state().1;
+    let custody =
+        |env: &V16CuEnv| [env.vault, env.mint].map(|key| env.svm.get_account(&key).unwrap());
+    let initial_custody = custody(&env);
+    let frame = |env: &V16CuEnv| {
+        // All trade/control writables and passive custody, including economic lamports.
+        // The network-fee payer alone is excluded; no token transfers occur after setup.
+        [
+            env.market,
+            ta,
+            la,
+            ctx,
+            residual_ctx,
+            taker.pubkey(),
+            lp.pubkey(),
+            delegate,
+            residual_delegate,
+            env.vault,
+            env.mint,
+            matcher,
+            residual_matcher,
+        ]
+        .map(|key| env.svm.get_account(&key).unwrap())
+    };
+    let assert_prefix = |env: &V16CuEnv, fills: usize, quantity: i128, observed: [u128; 3]| {
+        let (expected_q, expected) = planned_prefix(fills);
+        assert_eq!(
+            (quantity, observed),
+            (expected_q, expected),
+            "{history:?}, prefix={fills}"
+        );
+        assert!(quantity.unsigned_abs() <= history.total_q.unsigned_abs());
+        assert!(observed[1] <= original_budget[1] && observed[2] <= original_budget[2]);
+        if direction > 0 {
+            assert!(
+                observed[0] <= original_budget[0],
+                "cumulative buy-quote ceiling"
+            );
+        } else {
+            assert!(observed[0] >= expected[0], "executed sell-quote floor");
+        }
+        for (index, key) in [ta, la].into_iter().enumerate() {
+            let account = env.portfolio_state(key);
+            assert_eq!(
+                account.capital.get(),
+                1_000_000 - observed[1],
+                "{history:?}"
+            );
+            assert_eq!(
+                account.pnl.get(),
+                0,
+                "manual mark and funding must remain fixed"
+            );
+            assert_eq!(
+                env.portfolio_position_epoch(key),
+                initial_epochs[index] + fills as u64
+            );
+            if fills == 0 {
+                assert!(!has_active_leg_for_asset(&account, 0));
+            } else {
+                assert_eq!(
+                    active_leg_for_asset(&account, 0).basis_pos_q,
+                    if index == 0 { quantity } else { -quantity }
+                );
+            }
+        }
+        let market = env.market_state().1;
+        assert_eq!(market.assets[0].effective_price, 100);
+        assert_eq!(market.assets[0].oi_eff_long_q, quantity.unsigned_abs());
+        assert_eq!(market.assets[0].oi_eff_short_q, quantity.unsigned_abs());
+        assert_eq!(market.insurance, initial_market.insurance + 2 * observed[1]);
+        assert_eq!(market.c_tot, initial_market.c_tot - 2 * observed[1]);
+        assert_eq!(market.vault, initial_market.vault);
+        assert_eq!(market.c_tot + market.insurance, market.vault);
+        assert_eq!(market.vault, u128::from(env.token_amount(env.vault)));
+        assert_eq!(
+            custody(env),
+            initial_custody,
+            "{history:?}: exact SPL custody"
+        );
+        let unsplit_fee = partial_retry_reference_fee(quantity) / 2;
+        assert!(observed[1] >= unsplit_fee);
+        assert!(observed[1] - unsplit_fee <= 2 * fills.saturating_sub(1) as u128);
+    };
+    let send = |env: &mut V16CuEnv, transport, ix: ProgInstruction, residual: bool| {
+        let (program, context, signer) = if residual {
+            (residual_matcher, residual_ctx, residual_delegate)
+        } else {
+            (matcher, ctx, delegate)
+        };
+        let cpi = matches!(
+            transport,
+            PartialRetryRoute::Cpi | PartialRetryRoute::BatchCpi
+        );
+        let accounts = if cpi {
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+                AccountMeta::new_readonly(program, false),
+                AccountMeta::new(context, false),
+                AccountMeta::new_readonly(signer, false),
+            ]
+        } else {
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+            ]
+        };
+        let mut signers = vec![&env.payer, &taker];
+        if !cpi {
+            signers.push(&lp);
+        }
+        env.svm.expire_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                cu_ix(),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts,
+                    data: ix.encode(),
+                },
+            ],
+            Some(&env.payer.pubkey()),
+            &signers,
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+    let assert_error = |error: &litesvm::types::FailedTransactionMetadata,
+                        expected: PercolatorError| {
+        assert_eq!(
+            error.err,
+            TransactionError::InstructionError(2, InstructionError::Custom(expected as u32)),
+            "{history:?}: require the wrapper error, not a transaction-cache or CU rejection"
+        );
+    };
+
+    // Fills, bound rejects, consumed rejects, public controls, integral fills, residue fills,
+    // sub-unit residuals, maximum transaction CU. Never reset these or the economic ledger on error.
+    let mut evidence = [0u64; 8];
+    let mut quantity = 0;
+    let mut observed = [0u128; 3];
+    let mut retained_first = None;
+    assert_prefix(&env, 0, quantity, observed);
+    for step in 0..plan.len() {
+        let residual = step == history.partials.len();
+        let transport = if residual {
+            route
+        } else {
+            PartialRetryRoute::Cpi
+        };
+        if residual {
+            env.set_matcher_config(
+                residual_matcher,
+                &lp,
+                la,
+                residual_ctx,
+                residual_delegate,
+                1,
+            );
+        } else {
+            let before = frame(&env);
+            control(&mut env, vec![11, 19, history.partials[step].0]);
+            let mut expected = before;
+            expected[3].data[64] = 19;
+            expected[3].data[65] = history.partials[step].0;
+            assert_eq!(
+                frame(&env),
+                expected,
+                "configuration may only change matcher capacity"
+            );
+        }
+        evidence[3] += 1;
+        assert_prefix(&env, step, quantity, observed);
+
+        let requested = history.total_q - quantity;
+        let price = plan[step].1;
+        let mut current = retained_partial_retry_ix(&env, transport, ta, la, requested);
+        match &mut current {
+            ProgInstruction::TradeCpi { limit_price, .. } => *limit_price = price,
+            ProgInstruction::BatchTradeCpi {
+                legs,
+                max_fee_atoms,
+                max_slippage_atoms,
+                ..
+            } => {
+                legs[0].limit_price = price;
+                *max_fee_atoms = original_budget[1] - observed[1];
+                *max_slippage_atoms = original_budget[2] - observed[2];
+                assert_eq!(
+                    [*max_fee_atoms, *max_slippage_atoms],
+                    [
+                        economics(requested, price)[1],
+                        economics(requested, price)[2]
+                    ]
+                );
+            }
+            ProgInstruction::TradeNoCpi { exec_price, .. } => *exec_price = price,
+            ProgInstruction::BatchTradeNoCpi { legs, .. } => legs[0].exec_price = price,
+            _ => unreachable!(),
+        }
+        let attempts = if residual {
+            history.residual_rejections
+        } else {
+            history.partials[step].1
+        };
+        for attempt in 0..attempts {
+            let mut rejected = current.clone();
+            match &mut rejected {
+                ProgInstruction::TradeCpi { limit_price, .. } => {
+                    *limit_price = if direction > 0 { price - 1 } else { price + 1 }
+                }
+                ProgInstruction::BatchTradeCpi {
+                    max_fee_atoms,
+                    max_slippage_atoms,
+                    ..
+                } => {
+                    if attempt % 2 == 0 {
+                        *max_fee_atoms -= 1;
+                    } else {
+                        *max_slippage_atoms -= 1;
+                    }
+                }
+                ProgInstruction::TradeNoCpi { fee_bps, .. } => *fee_bps = 99,
+                ProgInstruction::BatchTradeNoCpi { legs, .. } => legs[0].fee_bps = 99,
+                _ => unreachable!(),
+            }
+            let before = frame(&env);
+            let error = send(&mut env, transport, rejected, residual)
+                .expect_err("signed bound must reject");
+            assert_error(&error, PercolatorError::InvalidInstruction);
+            if matches!(
+                transport,
+                PartialRetryRoute::Cpi | PartialRetryRoute::BatchCpi
+            ) {
+                let program = if residual { residual_matcher } else { matcher };
+                assert!(
+                    error
+                        .meta
+                        .logs
+                        .iter()
+                        .any(|line| line == &format!("Program {program} success")),
+                    "the matcher must execute before signed-bound rejection"
+                );
+            }
+            assert_eq!(
+                frame(&env),
+                before,
+                "{history:?}, step={step}, reject={attempt}"
+            );
+            assert_prefix(&env, step, quantity, observed);
+            evidence[1] += 1;
+            evidence[7] = evidence[7].max(error.meta.compute_units_consumed);
+        }
+
+        retained_first.get_or_insert_with(|| current.clone());
+        let success =
+            send(&mut env, transport, current.clone(), residual).unwrap_or_else(|error| {
+                panic!("{history:?}, step={step}: fresh fill rejected: {error:?}")
+            });
+        let (filled, paid_price) = match transport {
+            PartialRetryRoute::Cpi | PartialRetryRoute::BatchCpi => {
+                let ret = if matches!(transport, PartialRetryRoute::BatchCpi) {
+                    assert_eq!(success.return_data.program_id, residual_matcher);
+                    assert_eq!(success.return_data.data.len(), MATCHER_RETURN_BYTES);
+                    read_matcher_return(&success.return_data.data).unwrap()
+                } else {
+                    let context = if residual { residual_ctx } else { ctx };
+                    read_matcher_return(&env.svm.get_account(&context).unwrap().data).unwrap()
+                };
+                assert_eq!(ret.asset_index, 0);
+                assert_eq!(ret.oracle_price_e6, 100);
+                if !residual {
+                    assert_ne!(ret.flags & FLAG_PARTIAL_OK, 0);
+                }
+                (ret.exec_size, ret.exec_price_e6)
+            }
+            _ => (requested, price),
+        };
+        assert_eq!(
+            (filled, paid_price),
+            plan[step],
+            "{history:?}: decoded fill must match independent partition"
+        );
+        quantity += filled;
+        for (sum, amount) in observed.iter_mut().zip(economics(filled, paid_price)) {
+            *sum += amount;
+        }
+        assert_prefix(&env, step + 1, quantity, observed);
+        evidence[0] += 1;
+        evidence[if filled.unsigned_abs() % POS_SCALE == 0 {
+            4
+        } else {
+            5
+        }] += 1;
+        evidence[6] += u64::from(residual && filled.unsigned_abs() < POS_SCALE);
+        evidence[7] = evidence[7].max(success.compute_units_consumed);
+
+        // The original first partial is delayed across later partials. After the grant switch,
+        // retry only the just-consumed residual, so an old grant cannot supply the rejection.
+        let stale = if residual {
+            current
+        } else {
+            retained_first.as_ref().unwrap().clone()
+        };
+        let before = frame(&env);
+        let error =
+            send(&mut env, transport, stale, residual).expect_err("consumed consent must reject");
+        assert_error(&error, PercolatorError::EngineStale);
+        assert_eq!(
+            frame(&env),
+            before,
+            "{history:?}: consumed consent rollback"
+        );
+        assert_prefix(&env, step + 1, quantity, observed);
+        evidence[2] += 1;
+        evidence[7] = evidence[7].max(error.meta.compute_units_consumed);
+    }
+    assert_eq!((quantity, observed), (history.total_q, original_budget));
+    assert!(
+        observed[2] > 0,
+        "residual must exercise a nonzero slippage budget"
+    );
+    assert_cu_within("generated partial/residual history", evidence[7], 1_375_000);
+    evidence
+}
+
+#[test]
+fn v16_program_generated_partial_residual_histories_preserve_signed_budget() {
+    use proptest::{
+        prelude::*,
+        test_runner::{Config, RngAlgorithm, TestRng, TestRunner},
+    };
+
+    let counts = std::cell::Cell::new([0u64; 8]);
+    let record = |history: PartialBudgetHistory| {
+        let evidence = run_partial_budget_history(&history);
+        let mut total = counts.get();
+        for index in 0..7 {
+            total[index] += evidence[index];
+        }
+        total[7] = total[7].max(evidence[7]);
+        counts.set(total);
+    };
+    // Pin all sign / integral-neighbor / residual-transport cells; the random tail shrinks the
+    // partition length, each ratio, rejection placement/count, quantity and residual transport.
+    for direction in [-1i128, 1] {
+        for (boundary, offset) in [-1i128, 0, 1].into_iter().enumerate() {
+            for residual_route in 0..4 {
+                record(PartialBudgetHistory {
+                    total_q: direction * (255 * POS_SCALE as i128 + offset),
+                    partials: [1, 127, 254]
+                        .into_iter()
+                        .take(1 + (boundary + residual_route) % 3)
+                        .enumerate()
+                        .map(|(step, ratio)| (ratio, ((step + residual_route) % 3) as u8))
+                        .collect(),
+                    residual_route,
+                    residual_rejections: 2,
+                });
+            }
+        }
+    }
+    let strategy = (
+        255u128..=1024,
+        prop::sample::select(vec![0, 1, POS_SCALE / 2, POS_SCALE - 1]),
+        any::<bool>(),
+        prop::collection::vec((1u8..=254, 0u8..=2), 1..=3),
+        0usize..4,
+        0u8..=2,
+    )
+        .prop_map(
+            |(units, residue, negative, partials, residual_route, residual_rejections)| {
+                PartialBudgetHistory {
+                    total_q: (units * POS_SCALE + residue) as i128 * if negative { -1 } else { 1 },
+                    partials,
+                    residual_route,
+                    residual_rejections,
+                }
+            },
+        );
+    let mut runner = TestRunner::new_with_rng(
+        Config {
+            cases: 32,
+            max_shrink_iters: 128,
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(
+                    "tests/invariants/cu/inv_009_partial_residual_history.proptest-regressions",
+                ),
+            )),
+            ..Config::default()
+        },
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[0x09; 32]),
+    );
+    runner
+        .run(&strategy, |history| {
+            record(history);
+            Ok(())
+        })
+        .unwrap();
+    let totals = counts.get();
+    assert!(totals[4] > 0 && totals[5] > 0 && totals[6] > 0);
+    println!("INV-009/011: 24 boundary histories + 32 seeded shrinkable histories; fills/bound rejects/consumed rejects/public controls/integral fills/residue fills/sub-unit residuals/max CU={totals:?}");
 }
 
 #[test]
