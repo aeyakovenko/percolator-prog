@@ -12,6 +12,11 @@
 //! portfolio, and market identities. The complete engine portfolios, market,
 //! oracle profile, SPL custody, fees, and terminal payouts must remain equal. CPI
 //! legs receive fresh episode-bound matcher consent.
+//! `v16_program_common_control_partial_liquidation_matches_independent_owners_and_routes` extends
+//! the same identity-independence rule past open/close round trips into a genuine authenticated
+//! mark move, certificate refresh, and partial liquidation. A common owner must receive the same
+//! bounded mark, matched OI, unchanged counterparty account, custody, and value result as two
+//! independent owners over the same public no-CPI/CPI routes.
 //! Paid off-mark coalition attacks
 //! are independently exercised by INV-045's fee-reserve and liquidation-reward
 //! models; this file owns the identity-independence and terminal-custody assertion.

@@ -6,6 +6,10 @@
 //! owns INV-027's insurance-withdrawal seniority row: loss-stale live withdrawal preserves market,
 //! vault, and both funded portfolios byte-for-byte; both users then recover exact principal before
 //! the authority receives only the exact residual insurance in terminal mode.
+//! `v16_program_insurance_withdrawal_ledger_history_is_economically_transparent` crosses absent,
+//! continuous, and intermittent optional insurance-ledger attachment. Ledger observation may record
+//! history, but it cannot change live/resolved withdrawal allowance, domain budgets, SPL custody,
+//! mint supply, rollback, or bounded-CU behavior.
 
 use super::*;
 
