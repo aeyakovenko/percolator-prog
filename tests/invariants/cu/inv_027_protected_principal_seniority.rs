@@ -11,6 +11,8 @@
 //! reject with exact rollback while an unrelated flat user retains a complete public exit. The
 //! source-complete census composes this matrix with the trade, conversion, reduction, crank, and
 //! terminal witnesses and fails when the pinned wrapper adds an unclassified ingress.
+//! The stale-positive-PnL withdrawal test composes implicit maintenance collection with a real
+//! released claim: rejected partial withdrawals roll back, and principal exits before conversion.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -1108,6 +1110,237 @@ fn v16_program_loss_stale_reserve_matrix_preserves_senior_stocks_and_flat_exit()
     let final_group = env.market_state().1;
     assert!(final_group.assets[asset_index as usize].slot_last < final_group.current_slot);
     assert_eq!(final_group.vault as u64, env.token_amount(env.vault));
+    assert!(final_group.vault >= final_group.c_tot + final_group.insurance);
+}
+
+#[test]
+fn v16_program_stale_positive_pnl_cannot_fund_withdrawal_ahead_of_maintenance() {
+    const PRINCIPAL: u128 = 1_000;
+    const FEE_PER_SLOT: u128 = 7;
+    const PROFIT: u128 = 50;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        maintenance_fee_per_slot: FEE_PER_SLOT,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.top_up_backing_bucket(1, 75, 100);
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    env.deposit(&winner_owner, winner, PRINCIPAL);
+    env.deposit(&loser_owner, loser, PRINCIPAL);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        SIZE_Q,
+        100,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    for portfolio in [loser, winner] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        -SIZE_Q,
+        105,
+        0,
+    );
+    let released = env.portfolio_state(winner);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&released)));
+    assert!(health_cert(&released).valid);
+    assert_eq!(
+        health_cert(&released).cert_oracle_epoch,
+        env.market_state().1.oracle_epoch
+    );
+    assert_eq!(released.capital.get(), PRINCIPAL - FEE_PER_SLOT);
+    assert_eq!(released.pnl.get(), PROFIT as i128);
+    assert_eq!(released.last_fee_slot.get(), 2);
+    assert_eq!(
+        env.portfolio_state(loser).capital.get(),
+        PRINCIPAL - FEE_PER_SLOT - PROFIT
+    );
+
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_for_asset_as_admin(0, 3, 106);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    let stale = env.portfolio_state(winner);
+    let before = env.market_state().1;
+    assert_eq!(health_cert(&stale), health_cert(&released));
+    assert!(health_cert(&stale).cert_oracle_epoch < before.oracle_epoch);
+    assert_eq!(stale.capital.get(), released.capital.get());
+    assert_eq!(stale.last_fee_slot.get(), 2);
+    assert_eq!(stale.pnl.get(), PROFIT as i128);
+    let capital = PRINCIPAL - FEE_PER_SLOT;
+    let post_fee_principal = capital - FEE_PER_SLOT;
+    assert!(post_fee_principal + 1 < capital);
+    assert!(
+        PROFIT > FEE_PER_SLOT,
+        "junior value could mask the entire unpaid fee"
+    );
+
+    let destination = env.token_account(winner_owner.pubkey(), 0);
+    let withdraw_accounts = vec![
+        AccountMeta::new(winner_owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(winner, false),
+        AccountMeta::new(destination, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let tracked = [
+        env.market,
+        winner,
+        loser,
+        keeper,
+        env.vault,
+        destination,
+        env.mint,
+        winner_owner.pubkey(),
+        env.vault_authority,
+        spl_token::ID,
+    ];
+    let reject_exactly = |env: &mut V16CuEnv, ix, accounts| {
+        let snapshot: Vec<_> = tracked.iter().map(|key| env.svm.get_account(key)).collect();
+        let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        env.svm.expire_blockhash();
+        let error = env
+            .send(ix, accounts, &[&winner_owner])
+            .expect_err("junior value is not spendable ahead of the fee");
+        assert!(error.contains("InstructionError(2, Custom("), "{error}");
+        for (key, account) in tracked.iter().zip(snapshot) {
+            assert!(
+                env.svm.get_account(key) == account,
+                "rejected instruction changed {key}"
+            );
+        }
+        payer.lamports -= 2 * solana_sdk::fee::FeeStructure::default().lamports_per_signature;
+        assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+    };
+
+    // Unlike the isolated stale-conversion control, this withdrawal stages a real fee debit
+    // before failing one atom above post-fee principal, despite sufficient positive PnL.
+    for _ in 0..2 {
+        let ix = env.withdraw_ix(winner, post_fee_principal + 1);
+        reject_exactly(&mut env, ix, withdraw_accounts.clone());
+        let ix = env.convert_released_pnl_ix(winner, PROFIT);
+        let accounts = vec![
+            AccountMeta::new(winner_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(winner, false),
+        ];
+        reject_exactly(&mut env, ix, accounts);
+    }
+
+    let protected_loser = env.svm.get_account(&loser).unwrap();
+    env.svm.expire_blockhash();
+    env.send(
+        env.withdraw_ix(winner, capital),
+        withdraw_accounts.clone(),
+        &[&winner_owner],
+    )
+    .expect("withdraw-all settles the fee and returns only remaining principal");
+    let exited = env.portfolio_state(winner);
+    let after_exit = env.market_state().1;
+    assert_eq!(exited.capital.get(), 0);
+    assert_eq!(exited.pnl.get(), PROFIT as i128);
+    assert_eq!(exited.last_fee_slot.get(), 3);
+    assert_eq!(
+        u128::from(env.token_amount(destination)),
+        post_fee_principal
+    );
+    assert_eq!(after_exit.insurance, before.insurance + FEE_PER_SLOT);
+    assert_eq!(after_exit.c_tot, before.c_tot - capital);
+    assert_eq!(after_exit.vault, before.vault - post_fee_principal);
+    assert_eq!(after_exit.source_credit[1], before.source_credit[1]);
+    assert_eq!(
+        after_exit.source_backing_buckets[1],
+        before.source_backing_buckets[1]
+    );
+
+    env.svm.expire_blockhash();
+    env.crank(
+        winner,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    let current = env.portfolio_state(winner);
+    let before_conversion = env.market_state().1;
+    assert!(health_cert(&current).valid);
+    assert_eq!(
+        health_cert(&current).cert_oracle_epoch,
+        before_conversion.oracle_epoch
+    );
+    env.convert_released_pnl_with_cu(&winner_owner, winner, PROFIT);
+    let converted = env.portfolio_state(winner);
+    let after_conversion = env.market_state().1;
+    assert_eq!(converted.capital.get(), PROFIT);
+    assert_eq!(converted.pnl.get(), 0);
+    assert_eq!(after_conversion.c_tot, after_exit.c_tot + PROFIT);
+    assert_eq!(after_conversion.insurance, after_exit.insurance);
+    assert_eq!(after_conversion.vault, after_exit.vault);
+    assert_eq!(
+        after_conversion.source_backing_buckets[1].consumed_liened_backing_num,
+        before_conversion.source_backing_buckets[1].consumed_liened_backing_num
+            + PROFIT * BOUND_SCALE,
+    );
+    assert_eq!(
+        after_conversion.source_credit[1].positive_claim_bound_num + PROFIT * BOUND_SCALE,
+        before_conversion.source_credit[1].positive_claim_bound_num,
+    );
+    env.svm.expire_blockhash();
+    env.send(
+        env.withdraw_ix(winner, PROFIT),
+        withdraw_accounts,
+        &[&winner_owner],
+    )
+    .expect("current converted claim retains its exact public payout");
+    assert_eq!(env.portfolio_state(winner).capital.get(), 0);
+    assert_eq!(
+        u128::from(env.token_amount(destination)),
+        post_fee_principal + PROFIT
+    );
+    assert_eq!(env.svm.get_account(&loser).unwrap(), protected_loser);
+    let final_group = env.market_state().1;
+    assert_eq!(final_group.insurance, before.insurance + FEE_PER_SLOT);
+    assert_eq!(final_group.c_tot, before.c_tot - capital);
+    assert_eq!(
+        final_group.vault,
+        before.vault - post_fee_principal - PROFIT
+    );
+    assert_eq!(final_group.vault, u128::from(env.token_amount(env.vault)));
     assert!(final_group.vault >= final_group.c_tot + final_group.insurance);
 }
 
