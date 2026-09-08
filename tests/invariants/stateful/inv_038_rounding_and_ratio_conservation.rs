@@ -32,10 +32,13 @@
 //! `v16_program_b_carry_survives_admitted_owner_weight_changes` adds one bounded public
 //! booking/settlement/reduction history on the short loss side. A close-loss-origin ledger checks
 //! scaled B allocations, retained liability
-//! carry, actual owner PnL and unchanged capital at every post-seed transaction through zero OI.
+//! carry, actual owner PnL and unchanged capital at every B-phase transaction through zero OI.
 //! It distinguishes a successful reduction that retains weight from a later nonzero denominator
-//! change with nonzero market and leg carry. K/F seed construction remains separately owned;
-//! this is not a mixed funding/receipt generator or a cash-residue classification proof.
+//! change with nonzero market and leg carry. Before B, the fixed seed's public mark/quantity
+//! inputs independently determine both cohort owners' K allocations and complementary residues;
+//! each settlement and same-state rejection is observed. Initialization and nonzero funding
+//! remain separately owned; this is not a mixed funding/receipt generator or a cash-residue
+//! classification proof.
 //! `v16_program_generated_receipt_histories_preserve_deferred_rounding` compares eager and
 //! deferred claims across generated backing releases, expiry spacing and mixed claim/close/crank
 //! schedules. Every suffix transaction checks immutable-face entitlement, explicit floor residue,
@@ -408,6 +411,78 @@ impl PublicBHistoryObserver {
     }
 }
 
+fn verify_pre_b_mark_origin(
+    snapshot: &BHistorySnapshot,
+    cohort_q: u128,
+    settled: [bool; 2],
+) -> Result<[u128; 2], String> {
+    const PRINCIPAL: u128 = 1_000_000;
+    // public_b_close_seed(Short) submits twenty authenticated -500 bps marks,
+    // with no cohort resize, ADL or funding before this checkpoint.
+    let mark = (0..20).fold(INITIAL_PRICE, |price, _| price * 9_500 / 10_000);
+    let price_delta = u128::from(INITIAL_PRICE - mark);
+    let exact_num = i128::try_from(
+        cohort_q
+            .checked_mul(price_delta)
+            .ok_or("K origin overflow")?,
+    )
+    .map_err(|_| "K origin exceeds signed range")?;
+    let (gain, remainder) = crate::support::reference_math::mul_div_floor_with_remainder(
+        cohort_q,
+        price_delta,
+        POS_SCALE,
+    )?;
+    if gain == 0 || remainder == 0 {
+        return Err("K origin must exercise nonzero allocations and both rounding residues".into());
+    }
+    let residues = [remainder, POS_SCALE - remainder];
+    let target_k = i128::try_from(price_delta * percolator::ADL_ONE).unwrap();
+    let asset = snapshot.group.assets[0];
+    if asset.effective_price != mark
+        || (asset.a_long, asset.a_short) != (percolator::ADL_ONE, percolator::ADL_ONE)
+        || (asset.k_long, asset.k_short) != (-target_k, target_k)
+        || (asset.f_long_num, asset.f_short_num) != (0, 0)
+    {
+        return Err("K checkpoint differs from the public seed's mark/quantity origin".into());
+    }
+    for side in 0..2 {
+        let (_, index, carry, dust, explicit) = snapshot.side(side);
+        if (index, carry, dust, explicit) != (0, 0, 0, 0) {
+            return Err("pre-B K settlement cannot book or allocate social loss".into());
+        }
+    }
+    for (index, actor) in [2, 3].into_iter().enumerate() {
+        let account = &snapshot.accounts[actor];
+        let leg = snapshot.leg(actor).ok_or("K origin lost its cohort leg")?;
+        let sign = if actor == 2 { 1 } else { -1 };
+        let expected_capital = if actor == 3 && settled[index] {
+            PRINCIPAL
+                .checked_sub(gain + 1)
+                .ok_or("K loss exceeds principal")?
+        } else {
+            PRINCIPAL
+        };
+        let allocated_num = (b_account_value(account) - PRINCIPAL as i128) * POS_SCALE as i128;
+        let pending_num = if settled[index] { 0 } else { sign * exact_num };
+        let residue = if settled[index] { residues[index] } else { 0 };
+        if account.capital.get() != expected_capital
+            || allocated_num + pending_num + residue as i128 != sign * exact_num
+            || leg.basis_pos_q != -sign * cohort_q as i128
+            || b_side(leg.side) != usize::from(actor == 2)
+            || leg.a_basis != percolator::ADL_ONE
+            || leg.loss_weight != cohort_q
+            || (leg.b_snap, leg.b_rem) != (0, 0)
+            || leg.k_snap != if settled[index] { sign * target_k } else { 0 }
+            || leg.f_snap != 0
+        {
+            return Err(format!(
+                "K owner {actor}: allocation/pending/residue or capital mismatch"
+            ));
+        }
+    }
+    Ok(residues)
+}
+
 #[test]
 fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
     use crate::support::fuzz_model::public_b_close_seed;
@@ -416,11 +491,25 @@ fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
     let side = SideV16::Short;
     let chunk = 250_007;
     let order = [3, 2, 0];
-    let mut env = public_b_close_seed(side, POS_SCALE / 2 + 3, chunk).unwrap();
-    // K/F belongs to the existing seed owner. Start the B ledger only after it is current.
+    let cohort_q = POS_SCALE / 2 + 3;
+    let mut env = public_b_close_seed(side, cohort_q, chunk).unwrap();
+    env.begin_public_trace();
+    let mut settled = [false; 2];
+    let residues =
+        verify_pre_b_mark_origin(&BHistorySnapshot::read(&env), cohort_q, settled).unwrap();
+    assert_eq!(residues.iter().sum::<u128>(), POS_SCALE);
+    let keys = std::iter::once(env.market)
+        .chain(env.actors.iter().map(|actor| actor.portfolio))
+        .chain([env.foreign_market, env.foreign_actor.portfolio])
+        .collect::<Vec<_>>();
     for actor in [2, 3] {
-        let mut current = false;
-        for _ in 0..8 {
+        for expected_success in [true, false] {
+            let raw = keys
+                .iter()
+                .map(|key| env.svm.get_account(key))
+                .collect::<Vec<_>>();
+            let tokens = env.all_token_account_data();
+            let before = BHistorySnapshot::read(&env);
             let tx = env
                 .crank_if_actionable(
                     actor,
@@ -431,15 +520,67 @@ fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
                     }],
                 )
                 .unwrap();
-            assert_public_stock_census("INV-038 pre-B K/F settlement", &env).unwrap();
-            if tx.is_none() {
-                current = true;
-                break;
+            assert_eq!(
+                tx.is_some(),
+                expected_success,
+                "K settlement then exact NonProgress retry"
+            );
+            if let Some(tx) = tx {
+                assert!(tx.compute_units < TX_CU_LIMIT);
+                settled[actor - 2] = true;
             }
+            let after = BHistorySnapshot::read(&env);
+            assert_eq!(
+                verify_pre_b_mark_origin(&after, cohort_q, settled).unwrap(),
+                residues
+            );
+            assert_eq!(env.all_token_account_data(), tokens);
+            assert_eq!(after.group.vault, before.group.vault);
+            assert_eq!(after.group.vault, u128::from(env.token_amount(env.vault)));
+            assert_eq!(after.group.insurance, before.group.insurance);
+            assert_eq!(
+                after.group.insurance_domain_budget,
+                before.group.insurance_domain_budget
+            );
+            assert_eq!(
+                after.group.backing_provider_earnings_total,
+                before.group.backing_provider_earnings_total
+            );
+            assert_eq!(after.accounts[actor].owner, before.accounts[actor].owner);
+            assert_eq!(
+                after.accounts[actor].provenance_header,
+                before.accounts[actor].provenance_header
+            );
+            for (index, key) in keys.iter().enumerate() {
+                if !expected_success || (*key != env.market && *key != env.actors[actor].portfolio)
+                {
+                    assert_eq!(
+                        env.svm.get_account(key),
+                        raw[index],
+                        "K rejected/unrelated frame"
+                    );
+                }
+            }
+            assert_public_stock_census("INV-038 pre-B K/F settlement", &env).unwrap();
         }
-        assert!(current);
     }
-    env.begin_public_trace();
+    // Mutate observations only: a missing ceiling atom, senior reclassification,
+    // and a conserved wrong-owner transfer must all fail the origin oracle.
+    let checkpoint = BHistorySnapshot::read(&env);
+    let mut wrong = checkpoint.clone();
+    wrong.accounts[3].capital = percolator::V16PodU128::new(wrong.accounts[3].capital.get() + 1);
+    assert!(verify_pre_b_mark_origin(&wrong, cohort_q, settled).is_err());
+    let mut wrong = checkpoint.clone();
+    wrong.accounts[2].capital = percolator::V16PodU128::new(wrong.accounts[2].capital.get() + 1);
+    wrong.accounts[2].pnl = percolator::V16PodI128::new(wrong.accounts[2].pnl.get() - 1);
+    assert!(verify_pre_b_mark_origin(&wrong, cohort_q, settled).is_err());
+    let mut wrong = checkpoint;
+    wrong.accounts[2].pnl = percolator::V16PodI128::new(wrong.accounts[2].pnl.get() + 1);
+    wrong.accounts[3].pnl = percolator::V16PodI128::new(wrong.accounts[3].pnl.get() - 1);
+    assert!(verify_pre_b_mark_origin(&wrong, cohort_q, settled).is_err());
+    eprintln!(
+        "INV-038 pre-B K: steps=4, rejected=2, residue_nums={residues:?}, denominator={POS_SCALE}"
+    );
     let mut observer = PublicBHistoryObserver::new(&env);
     assert!(observer.step(&mut env, 1, None));
     observer.settle(&mut env, &order);
@@ -533,10 +674,10 @@ fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
     let trace = env.finish_public_trace();
     trace.validate_public_execution().unwrap();
     assert_eq!(trace.out_of_band_economic_mutations, 0);
-    assert_eq!(trace.steps.len(), observer.steps);
+    assert_eq!(trace.steps.len(), observer.steps + 4);
     assert_eq!(
         trace.steps.iter().filter(|step| !step.succeeded).count(),
-        observer.rejected
+        observer.rejected + 2
     );
 }
 

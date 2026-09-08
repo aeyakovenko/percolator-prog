@@ -4838,14 +4838,15 @@ from this bounded increment.
 
 ### INV-038 executing evidence and mixed-history gap
 
-Updated from base `14a79110`, 2026-09-07, with one bounded public B history in addition to the
-existing component evidence. `AUDIT-038` remains `REOPENED`; all method/status labels are unchanged. The INV-038 M
+Updated from base `ff262c38`, 2026-09-08: the bounded public B history now independently observes
+its cohort's pre-B K settlement as well. `AUDIT-038` remains `REOPENED`; all method/status labels
+are unchanged. The INV-038 M
 `COVERED` row in [`special_method_coverage.tsv`](special_method_coverage.tsv) selects the executing
 INV-052 backing-fee test below, not a generic mixed-route history F owner.
 
 | Executing owner and entrypoint | Existing oracle and finite domain |
 | --- | --- |
-| [Stateful INV-038](stateful/inv_038_rounding_and_ratio_conservation.rs): `v16_program_b_carry_survives_admitted_owner_weight_changes` | `public_b_close_seed` reuses INV-086's public active-close construction; `PublicBHistoryObserver` checks one short-side, one-asset history through two B bookings, interleaved settlement, retained-weight and actually weight-changing owner reductions, and zero-OI leg cleanup. Every post-seed transaction has owner-value, scaled liability-conservation, custody and tracked frame checks. Nonzero market and leg carry survive the admitted denominator decrease. This is a bounded witness, not a generated mixed-route F product. |
+| [Stateful INV-038](stateful/inv_038_rounding_and_ratio_conservation.rs): `v16_program_b_carry_survives_admitted_owner_weight_changes` | `public_b_close_seed` reuses INV-086's public active-close construction; `verify_pre_b_mark_origin` first binds the two cohort owners' K settlements and complementary residues to public quantity/mark inputs, including exact same-state retries. `PublicBHistoryObserver` then checks the same short-side, one-asset history through two B bookings, interleaved settlement, retained-weight and actually weight-changing owner reductions, and zero-OI leg cleanup. Every post-seed transaction has owner-value, scaled conservation, custody and tracked frame checks. Nonzero market and leg carry survive the admitted denominator decrease. This is a bounded witness, not a generated mixed-route F product. |
 | [Stateful INV-038](stateful/inv_038_rounding_and_ratio_conservation.rs): `v16_program_trade_driven_ewma_partitions_cannot_buy_unfunded_mark_movement`, `v16_program_zero_move_dust_prefix_cannot_consume_later_ewma_capacity` | `inv038_notional_ceil` / `assert_ewma_partition_segments` independently check fee ceilings and residues, with insurance, OI, stock and SPL checks. Sixteen worlds: four transports, aggregate versus quarter/three-quarter paid split or one-quantum dust prefix; at most 8 catch-up attempts per actor for five actors. The later-slot paid split intentionally moves farther and pays more, so blanket equality is invalid. |
 | [Stateful INV-038](stateful/inv_038_rounding_and_ratio_conservation.rs): `v16_program_resolved_topups_preserve_exact_floor_remainders` | `verify_resolved_receipt_split_topups` reconstructs immutable-face floors with independent shift/add arithmetic. Two rate raises check payouts, cumulative paid deltas, nonzero bounded remainders and engine/SPL custody; the receipt remains partial. |
 | [Stateful INV-038](stateful/inv_038_rounding_and_ratio_conservation.rs): `v16_program_generated_receipt_histories_preserve_deferred_rounding` | Three boundary pairs plus a shrinkable seeded tail compare eager/deferred claim histories over two independently expiring backing domains. Provider amounts, expiry spacing and claim/close/crank route words vary. `ReceiptHistoryOracle` checks cumulative immutable-face floors, retained remainder, per-owner payouts and custody after every suffix transaction; common endpoints compare exact tracked bytes without normalization. |
@@ -4860,9 +4861,10 @@ are direct regressions. Neither supplies the mixed-history generator.
 **New bounded executable slice:** the earlier `0963a10d` helper-ownership blocker is removed for
 this one history by a small extraction in [fuzz_model.rs](../support/fuzz_model.rs). INV-086's
 existing seed keeps its original parameters and checks. No CU fixture or engine proof is copied,
-and the shared transaction runner is unchanged. The new observer starts after public seed/K/F
+and the shared transaction runner is unchanged. The B observer starts after public seed/K/F
 construction, with zero B, and wraps each subsequent transaction individually. Its origin is the
-close's outstanding loss, not the stock census's derived `junior_residual`.
+close's outstanding loss, not the stock census's derived `junior_residual`. The pre-B K phase now
+has the separate input-driven origin oracle described below; initialization is still outside it.
 
 The scaled identity is `booked * SOCIAL_LOSS_DEN = settled * SOCIAL_LOSS_DEN + outstanding`.
 Outstanding includes each owner's weight times unsettled B, leg carry, market booking carry,
@@ -4874,13 +4876,37 @@ cannot grow. The existing full-refresh/current-certificate oracle excludes healt
 when its currentness predicates hold. Observation-only mutations of residue, senior capital and
 owner attribution fail, even when aggregate account value is preserved.
 
-The fixed history uses 28 post-seed transaction attempts, with two bookings and four nonzero
-account settlements. Continuations are bounded by 16 calls per actor/phase; pre-B K/F uses at
-most eight calls per cohort actor. A successful in-close reduction must retain loss weight; a
-later successful reduction must lower the nonzero denominator while preserving nonzero market
+The B suffix uses 28 transaction attempts, with two bookings and four nonzero
+account settlements. Continuations are bounded by 16 calls per actor/phase; pre-B K now requires
+one successful settlement and one exact nonprogress retry per cohort actor. A successful in-close
+reduction must retain loss weight; a later successful reduction must lower the nonzero denominator while preserving nonzero market
 and leg carry. Cleanup removes every leg and both sides' OI/weights. The live-side market booking
 numerator remains explicitly recorded at zero OI; it is not declared cleared or converted to
 cash. Tracked nonprogress rollback is checked both by the observer and the public trace.
+
+**Pre-B K-origin extension, base `ff262c38`, 2026-09-08:** the same entrypoint now starts its
+public trace before the two cohort owners settle. From the supplied quantity `500003`, original
+price `1000000`, and the seed's twenty authenticated `-500` bps mark inputs, the independent
+oracle derives mark `358482` and exact PnL magnitude `320760924554 / 1000000`. It checks the
+market K targets, unchanged full A multipliers and zero funding, then each owner's identity,
+capital and signed `allocation + pending + residue = origin` numerator equation after every
+attempt. The winning short receives `320760` PnL atoms and retains `1000000` capital; the
+losing long pays `320761` capital atoms and retains zero PnL. Their floor/ceiling residue
+numerators are `924554` and `75446`, together exactly one quote atom. These are independently
+accounted rounding fractions, not persisted K carries or new cash-classification evidence.
+Only independently checked balances enter the unchanged B observer.
+
+The added four attempts include two exact `EngineNonProgress` retries. SPL accounts, custody,
+insurance and provider earnings are framed, unrelated portfolios remain byte-identical, and
+the shared stock census and full tracked rollback checks compose existing owners. Observation-only
+mutations that omit the ceiling atom, reclassify PnL as senior capital, or transfer a conserved
+atom between owners all fail. The combined test passes **32 traced attempts, 12 exact rejections**,
+retaining the existing two B bookings and four nonzero B settlements. Host harnesses are compiled
+from this worktree against read-only cached dependencies and private copies of existing
+default-feature SBF `230b6db1` / matcher `50e53226`; no SBF rebuild or engine proof is claimed.
+The public initialization/mark-submission prefix is not individually observed by this new oracle,
+and funding is disabled. This narrows one fixed K-to-B origin gap without adding a partition
+product or promoting INV-038.
 
 **Generated receipt-cadence slice, base `a5f05a22`, 2026-09-07:** the new test above reuses the
 INV-086 public receipt builder through `public_resolved_receipt_seed`, without changing existing
@@ -4918,8 +4944,8 @@ INV-086 general runner's full step relation, generic F completion or any status 
 **Remaining gap / next owner:** the same stateful INV-038 module now has a reusable seed and
 observer for extending this bounded slice. Fresh booking after the denominator change, alternate
 side/chunk/order schedules, generated mixed-route histories, residue-origin observation during
-initialization/K/F, arbitrary-length ratio/top-up episodes, funding/receipt interleavings,
-multi-claimant residue ownership, additional assets and maximum shapes remain unclaimed. The
+initialization/mark submission and nonzero funding, arbitrary-length ratio/top-up episodes,
+funding/receipt interleavings, multi-claimant residue ownership, additional assets and maximum shapes remain unclaimed. The
 receipt slice fixes the live prefix, two expiry events, one claimant and fully reserved backing;
 it does not vary authenticated expiry order, source allocation policy, trade transports or terminal drain.
 Neither slice produces new cash-residue classification
