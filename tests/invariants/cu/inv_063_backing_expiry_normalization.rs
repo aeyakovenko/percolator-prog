@@ -1073,3 +1073,206 @@ fn v16_program_retire_normalizes_unreferenced_lapsed_backing() {
     assert_eq!(retired.vault, accounting_vault);
     assert_eq!(env.token_amount(env.vault), vault_tokens);
 }
+
+// INV-063 / INV-069: the existing consumer matrices cover expiry-1/equal/+1, and
+// v16_program_retire_normalizes_unreferenced_lapsed_backing covers one funded domain.
+// This is the mixed-maturity boundary: retirement must roll back normalization of
+// an expired domain while its funded sibling remains fresh, then normalize BOTH
+// still-Fresh stored tags once both deadlines pass. Reverse which side expires
+// first and finish at the later deadline or one slot late. Unlike INV-069's
+// insurance/backing drain lattice, no provider withdrawal clears either blocker.
+// All state comes from public instructions and valid initial accounts; only Clock
+// advances between retirement attempts. Exact rollback, an unrelated funded asset
+// and senior portfolio frame, and unchanged SPL custody distinguish normalization
+// from erasing a live obligation. This does not cover liens, claims, implicit
+// refill normalization, Recovery, or permissionless terminal scans.
+#[test]
+fn v16_program_retire_staggered_backing_expiry_is_atomic_across_siblings() {
+    const ASSET: u16 = 1;
+    const DOMAINS: [u16; 2] = [ASSET * 2, ASSET * 2 + 1];
+    const BACKING: [u128; 2] = [700, 311];
+    const EARLY_EXPIRY: u64 = 5;
+    const LATE_EXPIRY: u64 = 9;
+    const OTHER_BACKING: u128 = 113;
+    const SENIOR_CAPITAL: u128 = 101;
+
+    for early_side in 0..2 {
+        for finish_late in [false, true] {
+            let mut env = V16CuEnv::new();
+            env.activate_asset(ASSET, 1, 100);
+            let admin = env.admin.insecure_clone();
+            let owner = Keypair::new();
+            let portfolio = env.create_portfolio(&owner);
+            let deposit_source = env.deposit(&owner, portfolio, SENIOR_CAPITAL);
+            let other_source = env.top_up_backing_bucket(0, OTHER_BACKING, 100);
+            let expiries = std::array::from_fn::<_, 2, _>(|side| {
+                if side == early_side {
+                    EARLY_EXPIRY
+                } else {
+                    LATE_EXPIRY
+                }
+            });
+            let sources = std::array::from_fn::<_, 2, _>(|side| {
+                env.top_up_backing_bucket(DOMAINS[side], BACKING[side], expiries[side])
+            });
+            let (config_before, funded) = env.market_state();
+            let market_id = funded.assets[ASSET as usize].market_id;
+            let authority_epoch = env.control_sequences(0).authority_epoch;
+            let retire = |env: &mut V16CuEnv, now_slot: u64| {
+                env.svm.expire_blockhash();
+                env.send(
+                    ProgInstruction::UpdateAssetLifecycle {
+                        action: processor::ASSET_ACTION_RETIRE,
+                        asset_index: ASSET,
+                        market_id,
+                        authority_epoch,
+                        now_slot,
+                        initial_price: 0,
+                        max_init_fee: u128::MAX,
+                        insurance_authority: admin.pubkey().to_bytes(),
+                        insurance_operator: admin.pubkey().to_bytes(),
+                        backing_bucket_authority: admin.pubkey().to_bytes(),
+                        oracle_authority: admin.pubkey().to_bytes(),
+                    },
+                    vec![
+                        AccountMeta::new(admin.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                    ],
+                    &[&admin],
+                )
+            };
+            let custody = SENIOR_CAPITAL + OTHER_BACKING + BACKING.iter().sum::<u128>();
+            assert_eq!(funded.vault, custody);
+            assert_eq!(u128::from(env.token_amount(env.vault)), custody);
+            for side in 0..2 {
+                let domain = DOMAINS[side] as usize;
+                assert_eq!(env.token_amount(sources[side]), 0);
+                assert_eq!(
+                    funded.source_backing_buckets[domain].status,
+                    BackingBucketStatusV16::Fresh
+                );
+                assert_eq!(
+                    funded.source_backing_buckets[domain].expiry_slot,
+                    expiries[side]
+                );
+                assert_eq!(
+                    funded.source_backing_buckets[domain].fresh_unliened_backing_num,
+                    BACKING[side] * BOUND_SCALE
+                );
+                assert_eq!(
+                    funded.source_credit[domain].fresh_reserved_backing_num,
+                    BACKING[side] * BOUND_SCALE
+                );
+                assert_eq!(funded.source_credit[domain].positive_claim_bound_num, 0);
+                assert_eq!(funded.source_credit[domain].valid_liened_backing_num, 0);
+            }
+
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let framed_keys = [
+                env.vault,
+                env.mint,
+                admin.pubkey(),
+                owner.pubkey(),
+                portfolio,
+                deposit_source,
+                other_source,
+                sources[0],
+                sources[1],
+            ];
+            let frame = |env: &V16CuEnv| {
+                framed_keys.map(|key| env.svm.get_account(&key).expect("framed account"))
+            };
+            let frame_before = frame(&env);
+            let other_slot_start = percolator_prog::constants::MARKET_GROUP_OFF
+                + core::mem::size_of::<percolator::MarketGroupV16HeaderAccount>();
+            let other_slot_end = other_slot_start
+                + core::mem::size_of::<percolator::Market<state::AssetOracleStorageV16>>();
+
+            for now_slot in [
+                EARLY_EXPIRY - 1,
+                EARLY_EXPIRY,
+                EARLY_EXPIRY + 1,
+                LATE_EXPIRY - 1,
+            ] {
+                env.svm.warp_to_slot(now_slot);
+                assert_eq!(env.svm.get_sysvar::<Clock>().slot, now_slot);
+                assert_eq!(
+                    env.svm.get_account(&env.market).unwrap(),
+                    market_before,
+                    "Clock alone must leave both funded stored tags Fresh"
+                );
+                assert!(now_slot < expiries[1 - early_side]);
+                let error = retire(&mut env, now_slot)
+                    .expect_err("an unexpired funded sibling must still block retirement");
+                assert!(
+                    error.contains("Custom(21)"),
+                    "expected EngineLockActive, side={early_side} slot={now_slot}: {error}"
+                );
+                assert_eq!(
+                    env.svm.get_account(&env.market).unwrap(),
+                    market_before,
+                    "side={early_side} slot={now_slot}: roll back both normalization and retirement"
+                );
+                assert_eq!(frame(&env), frame_before);
+            }
+
+            let now_slot = LATE_EXPIRY + u64::from(finish_late);
+            env.svm.warp_to_slot(now_slot);
+            assert_eq!(env.svm.get_sysvar::<Clock>().slot, now_slot);
+            assert!(expiries.iter().all(|expiry| *expiry <= now_slot));
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            let cu = retire(&mut env, now_slot)
+                .expect("both lapsed Fresh buckets must normalize in one retirement instruction");
+            assert_cu_within("paired lapsed-backing retirement", cu, CUSTODY_CU_LIMIT);
+
+            let (config_after, retired) = env.market_state();
+            assert_eq!(
+                retired.assets[ASSET as usize].lifecycle,
+                AssetLifecycleV16::Retired
+            );
+            assert_eq!(retired.assets[ASSET as usize].market_id, market_id);
+            assert_eq!(retired.assets[ASSET as usize].retired_slot, now_slot);
+            assert_eq!(
+                config_after.free_market_slot_count,
+                config_before.free_market_slot_count + 1
+            );
+            for domain in DOMAINS {
+                assert_eq!(
+                    retired.source_backing_buckets[domain as usize],
+                    percolator::BackingBucketV16 {
+                        market_id,
+                        ..percolator::BackingBucketV16::EMPTY
+                    }
+                );
+                assert_eq!(
+                    retired.source_credit[domain as usize],
+                    percolator::SourceCreditStateV16::EMPTY
+                );
+            }
+            assert_eq!(
+                retired
+                    .source_credit
+                    .iter()
+                    .map(|source| source.fresh_reserved_backing_num)
+                    .sum::<u128>(),
+                OTHER_BACKING * BOUND_SCALE,
+                "only the unrelated, unexpired principal remains available as backing"
+            );
+            assert_eq!(retired.c_tot, SENIOR_CAPITAL);
+            assert_eq!(retired.insurance, 0);
+            assert_eq!(retired.vault, custody);
+            assert_eq!(frame(&env), frame_before);
+            let market_after = env.svm.get_account(&env.market).unwrap();
+            assert_eq!(market_after.lamports, market_before.lamports);
+            assert_eq!(
+                &market_after.data[other_slot_start..other_slot_end],
+                &market_before.data[other_slot_start..other_slot_end],
+                "retirement must frame the unrelated funded asset's complete stored slot"
+            );
+            eprintln!(
+                "INV-063 staggered retirement: early_side={early_side} slot={now_slot}, \
+                 4 exact rollbacks, 2 normalized buckets, unchanged custody={custody}, {cu} CU"
+            );
+        }
+    }
+}
