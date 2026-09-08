@@ -22,8 +22,10 @@
 //! closes/reinitializes the now-flat address, and checks fresh cap admission in
 //! both account roles. Real two-asset batches frame an otherwise valid leg on
 //! rejection; split refills and cross-zero reuse only post-transition headroom.
-//! This finite, fixed-price witness asserts unit ADL indices and does not isolate
-//! aggregate side-OI enforcement from the account cap or exercise rate limits.
+//! A distinct-owner-pair regression isolates aggregate side-OI enforcement from
+//! account-local position caps by filling the side cap across two pairs, then
+//! rejecting one additional public trade with exact rollback. These fixed-price
+//! witnesses assert unit ADL indices and do not exercise rate limits.
 //!
 //! Guarantee boundary: `MAX_TRADE_SIZE_Q`, `MAX_POSITION_ABS_Q`, and
 //! `MAX_OI_SIDE_Q` are currently one shared bound, while the exact maximum
@@ -212,6 +214,114 @@ fn v16_program_split_fills_cannot_cross_position_or_side_oi_cap_on_any_route_pai
             assert_public_encumbrance_census("INV-058 split-cap terminal", &env)
                 .expect("split-cap route preserves independent encumbrance reconciliation");
         }
+    }
+}
+
+#[test]
+fn v16_program_distinct_owner_pairs_cannot_cross_shared_side_oi_cap() {
+    const ASSET: u16 = 0;
+    const PRICE: u64 = 100;
+    const EXTRA_TAKER: usize = 4;
+
+    fn enable_matcher_if_needed(env: &mut V16Svm, route: TradeRoute, maker: usize) {
+        if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+            env.ensure_primary_matcher_enabled(maker)
+                .expect("prepare public CPI capability");
+        }
+    }
+
+    fn assert_positions(env: &V16Svm, expected: [i128; PRIMARY_ACTOR_COUNT]) {
+        let (_, group) = env.primary_market_state();
+        let asset = &group.assets[ASSET as usize];
+        let mut recomputed = [0u128; 2];
+        for (actor, expected_q) in expected.into_iter().enumerate() {
+            let account = env.primary_portfolio(actor);
+            let actual = if expected_q == 0 {
+                assert!(
+                    !has_active_leg_for_asset(&account, ASSET as usize),
+                    "actor {actor} unexpectedly has active exposure"
+                );
+                0
+            } else {
+                let leg = active_leg_for_asset(&account, ASSET as usize);
+                assert_eq!(leg.market_id, asset.market_id);
+                assert_eq!(leg.a_basis, ADL_ONE);
+                assert_eq!(leg.basis_pos_q, expected_q, "actor {actor} position");
+                leg.basis_pos_q
+            };
+            assert!(actual.unsigned_abs() <= percolator::MAX_POSITION_ABS_Q);
+            if actual > 0 {
+                recomputed[0] = recomputed[0].checked_add(actual.unsigned_abs()).unwrap();
+            } else if actual < 0 {
+                recomputed[1] = recomputed[1].checked_add(actual.unsigned_abs()).unwrap();
+            }
+        }
+        assert_eq!(
+            [asset.oi_eff_long_q, asset.oi_eff_short_q],
+            recomputed,
+            "maintained side OI must equal the sum of distinct owner-pair exposure"
+        );
+        assert_eq!(recomputed, [percolator::MAX_OI_SIDE_Q; 2]);
+        assert_public_stock_census("INV-058 side-OI cap", env)
+            .expect("side-OI cap route preserves stock reconciliation");
+        assert_public_encumbrance_census("INV-058 side-OI cap", env)
+            .expect("side-OI cap route preserves encumbrance reconciliation");
+    }
+
+    assert!(
+        PRIMARY_ACTOR_COUNT > EXTRA_TAKER,
+        "side-OI split test needs two pairs plus one extra taker"
+    );
+    let max = i128::try_from(percolator::MAX_OI_SIDE_Q).unwrap();
+    let first = max / 2;
+    let second = max - first;
+    assert!(first > 0 && second > 0 && first < max && second < max);
+
+    for (fill_index, fill_route) in INV_058_TRADE_ROUTES.into_iter().enumerate() {
+        let mut seed = [0x58; 32];
+        seed[0] = 0x42;
+        seed[1] = fill_index as u8;
+        let mut env = V16Svm::new(seed, inv_058_max_position_config());
+        env.begin_public_trace();
+
+        enable_matcher_if_needed(&mut env, fill_route, 1);
+        execute_trade_route(&mut env, fill_route, 0, 1, ASSET, first, PRICE, 0)
+            .unwrap_or_else(|error| panic!("{fill_route:?} first side-OI fill failed: {error}"));
+        enable_matcher_if_needed(&mut env, fill_route, 3);
+        execute_trade_route(&mut env, fill_route, 2, 3, ASSET, second, PRICE, 0)
+            .unwrap_or_else(|error| panic!("{fill_route:?} second side-OI fill failed: {error}"));
+
+        let expected = [first, -first, second, -second, 0];
+        assert_positions(&env, expected);
+        assert!(
+            expected
+                .into_iter()
+                .all(|q| q.unsigned_abs() < percolator::MAX_POSITION_ABS_Q),
+            "each populated account must remain below its own cap so rejection isolates side OI"
+        );
+
+        for reject_route in INV_058_TRADE_ROUTES {
+            enable_matcher_if_needed(&mut env, reject_route, 1);
+            let before = inv_058_economic_snapshot(&env);
+            let error =
+                execute_trade_route(&mut env, reject_route, EXTRA_TAKER, 1, ASSET, 1, PRICE, 0)
+                    .expect_err("one more atom must reject at the shared side-OI cap");
+            let code = PercolatorError::EngineInvalidLeg as u32;
+            assert!(
+                error.contains(&format!("Custom({code})")),
+                "{fill_route:?}->{reject_route:?} returned {error}"
+            );
+            assert_eq!(
+                inv_058_economic_snapshot(&env),
+                before,
+                "{fill_route:?}->{reject_route:?} side-OI cap rollback"
+            );
+        }
+
+        let trace = env.finish_public_trace();
+        trace
+            .validate_public_execution()
+            .expect("distinct-pair side-OI cap uses public instructions only");
     }
 }
 
