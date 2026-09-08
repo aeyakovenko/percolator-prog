@@ -4,7 +4,9 @@
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): empty-target crank
 //! equivalence, batch end-state margin protection, and exact normalized sequential/batch position
-//! semantics across clear, lower-slot flip reuse, attach, and resize in one route. Legacy
+//! semantics across clear, lower-slot flip reuse, attach, and resize in one route. A fee-charged
+//! single/batch exact close also compares full account frames from one fixture while preserving
+//! another asset's exposure. Legacy
 //! market-level insurance top-up is also compared with its exact two-domain expansion, including
 //! odd-atom rounding and all persisted bytes after replay-watermark normalization. Authority and
 //! permissionless stale resolution are byte-exact from the same matured snapshot and dispatch one
@@ -248,6 +250,129 @@ fn v16_program_one_leg_batch_nocpi_matches_single_nocpi_fee_trade() {
         batch, single,
         "a one-leg BatchTradeNoCpi must preserve the exact economic delta of TradeNoCpi, including fees",
     );
+}
+
+#[test]
+fn v16_program_fee_charged_close_matches_single_and_one_leg_batch_routes() {
+    const PRICE: u64 = 100;
+    const CLOSE_Q: i128 = 7 * POS_SCALE as i128;
+    const FEE_BPS: u64 = 333;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: PRICE,
+        ..V16CuMarketParams::default()
+    });
+    for asset_index in 0..2 {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, PRICE);
+    }
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    let source_a = env.deposit(&owner_a, account_a, 1_000_000);
+    let source_b = env.deposit(&owner_b, account_b, 1_000_000);
+    for (asset_index, size_q) in [(0, CLOSE_Q), (1, -(2 * POS_SCALE as i128))] {
+        env.trade_asset_with_cu(
+            asset_index,
+            &owner_a,
+            account_a,
+            &owner_b,
+            account_b,
+            size_q,
+            PRICE,
+            0,
+        );
+    }
+
+    // Normalize only by excluding the network fee payer; retain every economic account byte.
+    let tracked = [
+        env.market,
+        account_a,
+        account_b,
+        env.vault,
+        env.mint,
+        owner_a.pubkey(),
+        owner_b.pubkey(),
+        source_a,
+        source_b,
+    ];
+    let snapshot = |env: &V16CuEnv| tracked.map(|key| env.svm.get_account(&key).unwrap());
+    let initial = snapshot(&env);
+    let initial_group = env.market_state().1;
+    let initial_a = env.portfolio_state(account_a);
+    let initial_b = env.portfolio_state(account_b);
+    let routes = [
+        (
+            "TradeNoCpi",
+            env.trade_no_cpi_ix(account_a, account_b, 0, -CLOSE_Q, PRICE, FEE_BPS),
+        ),
+        (
+            "BatchTradeNoCpi",
+            env.batch_trade_no_cpi_ix(
+                account_a,
+                account_b,
+                vec![BatchTradeLeg {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    size_q: -CLOSE_Q,
+                    exec_price: PRICE,
+                    fee_bps: FEE_BPS,
+                }],
+            ),
+        ),
+    ];
+    let mut single_state = None;
+    for (label, instruction) in routes {
+        for (key, account) in tracked.iter().zip(&initial) {
+            env.svm.set_account(*key, account.clone()).unwrap();
+        }
+        env.svm.expire_blockhash();
+        env.send(
+            instruction,
+            vec![
+                AccountMeta::new(owner_a.pubkey(), true),
+                AccountMeta::new(owner_b.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+            ],
+            &[&owner_a, &owner_b],
+        )
+        .unwrap_or_else(|error| panic!("{label} fee-charged exact close failed: {error}"));
+
+        let group = env.market_state().1;
+        assert!(group.insurance > initial_group.insurance, "{label}");
+        assert_eq!(group.assets[0].oi_eff_long_q, 0, "{label}");
+        assert_eq!(group.assets[0].oi_eff_short_q, 0, "{label}");
+        assert_eq!(group.assets[1], initial_group.assets[1], "{label}");
+        assert_eq!(group.vault, group.c_tot + group.insurance, "{label}");
+        for (key, before) in [(account_a, &initial_a), (account_b, &initial_b)] {
+            let after = env.portfolio_state(key);
+            assert!(!has_active_leg_for_asset(&after, 0), "{label}: {key}");
+            assert_eq!(
+                active_leg_for_asset(&after, 1),
+                active_leg_for_asset(before, 1),
+                "{label}: unrelated leg changed for {key}",
+            );
+            assert!(after.capital.get() < before.capital.get(), "{label}: {key}");
+            assert_eq!(after.pnl.get(), 0, "{label}: {key}");
+        }
+        let normalized_state = snapshot(&env);
+        assert_eq!(
+            normalized_state[3..],
+            initial[3..],
+            "{label}: custody/owners"
+        );
+        if let Some(expected) = &single_state {
+            assert_eq!(
+                &normalized_state, expected,
+                "single and one-leg batch fee closes must have identical normalized final states",
+            );
+        } else {
+            single_state = Some(normalized_state);
+        }
+    }
 }
 
 #[test]
@@ -1461,6 +1586,7 @@ fn v16_program_equivalent_route_family_composition_is_source_complete() {
     assert!(confinement_source
         .contains("fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes"));
     for family_witness in [
+        "v16_program_fee_charged_close_matches_single_and_one_leg_batch_routes",
         "v16_program_legacy_insurance_topup_matches_explicit_domain_split",
         "v16_program_authority_and_permissionless_resolution_match_at_maturity",
         "v16_program_optional_topup_ledgers_are_economically_transparent",
