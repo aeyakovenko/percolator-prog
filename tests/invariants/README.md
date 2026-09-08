@@ -7786,6 +7786,81 @@ rustfmt --edition 2021 --check tests/invariants/stateful/inv_050_cross_zero_deco
 git diff --check
 ```
 
+### INV-060 accrued maintenance before new-asset admission
+
+`cu/inv_060_single_sided_margin_and_penalty_accounting.rs` adds one public LiteSVM test,
+`v16_program_accrued_maintenance_precedes_new_asset_risk_admission`. Its 16 worlds cross all
+four trade transports, either constrained party (including the unsigned CPI maker), and direct
+admission versus explicit `SyncMaintenanceFee` plus `PermissionlessCrank` full refresh.
+
+Both traders already hold one 100-atom-notional leg. An unrelated empty keeper advances three
+constant-price slots without changing either portfolio; each owes `3 * 37 = 111` atoms of
+uncollected maintenance. K/F and effective/target prices stay unchanged. The constrained account
+has 311 atoms before collection and exactly 200 afterward. First exposure on asset one requiring
+201 atoms of total IM must reject with `EngineInvalidConfig` and exact tracked-account rollback;
+200 atoms must admit. Skipping the liability would admit the larger request, while double
+collection would prevent the exact-limit control.
+
+Every admission independently checks both accounts' capital, fee cursor, zero residual fee debt
+and PnL, both signed positions and OI, all certificate lanes/keys, and exact zero IM headroom for
+the constrained owner. Fees reduce equity once without adding a requirement penalty. Total
+insurance is 222, with asset-zero domain budgets 110/112 from the two per-account 55/56 splits;
+asset-one budgets remain zero. Complete certificates also equal the public full-refresh control
+across schedules and transports. Rejected instructions frame every tracked account's bytes and
+economic lamports, including matcher program/context/delegate; successful instructions frame
+unrelated accounts and SPL custody. A subsequent same-slot fee sync is an exact no-op separately
+for each party. The network transaction-fee payer is intentionally outside the economic frame.
+
+This is net-new ordering evidence: INV-060's existing fee/lag decomposition observes already
+refreshed lanes, INV-027's aged standing-matcher witness cranks before the fill, INV-053's
+combined fee/lag matrix explicitly collects the target fee before trading, and INV-047/056's
+stale-liability hint histories use zero maintenance fees. INV-054's fee-only admission tests
+also start after an explicit debit. Here the direct path must account uncollected elapsed fees
+inside admission, on both parties, at a one-atom-discriminating new-asset risk boundary.
+
+Scope is already-live portfolios, two assets, one-leg batches, fixed AuthMark prices and fee
+rate, and fully collectible maintenance. Flat/no-position first opens remain an OPEN gap:
+the current `collect_maintenance_fee_before_trade_view` explicitly defers flat-account fees.
+This test does not certify that branch or close reopening 413 / INV-060. Exhausted-capital fee
+debt, simultaneous lag/funding/pending obligations, wider histories, multi-leg batches, and
+maximum shapes remain outside this increment. There are no production, dependency, engine-proof,
+or invariant-status changes, and no direct economic state-byte mutation.
+
+Validation on base `6abf756f` / engine `495a5590` uses only the supplied cached default SBF
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20` and the cached auth matcher
+`397cdded3ba64b5e03ea54498a160878dcc81dc844222f3ffbdc4e6210dd2936`. The latter is loaded through
+an ignored `tests/fixtures/auth_matcher/target` symlink to the existing fixture build at
+`/home/anatoly/percolator-prog/tests/fixtures/auth_matcher/target`; its context is system-created
+and initialized/authorized by public instructions. No SBF rebuild is performed.
+The new selector passes **16 exact rejections, 16 exact-limit admissions, and 32 exact fee-sync
+no-ops**, with maximum admission CU **358,172**. All five selectors below pass individually
+(`1 passed; 0 failed` each) after worktree-local host compilation. No unfiltered suite is run.
+
+The shared target directory can contain another worktree's host binary (one initial related CPI
+run failed on that worktree's missing matcher fixture). Before each final Cargo invocation,
+`touch tests/invariants/cu/inv_060_single_sided_margin_and_penalty_accounting.rs` forces the host
+test to compile from this worktree without changing file contents or rebuilding SBF. The first
+development run also corrected the test oracle's aggregate fee split to the documented
+per-account split; the liability, admission, and equity assertions were not relaxed.
+
+Exact focused commands, with the following environment on every Cargo invocation:
+
+```bash
+export PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+
+cargo test --locked --offline --test v16_cu inv_060_single_sided_margin_and_penalty_accounting::v16_program_accrued_maintenance_precedes_new_asset_risk_admission -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_060_single_sided_margin_and_penalty_accounting::v16_program_fee_and_target_lag_compose_exactly_once_in_health_lanes -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_060_single_sided_margin_and_penalty_accounting::v16_program_margin_gap_zone_no_liquidation_no_risk_increase -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_054_certificate_epoch_completeness::v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_054_certificate_epoch_completeness::v16_program_fee_only_invalidation_cannot_preserve_cpi_or_batch_trade_headroom -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_060_single_sided_margin_and_penalty_accounting.rs
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## Commands
 
 ```bash
