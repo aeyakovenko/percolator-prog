@@ -812,19 +812,247 @@ fn v16_program_multi_episode_history_enforces_each_owners_exact_entitlement() {
     }
 }
 
-#[test]
-fn v16_program_public_trace_enforces_authority_attributed_quote_flow() {
-    let mut env =
-        support::v16_svm::V16Svm::new([0x42; 32], support::v16_svm::MarketConfig::default());
+fn inv024_check_reserve_exit_flow(domain: u16, providers_absent: bool) {
+    use percolator::BOUND_SCALE;
+    use percolator_prog::processor::{
+        ASSET_AUTH_BACKING_BUCKET, ASSET_AUTH_INSURANCE, ASSET_AUTH_INSURANCE_OPERATOR,
+    };
+
+    const USER: usize = 0;
+    const BACKER: usize = 1;
+    const INSURER: usize = 2;
+    let mut env = V16Svm::new(
+        [0x42; 32],
+        MarketConfig {
+            actor_deposits: [1; 5],
+            actor_token_balances: [18, 38, 54, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    for (role, actor) in [
+        (ASSET_AUTH_BACKING_BUCKET, BACKER),
+        (ASSET_AUTH_INSURANCE, INSURER),
+        (ASSET_AUTH_INSURANCE_OPERATOR, INSURER),
+    ] {
+        env.update_asset_authority_from_admin(0, role, actor)
+            .expect("install independent reserve owner before funding");
+    }
+    let supply = env.token_supply_observed();
+    let market_admin =
+        solana_sdk::pubkey::Pubkey::new_from_array(env.primary_market_state().0.marketauth);
+    let fixed_portfolios = [1, 2, 3, 4].map(|actor| env.primary_portfolio_data(actor));
+    let foreign = (env.market_data(true), env.foreign_portfolio_data());
+    let token_frame = env.all_token_account_data();
+    let mutable_tokens = [
+        env.vault,
+        env.actors[USER].source_token,
+        env.actors[USER].destination_token,
+        env.actors[BACKER].source_token,
+        env.actors[BACKER].destination_token,
+        env.actors[INSURER].source_token,
+        env.actors[INSURER].destination_token,
+    ];
+    let check = |env: &V16Svm, deposited: [u128; 3], paid: [u128; 3], user_closed: bool| {
+        let label = format!("domain={domain} providers_absent={providers_absent}");
+        for actor in 0..5 {
+            let capital = if actor == USER {
+                1 + deposited[USER] - paid[USER]
+            } else {
+                1
+            };
+            if actor == USER && user_closed {
+                let account = env.svm.get_account(&env.actors[USER].portfolio).unwrap();
+                assert_eq!(capital, 0);
+                assert_eq!(account.lamports, 0);
+                assert!(account.data.is_empty());
+            } else {
+                let portfolio = env.primary_portfolio(actor);
+                assert_eq!(
+                    (portfolio.capital.get(), portfolio.pnl.get()),
+                    (capital, 0),
+                    "{label}: actor {actor}"
+                );
+            }
+            if actor < 3 {
+                assert_eq!(
+                    u128::from(env.token_amount(env.actors[actor].source_token)),
+                    [17, 37, 53][actor] - deposited[actor],
+                    "{label}: source {actor}"
+                );
+                assert_eq!(
+                    u128::from(env.token_amount(env.actors[actor].destination_token)),
+                    paid[actor],
+                    "{label}: payout {actor}"
+                );
+            }
+        }
+        let backing = deposited[BACKER] - paid[BACKER];
+        let insurance = deposited[INSURER] - paid[INSURER];
+        let capital = 5 + deposited[USER] - paid[USER];
+        let (_, group) = env.primary_market_state();
+        assert_eq!(
+            (group.c_tot, group.insurance, group.vault),
+            (capital, insurance, capital + backing + insurance),
+            "{label}: disjoint stock classes"
+        );
+        assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+        for (index, source) in group.source_credit.iter().enumerate() {
+            let expected = if index == usize::from(domain) {
+                backing * BOUND_SCALE
+            } else {
+                0
+            };
+            assert_eq!(
+                source.fresh_reserved_backing_num, expected,
+                "{label}: source {index}"
+            );
+            assert_eq!(
+                group.source_backing_buckets[index].fresh_unliened_backing_num, expected,
+                "{label}: bucket {index}"
+            );
+            assert_eq!(
+                source.positive_claim_bound_num, 0,
+                "reserve funding must not create a user claim"
+            );
+            assert_eq!(
+                source.spent_backing_num, 0,
+                "normal principal exit must not consume support"
+            );
+            assert_eq!(
+                group.insurance_domain_budget[index],
+                if index == usize::from(domain) {
+                    insurance
+                } else {
+                    0
+                },
+                "{label}: insurance domain {index}"
+            );
+        }
+        assert_eq!(
+            [1, 2, 3, 4].map(|actor| env.primary_portfolio_data(actor)),
+            fixed_portfolios
+        );
+        assert_eq!(
+            (env.market_data(true), env.foreign_portfolio_data()),
+            foreign
+        );
+        let tokens = env.all_token_account_data();
+        assert_eq!(tokens.len(), token_frame.len());
+        for ((key, before), (after_key, after)) in token_frame.iter().zip(tokens) {
+            assert_eq!(*key, after_key);
+            if !mutable_tokens.contains(key) {
+                assert_eq!(*before, after, "{label}: unrelated token account {key}");
+            }
+        }
+        assert_eq!(env.token_supply_observed(), supply);
+        support::fuzz_model::assert_public_stock_census(&label, env).expect("reserve stock census");
+        support::fuzz_model::assert_public_encumbrance_census(&label, env)
+            .expect("reserve encumbrance census");
+    };
+    let mut deposited = [0; 3];
+    let mut paid = [0; 3];
+    check(&env, deposited, paid, false);
     env.begin_public_trace();
-    env.deposit_primary(0, 17)
+    env.deposit_primary(USER, 17)
         .expect("authenticated owner deposit");
-    env.withdraw_primary(0, 3)
+    deposited[USER] = 17;
+    check(&env, deposited, paid, false);
+    env.withdraw_primary(USER, 3)
         .expect("authenticated owner withdrawal");
+    paid[USER] = 3;
+    check(&env, deposited, paid, false);
+    env.top_up_backing_bucket_for_actor(BACKER, domain, 37, 100)
+        .expect("provider funds its own backing");
+    deposited[BACKER] = 37;
+    check(&env, deposited, paid, false);
+    env.top_up_insurance_domain_for_actor(INSURER, domain, 53)
+        .expect("independent insurer funds its domain");
+    deposited[INSURER] = 53;
+    check(&env, deposited, paid, false);
+
+    let snapshot = |env: &V16Svm| {
+        (
+            [env.market_data(false), env.market_data(true)],
+            env.backing_domain_ledger_data(),
+            env.all_primary_portfolio_data(),
+            env.foreign_portfolio_data(),
+            env.all_token_account_data(),
+            env.all_matcher_context_data(),
+            env.all_economic_account_lamports(),
+        )
+    };
+    let before_rejection = snapshot(&env);
+    env.withdraw_primary(USER, 16)
+        .expect_err("90 reserve atoms must not expand the user's remaining 15-atom entitlement");
+    assert_eq!(snapshot(&env), before_rejection);
+    check(&env, deposited, paid, false);
+
+    // Withholding every reserve-owner signature must not prevent the user's
+    // complete withdrawal and portfolio close. Cooperative exits are a control.
+    let withdrawals: &[(usize, u128)] = if providers_absent {
+        &[(USER, 1), (USER, 14)]
+    } else {
+        &[
+            (USER, 1),
+            (BACKER, 11),
+            (INSURER, 17),
+            (INSURER, 36),
+            (BACKER, 26),
+            (USER, 14),
+        ]
+    };
+    for &(actor, amount) in withdrawals {
+        match actor {
+            USER => env.withdraw_primary(USER, amount),
+            BACKER => env.withdraw_backing_bucket_for_actor(BACKER, domain, amount),
+            INSURER => env.withdraw_insurance_asset(INSURER, 0, amount),
+            _ => unreachable!(),
+        }
+        .expect("owner exits only its independently funded stock");
+        paid[actor] += amount;
+        check(&env, deposited, paid, false);
+    }
+    assert_eq!(
+        paid,
+        if providers_absent {
+            [18, 0, 0]
+        } else {
+            [18, 37, 53]
+        }
+    );
+    env.close_primary_portfolio(USER)
+        .expect("funded reserve owners need not authorize the user's normal portfolio close");
+    check(&env, deposited, paid, true);
     let trace = env.finish_public_trace();
     trace
         .validate_public_execution()
         .expect("balanced owner/vault quote flows are valid public evidence");
+    assert_eq!(trace.steps.len(), 6 + withdrawals.len());
+    assert_eq!(trace.steps.iter().filter(|step| !step.succeeded).count(), 1);
+    assert!(!trace.steps[4].succeeded);
+    assert_eq!(trace.steps[4].rejected_exact_writable_rollback, Some(true));
+    assert_eq!(trace.steps[4].rejected_no_program_lamport_delta, Some(true));
+    assert_eq!(trace.out_of_band_economic_mutations, 0);
+    if providers_absent {
+        for step in &trace.steps[4..] {
+            assert!(step
+                .transaction_signers
+                .contains(&env.actors[USER].signer.pubkey()));
+            assert!(step.transaction_signers.iter().all(|signer| {
+                *signer == step.fee_payer || *signer == env.actors[USER].signer.pubkey()
+            }));
+            for absent in [
+                market_admin,
+                env.actors[BACKER].signer.pubkey(),
+                env.actors[INSURER].signer.pubkey(),
+            ] {
+                assert!(
+                    !step.transaction_signers.contains(&absent),
+                    "user exit required an absent reserve/admin signer"
+                );
+            }
+        }
+    }
 
     let source = env.actors[0].source_token;
     assert_eq!(
@@ -871,4 +1099,13 @@ fn v16_program_public_trace_enforces_authority_attributed_quote_flow() {
         wrong_owner.validate_public_execution().is_err(),
         "quote movement attributed to a different owner must not qualify as public evidence"
     );
+}
+
+#[test]
+fn v16_program_public_trace_enforces_authority_attributed_quote_flow() {
+    for domain in [0, 1] {
+        for providers_absent in [false, true] {
+            inv024_check_reserve_exit_flow(domain, providers_absent);
+        }
+    }
 }

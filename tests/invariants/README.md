@@ -4818,6 +4818,60 @@ No failing public conformance trace was observed. During harness development an 
 top-up was initially expected to succeed; the final test requires its exact lifecycle rejection
 and full rollback, without changing any entitlement expectation.
 
+### INV-024 reserve-owner exit attribution
+
+The 2026-09-08 tests-only maintenance increment from committed conformance base `379ce5a5`
+extends `v16_program_public_trace_enforces_authority_attributed_quote_flow` in the existing
+[stateful owner](stateful/inv_024_attributed_quote_value_conservation.rs). It retains the original
+owner deposit/withdrawal prefix and malformed-trace checks, with no additional test entrypoint or
+public-trace consumer. INV-024, INV-027 and INV-031 statuses remain unchanged.
+
+**Bounded new relation.** Four public histories cross both asset-0 source sides and absent versus
+cooperative reserve owners. Distinct actors receive the backing-provider and insurance
+authority/operator roles before funding. The user has one setup atom plus a public 17-atom
+deposit; independent SPL sources supply 37 backing and 53 insurance atoms. With both reserve
+owners absent after funding, the user withdraws `[3, 1, 14]` and closes its portfolio while all
+90 reserve atoms remain attributed and unspent. Every transaction after funding explicitly
+excludes admin, provider and operator signatures; only the user and fee payer sign. The controls
+withdraw backing as `[11, 26]` and insurance as `[17, 36]` before the user's final withdrawal.
+
+Each world also requests 16 atoms against the user's remaining 15, while custody includes 90
+reserve atoms. That rejection preserves both markets, every portfolio, backing ledger, token
+account, matcher context and economic lamport frame exactly, without advancing the history.
+The user then completes its legitimate exit. The **40 checked wrapper calls** comprise 32
+successful quote transfers, four successful portfolio closes and four exact rejections.
+After every call, input-derived deposit/payment ledgers check each live actor's capital, zero
+PnL, source debit and destination payout separately, or the user's expected closed account.
+All source domains retain exact fresh backing/bucket mirrors and insurance budgets, with zero
+new claim face or spent support. Engine/SPL custody equals the disjoint capital, backing and
+insurance stocks. The shared stock/encumbrance censuses, unchanged non-user portfolio bytes,
+foreign market/portfolio and unrelated token frames, and exact token supply also hold at each
+step. The user always receives exactly 18 atoms. Absent-provider endpoints retain `4 + 37 + 53`
+atoms in custody; cooperative endpoints pay `18 / 37 / 53` to the respective owners and retain
+only the other four actors' setup principal. Fixture initialization and role installation
+precede the observed calls; no program-owned economic bytes are injected.
+
+This adds normal user exit without reserve-owner cooperation, not merely privileged withdrawals.
+INV-025's scalar stock example withdraws user principal before reserve funding; INV-027's
+loss-stale reserve matrix rejects reserve exits; INV-031's claim-consumption/retry histories do
+not supply this flat-user/independent-reserve-owner relation. The market remains Live: trading,
+support consumption or assignment to nonzero claims, provider earnings, fees, expiry, impairment,
+Recovery, receipts, market/slab terminalization, portfolio recreation and generic history adapters
+remain outside this slice. In particular, `coverage_reopenings.tsv` rows 420/421 (whole-market
+terminal progress with absent reserve signers) and 423 (historical settlement-resource capacity)
+remain open. No vulnerable pin, holdout diff, production change or engine proof is involved.
+
+The exact selector passed using the lane-authorized cached default-feature wrapper SBF
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`, engine `495a5590`,
+and cached fixture matcher `50e53226`. The fixture loads the matcher even without a CPI trade;
+the initial run stopped on its missing worktree-local artifact, then passed after an ignored
+symlink to the matching cached fixture was installed. No SBF rebuild or broad test run was used.
+The exact INV-079 public-trace consumer guard, `cargo fmt --check` and `git diff --check` also pass.
+
+```bash
+PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test --locked --offline --test v16_program_stateful_fuzz inv_024_attributed_quote_value_conservation::v16_program_public_trace_enforces_authority_attributed_quote_flow -- --exact --nocapture
+```
+
 ### INV-027 principal-interleaving histories
 
 The 2026-09-07 increment from wrapper base `e6e5bdb0da2e69681dce08e21c25b3bbeb5a2b4d`
