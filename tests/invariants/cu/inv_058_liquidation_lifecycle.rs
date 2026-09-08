@@ -3,6 +3,9 @@
 //! Close/reinitialize/deposit cannot skip that reset; afterwards a fresh trade
 //! reuses the released capacity without losing a surviving second-asset notional.
 //! No split-fill, cross-zero, fee-cap, or scalar max/max-plus-one probe is used.
+//! This finite fixed-price witness checks counters, not independent aggregate
+//! side-OI rejection or rate-limit enforcement. The harness only bootstraps valid
+//! storage/tokens; every subsequent economic transition is publicly traced.
 
 use super::*;
 
@@ -158,6 +161,10 @@ fn v16_program_liquidation_reset_reopen_reuses_capacity_and_preserves_live_notio
     assert!(old_q.unsigned_abs() + new_q.unsigned_abs() > cap);
     assert!(old_q.unsigned_abs() < cap && new_q.unsigned_abs() < cap);
     assert!(notional(old_q) * 500 / 10_000 < MM_FLOOR);
+    assert!(
+        notional(new_q) + notional(live_q) > notional(new_q + live_q),
+        "per-leg ceil notional must differ from rounding the account-wide sum once"
+    );
 
     for direction in [-1i128, 1] {
         for route in INV_058_TRADE_ROUTES {
@@ -191,6 +198,8 @@ fn v16_program_liquidation_reset_reopen_reuses_capacity_and_preserves_live_notio
                 ledger.effective = ledger.raw;
                 ledger.recertify(taker);
                 ledger.recertify(maker);
+                assert!(health_cert(&env.primary_portfolio(taker)).valid);
+                assert!(health_cert(&env.primary_portfolio(maker)).valid);
                 ledger.check(&env, "open");
             }
             env.warp_to_slot(2);
@@ -259,9 +268,20 @@ fn v16_program_liquidation_reset_reopen_reuses_capacity_and_preserves_live_notio
             assert_eq!(env.actors[1].portfolio, address);
             assert!(env.primary_portfolio_id(1) > old_id);
             ledger.check(&env, "reinitialized");
+            let source_before = env.token_amount(env.actors[1].source_token);
             env.deposit_primary(1, CAPITAL).unwrap();
             ledger.capital[1] = CAPITAL;
             ledger.check(&env, "redeposited");
+            assert_eq!(
+                source_before - env.token_amount(env.actors[1].source_token),
+                u64::try_from(CAPITAL).unwrap()
+            );
+            assert_eq!(
+                env.primary_portfolio_data(0),
+                survivor_before,
+                "close/reinitialize/redeposit cannot erase retained basis or risk cache"
+            );
+            assert_eq!(env.primary_market_state().1.assets[1], live_asset_before);
 
             // Recreated actor is the taker; the surviving maker's public matcher
             // capability is current. This is a lifecycle gate, not stale consent.
@@ -281,27 +301,25 @@ fn v16_program_liquidation_reset_reopen_reuses_capacity_and_preserves_live_notio
             assert_eq!(inv_058_economic_snapshot(&env), before);
             ledger.check(&env, "reset-gated retrade rollback");
 
-            for _ in 0..3 {
-                if !has_active_leg_for_asset(&env.primary_portfolio(0), 0) {
-                    break;
-                }
-                env.crank(0, 2, vec![]).unwrap();
-            }
+            env.crank(0, 2, vec![])
+                .expect("one bounded cleanup removes prior-reset basis, not live asset 1");
             assert!(!has_active_leg_for_asset(&env.primary_portfolio(0), 0));
             ledger.raw[0][0] = 0;
             ledger.capital[0] -= MAINTENANCE;
             ledger.insurance += MAINTENANCE;
             ledger.recertify(0);
+            assert!(health_cert(&env.primary_portfolio(0)).valid);
             ledger.check(&env, "prior-reset residue cleanup");
             let asset = env.primary_market_state().1.assets[0];
-            if (if reset_side == 0 {
-                asset.mode_long
-            } else {
-                asset.mode_short
-            }) == SideModeV16::ResetPending
-            {
-                env.finalize_reset_side(0, reset_side).unwrap();
-            }
+            assert_eq!(
+                if reset_side == 0 {
+                    asset.mode_long
+                } else {
+                    asset.mode_short
+                },
+                SideModeV16::ResetPending
+            );
+            env.finalize_reset_side(0, reset_side).unwrap();
             let asset = env.primary_market_state().1.assets[0];
             assert_eq!(
                 [asset.mode_long, asset.mode_short],
