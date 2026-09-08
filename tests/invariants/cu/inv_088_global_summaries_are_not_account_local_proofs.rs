@@ -13,12 +13,18 @@
 //! raw summaries after every public transition. A source-complete roster also
 //! assigns all wrapper-to-engine transition call sites to a summary family and
 //! named executable witness.
+//! The account-fee sibling independently prices staggered account lifetimes
+//! after reward-recipient touches and unrelated asset-clock advancement; all
+//! six owner-withdrawal orders must preserve each account's own fee cursor.
 //!
 //! Guarantee boundary: this closes the currently exposed wrapper transition and
 //! persisted-summary surface. A new engine transition call site, persisted
 //! aggregate, public writer, or larger supported shape reopens the invariant.
 
 use super::*;
+
+#[path = "inv_088_account_fee_cursors.rs"]
+mod account_fee_cursors;
 
 fn inv_088_scan_asset(
     portfolios: &[PortfolioAccountV16],
