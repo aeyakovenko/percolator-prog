@@ -36,6 +36,10 @@
 //! transfer route; INV-049 source-locks the complete position-writer surface.
 
 use super::*;
+
+#[path = "inv_058_liquidation_lifecycle.rs"]
+mod liquidation_lifecycle;
+
 use support::{
     fuzz_model::{
         assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
