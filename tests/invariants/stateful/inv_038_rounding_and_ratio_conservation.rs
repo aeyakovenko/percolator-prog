@@ -49,6 +49,8 @@
 //! schedules. Every suffix transaction checks immutable-face entitlement, explicit floor residue,
 //! per-owner SPL payout, custody and exact rejected frames. The common endpoint remains partial;
 //! this is claim-cadence equivalence, not a permutation of authenticated expiry events.
+//! A third schedule defers both backing normalizations until the second expiry, preserving the
+//! same authenticated events and checking each bounded release before mixed-route payout.
 //! INV-068's generated terminal-drain test reuses this history with eager or terminal-only
 //! top-ups and both owner/continuation orders. Its independent checkpoint observer checks
 //! terminal entitlements through all five public portfolio closes and stale-claim rollback.
@@ -2189,10 +2191,12 @@ fn run_receipt_rounding_history(
     expiry_gap: u64,
     routes: &[ReceiptPayoutRoute],
     eager: bool,
+    coalesce_releases: bool,
     drain: Option<bool>,
 ) -> (ReceiptHistoryFrame, bool) {
     use ReceiptHistoryAction::{Payout, Release, TryDelete};
 
+    assert!(!coalesce_releases || (!eager && drain.is_none()));
     let mut env =
         crate::support::fuzz_model::public_resolved_receipt_seed(amounts, 13 + expiry_gap).unwrap();
     let mut oracle = ReceiptHistoryOracle::new(&env);
@@ -2204,7 +2208,22 @@ fn run_receipt_rounding_history(
         oracle.step(&mut env, Payout(route));
     }
     for (index, domain) in [3, 5].into_iter().enumerate() {
-        env.warp_to_slot(13 + if index == 0 { 0 } else { expiry_gap });
+        env.warp_to_slot(
+            13 + if index == 0 && !coalesce_releases {
+                0
+            } else {
+                expiry_gap
+            },
+        );
+        let coalesced_prefix = (coalesce_releases && index == 0).then(|| {
+            let group = env.primary_market_state().1;
+            for domain in [3, 5] {
+                let bucket = group.source_backing_buckets[domain];
+                assert_eq!(bucket.status, percolator::BackingBucketStatusV16::Fresh);
+                assert!(bucket.expiry_slot <= env.current_slot());
+            }
+            (group.source_backing_buckets[5], group.source_credit[5])
+        });
         // Seed capital backs domain 3 by 250 atoms. Domain 5 receives two solvent
         // five-price-atom moves over four units before its counterparty exhausts capital.
         let released = amounts[index] + [250, 2 * 5 * 4][index];
@@ -2222,6 +2241,14 @@ fn run_receipt_rounding_history(
                 amount: released,
             },
         );
+        if let Some(sibling) = coalesced_prefix {
+            let group = env.primary_market_state().1;
+            assert_eq!(
+                (group.source_backing_buckets[5], group.source_credit[5]),
+                sibling,
+                "one bounded release must frame the other overdue source"
+            );
+        }
         oracle.step(&mut env, TryDelete);
         if eager || (index == 1 && drain.is_none()) {
             for &route in routes {
@@ -2279,7 +2306,7 @@ fn run_receipt_rounding_history(
         trace.steps.iter().filter(|step| !step.succeeded).count(),
         oracle.rejections
     );
-    eprintln!("INV-038/066/067/068 receipt eager={eager} drain={drain:?} amounts={amounts:?} gap={expiry_gap} routes={routes:?}: steps={}, rejections={}, payments={}, nonzero_remainders={}, lost_carry={lost_carry}", oracle.steps, oracle.rejections, oracle.payments, oracle.nonzero_remainders);
+    eprintln!("INV-038/066/067/068 receipt eager={eager} coalesce_releases={coalesce_releases} drain={drain:?} amounts={amounts:?} gap={expiry_gap} routes={routes:?}: steps={}, rejections={}, payments={}, nonzero_remainders={}, lost_carry={lost_carry}", oracle.steps, oracle.rejections, oracle.payments, oracle.nonzero_remainders);
     (ReceiptHistoryFrame::read(&env), lost_carry != 0)
 }
 
@@ -2289,13 +2316,16 @@ fn v16_program_generated_receipt_histories_preserve_deferred_rounding() {
     use ReceiptPayoutRoute::{Claim, Close, Crank};
 
     let compare = |amounts, gap, routes: &[ReceiptPayoutRoute]| {
-        let eager = run_receipt_rounding_history(amounts, gap, routes, true, None);
-        let deferred = run_receipt_rounding_history(amounts, gap, routes, false, None);
-        assert!(
-            eager.0 == deferred.0,
-            "claim-cadence endpoint mismatch: {amounts:?} gap={gap} routes={routes:?}"
-        );
-        assert_eq!(eager.1, deferred.1);
+        let eager = run_receipt_rounding_history(amounts, gap, routes, true, false, None);
+        for coalesce_releases in [false, true] {
+            let deferred =
+                run_receipt_rounding_history(amounts, gap, routes, false, coalesce_releases, None);
+            assert!(
+                eager.0 == deferred.0,
+                "receipt-cadence endpoint mismatch: {amounts:?} gap={gap} routes={routes:?} coalesce_releases={coalesce_releases}"
+            );
+            assert_eq!(eager.1, deferred.1);
+        }
         eager.1
     };
     let mut carry_witnesses = 0;
@@ -2347,7 +2377,7 @@ pub(super) fn verify_generated_receipt_terminal_drain_histories() {
         for eager in [true, false] {
             for reverse in [false, true] {
                 let observed =
-                    run_receipt_rounding_history(amounts, gap, routes, eager, Some(reverse));
+                    run_receipt_rounding_history(amounts, gap, routes, eager, false, Some(reverse));
                 if let Some(expected) = &endpoint {
                     assert!(expected == &observed,
                         "terminal-drain endpoint mismatch: amounts={amounts:?} gap={gap} routes={routes:?} eager={eager} reverse={reverse}");

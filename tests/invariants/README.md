@@ -4227,6 +4227,9 @@ These untested coverage gaps are not findings and receive no severity/impact lab
    partitions, preserving authenticated event history and explicitly bounding noncommuting outcomes.
    Check per-actor value as well as quotient/remainder conservation; distinguish non-extractable
    drift from LoF. Reuse INV-010/052/085 rather than duplicating engine arithmetic proofs.
+   The receipt generator now also compares coalesced overdue backing releases with on-time
+   normalization under its existing origin oracle; this bounded schedule increment does not close
+   the broader mixed-history TODO (see [executing evidence](#inv-038-executing-evidence-and-mixed-history-gap)).
 
 6. **INV-021: account-lifecycle composition.** Owner:
    [`cu/inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs`](cu/inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs).
@@ -5932,7 +5935,7 @@ INV-052 backing-fee test below, not a generic mixed-route history F owner.
 | [Stateful INV-038](stateful/inv_038_rounding_and_ratio_conservation.rs): `v16_program_b_carry_survives_admitted_owner_weight_changes` | `public_b_close_seed` reuses INV-086's public active-close construction; `verify_pre_b_mark_origin` first binds the two cohort owners' K settlements and complementary residues to public quantity/mark inputs, including exact same-state retries. `PublicBHistoryObserver` then checks the same short-side, one-asset history through two B bookings, interleaved settlement, retained-weight and actually weight-changing owner reductions, and zero-OI leg cleanup. Every post-seed transaction has owner-value, scaled conservation, custody and tracked frame checks. Nonzero market and leg carry survive the admitted denominator decrease. This is a bounded witness, not a generated mixed-route F product. |
 | [Stateful INV-038](stateful/inv_038_rounding_and_ratio_conservation.rs): `v16_program_trade_driven_ewma_partitions_cannot_buy_unfunded_mark_movement`, `v16_program_zero_move_dust_prefix_cannot_consume_later_ewma_capacity` | `inv038_notional_ceil` / `assert_ewma_partition_segments` independently check fee ceilings and residues, with insurance, OI, stock and SPL checks. Sixteen worlds: four transports, aggregate versus quarter/three-quarter paid split or one-quantum dust prefix; at most 8 catch-up attempts per actor for five actors. The later-slot paid split intentionally moves farther and pays more, so blanket equality is invalid. |
 | [Stateful INV-038](stateful/inv_038_rounding_and_ratio_conservation.rs): `v16_program_resolved_topups_preserve_exact_floor_remainders` | `verify_resolved_receipt_split_topups` reconstructs immutable-face floors with independent shift/add arithmetic. Two rate raises check payouts, cumulative paid deltas, nonzero bounded remainders and engine/SPL custody; the receipt remains partial. |
-| [Stateful INV-038](stateful/inv_038_rounding_and_ratio_conservation.rs): `v16_program_generated_receipt_histories_preserve_deferred_rounding` | Three boundary pairs plus a shrinkable seeded tail compare eager/deferred claim histories over two independently expiring backing domains. Provider amounts, expiry spacing and claim/close/crank route words vary. `ReceiptHistoryOracle` checks cumulative immutable-face floors, retained remainder, per-owner payouts and custody after every suffix transaction; common endpoints compare exact tracked bytes without normalization. |
+| [Stateful INV-038](stateful/inv_038_rounding_and_ratio_conservation.rs): `v16_program_generated_receipt_histories_preserve_deferred_rounding` | Three boundary cases plus a shrinkable seeded tail compare eager claims, deferred claims with on-time releases, and deferred claims with both releases coalesced at the second expiry. The coalesced schedule requires two overdue Fresh buckets and frames the second source during the first bounded release. Provider amounts, expiry spacing and claim/close/crank route words vary. `ReceiptHistoryOracle` checks cumulative immutable-face floors, retained remainder, per-owner payouts and custody after every suffix transaction; all three endpoints compare exact tracked bytes without normalization. |
 | [CU INV-038](cu/inv_038_rounding_and_ratio_conservation.rs): `v16_program_social_loss_booking_and_settlement_preserve_exact_remainders`, `v16_program_social_loss_aggregate_and_chunked_routes_converge_exactly` | `inv038_assert_social_loss_booking_partition` and settlement equations reconstruct booking, actual capital/PnL debit, carry and side-local dust/explicit loss. One asset-1 long-loss fixture compares aggregate/one-atom caps with exact terminal `SocialLossPartitionFrame` equality; boundary loops cap at 8, schedule loops at 16 per phase. |
 | [Stateful INV-052](stateful/inv_052_split_merge_invariance.rs): `v16_program_backing_fee_partitions_are_conservative_and_value_exact` | `fee_ceil` / `fee_adjusted_terminal_frame`: eight 3,333-bps worlds across direct/matcher CPI, both domain orders and one/two accounts per domain; at most one conservative fee atom per added account, with exact fee-adjusted value, OI, stocks and custody. |
 | [Stateful INV-052](stateful/inv_052_split_merge_invariance.rs): `v16_program_generated_target_histories_are_crank_partition_invariant`, `v16_program_public_resolved_claim_split_is_conservatively_rounded`, `v16_program_public_source_lien_expiry_is_split_merge_invariant`, `v16_program_backed_claim_conversion_is_atomic_under_split_caps` | Separate normalized common-prefix cadence, one-through-four-account receipt/lien rounding with `N - 1` conservative atoms, and atomic conversion/rollback oracles. Authenticated target order is fixed; gross funding telemetry is not net value. These do not interleave all route families. |
@@ -6023,6 +6026,22 @@ claimed. A 24-case tail passes 54 worlds, 675 attempts, 162 exact rejections and
 Every common endpoint is still a partial receipt, not completed terminal retirement.
 This adds generated mixed terminal-route rounding/order evidence for INV-038/052/086, not the
 INV-086 general runner's full step relation, generic F completion or any status promotion.
+
+**Coalesced-release increment, base `1ab9a137`, 2026-09-08:** the same generator now adds a
+third history per case: no backing normalization until both original deadlines have elapsed,
+then one bounded public `CloseResolved` per domain before the generated claimant route word.
+The existing input-derived release amounts and frozen receipt origin check both intermediate
+rates, retained fractional entitlement, exact owner payout and custody. The first release must
+leave the other overdue source/bucket unchanged. Every coalesced endpoint equals both existing
+cadences byte-for-byte; the cumulative-versus-incremental floor mutation remains nonvacuous.
+This adds the overlapping overdue-frontier schedule absent from the original generator and
+INV-066's separately landed expiry matrix. It does not repeat INV-052's account/fee partitions or
+INV-085's arithmetic proofs, reorder authenticated expiry events, alter the INV-068 terminal-drain
+schedule, or close the generic mixed-history/cash-residue-classification gap.
+Focused verification passes both exact INV-038 receipt-cadence and INV-068 terminal-drain tests
+using cached SBF `230b6db1` and matcher `50e53226`, with no rebuild. INV-038 now passes 33 worlds,
+389 suffix attempts, 99 exact rejections and 44 nonzero payouts; the 11 new coalesced worlds add
+119 attempts, 33 rejections and 11 payouts. `cargo fmt --check` and `git diff --check` pass.
 
 **Remaining gap / next owner:** the same stateful INV-038 module now has a reusable seed and
 observer for extending this bounded slice. Fresh booking after the denominator change, alternate
