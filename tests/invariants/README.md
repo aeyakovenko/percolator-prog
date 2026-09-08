@@ -79,6 +79,52 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_085_proven_arithmetic_equ
 git diff --check
 ```
 
+## Identity and retained-retry checkpoint (2026-09-08)
+
+Finding-blind work based on `origin/codex/invariant-fidelity-reopen-20260904` at
+`2b1a1abcf9a855dcb420b8def89c7c2846e148f6`. No GitHub PR material or holdout branch was
+inspected, and production code and engine proofs are unchanged.
+
+The accepted increment is
+`v16_program_trade_route_retry_sets_remain_consumed_across_fresh_episode` in
+[`public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs`](public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs).
+For each of the four public single/batch and CPI/no-CPI winner routes, it retains two complete
+sets of independently signed route variants plus the winner before any state transition. It lands
+the winner, rejects the first route set, lands a fresh cross-route close, and then rejects the
+second old route set. All nine retained transactions per world have distinct signatures and
+message bytes, so duplicate-signature caching cannot supply the result. The 32 rejected calls
+produce the exact stale-incarnation wrapper error and preserve market, portfolio,
+matcher-context, and token-account bytes plus token supply. Normalized traces separately require
+exact writable-account rollback with no program lamport or token delta. The eight opening/closing
+controls advance both position episodes and move exact open interest through a nonzero episode
+back to zero. Construction and execution use the public `V16Svm` transaction builders and
+retained signed `Transaction` values; the test performs no account-byte mutation.
+
+The retained candidate adds history composition that the existing isolated ordered route-pair
+matrix did not cover: one stale route set must not poison later valid progress, and a fresh episode
+must not revive a second independently signed set from the old pre-state. Additional single-route
+examples for INV-001, INV-002, INV-003, INV-004, INV-005, and INV-007, plus Kani scalar
+predicates, were rejected as duplicate or marginal because the existing generic lifecycle
+matrices already enumerate the public identity, generation, position-episode, authority, and
+whole-market ABA route families, while the pinned proofs already own full-width monotonicity and
+equality obligations. No named-finding regression or duplicate engine proof was added.
+
+This is bounded evidence for one asset, one bilateral position pair, fixed quarter-unit trades,
+and the four deployed trade route families in a default live market. It does not establish
+arbitrary-history, multi-asset, partial-fill, expiry, durable-nonce, or simultaneous multi-identity
+closure, and it does not change any invariant status. No failing public conformance trace was
+observed. The inherited source contained 80 validated `finish_public_trace()` consumers while
+the metadata census was pinned to 79; this new consumer brings the audited total to 81, so the
+census was updated only after every consumer passed the normalized-evidence check.
+
+Focused verification used default-feature SBF rebuilt from this worktree with platform-tools
+v1.52. The program SHA-256 was
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`; the matcher fixture
+SHA-256 was `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Exact tests covered the accepted history, the neighboring INV-001/002/003/005/007 public
+lifecycle matrices, the existing INV-008 ordered route-pair matrix, and all six invariant
+metadata guards. `rustfmt --check` and `git diff --check` complete the checkpoint.
+
 ## Wrapper custody checkpoint (2026-09-08)
 
 Finding-blind additions based on `origin/codex/invariant-fidelity-reopen-20260904` at

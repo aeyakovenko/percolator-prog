@@ -8,9 +8,11 @@
 //! `v16_program_same_transaction_cross_route_retry_is_atomic_and_exact_once` bundles the direct
 //! and domain insurance variants in both orders, while the all-family matrix duplicates each of
 //! the eleven retained intents in one transaction. The retained-trade matrix additionally covers
-//! all sixteen ordered pairs of single/batch CPI/no-CPI routes from one pre-state. These prove
-//! whole-transaction rollback, then prove exactly one standalone request can land; PR362 and the
-//! issue387/389 tests cover generation/position-bound activation, conversion, and reduction.
+//! all sixteen ordered pairs of single/batch CPI/no-CPI routes from one pre-state. The route-set
+//! history retains two independently signed copies of every route together, rejecting one set
+//! before a fresh cross-route close and the other afterward. These prove whole-transaction
+//! rollback, then prove exactly one standalone request can land; PR362 and the issue387/389 tests
+//! cover generation/position-bound activation, conversion, and reduction.
 //! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -21,7 +23,202 @@
 //! schema requirements.
 
 use super::*;
+use crate::support::invariant_discovery::DiscoveryTradeRoute;
 use crate::support::v16_svm::{MarketConfig, V16Svm};
+use percolator::POS_SCALE;
+use solana_sdk::{pubkey::Pubkey, transaction::Transaction};
+use std::collections::BTreeSet;
+
+#[derive(Debug, PartialEq, Eq)]
+struct RetainedTradeSnapshot {
+    market: Vec<u8>,
+    portfolios: Vec<Vec<u8>>,
+    matcher_contexts: Vec<Vec<u8>>,
+    token_accounts: Vec<(Pubkey, Vec<u8>)>,
+    token_supply: u128,
+}
+
+impl RetainedTradeSnapshot {
+    fn capture(env: &V16Svm) -> Self {
+        Self {
+            market: env.market_data(false),
+            portfolios: env.all_primary_portfolio_data(),
+            matcher_contexts: env.all_matcher_context_data(),
+            token_accounts: env.all_token_account_data(),
+            token_supply: env.token_supply_observed(),
+        }
+    }
+}
+
+fn build_retained_trade_message(
+    env: &mut V16Svm,
+    route: DiscoveryTradeRoute,
+    size_q: i128,
+) -> Transaction {
+    const TAKER: usize = 0;
+    const MAKER: usize = 1;
+    const ASSET: u16 = 0;
+
+    match route {
+        DiscoveryTradeRoute::NoCpi => {
+            env.build_retained_no_cpi_trade(TAKER, MAKER, ASSET, size_q, 100)
+        }
+        DiscoveryTradeRoute::BatchNoCpi => {
+            env.build_retained_batch_no_cpi_trade(TAKER, MAKER, ASSET, size_q, 100)
+        }
+        DiscoveryTradeRoute::Cpi => env.build_retained_cpi_trade(TAKER, MAKER, ASSET, size_q, 0),
+        DiscoveryTradeRoute::BatchCpi => {
+            env.build_retained_batch_cpi_trade(TAKER, MAKER, ASSET, size_q, 0)
+        }
+    }
+}
+
+fn assert_retained_trade_is_stale(
+    env: &mut V16Svm,
+    route: DiscoveryTradeRoute,
+    transaction: Transaction,
+    phase: &str,
+) {
+    let before = RetainedTradeSnapshot::capture(env);
+    let error = match env.land_retained(transaction) {
+        Ok(success) => panic!(
+            "{route:?} {phase} retained trade landed in {} CU",
+            success.compute_units
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("Custom(19)") || error.contains("custom program error: 0x13"),
+        "{route:?} {phase} retained trade rejected for the wrong reason: {error}"
+    );
+    assert_eq!(
+        RetainedTradeSnapshot::capture(env),
+        before,
+        "{route:?} {phase} retained trade did not roll back exactly"
+    );
+}
+
+#[test]
+fn v16_program_trade_route_retry_sets_remain_consumed_across_fresh_episode() {
+    const TAKER: usize = 0;
+    const MAKER: usize = 1;
+    const SIZE_Q: i128 = POS_SCALE as i128 / 4;
+
+    let routes = DiscoveryTradeRoute::ALL;
+    for winner_index in 0..routes.len() {
+        let winner_route = routes[winner_index];
+        let close_route = routes[(winner_index + 1) % routes.len()];
+        let mut seed = [0x6d; 32];
+        seed[0] ^= u8::try_from(winner_index).expect("four routes fit u8");
+        let mut env = V16Svm::new(seed, MarketConfig::default());
+        let supply_before = env.token_supply_observed();
+        let epochs_before = [
+            env.primary_portfolio_position_epoch(TAKER),
+            env.primary_portfolio_position_epoch(MAKER),
+        ];
+
+        let winner = build_retained_trade_message(&mut env, winner_route, SIZE_Q);
+        let early_retries: Vec<_> = routes
+            .into_iter()
+            .map(|route| (route, build_retained_trade_message(&mut env, route, SIZE_Q)))
+            .collect();
+        let late_retries: Vec<_> = routes
+            .into_iter()
+            .map(|route| (route, build_retained_trade_message(&mut env, route, SIZE_Q)))
+            .collect();
+
+        let retained_messages = std::iter::once(&winner)
+            .chain(early_retries.iter().map(|(_, transaction)| transaction))
+            .chain(late_retries.iter().map(|(_, transaction)| transaction));
+        let mut signatures = BTreeSet::new();
+        let mut message_bytes = BTreeSet::new();
+        for transaction in retained_messages {
+            transaction
+                .verify()
+                .unwrap_or_else(|error| panic!("invalid retained signature: {error:?}"));
+            assert!(!transaction.signatures.is_empty());
+            signatures.insert(
+                transaction
+                    .signatures
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":"),
+            );
+            message_bytes.insert(transaction.message_data());
+        }
+        assert_eq!(
+            signatures.len(),
+            1 + 2 * routes.len(),
+            "{winner_route:?}: retained retries must be independently signed"
+        );
+        assert_eq!(
+            message_bytes.len(),
+            1 + 2 * routes.len(),
+            "{winner_route:?}: retained retries must not rely on duplicate-signature caching"
+        );
+
+        env.begin_public_trace();
+        env.land_retained(winner)
+            .unwrap_or_else(|error| panic!("{winner_route:?} initial trade rejected: {error}"));
+        let epochs_after_open = [
+            env.primary_portfolio_position_epoch(TAKER),
+            env.primary_portfolio_position_epoch(MAKER),
+        ];
+        assert!(
+            epochs_after_open[0] > epochs_before[0] && epochs_after_open[1] > epochs_before[1],
+            "{winner_route:?}: successful trade did not consume both position episodes"
+        );
+        let (_, group_after_open) = env.primary_market_state();
+        assert_eq!(group_after_open.assets[0].oi_eff_long_q, SIZE_Q as u128);
+        assert_eq!(group_after_open.assets[0].oi_eff_short_q, SIZE_Q as u128);
+
+        for (route, transaction) in early_retries {
+            assert_retained_trade_is_stale(&mut env, route, transaction, "before fresh close");
+        }
+
+        env.ensure_primary_matcher_enabled(MAKER)
+            .unwrap_or_else(|error| panic!("refresh current matcher grant: {error}"));
+        let fresh_close = build_retained_trade_message(&mut env, close_route, -SIZE_Q);
+        fresh_close
+            .verify()
+            .unwrap_or_else(|error| panic!("invalid fresh close signature: {error:?}"));
+        env.land_retained(fresh_close).unwrap_or_else(|error| {
+            panic!("{winner_route:?}->{close_route:?} fresh close rejected: {error}")
+        });
+        let epochs_after_close = [
+            env.primary_portfolio_position_epoch(TAKER),
+            env.primary_portfolio_position_epoch(MAKER),
+        ];
+        assert!(
+            epochs_after_close[0] > epochs_after_open[0]
+                && epochs_after_close[1] > epochs_after_open[1],
+            "{close_route:?}: fresh close did not consume the replacement episodes"
+        );
+        let (_, group_after_close) = env.primary_market_state();
+        assert_eq!(group_after_close.assets[0].oi_eff_long_q, 0);
+        assert_eq!(group_after_close.assets[0].oi_eff_short_q, 0);
+
+        for (route, transaction) in late_retries {
+            assert_retained_trade_is_stale(&mut env, route, transaction, "after fresh close");
+        }
+
+        assert_eq!(env.token_supply_observed(), supply_before);
+        let trace = env.finish_public_trace();
+        trace
+            .validate_public_execution()
+            .unwrap_or_else(|error| panic!("{winner_route:?} retry trace invalid: {error}"));
+        assert_eq!(trace.out_of_band_economic_mutations, 0);
+        let rejected: Vec<_> = trace.steps.iter().filter(|step| !step.succeeded).collect();
+        assert_eq!(rejected.len(), 2 * routes.len());
+        for step in rejected {
+            assert_eq!(step.program_id, percolator_prog::id());
+            assert_eq!(step.rejected_exact_writable_rollback, Some(true));
+            assert_eq!(step.rejected_no_program_lamport_delta, Some(true));
+            assert!(step.token_deltas.iter().all(|(_, delta)| *delta == 0));
+        }
+    }
+}
 
 #[test]
 fn v16_program_pr343_trade_retry_variants_reject_stale_and_land_fresh() {
