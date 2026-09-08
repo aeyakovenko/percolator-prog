@@ -3,6 +3,110 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-020 chunked observation completeness (2026-09-08)
+
+Tests/docs-only coverage from `origin/codex/invariant-fidelity-reopen-20260904` at
+`10658f7c1a400e796806b9a6c3560eefaff7afef`, developed on
+`codex/pr135-accrual-observation-20260908T225127Z` in
+`/tmp/codex-agent-worktrees/pr135-accrual-observation-20260908T225127Z`.
+The user's checkout was not modified. No open PR diffs or remote issues were inspected.
+
+[`cu/inv_020_chunked_observation_admission.rs`](cu/inv_020_chunked_observation_admission.rs)
+adds one public LiteSVM selector, mounted by INV-020. Its primary target is reopening
+426: maximum market-only catchup must not stand in for complete account observations.
+Sixteen histories cross both price directions, both Hybrid/AuthMark observation orders,
+and all four rotations of the four public trade transports. System, SPL, ATA, and wrapper
+instructions allocate, initialize, and fund every protocol/custody account. Matcher contexts
+use the existing System-created public fixture. Only Clock and external Pyth reports are
+supplied by the harness; no initialized protocol-account or program bytes are patched.
+
+Two 400/700-unit legs share an exposed 100-atom anchor with opposite 80/120 targets.
+At authenticated slot 64, the first successful crank processes exactly 32 logical steps
+on both assets, leaves both portfolio accounts byte-identical, and leaves their old
+certificates behind the new oracle epoch. A Hybrid-only retry could complete another
+32 steps on that asset, but omits the pending AuthMark leg. It returns exactly
+`EngineNonProgress` and restores complete tracked accounts, including market/profile carry,
+certificates, signers, mint, vault, source tokens, and reports. The separate network fee
+payer and runtime/program accounts are excluded from that frame.
+
+Supplying both observations completes the same bounded history and settles each owner's
+independently derived value. All four trade routes then reduce actual exposure through
+slots 64/65/66/67. The slot-67 price atom changes surviving owners' claims by 800 atoms;
+after final target catchup, their net mark results are exactly opposite 20,100-atom values.
+Every counted successful refresh changes tracked state; already-current peer retries at
+slots 65/66 return `EngineNonProgress` with exact rollback. Oracle/funding evidence is
+checked exactly; sequential peer settlement may age a conservative cached risk epoch.
+Both legs finally close, both sides' OI reach zero, and each owner withdraws 1,000 SPL atoms.
+Per-owner capital plus PnL, aggregate capital, unchanged pre-withdrawal custody, mint supply,
+and final vault debits are checked independently. This does not claim complete PnL redemption.
+
+Duplicate search distinguished this boundary from existing coverage:
+
+- INV-020 `current_health_evidence` covers timestamp faults and a one-step mixed refresh;
+  `liquidation_observation_replay` covers provider-epoch rewind on the rewarded route.
+- INV-053's fourteen single omissions and rounded nontraded-lag admission boundary, and
+  INV-056's mixed full-refresh trade boundary, do not cross a successful maximum
+  market-only prefix into partial-observation rollback and subsequent mixed-route exits.
+- INV-052's one-leg and fourteen-leg maximum-prefix tests do not compose an external
+  Hybrid tail with that rollback boundary. INV-045 `interleaved_cap_carry` supplies the
+  existing fresh-feed carry/reward history; this test uses carry only as an additional
+  wrapper-history discriminator for reopening 425, not another arithmetic proof.
+- INV-045 `accepted_price_reward` already owns the relevant row-422 reward/custody
+  coverage. No new reward-provenance claim is made here.
+
+No production bug or TDD fix is claimed. Rows 422/425/426 and invariant verdicts remain
+unchanged. This is two-leg, one-feed, zero-funding/zero-fee, live-market evidence, not
+maximum portfolio/feed fanout, liquidation, arbitrary-history closure, or a new rule
+requiring pre-cranks for otherwise valid owner reductions.
+
+Verification: the new selector passes 1/1 (16 histories; 1,057 filtered), and the
+private reviewed binary passes all 10 focused selectors below (1,048 filtered) in
+11.45 seconds. The new test's maximum observed crank/trade costs are 296,530/301,832 CU.
+Both scoped rustfmt checks and whitespace checks pass. No broad suite or engine proof
+rerun is claimed. Both SBFs were freshly built from this worktree with default features
+and platform-tools v1.52. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+auth-matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Early local failures were fixture/expectation corrections, not production counterexamples.
+Shared-cache invocations that collected zero tests or copied another worktree's binary
+are not credited. The final test binary is rebuilt and immediately copied into this
+worktree; its unique selector is explicitly listed before reuse. Its SHA-256 is
+`675db3e3f64e060ae44face31be8d61091e76f4b5907b5a563c074019901afae`.
+
+Exact build and verification commands (run in the worktree above):
+
+```sh
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$PWD/target/deploy" --offline -- --locked
+cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" --offline -- --locked
+selector=inv_020_authenticated_clock_slot_and_oracle_provenance::chunked_observation_admission::v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims
+touch tests/v16_cu.rs
+cargo test --locked --offline --test v16_cu "$selector" -- --exact --nocapture
+touch tests/v16_cu.rs
+cargo test --locked --offline --test v16_cu --no-run
+cp "$CARGO_TARGET_DIR/debug/deps/v16_cu-8c7475d0975fcbd3" target/v16_cu-reviewed
+target/v16_cu-reviewed "$selector" --exact --list
+# Continue only if the private binary lists exactly the one requested test.
+target/v16_cu-reviewed --exact --nocapture --test-threads=2 \
+  "$selector" \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::current_health_evidence::v16_program_mixed_hybrid_auth_mark_requires_current_health_evidence_before_owner_exit \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::liquidation_observation_replay::v16_program_liquidation_rejects_rewound_observations_after_authenticated_market_move \
+  inv_045_no_free_mark_movement::interleaved_cap_carry::v16_program_interleaved_trade_routes_preserve_oracle_cap_carry_and_reward_provenance \
+  inv_045_no_free_mark_movement::accepted_price_reward::v16_program_fresh_report_liquidation_rewards_follow_accepted_price_through_spl_exit \
+  inv_052_split_merge_invariance::v16_program_maximum_canonical_accrual_prefix_is_bounded_and_progresses \
+  inv_052_split_merge_invariance::v16_program_full_14_leg_maximum_accrual_prefix_stays_bounded \
+  inv_053_full_health_recertification_equivalence::v16_program_max_shape_refresh_rejects_each_single_omitted_pending_leg \
+  inv_053_full_health_recertification_equivalence::v16_program_rounded_nontraded_lag_full_refresh_preserves_exact_trade_boundary \
+  inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::v16_bpf_inv056_mixed_observations_preserve_full_refresh_trade_boundary
+rustfmt --edition 2021 --check tests/invariants/cu/inv_020_chunked_observation_admission.rs
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-081 native-quote success-state boundary (2026-09-08)
 
 [`cu/inv_081_success_state_validity_over_complete_public_routes.rs`](cu/inv_081_success_state_validity_over_complete_public_routes.rs)
