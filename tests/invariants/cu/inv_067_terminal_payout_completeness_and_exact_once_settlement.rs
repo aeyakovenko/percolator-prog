@@ -20,6 +20,9 @@
 
 use super::*;
 
+#[path = "inv_067_terminal_claim_late_expiry.rs"]
+mod late_expiry;
+
 #[test]
 fn v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_floor() {
     const PRICE: u64 = 1_000_000;

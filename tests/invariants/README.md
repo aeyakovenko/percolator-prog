@@ -84,6 +84,97 @@ metadata guards **6/6 passed** (117 filtered) in 0.06 seconds. The eight new his
 150,000/300,000 CU ceilings. Scoped rustfmt and `git diff --check` passed. Existing shared-test
 dead-code and Solana future-compatibility warnings remain. No broad suite or engine proof was run.
 
+## Terminal claim identity after late expiry (2026-09-08)
+
+One tests/docs-only increment on current branch commit
+`5395606e38ec80d0b8a4d4b8cafb951cc3909556`, developed in the isolated worktree
+`/tmp/codex-agent-worktrees/pr427-terminal-claim-late-expiry-20260908-r1`.
+The coordinator worktree, production code, engine proofs, invariant verdicts and reopening
+statuses are unchanged. Row 417 remains OPEN. No GitHub PR/issue diffs or holdout branches
+were used. The new case is an INV-067 submodule of the existing `v16_cu` target, not a
+standalone harness:
+[`cu/inv_067_terminal_claim_late_expiry.rs`](cu/inv_067_terminal_claim_late_expiry.rs).
+
+Four public LiteSVM histories cross expiry/expiry+1 with both orders of two unequal receipt
+holders. System creation, SPL minting/ATA initialization, wrapper initialization/deposits,
+marks, matched trades, resolution and receipt creation all execute public instructions.
+No program-owned bytes or economic state are injected. The two embedded receipts have faces
+700/1,300 and initial paid values 116/217. A third 1,000-face claim retains 350 atoms of
+reserved backing: 100 provider atoms plus 250 settled counterparty atoms.
+
+After receipt creation, its owner publicly changes one existing destination's SPL owner.
+The retained payout instruction keeps its original portfolio, owner and destination keys.
+A transaction executes `CloseResolved` expiry reclassification, then the other claimant's
+value-moving `ClaimResolvedPayoutTopup`, before the retained stale-destination claim rejects
+with `InstructionError(4, InvalidTokenAccount)`. Both prefix wrapper successes and a successful
+SPL transfer must appear in the logs. Full account snapshots restore bytes, metadata, lamports,
+receipts, backing and custody exactly; only the distinct network-fee payer is excluded.
+After public destination restoration, the same prefix followed by a retained backing top-up
+must roll back with `InstructionError(4, EngineLockActive)`. This second rejection is the
+Resolved-mode gate, not evidence for the separate Live-mode expiry guard.
+
+Retrying the unchanged public instructions releases exactly 350 atoms without token movement
+and pays exactly 82/151 additional atoms to the original receipts. Market/account/owner/episode
+provenance, snapshot slot, face and prior bound stay fixed; only cumulative paid value changes.
+The exact/unreceipted claim split stays 2,000/1,000 faces. Unrelated account frames, SPL supply,
+engine/SPL vault equality and duplicate-payment no-ops are checked along the suffix. Entitlement
+uses the public quantities, marks, deposits and backing, not an engine payout function or the
+observed payout rate. All five portfolios finish and mechanically close with exact rent transfer.
+Final owner SPL balances are `[1198, 0, 1283, 0, 1368]`, the rejected top-up leaves its one provider
+atom untouched, and custody holds only the independently calculated two-atom rounding remainder.
+
+Acceptance boundary: existing INV-066 three/four-receipt permutations and INV-063 post-snapshot
+expiry tests already own successful payout ordering. INV-068 split top-ups already own static
+identity substitution, and current-head `v16_program_retained_receipt_retry_cannot_absorb_later_vault_stock`
+already owns payout rollback after expiry has committed, custody replenishment and a substituted
+destination. None of those histories rolls back the stock reclassification itself together with
+another receipt holder's successful SPL payout after a formerly valid destination changes owner.
+That combined public history is the net-new INV-010/024/029/063/066/067/068/070 evidence here;
+the surrounding payout arithmetic and terminal checks are its oracle, not new engine proofs.
+
+Remaining gaps: fixed five-owner, single-expiry, single-mint, no-CPI history; no arbitrary claimant
+population, simultaneous expiries, policy changes, alternate collateral rails, funded lien/Recovery
+episodes or general history induction. The computed terminal rounding remainder is checked, but
+typed surplus sweep, asset retirement and `CloseSlab` are not exercised. No whole-invariant status
+is promoted. Preliminary runs caught a fixture expectation that omitted the backed counterparty's
+250 reserved atoms, and adjacent-test setup failures from a missing/unstripped matcher; neither was
+a production failure. The corrected fixture retains the same public history.
+
+Verification uses the supplied cached program SBF, SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+Only the adjacent stateful tests need the cached deployed matcher, SHA-256
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Its local symlink is ignored build output. No SBF rebuild is performed. Exact commands:
+
+```sh
+export PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p tests/fixtures/auth_matcher/target/deploy
+ln -sfn /home/anatoly/percolator-prog-pr427-conformance-20260908/tests/fixtures/auth_matcher/target/deploy/auth_matcher.so tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::late_expiry::v16_program_retained_claim_identity_survives_late_expiry_recipient_rotation_and_atomic_retry
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture \
+  inv_063_backing_expiry_normalization::v16_program_post_snapshot_expiry_topup_is_public_and_order_independent \
+  inv_066_resolved_payout_fairness_and_order_independence::v16_program_three_partial_receipts_exhaust_claim_and_release_orders \
+  inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries \
+  inv_068_receipt_uniqueness_and_monotonic_topups::collateral_rails::v16_program_retained_receipt_retry_cannot_absorb_later_vault_stock
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row \
+  inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter \
+  inv_079_public_reachability_evidence::v16_public_instruction_coverage_registry_matches_production_roster
+rustfmt --edition 2021 --check tests/invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs
+git diff --check
+```
+
+Results at `5395606e`: new selector **1/1 passed** (4.42 s; four worlds, eight paid-prefix
+rollbacks, eight positive retained top-ups, peak observed suffix 324,267 CU); adjacent selectors
+**4/4 passed** (35.16 s); metadata selectors **6/6 passed** (0.06 s). Scoped rustfmt and both
+staged/unstaged whitespace checks passed. No broad suite or engine proof was run.
+
 ## Retained batch authority/policy conformance (2026-09-08)
 
 Tests/docs-only increment from `codex/invariant-fidelity-reopen-20260904` at
