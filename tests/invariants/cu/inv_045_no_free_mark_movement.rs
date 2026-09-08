@@ -24,6 +24,8 @@
 //! when distinct mark ages straddle the accrual horizon, checking each paid movement independently.
 //! The `interleaved_cap_carry` child preserves a fractional fresh-oracle cap across mixed trade
 //! routes and repeated reports, attributing fees and keeper payouts at each committed-price prefix.
+//! The `late_stale_crank_rollback` child composes paid CPI discovery with a late stale-feed
+//! rejection, then fresh observation recovery and a mixed-mode no-CPI batch reversal.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -39,6 +41,9 @@ mod staggered_mark_envelope;
 
 #[path = "inv_045_interleaved_cap_carry.rs"]
 mod interleaved_cap_carry;
+
+#[path = "inv_045_late_stale_crank_rollback.rs"]
+mod late_stale_crank_rollback;
 
 #[test]
 fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
