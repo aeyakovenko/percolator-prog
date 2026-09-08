@@ -14,6 +14,8 @@
 //! every single provider through DrainOnly, Recovery, and Resolved value-bearing routes, and six
 //! multi-provider formulas through those lifecycles with denominator, expiry, and malformed-tail
 //! controls.
+//! An unchanged-report versus newer-same-price report matrix crosses public crank into funded
+//! withdrawal: settlement progress and caller slot hints cannot renew the oracle liveness epoch.
 //! An independent typed parser model covers 726 boundary words, 15,552 structural/semantic
 //! combinations, and 12,288 seeded valid layouts. An independent overflow-free confidence oracle
 //! compares all 65,536 basis-point settings across wide carry and overflow operands.
@@ -4573,6 +4575,207 @@ fn v16_program_hybrid_soft_stale_boundary_uses_clock_not_caller_slot() {
     assert_eq!(cfg.oracle_leg_prices_e6[0], NEXT_PRICE);
     assert_eq!(env.portfolio_state(portfolio).capital.get(), 1_000_000);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), before[3]);
+}
+
+#[test]
+fn v16_program_unchanged_oracle_report_cannot_renew_withdrawal_window() {
+    const INITIAL_SLOT: u64 = 1;
+    const OBSERVE_SLOT: u64 = 4;
+    const STALE_SLOTS: u64 = 5;
+    const INITIAL_TIME: i64 = 100;
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000_000;
+    const WITHDRAW: u128 = 100_000;
+
+    let mut max_crank_cu = 0;
+    let mut max_exit_cu = 0;
+    let mut max_withdraw_cu = 0;
+    for advanced_report in [false, true] {
+        for caller_slot in [0, u64::MAX] {
+            let mut env = V16CuEnv::new();
+            env.configure_permissionless_resolve_with_cu(STALE_SLOTS, 1);
+            set_test_clock(&mut env, INITIAL_SLOT, INITIAL_TIME);
+            let feed = [0xd5; 32];
+            let initial = env.set_pyth_price_with_conf(&feed, PRICE as i64, -6, 0, INITIAL_TIME);
+            configure_single_pyth(&mut env, feed, initial, INITIAL_SLOT, INITIAL_TIME, 100)
+                .expect("configure the initial authenticated Pyth observation");
+
+            let long_owner = Keypair::new();
+            let short_owner = Keypair::new();
+            let long = env.create_portfolio(&long_owner);
+            let short = env.create_portfolio(&short_owner);
+            env.deposit(&long_owner, long, DEPOSIT);
+            env.deposit(&short_owner, short, DEPOSIT);
+            env.trade_asset_with_cu(
+                0,
+                &long_owner,
+                long,
+                &short_owner,
+                short,
+                POS_SCALE as i128,
+                PRICE,
+                0,
+            );
+            let destination = env.token_account(long_owner.pubkey(), 0);
+
+            // Both reports are well within provider staleness. Only the control has a new
+            // publish time; neither a price change nor a different caller hint is required.
+            let observe_time = INITIAL_TIME + (OBSERVE_SLOT - INITIAL_SLOT) as i64;
+            set_test_clock(&mut env, OBSERVE_SLOT, observe_time);
+            let (report, expected_publish_time, expected_good_slot) = if advanced_report {
+                (
+                    env.set_pyth_price_with_conf(&feed, PRICE as i64, -6, 0, observe_time),
+                    observe_time,
+                    OBSERVE_SLOT,
+                )
+            } else {
+                (initial, INITIAL_TIME, INITIAL_SLOT)
+            };
+            let original_account = env.svm.get_account(&initial).unwrap();
+            let report_account = env.svm.get_account(&report).unwrap();
+            for settled_slot in INITIAL_SLOT + 1..=OBSERVE_SLOT {
+                let crank_cu = try_epoch_matrix_crank(&mut env, long, caller_slot, &[report])
+                    .expect("a valid unchanged report may advance real settlement time");
+                assert_cu_within(
+                    "oracle epoch withdrawal-window crank",
+                    crank_cu,
+                    CRANK_CU_LIMIT,
+                );
+                max_crank_cu = max_crank_cu.max(crank_cu);
+                assert_eq!(env.market_state().1.assets[0].slot_last, settled_slot);
+            }
+
+            let (cfg, group) = env.market_state();
+            let profile = state::read_asset_oracle_profile(
+                &env.svm.get_account(&env.market).unwrap().data,
+                0,
+            )
+            .unwrap();
+            assert_eq!(group.current_slot, OBSERVE_SLOT);
+            assert_eq!(group.assets[0].slot_last, OBSERVE_SLOT);
+            assert_eq!(group.assets[0].effective_price, PRICE);
+            assert_eq!(group.assets[0].raw_oracle_target_price, PRICE);
+            assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
+            assert_eq!(group.assets[0].oi_eff_short_q, POS_SCALE);
+            assert_eq!(cfg.last_good_oracle_slot, expected_good_slot);
+            assert_eq!(profile.last_good_oracle_slot, expected_good_slot);
+            assert_eq!(cfg.oracle_target_publish_time, expected_publish_time);
+            assert_eq!(profile.oracle_leg_publish_times[0], expected_publish_time);
+            assert_eq!(profile.oracle_leg_prices_e6[0], PRICE);
+
+            // Custody withdrawals require flat portfolios. Reach that state through the owner
+            // trade route while the original observation is still admissible in both worlds.
+            let exit_cu = env.trade_asset_with_cu(
+                0,
+                &long_owner,
+                long,
+                &short_owner,
+                short,
+                -(POS_SCALE as i128),
+                PRICE,
+                0,
+            );
+            assert_cu_within("oracle epoch owner trade exit", exit_cu, TRADE_CU_LIMIT);
+            max_exit_cu = max_exit_cu.max(exit_cu);
+            assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+            assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
+
+            let expiry_slot = expected_good_slot + STALE_SLOTS;
+            let original_expiry = INITIAL_SLOT + STALE_SLOTS;
+            let mut withdrawal_slots = vec![original_expiry - 1, original_expiry];
+            if advanced_report {
+                withdrawal_slots.push(expiry_slot);
+            }
+            let tracked = [
+                env.market,
+                long,
+                short,
+                destination,
+                env.vault,
+                initial,
+                report,
+            ];
+            let mut paid = 0u128;
+            for real_slot in withdrawal_slots {
+                set_test_clock(
+                    &mut env,
+                    real_slot,
+                    INITIAL_TIME + (real_slot - INITIAL_SLOT) as i64,
+                );
+                if real_slot < expiry_slot {
+                    // Advance engine time again without supplying a new observation epoch.
+                    let cu = try_epoch_matrix_crank(&mut env, long, caller_slot, &[report])
+                        .expect("settle the funded withdrawal with the same retained report");
+                    assert_cu_within("retained report before withdrawal", cu, CRANK_CU_LIMIT);
+                    max_crank_cu = max_crank_cu.max(cu);
+                    assert_eq!(env.market_state().1.assets[0].slot_last, real_slot);
+                }
+                // Cross into custody with no oracle tail. At expiry, even the persisted market
+                // clock is still earlier than the deadline; the sysvar must gate this debit.
+                assert!(env.market_state().1.current_slot < expiry_slot);
+                let before = tracked.map(|key| env.svm.get_account(&key).unwrap());
+                env.svm.expire_blockhash();
+                let result = env.send(
+                    env.withdraw_ix(long, WITHDRAW),
+                    vec![
+                        AccountMeta::new(long_owner.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(long, false),
+                        AccountMeta::new(destination, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&long_owner],
+                );
+                if real_slot < expiry_slot {
+                    let cu = result.unwrap_or_else(|error| {
+                        panic!("pre-expiry withdrawal: advanced={advanced_report}, hint={caller_slot}, slot={real_slot}: {error}")
+                    });
+                    assert_cu_within("oracle epoch admitted withdrawal", cu, CUSTODY_CU_LIMIT);
+                    max_withdraw_cu = max_withdraw_cu.max(cu);
+                    paid += WITHDRAW;
+                } else {
+                    let error =
+                        result.expect_err("replayed observation cannot renew withdrawal admission");
+                    assert!(
+                        error.contains("Custom(27)"),
+                        "expiry must reject with OracleStale: advanced={advanced_report}, hint={caller_slot}, slot={real_slot}: {error}"
+                    );
+                    assert_eq!(
+                        tracked.map(|key| env.svm.get_account(&key).unwrap()),
+                        before,
+                        "expiry rejection must preserve complete protocol, custody, and provider accounts"
+                    );
+                }
+                let (after_cfg, after_group) = env.market_state();
+                assert_eq!(after_cfg.last_good_oracle_slot, expected_good_slot);
+                assert_eq!(after_cfg.oracle_target_publish_time, expected_publish_time);
+                assert_eq!(after_group.mode, MarketModeV16::Live);
+                assert_eq!(after_group.assets[0].oi_eff_long_q, 0);
+                assert_eq!(after_group.assets[0].oi_eff_short_q, 0);
+                assert_eq!(env.portfolio_state(long).capital.get(), DEPOSIT - paid);
+                assert_eq!(env.portfolio_state(short).capital.get(), DEPOSIT);
+                assert_eq!(env.token_amount(destination) as u128, paid);
+                assert_eq!(env.token_amount(env.vault) as u128, 2 * DEPOSIT - paid);
+                assert_eq!(after_group.vault, 2 * DEPOSIT - paid);
+                assert_eq!(after_group.c_tot, after_group.vault);
+                assert_eq!(env.svm.get_account(&initial).unwrap(), original_account);
+                assert_eq!(env.svm.get_account(&report).unwrap(), report_account);
+            }
+            assert_eq!(
+                paid,
+                if advanced_report {
+                    2 * WITHDRAW
+                } else {
+                    WITHDRAW
+                }
+            );
+        }
+    }
+    println!(
+        "oracle epoch withdrawal window: 4 worlds, crank max {max_crank_cu} CU, owner exit max {max_exit_cu} CU, withdrawal max {max_withdraw_cu} CU"
+    );
 }
 
 #[test]
