@@ -5573,6 +5573,33 @@ funded controls. Validator blockhash age, partial fills, capability expiry, nonz
 populated retirement, other identity writers and maximum shapes remain outside this owner. It
 reuses the pinned engine contracts and neither duplicates INV-009/011/012 nor promotes any status.
 
+### INV-002 cross-slot activation frontier
+
+[`v16_program_cross_slot_activation_consumes_one_retained_generation_frontier`](public_sbf/inv_002_asset_generation_binding.rs)
+retains permissionless activations for two different retired slots at the same `next_market_id`.
+Both landing orders are exercised. The first activation consumes generation N while the other
+slot's engine state and oracle profile remain unchanged. The second retained request must reject
+with `AssetGenerationMismatch` and preserve every tracked economic account, including its data and
+lamports; the transaction fee payer is excluded. A fresh request at the next authenticated slot
+activates the untouched target as N+1 and leaves the frontier at N+2. Each successful creator pays
+exactly one token atom into vault custody and engine insurance; the failed request pays no
+activation fee. The first activated slot remains unchanged by the second activation, the base
+asset is preserved, and total SPL supply is constant.
+
+This is distinct from the adjacent consumed-frontier test: that test reuses and retires the same
+target slot between signing and rejection. Here only a different slot consumes the shared
+allocator, so no target-slot lifecycle change can account for stale admission. This bounded
+two-slot witness adds no invariant-status promotion or production change.
+
+The exact test passed with offline default-feature program and matcher SBF builds using
+platform-tools v1.52. Focused verification from the isolated worktree:
+
+```sh
+CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so" cargo test --locked --offline --test v16_program_fuzz_regressions inv_002_asset_generation_binding::v16_program_cross_slot_activation_consumes_one_retained_generation_frontier -- --exact --nocapture
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/public_sbf/inv_002_asset_generation_binding.rs
+git diff --check
+```
+
 ### INV-009 executing evidence and F plan
 
 Traceability review, 2026-09-07: the INV-009 M registry now points at the executing
