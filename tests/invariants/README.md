@@ -1353,18 +1353,64 @@ a permissionless refresh admits one exact 50,000-atom conversion from the claima
 lien, leaves its original counterparty byte-identical, and moves no SPL custody. The existing
 pending-obligation and target-lag cases retain their distinct obligations.
 
-INV-053/054 also have one fee-only public admission witness:
-[`v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom`](cu/inv_054_certificate_epoch_completeness.rs).
+INV-053/054 fee-only public admission now covers all four trade transports. The existing
+[`v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom`](cu/inv_054_certificate_epoch_completeness.rs)
+keeps the single no-CPI case;
+[`v16_program_fee_only_invalidation_cannot_preserve_cpi_or_batch_trade_headroom`](cu/inv_054_certificate_epoch_completeness.rs)
+adds single CPI and both one-leg batch routes through the same runner, not duplicate fixtures.
 A public `SyncMaintenanceFee` debit leaves every global epoch, the active bitmap, and asset state
-unchanged but invalidates the touched certificate. A `TradeNoCpi` increase affordable under the old
-certificate must reject at health admission with exact market, portfolio, peer, keeper, owner, and
-SPL-vault rollback (the transaction fee payer is excluded). A canonical public crank then certifies
-the exact post-debit equity; a smaller, still-affordable increase succeeds without moving custody.
+unchanged but invalidates the touched certificate. Each transport's increase affordable under the
+old certificate must reject with `EngineInvalidConfig` at health admission and exact market,
+portfolio, peer, keeper, owner, and SPL-vault rollback (the transaction fee payer is excluded).
+CPI uses the existing authenticated matcher with a system-created context and public initialization
+and grant; its program, context, and delegate join the rollback snapshot. No economic account bytes
+are injected. A canonical public crank then certifies the exact post-debit equity; a smaller,
+still-affordable increase succeeds on the same transport and unchanged matcher grant without moving
+custody. Before the debit, after the public refresh, and for both participants after the control,
+the existing snapshot full-refresh oracle must execute nonvacuously and equal the independent
+raw-state model. The committed certificate must equal that model in every health lane and key.
 Unlike the existing INV-053 combined-fee/lag comparison and INV-060 lane decomposition, this checks
 admission immediately after fee settlement, before recertification and without an oracle change.
-This is one single-asset, unrewarded fee-debit history, not CPI/batch, rewarded/self-rewarded fee,
-fee-debt, multi-asset, or maximum-shape coverage. It adds no engine leaf proof or status promotion;
-INV-053 and INV-054 remain `OPEN_EVIDENCE`/`SAMPLED`.
+This is a four-transport, single-asset, unrewarded 37-atom fee-debit history, not multi-leg batches,
+rewarded/self-rewarded fee, fee-debt, multi-asset, arbitrary-history, or maximum-shape coverage.
+It adds no engine leaf proof or status promotion; INV-053 and INV-054 remain
+`OPEN_EVIDENCE`/`SAMPLED`.
+
+At base `7d8c99ea` / engine `495a5590`, both exact tests pass: four public worlds, four exact
+rejections, four successful refreshed controls, and sixteen nonvacuous certificate comparisons.
+Fee settlement uses 112,300 CU and the public refresh 97,369 CU in every world. Opening/control CU
+are 130,678/255,476 (NoCpi), 177,274/306,395 (Cpi), 129,359/254,132 (BatchNoCpi), and
+149,461/274,224 (BatchCpi), all within the existing bounds. Fresh same-worktree default-feature
+SBF and matcher builds use platform-tools v1.52; SHA-256 is respectively
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20` and
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The certificate-disposition callsite guard and all four listed metadata/status guards pass
+individually (1/1 each). Scoped rustfmt, eight-column traceability TSV validation (18 rows including
+the header, one INV-054 row), and `git diff --check 7d8c99ea` pass. Existing host dead-code and
+Solana future-compatibility warnings remain; no full-suite or new proof run is claimed.
+Commands run from `/tmp/codex-agent-worktrees/inv053-054-epoch-coverage-20260908` unless noted;
+the private target was seeded by copying existing build caches, without writing their sources:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/inv053-054-epoch-coverage-20260908-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=2
+cargo build-sbf --tools-version v1.52 --offline -- --locked
+# Working directory: tests/fixtures/auth_matcher
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir /tmp/codex-agent-worktrees/inv053-054-epoch-coverage-20260908/tests/fixtures/auth_matcher/target/deploy -- --locked
+# Working directory: worktree root
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_054_certificate_epoch_completeness::v16_program_fee_only_invalidation_cannot_preserve_cpi_or_batch_trade_headroom -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_054_certificate_epoch_completeness::v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_088_global_summaries_are_not_account_local_proofs::v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_054_certificate_epoch_completeness.rs
+awk -F '\t' '!/^#/ && NF { if (NF != 8) { print "invalid columns at line", NR; bad=1 } rows++; if ($1 == "INV-054") inv054++ } END { if (bad || inv054 != 1) exit 1; printf "traceability TSV: %d eight-column rows; one INV-054 row\n", rows }' tests/invariants/traceability_gaps.tsv
+git diff --check 7d8c99ea
+```
 
 The existing INV-064 live-to-terminal lifecycle now closes the insurance-withdrawal seniority row:
 loss-stale live withdrawal preserves the market, vault, and both portfolios byte-for-byte; the two

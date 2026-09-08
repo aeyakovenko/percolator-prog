@@ -14,12 +14,19 @@
 //! atomically recertified with its exact deficit, unrelated certificates are staled by the composed
 //! source-risk writes, risk-bearing reuse rejects, and a flat unrelated owner retains its
 //! state-independent principal exit.
+//! The fee-only admission witness also crosses all four trade transports, including one-leg
+//! batches with a system-created authenticated matcher. Every current control is checked against
+//! the existing snapshot full-refresh and independent certificate oracles.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+use crate::support::fuzz_model::{
+    assert_current_certificate_matches_independent,
+    assert_current_certificate_matches_snapshot_full_refresh, TradeRoute,
+};
 
 const PUBLIC_RELEASED_PNL: u128 = PUBLIC_RELEASED_PNL_FIXTURE_AMOUNT;
 const PUBLIC_RELEASED_PNL_SOURCE_DOMAIN: usize = 1;
@@ -161,6 +168,21 @@ fn refresh_and_convert_public_claim(
 
 #[test]
 fn v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom() {
+    run_fee_only_admission_case(TradeRoute::NoCpi);
+}
+
+#[test]
+fn v16_program_fee_only_invalidation_cannot_preserve_cpi_or_batch_trade_headroom() {
+    for route in [
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        run_fee_only_admission_case(route);
+    }
+}
+
+fn run_fee_only_admission_case(route: TradeRoute) {
     const PRICE: u64 = 100;
     const CAPITAL: u128 = 200;
     const FEE: u128 = 37;
@@ -183,16 +205,85 @@ fn v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom() 
     let keeper = env.create_portfolio(&keeper_owner);
     env.deposit(&owner, portfolio, CAPITAL);
     env.deposit(&peer_owner, peer, 1_000);
-    env.trade_asset_with_cu(
-        0,
-        &owner,
-        portfolio,
-        &peer_owner,
-        peer,
-        POS_SCALE as i128,
-        PRICE,
-        0,
-    );
+    let matcher = matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi)
+        .then(|| auth_matcher_for_lp_via_system_create(&mut env, &peer_owner, peer));
+    let trade = |env: &mut V16CuEnv, size_q| {
+        let ix = match route {
+            TradeRoute::NoCpi => env.trade_no_cpi_ix(portfolio, peer, 0, size_q, PRICE, 0),
+            TradeRoute::Cpi => env.trade_cpi_ix(portfolio, peer, 0, size_q, 0, PRICE),
+            TradeRoute::BatchNoCpi => env.batch_trade_no_cpi_ix(
+                portfolio,
+                peer,
+                vec![BatchTradeLeg {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    size_q,
+                    exec_price: PRICE,
+                    fee_bps: 0,
+                }],
+            ),
+            TradeRoute::BatchCpi => env.batch_trade_cpi_ix_with_caps(
+                portfolio,
+                peer,
+                vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    size_q,
+                    fee_bps: 0,
+                    limit_price: PRICE,
+                }],
+                0,
+                0,
+            ),
+        };
+        env.svm.expire_blockhash();
+        if let Some((program, context, delegate)) = matcher {
+            env.send(
+                ix,
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(peer, false),
+                    AccountMeta::new_readonly(program, false),
+                    AccountMeta::new(context, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[&owner],
+            )
+        } else {
+            env.send(
+                ix,
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(peer_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(peer, false),
+                ],
+                &[&owner, &peer_owner],
+            )
+        }
+    };
+    let assert_exact_certificate = |env: &V16CuEnv, account_key| {
+        let label = format!("{route:?} fee-only account {account_key}");
+        let market = env.svm.get_account(&env.market).unwrap();
+        let account = env.svm.get_account(&account_key).unwrap();
+        assert!(assert_current_certificate_matches_snapshot_full_refresh(
+            &label,
+            &market.data,
+            &account.data,
+        )
+        .expect("current certificate must match the snapshot full-refresh oracle"));
+        assert!(assert_current_certificate_matches_independent(
+            &label,
+            &env.market_state().1,
+            &env.portfolio_state(account_key),
+        )
+        .expect("explicit recertification must match every independent health lane exactly"));
+    };
+    let open_cu = trade(&mut env, POS_SCALE as i128).expect("funded opening trade");
+    assert_cu_within("fee-only opening trade", open_cu, TRADE_CU_LIMIT);
 
     // Advance only the market's zero-move interval before isolating the account-local debit.
     env.svm.warp_to_slot(2);
@@ -211,6 +302,7 @@ fn v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom() 
     assert_eq!(account_before.capital.get(), CAPITAL);
     assert_eq!(cert_before.certified_equity, CAPITAL as i128);
     assert_eq!(cert_before.certified_initial_req, PRICE as u128);
+    assert_exact_certificate(&env, portfolio);
     assert_eq!(
         cert_before.certified_equity - cert_before.certified_initial_req as i128,
         PRICE as i128,
@@ -244,7 +336,7 @@ fn v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom() 
         "the fee debit must invalidate the touched cache despite unchanged global epoch keys"
     );
 
-    let tracked = [
+    let mut tracked = vec![
         env.market,
         portfolio,
         peer,
@@ -253,32 +345,24 @@ fn v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom() 
         owner.pubkey(),
         peer_owner.pubkey(),
     ];
-    let snapshot = tracked.map(|key| env.svm.get_account(&key));
-    env.svm.expire_blockhash();
-    let error = env
-        .try_trade_asset_with_cu(
-            0,
-            &owner,
-            portfolio,
-            &peer_owner,
-            peer,
-            POS_SCALE as i128,
-            PRICE,
-            0,
-        )
+    if let Some((program, context, delegate)) = matcher {
+        tracked.extend([program, context, delegate]);
+    }
+    let snapshot: Vec<_> = tracked.iter().map(|key| env.svm.get_account(key)).collect();
+    let error = trade(&mut env, POS_SCALE as i128)
         .expect_err("pre-debit headroom cannot authorize a post-debit risk increase");
     assert!(
         error.contains(&format!(
             "Custom({})",
             PercolatorError::EngineInvalidConfig as u32
         )),
-        "the unaffordable increase must fail health admission: {error}"
+        "{route:?}: the unaffordable increase must fail health admission: {error}"
     );
     for (key, expected) in tracked.into_iter().zip(snapshot) {
         assert_eq!(
             env.svm.get_account(&key),
             expected,
-            "rejected increase changed {key}"
+            "{route:?}: rejected increase changed {key}"
         );
     }
 
@@ -306,19 +390,11 @@ fn v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom() 
         cert_before.certified_worst_case_loss
     );
     assert_eq!(refreshed.certified_liq_deficit, 0);
+    assert_exact_certificate(&env, portfolio);
 
     // A smaller increase remains affordable after the same debit and canonical refresh.
-    env.svm.expire_blockhash();
-    let trade_cu = env.trade_asset_with_cu(
-        0,
-        &owner,
-        portfolio,
-        &peer_owner,
-        peer,
-        (POS_SCALE / 2) as i128,
-        PRICE,
-        0,
-    );
+    let trade_cu = trade(&mut env, (POS_SCALE / 2) as i128)
+        .expect("affordable increase must succeed on the same transport and matcher grant");
     assert_cu_within("affordable post-fee increase", trade_cu, TRADE_CU_LIMIT);
     let live = env.portfolio_state(portfolio);
     assert!(cert_is_current(&env, portfolio));
@@ -330,6 +406,12 @@ fn v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom() 
     assert_eq!(health_cert(&live).certified_equity, (CAPITAL - FEE) as i128);
     assert_eq!(health_cert(&live).certified_initial_req, 150);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    for account_key in [portfolio, peer] {
+        assert_exact_certificate(&env, account_key);
+    }
+    println!(
+        "{route:?} fee-only admission: exact rejection; open={open_cu}, fee={sync_cu}, refresh={refresh_cu}, control={trade_cu} CU"
+    );
 }
 
 #[test]
