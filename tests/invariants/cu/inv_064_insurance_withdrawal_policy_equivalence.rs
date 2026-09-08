@@ -406,6 +406,228 @@ fn v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget()
     }
 }
 
+#[test]
+fn v16_program_insurance_withdrawal_ledger_history_is_economically_transparent() {
+    const BUDGETS: [u128; 4] = [11, 13, 17, 19];
+    const FUNDED: u64 = 60;
+    // Same cold authority, two assets: a retained ledger observation is not either asset's budget.
+    const WITHDRAWALS: [(u16, u128); 5] = [(0, 7), (1, 5), (0, 17), (1, 11), (1, 20)];
+
+    let mut reference = None;
+    for ledger_mask in [0u8, 0b11111, 0b10101] {
+        let mut svm = LiteSVM::new();
+        let program_id = percolator_prog::id();
+        svm.add_program(program_id, &std::fs::read(program_path()).unwrap());
+        svm.add_program(
+            spl_token::ID,
+            &std::fs::read(spl_token_program_path()).unwrap(),
+        );
+        svm.add_program(
+            associated_token_program_id(),
+            &std::fs::read(associated_token_program_path()).unwrap(),
+        );
+        let payer = Keypair::new();
+        let admin = Keypair::new();
+        svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+        svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
+        let mint = Keypair::new();
+        let market = Keypair::new();
+        let ledger = Keypair::new();
+        for (account, len, owner) in [
+            (&mint, Mint::LEN, spl_token::ID),
+            (
+                &market,
+                state::market_account_len_for_capacity(2).unwrap(),
+                program_id,
+            ),
+            (&ledger, state::insurance_ledger_account_len(), program_id),
+        ] {
+            system_create_account_for_test(&mut svm, &payer, account, len, owner);
+        }
+        send_raw_tx(
+            &mut svm,
+            &payer,
+            spl_token::instruction::initialize_mint2(
+                &spl_token::ID,
+                &mint.pubkey(),
+                &admin.pubkey(),
+                None,
+                0,
+            )
+            .unwrap(),
+            &[],
+        )
+        .unwrap();
+        let destination = create_ata_for_test(&mut svm, &payer, admin.pubkey(), mint.pubkey());
+        send_raw_tx(
+            &mut svm,
+            &payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &mint.pubkey(),
+                &destination,
+                &admin.pubkey(),
+                &[],
+                FUNDED,
+            )
+            .unwrap(),
+            &[&admin],
+        )
+        .unwrap();
+        let vault_authority =
+            Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
+        let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint.pubkey());
+        let params = V16CuMarketParams {
+            max_portfolio_assets: 2,
+            ..V16CuMarketParams::default()
+        };
+        let init_market_cu = send_tx(
+            &mut svm,
+            program_id,
+            &payer,
+            init_market_instruction(&params),
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(market.pubkey(), false),
+                AccountMeta::new_readonly(mint.pubkey(), false),
+            ],
+            &[&admin],
+        )
+        .unwrap();
+        let mut env = V16CuEnv {
+            svm,
+            program_id,
+            payer,
+            admin: admin.insecure_clone(),
+            init_market_cu,
+            market: market.pubkey(),
+            mint: mint.pubkey(),
+            vault,
+            vault_authority,
+            portfolio_account_len: state::portfolio_account_len_for_market_slots(2).unwrap(),
+            portfolios: vec![],
+        };
+        for (domain, amount) in BUDGETS.into_iter().enumerate() {
+            env.send(
+                ProgInstruction::TopUpInsuranceDomain {
+                    domain: domain as u16,
+                    market_id: env.asset_market_id(domain as u16 / 2),
+                    authority_epoch: 0,
+                    intent_id: 0,
+                    amount,
+                },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(destination, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&admin],
+            )
+            .expect("public top-up from one finite SPL endowment");
+        }
+        env.sync_insurance_ledger_with_cu(ledger.pubkey());
+        let mint_frame = env.svm.get_account(&env.mint).unwrap();
+        assert_eq!(Mint::unpack(&mint_frame.data).unwrap().supply, FUNDED);
+        let withdraw = |env: &mut V16CuEnv, asset, amount, attach_ledger| {
+            env.svm.expire_blockhash();
+            let mut accounts = vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ];
+            if attach_ledger {
+                accounts.push(AccountMeta::new(ledger.pubkey(), false));
+            }
+            env.send(
+                env.withdraw_insurance_asset_instruction(admin.pubkey(), asset, amount),
+                accounts,
+                &[&admin],
+            )
+        };
+        let mut budgets = BUDGETS;
+        let mut paid = 0u64;
+        let mut recorded_withdrawals = 0u128;
+        let mut prefixes = Vec::new();
+        let mut max_cu = 0;
+        for (step, (asset, amount)) in WITHDRAWALS.into_iter().enumerate() {
+            if step == 2 {
+                env.resolve();
+                assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+                // The vault can pay 18, but asset 0 has only 17 left. Neither ledger history nor
+                // resolution may turn another asset's insurance into its withdrawal allowance.
+                let keys = [
+                    env.market,
+                    env.vault,
+                    destination,
+                    ledger.pubkey(),
+                    admin.pubkey(),
+                ];
+                let before = keys.map(|key| env.svm.get_account(&key).unwrap());
+                let error = withdraw(&mut env, 0, 18, ledger_mask != 0).unwrap_err();
+                assert!(
+                    error.contains(&format!(
+                        "Custom({})",
+                        PercolatorError::EngineLockActive as u32
+                    )),
+                    "{error}"
+                );
+                assert_eq!(keys.map(|key| env.svm.get_account(&key).unwrap()), before);
+            }
+            let attached = ledger_mask & (1 << step) != 0;
+            let ledger_before = env.svm.get_account(&ledger.pubkey()).unwrap();
+            let cu = withdraw(&mut env, asset, amount, attached)
+                .expect("optional ledger history must not strand a valid insurance withdrawal");
+            assert_cu_within("INV-064 retained-ledger withdrawal", cu, CUSTODY_CU_LIMIT);
+            max_cu = max_cu.max(cu);
+            let long = 2 * usize::from(asset);
+            let long_debit = amount.min(budgets[long]);
+            budgets[long] -= long_debit;
+            budgets[long + 1] -= amount - long_debit;
+            paid += u64::try_from(amount).unwrap();
+            let remaining = u128::from(FUNDED - paid);
+            let group = env.market_state().1;
+            assert_eq!(&group.insurance_domain_budget[..4], &budgets);
+            assert_eq!(
+                (group.insurance, group.vault, group.c_tot),
+                (remaining, remaining, 0)
+            );
+            assert_eq!(env.token_amount(destination), paid);
+            assert_eq!(env.token_amount(env.vault), FUNDED - paid);
+            assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_frame);
+            if attached {
+                recorded_withdrawals += amount;
+                let record = state::read_insurance_ledger(
+                    &env.svm.get_account(&ledger.pubkey()).unwrap().data,
+                )
+                .unwrap();
+                assert_eq!(record.total_withdrawn_atoms, recorded_withdrawals);
+                assert_eq!(
+                    record.last_observed_insurance_atoms,
+                    budgets[long] + budgets[long + 1]
+                );
+            } else {
+                assert_eq!(
+                    env.svm.get_account(&ledger.pubkey()).unwrap(),
+                    ledger_before
+                );
+            }
+            prefixes.push((budgets, group.insurance, group.vault, paid));
+        }
+        assert_eq!(paid, FUNDED);
+        if let Some(expected) = &reference {
+            assert_eq!(&prefixes, expected, "ledger mask {ledger_mask:05b}");
+        } else {
+            reference = Some(prefixes);
+        }
+        println!("INV-064 ledger mask {ledger_mask:05b}: five payouts, max CU {max_cu}");
+    }
+}
+
 // Live and resolved insurance withdrawal is uniformly asset-scoped through tag 57. The old
 // asset-0-only rate-limit tag, its policy-update tag, and the market-wide terminal tag must reject
 // raw instruction bytes without mutating state.
