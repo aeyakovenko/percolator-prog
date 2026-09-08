@@ -167,6 +167,86 @@ cargo fmt --check
 git diff --check
 ```
 
+## Pending-obligation domain-release checkpoint (2026-09-08)
+
+Tests/docs-only increment based on local conformance commit
+`379ce5a50f39089c2d759e65502e59556132395a`, developed in an isolated worktree.
+`cu/inv_039_pending_loss_obligation_durability.rs` adds one test:
+`v16_program_pending_obligations_release_only_the_settled_domain_across_payout_orders`.
+No production code, engine proofs, invariant statuses, or reopening verdicts change.
+
+Eight public LiteSVM histories cross mirrored long/short orientations, two debtor-settlement
+orders, and two resolved-payout orders. Two independent assets have unequal quantities and
+30,000/40,000-atom debts. Public cranks book each creditor's PnL while the opposing debtor
+remains unrefreshed. Owner-signed Recovery forfeits then remove creditor exposure but must
+retain its exact owner, asset, side, and loss weight. Settling and releasing one pair must
+leave the other pair's portfolios, asset, source-credit/backing domains, and insurance spending
+unchanged. The oracle predicts basis, OI, stored counts, pending counts, and weights from the
+public input history, rather than inferring the expected pending state from the deployed output.
+
+Each debtor settlement is first composed with a later invalid `ClosePortfolio`. The first
+instruction must succeed before the second rejects with `InstructionError(3, Custom(21))`.
+All market, portfolio, owner, admin, mint, vault, and destination account snapshots must be
+restored exactly, including bytes, lamports, owner, executable, and rent fields. The distinct
+transaction fee payer is excluded. Retrying the debtor settlement succeeds, and one unsigned
+crank releases only that domain's obligation. The failed close is also capital-gated; this is
+late transaction rollback evidence, not a new proof of the pending-only close gate.
+
+After both debts settle, resolution and unsigned payouts must deliver exactly
+`[230000, 150000, 340000, 210000, 777]` to the five owners in either payout order. Entitlements
+are calculated from deposits and signed quantity/price inputs. Every step reconciles token
+custody and account capital/PnL totals; no payout may exceed its owner's entitlement. Finalized
+top-up retries have exact no-op frames. All five portfolios reach economic terminal state and
+then allow separate owner-signed mechanical deletion. The vault ends empty. Forfeit/release
+calls are capped at 325,000 CU; payout/deletion calls at 300,000 CU.
+
+Construction itself uses System account creation, SPL mint initialization/minting, ATA creation,
+and public wrapper initialization/deposits. Clock advancement, blockhash freshness, and initial
+signer SOL funding use LiteSVM environment controls. No program-owned account bytes or economic
+state are injected, and no production or engine transition is invoked as the expected-value oracle.
+
+Duplicate review: existing INV-039 owns a single-domain Recovery pair; INV-041 permutes four
+participants within one asset; INV-037/076 own cure and close-drift residual partitions; INV-086
+owns bounded single-episode frontiers. This increment adds the coupled *independent-domain*
+release frame plus staged-debt transaction rollback and exact owner payout through the same
+public history. It adds bounded evidence for INV-039/041/048/066/067/081/086, not another engine
+proof or a finding-specific regression. INV-037/076 receive no new nonzero-residual evidence.
+INV-073 evidence requires cooperative debtor signatures before unsigned release/payout.
+
+Row 419 remains OPEN. Resolution while opposing economic debt is still unsettled, bankruptcy
+and adverse close drift, B/ADL, liens/backing/insurance-funded losses, all trade transports,
+missing-owner-signature continuations, and whole-route induction remain outside this matrix.
+
+Verification uses the supplied cached SBF, SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`:
+
+```sh
+export PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_039_pending_loss_obligation_durability::v16_program_pending_obligations_release_only_the_settled_domain_across_payout_orders \
+  inv_039_pending_loss_obligation_durability::v16_program_pending_obligation_blocks_close_then_releases \
+  inv_037_exact_residual_partition::v16_program_insurance_covered_liquidation_close_ledger_partitions_exactly \
+  inv_041_deterministic_allocation_and_caller_order_independence::v16_program_four_party_recovery_exit_orders_are_economically_identical \
+  inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_public_close_zero_cure_rejects_atomically_and_terminal_progress_remains \
+  inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_unrelated_asset_slot_drift_preserves_local_close_progress_and_live_scope
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row \
+  inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter
+rustfmt --edition 2021 --check tests/invariants/cu/inv_039_pending_loss_obligation_durability.rs
+git diff --check
+```
+
+Results: combined SBF command **6 passed, 0 failed** (10.62s); metadata command **4 passed,
+0 failed** (0.02s); formatting and whitespace checks exit 0. The new exact selector alone
+passed all eight worlds (4.43s), reporting 16 staged-settlement rollbacks, 16 domain-local
+releases, and 40 exact payouts and terminal deletions. Existing test-support dead-code warnings
+and the Solana-client future-incompatibility warning remain. No full unfiltered suite or engine
+proof rerun is claimed.
+
 ## Wrapper arithmetic conformance checkpoint (2026-09-08)
 
 Finding-blind tests/docs increment from
