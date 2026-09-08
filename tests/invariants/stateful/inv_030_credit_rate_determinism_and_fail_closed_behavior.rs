@@ -12,6 +12,11 @@
 //! primary and foreign source domain after every generated public action with overflow-free u128
 //! long division independent of the engine's U256 routine. The persisted minimized seed is the
 //! public trace that exposed the pre-fix lapsed-Fresh crank loop.
+//! `v16_program_source_credit_saturation_boundary_preserves_claims_and_advances_epoch` holds a
+//! publicly settled claim fixed on each source side while one-atom provider top-ups reach exact
+//! full backing and then exceed it. Every backing mutation must advance the credit epoch even when
+//! the rate remains capped, with exact SPL deltas and framed claims, portfolios, and unrelated
+//! source domains.
 //! `v16_program_liened_backing_expiry_route_matrix_preserves_owner_reduction` crosses all four
 //! public trade families with both source sides. Every world creates a real counterparty lien,
 //! expires that live lien through the public crank, and proves the resulting impaired backing
@@ -40,7 +45,7 @@ use crate::support::{
     },
     v16_svm::{MarketConfig, V16Svm},
 };
-use percolator::{BackingBucketStatusV16, CREDIT_RATE_SCALE, POS_SCALE};
+use percolator::{BackingBucketStatusV16, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
 
 fn inv_030_observations(env: &V16Svm, assets: &[u16]) -> Vec<CrankObservationHint> {
@@ -471,6 +476,126 @@ fn v16_program_liened_backing_expiry_route_matrix_preserves_owner_reduction() {
         for winner_long in [false, true] {
             run_liened_backing_expiry_world(route, winner_long);
         }
+    }
+}
+
+#[test]
+fn v16_program_source_credit_saturation_boundary_preserves_claims_and_advances_epoch() {
+    const CLAIM_ATOMS: u128 = 20 * 5;
+    const EXPIRY_SLOT: u64 = 10;
+
+    for (domain, direction, winning_mark) in [(1usize, 1i128, 105u64), (0, -1, 95)] {
+        let mut env = V16Svm::new(
+            [0x3a + domain as u8; 32],
+            MarketConfig {
+                initial_price: 100,
+                maintenance_margin_bps: 1_000,
+                initial_margin_bps: 1_000,
+                max_price_move_bps_per_slot: 500,
+                max_accrual_dt_slots: 1,
+                min_funding_lifetime_slots: 1,
+                actor_deposits: [1_000, 1_000, 1, 1, 1],
+                actor_token_balances: [1_000, 1_000, 1, 1, 1],
+                ..MarketConfig::default()
+            },
+        );
+        env.begin_public_trace();
+        env.top_up_backing_bucket(domain as u16, CLAIM_ATOMS - 1, EXPIRY_SLOT)
+            .expect("provider funds one atom below the prospective claim");
+        env.trade_no_cpi(0, 1, 0, direction * 20 * POS_SCALE as i128, 100, 0)
+            .expect("public trade opens the claim-producing pair");
+        env.warp_to_slot(2);
+        env.push_auth_mark(0, 2, winning_mark)
+            .expect("authenticated mark creates the exact 100-atom claim");
+        // Leave the counterparty loss unsettled so it cannot fund the discounted source claim.
+        for actor in [4usize, 0] {
+            inv_030_crank_actor_steps(&mut env, actor, 2, &[0], "saturation boundary setup");
+        }
+
+        let checkpoint = |env: &V16Svm, backing_atoms: u128| {
+            let label = format!("INV-030 saturation domain={domain} backing={backing_atoms}");
+            assert_inv_030_census(&label, env);
+            let (_, group) = env.primary_market_state();
+            assert_source_credit_rates(&label, &group).expect("independent boundary rate oracle");
+            let source = group.source_credit[domain];
+            assert_eq!(source.positive_claim_bound_num, CLAIM_ATOMS * BOUND_SCALE);
+            assert_eq!(source.exact_positive_claim_num, CLAIM_ATOMS * BOUND_SCALE);
+            assert_eq!(
+                group.source_claim_bound_total_num,
+                CLAIM_ATOMS * BOUND_SCALE
+            );
+            assert_eq!(
+                source.fresh_reserved_backing_num,
+                backing_atoms * BOUND_SCALE
+            );
+            assert_eq!(source.valid_liened_backing_num, 0);
+            assert_eq!(source.impaired_liened_backing_num, 0);
+            assert_eq!(source.insurance_credit_reserved_num, 0);
+            assert_eq!(source.valid_liened_insurance_num, 0);
+            assert_eq!(source.impaired_liened_insurance_num, 0);
+            assert_eq!(
+                source.credit_rate_num,
+                backing_atoms.min(CLAIM_ATOMS) * CREDIT_RATE_SCALE / CLAIM_ATOMS,
+                "{label}: rate must floor below full backing and clamp at full backing"
+            );
+            assert_eq!(
+                group.source_backing_buckets[domain].status,
+                BackingBucketStatusV16::Fresh
+            );
+            assert_eq!(env.primary_portfolio(0).pnl.get(), CLAIM_ATOMS as i128);
+            group
+        };
+
+        let mut before = checkpoint(&env, CLAIM_ATOMS - 1);
+        let portfolios_before = env.all_primary_portfolio_data();
+        let foreign_market_before = env.market_data(true);
+        let supply_before = env.token_supply_observed();
+        let vault_before = env.token_amount(env.vault);
+        let provider_source_before = env.token_amount(env.provider_source_token);
+        let provider_destination_before = env.token_amount(env.provider_destination_token);
+
+        for (step, backing_atoms) in [CLAIM_ATOMS, CLAIM_ATOMS + 1].into_iter().enumerate() {
+            env.top_up_backing_bucket(domain as u16, 1, EXPIRY_SLOT)
+                .expect("one-atom top-up crosses the saturation boundary");
+            let deposited = step as u64 + 1;
+            let after = checkpoint(&env, backing_atoms);
+            assert_source_credit_rate_transition("saturation boundary step", &before, &after)
+                .expect("backing mutation must advance the epoch even at an unchanged capped rate");
+            assert!(
+                after.source_credit[domain].credit_epoch
+                    > before.source_credit[domain].credit_epoch
+            );
+            for (other_domain, (old, new)) in before
+                .source_credit
+                .iter()
+                .zip(&after.source_credit)
+                .enumerate()
+            {
+                if other_domain != domain {
+                    assert_eq!(old, new, "unrelated source domain {other_domain} changed");
+                }
+            }
+            assert_eq!(env.all_primary_portfolio_data(), portfolios_before);
+            assert_eq!(env.market_data(true), foreign_market_before);
+            assert_eq!(env.token_supply_observed(), supply_before);
+            assert_eq!(env.token_amount(env.vault), vault_before + deposited);
+            assert_eq!(after.vault, u128::from(vault_before + deposited));
+            assert_eq!(
+                env.token_amount(env.provider_source_token),
+                provider_source_before - deposited
+            );
+            assert_eq!(
+                env.token_amount(env.provider_destination_token),
+                provider_destination_before
+            );
+            before = after;
+        }
+
+        let trace = env.finish_public_trace();
+        trace
+            .validate_public_execution()
+            .expect("saturation boundary history must be public and rollback-exact");
+        assert_eq!(trace.out_of_band_economic_mutations, 0);
     }
 }
 
