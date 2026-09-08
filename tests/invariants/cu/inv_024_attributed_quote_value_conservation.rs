@@ -6,8 +6,13 @@
 //! and assert aggregate custody, capital, insurance, backing, PnL, and fee
 //! conservation across realistic trade, crank, liquidation, funding, and
 //! withdrawal sequences.
+//! The maintenance-policy sibling adds live owner entitlements across a policy
+//! interleaving whose two histories have identical aggregate custody and fees.
 
 use super::*;
+
+#[path = "inv_024_maintenance_policy_entitlement.rs"]
+mod maintenance_policy_entitlement;
 
 #[path = "inv_024_recycled_reward_terminal_history.rs"]
 mod recycled_reward_terminal_history;
