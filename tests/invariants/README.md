@@ -135,6 +135,35 @@ cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --n
   inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter \
   inv_079_public_reachability_evidence::v16_public_instruction_coverage_registry_matches_production_roster
 rustfmt --edition 2021 --check tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs
+```
+
+## Wrapper clipped-fee retry checkpoint (2026-09-08)
+
+`cu/inv_040_no_fee_seniority.rs` adds one finite public-route test,
+`v16_program_clipped_maintenance_refill_retries_cannot_recharge_or_redirect`.
+A 30-atom maintenance obligation collects only 7 atoms; a 3,333-bps self-reward
+returns 2 atoms and keeps the same portfolio alive. After a public 17-atom refill,
+four same-slot retries switch between separate, absent, and self reward recipients.
+Every retry preserves the complete ten-account frame, excluding only the network
+fee payer. Both owners withdraw their exact 19/41-atom balances through SPL and
+close their portfolios; only the independently calculated 5 retained atoms remain
+in insurance and custody.
+
+This extends the well-funded retry and one-shot clipped-arithmetic witnesses with
+a same-incarnation refill/recipient-switch history. `V16CuEnv` supplies market and
+external token endowment fixtures; all tested portfolio and custody transitions
+use public instructions, with no injected engine state. This is INV-040 wrapper
+composition evidence, not an engine proof or INV-059 episode-history closure.
+Active legs, source backing, nonzero PnL, later-slot accrual and liquidation/matcher
+histories are outside this test; invariant verdicts and method status are unchanged.
+
+The exact test passed (1/1) using the cached default-feature SBF, SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+No SBF rebuild, matcher artifact, engine proof or broad test rerun was needed:
+
+```sh
+CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so cargo test --locked --offline --test v16_cu inv_040_no_fee_seniority::v16_program_clipped_maintenance_refill_retries_cannot_recharge_or_redirect -- --exact --nocapture
+cargo fmt --check
 git diff --check
 ```
 
