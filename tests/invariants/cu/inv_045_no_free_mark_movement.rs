@@ -20,6 +20,8 @@
 //! oracle-failure, and maximum-shape evidence to those chains.
 //! The `accepted_price_reward` child adds fresh-feed lag/catchup composition with
 //! independent per-actor fee/PnL attribution and exact keeper SPL withdrawal.
+//! The `staggered_mark_envelope` child compares a two-asset batch with single reductions
+//! when distinct mark ages straddle the accrual horizon, checking each paid movement independently.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -29,6 +31,9 @@ use super::*;
 
 #[path = "inv_045_accepted_price_reward.rs"]
 mod accepted_price_reward;
+
+#[path = "inv_045_staggered_mark_envelope.rs"]
+mod staggered_mark_envelope;
 
 #[test]
 fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
