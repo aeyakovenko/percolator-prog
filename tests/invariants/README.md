@@ -822,6 +822,63 @@ rustfmt --edition 2021 --check --config skip_children=true tests/invariants/publ
 git diff --check
 ```
 
+### INV-008 retained withdrawal after exact redeposit
+
+`v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody` in
+[`cu/inv_008_intent_uniqueness_and_bounded_replay.rs`](cu/inv_008_intent_uniqueness_and_bounded_replay.rs)
+adds a portfolio-withdrawal family history, not another insurance top-up refund test. System,
+SPL Token, ATA and public wrapper instructions create and fund the fixture; no program-owned
+bytes are installed, restored or repaired directly. One finite 123-atom endowment supplies the
+entire history, with no later minting or external replenishment.
+
+A retained 37-atom withdrawal first appears twice in one transaction. The trailing stale copy
+rolls back the successful wrapper/SPL prefix, leaving that exact request usable once standalone.
+Both orders of a current 37-atom redeposit and the consumed withdrawal then fail atomically.
+The unchanged redeposit succeeds alone and restores the original complete user-token, vault and
+mint accounts, as well as the original capital and accounting vault. The old withdrawal still
+rejects. A new withdrawal differing only in owner-state sequence also survives both bundle
+orders with the stale request before executing once; both spent withdrawals subsequently reject.
+
+All 12 suffix envelopes have distinct verified signatures and frozen instruction bytes/metas.
+Nine `EngineStale` failures check the exact instruction index, expected completed prefix and
+full compiled-account rollback, including non-payer metadata/lamports and absent accounts. The
+fee payer changes only by the exact signature fee. An independent fixed-amount oracle checks
+capital, accounting/SPL vaults, owner tokens, unchanged identity/position episode and control
+watermarks, and unchanged mint supply. The remaining stock can fund another 37-atom debit even
+before redeposit, so balance exhaustion cannot supply the replay witness. Exactly two distinct
+withdrawal intents pay 37 atoms each; one redeposit returns 37, leaving the owner with 37.
+
+This is bounded evidence related to counterexample 415 and the Deposit/Withdraw replay rows,
+not closure of `WithdrawInsuranceAsset`: that instruction's current wire has no signed stock
+sequence. Its disposition now records the open boundary instead of claiming that binding.
+`invariant_status.tsv` is unchanged. Partial fills, insurance-stock replenishment, detached
+signatures, durable nonces, expiry products and arbitrary histories remain outside this test.
+Only local production/tests/docs were inspected; no GitHub PR/issue/holdout diffs were used.
+
+Verification reuses the supplied default-feature wrapper SBF, SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`, without rebuilding it:
+
+```sh
+export PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+touch tests/v16_cu.rs tests/invariants/cu/inv_008_intent_uniqueness_and_bounded_replay.rs tests/invariants/inv_008_replay_disposition.tsv tests/invariants/README.md
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody -- --list --exact
+touch tests/v16_cu.rs tests/invariants/cu/inv_008_intent_uniqueness_and_bounded_replay.rs tests/invariants/inv_008_replay_disposition.tsv tests/invariants/README.md
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody -- --exact --nocapture
+touch tests/v16_cu.rs tests/invariants/cu/inv_008_intent_uniqueness_and_bounded_replay.rs tests/invariants/inv_008_replay_disposition.tsv tests/invariants/README.md
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay:: -- --nocapture
+rustfmt --edition 2021 --check --config skip_children=true tests/v16_cu.rs tests/invariants/cu/inv_008_intent_uniqueness_and_bounded_replay.rs
+git diff --check
+```
+
+On 2026-09-08, the exact selector collected one test and passed (12 transactions, 9 exact stale
+rollbacks, maximum 52,980 CU). All seven INV-008 CU tests also passed, including the updated
+disposition roster; the new history's maximum in that run was 42,480 CU, below the 300,000-CU
+custody bound. Formatting and whitespace checks passed. Only the existing `solana-client`
+future-compatibility warning appeared. This is focused cached-artifact conformance, not a fresh
+SBF build or full `v16_cu`/public-SBF/stateful suite certification.
+
 ## Wrapper custody checkpoint (2026-09-08)
 
 Finding-blind additions based on `origin/codex/invariant-fidelity-reopen-20260904` at

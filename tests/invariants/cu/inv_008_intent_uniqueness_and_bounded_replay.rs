@@ -15,6 +15,10 @@
 //! orders, then returns the exact deposited tokens to the source. Restoring the original custody
 //! and insurance balances must not restore consent: both retained routes stay stale, while a
 //! fresh alternate-route intent remains live. This is not a terminal payout or partial-fill probe.
+//! A separate portfolio-withdrawal history restores capital and SPL custody by redepositing the
+//! exact payout. Duplicate and mixed deposit/withdraw bundles roll back their successful prefix;
+//! neither restored balances nor a fresh owner sequence can revive the retained withdrawal.
+//! This does not certify insurance-withdrawal stock binding (counterexample 415 remains open).
 //! This is bounded asset-0 evidence using fresh blockhash envelopes around retained instruction
 //! bytes, not detached-signature, durable-nonce, or arbitrary-history coverage.
 
@@ -750,4 +754,300 @@ fn v16_insurance_refund_does_not_revive_consumed_cross_route_intent() {
         );
         eprintln!("insurance refund direct_first={direct_first}: 11 transactions, max CU={max_cu}");
     }
+}
+
+#[test]
+fn v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+    use litesvm::types::FailedTransactionMetadata;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const FUNDING: u64 = 123;
+    const AMOUNT: u64 = 37;
+
+    let mut env = inv018_public_spl_market(6);
+    let owner = Keypair::new();
+    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    let portfolio_key = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &portfolio_key,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    let portfolio = portfolio_key.pubkey();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .expect("initialize System-created portfolio through the public wrapper");
+    let user_token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &env.mint,
+            &user_token,
+            &env.admin.pubkey(),
+            &[],
+            FUNDING,
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .expect("one finite public SPL endowment");
+
+    let deposit_accounts = vec![
+        AccountMeta::new(owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+        AccountMeta::new(user_token, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    env.send(
+        env.deposit_ix(portfolio, FUNDING as u128),
+        deposit_accounts.clone(),
+        &[&owner],
+    )
+    .expect("public deposit funds the withdrawal without injected program state");
+
+    let program_id = env.program_id;
+    let retained = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(user_token, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: env.withdraw_ix(portfolio, AMOUNT as u128).encode(),
+    };
+    let portfolio_id = env.portfolio_id(portfolio);
+    let position_epoch = env.portfolio_position_epoch(portfolio);
+    let sequence = env.portfolio_matcher_sequence(portfolio);
+    assert_eq!(sequence, 1, "only the initial deposit consumed owner state");
+    let custody_keys = [user_token, env.vault, env.mint];
+    let custody = |env: &V16CuEnv| custody_keys.map(|key| env.svm.get_account(&key).unwrap());
+    let custody_before = custody(&env);
+    assert_eq!(
+        Mint::unpack(&custody_before[2].data).unwrap().supply,
+        FUNDING
+    );
+    let controls_before = env.control_sequences(0);
+
+    let assert_economics = |env: &V16CuEnv, paid: u64, expected_sequence: u64| {
+        let remaining = u128::from(FUNDING - paid);
+        let (_, group) = env.market_state();
+        assert_eq!(group.mode, MarketModeV16::Live);
+        assert_eq!(
+            (group.vault, group.c_tot, group.insurance),
+            (remaining, remaining, 0)
+        );
+        assert_eq!(group.materialized_portfolio_count, 1);
+        assert_eq!(group.assets[0].oi_eff_long_q, 0);
+        assert_eq!(group.assets[0].oi_eff_short_q, 0);
+        assert_eq!(env.portfolio_state(portfolio).capital.get(), remaining);
+        assert_eq!(env.portfolio_state(portfolio).pnl.get(), 0);
+        assert_eq!(env.portfolio_id(portfolio), portfolio_id);
+        assert_eq!(env.portfolio_position_epoch(portfolio), position_epoch);
+        assert_eq!(env.portfolio_matcher_sequence(portfolio), expected_sequence);
+        assert_eq!(env.control_sequences(0), controls_before);
+        assert_eq!(env.token_amount(user_token), paid);
+        assert_eq!(env.token_amount(env.vault), FUNDING - paid);
+        assert_eq!(env.svm.get_account(&env.mint).unwrap(), custody_before[2]);
+    };
+    let assert_completed_prefix = |logs: &[String], count: usize| {
+        for program in [program_id, spl_token::ID] {
+            assert_eq!(
+                logs.iter()
+                    .filter(|line| *line == &format!("Program {program} success"))
+                    .count(),
+                count,
+                "only the expected prefix and its SPL transfer may complete"
+            );
+        }
+        if count == 0 {
+            assert!(
+                !logs
+                    .iter()
+                    .any(|line| { line.starts_with(&format!("Program {} invoke", spl_token::ID)) }),
+                "standalone stale request must stop before token CPI"
+            );
+        }
+    };
+    let assert_stale = |error: FailedTransactionMetadata, completed_prefix: usize| {
+        assert_eq!(
+            error.err,
+            TransactionError::InstructionError(
+                2 + completed_prefix as u8,
+                InstructionError::Custom(PercolatorError::EngineStale as u32),
+            )
+        );
+        assert_completed_prefix(&error.meta.logs, completed_prefix);
+    };
+    let mut signatures = BTreeSet::new();
+    let mut max_cu = 0;
+    let mut committed = 0;
+    let mut rejected = 0;
+    let mut execute = |env: &mut V16CuEnv, instructions: Vec<Instruction>| {
+        // Never use send_tx's binding adapters for retained instructions. Only renew the envelope.
+        env.svm.expire_blockhash();
+        let mut message = vec![heap_ix(), cu_ix()];
+        message.extend(instructions);
+        let tx = Transaction::new_signed_with_payer(
+            &message,
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &owner],
+            env.svm.latest_blockhash(),
+        );
+        tx.verify().expect("valid independently signed envelope");
+        assert!(signatures.insert(tx.signatures[0].to_string()));
+        let before: Vec<_> = tx
+            .message
+            .account_keys
+            .iter()
+            .map(|key| (*key, env.svm.get_account(key)))
+            .collect();
+        let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        expected_payer.lamports -= FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let result = env.svm.send_transaction(tx);
+        let meta = match &result {
+            Ok(meta) => {
+                committed += 1;
+                assert_completed_prefix(&meta.logs, 1);
+                meta
+            }
+            Err(error) => {
+                rejected += 1;
+                for (key, account) in before {
+                    if key != env.payer.pubkey() {
+                        assert_eq!(
+                            env.svm.get_account(&key),
+                            account,
+                            "replay must restore all bytes, metadata and lamports at {key}"
+                        );
+                    }
+                }
+                &error.meta
+            }
+        };
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()).unwrap(),
+            expected_payer
+        );
+        assert_eq!(env.svm.get_account(&env.mint).unwrap(), custody_before[2]);
+        assert!(meta.compute_units_consumed > 0);
+        assert_cu_within(
+            "withdrawal/redeposit replay",
+            meta.compute_units_consumed,
+            CUSTODY_CU_LIMIT,
+        );
+        max_cu = max_cu.max(meta.compute_units_consumed);
+        result
+    };
+
+    assert_economics(&env, 0, sequence);
+    let error = execute(&mut env, vec![retained.clone(), retained.clone()])
+        .expect_err("second copy aborts even the first successful withdrawal and SPL transfer");
+    assert_stale(error, 1);
+    assert_economics(&env, 0, sequence);
+    execute(&mut env, vec![retained.clone()])
+        .expect("exact original request remains live after duplicate-bundle rollback");
+    assert_economics(&env, AMOUNT, sequence + 1);
+    assert!(
+        FUNDING - AMOUNT >= AMOUNT,
+        "retries are not blocked by depleted stock"
+    );
+    assert_stale(
+        execute(&mut env, vec![retained.clone()]).expect_err("standalone retained retry is stale"),
+        0,
+    );
+
+    let redeposit = Instruction {
+        program_id,
+        accounts: deposit_accounts,
+        data: env.deposit_ix(portfolio, AMOUNT as u128).encode(),
+    };
+    for redeposit_first in [false, true] {
+        let bundle = if redeposit_first {
+            vec![redeposit.clone(), retained.clone()]
+        } else {
+            vec![retained.clone(), redeposit.clone()]
+        };
+        assert_stale(
+            execute(&mut env, bundle).expect_err("redeposit cannot revive a consumed withdrawal"),
+            usize::from(redeposit_first),
+        );
+        assert_economics(&env, AMOUNT, sequence + 1);
+    }
+    execute(&mut env, vec![redeposit])
+        .expect("unchanged current deposit survives both aborted instruction orders");
+    assert_eq!(
+        custody(&env),
+        custody_before,
+        "public redeposit restores exact original custody"
+    );
+    assert_economics(&env, 0, sequence + 2);
+    assert_stale(
+        execute(&mut env, vec![retained.clone()])
+            .expect_err("restored capital and custody cannot restore the old withdrawal consent"),
+        0,
+    );
+
+    let fresh = Instruction {
+        data: env.withdraw_ix(portfolio, AMOUNT as u128).encode(),
+        ..retained.clone()
+    };
+    assert_eq!(
+        fresh.data,
+        ProgInstruction::Withdraw {
+            portfolio_id,
+            expected_sequence: sequence + 2,
+            amount: AMOUNT as u128,
+        }
+        .encode(),
+        "fresh intent changes only its owner-state sequence"
+    );
+    for fresh_first in [false, true] {
+        let bundle = if fresh_first {
+            vec![fresh.clone(), retained.clone()]
+        } else {
+            vec![retained.clone(), fresh.clone()]
+        };
+        assert_stale(
+            execute(&mut env, bundle).expect_err("old retry also aborts a current withdrawal"),
+            usize::from(fresh_first),
+        );
+        assert_economics(&env, 0, sequence + 2);
+    }
+    execute(&mut env, vec![fresh.clone()])
+        .expect("exact current withdrawal survives stale-first and successful-prefix rollbacks");
+    assert_economics(&env, AMOUNT, sequence + 3);
+    for replay in [retained, fresh] {
+        assert_stale(
+            execute(&mut env, vec![replay])
+                .expect_err("both consumed withdrawal intents stay stale"),
+            0,
+        );
+        assert_economics(&env, AMOUNT, sequence + 3);
+    }
+    assert_eq!((committed, rejected, signatures.len()), (3, 9, 12));
+    eprintln!(
+        "withdrawal/redeposit: 12 transactions, 9 exact stale rollbacks, max CU={max_cu}; \
+         two distinct withdrawals paid {AMOUNT} each, one redeposit returned {AMOUNT}"
+    );
 }
