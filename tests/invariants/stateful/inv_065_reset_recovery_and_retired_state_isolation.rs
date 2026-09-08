@@ -42,6 +42,10 @@
 //! orientations on each asset, and both lifecycle orders. Each successful transition must frame
 //! the other asset's profile, users, matcher state, backing ledger, and SPL accounts before both
 //! episodes restart and all four users exit with order-independent payouts.
+//! `v16_program_reused_asset_second_shutdown_rearms_owner_window_and_keeper_exit` carries a
+//! completed reset/Recovery episode through restart or retirement/reactivation into a second
+//! shutdown. The old deadline is already past, but the new generation still admits an owner
+//! reduction and rejects early force-close; its own deadline enables keeper-only economic exit.
 //!
 //! This is bounded generated coverage, not exhaustive reset/recovery/retirement
 //! reachability.
@@ -50,9 +54,13 @@ use super::*;
 use crate::support::fuzz_model::{
     assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
 };
-use crate::support::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, TX_CU_LIMIT};
+use crate::support::v16_svm::{
+    MarketConfig, V16Svm, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT,
+};
 use percolator::{AssetLifecycleV16, SideModeV16, POS_SCALE};
-use percolator_prog::ix::CrankObservationHint;
+use percolator_prog::error::PercolatorError;
+use percolator_prog::ix::{CrankObservationHint, Instruction as ProgInstruction};
+use solana_sdk::signature::Signer;
 
 #[test]
 fn v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit() {
@@ -1520,6 +1528,337 @@ fn v16_program_unilateral_zero_oi_reset_route_side_matrix_finalizes_permissionle
                 seed[1] ^= u8::from(reducer_long);
                 seed[2] ^= asset_index as u8;
                 assert_public_reset_lifecycle(route, reducer_long, asset_index, seed);
+            }
+        }
+    }
+}
+
+fn assert_recovery_window_pair(env: &V16Svm, asset_index: u16, signed_size: i128) {
+    let asset = env.primary_market_state().1.assets[asset_index as usize];
+    assert_eq!(asset.oi_eff_long_q, signed_size.unsigned_abs());
+    assert_eq!(asset.oi_eff_short_q, signed_size.unsigned_abs());
+    assert_eq!(asset.mode_long, SideModeV16::Normal);
+    assert_eq!(asset.mode_short, SideModeV16::Normal);
+    for (actor, expected) in [(0, signed_size), (1, -signed_size)] {
+        let account = env.primary_portfolio(actor);
+        let leg = account
+            .legs
+            .iter()
+            .find(|leg| leg.active != 0 && leg.asset_index.get() == u32::from(asset_index));
+        assert_eq!(
+            leg.map(|leg| leg.basis_pos_q.get()),
+            (expected != 0).then_some(expected)
+        );
+    }
+    let count = u64::from(signed_size != 0);
+    assert_eq!(asset.stored_pos_count_long, count);
+    assert_eq!(asset.stored_pos_count_short, count);
+    assert_eq!(asset.pending_obligation_count_long, 0);
+    assert_eq!(asset.pending_obligation_count_short, 0);
+}
+
+fn run_second_shutdown_window(
+    route: TradeRoute,
+    reducer_long: bool,
+    asset_index: u16,
+    retire_and_reactivate: bool,
+    seed: [u8; 32],
+) -> Result<(), String> {
+    const KEEPER: usize = 4;
+    const DELAY: u64 = 5;
+    const FIRST_SHUTDOWN: u64 = 1;
+    const RENEW: u64 = 8;
+    const SECOND_SHUTDOWN: u64 = 12;
+    const SECOND_DEADLINE: u64 = SECOND_SHUTDOWN + DELAY;
+
+    let config = MarketConfig::default();
+    let mut env = V16Svm::new(seed, config);
+    let supply = env.token_supply_observed();
+    let initial_custody = env.token_amount(env.vault);
+    let initial_sources = env.all_token_account_data();
+    let creator_source = env.token_amount(env.actors[2].source_token);
+    let signed_size = if reducer_long {
+        POS_SCALE as i128
+    } else {
+        -(POS_SCALE as i128)
+    };
+    env.begin_public_trace();
+    env.configure_permissionless_resolve(1_000, DELAY)?;
+    execute_trade_route(
+        &mut env,
+        route,
+        0,
+        1,
+        asset_index,
+        signed_size,
+        INITIAL_PRICE,
+        0,
+    )?;
+    env.rebalance_reduce(0, asset_index, POS_SCALE)?;
+    let pending = env.primary_market_state().1.assets[asset_index as usize];
+    assert_eq!(
+        if reducer_long {
+            pending.mode_short
+        } else {
+            pending.mode_long
+        },
+        SideModeV16::ResetPending
+    );
+    assert!(has_asset_leg(&env, 1, asset_index));
+    env.warp_to_slot(FIRST_SHUTDOWN);
+    env.shutdown_asset(asset_index, FIRST_SHUTDOWN)?;
+    let old_generation = env.primary_market_state().1.assets[asset_index as usize].market_id;
+    assert_eq!(
+        env.primary_profile(asset_index as usize)
+            .last_good_oracle_slot,
+        FIRST_SHUTDOWN
+    );
+    env.crank(1, FIRST_SHUTDOWN, vec![])?;
+    env.finalize_reset_side(asset_index, u8::from(reducer_long))?;
+    assert_recovery_window_pair(&env, asset_index, 0);
+
+    // The previous Recovery deadline has elapsed before this slot is reused.
+    assert!(RENEW > FIRST_SHUTDOWN + DELAY);
+    if retire_and_reactivate {
+        env.warp_to_slot(RENEW - 1);
+        env.retire_asset(asset_index, RENEW - 1)
+            .map_err(|error| format!("retire cleaned Recovery asset: {error}"))?;
+        assert_eq!(
+            env.primary_market_state().1.assets[asset_index as usize].lifecycle,
+            AssetLifecycleV16::Retired
+        );
+        env.update_market_init_fee_policy(1)
+            .map_err(|error| format!("configure reuse fee: {error}"))?;
+        env.warp_to_slot(RENEW);
+        env.activate_permissionless_asset(2, asset_index, RENEW, INITIAL_PRICE, 1)
+            .map_err(|error| format!("reactivate retired asset: {error}"))?;
+        env.configure_auth_mark(false, asset_index, RENEW, INITIAL_PRICE)?;
+    } else {
+        env.warp_to_slot(RENEW);
+        env.restart_asset_oracle(asset_index, RENEW, INITIAL_PRICE)?;
+    }
+    let renewed = env.primary_market_state().1.assets[asset_index as usize];
+    assert_eq!(renewed.lifecycle, AssetLifecycleV16::Active);
+    assert!(renewed.market_id > old_generation);
+    assert_recovery_window_pair(&env, asset_index, 0);
+    execute_trade_route(
+        &mut env,
+        route,
+        0,
+        1,
+        asset_index,
+        2 * signed_size,
+        INITIAL_PRICE,
+        0,
+    )
+    .map_err(|error| format!("open renewed generation: {error}"))?;
+    assert_recovery_window_pair(&env, asset_index, 2 * signed_size);
+
+    let before_active_close = lifecycle_rollback_snapshot(&env);
+    let error = env
+        .force_close_abandoned_asset(KEEPER, 0, 1, asset_index, RENEW, POS_SCALE)
+        .expect_err(
+            "elapsed old deadline does not authorize force-close of a renewed Active asset",
+        );
+    assert!(error.contains(&format!(
+        "Custom({})",
+        PercolatorError::EngineLockActive as u32
+    )));
+    assert_eq!(lifecycle_rollback_snapshot(&env), before_active_close);
+
+    env.warp_to_slot(SECOND_SHUTDOWN);
+    env.shutdown_asset(asset_index, SECOND_SHUTDOWN)
+        .map_err(|error| format!("second shutdown: {error}"))?;
+    let recovery = env.primary_market_state().1.assets[asset_index as usize];
+    assert_eq!(recovery.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(recovery.market_id, renewed.market_id);
+    assert_eq!(
+        env.primary_profile(asset_index as usize)
+            .last_good_oracle_slot,
+        SECOND_SHUTDOWN
+    );
+    assert_recovery_window_pair(&env, asset_index, 2 * signed_size);
+
+    env.warp_to_slot(SECOND_DEADLINE - 1);
+    let before_early_close = lifecycle_rollback_snapshot(&env);
+    let error = env
+        .force_close_abandoned_asset(KEEPER, 0, 1, asset_index, SECOND_DEADLINE - 1, POS_SCALE)
+        .expect_err("second Recovery must preserve its own complete owner window");
+    assert!(error.contains(&format!(
+        "Custom({})",
+        PercolatorError::EngineLockActive as u32
+    )));
+    assert_eq!(lifecycle_rollback_snapshot(&env), before_early_close);
+
+    let tokens_before_reduce = env.all_token_account_data();
+    execute_trade_route(
+        &mut env,
+        route,
+        0,
+        1,
+        asset_index,
+        -signed_size,
+        INITIAL_PRICE,
+        0,
+    )?;
+    assert_recovery_window_pair(&env, asset_index, signed_size);
+    assert_eq!(env.all_token_account_data(), tokens_before_reduce);
+    assert_eq!(
+        env.primary_profile(asset_index as usize)
+            .last_good_oracle_slot,
+        SECOND_SHUTDOWN
+    );
+    assert_public_stock_census("INV-065 second Recovery owner reduction", &env)?;
+    assert_public_encumbrance_census("INV-065 second Recovery owner reduction", &env)?;
+
+    // From this point only the unrelated keeper and transaction fee payer participate.
+    env.warp_to_slot(SECOND_DEADLINE);
+    env.force_close_abandoned_asset(KEEPER, 0, 1, asset_index, SECOND_DEADLINE, POS_SCALE)?;
+    assert_recovery_window_pair(&env, asset_index, 0);
+    let fee = u64::from(retire_and_reactivate);
+    assert_eq!(env.token_amount(env.vault), initial_custody + fee);
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let account = env.primary_portfolio(actor);
+        assert_eq!(account.capital.get(), config.actor_deposits[actor]);
+        assert_eq!(account.pnl.get(), 0);
+        assert_eq!(account.reserved_pnl.get(), 0);
+    }
+    assert_eq!(
+        env.primary_market_state().1.c_tot,
+        config.actor_deposits.iter().sum::<u128>()
+    );
+    assert_public_stock_census("INV-065 second Recovery permissionless close", &env)?;
+    assert_public_encumbrance_census("INV-065 second Recovery permissionless close", &env)?;
+
+    let cfg = env.primary_market_state().0;
+    let maturity = cfg.last_good_oracle_slot + cfg.permissionless_resolve_stale_slots;
+    assert!(maturity > SECOND_DEADLINE);
+    env.resolve_stale_permissionless(maturity)?;
+    assert_eq!(
+        env.primary_market_state().1.mode,
+        percolator::MarketModeV16::Resolved
+    );
+    env.warp_to_slot(maturity + DELAY);
+    let mut paid = 0u128;
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        env.close_resolved_primary(actor)?;
+        paid += config.actor_deposits[actor];
+        let account = env.primary_portfolio(actor);
+        assert_eq!(account.capital.get(), 0);
+        assert_eq!(account.pnl.get(), 0);
+        assert_eq!(account.reserved_pnl.get(), 0);
+        assert_eq!(account.fee_credits.get(), 0);
+        assert_eq!(account.cancel_deposit_escrow.get(), 0);
+        assert!(account.active_bitmap.iter().all(|word| word.get() == 0));
+        assert!(account
+            .source_domains
+            .iter()
+            .all(|source| !source.is_occupied()));
+        let close = account.close_progress.try_to_runtime().unwrap();
+        assert!(!close.active || (close.finalized && close.residual_remaining == 0));
+        let receipt = account.resolved_payout_receipt.try_to_runtime().unwrap();
+        assert!(!receipt.present || receipt.finalized);
+        assert_eq!(
+            u128::from(env.token_amount(env.actors[actor].destination_token)),
+            config.actor_deposits[actor]
+        );
+        let group = env.primary_market_state().1;
+        assert_eq!(
+            group.c_tot,
+            config.actor_deposits.iter().sum::<u128>() - paid
+        );
+        assert_eq!(group.vault, u128::from(initial_custody + fee) - paid);
+        assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+        assert_public_stock_census("INV-065 reused Recovery keeper payout", &env)?;
+        assert_public_encumbrance_census("INV-065 reused Recovery keeper payout", &env)?;
+    }
+    let terminal = env.primary_market_state().1;
+    assert_eq!(
+        terminal.materialized_portfolio_count,
+        PRIMARY_ACTOR_COUNT as u64
+    );
+    assert_eq!(terminal.vault, u128::from(fee));
+    assert_eq!(terminal.insurance, u128::from(fee));
+    assert_eq!(env.token_supply_observed(), supply);
+    assert_eq!(
+        env.token_amount(env.actors[2].source_token),
+        creator_source - fee
+    );
+    let terminal_tokens = env.all_token_account_data();
+    assert_eq!(initial_sources.len(), terminal_tokens.len());
+    for ((key, before), (after_key, after)) in initial_sources.iter().zip(&terminal_tokens) {
+        assert_eq!(key, after_key);
+        if *key != env.vault
+            && !env
+                .actors
+                .iter()
+                .any(|actor| actor.destination_token == *key)
+            && !(retire_and_reactivate && *key == env.actors[2].source_token)
+        {
+            assert_eq!(after, before, "unrelated SPL account {key}");
+        }
+    }
+    let trace = env.finish_public_trace();
+    trace.validate_public_execution()?;
+    assert_eq!(trace.steps.iter().filter(|step| !step.succeeded).count(), 2);
+    let suffix = &trace.steps[trace.steps.len() - (PRIMARY_ACTOR_COUNT + 2)..];
+    assert_eq!(
+        suffix[0].instruction_data,
+        ProgInstruction::ForceCloseAbandonedAsset {
+            asset_index,
+            now_slot: SECOND_DEADLINE,
+            close_q: POS_SCALE,
+        }
+        .encode()
+    );
+    for (index, step) in suffix.iter().enumerate() {
+        assert!(step.succeeded);
+        assert!(step.compute_units.unwrap() < TX_CU_LIMIT);
+        assert!(env
+            .actors
+            .iter()
+            .all(|actor| actor.signer.pubkey() != step.fee_payer));
+        for signer in &step.transaction_signers {
+            assert_ne!(signer.to_bytes(), cfg.marketauth);
+            assert!(
+                *signer == step.fee_payer
+                    || (index == 0 && *signer == env.actors[KEEPER].signer.pubkey())
+            );
+        }
+        if index != 0 {
+            assert_eq!(step.transaction_signers, vec![step.fee_payer]);
+            assert!(step.accounts.iter().all(|meta| !meta.is_signer));
+        }
+    }
+    eprintln!(
+        "INV-065 second shutdown {route:?}/long={reducer_long}/asset={asset_index}/retire={retire_and_reactivate}: calls={} keeper_suffix={} paid={paid} max_cu={}",
+        trace.steps.len(), suffix.len(), trace.steps.iter().filter_map(|step| step.compute_units).max().unwrap()
+    );
+    Ok(())
+}
+
+#[test]
+fn v16_program_reused_asset_second_shutdown_rearms_owner_window_and_keeper_exit() {
+    for (route_index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for reducer_long in [false, true] {
+            for (asset_index, retire_and_reactivate) in [(0, false), (1, false), (1, true)] {
+                let mut seed = [0x55; 32];
+                seed[0] ^= route_index as u8;
+                seed[1] ^= u8::from(reducer_long);
+                seed[2] ^= asset_index as u8;
+                seed[3] ^= u8::from(retire_and_reactivate);
+                run_second_shutdown_window(route, reducer_long, asset_index, retire_and_reactivate, seed)
+                    .unwrap_or_else(|error| panic!(
+                        "{route:?}/long={reducer_long}/asset={asset_index}/retire={retire_and_reactivate}: {error}"
+                    ));
             }
         }
     }

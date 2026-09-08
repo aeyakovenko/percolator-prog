@@ -53,11 +53,90 @@ open. No failing valid public conformance trace was observed.
 Verification uses default-feature SBF rebuilt with platform-tools v1.52, SHA-256
 `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`, and the rebuilt matcher
 fixture, SHA-256 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
-The rebased source has 82 validated `finish_public_trace()` consumers while the metadata census
-remained pinned to 81; the added consumer brings the inspected total to 83. Focused verification
+The rebased source had 82 validated `finish_public_trace()` consumers while the metadata census
+remained pinned to 81; this case and the later receipt/lifecycle cases bring the inspected total to
+84. Focused verification
 runs the new case, all tests in its INV-088 stateful module, the adjacent exact INV-034/035/041/074
 stateful anchors, and the six invariant metadata guards, followed by scoped rustfmt and
 `git diff --check`.
+
+## Second-shutdown conformance checkpoint (2026-09-08)
+
+PR 427 tests-only increment from `origin/codex/invariant-fidelity-reopen-20260904` at
+`b5bf06540b07ec4fca253f733e17283c432f267a`, developed in a fresh isolated worktree.
+No GitHub PR/issue diffs or holdout branches were inspected. Production code, engine proofs,
+invariant verdicts, and verification-method status are unchanged.
+
+[`stateful/inv_065_reset_recovery_and_retired_state_isolation.rs`](stateful/inv_065_reset_recovery_and_retired_state_isolation.rs)
+adds `v16_program_reused_asset_second_shutdown_rearms_owner_window_and_keeper_exit`.
+Its 24 LiteSVM histories cross all four single/batch CPI/no-CPI trade routes, both reset sides,
+and base-asset restart, dynamic-asset restart, or dynamic retirement/permissionless reactivation.
+An ordinary unilateral reduction creates a real opposite-side reset; public shutdown, crank, and
+finalization clear it. After the old Recovery deadline has elapsed, the same owners open a new
+position episode in the renewed generation. A fresh force-close rejects while Active. A second
+shutdown starts a new owner window: force-close rejects one slot before its deadline, a normal
+owner trade halves both exposures without moving tokens or the shutdown clock, and force-close
+clears the remainder exactly at the new deadline. All 48 rejections preserve the complete tracked
+market, portfolio, matcher, backing, SPL, and economic-lamport snapshots.
+
+The final seven calls in each world use only an unrelated keeper and fee payer: force-close,
+stale resolution, then five unsigned `CloseResolved` payouts. All 120 payouts equal the original
+deposits, with exact prefix capital/custody reconciliation and empty account obligations. Only the
+one-atom activation fee remains as insurance in reactivation worlds. The complete 492-transaction
+capture validates no out-of-band economic mutation and normalized rollback; the economic suffix
+also checks actual signers and account metas. Peak observed CU is 214,286. Portfolio deletion and
+administrative retirement after payout are not claimed as permissionless progress.
+
+Net-new obligation: existing INV-055 cells isolate lifecycle admission, INV-065 reset/shutdown
+histories end after one renewal and a fresh roundtrip, and INV-078's force-close/reuse history ends
+at first reactivation. They do not execute a second shutdown in the reused slot, test its newly
+armed owner window after the old deadline, and require a keeper-only payout suffix from that
+history. Shared-portfolio reset scheduling and partial reduction before first force-close were
+discarded as duplicate candidates. No additional scalar proof, identity replay matrix, or generic
+rollback-only test was retained. The base contained 82 validated trace consumers, although its
+census expected 81; this capture and the sibling receipt/domain-allocation captures bring the
+audited count to 84. The metadata-only guard update includes that inherited count correction, with
+all per-consumer validation checks retained.
+
+This is bounded public-route evidence for INV-055/057/065/073/078, not a universal lifecycle
+reachability theorem. The existing harness supplies zeroed allocation and external SPL fixtures;
+market/portfolio initialization and every tested transition use public instructions. Prices stay
+constant, funding/maintenance/trade fees are zero, and backing/claim stress and maximum shapes are
+outside this matrix. The public setup uses authorized shutdown/renewal and owner reduction; only
+the terminal suffix is keeper-only. No current-pin conformance failure was observed. Development
+setup errors (invalid accrual configuration and same-slot reactivation) were removed by using the
+standard configuration and the existing one-slot reactivation prerequisite.
+
+Verification reuses the existing default-feature program SBF, SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`, and auth matcher,
+SHA-256 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`. No SBF rebuild.
+Exact focused selectors:
+
+```sh
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture \
+  inv_065_reset_recovery_and_retired_state_isolation::v16_program_reused_asset_second_shutdown_rearms_owner_window_and_keeper_exit \
+  inv_065_reset_recovery_and_retired_state_isolation::v16_program_shutdown_during_reset_pending_retains_permissionless_progress \
+  inv_065_reset_recovery_and_retired_state_isolation::v16_program_unilateral_zero_oi_reset_route_side_matrix_finalizes_permissionlessly \
+  inv_065_reset_recovery_and_retired_state_isolation::v16_program_retained_reduction_landing_after_shutdown_has_a_bounded_recovery_fallback \
+  inv_055_state_indexed_admission::v16_program_user_operation_lifecycle_admission_matrix \
+  inv_078_permissionless_recovery_coverage::v16_program_recovery_resource_failure_lattice_preserves_public_exit
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_055_state_indexed_admission::v16_program_reset_pending_admission_matrix_rejects_risk_then_restores_trade \
+  inv_055_state_indexed_admission::v16_program_retired_slot_reactivation_restores_fresh_generation_trade_admission \
+  inv_057_risk_reduction_availability::v16_attack_recovery_cpi_routes_allow_user_exit_before_force_close
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row \
+  inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter \
+  inv_079_public_reachability_evidence::v16_public_instruction_coverage_registry_matches_production_roster
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs
+git diff --check
+```
 
 ## Wrapper arithmetic conformance checkpoint (2026-09-08)
 
