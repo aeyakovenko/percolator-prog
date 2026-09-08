@@ -12714,6 +12714,7 @@ pub struct BoundedRecoveryFrontierEvidence {
     pub unique_edge_count: usize,
     pub fresh_seed_world_count: usize,
     pub exact_expiry_seed_world_count: usize,
+    pub after_expiry_seed_world_count: usize,
     pub nonflat_seed_world_count: usize,
     pub bounded_exit_world_count: usize,
     pub value_moving_exit_world_count: usize,
@@ -17540,7 +17541,7 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
 }
 
 fn build_bounded_recovery_reference_seed(
-    exact_expiry: bool,
+    landing: BoundedExpiryLanding,
 ) -> Result<(ScenarioRunner, bool), String> {
     let scenario = Scenario {
         seed: [0x8d; 32],
@@ -17613,21 +17614,27 @@ fn build_bounded_recovery_reference_seed(
     }
 
     let expiry_slot = backing.expiry_slot;
-    if exact_expiry {
-        runner.env.warp_to_slot(expiry_slot);
-        node = runner.bounded_reference_node()?;
-        if runner.env.current_slot() != expiry_slot
-            || node.source_backing_buckets[0].status != BackingBucketStatusV16::Fresh as u8
-        {
-            return Err(format!(
-                "INV-086 exact-expiry Recovery seed normalized before a public consumer: {node:?}"
-            ));
+    match landing {
+        BoundedExpiryLanding::Before => {
+            if runner.env.current_slot() >= expiry_slot {
+                return Err(format!(
+                    "INV-086 fresh Recovery seed reached backing expiry {} >= {expiry_slot}",
+                    runner.env.current_slot()
+                ));
+            }
         }
-    } else if runner.env.current_slot() >= expiry_slot {
-        return Err(format!(
-            "INV-086 fresh Recovery seed reached backing expiry {} >= {expiry_slot}",
-            runner.env.current_slot()
-        ));
+        BoundedExpiryLanding::At | BoundedExpiryLanding::After => {
+            let landing_slot = landing.slot(expiry_slot);
+            runner.env.warp_to_slot(landing_slot);
+            node = runner.bounded_reference_node()?;
+            if runner.env.current_slot() != landing_slot
+                || node.source_backing_buckets[0].status != BackingBucketStatusV16::Fresh as u8
+            {
+                return Err(format!(
+                    "INV-086 {landing:?} Recovery seed normalized before a public consumer: {node:?}"
+                ));
+            }
+        }
     }
     Ok((runner, nonflat))
 }
@@ -17636,15 +17643,25 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
 {
     type ExactEdge = (AuthenticatedGraphState, u8, AuthenticatedGraphState);
 
-    let (fresh_control, _) = build_bounded_recovery_reference_seed(false)?;
-    let (expiry_control, _) = build_bounded_recovery_reference_seed(true)?;
-    if fresh_control.snapshot() != expiry_control.snapshot() {
+    let (fresh_control, _) = build_bounded_recovery_reference_seed(BoundedExpiryLanding::Before)?;
+    let (expiry_control, _) = build_bounded_recovery_reference_seed(BoundedExpiryLanding::At)?;
+    let (late_control, _) = build_bounded_recovery_reference_seed(BoundedExpiryLanding::After)?;
+    if fresh_control.snapshot() != expiry_control.snapshot()
+        || fresh_control.snapshot() != late_control.snapshot()
+    {
         return Err(
             "INV-086 Recovery expiry controls did not replay to byte-identical economic state"
                 .into(),
         );
     }
-    if fresh_control.authenticated_graph_state() == expiry_control.authenticated_graph_state() {
+    let authenticated_controls = [
+        fresh_control.authenticated_graph_state(),
+        expiry_control.authenticated_graph_state(),
+        late_control.authenticated_graph_state(),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if authenticated_controls.len() != BoundedExpiryLanding::ALL.len() {
         return Err("INV-086 Recovery expiry controls did not vary authenticated Clock".into());
     }
 
@@ -17654,6 +17671,7 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
         edges: BTreeSet<ExactEdge>,
         fresh_seed_world_count: usize,
         exact_expiry_seed_world_count: usize,
+        after_expiry_seed_world_count: usize,
         nonflat_seed_world_count: usize,
         bounded_exit_world_count: usize,
         value_moving_exit_world_count: usize,
@@ -17670,6 +17688,7 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
             self.edges.extend(other.edges);
             self.fresh_seed_world_count += other.fresh_seed_world_count;
             self.exact_expiry_seed_world_count += other.exact_expiry_seed_world_count;
+            self.after_expiry_seed_world_count += other.after_expiry_seed_world_count;
             self.nonflat_seed_world_count += other.nonflat_seed_world_count;
             self.bounded_exit_world_count += other.bounded_exit_world_count;
             self.value_moving_exit_world_count += other.value_moving_exit_world_count;
@@ -17702,13 +17721,14 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
     }
 
     fn replay_recovery_word(
-        exact_expiry: bool,
+        landing: BoundedExpiryLanding,
         word: &[(usize, Action)],
         graph: &mut RecoveryAccumulator,
     ) -> Result<(), String> {
-        let (mut runner, nonflat) = build_bounded_recovery_reference_seed(exact_expiry)?;
-        graph.fresh_seed_world_count += usize::from(!exact_expiry);
-        graph.exact_expiry_seed_world_count += usize::from(exact_expiry);
+        let (mut runner, nonflat) = build_bounded_recovery_reference_seed(landing)?;
+        graph.fresh_seed_world_count += usize::from(landing == BoundedExpiryLanding::Before);
+        graph.exact_expiry_seed_world_count += usize::from(landing == BoundedExpiryLanding::At);
+        graph.after_expiry_seed_world_count += usize::from(landing == BoundedExpiryLanding::After);
         graph.nonflat_seed_world_count += usize::from(nonflat);
 
         let mut before_exact = runner.authenticated_graph_state();
@@ -17719,13 +17739,13 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
                 .run_safety_prefix(std::slice::from_ref(action))
                 .map_err(|error| {
                     format!(
-                        "INV-086 Recovery word expiry={exact_expiry} {word:?} failed at position {position}: {error}"
+                        "INV-086 Recovery word landing={landing:?} {word:?} failed at position {position}: {error}"
                     )
                 })?;
             let after_economic = runner.bounded_reference_node()?;
             let after_exact = runner.authenticated_graph_state();
             bounded_source_credit_transition_evidence(
-                &format!("INV-030 Recovery edge expiry={exact_expiry} action={action_index}"),
+                &format!("INV-030 Recovery edge landing={landing:?} action={action_index}"),
                 &before_economic,
                 &after_economic,
             )?;
@@ -17761,7 +17781,7 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
             .run_direct_user_exit_campaign()
             .map_err(|error| {
                 format!(
-                    "INV-073 Recovery word expiry={exact_expiry} {word:?} had no bounded owner exit: {error}"
+                    "INV-073 Recovery word landing={landing:?} {word:?} had no bounded owner exit: {error}"
                 )
             })?;
         graph.bounded_exit_world_count += 1;
@@ -17776,7 +17796,7 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
         })?;
         if destination_total <= destination_total_before {
             return Err(format!(
-                "INV-073 Recovery word expiry={exact_expiry} {word:?} exited without increasing funded user destinations: {destination_total_before}->{destination_total}"
+                "INV-073 Recovery word landing={landing:?} {word:?} exited without increasing funded user destinations: {destination_total_before}->{destination_total}"
             ));
         }
         graph.value_moving_exit_world_count += 1;
@@ -17798,9 +17818,9 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
             ]);
         }
     }
-    let jobs = [false, true]
+    let jobs = BoundedExpiryLanding::ALL
         .into_iter()
-        .flat_map(|exact_expiry| words.iter().cloned().map(move |word| (exact_expiry, word)))
+        .flat_map(|landing| words.iter().cloned().map(move |word| (landing, word)))
         .collect::<Vec<_>>();
     let worker_count = std::thread::available_parallelism()
         .map(usize::from)
@@ -17814,8 +17834,8 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
             .map(|chunk| {
                 scope.spawn(move || -> Result<RecoveryAccumulator, String> {
                     let mut graph = RecoveryAccumulator::default();
-                    for (exact_expiry, word) in chunk {
-                        replay_recovery_word(*exact_expiry, word, &mut graph)?;
+                    for (landing, word) in chunk {
+                        replay_recovery_word(*landing, word, &mut graph)?;
                     }
                     Ok(graph)
                 })
@@ -17840,6 +17860,7 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
         unique_edge_count: graph.edges.len(),
         fresh_seed_world_count: graph.fresh_seed_world_count,
         exact_expiry_seed_world_count: graph.exact_expiry_seed_world_count,
+        after_expiry_seed_world_count: graph.after_expiry_seed_world_count,
         nonflat_seed_world_count: graph.nonflat_seed_world_count,
         bounded_exit_world_count: graph.bounded_exit_world_count,
         value_moving_exit_world_count: graph.value_moving_exit_world_count,

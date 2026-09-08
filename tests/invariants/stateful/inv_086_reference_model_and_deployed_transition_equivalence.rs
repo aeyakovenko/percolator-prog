@@ -30,7 +30,8 @@
 //! public genesis, applies the independent state oracles after every transition,
 //! records exact rollback as a self-edge, and distinguishes normalized economic states.
 //! A Recovery-seeded frontier starts from independently rebuilt public positions with nonflat
-//! mark/funding state, funded backing and insurance, and either fresh or exact-expiry backing.
+//! mark/funding state, funded backing and insurance, and fresh, exact-expiry, or one-slot-late
+//! backing.
 //! It exhausts every one- and two-action word over Recovery crank, owner forfeit, abandoned-pair
 //! force-close, owner deposit, backing, insurance, resolve, and resolved-close routes, plus exact
 //! rollback controls for live-mode rebalance. Every reached state must retain a bounded
@@ -674,15 +675,16 @@ fn v16_program_recovery_seeded_frontier_preserves_bounded_owner_exit() {
         run_bounded_recovery_reference_frontier().expect("INV-086 public Recovery seeded frontier");
 
     assert_eq!(
-        evidence.word_count, 366,
-        "must exhaust two expiry seeds x (13^0 + 13^1 + 13^2) Recovery words"
+        evidence.word_count, 549,
+        "must exhaust three expiry seeds x (13^0 + 13^1 + 13^2) Recovery words"
     );
     assert_eq!(
-        evidence.transition_count, 702,
+        evidence.transition_count, 1_053,
         "must replay every edge in every one- and two-action Recovery word"
     );
     assert_eq!(evidence.fresh_seed_world_count, 183);
     assert_eq!(evidence.exact_expiry_seed_world_count, 183);
+    assert_eq!(evidence.after_expiry_seed_world_count, 183);
     assert_eq!(
         evidence.nonflat_seed_world_count, evidence.word_count,
         "every Recovery word must start with booked or pending nonflat value"
@@ -703,15 +705,15 @@ fn v16_program_recovery_seeded_frontier_preserves_bounded_owner_exit() {
         evidence
             .action_attempts
             .iter()
-            .all(|attempts| *attempts == 54),
+            .all(|attempts| *attempts == 81),
         "every Recovery action must occupy every first and second position: {evidence:?}"
     );
     assert!(
         evidence
             .second_position_attempts
             .iter()
-            .all(|attempts| *attempts == 26),
-        "every Recovery action must follow every first action in both expiry states: {evidence:?}"
+            .all(|attempts| *attempts == 39),
+        "every Recovery action must follow every first action in all three expiry states: {evidence:?}"
     );
     for action_index in [0usize, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12] {
         assert_ne!(
