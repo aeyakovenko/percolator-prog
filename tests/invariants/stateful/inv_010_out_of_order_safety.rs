@@ -21,6 +21,11 @@
 //! a reduction landing last recertifies against the deposited capital, while a deposit landing last
 //! conservatively invalidates the older certificate. Both orders leave fresh complete position and
 //! capital exits.
+//! `v16_program_taker_deposit_and_retained_trade_commute_across_public_routes` pairs both landing
+//! orders across single/batch CPI/no-CPI trades and both position signs. Each prefix independently
+//! checks owner capital, positions, authorization epochs, OI, and SPL custody. Only the taker's
+//! documented health-certificate cache is normalized at the open endpoint; a fresh matched close
+//! and both owner withdrawals then converge byte-for-byte within each transport.
 //! `v16_program_authority_handoff_and_retained_policy_obey_both_landing_orders` crosses a retained
 //! market-authority handoff with all eight market/asset-0 policy lanes at low, midpoint, and maximum
 //! valid values. Policy-first permits both authorized requests; handoff-first makes the old
@@ -50,7 +55,9 @@
 //! retained policy route or widening that topology reopens this finite product obligation.
 
 use super::*;
-use crate::support::fuzz_model::verify_underfunded_authority_policy_resolve_claim_orders;
+use crate::support::fuzz_model::{
+    verify_underfunded_authority_policy_resolve_claim_orders, TradeRoute,
+};
 use crate::support::v16_svm::{
     assert_closed_market_tombstone, MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
 };
@@ -723,6 +730,175 @@ fn v16_program_deposit_and_owner_reduction_commute_across_independent_bindings()
             reduction_first.0,
             deposit_amount,
         );
+    }
+}
+
+#[test]
+fn v16_program_taker_deposit_and_retained_trade_commute_across_public_routes() {
+    const DEPOSIT: u128 = 37;
+    const CERT_START: usize = percolator_prog::constants::HEADER_LEN
+        + core::mem::offset_of!(PortfolioAccountV16Account, health_cert);
+    const CERT_END: usize = CERT_START + core::mem::size_of::<HealthCertV16Account>();
+
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        for size_q in [-(POS_SCALE as i128 + 1), POS_SCALE as i128 + 1] {
+            let config = MarketConfig::default();
+            let build_trade = |env: &mut V16Svm, quantity| match route {
+                TradeRoute::NoCpi => {
+                    env.build_retained_no_cpi_trade(TAKER, LP, 0, quantity, config.initial_price)
+                }
+                TradeRoute::Cpi => {
+                    env.build_retained_cpi_trade(TAKER, LP, 0, quantity, config.initial_price)
+                }
+                TradeRoute::BatchNoCpi => env.build_retained_batch_no_cpi_trade(
+                    TAKER,
+                    LP,
+                    0,
+                    quantity,
+                    config.initial_price,
+                ),
+                TradeRoute::BatchCpi => {
+                    env.build_retained_batch_cpi_trade(TAKER, LP, 0, quantity, config.initial_price)
+                }
+            };
+            let mut reference = None;
+            for deposit_first in [true, false] {
+                let mut env = V16Svm::new([0xda; 32], config);
+                env.ensure_primary_matcher_enabled(LP)
+                    .expect("common maker authorization for every transport");
+                let initial = snapshot(&env);
+                let initial_group = env.primary_market_state().1;
+                let initial_source = env.token_amount(env.actors[TAKER].source_token);
+                let supply = env.token_supply_observed();
+                let sequences = [LP, TAKER].map(|actor| {
+                    (
+                        env.primary_portfolio_matcher_sequence(actor),
+                        env.primary_portfolio_position_epoch(actor),
+                    )
+                });
+                // Both requests are signed against the same prestate, before either lands.
+                let deposit = env.build_retained_deposit(TAKER, DEPOSIT);
+                let trade = build_trade(&mut env, size_q);
+                let requests = if deposit_first {
+                    [(true, deposit), (false, trade)]
+                } else {
+                    [(false, trade), (true, deposit)]
+                };
+                env.begin_public_trace();
+                let mut deposited = 0;
+                let mut traded = false;
+                for (is_deposit, request) in requests {
+                    let tokens_before = env.all_token_account_data();
+                    env.land_retained(request).unwrap_or_else(|error| {
+                        panic!("{route:?}, size={size_q}, deposit_first={deposit_first}: {error}")
+                    });
+                    if is_deposit {
+                        deposited = DEPOSIT;
+                    } else {
+                        traded = true;
+                        assert_eq!(env.all_token_account_data(), tokens_before);
+                    }
+                    for (index, actor) in [LP, TAKER].into_iter().enumerate() {
+                        let account = env.primary_portfolio(actor);
+                        let credit = if actor == TAKER { deposited } else { 0 };
+                        let position = if !traded {
+                            0
+                        } else if actor == TAKER {
+                            size_q
+                        } else {
+                            -size_q
+                        };
+                        assert_eq!(account.capital.get(), config.actor_deposits[actor] + credit);
+                        assert_eq!(account.pnl.get(), 0);
+                        assert_eq!(account.legs[0].basis_pos_q.get(), position);
+                        assert_eq!(
+                            env.primary_portfolio_matcher_sequence(actor),
+                            sequences[index].0 + u64::from(credit != 0)
+                        );
+                        assert_eq!(
+                            env.primary_portfolio_position_epoch(actor),
+                            sequences[index].1 + u64::from(traded)
+                        );
+                    }
+                    let group = env.primary_market_state().1;
+                    let expected_oi = if traded { size_q.unsigned_abs() } else { 0 };
+                    assert_eq!(group.assets[0].oi_eff_long_q, expected_oi);
+                    assert_eq!(group.assets[0].oi_eff_short_q, expected_oi);
+                    assert_eq!(group.c_tot, initial_group.c_tot + deposited);
+                    assert_eq!(group.vault, initial_group.vault + deposited);
+                    assert_eq!(group.insurance, initial_group.insurance);
+                    assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+                    assert_eq!(
+                        u128::from(env.token_amount(env.actors[TAKER].source_token)),
+                        u128::from(initial_source) - deposited
+                    );
+                    assert_eq!(env.token_supply_observed(), supply);
+                }
+
+                let mut open = snapshot(&env);
+                assert_eq!(open.foreign_market, initial.foreign_market);
+                assert_eq!(open.foreign_portfolio, initial.foreign_portfolio);
+                assert_eq!(open.backing_ledger, initial.backing_ledger);
+                assert_eq!(open.lamports, initial.lamports);
+                for actor in 2..PRIMARY_ACTOR_COUNT {
+                    assert_eq!(open.portfolios[actor], initial.portfolios[actor]);
+                }
+                let mut cert = env
+                    .primary_portfolio(TAKER)
+                    .health_cert
+                    .try_to_runtime()
+                    .expect("decode taker certificate");
+                assert_eq!(cert.valid, deposit_first);
+                assert_eq!(
+                    cert.certified_equity,
+                    (config.actor_deposits[TAKER] + if deposit_first { DEPOSIT } else { 0 })
+                        as i128
+                );
+                // Check the only permitted cache differences before masking their wire bytes.
+                cert.valid = false;
+                cert.certified_equity = config.actor_deposits[TAKER] as i128;
+                open.portfolios[TAKER][CERT_START..CERT_END].fill(0);
+
+                let close = build_trade(&mut env, -size_q);
+                env.land_retained(close)
+                    .expect("fresh same-route matched close remains live after either order");
+                for actor in [TAKER, LP] {
+                    let payout =
+                        config.actor_deposits[actor] + if actor == TAKER { DEPOSIT } else { 0 };
+                    assert_eq!(env.primary_portfolio(actor).legs[0].basis_pos_q.get(), 0);
+                    env.withdraw_primary(actor, payout)
+                        .expect("complete owner payout remains live after either order");
+                    assert_eq!(env.primary_portfolio(actor).capital.get(), 0);
+                    assert_eq!(
+                        u128::from(env.token_amount(env.actors[actor].destination_token)),
+                        payout
+                    );
+                }
+                let group = env.primary_market_state().1;
+                assert_eq!(group.assets[0].oi_eff_long_q, 0);
+                assert_eq!(group.assets[0].oi_eff_short_q, 0);
+                assert_eq!(group.c_tot, initial_group.c_tot - 2 * USER_DEPOSIT);
+                assert_eq!(group.vault, initial_group.vault - 2 * USER_DEPOSIT);
+                assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+                assert_eq!(env.token_supply_observed(), supply);
+                let trace = env.finish_public_trace();
+                trace.validate_public_execution().expect("public history");
+                assert_eq!(trace.steps.len(), 5);
+                assert!(trace.steps.iter().all(|step| step.succeeded));
+
+                let outcome = (open, cert, snapshot(&env));
+                if let Some(expected) = &reference {
+                    assert_eq!(&outcome, expected, "{route:?}, size={size_q}");
+                } else {
+                    reference = Some(outcome);
+                }
+            }
+        }
     }
 }
 

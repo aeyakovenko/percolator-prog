@@ -5576,6 +5576,29 @@ residuals and atomic failures, nonzero-priced partials, variable marks/fees, bac
 collateral/PnL-credit allowances, funding/time movement and environmental interleavings. The
 existing fixed maximum-quantity and short-fill rejection owners are not replaced.
 
+### INV-010 retained taker-deposit/trade ordering
+
+`v16_program_taker_deposit_and_retained_trade_commute_across_public_routes` in
+`stateful/inv_010_out_of_order_safety.rs` adds one fixed public-wrapper composition:
+four single/batch CPI/no-CPI transports x both position signs x both deposit/trade landing orders.
+Both requests are retained from the same prestate. The 37-atom taker deposit consumes only its
+owner-state sequence, while the bilateral trade consumes both position episodes and CPI binds
+the unchanged maker matcher sequence. Every prefix checks exact per-owner capital, zero PnL,
+signed positions, authorization epochs, matched OI, market stock, SPL custody and token supply.
+
+Within each transport/sign pair, open endpoints compare all tracked economic account bytes after
+normalizing only the taker's health certificate. Its validity and equity difference are checked
+explicitly, and every other decoded certificate field remains exact. A freshly signed same-route
+matched close and both full owner withdrawals then converge without normalization. All 16 worlds
+must complete five traced public instructions with no rejected or out-of-band economic step.
+
+This is distinct from the existing unilateral deposit/reduction pair, stale trade-retry products,
+and heterogeneous signed-leg permutations: it tests a retained collateral mutation interleaved
+with a retained bilateral risk increase through every trade wrapper. It is one funded Live-market,
+fixed-mark, zero-fee/funding case with quantity `POS_SCALE + 1`, not a new general history proof or
+cross-transport raw-byte equivalence claim. Maker deposits, changing policies/oracles, claims,
+maximum shapes and invariant-status promotion remain outside this increment.
+
 ### INV-011 aggregate-cap evidence and F plan
 
 Traceability review, 2026-09-07: the INV-011 M registry now selects
