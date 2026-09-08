@@ -3,6 +3,95 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## Retained batch authority/policy conformance (2026-09-08)
+
+Tests/docs-only increment from `codex/invariant-fidelity-reopen-20260904` at
+`ae2f5e46d899d3e9f464c5eda0d1a224bd8197ec`, developed in the isolated worktree
+`/tmp/codex-agent-worktrees/pr427-retained-authority-policy-20260908-r4`.
+No GitHub PR/issue diffs, holdout branches, or finding-specific reproductions were inspected.
+The coordinator worktree, production code, engine proofs, `coverage_reopenings.tsv` statuses,
+and `invariant_status.tsv` verdicts are unchanged. Rows 411 and 416 remain OPEN.
+
+[`stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs`](stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs)
+adds `v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider`.
+Its 16 histories cross rejected/accepted batch CPI/no-CPI transports, both mixed-position
+orientations, and 37/503-bps fee envelopes. Before market authority transfers to an unrelated
+successor, the owners sign two-leg exact-quantity/price bilateral batches, and the taker signs
+corresponding CPI batches with an independently calculated aggregate quote-atom fee cap under
+the LP's existing matcher consent. A separate incumbent publicly funds 38,260 atoms of backing
+principal. The handoff must preserve that incumbent's role and stock,
+invalidate its old epoch-bound withdrawal, and leave its fresh principal exit available.
+
+The successor raises the base fee by one bps, then restores the signed rate. Under the tighter
+policy, each leg's fee still fits the old aggregate cap, but their sum does not. The retained
+CPI request must reject after successful matcher CPI with a deliberately permissive LP fee cap;
+the no-CPI request rejects against both owners' signed per-leg fee bounds. Complete account
+snapshots require exact rollback, including matcher writes, market/portfolio/ledger bytes,
+SPL accounts, executable metadata, and economic signer lamports, excluding network fee payers.
+A separately signed, retained same-route or cross-route alternative then lands without
+re-signing. A third retained delivery cannot reuse the consumed position episode. A fresh
+opposite-route matched close, five owner withdrawals, and the incumbent's principal withdrawal
+reach identical SPL endpoints across transports. Bilateral fills revoke LP matcher consent;
+the subsequent fresh CPI exit explicitly renews it through `SetMatcherConfig`.
+
+The input-only oracle independently rounds notional and per-leg fees upward, checks exact owner
+capital/position deltas and per-domain insurance credits after each post-retention step, and
+separates provider principal from fees and user deposits. It composes the existing stock/encumbrance
+censuses rather than duplicating engine proofs. All 296 captured transactions validate public
+execution; all 48 rejections preserve the exact tracked frame. Only the independently calculated
+roundtrip fees remain in terminal custody. Peak successful CU is 231,511. The shared `V16Svm`
+fixture supplies zeroed allocations and external SPL endowments; initialization, funding, role
+changes, and every economic transition use public instructions without injected program state.
+The public-trace consumer census increases from 92 to 93, retaining its per-consumer validation.
+
+Net-new coverage is the retained aggregate-cap/refusal/route-switch composition across a policy
+authority change with an independently funded incumbent. Existing INV-005 ABA/funded-role
+matrices do not carry traders' retained batches; INV-014's delayed-fee matrix does not own this
+retained batch aggregate-cap history; INV-010's bilateral relaxation matrix has no intervening
+refusal or authority succession; INV-011's aggregate-cap tests do not retain the envelope across
+policy/role changes. This adds bounded evidence for INV-005/010/011/014/024/027/036/047/081, not
+whole-invariant closure. Single-CPI consent without an aggregate cap, cold-admin replacement of
+funded roles, insurance-role succession, nonzero source claims/utilization earnings, partial
+fills, and arbitrary policy/authority histories remain open. This is Live-state evidence only;
+no new INV-055 lifecycle cell or permissionless terminal-progress theorem is claimed.
+
+Verification reuses the requested cached program SBF, SHA-256
+`230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`, and the existing auth matcher,
+SHA-256 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`. The isolated fixture
+`target` is symlinked to
+`/home/anatoly/percolator-prog-pr427-conformance-20260908/tests/fixtures/auth_matcher/target`;
+neither SBF was rebuilt. Development corrected a test import typo and an invalid attempt to use
+one domain-bound auxiliary ledger for two domains; no failing valid conformance trace was observed.
+Exact verification selectors (run from the isolated worktree):
+
+```sh
+export CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908
+export PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider \
+  inv_010_out_of_order_safety::v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_orders \
+  inv_010_out_of_order_safety::v16_program_authority_handoff_and_retained_policy_obey_both_landing_orders
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_011_signed_aggregate_economic_bounds::v16_program_signed_aggregate_bound_composition_is_source_complete \
+  inv_011_signed_aggregate_economic_bounds::v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row \
+  inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter \
+  inv_079_public_reachability_evidence::v16_public_instruction_coverage_registry_matches_production_roster
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs tests/invariants/public_sbf/inv_079_public_reachability_evidence.rs
+git diff --check
+```
+
+Final results: stateful selectors **3/3 passed** in 23.33 seconds, adjacent aggregate-cap
+selectors **2/2 passed** in 0.41 seconds, and metadata guards **6/6 passed** in 0.06 seconds.
+Scoped rustfmt and `git diff --check` both passed. The focused new test also passed alone (1/1).
+Existing shared-harness dead-code and Solana future-compatibility warnings remain; no broad
+suite, SBF rebuild, engine proof, or holdout-pin run was performed.
+
 ## INV-058 status correction (2026-09-08)
 
 The prior coverage index overclaimed cross-owner aggregate side-OI coverage. A finding-blind
