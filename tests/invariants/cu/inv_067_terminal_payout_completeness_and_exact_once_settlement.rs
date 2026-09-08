@@ -21,6 +21,9 @@
 //! payout routes against one positive due within a successful transaction. Crank-first and
 //! top-up-first batches each transfer exactly once despite a duplicate top-up, and fresh-blockhash
 //! retries preserve the receipt. Both unequal claimants complete public cleanup in both orders.
+//! `v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements` pays
+//! real trading claims before distinct asset-1 providers exit, checks retained withdrawals and
+//! atomic payout rollback against still-funded unrelated insurance, and reconciles every SPL atom.
 //!
 //! Guarantee boundary: this is one adversarial public lifecycle matrix, not an exhaustive proof of
 //! every terminal residual partition.
@@ -29,6 +32,9 @@ use super::*;
 
 #[path = "inv_067_terminal_claim_late_expiry.rs"]
 pub(super) mod late_expiry;
+
+#[path = "inv_067_terminal_provider_insurance_retries.rs"]
+mod provider_insurance_retries;
 
 #[test]
 fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {
