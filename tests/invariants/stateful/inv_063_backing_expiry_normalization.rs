@@ -42,6 +42,9 @@
 //! with both source sides and under/exact/over-backed final refills. Account-local claim ownership,
 //! unused-domain counters, history-derived rates and unspent surplus remain exact through expiry,
 //! rejected refill bundles, fresh conversion and all three owner payouts.
+//! The sibling INV-031 test `v16_program_shared_lien_expiry_refill_preserves_owner_attribution`
+//! covers exact/late expiry while two account-local liens are live, ordered owner release, rejected
+//! replacement backing while impairment remains, and aggregate/split refill after both liens clear.
 //!
 //! Guarantee boundary: the trade, conversion, and retained-top-up consumers have fixed-pin bounded
 //! evidence over the generated route and expiry boundaries represented here.

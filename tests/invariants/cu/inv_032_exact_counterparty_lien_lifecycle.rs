@@ -191,6 +191,8 @@ fn v16_program_counterparty_lien_lifecycle_composition_is_source_complete() {
         include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
     assert!(retry_source
         .contains("fn v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing"));
+    assert!(retry_source
+        .contains("fn v16_program_shared_lien_expiry_refill_preserves_owner_attribution"));
 
     let insurance_source = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
     assert!(insurance_source.contains(

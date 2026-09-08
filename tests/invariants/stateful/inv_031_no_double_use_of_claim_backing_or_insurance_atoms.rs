@@ -27,6 +27,11 @@
 //! Its suffix ledger checks both owners separately while the sibling still owns a live lien,
 //! then requires its exact claim conversion and payout. This is eight no-CPI histories, not
 //! expiry/impairment, arbitrary histories, insurance-lien reachability or engine-proof closure.
+//! `v16_program_shared_lien_expiry_refill_preserves_owner_attribution` crosses the same public
+//! shared-lien frontier with authenticated exact/late expiry. The old valid total must become
+//! impaired exactly once, each owner must release only its own amount while the sibling remains
+//! byte-exact, and replacement backing must reject until both old liens clear. Only the newly
+//! transferred aggregate or split refill may then become fresh.
 //! The haircut-conversion matrix also submits a cap one atom below the independently known
 //! conversion amount. The deployed handler reaches its post-conversion cap rejection, and SVM
 //! rollback must restore the claim, backing bucket, portfolio, custody, and every auxiliary
@@ -46,7 +51,7 @@ use crate::support::{
     },
     v16_svm::{MarketConfig, TxSuccess, V16Svm, PRIMARY_ACTOR_COUNT},
 };
-use percolator::{BackingBucketStatusV16, POS_SCALE};
+use percolator::{BackingBucketStatusV16, BOUND_SCALE, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -443,11 +448,18 @@ fn v16_program_live_source_lien_route_pairs_preserve_single_backing_ownership() 
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ConcurrentLienSuffix {
+    ReleaseOnly,
+    PartialConsumption { split_refill: bool },
+    ExpiryRefill { late: bool, split_refill: bool },
+}
+
 fn verify_two_account_concurrent_lien_ownership(
     route: TradeRoute,
     reverse_order: bool,
     winner_long: bool,
-    split_refill: Option<bool>,
+    suffix: ConcurrentLienSuffix,
 ) -> Result<(), String> {
     const WINNERS: [usize; 2] = [0, 1];
     const COUNTERPARTIES: [usize; 2] = [2, 3];
@@ -473,7 +485,7 @@ fn verify_two_account_concurrent_lien_ownership(
         TradeRoute::BatchCpi => 3,
     };
     let label = format!(
-        "INV-031 concurrent route={route:?} reverse={reverse_order} winner_long={winner_long} split_refill={split_refill:?}"
+        "INV-031 concurrent route={route:?} reverse={reverse_order} winner_long={winner_long} suffix={suffix:?}"
     );
     let mut seed = [0x31; 32];
     seed[0] ^= 0xa0 | route_index;
@@ -503,7 +515,11 @@ fn verify_two_account_concurrent_lien_ownership(
     );
     let supply_before = env.token_supply_observed();
     env.begin_public_trace();
-    env.top_up_backing_bucket(source_domain as u16, BACKING_ATOMS, 100)
+    let backing_expiry = match suffix {
+        ConcurrentLienSuffix::ExpiryRefill { .. } => 5,
+        ConcurrentLienSuffix::ReleaseOnly | ConcurrentLienSuffix::PartialConsumption { .. } => 100,
+    };
+    env.top_up_backing_bucket(source_domain as u16, BACKING_ATOMS, backing_expiry)
         .map_err(|error| format!("{label} backing top-up: {error}"))?;
 
     for pair in 0..WINNERS.len() {
@@ -667,16 +683,29 @@ fn verify_two_account_concurrent_lien_ownership(
         ));
     }
 
-    let extra_rejections = if let Some(split) = split_refill {
+    let extra_rejections = if let ConcurrentLienSuffix::PartialConsumption { split_refill } = suffix
+    {
         verify_shared_lien_partial_consumption_suffix(
             &label,
             &mut env,
             winner_long,
             actor_order,
             accepted_increments,
-            split,
+            split_refill,
         )?;
         3
+    } else if let ConcurrentLienSuffix::ExpiryRefill { late, split_refill } = suffix {
+        verify_shared_lien_expiry_refill_suffix(
+            &label,
+            &mut env,
+            source_domain,
+            actor_order,
+            winner_long,
+            accepted_increments,
+            late,
+            split_refill,
+        )?;
+        2
     } else {
         for pair in actor_order {
             let accepted_q = i128::try_from(accepted_increments[pair])
@@ -796,12 +825,237 @@ fn v16_program_two_accounts_cannot_reserve_the_same_source_backing_atoms() {
                     route,
                     reverse_order,
                     winner_long,
-                    None,
+                    ConcurrentLienSuffix::ReleaseOnly,
                 )
                 .unwrap_or_else(|error| panic!("{error}"));
             }
         }
     }
+}
+
+fn verify_shared_lien_expiry_refill_suffix(
+    label: &str,
+    env: &mut V16Svm,
+    domain: usize,
+    actor_order: [usize; 2],
+    winner_long: bool,
+    accepted_increments: [u128; 2],
+    late: bool,
+    split_refill: bool,
+) -> Result<(), String> {
+    const EXPIRY_SLOT: u64 = 5;
+    const NEXT_EXPIRY_SLOT: u64 = 9;
+    const REFILL_ATOMS: u128 = 37;
+
+    let before = env.primary_market_state().1;
+    let bucket_before = before.source_backing_buckets[domain];
+    let source_before = before.source_credit[domain];
+    let local_liens = actor_order.map(|actor| counterparty_lien_backing(env, actor, domain));
+    let valid_before = local_liens.iter().sum::<u128>();
+    if bucket_before.status != BackingBucketStatusV16::Fresh
+        || bucket_before.expiry_slot != EXPIRY_SLOT
+        || local_liens.iter().any(|lien| *lien == 0)
+        || bucket_before.valid_liened_backing_num != valid_before
+        || source_before.valid_liened_backing_num != valid_before
+        || bucket_before.impaired_liened_backing_num != 0
+        || source_before.impaired_liened_backing_num != 0
+    {
+        return Err(format!(
+            "{label} did not reach a fresh shared-lien expiry frontier: local={local_liens:?}, source={source_before:?}, bucket={bucket_before:?}"
+        ));
+    }
+
+    let provider_before = env.token_amount(env.provider_source_token);
+    let vault_before = env.token_amount(env.vault);
+    let landing_slot = EXPIRY_SLOT + u64::from(late);
+    env.warp_to_slot(landing_slot);
+
+    shared_lien_suffix_step(
+        &format!("{label} rejected pre-normalization refill"),
+        env,
+        Some(21),
+        |env| env.top_up_backing_bucket(domain as u16, REFILL_ATOMS + 1, NEXT_EXPIRY_SLOT),
+    )?;
+
+    let winning_mark = if winner_long { 105 } else { 95 };
+    let adverse_mark = if winner_long { 95 } else { 105 };
+    for (asset, mark) in [(0, winning_mark), (1, adverse_mark), (2, adverse_mark)] {
+        shared_lien_suffix_step(&format!("{label} refresh mark {asset}"), env, None, |env| {
+            env.push_auth_mark(asset, landing_slot, mark)
+        })?;
+    }
+    let observations = [0u16, 1, 2]
+        .into_iter()
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
+        })
+        .collect::<Vec<_>>();
+    let mut normalization_steps = 0usize;
+    while {
+        let group = env.primary_market_state().1;
+        group.source_backing_buckets[domain].status == BackingBucketStatusV16::Fresh
+            || group.source_credit[domain].valid_liened_backing_num != 0
+    } {
+        if normalization_steps == 16 {
+            return Err(format!("{label} shared expiry did not normalize boundedly"));
+        }
+        let actor = actor_order[normalization_steps % actor_order.len()];
+        shared_lien_suffix_step(
+            &format!("{label} normalization step {normalization_steps} actor {actor}"),
+            env,
+            None,
+            |env| env.crank(actor, landing_slot, observations.clone()),
+        )?;
+        normalization_steps += 1;
+    }
+    if normalization_steps == 0 {
+        return Err(format!("{label} shared expiry normalization was vacuous"));
+    }
+
+    let normalized = env.primary_market_state().1;
+    let normalized_source = normalized.source_credit[domain];
+    let normalized_bucket = normalized.source_backing_buckets[domain];
+    if normalized_bucket.status == BackingBucketStatusV16::Fresh
+        || normalized_bucket.fresh_unliened_backing_num != 0
+        || normalized_source.fresh_reserved_backing_num != 0
+        || normalized_bucket.valid_liened_backing_num != 0
+        || normalized_source.valid_liened_backing_num != 0
+        || normalized_bucket.impaired_liened_backing_num != valid_before
+        || normalized_source.impaired_liened_backing_num != valid_before
+    {
+        return Err(format!(
+            "{label} shared expiry did not impair each old lien exactly once: local={:?}, source={normalized_source:?}, bucket={normalized_bucket:?}",
+            actor_order.map(|actor| counterparty_lien_backing(env, actor, domain))
+        ));
+    }
+
+    let direction = if winner_long { 1 } else { -1 };
+    let mut impaired_remaining = valid_before;
+    for (order_index, actor) in actor_order.into_iter().enumerate() {
+        let sibling = actor_order[1 - order_index];
+        let sibling_before = env.primary_portfolio_data(sibling);
+        let actor_lien = counterparty_lien_backing(env, actor, domain);
+        let adverse_q =
+            10 * POS_SCALE as i128 + accepted_increments[actor] as i128 * (POS_SCALE / 10) as i128;
+        for (asset, size, price) in [
+            (1 + actor as u16, adverse_q, adverse_mark),
+            (0, 20 * POS_SCALE as i128, winning_mark),
+        ] {
+            shared_lien_suffix_step(
+                &format!("{label} owner {actor} risk reduction asset {asset}"),
+                env,
+                None,
+                |env| {
+                    execute_trade_route(
+                        env,
+                        TradeRoute::NoCpi,
+                        actor,
+                        actor + 2,
+                        asset,
+                        -direction * size,
+                        price,
+                        0,
+                    )
+                },
+            )?;
+        }
+        if !percolator::active_bitmap_is_empty(
+            env.primary_portfolio(actor)
+                .active_bitmap
+                .map(|word| word.get()),
+        ) {
+            return Err(format!(
+                "{label} owner {actor} did not flatten after impairment"
+            ));
+        }
+        let mut release_steps = 0usize;
+        while counterparty_lien_backing(env, actor, domain) != 0 {
+            if release_steps == 8 {
+                return Err(format!(
+                    "{label} owner {actor} impaired lien did not release boundedly"
+                ));
+            }
+            shared_lien_suffix_step(
+                &format!("{label} owner {actor} impaired release {release_steps}"),
+                env,
+                None,
+                |env| env.crank(actor, landing_slot, observations.clone()),
+            )?;
+            release_steps += 1;
+        }
+        if release_steps == 0 {
+            return Err(format!(
+                "{label} owner {actor} impaired release was vacuous"
+            ));
+        }
+        impaired_remaining = impaired_remaining
+            .checked_sub(actor_lien)
+            .ok_or_else(|| format!("{label} owner {actor} impaired lien exceeded aggregate"))?;
+        let group = env.primary_market_state().1;
+        let source = group.source_credit[domain];
+        let bucket = group.source_backing_buckets[domain];
+        if source.valid_liened_backing_num != 0
+            || bucket.valid_liened_backing_num != 0
+            || source.impaired_liened_backing_num != impaired_remaining
+            || bucket.impaired_liened_backing_num != impaired_remaining
+            || (order_index == 0 && env.primary_portfolio_data(sibling) != sibling_before)
+            || (order_index == 0
+                && counterparty_lien_backing(env, sibling, domain) != local_liens[1])
+        {
+            return Err(format!(
+                "{label} owner {actor} release changed sibling attribution: remaining={impaired_remaining}, source={source:?}, bucket={bucket:?}"
+            ));
+        }
+        if order_index == 0 {
+            shared_lien_suffix_step(
+                &format!("{label} rejected refill with sibling impairment"),
+                env,
+                Some(21),
+                |env| env.top_up_backing_bucket(domain as u16, REFILL_ATOMS + 2, NEXT_EXPIRY_SLOT),
+            )?;
+        }
+    }
+
+    let parts: &[u128] = if split_refill { &[17, 20] } else { &[37] };
+    let mut refilled = 0u128;
+    for &amount in parts {
+        shared_lien_suffix_step(
+            &format!("{label} refill amount {amount}"),
+            env,
+            None,
+            |env| env.top_up_backing_bucket(domain as u16, amount, NEXT_EXPIRY_SLOT),
+        )?;
+        refilled += amount;
+        let group = env.primary_market_state().1;
+        let source = group.source_credit[domain];
+        let bucket = group.source_backing_buckets[domain];
+        if bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.expiry_slot != NEXT_EXPIRY_SLOT
+            || bucket.fresh_unliened_backing_num != refilled * BOUND_SCALE
+            || source.fresh_reserved_backing_num != refilled * BOUND_SCALE
+            || bucket.valid_liened_backing_num != 0
+            || source.valid_liened_backing_num != 0
+            || bucket.impaired_liened_backing_num != 0
+            || source.impaired_liened_backing_num != 0
+            || actor_order
+                .iter()
+                .any(|actor| counterparty_lien_backing(env, *actor, domain) != 0)
+            || env.token_amount(env.provider_source_token)
+                != provider_before - u64::try_from(refilled).expect("bounded refill")
+            || env.token_amount(env.vault)
+                != vault_before + u64::try_from(refilled).expect("bounded refill")
+        {
+            return Err(format!(
+                "{label} expiry/refill did not preserve shared ownership: refilled={refilled}, local={:?}, source={source:?}, bucket={bucket:?}",
+                actor_order.map(|actor| counterparty_lien_backing(env, actor, domain))
+            ));
+        }
+    }
+    if refilled != REFILL_ATOMS {
+        return Err(format!("{label} refill partition totaled {refilled}"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1185,9 +1439,28 @@ fn v16_program_shared_lien_partial_consumption_retries_preserve_sibling_claim() 
                     TradeRoute::NoCpi,
                     reverse_order,
                     winner_long,
-                    Some(split_refill),
+                    ConcurrentLienSuffix::PartialConsumption { split_refill },
                 )
                 .unwrap_or_else(|error| panic!("{error}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn v16_program_shared_lien_expiry_refill_preserves_owner_attribution() {
+    for late in [false, true] {
+        for reverse_order in [false, true] {
+            for winner_long in [false, true] {
+                for split_refill in [false, true] {
+                    verify_two_account_concurrent_lien_ownership(
+                        TradeRoute::NoCpi,
+                        reverse_order,
+                        winner_long,
+                        ConcurrentLienSuffix::ExpiryRefill { late, split_refill },
+                    )
+                    .unwrap_or_else(|error| panic!("{error}"));
+                }
             }
         }
     }

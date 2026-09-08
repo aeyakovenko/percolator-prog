@@ -4500,11 +4500,48 @@ diff -u <(git show 284650c5:tests/invariants/README.md) <(awk '/^### INV-031\/03
 
 **Remaining gap.** This is a fully backed, fixed-slot, zero-fee/funding suffix with one shared
 domain, two equal claims and disjoint adverse assets. Reservation and exit order are coupled;
-other retry placements, cross-transport suffixes, unequal claims/ratios, expiry/impairment,
-Recovery/receipts, provider withdrawal, counterparty-claim terminal completion and maximum shapes
-remain open. The separate INV-063 shared-lien expiry/refill gap is unchanged. INV-033 retains its
-existing public absence guard and pinned engine-owned contracts; no insurance-lien creation,
-engine proof rerun, generic F completion or invariant status promotion is claimed.
+other retry placements, cross-transport suffixes, unequal claims/ratios, Recovery/receipts,
+provider withdrawal, counterparty-claim terminal completion and maximum shapes remain open. The
+shared-lien expiry/refill slice is addressed separately below. INV-033 retains its existing public
+absence guard and pinned engine-owned contracts; no insurance-lien creation, engine proof rerun,
+generic F completion or invariant status promotion is claimed.
+
+### INV-031/032/063 shared-lien expiry/refill histories
+
+`stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs` now owns
+`v16_program_shared_lien_expiry_refill_preserves_owner_attribution`. It reuses the existing
+publicly funded two-owner reservation frontier rather than adding another setup. Sixteen no-CPI
+worlds cross both source sides, both owner orders, exact/late authenticated expiry and a 37-atom
+replacement refill submitted as `37` or `17 + 20`.
+
+At expiry, a distinct 38-atom refill must reject with `Custom(21)` and exact economic rollback.
+Authenticated mark updates and bounded public cranks then move the sum of both nonzero account
+liens from the source and bucket valid classes into the impaired classes exactly once. Each owner
+uses ordinary no-CPI risk-reducing trades and bounded public cranks to flatten and release only its
+checkpoint lien. The first release must leave the sibling portfolio byte-exact with its original
+nonzero lien, and a distinct 39-atom refill still rejects exactly while that impairment remains.
+After the second release, both valid and impaired aggregates are zero. Only then may the real SPL
+transfer create exactly 37 fresh atoms under the new expiry, with aggregate and split refills
+producing the same source classification and custody delta.
+
+The test checks the independent stock and encumbrance censuses plus source-rate transition oracle
+after every successful and failed suffix transaction. It also checks account-local lien ownership,
+source/bucket valid and impaired totals, provider debit, engine/SPL vault credit, token supply,
+nonvacuous normalization, bounded owner release and exact failed-transaction frames. This is a
+wrapper public-route composition test; it adds no production code or engine proof.
+
+Verified from isolated wrapper base `8584e893` with default-feature SBF SHA-256 `230b6db1` and
+authenticated matcher SHA-256 `50e53226`:
+
+```bash
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_shared_lien_expiry_refill_preserves_owner_attribution -- --exact --nocapture
+```
+
+**Remaining gap.** The product fixes equal 100-atom claims, one expiry/refill cycle, zero
+fees/funding and no-CPI suffixes. Cross-transport reductions, unequal claims and backing ratios,
+arbitrary expiry/refill schedules, conversion or terminal payout after replacement backing,
+Recovery/receipts, provider exit, insurance and supported maximum shapes remain open. The result
+does not promote INV-031, INV-032 or INV-063 status.
 
 ## Recorded PR135 inventory
 
