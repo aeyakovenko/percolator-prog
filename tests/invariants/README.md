@@ -4200,8 +4200,8 @@ These untested coverage gaps are not findings and receive no severity/impact lab
 3. **INV-012: retained capability lifecycle.** Owner:
    [`stateful/inv_012_capability_and_delegate_scope.rs`](stateful/inv_012_capability_and_delegate_scope.rs).
    Route family: matcher grants and both CPI transports, composed with position/lifecycle writers.
-   Gap: the bounded one-writer, ordered-grant and canonical context/delegate replacement histories
-   do not cover all automatic invalidation families or matcher/domain substitutions.
+   Gap: the bounded one-writer, ordered-grant and canonical matcher program/context/delegate
+   replacement histories do not cover all automatic invalidation families or domain substitutions.
    TODO: extend their independent authorization-history oracle across those writer/scope/expiry
    partitions, retaining fresh-authorized liveness controls. Keep rejection
    or stale-acceptance evidence separate from attributed economic harm; share with INV-004/005.
@@ -4264,8 +4264,8 @@ plan only; the executing increments below record subsequent bounded SBF evidence
 production/engine-proof changes or promotes status. The initial plan did not use issue-labeled
 reproduction bodies; the increments are invariant-scoped, not finding adapters.
 
-**Existing links and limits.** The following are separate component owners, not one reusable
-retained authorization-history oracle:
+**Existing links and limits.** The following component owners and bounded increments do not yet
+cover the full retained authorization-history product:
 
 | Component | Executing or supporting owner | Observed assertion boundary |
 | --- | --- | --- |
@@ -4275,6 +4275,7 @@ retained authorization-history oracle:
 | Position and lifecycle writers | [`stateful/inv_004_position_episode_binding.rs`](stateful/inv_004_position_episode_binding.rs), `v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not`, `v16_program_position_episode_matrix_rejects_stale_consent_atomically`, and `v16_program_cure_consent_cannot_cross_close_episodes_in_one_portfolio` | Four-transport episode advancement plus reduction, Recovery-forfeit, conversion and close/cure consent checks support writer/episode reuse. They do not assert a common retained matcher-authorization history. The INV-012 CU header also documents direct position/lifecycle regressions; those remain direct evidence, not generic F ownership. |
 | Consumer and writer census | CU INV-012 `v16_program_matcher_capability_route_roster_binds_every_current_scope`; [`cu/inv_004_position_episode_binding.rs`](cu/inv_004_position_episode_binding.rs), `v16_program_retained_position_binding_and_writer_rosters_are_source_complete` | Source drift guards bind the two CPI consumers and episode fields/writer callsites. Source membership is not an executing writer-family oracle, and an episode bump alone does not establish the grant's disposition. |
 | Authority ownership | [`inv_005_adversarial_role_containment.tsv`](inv_005_adversarial_role_containment.tsv), Matcher/Delegate rows; [`stateful/inv_005_authority_incarnation_binding.rs`](stateful/inv_005_authority_incarnation_binding.rs), `v16_program_authority_incarnation_operation_matrix_rejects_aba_replays` | The Matcher row delegates incarnation checks to the same fixed INV-012 test; the Delegate row delegates CPI identity to INV-019. The separate configured-authority matrix does not supply the missing capability-history product or substitute authentication for economic containment. |
+| Retained matcher-program replacement | Stateful INV-012 `v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers` | Adds 24 distinct-program histories to the 24 same-program controls, crossing owner grant replacement/ABA, both CPI consumers, both signs and pre/exact/post expiry. Byte-identical authenticated matcher fixtures isolate program identity from matcher behavior; canonical contexts/delegates change with the program. The existing event oracle requires stale/scope/expiry rejection, exact rollback and fresh nonzero fills. This does not cover arbitrary domain substitutions or lifecycle writers. |
 
 The shared [`fuzz_model.rs`](../support/fuzz_model.rs) has `SetMatcherConfig`, writer actions and a
 retained queue, but `Action::RetainTrade` builds only a no-CPI transaction. `LandRetained` checks
@@ -4408,8 +4409,9 @@ CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_T
 
 ### INV-012 matcher-scope replacement histories
 
+The original context-only increment,
 `v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers` in the
-[stateful owner](stateful/inv_012_capability_and_delegate_scope.rs) adds a finite product at base
+[stateful owner](stateful/inv_012_capability_and_delegate_scope.rs), added a finite product at base
 `ff262c38`: both CPI consumers, both position signs, `A -> B` / `A -> B -> A` grants and
 authenticated slots `expiry-1`, `expiry`, `expiry+1`. Unlike the earlier fixed-tuple products,
 A and B are distinct initialized matcher contexts with their canonical delegates for the same
@@ -4495,6 +4497,31 @@ git worktree add --detach /tmp/codex-agent-worktrees/inv012-capability-history-2
 # Working directory: /tmp/codex-agent-worktrees/inv012-capability-history-20260908-baseline
 cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence -- --exact --nocapture
 git status --short --branch
+```
+
+**Matcher-program maintenance increment (base `379ce5a5`, 2026-09-08).** The same entrypoint now
+also loads the identical authenticated matcher fixture at a distinct program ID, then publicly
+creates/funds/initializes its context and canonical delegate. Owner-signed `SetMatcherConfig`
+events replace A with B or return to A; consumers remain unsigned by the LP owner. This reuses
+the event-derived grant oracle, current-episode controls, displaced-tuple rejection before expiry,
+retained delivery at all three Clock boundaries, exact rollback and fresh nonzero continuations.
+No wrapper state or matcher context is patched. Program/context/delegate replacement is coupled,
+not an isolated one-field substitution or a different matcher-behavior test.
+
+The exact affected selector passes **48 histories: 24 original plus 24 net-new distinct-program
+histories**, with 360 wrapper transactions and 48 public external-setup transactions. Its consumer
+counts are 48 stale, 48 scope mismatch, 32 expired and 64 live (including 48 fresh continuations).
+Only this selector was rerun; the commands and broader results above describe the original
+context-only increment. The maintenance run reuses cached wrapper `230b6db1` and matcher `50e53226`
+SBF artifacts (full hashes above), without rebuilding SBF or changing production/engine proofs.
+Other domain substitutions, lifecycle/keeper writers, longer histories and multi-leg/max-shape
+products remain open; no evidence status or economic-harm claim changes. Commands, from the
+isolated worktree root:
+
+```bash
+CARGO_TARGET_DIR=/home/anatoly/pr427-conformance-target-20260908 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 PERCOLATOR_FUZZ_SBF=/home/anatoly/pr427-conformance-target-20260908/deploy/percolator_prog.so cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers -- --exact --nocapture
+cargo fmt --check
+git diff --check
 ```
 
 ### INV-024 implementation-readiness

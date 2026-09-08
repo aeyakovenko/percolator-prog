@@ -12,7 +12,8 @@
 //! still execute, excluding an always-rejecting fix.
 //! The event-history products also separate request freshness from grant scope
 //! and authenticated expiry, including replacement with a second canonical
-//! matcher context/delegate pair and return to the original pair.
+//! matcher context/delegate pair under the same or a distinct matcher program
+//! and return to the original tuple.
 
 use crate::support::v16_svm::{MarketConfig, TxSuccess, V16Svm, TX_CU_LIMIT};
 use percolator::POS_SCALE;
@@ -964,7 +965,7 @@ fn v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers() {
         )
     }
 
-    fn run_case(route: CpiRoute, aba: bool, slot: u64, sign: i128) -> usize {
+    fn run_case(route: CpiRoute, replace_program: bool, aba: bool, slot: u64, sign: i128) -> usize {
         let mut env = V16Svm::new(
             [0x1d; 32],
             MarketConfig {
@@ -977,6 +978,18 @@ fn v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers() {
         let mut history = AuthorizationHistory::new(&env);
         let setup_events = history.accepted.len();
         let original: [Pubkey; 3] = history.replay()[LP].scope[4..].try_into().unwrap();
+        let matcher_program = if replace_program {
+            // Load identical external fixture code at a distinct program ID;
+            // context and wrapper capability state still require public setup.
+            let program = Pubkey::new_from_array([0x3d; 32]);
+            assert!(env.svm.get_account(&program).is_none());
+            let fixture = env.svm.get_account(&env.matcher_program).unwrap();
+            env.svm.add_program(program, &fixture.data);
+            program
+        } else {
+            env.matcher_program
+        };
+        assert_eq!(matcher_program != original[0], replace_program);
         let context = Keypair::from_seed(&[0x2d; 32]).unwrap();
         let owner = &env.actors[LP].signer;
         let payer = &env.actors[4].signer;
@@ -986,13 +999,13 @@ fn v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers() {
                 env.market.as_ref(),
                 env.actors[LP].portfolio.as_ref(),
                 owner.pubkey().as_ref(),
-                env.matcher_program.as_ref(),
+                matcher_program.as_ref(),
                 context.pubkey().as_ref(),
             ],
             &env.program_id,
         )
         .0;
-        let alternate = [env.matcher_program, context.pubkey(), delegate];
+        let alternate = [matcher_program, context.pubkey(), delegate];
         let context_len = env.svm.get_account(&original[1]).unwrap().data.len();
         // Only external fixture construction: System creates/funds the canonical
         // pair, then the authenticated matcher initializes it with the LP owner.
@@ -1003,7 +1016,7 @@ fn v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers() {
                     &context.pubkey(),
                     env.svm.minimum_balance_for_rent_exemption(context_len),
                     context_len as u64,
-                    &env.matcher_program,
+                    &matcher_program,
                 ),
                 system_instruction::transfer(
                     &payer.pubkey(),
@@ -1011,7 +1024,7 @@ fn v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers() {
                     env.svm.minimum_balance_for_rent_exemption(0),
                 ),
                 Instruction {
-                    program_id: env.matcher_program,
+                    program_id: matcher_program,
                     accounts: vec![
                         AccountMeta::new_readonly(owner.pubkey(), true),
                         AccountMeta::new_readonly(delegate, false),
@@ -1111,25 +1124,29 @@ fn v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers() {
     let mut histories = 0;
     let mut successes = 0;
     let mut consumers = [0; 4]; // stale, scope mismatch, expired, live
-    for route in [CpiRoute::Single, CpiRoute::Batch] {
-        for aba in [false, true] {
-            for slot in [EXPIRY - 1, EXPIRY, EXPIRY + 1] {
-                for sign in [-1, 1] {
-                    successes += std::panic::catch_unwind(|| run_case(route, aba, slot, sign))
-                        .unwrap_or_else(|_| panic!("scope history failed: {route:?}, aba={aba}, slot={slot}, sign={sign}"));
-                    histories += 1;
-                    consumers[0] += 1;
-                    consumers[1] += 1;
-                    consumers[if slot < EXPIRY { 3 } else { 2 }] += 1;
-                    consumers[3] += 1;
+    for replace_program in [false, true] {
+        for route in [CpiRoute::Single, CpiRoute::Batch] {
+            for aba in [false, true] {
+                for slot in [EXPIRY - 1, EXPIRY, EXPIRY + 1] {
+                    for sign in [-1, 1] {
+                        successes += std::panic::catch_unwind(|| {
+                            run_case(route, replace_program, aba, slot, sign)
+                        })
+                        .unwrap_or_else(|_| panic!("scope history failed: {route:?}, replace_program={replace_program}, aba={aba}, slot={slot}, sign={sign}"));
+                        histories += 1;
+                        consumers[0] += 1;
+                        consumers[1] += 1;
+                        consumers[if slot < EXPIRY { 3 } else { 2 }] += 1;
+                        consumers[3] += 1;
+                    }
                 }
             }
         }
     }
-    assert_eq!(histories, 24);
-    assert_eq!(consumers, [24, 24, 16, 32]);
-    assert_eq!(successes, 116);
-    eprintln!("INV-012 scope replacement: {histories} histories, 180 wrapper transactions, 24 public external-setup transactions; consumers [stale, scope, expired, live]={consumers:?}; gaps: alternate matcher programs/domains, lifecycle writers, multi-leg/max shapes");
+    assert_eq!(histories, 48);
+    assert_eq!(consumers, [48, 48, 32, 64]);
+    assert_eq!(successes, 232);
+    eprintln!("INV-012 scope replacement: {histories} histories (24 same-program, 24 replaced-program), 360 wrapper transactions, 48 public external-setup transactions; consumers [stale, scope, expired, live]={consumers:?}; gaps: other matcher domains, lifecycle writers, multi-leg/max shapes");
 }
 
 // Ordered grant-only words extend the one-writer prototype above. No position
