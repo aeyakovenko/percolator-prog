@@ -68,6 +68,110 @@ cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-thread
   inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once \
   inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once \
   inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_same_owner_receipts_keep_independent_topups_and_terminal_replays
+## INV-057 funded owner risk-reduction witnesses (2026-09-09)
+
+[`cu/inv_057_funded_owner_routes.rs`](cu/inv_057_funded_owner_routes.rs) is mounted
+from the existing INV-057 file. This finding-blind, coverage-only increment uses
+base `1aba1f8b7c032bf135eae75c4d11b35de34e2fc9` from
+`origin/codex/invariant-fidelity-reopen-20260904` and its pinned engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No open PR branch, diff, test, or
+finding inventory was consulted. The independent Git checkout and all build
+outputs are under `/dev/shm`; the original working tree was not modified.
+
+**Guarantee.** Each of 22 publicly constructed worlds has an explicitly bounded
+owner-only public route that strictly reduces exposure or forfeits an unbooked
+junior gain without consuming another owner's principal. All economic account
+creation, minting, deposits, positions, accepted marks, and lifecycle changes
+use System/SPL/ATA/wrapper instructions in LiteSVM. Mint authority is revoked
+after finite funding. There are no direct engine transitions, program-owned byte
+edits, state restoration, matcher fixtures, insurance subsidies, or backing
+top-ups in this module. The unchanged INV-018 public market constructor is
+reused; the new fixture and assertions are local to INV-057.
+
+| Starting state | Worlds | Owner witness | Observed calls | Peak witness CU |
+| --- | ---: | --- | ---: | ---: |
+| Live or DrainOnly, two opposite-direction asset legs | 8 | RebalanceReduce halves one leg; sibling asset state and the peer Account remain unchanged | 1 | 158,000 |
+| ResetPending retained leg plus nonzero live sibling | 4 | PermissionlessCrank detaches the reset leg, then RebalanceReduce halves the live sibling | 2 | 125,604 |
+| Asset Recovery, unbooked 10-atom gain and a live sibling | 4 | ForfeitRecoveryLeg removes the recovery exposure without booking/converting the gain | 1 | 110,973 |
+| Resolved, two still-effective legs, within the five-slot owner window | 4 | Owner-signed PermissionlessCrank strictly reduces effective exposure | 1 | 180,229 |
+| Active partial close with residual debt | 1 | PermissionlessCrank finalizes the remaining debt; ForfeitRecoveryLeg removes exposure | 2 | 88,918 |
+| Expired partial close and its Recovery/Resolved successors | 1 | Owner cranks preempt into Recovery, resolve, then reduce the owner's terminal exposure | 3 | 185,445 |
+
+The first four rows mirror asset 0/1 and long/short ownership. Reset residue
+alone is not counted as live exposure: the reset owner must retain a nonzero
+sibling position. Resolved starting quantities must equal independently
+computed effective quantities, not merely stale stored basis. The close cases
+use a publicly funded two-atom principal, a small matched position and ordinary
+accepted adverse marks to create the close ledger; an unrelated 137-atom
+depositor and another live asset remain present.
+
+Every witness transaction has exactly one signer, the exposed owner, who also
+pays exactly one signature fee. The setup payer, administrator, other owners,
+other portfolios, mint, and non-destination token accounts are Account-exact
+across each witness. Non-payout actions also preserve the vault Account exactly.
+Each checked state reconciles individual principal rights, aggregate `c_tot`,
+the SPL vault, and the complete fixed token supply. The debtor's own marked loss
+is explicitly deducted from its expected principal before terminal assertions;
+other principal is never treated as loss-absorbing junior value. Both the
+unrelated principal and the counterparty principal remain nonzero. A successful
+transaction or cursor change alone is not the INV-057 endpoint.
+
+Every owner call is guarded at 325,000 CU. Hard route limits are one call for
+live/drain and recovery forfeiture, two for reset plus sibling reduction, at
+most eight terminal continuation calls, at most three active-close calls, and
+at most ten expired-close calls including mode transitions. No rejected call is
+silently skipped. The observed routes above require only one to three calls.
+
+**Non-duplicate value.** Existing INV-057 covers fee-policy, bilateral/CPI,
+stale-oracle and individual lifecycle exits; adjacent INV-065/071/073 cover reset
+and terminal progress, and INV-027 covers booked-claim seniority during recovery.
+This adds a common all-public, fixed-supply, single-owner-payer witness contract
+across the lifecycle categories, with mirrored two-asset exposure, unrelated
+funded principal, and complete absent-party frames. In particular, reset cleanup
+must lead to reduction of still-live sibling risk, and active-close debt
+finalization must lead to actual owner detachment, not just an updated ledger.
+It adds coverage, not a production finding, proof-method completion, or invariant
+status promotion.
+
+**Remaining gaps.** These are finite deterministic witnesses, not a search of
+every reachable state. Coverage is limited to two assets, small funded amounts,
+authenticated marks, zero trading/maintenance fees and funding, and the stated
+side/epoch combinations. Maximum shapes, nonunit ADL histories beyond the reset
+setup, arbitrary oracle staleness, CPI/delegated routes, nonzero reserve-provider
+claims, and arbitrary close/interleaving schedules remain outside this increment.
+Resolved tests stop at strict risk reduction: they do not certify full payout,
+receipt creation, receipt top-ups, or independence from cohort readiness for
+positive-claim settlement. Recovery forfeiture does not claim to drain every
+retained zero-basis obligation. The seven adjacent controls below are selected
+controls, not complete INV-046/057/071/073 suite runs or engine proofs.
+
+**Validation.** A fresh default-feature SBF was built offline from this checkout
+with platform-tools v1.52, SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The final focused run passes **5 tests, 0 failed, 1,110 filtered**, with all 22
+worlds executed. The adjacent run passes **7 tests, 0 failed, 1,108 filtered**.
+An earlier standalone run of the selected INV-046 control also passed.
+`cargo fmt --all -- --check` and `git diff --check` both pass. Production source,
+manifests, lockfiles, and shared helpers are unchanged. Exact validation commands:
+
+```bash
+cd /dev/shm/percolator-inv057-coverage-20260909
+env PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:/home/anatoly/.cache/solana/v1.52/platform-tools/llvm/bin:/home/anatoly/.local/share/solana/install/active_release/bin:/home/anatoly/.cargo/bin:/usr/local/bin:/usr/bin:/bin \
+  CARGO_TARGET_DIR=/dev/shm/percolator-inv057-coverage-20260909-target \
+  TMPDIR=/dev/shm/percolator-inv057-coverage-20260909-tmp CARGO_BUILD_JOBS=4 \
+  cargo build-sbf --tools-version v1.52 --no-rustup-override --offline -- --locked
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv057-coverage-20260909-target
+export TMPDIR=/dev/shm/percolator-inv057-coverage-20260909-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_057_risk_reduction_availability::funded_owner_routes:: -- --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_057_risk_reduction_availability::v16_program_backing_fee_gate_preserves_post_adl_owner_only_reduction \
+  inv_057_risk_reduction_availability::v16_program_force_shutdown_timeout_lets_traders_exit_before_close \
+  inv_046_trade_availability_without_unsafe_mark_admission::v16_program_invalid_non_base_hybrid_report_preserves_mirrored_sibling_exit \
+  inv_071_crank_progress::v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves \
+  inv_071_crank_progress::v16_program_completed_terminal_hint_replay_preserves_remaining_crank_rank \
+  inv_073_no_permanent_user_lock::v16_program_drain_only_stale_exit_does_not_require_reserve_or_counterparty_signers \
+  inv_073_no_permanent_user_lock::v16_program_expired_partial_close_matrix_resolves_and_preserves_idle_exit
 cargo fmt --all -- --check
 git diff --check
 ```

@@ -14,6 +14,9 @@
 
 use super::*;
 
+#[path = "inv_057_funded_owner_routes.rs"]
+mod funded_owner_routes;
+
 // Unlike the bilateral fee-policy exits below, this composes a newly installed batch gate
 // with nonunit ADL and a counterparty-free exit. All economic state comes from public calls.
 #[test]
