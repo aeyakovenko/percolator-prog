@@ -46,6 +46,9 @@ use super::*;
 #[path = "inv_073_mixed_backing_expiry_exit.rs"]
 mod mixed_backing_expiry_exit;
 
+#[path = "inv_073_recovery_claim_liability_exit.rs"]
+mod recovery_claim_liability_exit;
+
 #[test]
 fn v16_program_restarted_asset_with_retained_live_leg_has_bounded_stale_exit() {
     const CAPITAL: u128 = 1_000;

@@ -3,6 +3,89 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-071/073/078 Recovery claims with deferred live liabilities (2026-09-09)
+
+[`cu/inv_073_recovery_claim_liability_exit.rs`](cu/inv_073_recovery_claim_liability_exit.rs),
+mounted by INV-073, adds one finding-blind coverage test:
+`v16_program_recovery_claim_and_deferred_liability_preserve_keeper_exit`.
+Base: local branch `codex/invariant-fidelity-reopen-20260904` at
+`ec04e4f9cf5e0b8546381148d85d996ec4ed1c38`. Test/docs edits and fresh build
+artifacts are in `/dev/shm/percolator-inv-liveness-private-20260909`, backed by
+a separate private repository. No GitHub requests, other PR branches, holdouts,
+or external reports supplied evidence. Production, Cargo files, engine, shared
+helpers, fixtures, invariant statuses, and coverage verdicts are unchanged.
+
+**Guarantee.** Eight public LiteSVM/SBF worlds cross Recovery asset index 0/1,
+backing expiry at the first permissionless payout slot versus still-live backing,
+and claimant-first versus debtor-first exit schedules. Public System, ATA, SPL,
+and wrapper instructions create four portfolios, deposit `[1000,1000,1000,137]`,
+and fund `[17,23]` backing atoms. Mint authority is revoked. Independent input
+quantities and marks produce 35 and 55 profit atoms on two assets. An authorized
+shutdown and permissionless force-close leave a released Recovery-domain claim,
+an active second leg, and another owner's still-unsettled 55-atom liability. The
+corresponding debtor's account has neither booked that loss nor paid it.
+
+Stale resolution and all subsequent transactions require only an unrelated fee
+payer. The claimant-first prefix clears exposure but reaches an exact local
+`EngineNonProgress` boundary with 1,000 capital, 90 PnL, two intact source claims,
+no receipt, and no payout. Both public payout aliases preserve the complete
+tracked economic Account frame on retry. That wait cannot block the idle user's
+full 137-atom payout. Keeper settlement of the debtor then exposes the claimant's
+remaining terminal continuation without any owner/provider/admin signature. Both
+orders end at exact payouts `[1090,965,945,137]`, zero capital/OI/stored legs,
+empty source tables, terminal receipts where present, and 40 remaining vault atoms.
+Provider payout and administrative retirement are not attempted.
+
+Every accepted exit strictly decreases a decoded-state lexicographic rank over
+due backing expiry, active legs, source entries, capital, positive PnL, terminal
+status, and unpaid receipt face. At most eight successful calls per account are
+allowed; observed maxima are four for the claimant and one for each other owner.
+Each payout transaction verifies its sole payer signature and packet size and
+requests the existing **325,000 CU** crank limit. Complete economic Accounts,
+including Clock and nonparticipating owner/provider accounts, are framed around
+each transition; the network fee payer is excluded. All payout prefixes reconcile
+portfolio capital, internal/SPL vault custody, destination tokens and fixed mint
+supply. The owner-window boundary and both final replay aliases require exact
+errors and economic rollback.
+
+**Distinct scope and gaps.** The existing owner-reduction witnesses do not own
+this mixed Recovery/live liability dependency. The resource-failure lattice first
+requires both owners to forfeit; the source-backed force-close test recovers both
+assets; the shared-expiry test does not carry a Recovery history. This increment
+instead demonstrates progress through a real locally blocked claimant while
+independent principal exits and unsigned debtor settlement remain available. It is
+not a provider-first attempt or maximum-shape B-budget test. Only two assets, long
+winners, solvent debtors, zero fees/funding, accessible portfolio and destination
+accounts, and configured authenticated recovery timing are covered. Partial
+receipts, bankruptcy/B deficits, source liens, spent insurance, native quote,
+arbitrary schedules, maximum shapes, and signer-dependent deletion or reserve
+retirement remain outside this witness. No universal INV-057/071/073/078 closure
+or production bug is claimed.
+
+**Validation.** Fresh default-feature SBF, platform-tools v1.52, locked/offline;
+wrapper SHA-256 `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The focused selector passes all eight worlds: 48 accepted payout continuations,
+84 exact refusals, peak 321,661 CU. Invariant index and formatting/whitespace
+checks pass. Development corrected test premises about clock advancement, oracle
+maturity, and receipt creation before liability settlement. A 321,526-CU
+successful transaction exceeded the initially chosen 300,000 custody assertion;
+the final test enforces the existing crank budget in the actual transaction. None
+of these was a public-interface LoF/DoS/CU finding. No broad suite was run.
+
+Commands from the private worktree:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::recovery_claim_liability_exit::v16_program_recovery_claim_and_deferred_liability_preserve_keeper_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+```
+
 ## INV-019 retained CPI return freshness (2026-09-09)
 
 [`cu/inv_019_retained_return_freshness.rs`](cu/inv_019_retained_return_freshness.rs)
