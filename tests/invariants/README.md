@@ -3,6 +3,62 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-025 active reserve-swap stock attribution (2026-09-09)
+
+[`cu/inv_025_active_reserve_swap.rs`](cu/inv_025_active_reserve_swap.rs), mounted
+by INV-025, adds one net-new partial INV-025/024 public LiteSVM history on base
+`f531aeff`. Branch: `codex/pr135-inv024-quote-partition-20260909`; separate worktree:
+`/home/anatoly/pr135-inv024-quote-partition-20260909`. **PR135 tests/docs only;
+production, engine pins and invariant statuses unchanged.**
+
+Public System/SPL/ATA/wrapper transactions create fixed-supply primary/secondary
+mints, 101 owner-capital atoms, 43 insurance atoms, two 17/29-atom backing domains
+and a 211-atom unaccounted secondary reserve. After each economic suffix transaction,
+the oracle scans raw portfolio/asset stocks, checks their header aggregates and
+backing/source mirrors, and reconciles every token account and each mint separately.
+Primary surplus is derived from signed swap inputs plus secondary owner payouts,
+not inferred as an unexplained difference from the engine vault. Both actors retain
+their exact input-derived entitlements; rounding, PnL, earnings and liens remain zero.
+
+A valid 37-atom swap followed by a one-atom owner overclaim rejects at instruction 3
+with `EngineLockActive`. Logs confirm both swap SPL transfers completed; complete
+compiled-account plus mint/wallet snapshots restore bytes, metadata and lamports,
+with only the exact payer signature fee deducted. The identical swap instruction
+then succeeds without changing market or portfolio bytes. Mixed-rail owner exits
+and live provider/insurance withdrawals leave zero engine stock and exactly
+98 primary plus 113 secondary reserve atoms, with no claim minted from surplus.
+Unlike the existing empty-market swap partitions and mixed-rail owner retries,
+this composes reserve replacement with all three live stock classes. It does not
+repeat row410/417/418/425 or resolved-payout fairness histories.
+
+Residual gaps: positions, PnL/fees, encumbered backing, arbitrary reserve histories,
+other quote programs, terminal disposition and maximum shapes. No full-history
+proof, status promotion, fresh SBF build or production counterexample is claimed.
+Validation uses a private copy of the source-matching row424 cache (engine
+`394fd0bf`), SBF SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Exact commands from the separate worktree (copy is first-use setup):
+
+```sh
+cp -a /dev/shm/pr135-row424-progress-target /dev/shm/pr135-inv025-reserve-swap-target
+export CARGO_TARGET_DIR=/dev/shm/pr135-inv025-reserve-swap-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_025_exact_stock_reconciliation::active_reserve_swap::v16_program_active_reserve_swap_preserves_stock_classes_and_owner_claim -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_025_exact_stock_reconciliation::active_reserve_swap::v16_program_active_reserve_swap_preserves_stock_classes_and_owner_claim \
+  inv_024_attributed_quote_value_conservation::v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim \
+  inv_052_split_merge_invariance::v16_program_base_unit_swap_amount_is_history_partition_invariant
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: new selector **1/1**, combined focused run **3/3**, format/whitespace checks
+pass. The new history checks ten successful transitions and one exact rollback;
+peak CU is **70,418** isolated (**43,418** in the warmed combined run). An initial
+test-only `Active`/`Live` enum spelling error was corrected before execution.
+The existing `solana-client` future-incompatibility warning remains.
+
 ## INV-082 keeper reconstruction of a closed payout destination (2026-09-09)
 
 [`cu/inv_082_terminal_destination_recovery.rs`](cu/inv_082_terminal_destination_recovery.rs),
