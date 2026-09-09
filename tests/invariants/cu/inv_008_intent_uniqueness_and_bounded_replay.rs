@@ -20,6 +20,8 @@
 //! neither restored balances nor a fresh owner sequence can revive the retained withdrawal.
 //! The stock-history sibling generates mixed deposit/reward/custody replenishment schedules,
 //! checking an independent value model after partial payouts and late SPL rollback/retry.
+//! The released-PnL history consumes principal withdrawal before converting a distinct junior
+//! claim, including exact rollback of that reclassification on a stale withdrawal suffix.
 //! This does not certify insurance-withdrawal stock binding (counterexample 415 remains open).
 //! This is bounded asset-0 evidence using signature-distinct envelopes around retained instruction
 //! bytes, not detached-signature, durable-nonce, or arbitrary-history coverage.
@@ -1057,5 +1059,410 @@ fn v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody() {
     eprintln!(
         "withdrawal/redeposit: 12 transactions, 9 exact stale rollbacks, max CU={max_cu}; \
          two distinct withdrawals paid {AMOUNT} each, one redeposit returned {AMOUNT}"
+    );
+}
+
+#[test]
+fn v16_consumed_withdrawal_cannot_spend_later_converted_pnl() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const INITIAL: [u64; 3] = [101, 503, 59];
+    const PRICE: u64 = 100;
+    const GAIN: u64 = 111;
+    const SLOT: u64 = 5;
+
+    let mut env = inv018_public_spl_market(0);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, PRICE);
+    let owners: [Keypair; 3] = std::array::from_fn(|_| Keypair::new());
+    let portfolios: [Pubkey; 3] = std::array::from_fn(|actor| {
+        env.svm
+            .airdrop(&owners[actor].pubkey(), 1_000_000_000)
+            .unwrap();
+        let key = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &key,
+            env.portfolio_account_len,
+            env.program_id,
+        );
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owners[actor].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(key.pubkey(), false),
+            ],
+            &[&owners[actor]],
+        )
+        .unwrap();
+        key.pubkey()
+    });
+    let tokens: [Pubkey; 3] = std::array::from_fn(|actor| {
+        let token = create_ata_for_test(&mut env.svm, &env.payer, owners[actor].pubkey(), env.mint);
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &token,
+                &env.admin.pubkey(),
+                &[],
+                INITIAL[actor],
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .unwrap();
+        env.send(
+            env.deposit_ix(portfolios[actor], INITIAL[actor].into()),
+            vec![
+                AccountMeta::new(owners[actor].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[actor], false),
+                AccountMeta::new(token, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owners[actor]],
+        )
+        .unwrap();
+        token
+    });
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &env.mint,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            &env.admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .unwrap();
+    env.trade_with_cu(
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(SLOT);
+    env.push_auth_mark_with_cu(SLOT, PRICE + GAIN);
+    for _ in 0..SLOT {
+        if env.market_state().1.assets[0].slot_last == SLOT {
+            break;
+        }
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: SLOT,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[2], false),
+            ],
+            &[],
+        )
+        .unwrap();
+    }
+    assert_eq!(env.market_state().1.assets[0].slot_last, SLOT);
+    for actor in [1, 0] {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: SLOT,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[actor], false),
+            ],
+            &[],
+        )
+        .unwrap();
+    }
+    env.trade_with_cu(
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        -(POS_SCALE as i128),
+        PRICE + GAIN,
+        0,
+    );
+
+    let ids = portfolios.map(|key| env.portfolio_id(key));
+    let epochs = portfolios.map(|key| env.portfolio_position_epoch(key));
+    let sequences = portfolios.map(|key| env.portfolio_matcher_sequence(key));
+    let controls = env.control_sequences(0);
+    let mint_frame = env.svm.get_account(&env.mint).unwrap();
+    let supply = INITIAL.iter().sum::<u64>();
+    assert_eq!(Mint::unpack(&mint_frame.data).unwrap().supply, supply);
+    assert_eq!(
+        Mint::unpack(&mint_frame.data).unwrap().mint_authority,
+        COption::None
+    );
+    let token_keys = [tokens[0], tokens[1], tokens[2], env.vault];
+    let token_frames = token_keys.map(|key| env.svm.get_account(&key).unwrap());
+    let passive_keys = [
+        portfolios[1],
+        portfolios[2],
+        owners[0].pubkey(),
+        owners[1].pubkey(),
+        owners[2].pubkey(),
+        env.admin.pubkey(),
+    ];
+    let passive_frames = passive_keys.map(|key| env.svm.get_account(&key));
+    let check = |env: &V16CuEnv, converted: u64, paid: u64, withdrawals: u64| {
+        let capital = [INITIAL[0] + converted - paid, INITIAL[1] - GAIN, INITIAL[2]];
+        let pnl = GAIN - converted;
+        for actor in 0..3 {
+            let p = env.portfolio_state(portfolios[actor]);
+            assert_eq!(p.capital.get(), u128::from(capital[actor]));
+            assert_eq!(p.pnl.get(), if actor == 0 { i128::from(pnl) } else { 0 });
+            assert_eq!(p.reserved_pnl.get(), 0);
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(&p)));
+            assert_eq!(
+                p.source_domains
+                    .iter()
+                    .map(|s| s.source_claim_bound_num.get())
+                    .sum::<u128>(),
+                if actor == 0 {
+                    u128::from(pnl) * BOUND_SCALE
+                } else {
+                    0
+                },
+            );
+            assert_eq!(env.portfolio_id(portfolios[actor]), ids[actor]);
+            assert_eq!(
+                env.portfolio_matcher_sequence(portfolios[actor]),
+                sequences[actor] + if actor == 0 { withdrawals } else { 0 }
+            );
+            assert_eq!(
+                env.portfolio_position_epoch(portfolios[actor]),
+                epochs[actor] + u64::from(actor == 0 && converted != 0)
+            );
+        }
+        let group = env.market_state().1;
+        assert_eq!(group.mode, MarketModeV16::Live);
+        assert_eq!(group.vault, u128::from(supply - paid));
+        assert_eq!(group.c_tot, capital.iter().map(|c| u128::from(*c)).sum());
+        assert_eq!(group.pnl_pos_tot, u128::from(pnl));
+        assert_eq!(
+            group.source_claim_bound_total_num,
+            u128::from(pnl) * BOUND_SCALE
+        );
+        assert_eq!(group.insurance, 0);
+        assert!(group
+            .insurance_domain_budget
+            .iter()
+            .all(|amount| *amount == 0));
+        assert_eq!(
+            (
+                group.assets[0].oi_eff_long_q,
+                group.assets[0].oi_eff_short_q
+            ),
+            (0, 0)
+        );
+        assert_eq!(group.c_tot + group.pnl_pos_tot, group.vault);
+        assert_eq!(env.control_sequences(0), controls);
+        for (index, key) in token_keys.into_iter().enumerate() {
+            let mut expected = token_frames[index].clone();
+            let mut token = TokenAccount::unpack(&expected.data).unwrap();
+            token.amount = match index {
+                0 => paid,
+                3 => supply - paid,
+                _ => 0,
+            };
+            TokenAccount::pack(token, &mut expected.data).unwrap();
+            assert_eq!(env.svm.get_account(&key).unwrap(), expected);
+        }
+        assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_frame);
+        assert_eq!(
+            passive_keys.map(|key| env.svm.get_account(&key)),
+            passive_frames
+        );
+    };
+    let retained = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owners[0].pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolios[0], false),
+            AccountMeta::new(tokens[0], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: env.withdraw_ix(portfolios[0], INITIAL[0].into()).encode(),
+    };
+    let signed = |env: &V16CuEnv, instructions: &[Instruction], nonce: u32| {
+        let mut message = vec![
+            heap_ix(),
+            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000 - nonce),
+        ];
+        message.extend_from_slice(instructions);
+        Transaction::new_signed_with_payer(
+            &message,
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &owners[0]],
+            env.svm.latest_blockhash(),
+        )
+    };
+    // Retain both signed envelopes before either lands; no binding adapter refreshes their bytes.
+    let first = signed(&env, &[retained.clone()], 1);
+    let retry = signed(&env, &[retained.clone()], 2);
+    assert_ne!(first.signatures, retry.signatures);
+    let frame_keys: BTreeSet<_> = portfolios
+        .into_iter()
+        .chain(token_keys)
+        .chain(passive_keys)
+        .chain([env.market, env.mint])
+        .collect();
+    let mut peak_cu = 0;
+    let mut send = |env: &mut V16CuEnv, tx: Transaction, stale_prefix: Option<usize>| {
+        tx.verify().unwrap();
+        let before: Vec<_> = frame_keys
+            .iter()
+            .chain(&tx.message.account_keys)
+            .map(|key| (*key, env.svm.get_account(key)))
+            .collect();
+        let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        payer.lamports -= FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let result = env.svm.send_transaction(tx);
+        let meta = if let Some(prefix) = stale_prefix {
+            let error = result.expect_err("consumed withdrawal cannot acquire converted stock");
+            assert_eq!(
+                error.err,
+                TransactionError::InstructionError(
+                    2 + prefix as u8,
+                    InstructionError::Custom(PercolatorError::EngineStale as u32),
+                )
+            );
+            assert_eq!(
+                error
+                    .meta
+                    .logs
+                    .iter()
+                    .filter(|line| *line == &format!("Program {} success", env.program_id))
+                    .count(),
+                prefix
+            );
+            assert!(!error
+                .meta
+                .logs
+                .iter()
+                .any(|line| line.starts_with(&format!("Program {} invoke", spl_token::ID))));
+            for (key, account) in before {
+                if key != env.payer.pubkey() {
+                    assert_eq!(
+                        env.svm.get_account(&key),
+                        account,
+                        "exact rollback at {key}"
+                    );
+                }
+            }
+            error.meta
+        } else {
+            result.expect("current signed request must succeed")
+        };
+        assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+        assert_cu_within(
+            "INV-008 converted stock",
+            meta.compute_units_consumed,
+            CUSTODY_CU_LIMIT,
+        );
+        peak_cu = peak_cu.max(meta.compute_units_consumed);
+    };
+    check(&env, 0, 0, 0);
+    send(&mut env, first, None);
+    check(&env, 0, INITIAL[0], 1);
+
+    // Principal withdrawal invalidates the certificate needed to convert the separate claim.
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: SLOT,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolios[0], false),
+        ],
+        &[],
+    )
+    .expect("public refresh preserves the unconverted claim after principal withdrawal");
+    check(&env, 0, INITIAL[0], 1);
+
+    let conversion = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owners[0].pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolios[0], false),
+        ],
+        data: env
+            .convert_released_pnl_ix(portfolios[0], GAIN.into())
+            .encode(),
+    };
+    let invalid_suffix = signed(&env, &[conversion.clone(), retained.clone()], 3);
+    send(&mut env, invalid_suffix, Some(1));
+    check(&env, 0, INITIAL[0], 1);
+    let convert_tx = signed(&env, &[conversion], 4);
+    send(&mut env, convert_tx, None);
+    check(&env, GAIN, INITIAL[0], 1);
+    assert!(
+        GAIN >= INITIAL[0],
+        "new stock could fund the original amount"
+    );
+    send(&mut env, retry, Some(0));
+    check(&env, GAIN, INITIAL[0], 1);
+
+    let fresh = Instruction {
+        data: env.withdraw_ix(portfolios[0], INITIAL[0].into()).encode(),
+        ..retained.clone()
+    };
+    assert_eq!(
+        fresh.data,
+        ProgInstruction::Withdraw {
+            portfolio_id: ids[0],
+            expected_sequence: sequences[0] + 1,
+            amount: INITIAL[0].into(),
+        }
+        .encode()
+    );
+    let fresh_tx = signed(&env, &[fresh], 5);
+    send(&mut env, fresh_tx, None);
+    check(&env, GAIN, 2 * INITIAL[0], 2);
+    let remainder = Instruction {
+        data: env
+            .withdraw_ix(portfolios[0], (GAIN - INITIAL[0]).into())
+            .encode(),
+        ..retained
+    };
+    let remainder_tx = signed(&env, &[remainder], 6);
+    send(&mut env, remainder_tx, None);
+    check(&env, GAIN, INITIAL[0] + GAIN, 3);
+    assert_eq!(env.token_amount(tokens[0]), 212);
+    assert_eq!(env.token_amount(env.vault), 451);
+    eprintln!(
+        "INV-008 converted stock: six withdrawal/conversion transactions plus public refresh, \
+         two exact stale rollbacks, peak withdrawal/conversion CU {peak_cu}"
     );
 }

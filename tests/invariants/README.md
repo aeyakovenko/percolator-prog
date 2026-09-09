@@ -3,6 +3,74 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-008 retained withdrawal across PnL conversion (2026-09-09)
+
+[`cu/inv_008_intent_uniqueness_and_bounded_replay.rs`](cu/inv_008_intent_uniqueness_and_bounded_replay.rs)
+adds `v16_consumed_withdrawal_cannot_spend_later_converted_pnl`. One public
+System/SPL/ATA/wrapper history funds three owners with 101/503/59 atoms, revokes
+mint authority, opens one matched lot at 100, publishes an authenticated mark of
+211, settles the loss and gain, and closes the position with zero fees/funding.
+The winner has 101 capital plus a separately attributed 111-atom PnL claim; the
+counterparty has 392 capital and the unrelated owner retains 59.
+
+Two signature-distinct withdrawals of 101 are signed before either executes.
+The first exhausts the winner's capital. Public refresh restores the certificate
+needed for conversion without changing value or the consumed withdrawal sequence.
+`ConvertReleasedPnl` followed by the retained withdrawal rejects instruction 3
+with exactly `EngineStale`, after one successful wrapper conversion and no SPL CPI.
+Every tracked Account rolls back, including claim bounds, capital, certificate,
+position epoch, token metadata and economic lamports; the payer loses exactly the
+calculated two-signature fee. The identical conversion instruction then succeeds.
+
+Conversion retires exactly 111 atoms of PnL and source-claim bound while creating
+111 capital, with unchanged custody and withdrawal sequence. The originally signed
+retry still rejects despite sufficient capital for its original 101-atom amount.
+Fresh consent changing only that withdrawal's sequence pays 101, and a separately
+signed 10-atom remainder completes the winner's exact 212-atom entitlement.
+The remaining 451 custody atoms belong to the unchanged counterparty/bystander
+portfolios. Every suffix checkpoint checks input-derived per-owner capital/PnL,
+claim bounds, owner and position sequences, aggregate capital/PnL, zero insurance
+and OI, complete expected SPL Accounts, fixed supply 663 and passive Account frames.
+All economic state comes from public instructions; only signer SOL, Clock and
+blockhashes are harness-supplied. Expected token serialization changes off-chain
+copies only, never LiteSVM account state.
+
+The existing withdrawal-stock histories replenish through deposits, rewards and raw
+custody transfers. INV-024's PnL/reward history converts before its live payout;
+its seeded withdrawal retries run between already-converted payout chunks.
+The retry operation matrix retains conversions across new trading episodes.
+This increment instead composes consumed principal withdrawal, certificate refresh,
+junior-to-capital reclassification, and atomic rollback of that reclassification.
+It adds no insurance-ledger, insurance-withdrawal or partial-fill budget matrix.
+This is sampled evidence adjacent to INV-008/010/011/024/031/064 reopening row 415;
+**row 415 remains OPEN** and all invariant statuses stay unchanged. Insurance stock
+binding, partial authorization ledgers, other rails, impaired claims and arbitrary
+histories remain outside this witness. No production inconsistency was observed.
+
+Validation uses a fresh default-feature SBF build in private worktree
+`/dev/shm/percolator-inv008-stock-sequence-20260910`, base
+`39bad808b3af2afbee3c951eb2d5cdc3e865d374`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, platform-tools v1.52.
+SBF SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new selector passes one history with six withdrawal/conversion transactions,
+one public refresh and two exact stale rollbacks; peak withdrawal/conversion cost
+is 75,551 CU under the 300,000 custody limit. Development runs corrected a test
+nonce type, an unsupported fixture configuration, and the required post-withdrawal
+refresh. The adjacent exact withdrawal selector and invariant index pass; targeted
+rustfmt and whitespace checks pass. Cargo reports its existing solana-client
+future-incompatibility warning.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=6 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 TMPDIR=/dev/shm
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_BUILD_JOBS=4 cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::v16_consumed_withdrawal_cannot_spend_later_converted_pnl -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_008_intent_uniqueness_and_bounded_replay.rs
+git diff --check
+```
+
 ## INV-045 fractional target reversal and neutral reduction (2026-09-09)
 
 [`cu/inv_045_no_free_mark_movement.rs`](cu/inv_045_no_free_mark_movement.rs) adds
