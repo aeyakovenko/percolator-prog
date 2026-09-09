@@ -2,7 +2,7 @@
 //! maintenance and rounded adverse nontraded-leg target lag, on either party.
 //! INV-060 owns fees alone; INV-053 owns lag after explicit fee collection. This
 //! matrix compares direct admission with public settlement while both are pending.
-//! Already-live portfolios only: flat first-risk ordering remains with #430/#413.
+//! Already-live portfolios only: flat histories belong to the flat-admission sibling.
 //! All economic state is constructed through System/SPL/ATA/wrapper instructions.
 
 use super::*;
