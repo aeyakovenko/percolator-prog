@@ -14,8 +14,10 @@
 //! and authenticated expiry, including replacement with a second canonical
 //! matcher context/delegate pair under the same or a distinct matcher program
 //! and return to the original tuple.
+//! The owner-episode child adds partial/full reduction and released-PnL
+//! conversion with retained consumers on a separate live asset.
 
-use crate::support::v16_svm::{MarketConfig, TxSuccess, V16Svm, TX_CU_LIMIT};
+use crate::support::v16_svm::{MarketConfig, TxSuccess, V16Svm, ASSET_COUNT, TX_CU_LIMIT};
 use percolator::POS_SCALE;
 use percolator_prog::{
     error::PercolatorError,
@@ -35,6 +37,9 @@ use solana_sdk::{
     system_instruction,
     transaction::Transaction,
 };
+
+#[path = "inv_012_owner_episode_revocation.rs"]
+mod owner_episode_revocation;
 
 #[derive(Clone, Copy, Debug)]
 enum CpiRoute {
@@ -203,7 +208,7 @@ struct GrantOracle {
     enabled: bool,
     cap: u16,
     expiry: u64,
-    position: i128,
+    positions: [i128; ASSET_COUNT],
 }
 
 impl GrantOracle {
@@ -226,8 +231,14 @@ enum AuthorizationEvent {
     Fill {
         taker: usize,
         lp: usize,
+        asset: usize,
         size: i128,
         cpi: bool,
+    },
+    OwnerEpisode {
+        actor: usize,
+        asset: usize,
+        position_delta: i128,
     },
 }
 
@@ -258,7 +269,7 @@ impl AuthorizationHistory {
                 enabled: false,
                 cap: 0,
                 expiry: 0,
-                position: 0,
+                positions: [0; ASSET_COUNT],
             })
             .collect();
         // V16Svm::new publicly creates each portfolio, installs exactly one grant,
@@ -304,18 +315,30 @@ impl AuthorizationHistory {
                 AuthorizationEvent::Fill {
                     taker,
                     lp,
+                    asset,
                     size,
                     cpi,
                 } => {
                     for (actor, delta) in [(taker, size), (lp, -size)] {
                         let grant = &mut grants[actor];
                         grant.epoch += 1;
-                        grant.position += delta;
+                        grant.positions[asset] += delta;
                         if !(cpi && actor == lp) {
                             grant.enabled = false;
                             grant.expiry = 0;
                         }
                     }
+                }
+                AuthorizationEvent::OwnerEpisode {
+                    actor,
+                    asset,
+                    position_delta,
+                } => {
+                    let grant = &mut grants[actor];
+                    grant.epoch += 1;
+                    grant.positions[asset] += position_delta;
+                    grant.enabled = false;
+                    grant.expiry = 0;
                 }
             }
         }
@@ -357,10 +380,16 @@ impl AuthorizationHistory {
                 assert_eq!(observed.matcher_context, expected.scope[5].to_bytes());
                 assert_eq!(observed.matcher_delegate, expected.scope[6].to_bytes());
             }
+            let mut positions = [0; ASSET_COUNT];
+            for leg in &env.primary_portfolio(i).legs {
+                let leg = leg.try_to_runtime().expect("decode observed leg");
+                if leg.active {
+                    positions[leg.asset_index as usize] += leg.basis_pos_q;
+                }
+            }
             assert_eq!(
-                env.primary_portfolio(i).legs[0].basis_pos_q.get(),
-                expected.position,
-                "actor {i} exact signed fill history"
+                positions, expected.positions,
+                "actor {i} exact position history"
             );
         }
         assert_eq!(env.token_supply_observed(), env.initial_token_supply);
@@ -524,6 +553,7 @@ fn land_capability_trade(
         Some(AuthorizationEvent::Fill {
             taker: 0,
             lp: 1,
+            asset: 0,
             size,
             cpi: true,
         }),
@@ -612,6 +642,7 @@ fn run_capability_history(case: CapabilityCase) {
                 Some(AuthorizationEvent::Fill {
                     taker,
                     lp,
+                    asset: 0,
                     size: case.size,
                     cpi,
                 }),
@@ -758,6 +789,7 @@ fn v16_program_retained_taker_writers_preserve_untouched_lp_capability() {
             Some(AuthorizationEvent::Fill {
                 taker,
                 lp,
+                asset: 0,
                 size: writer_size,
                 cpi,
             }),
@@ -769,7 +801,7 @@ fn v16_program_retained_taker_writers_preserve_untouched_lp_capability() {
         );
         let current = history.replay();
         assert_eq!(current[TAKER].epoch, request[TAKER].epoch + 1);
-        assert_eq!(current[TAKER].position, size);
+        assert_eq!(current[TAKER].positions[0], size);
         assert_eq!(current[TAKER].enabled, cpi && lp == TAKER);
         assert_eq!(current[LP], request[LP], "untouched LP authorization scope");
         assert!(current[LP].authorizes(
@@ -828,7 +860,7 @@ fn v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes(
         enabled: false,
         cap: 0,
         expiry: 0,
-        position: 0,
+        positions: [0; ASSET_COUNT],
     };
     let mut history = AuthorizationHistory {
         created: vec![created; 2],
@@ -862,6 +894,7 @@ fn v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes(
     history.accepted.push(AuthorizationEvent::Fill {
         taker: 1,
         lp: 0,
+        asset: 0,
         size: 1,
         cpi: true,
     });
@@ -891,6 +924,32 @@ fn v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes(
     assert!(!rebound.authorizes(rebound.scope, live.sequence, 5));
     assert!(!rebound.authorizes(rebound.scope, rebound.sequence, 6));
     assert_eq!(history.accepted.len(), 3, "regrant retains prior events");
+    for position_delta in [0, -1] {
+        let mut owner_history = AuthorizationHistory {
+            created: history.created.clone(),
+            accepted: history.accepted.clone(),
+        };
+        let before = owner_history.replay();
+        owner_history
+            .accepted
+            .push(AuthorizationEvent::OwnerEpisode {
+                actor: 1,
+                asset: 0,
+                position_delta,
+            });
+        let after = owner_history.replay();
+        assert_eq!(after[0], before[0], "other grants survive owner episodes");
+        assert_eq!(after[1].scope, rebound.scope);
+        assert_eq!(after[1].sequence, rebound.sequence);
+        assert_eq!(after[1].cap, rebound.cap);
+        assert_eq!(after[1].epoch, rebound.epoch + 1);
+        assert_eq!(after[1].positions[0], rebound.positions[0] + position_delta);
+        assert_eq!(after[1].expiry, 0);
+        assert!(
+            !after[1].authorizes(rebound.scope, rebound.sequence, 5),
+            "even a zero-position-delta owner episode revokes authority"
+        );
+    }
 }
 
 #[test]
@@ -1321,6 +1380,7 @@ fn v16_program_ordered_grant_histories_bind_retained_cpi_disposition() {
             Some(AuthorizationEvent::Fill {
                 taker: 0,
                 lp: LP,
+                asset: 0,
                 size,
                 cpi: true,
             }),

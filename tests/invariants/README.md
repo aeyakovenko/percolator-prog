@@ -70,6 +70,84 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_012_joint_incarnation_bin
 git diff --check
 ```
 
+## INV-012 owner-episode revocation (row 412, 2026-09-09)
+
+[`stateful/inv_012_owner_episode_revocation.rs`](stateful/inv_012_owner_episode_revocation.rs),
+mounted by the existing INV-012 stateful owner, adds a passing bounded slice of
+`retained-capability-cannot-cross-any-authority-revoking-state-transition` on coordinator
+base `2e722773`, retaining the work started at `d309de32` in the existing row-412 worktree.
+This is **PR135-only coverage**, not a production fix or a finding adapter.
+Row **412 remains OPEN**. No production code, engine pin/proof, shared support harness,
+coordinator files, or invariant status changes.
+
+This increment retains **trade consumers**, not `SetMatcherConfig` transactions. Retained
+grant re-delivery and its production episode-binding fix remain owned by
+[PR #412](https://github.com/aeyakovenko/percolator-prog/pull/412); this passing slice does
+not reproduce or certify that fix. Existing INV-004 owner-writer episode tests and INV-012
+trade/grant-replacement histories do not compose these owner writers with both retained
+CPI consumers and untouched-scope controls under the common authorization oracle.
+
+The product crosses partial reduction, full reduction, and released-PnL conversion with
+the retained taker, retained LP, and unrelated portfolio; both CPI consumers; and both
+position signs: **36 histories, 392 checked public wrapper transactions, no skipped cells**.
+Reduction removes exactly 3 or 12 units from a 12-unit position. Conversion moves exactly
+60 publicly earned quote atoms into owner capital without changing the position vector.
+The retained one-leg fill targets a separate live asset, so admission on the unbalanced
+reduced asset cannot mask portfolio-wide authorization. Conversion setup authenticates
+both asset clocks and refreshes consumer certificates before retaining requests. Four redundant
+already-certified LP cranks were removed during review; no history partition was removed.
+
+The common append-only oracle now tracks positions by asset and classifies owner episodes
+independently of observed grant state. Each prefix checks exact positions, portfolio IDs,
+episodes, config sequences, enabled state, expiry, cap and live scope. Owner episodes revoke
+without advancing the grant sequence or modifying external matcher contexts; untouched LP
+bytes remain exact. Pure oracle controls include a zero-position-delta revocation.
+
+Each retained transaction successfully simulates before and after an invalid zero-amount
+writer: **72 live simulations and 36 atomic rejected-writer controls**. The identical retained
+bytes then yield **24 EngineStale rejections** or **12 scope-preserving fills**. Current-episode
+requests do not renew grants: **12 revoked-LP requests reject Unauthorized**, while **24
+untouched-LP controls fill**. Explicit owner reauthorization restores **12 nonzero fills**.
+All rejections preserve the complete tracked economic-account data/metadata, matcher and
+delegate accounts, SPL custody/supply and economic lamports, excluding network fee payers.
+Every checked wrapper call validates the public trace and disallows hidden reauthorization.
+
+Scope is two exercised assets in the standard three-asset `V16Svm` bootstrap, one consumer
+leg, fixed canonical matcher tuple, zero fees/funding, and unexpired grants. Standard initial
+account/token fixtures are reused; no initialized wrapper/engine bytes are edited. Recovery,
+cure/close, liquidation/force-close, retained grant re-delivery, generation/incarnation
+replacement, arbitrary writer words, fee boundaries and maximum shapes remain outside this
+increment. INV-004/005/016/022 and the pinned engine continue to own their existing component proofs.
+
+The final exact selector passes **1/1** in 18.02s (293 filtered). Peak measured successful transaction CU is
+**167,860**, and the owner-writer peak is **110,524**; bootstrap, grant setup and rejected CU
+are not included in those maxima. These are bounded measurements, not worst-case CU claims.
+The five existing selectors sharing the modified event oracle also pass **5/5** in 203.56s
+(289 filtered). New-module formatting, whitespace and the eight-column TSV check pass.
+No broad suite, Kani, engine proof, or parent-red/fixed-green evidence is claimed.
+
+The continuation reuses the existing worktree-local default-feature SBF artifacts, verifying
+their hashes. Coordinator `2e722773` changes no production, engine, fixture or shared-support
+source relative to `d309de32`; the engine remains `394fd0bf`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Build output and host test binaries are private to the worktree.
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+sha256sum target/deploy/percolator_prog.so tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::owner_episode_revocation::v16_program_retained_capability_cannot_cross_owner_episode_revocation -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact \
+  inv_012_capability_and_delegate_scope::v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes \
+  inv_012_capability_and_delegate_scope::v16_program_retained_capability_histories_preserve_authorization_scope \
+  inv_012_capability_and_delegate_scope::v16_program_retained_taker_writers_preserve_untouched_lp_capability \
+  inv_012_capability_and_delegate_scope::v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers \
+  inv_012_capability_and_delegate_scope::v16_program_ordered_grant_histories_bind_retained_cpi_disposition
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_012_owner_episode_revocation.rs
+git diff --check
+```
+
 ## INV-028 historical and latent settlement capacity (row 423, 2026-09-09)
 
 [`cu/inv_028_historical_latent_capacity.rs`](cu/inv_028_historical_latent_capacity.rs),
