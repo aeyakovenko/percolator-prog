@@ -142,6 +142,73 @@ git diff --check
 git diff --exit-code 98cd3c21 -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support
 ```
 
+## INV-039 shared-cohort reduction and paid-holder transfer (2026-09-09)
+
+[`cu/inv_039_pending_loss_cohort_reduction.rs`](cu/inv_039_pending_loss_cohort_reduction.rs)
+adds one public LiteSVM selector on base `98cd3c21`, mounted by the existing INV-039
+owner. Two mirrored worlds use the existing public System/SPL/ATA/wrapper fixture:
+two equal-weight holders share one asset/side, and a matched bankruptcy close leaves
+20,000 atoms of residual. The other holder reduces one quarter of its exposure,
+then flattens, retaining its full original loss weight at both prefixes. An
+input-derived oracle requires exactly 10,000 atoms of B debit per original holder,
+including after the first holder's weight is removed and its principal is transferred.
+
+Before and after residual booking, an unpaid holder's Withdraw/SPL transfer/Deposit/
+ClosePortfolio/rent-refill/InitPortfolio bundle rejects at instruction 2 with
+`EngineStale`. Once its own B share is paid and its certificate refreshed, the same
+bundle reaches instruction 5 and rejects with `EngineLockActive` because the claim
+remains. Close binds the post-withdraw custody sequence, not a stale pre-prefix
+sequence. Every rejection restores the complete economic-account/metadata/lamport
+frame, excluding only the dedicated transaction fee payer. The transfer prefix alone
+then commits while the second holder remains byte-identical with a real unpaid B
+snapshot. That holder pays only its original half, not a recomputed sole-holder share.
+
+After both debits, full Live claim conversion and the remaining transfer/close/recreate
+bundle succeed. New identity, exact rent movement, empty source/close/receipt state,
+unchanged foreign accounts and unused assets, OI/weight/count census, capital/PnL
+aggregates, repeat-crank value stability and SPL supply are asserted. All five exact
+terminal payouts are `[0, 0, 490000, 50000, 390777]` in both orientations; vault,
+capital and materialized portfolio count end at zero.
+
+**Non-duplicate:** existing INV-039 transfer coverage has one retained holder;
+close/reopen coverage recreates its bankrupt debtor; resolved histories use separate
+domains. This adds shared-domain partial weight reduction, removal of one original
+holder before the other pays, and paid-holder custody/recreation. It is bounded,
+integral-quantity, no-fee/funding, no-CPI evidence, not arbitrary-history coverage or
+counterexample reproduction. **Coverage-only: no production fix, engine/pin change,
+PR merge, or invariant-status promotion. Row 419 remains OPEN and INV-039 remains
+REFUTED_CURRENT.** No open fix PR code or tests were consulted.
+
+Validation used a private copy of the existing row412 host/SBF cache. `src`, Cargo
+files and matcher sources match the documented `39d05875` artifact checkpoint
+(`git diff 39d05875 HEAD -- src Cargo.toml Cargo.lock tests/fixtures/auth_matcher`
+is empty; engine `394fd0bf`). Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+No SBF rebuild or matcher execution. Final exact run: **3 passed, 0 failed**, 1,100
+filtered, 5.36s. New probe: **2 worlds / 4 reductions / 6 exact rollbacks / 2 principal
+transfers / 2 recreations / 10 payouts**, peak composed route **519,781 CU** against
+900,000. Development failures corrected fixture assumptions about bounded leg cleanup,
+certificate refresh, post-withdraw sequence binding and optional early-conversion
+haircuts; the final route waits for both B debits before full conversion. Economic
+debit and terminal-entitlement assertions were not relaxed. Fmt and diff checks pass;
+the existing `solana-client` future-Rust warning remains. No broad suite or engine
+proof run is claimed.
+
+Commands from `/tmp/codex-agent-worktrees/inv039-public-obligation-durability-20260909`:
+
+```sh
+cp -a /dev/shm/pr135-row412-verify2 /dev/shm/inv039-public-obligation-durability-20260909-target
+export CARGO_TARGET_DIR=/dev/shm/inv039-public-obligation-durability-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_039_pending_loss_obligation_durability::cohort_reduction::v16_program_reduced_cohort_keeps_exact_loss_after_paid_holder_transfer_and_recreation \
+  inv_039_pending_loss_obligation_durability::transfer_route::v16_program_pending_obligation_cannot_follow_withdraw_transfer_redeposit \
+  inv_039_pending_loss_obligation_durability::close_reopen::v16_program_pending_loss_survives_debtor_recreation_and_bystander_payout
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-047/052 two-asset fee-leg partition (2026-09-09)
 
 [`cu/inv_047_fee_leg_partition.rs`](cu/inv_047_fee_leg_partition.rs), mounted by

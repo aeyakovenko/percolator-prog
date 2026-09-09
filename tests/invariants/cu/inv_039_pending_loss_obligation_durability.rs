@@ -40,6 +40,9 @@ mod transfer_route;
 #[path = "inv_039_pending_loss_close_reopen.rs"]
 mod close_reopen;
 
+#[path = "inv_039_pending_loss_cohort_reduction.rs"]
+mod cohort_reduction;
+
 #[path = "inv_039_pending_loss_resolved_histories.rs"]
 mod resolved_histories;
 
