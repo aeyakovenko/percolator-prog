@@ -46,14 +46,65 @@ cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-thread
   inv_069_terminal_normalization_and_retirement::v16_program_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate \
   inv_063_backing_expiry_normalization::v16_program_retire_staggered_backing_expiry_is_atomic_across_siblings \
   inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry
-cargo fmt --all -- --check
-git diff --check
 ```
 
 Results: isolated new selector **1/1**, focused group **4/4**, final format and
 whitespace checks **PASS**. New-selector peak checked step: **42,561 CU** isolated,
 **36,561 CU** in the warmed group, below 300,000. Initial formatting differences
 were corrected; the existing `solana-client` future-incompatibility warning remains.
+
+## INV-046 invalid Hybrid report and stale owner-only exit (2026-09-09)
+
+[`cu/inv_046_trade_availability_without_unsafe_mark_admission.rs`](cu/inv_046_trade_availability_without_unsafe_mark_admission.rs)
+adds one public LiteSVM history, with adjacent INV-020/045 price-containment and
+INV-053 recertification evidence. Base: `82fe477d`; branch:
+`codex/pr135-owner-exit-boundary-20260909`; separate worktree:
+`/home/anatoly/worktrees/pr135-owner-exit-boundary-20260909`.
+**PR135 tests/docs only; production, engine pins and invariant statuses unchanged.**
+
+Public System/SPL/ATA/wrapper setup funds a two-unit short and its counterparty.
+An independent observer admits a 1,000,000 -> 1,050,000 Hybrid price move while
+leaving the owner's old healthy certificate untouched and epoch-stale. A fresh,
+correct-feed report at `MAX_ORACLE_PRICE + 1` rejects `OracleInvalid`, with full
+tracked-account rollback and the exact payer signature fee. Without any further
+successful observation, admin action, or counterparty signature, two owner-only
+`RebalanceReduce` calls settle the independently calculated 100,000-atom loss,
+reduce both OI sides to zero, and match the independent current-certificate model
+plus explicit health lanes. The owner withdraws exactly 900,000 atoms. The entire
+admitted oracle profile, counterparty, mint, and untouched accounts stay unchanged;
+engine/SPL custody reconciles to the original 2,000,000-atom supply.
+
+This composes rejected provider data with an actual stale losing certificate and
+unilateral exit, unlike the existing AuthMark local-stale reduction or bilateral
+reported-price exit cases. It does not duplicate EWMA zero-price, row425 carry,
+row426 staged observations, provider coherence matrices, or caller-hint products.
+Residual gaps: mirrored side, multiple assets/providers, funding/fees, backing,
+long-outage/resolve boundaries, counterparty claim settlement and terminal cleanup.
+No full INV-056 route-completeness or unbounded exit theorem is claimed.
+
+Validation uses a private copy of the row424 cache, whose build-source checkout
+matches `src/v16_program.rs`, `Cargo.toml` and `Cargo.lock` byte-for-byte (engine
+`394fd0bf`). No fresh SBF build is claimed. SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Exact commands from the separate worktree (copy is first-use setup):
+
+```sh
+cp -a /dev/shm/pr135-row424-progress-target /dev/shm/pr135-owner-exit-boundary-target
+export CARGO_TARGET_DIR=/dev/shm/pr135-owner-exit-boundary-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_046_trade_availability_without_unsafe_mark_admission::v16_program_invalid_hybrid_report_preserves_stale_owner_only_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_046_trade_availability_without_unsafe_mark_admission::v16_program_invalid_hybrid_report_preserves_stale_owner_only_exit \
+  inv_046_trade_availability_without_unsafe_mark_admission::v16_bpf_tradenocpi_allows_off_mark_strict_reduction_without_value_extraction \
+  inv_057_risk_reduction_availability::v16_attack_non_base_local_stale_owner_reduce_remains_live
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: isolated new selector **1/1**, combined focused run **3/3**, formatting
+and whitespace checks pass. Peak new-test exit CU: **219,404**. The existing
+`solana-client` future-incompatibility warning remains.
 
 ## INV-017 transaction-wide privileges and account-kind alias (2026-09-09)
 
