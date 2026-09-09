@@ -3,6 +3,66 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-073 terminal provider earnings and late ledger creation (2026-09-09)
+
+[`cu/inv_073_no_permanent_user_lock.rs`](cu/inv_073_no_permanent_user_lock.rs) adds
+`v16_program_terminal_provider_earnings_and_lazy_ledger_reach_exact_slab_close`.
+One public LiteSVM/SBF history leaves earned provider fees as the sole resolved
+stock after user payout, portfolio deletion, and backing-principal withdrawal.
+The provider is distinct from the market authority and both users. System, SPL,
+ATA, and wrapper instructions create all accounts and economic state; harness
+changes are limited to signer SOL, Clock, and blockhashes.
+
+A matched position gains 5,000 atoms. Increasing its size requires 2,623 atoms
+of backed margin and charges `ceil(2623 * 3333 / 10000) = 875` provider-fee atoms.
+With mint authority disabled, input-derived payouts are 56,627 and 1,995,000 to
+the users and 100,000 principal plus 875 earnings to the provider. User payout
+uses only the fee payer's signature; portfolio deletion, provider withdrawal,
+and final slab close use their ordinary required signers.
+
+After principal withdrawal, custody contains exactly the 875 earned atoms.
+`CloseSlab` rejects `EngineLockActive` with exact rollback including the calculated
+network fee. `WithdrawBackingBucketEarnings` with a newly System-created zeroed
+ledger followed by `CloseSlab` is successfully simulated. Substituting the slab
+destination makes instruction 3 reject `InvalidTokenAccount` after one successful
+SPL transfer. All 16 tracked Accounts, including the uninitialized ledger, roll
+back exactly except the calculated payer fee. Restoring the destination admits
+the unchanged earnings payment and completes slab closure.
+
+The final ledger binds the provider, domain, and market and records exactly 875
+withdrawn atoms. Its accrual counter starts at zero because it observes only
+changes after creation; the preexisting bucket claim remains fully payable.
+Fixed SPL supply, per-owner balances, engine/vault parity, unrelated Accounts,
+vault closure, typed market tombstone, and exact SOL refunds are checked.
+
+This adds the earned-fee-only blocker, late ledger initialization, and final slab
+disposition to the existing cooperative principal/insurance retry evidence.
+It does not duplicate receipt retries, same-owner receipt identity, spent
+insurance, or mixed Recovery/Active exits. This is bounded evidence adjacent to
+row 420, not absent-provider progress: **row 420 remains OPEN** and invariant
+statuses are unchanged. Expiry, alternate rails, other fee policies, and absent
+provider or market-authority signatures are outside this witness. No new
+production inconsistency was observed in the cooperative path.
+
+Validation uses a fresh default-feature SBF build from private worktree
+`/dev/shm/inv073-provider-coverage-20260909`, based on `30cf2daa91f16df710915edc2ca373baa1f97531`.
+Engine: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new exact selector passes 1/1, with terminal batch peak 245,309 CU below its
+500,000 limit. Initial validation corrected a test import and LiteSVM's fee charge
+on rejected simulation; the negative control now checks an actual transaction.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_terminal_provider_earnings_and_lazy_ledger_reach_exact_slab_close -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-068 atomic receipt retry accounting (2026-09-09)
 
 [`stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs`](stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs)
