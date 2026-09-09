@@ -10,6 +10,9 @@ use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv01
 #[path = "inv_012_matcher_program_generation.rs"]
 mod matcher_program_generation;
 
+#[path = "inv_012_used_generation_lifecycle.rs"]
+mod used_generation_lifecycle;
+
 const CAPITAL: u128 = 1_000_000;
 const PRICE: u64 = 100;
 const SLOT: u64 = 1;
@@ -323,6 +326,19 @@ impl History {
     }
 
     fn replace(&mut self, object: u8, evidence: &mut Evidence) {
+        self.replace_without_mark_refresh(object, evidence);
+        if object != GRANT {
+            for asset in 0..3 {
+                let cu = self
+                    .env
+                    .configure_auth_mark_for_asset_as_admin(asset, self.slot, PRICE);
+                evidence.writer_cu = evidence.writer_cu.max(cu);
+            }
+        }
+        self.assert_state();
+    }
+
+    fn replace_without_mark_refresh(&mut self, object: u8, evidence: &mut Evidence) {
         let cu = if object == GRANT {
             let cu = self
                 .env
@@ -396,12 +412,6 @@ impl History {
                     self.next_id += 1;
                 }
                 self.assert_state();
-            }
-            for asset in 0..3 {
-                max_cu = max_cu.max(
-                    self.env
-                        .configure_auth_mark_for_asset_as_admin(asset, self.slot, PRICE),
-                );
             }
             max_cu
         };

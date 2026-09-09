@@ -818,6 +818,100 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_045_custody_cap_carry.rs
 git diff --check
 ```
 
+## INV-012 used-generation lifecycle (row 414, 2026-09-09)
+
+[`cu/inv_012_used_generation_lifecycle.rs`](cu/inv_012_used_generation_lifecycle.rs)
+adds **partial positive public-route coverage**, mounted beneath the existing
+joint-incarnation owner. Base: `626789fa5ce950584acf154c232915e372fa1593`, from
+`origin/codex/invariant-fidelity-reopen-20260904`. Branch:
+`codex/astra-pr135-row414-capability-incarnations-20260909`; isolated worktree:
+`/home/anatoly/worktrees/astra-pr135-row414-20260909`. The original workspace,
+production code, dependencies, invariant verdicts and reopening rows are unchanged.
+**Row 414 remains OPEN; INV-012 remains REFUTED_CURRENT.** No new production bug,
+fix, exploit reproduction, or whole-invariant certification is claimed.
+
+The distinct relation is **used asset generation + surviving live sibling +
+explicit owner reauthorization + persistent matcher context/invocation counter**.
+Sixteen worlds cross target slots 1/2, single/batch entry, both side orientations,
+and both batch/single-exit/payout orders. Each world trades two assets, closes only
+the target, and retires/reactivates that used slot twice while the sibling stays
+open. Each replacement consumes a distinct input-derived generation, preserves
+both portfolios byte-for-byte, and retains the earlier single-CPI return record.
+Fresh authenticated marks and one public crank per portfolio recertify the live
+positions before configuring the new oracle and explicitly renewing the grant.
+Reentry uses the same matcher tuple and portfolio identities. Batch reentry mixes
+the replacement with an additional unit of the still-open sibling; final exits
+use the opposite transport and return both owners' entire SPL collateral.
+
+The parent's input/event oracle checks every active leg's generation and quantity,
+matched OI, position epochs, grant sequence/tuple/fee cap/expiry, capital/PnL,
+mint supply and engine/SPL custody. An independent call count starts at zero and
+requires exactly one market request-ID advance per committed CPI, never per
+retirement, activation, regrant or withdrawal. Single returns must match every
+typed ABI field and preserve the remainder of the external context; honest batch
+returns must execute without rewriting that old single-return record. This is
+INV-019 positive invocation conformance, not hostile-return or replay coverage.
+INV-002/007 receive current-generation and surviving-counter evidence; INV-089
+receives used-slot reentry/progress evidence, not another fresh-state differential.
+
+All economic state comes from System/SPL/ATA/wrapper instructions and an honest,
+System-created, owner-initialized external matcher. The parent helper now separates
+lifecycle changes from mark refresh, preserving the existing empty-slot tests'
+behavior while permitting the required live-portfolio recertification sequence.
+Two development failures came from trying its empty-slot oracle-reconfiguration
+shortcut on live/stale-certified portfolios; no production guard was relaxed.
+
+Duplicate boundary: no new matcher-program replacement, owner-episode revocation,
+or retained asset-generation trade/config replay test. Explicit reauthorization
+does **not** prove standing grants are confined to their original asset generations;
+that row-414 obligation remains open. Also outside scope: other replaceable object
+classes, base-asset restart, permissionless activation fees, nonzero fees/funding,
+claims/backing/loss histories, maximum shape and arbitrary histories. This bounded
+successful continuation is not a general permissionless-progress theorem.
+
+Validation uses a private copied Cargo target and cached default-feature SBF; no
+fresh SBF build is claimed. Production, Cargo and auth-matcher sources match the
+documented artifact build at `30993c0b` (`git diff 30993c0b HEAD -- src Cargo.toml
+Cargo.lock tests/fixtures/auth_matcher` is empty). Engine:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host tests are compiled in this worktree; the existing `solana-client v1.18.26`
+future-incompatibility warning remains. No broad suite or Kani proof was run.
+
+Focused commands, run from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-pr135-row414-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding:: -- --nocapture
+cargo test --locked --offline --test v16_cu inv_002_asset_generation_binding::v16_program_asset_generation_field_and_guard_roster_is_source_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_002_asset_generation_binding::host_asset_generation_wire_migrations_roundtrip_and_reject_legacy_payloads -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_007_no_aba_reuse:: -- --nocapture
+cargo test --locked --offline --test v16_cu inv_019_cpi_invocation_and_return_data_binding::v16_program_tradecpi_matcher_req_id_advances_monotonically_on_market -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_089_activation_reactivation_and_initialization_equivalence::v16_program_reuse_matches_fresh_activation_envelope_and_drops_old_authority -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
+The joint selector passes **3/3** (16.59s; final clean rebuild 16.49s), including
+both unchanged existing tests. The new child also passes alone (9.48s): **16 worlds, 32 replacements,
+64 recertifying cranks, 112 CPI fills/exits, 32 full withdrawals**. Maximum observed
+new-test lifecycle/crank, fill/exit, and withdrawal CU: **183,831 / 463,343 /
+146,268**, below the enforced 300,000 / 750,000 / 300,000 limits. The four adjacent
+wire/tombstone/request-ID/activation selectors each pass **1/1**. The INV-002
+source roster fails its existing certified-engine assertion: it expects `495a5590`
+while this base pins `394fd0bf`. This failure is not relaxed or reclassified.
+It also fails on untouched detached base `626789fa` at
+`/dev/shm/astra-pr135-row414-baseline` with the same exact roster command above;
+`git diff --exit-code` there is empty. Returning to the edited worktree initially
+reused that baseline binary (two tests, missing baseline-local matcher artifact).
+The private package artifacts were then cleaned with `cargo clean --target-dir
+/dev/shm/astra-pr135-row414-target -p percolator-prog` before rebuilding the final
+joint selector from this worktree. Formatting and diff checks pass.
+
 ## INV-012 joint incarnation binding (row 414, 2026-09-09)
 
 [`cu/inv_012_joint_incarnation_binding.rs`](cu/inv_012_joint_incarnation_binding.rs),
