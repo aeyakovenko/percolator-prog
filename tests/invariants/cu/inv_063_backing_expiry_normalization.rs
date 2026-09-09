@@ -25,6 +25,9 @@
 
 use super::*;
 
+#[path = "inv_063_spent_backing_expiry.rs"]
+mod spent_backing_expiry;
+
 struct Inv063BackingSurfaceClass {
     disposition: &'static str,
     witness: &'static str,

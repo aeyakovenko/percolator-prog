@@ -3,6 +3,71 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-063/078 spent backing across expiry (2026-09-09)
+
+[`cu/inv_063_spent_backing_expiry.rs`](cu/inv_063_spent_backing_expiry.rs), mounted by
+INV-063, adds one PR135-only selector on `c2e292fa`. Public System/SPL/ATA/wrapper
+instructions create three 1,000-atom portfolios, 17 initial backing atoms and unequal
+35/50-atom claims. Mint authority is revoked. The first claimant converts and withdraws
+1,035 atoms before expiry, leaving 35 spent/receivable atoms beside the unpaid claim.
+At exact Clock expiry, a retained new-expiry refill rejects with `EngineLockActive`
+at instruction 2: all 15 tracked accounts roll back exactly, including metadata and
+lamports, with only the separately checked payer signature fee charged.
+
+Two keeper-only calls normalize exactly 67 unused atoms without moving custody,
+capital, the 50-atom claim or the prior receivable. Full source/bucket equality checks
+include the credit-epoch increment. The unchanged refill instruction then succeeds;
+17/43 replacement atoms straddle the 35-atom receivable, retiring `min(refill, 35)`
+without resetting historical spent backing. One keeper refresh permits the remaining
+owner's conversion and withdrawal. The first claimant and settled peer remain
+byte-exact through normalization, refill, refresh and the second conversion.
+
+| Refill | Exact owner SPL payouts | Final spent / receivable | Remaining vault |
+| ---: | --- | --- | ---: |
+| 17 | `[1035, 1017, 915]` | `52 / 35` | 67 |
+| 43 | `[1035, 1043, 915]` | `78 / 43` | 67 |
+
+**Non-duplicate:** INV-031's shared-lien partial-consumption suffix refills while fresh;
+INV-063's expiry/refill histories consume only their final tranche. This composes
+nonzero spent/receivable stock with expiry, rejected replacement, keeper normalization
+and a still-unpaid owner's exit. It adds no staggered siblings, mixed-maturity terminal
+residue, missing destination or terminal provider/insurance payout product.
+Residual gaps: one side/source, one cycle, fixed claim/order and two refill amounts,
+zero fees/funding/insurance, no live liens, other transports, late expiry, Recovery mode,
+receipts or maximum shapes. Refilling needs its provider and withdrawals need their
+owners; only normalization/refresh are permissionless. The 67 remaining vault atoms
+are not drained. No production, Cargo/engine pin, shared-fixture or status changes.
+
+Validation used a private cache copy and existing default-feature SBF SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+production/Cargo inputs at its recorded `39d05875` base equal `c2e292fa` (engine
+`394fd0bf`). No SBF rebuild, matcher, broad suite or engine-proof run. Commands from
+`/tmp/codex-agent-worktrees/pr135-expiry-recovery-resource-20260909`:
+
+```sh
+cp -a /dev/shm/pr135-inv084-assumption-nonvacuity-integrated2 /dev/shm/pr135-expiry-recovery-resource-20260909-target
+export CARGO_TARGET_DIR=/dev/shm/pr135-expiry-recovery-resource-20260909-target
+mkdir -p "$CARGO_TARGET_DIR/deploy"
+cp /dev/shm/pr135-row412-verify2/deploy/percolator_prog.so "$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo clean -p percolator-prog --profile dev
+cargo test --locked --offline --test v16_cu inv_063_backing_expiry_normalization::spent_backing_expiry::v16_program_spent_backing_expiry_preserves_unpaid_claim_and_refill_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_063_backing_expiry_normalization::v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capitalization \
+  inv_073_no_permanent_user_lock::mixed_backing_expiry_exit::v16_program_mixed_backing_expiry_preserves_senior_and_live_domain_exit
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code c2e292fa -- src Cargo.toml Cargo.lock
+```
+
+Results: new selector **1 passed, 0 failed**, 1,100 filtered (1.07s), two histories;
+controls **2 passed, 0 failed**, 1,099 filtered (1.53s). Each history has two normalization
+calls at **114,124 / 152,371 CU**; refresh costs **158,299 / 158,298 CU** respectively.
+Peak checked CU is **170,750**, below the asserted 300,000 custody / 325,000 crank
+ceilings; two exact rejections and six owner withdrawals pass. Format, diff and unchanged
+input checks pass. Only the existing `solana-client v1.18.26` future-compatibility warning remains.
+
 ## INV-084 deposit assumption contract (2026-09-09)
 
 [`cu/inv_084_deposit_assumption_contract.rs`](cu/inv_084_deposit_assumption_contract.rs),
