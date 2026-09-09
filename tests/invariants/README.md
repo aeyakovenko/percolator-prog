@@ -3,6 +3,63 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-031/032/033 mixed reserve payout with a live lien (2026-09-09)
+
+[`cu/inv_033_insurance_backed_lien_single_classification.rs`](cu/inv_033_insurance_backed_lien_single_classification.rs)
+adds one public LiteSVM history on supplied worktree tip `77439c85`. System/SPL/ATA/wrapper
+instructions alone create and fund every economic account; mint authority is revoked at
+1,546 atoms. Public settlement adds 100 counterparty-loss atoms to 150 provider atoms.
+The winner's 100-atom claim supports a **52-atom counterparty lien**, leaving only
+`250 - 52 - 100 = 98` atoms withdrawable without reusing liened backing as generic support.
+
+A bundle first transfers **83 insurance atoms**, then requests **99 backing atoms**.
+The second wrapper instruction rejects with `EngineLockActive` at transaction index 3,
+after a successful SPL transfer. Every compiled account plus owners, portfolios, mint and
+tokens rolls back exactly, including metadata and lamports, except the exact payer fee.
+The **83 + 98** control succeeds with both portfolios byte-identical and every insurance
+reservation/lien category still zero. Bilateral flattening and one public crank release
+exactly 52 atoms, enabling their provider payout. An observed public refresh precedes
+100-atom claim conversion and the winner's 363-atom withdrawal. Local/domain claim and
+lien censuses, spent/receivable labels, insurance budgets, fixed SPL supply and the complete
+capital + insurance + fresh-backing stock equation are exact throughout the checked suffix.
+Final provider/insurer/winner payouts are **150/83/363**. Remaining custody is
+**900 capital + 50 peer-domain backing**, preserving the counterparty's 50-atom claim.
+
+This adds **cross-class payout atomicity while a lien is live**, not the existing separate
+counterparty-versus-insurance setup, route-pair/shared-owner contention, expiry/refill,
+conversion-cap retries, or account-shape products. Residual gaps: one source orientation,
+two assets, zero fees/funding, no expiry/impairment, CPI/batch trading, optional reserve
+ledgers or terminal peer payout. Actual insurance-backed liens remain wrapper-unreachable;
+this does not exercise their engine-only lifecycle or promote invariant/proof status.
+
+Validation reuses a private copy of the row424 cache, whose production and Cargo inputs
+at `39d05875` match this base (engine `394fd0bf`, unchanged). No fresh SBF build or broad
+suite run. SBF SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Commands from `/tmp/codex-agent-worktrees/percolator-pr135-lien-classification`:
+
+```sh
+cp -a /dev/shm/pr135-row424-progress-target /dev/shm/pr135-lien-classification-target
+export CARGO_TARGET_DIR=/dev/shm/pr135-lien-classification-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_033_insurance_backed_lien_single_classification::v16_program_mixed_reserve_payout_bundle_preserves_live_lien_classification -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_liquidation_spent_insurance_cannot_be_withdrawn_again \
+  inv_032_exact_counterparty_lien_lifecycle::v16_attack_force_close_source_backed_accounts_does_not_grow_source_liens
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: new selector **1/1 PASS**, adjacent selectors **2/2 PASS**, format and diff
+checks **PASS**. The adjacent insurance-cure history reports 100 spent and 26 paid
+atoms; the source-backed force-close control passes its lien and CU checks. Latest
+new-selector CU: lien trade **384,808** (<750,000), bundle **347,084** (<600,000), release
+**222,123** and refresh **163,177** (<325,000), released-backing payout **225,987**,
+conversion **168,700**, owner withdrawal **134,259** (<300,000 each). Setup oracle errors
+(settled backing, source side, the disjoint lien cap) and the missing observed refresh
+were corrected before the passing run; no production change was needed. Cargo emits
+the existing `solana-client v1.18.26` future-incompatibility warning.
+
 ## INV-075/076 atomic close handoff (2026-09-09)
 
 [`cu/inv_075_atomic_close_handoff.rs`](cu/inv_075_atomic_close_handoff.rs), mounted
