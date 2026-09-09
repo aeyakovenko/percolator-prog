@@ -66,6 +66,9 @@ use super::*;
 #[path = "inv_077_terminal_quote_variants.rs"]
 mod terminal_quote_variants;
 
+#[path = "inv_077_short_side_b_budget.rs"]
+mod short_side_b_budget;
+
 #[test]
 fn v16_program_active_leg_cap_pending_auth_marks_refresh_with_bounded_public_crank() {
     const N: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;

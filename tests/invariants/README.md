@@ -11897,6 +11897,90 @@ larger-budget/amount, simultaneous-lien, maximum-N, live-feed/accrual-backlog an
 products remain unmeasured here, as do the separate rewarded-maintenance and full-shape force-close
 gaps above.
 
+### INV-077 short-side multi-atom B progress (2026-09-09)
+
+[`inv_077_short_side_b_budget.rs`](cu/inv_077_short_side_b_budget.rs), mounted from
+the existing INV-077 CU module, adds the single selector
+`short_side_b_budget::v16_program_max_shape_short_b_budget_has_exact_public_progress`.
+This is finding-blind coverage on base `c8801cc28d0e88db6f67dc468cb3662bf83cf5c6`,
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No open PR branch, diff, or test
+was used. The root checkout was left untouched; the private worktree and its
+separate Git metadata are under `/dev/shm`.
+
+**Guarantee and non-duplicate value.** The existing full-shape B witness measures
+long-side obligations with a one-atom budget. This increment measures short-side
+obligations with a four-atom budget, including the final partial chunk and a
+nonzero intermediate B remainder, at both supported portfolio caps: fourteen
+active legs and twenty-eight occupied, positive, unliened source records.
+Fourteen completed long episodes leave one claim atom per odd source domain.
+Fourteen new short legs each earn eight atoms against two funded long atoms;
+public source-local shutdown, owner forfeit, and close continuation commit six
+B loss atoms per short leg. The market stays Live while all fourteen assets are
+in Recovery. Setup uses the existing zero-account/token fixtures and public
+wrapper instructions only; no program-owned state is injected and no direct
+engine transition is called.
+
+Twenty-eight owner-unsigned, hint-free `PermissionlessCrank` transactions consume
+an independently decoded pending-loss rank **84 -> 0**. Every call settles exactly
+one leg, with fourteen four-atom chunks and fourteen two-atom tails. The oracle
+checks the B-index/weight quotient and remainder, exact source-local claim debit,
+and exact PnL reduction **126 -> 42 atoms**, retaining **10,000 capital atoms**.
+Every accepted call retains all fourteen legs and all twenty-eight positive
+sources. Exposure, K/F, other source records, reserved PnL, frozen market assets,
+aggregate capital, insurance, engine/SPL vault custody, mint, and all peer and
+checkpoint accounts retain their asserted frames. B targets and B-stale state
+clear after the bounded suffix. No unsuccessful suffix call counts as progress.
+
+The measured suffix peak is **565,957 transaction CU**, asserted with exact
+equality, and each call also passes the **1,375,000 CU** guardrail under the usual
+**1,400,000 CU** transaction ceiling. Construction is excluded from that peak.
+The fresh default-feature SBF was built offline with platform-tools v1.52 from
+this base, SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The exact peak is artifact-specific; a future pin must be remeasured, not silently
+treated as the same CU evidence.
+
+**Validation.** The focused selector passes (1 passed, 1,117 filtered), as do the
+three selected adjacent INV-071/073/078 controls below (3 passed, 1,115 filtered).
+The separately run existing active-leg-cap AuthMark
+control passes at 143,780 CU for refresh and 747,397 CU for certification; these
+are control measurements, not the new B-suffix peak. Fixture development rejected
+an incompatible margin/price-move configuration and corrected certificate-refresh,
+flat fixed-point, and intermediate-remainder assumptions before the passing
+suffix. Those iterations are not retained rejection evidence.
+`cargo fmt --all -- --check` and `git diff --check` pass. Production, manifests, lockfiles and shared
+helpers are unchanged. Reproduction commands:
+
+```bash
+cd /dev/shm/inv077-coverage-20260909
+export CARGO_TARGET_DIR=/dev/shm/inv077-coverage-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+mkdir -p "$TMPDIR" "$CARGO_TARGET_DIR/deploy"
+env PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:/home/anatoly/.cache/solana/v1.52/platform-tools/llvm/bin:/home/anatoly/.local/share/solana/install/active_release/bin:/home/anatoly/.cargo/bin:/usr/local/bin:/usr/bin:/bin \
+  CARGO_BUILD_JOBS=4 cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::short_side_b_budget::v16_program_max_shape_short_b_budget_has_exact_public_progress -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_071_crank_progress::v16_program_public_pending_close_preempts_b_stale_then_exposes_b_progress \
+  inv_073_no_permanent_user_lock::v16_program_fragmented_recovery_pair_matrix_clears_every_fragment \
+  inv_078_permissionless_recovery_coverage::v16_program_unavailable_pyth_feed_has_bounded_terminal_fallback
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::v16_program_active_leg_cap_pending_auth_marks_refresh_with_bounded_public_crank -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
+**Remaining gaps.** This is required B-settlement progress, not a terminal payout,
+owner-capital withdrawal, or complete Recovery disposition. The fixed history uses
+AuthMark, zero funding and fees, ten-percent margins, a five-percent per-slot price
+allowance, one-slot accrual chunks, and a 100-slot claim horizon. Public catch-up
+is setup, not a measured maximum-backlog product. Mixed-side simultaneous B work,
+other budgets/amounts and close schedules, liens, distinct external feeds, maximum
+market-N, and combined terminal occupancy remain unmeasured here. Full-shape
+force close and rewarded maintenance retain their separate documented gaps.
+No production finding, engine proof, exhaustive guarantee, or invariant-status
+promotion is claimed; INV-077 remains open evidence.
+
 ### INV-077 source-capacity reclamation
 
 Additional bounded evidence, 2026-09-08:
