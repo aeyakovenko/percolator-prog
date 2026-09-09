@@ -83,6 +83,7 @@ fn v16_program_flat_admission_matches_explicit_liability_settlement() {
                             max_portfolio_assets: 2,
                             maintenance_margin_bps: 500,
                             initial_margin_bps: 1_000,
+                            max_price_move_bps_per_slot: 100,
                             maintenance_fee_per_slot: rate,
                             ..V16CuMarketParams::default()
                         },

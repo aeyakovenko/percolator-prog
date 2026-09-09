@@ -6807,18 +6807,7 @@ pub mod processor {
         group: &mut state::MarketViewMutV16<'_>,
         portfolio: &mut percolator::PortfolioV16ViewMut<'_>,
     ) -> Result<u128, ProgramError> {
-        let active_bitmap = portfolio
-            .header
-            .active_bitmap
-            .map(percolator::V16PodU64::get);
-        if percolator::active_bitmap_is_empty(active_bitmap) {
-            // Opening a first leg does not debit an existing exposure. Leave flat-account fee
-            // realization to SyncMaintenanceFee/Withdraw instead of advancing its cursor ahead of
-            // the loss-current anchor immediately before it becomes nonflat.
-            return Ok(0);
-        }
-        let now_slot = authenticated_market_slot_or_fallback_view(group);
-        collect_maintenance_fee_to_slot_before_value_debit_view(cfg, group, portfolio, now_slot)
+        collect_maintenance_fee_before_value_debit_view(cfg, group, portfolio)
     }
 
     fn require_asset_active_for_oracle_reconfiguration_view(
