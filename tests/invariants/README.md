@@ -3,6 +3,100 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## Row 424 persisted scan and authenticated maturity (2026-09-09)
+
+[`cu/inv_071_terminal_cursor_time.rs`](cu/inv_071_terminal_cursor_time.rs), mounted by
+INV-071, adds `v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings`.
+This is **net-new partial public LiteSVM evidence**, not a production finding/fix or
+closure claim. Initial base: `c90076ab733fcf423d94772b9174e8ac31a8d77b`; rebased and
+retested on the latest fetched `origin/codex/invariant-fidelity-reopen-20260904` head
+`deeb4c7ba2d97df618847cc0f752c3362e95dbf1` (tests/docs-only base increment). Isolated worktree:
+`/home/anatoly/percolator-pr135-row424`; branch: `codex/pr135-row424-progress-20260909`.
+Production/Cargo files, reopening rows and invariant verdicts are unchanged. **Row 424
+remains OPEN.** The current Cargo engine is `394fd0bf`, not the older `495a5590` named
+by the existing proof-certification guard; this new public test makes no engine-proof claim.
+
+Four histories cross both early source sides with exact/one-slot-late final sibling
+maturity. A 258-asset market is created and populated through public System/ATA/SPL and
+wrapper instructions. There is no `set_account`, engine mutation, or initialized-byte
+injection in the new probe. One senior deposits 101 atoms; public backing top-ups supply
+17 and 31 atoms at asset 1, expiring at 400 and 450, plus 43 atoms at asset 257 expiring
+at 425. Resolution at authenticated slot 300 leaves those three stored buckets Fresh.
+
+The distinct composed boundary is:
+
+- A resolved `PermissionlessCrank` pays 101 real SPL atoms, owner `ClosePortfolio` deletes
+  the portfolio, and authority `CloseSlab` parks the persisted cursor at asset 1. A second
+  same-slot `CloseSlab` rejects with exact `EngineLockActive` at transaction instruction 5.
+  Nine same-checkpoint variants cross caller slots 0/300/u64::MAX with empty hints and both
+  orders of a duplicated/out-of-range hint word. All have three completed wrapper prefixes
+  before rejection. Complete compiled-account plus fixture snapshots restore payout, deletion,
+  rent, market/engine clock and cursor; only the exact network fee remains charged.
+- The same retained crank succeeds standalone without owner/admin signatures, followed by
+  explicitly signer-gated deletion and scanning. At slot 400, an expiry-then-wait transaction
+  rejects at instruction 3, restoring the first expiry and tentative engine time exactly;
+  a standalone retry expires exactly 17 atoms. Waits at 399, 425 and 449 also reject exactly.
+  The later asset's elapsed bucket cannot make the cursor skip the still-live sibling at 1.
+- At 450/451, the sibling's 31 atoms expire. A separate 256-asset scan advances `1 -> 257`.
+  Authenticated time advances again to 452/453; the later 43-atom bucket expires without
+  altering any already-scanned slot. Final `CloseSlab` burns exactly the 91 claim-free atoms,
+  preserves the user's 101 atoms, pays no provider tokens, and returns exact vault/market
+  excess rent while retaining the canonical market tombstone.
+
+Each successful nonfinal scan strictly lowers `(Fresh bucket count, capacity - cursor)`;
+every prefix below the cursor must contain no Fresh bucket and its complete stored slots
+remain byte-identical on continuation. Input-derived bucket/source amounts and their raw
+global aggregate, exact nonmarket account frames, SPL custody and mint supply distinguish
+normalization from payout or value disappearance. Final closure enters a lower terminal
+state. This supplies narrow INV-020/063/069/071/072/077/080 evidence: authenticated time,
+expiry normalization, terminal normalization, progress, resolved-mode hint reclassification,
+scan-boundary CU and late-failure rollback respectively. It is not Live-mode hint-parser
+coverage, individual asset-retirement coverage, or a maximum-supported-shape bound.
+
+No existing row or test is duplicated: INV-063's staggered-sibling test owns atomic
+`UpdateAssetLifecycle` retirement without a persisted cursor; INV-071's completed-hint
+replay owns fixed-Clock market accrual; INV-077's older near-10-MiB residual scan injects
+its shape/economic state. Row 418 owns quote variants/empty terminal close and row 417
+owns late-expiry claimant/receipt order. None owns this public mixed-maturity scan plus
+crank/deletion/cursor rollback history.
+
+Remaining gaps: more asset placements/capacities including 5,782 slots, arbitrary expiry
+histories, new obligations or reuse behind a scanned prefix, insurance recredit, nonzero
+PnL/claims/liens/receipts, price/funding/backlog products, Recovery and independent quote
+rails. Resolution, account deletion and slab cleanup require their existing signers;
+only the resolved payout is claimed permissionless. No generic LoF/DoS theorem, proof
+rerun, full-suite execution or status promotion is claimed.
+
+Validation uses a private `/dev/shm` build tree seeded from the existing row-418 build
+cache, then a fresh same-worktree default-feature SBF build with the locked current
+engine. Program SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+No matcher is needed. Exact commands from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-row424-progress-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_071_crank_progress::terminal_cursor_time::v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::v16_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot \
+  inv_063_backing_expiry_normalization::v16_program_retire_staggered_backing_expiry_is_atomic_across_siblings \
+  inv_069_terminal_normalization_and_retirement::v16_program_abandoned_empty_portfolio_cannot_block_slab_close \
+  inv_071_crank_progress::v16_program_permissionless_crank_closes_capital_only_resolved_account \
+  inv_072_order_robust_crankability::v16_program_permissionless_crank_bad_hints_do_not_block_later_canonical_progress \
+  inv_080_error_propagation_and_exact_rollback::v16_engine_error_aborts_before_later_valid_instruction_can_commit
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: new selector **1/1 passed**, **4 worlds, 32 committed suffix transactions and
+52 exact rejected transactions**. The six neighboring selectors passed **6/6**; the final
+combined run on `deeb4c7b` of these seven exact selectors passed **7/7 in 6.75 s**. That
+run's measured activation/continuation peak was **138,725 CU**, below 300,000; the rejected
+multi-call transaction peak was **152,863 CU**, below 1,000,000. Repository-wide fmt and
+diff checks pass. Only the existing `solana-client` future-incompatibility warning was
+emitted. No production bug was observed in these bounded histories.
+
 ## INV-039 pending cohorts through resolution (row 419, 2026-09-09)
 
 [`cu/inv_039_pending_loss_resolved_histories.rs`](cu/inv_039_pending_loss_resolved_histories.rs),
