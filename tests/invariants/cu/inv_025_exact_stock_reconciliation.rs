@@ -12,6 +12,9 @@ use super::*;
 #[path = "inv_025_active_reserve_swap.rs"]
 mod active_reserve_swap;
 
+#[path = "inv_025_lien_recovery_attribution.rs"]
+mod lien_recovery_attribution;
+
 #[test]
 fn v16_program_fee_bearing_recovery_reconciles_raw_stocks_through_terminal_close() {
     use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;

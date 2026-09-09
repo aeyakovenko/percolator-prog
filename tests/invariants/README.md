@@ -129,6 +129,113 @@ git diff --cached --check
 git diff --quiet origin/codex/invariant-fidelity-reopen-20260904 -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support tests/fixtures
 ```
 
+## INV-024/025/026 lien-bearing stock movement and Recovery (2026-09-09)
+
+[`cu/inv_025_lien_recovery_attribution.rs`](cu/inv_025_lien_recovery_attribution.rs),
+mounted from the existing INV-025 CU file, adds finding-blind, coverage-only
+evidence on `origin/codex/invariant-fidelity-reopen-20260904` at
+`1bba9fed1f1f5d1a293b7c54fab0f93349e72ad2`. Worktree:
+`/dev/shm/percolator-inv024-026-20260909`. No open PR branch, diff, or test was
+inspected. Production, Cargo inputs, shared helpers, engine pin, and invariant
+status/method ledgers are unchanged.
+
+**Guarantee.** Eight worlds cross both source-side orientations, forward/reverse
+four-instruction custody prefixes, and independently reversed Recovery-forfeit
+owner order. Public System/SPL/ATA/wrapper instructions construct three portfolios,
+two assets and one fixed-supply 2,024-atom mint, then revoke mint authority. No
+program-owned bytes are injected or restored, and no engine transition is called
+directly. Initialization/funding is the explicitly checked starting boundary;
+every subsequent standalone successful wrapper transaction is checked separately.
+The history contains **264 successful transactions plus eight late rejections**.
+
+The independent ledger derives 100- and 50-atom gross source claims from opposing
+20- and 10-unit positions and five-atom mark changes. It separately attributes
+the corresponding capital losses to those source domains' fresh backing, rather
+than confusing loss-funded backing with provider SPL deposits or counting PnL as
+extra custody. Increasing the adverse position by two units reserves exactly
+`ceil((20 * winning_mark + 12 * adverse_mark) / 10) - (313 - 50)` atoms:
+53 for the short orientation and 61 for the long. These integer fixtures have
+full-rate source credit and no rounding residue. Every checkpoint compares each
+owner's capital, PnL, exposure, domain claim and lien, portfolio owner/market
+identity, each domain's bucket/source classes, raw header stock aggregates,
+separate insurance budgets, all four authority wallets and the vault, SPL
+supply/authority, and unchanged authority Accounts. Insurance reservations,
+impaired/consumed backing, receivables, earnings, fee credits, escrow and receipts
+remain explicitly zero. Reservations partition fresh backing; they add no tokens.
+
+A retained signed transaction executes a lien-creating trade, unrelated owner's
+17-atom deposit, 23-atom backing top-up and 19-atom insurance top-up, in either
+order, before an unfunded 94-atom deposit rejects at instruction 6 with
+`InvalidTokenAccount`. Logs require all four preceding wrapper instructions and
+all three SPL transfers to have succeeded. This is a **late transaction failure
+at the final wrapper's token preflight**, not a late CPI failure inside that
+deposit. Complete compiled/tracked Accounts, including all portfolios, wallets,
+mint, vault authority and Clock, roll back byte-for-byte with metadata/lamports;
+only the payer's exact signature fee is deducted. The original four instructions
+then succeed unchanged as individually observed transactions.
+
+While the lien remains live, an unrelated owner withdraws 31 atoms, the authority
+withdraws 11 atoms from the spare backing domain and seven insurance atoms, and
+both traders' complete portfolio Accounts remain unchanged. Public shutdown,
+owner forfeits, individual refreshes, a surviving-leg close and one flat-owner
+crank release the lien without consuming either source claim. All senior capital
+then exits. Final wallet balances are exactly `263 / 900 / 211 / 204`; the vault
+contains exactly 391 fresh-backing plus 55 insurance atoms, with zero capital and
+zero residual. The 100/50 junior claims remain unpaid and singly attributed.
+
+**Non-duplicate value.** This joins the README's live-lien/Recovery entitlement
+gap to stock-moving prefixes and retained transaction retries. INV-025's active
+reserve-swap history has no positions, PnL or liens; its fee-bearing Recovery
+history has zero PnL and no lien. INV-026's route/side/terminal matrix owns label
+lifecycles, but not this independent four-wallet, two-claim-domain ledger through
+mixed custody actions and a rolled-back lien-creating prefix. INV-031's shared
+claimant suffix instead owns multiple claims against one source. None is replaced
+or promoted to an arbitrary-history proof by this bounded increment.
+
+**Validation.** A private build-cache copy uses the SBF artifact already recorded
+in this README, with engine `394fd0bf` and SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+No fresh SBF build, open-PR source checkout, full suite or Kani run is claimed.
+Exact reproduction environment and validation commands:
+
+```sh
+cp -a /dev/shm/inv024-composed-entitlement-20260909-target /dev/shm/percolator-inv024-026-20260909-target
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv024-026-20260909-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_025_exact_stock_reconciliation::lien_recovery_attribution::v16_program_lien_recovery_preserves_attributed_stocks_and_late_rollback -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_025_exact_stock_reconciliation::lien_recovery_attribution::v16_program_lien_recovery_preserves_attributed_stocks_and_late_rollback \
+  inv_025_exact_stock_reconciliation::v16_program_fee_bearing_recovery_reconciles_raw_stocks_through_terminal_close \
+  inv_026_reservation_and_encumbrance_conservation_is_separate_from_token_value::v16_program_source_credit_reservation_labels_do_not_free_backing_value \
+  inv_027_protected_principal_seniority::v16_program_loss_stale_reserve_matrix_preserves_senior_stocks_and_flat_exit \
+  inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_liquidation_spent_insurance_cannot_be_withdrawn_again \
+  inv_038_rounding_and_ratio_conservation::v16_program_public_odd_atom_partitions_conserve_every_atom \
+  inv_080_error_propagation_and_exact_rollback::v16_engine_error_aborts_before_later_valid_instruction_can_commit
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git diff --exit-code 1bba9fed1f1f5d1a293b7c54fab0f93349e72ad2 -- src Cargo.toml Cargo.lock tests/support
+```
+
+The cache-copy command is first-use setup only. Final focused result: **1 passed,
+0 failed**, 1,122 filtered, 5.08s; eight worlds / 272 checked transactions / eight
+late rollbacks, peak 830,120 CU. Final adjacent selection: **7 passed, 0 failed**,
+1,116 filtered, 8.06s; new witness peak 836,187 CU, below the 1,400,000 transaction
+limit. CU varies with fresh fixture keys. Formatting, both whitespace checks and
+the unchanged-production/shared-support check exit 0. The existing
+`solana-client 1.18.26` future-compatibility warning remains. Development failures
+corrected test signer/identity inputs, account-refresh timing, loss-backing
+classification and zero-basis Recovery representation; no production fix was made.
+
+**Remaining gaps.** Fixed whole-unit no-CPI positions, zero funding/trading/backing
+fees, one shared reserve authority, unexpired unimpaired backing, and unspent
+insurance. Distinct provider/insurance identities, other transports, arbitrary
+prefixes, fractional carry, impairment/expiry, insurance consumption, conversion,
+resolved receipts, complete junior payout/provider retirement and larger shapes
+remain outside this evidence. Insurance-backed IM liens are not publicly created.
+
 ## INV-020 retained resolution and independent clocks (2026-09-09)
 
 [`cu/inv_020_retained_resolution_clock.rs`](cu/inv_020_retained_resolution_clock.rs),
