@@ -18,6 +18,9 @@
 
 use super::*;
 
+#[path = "inv_027_flat_first_risk_liabilities.rs"]
+mod flat_first_risk_liabilities;
+
 const ISSUE408_FEE_PER_SLOT: u128 = 1_000;
 const ISSUE408_AGED_SLOT: u64 = 500;
 const ISSUE408_MOVE_SLOT: u64 = 542;
