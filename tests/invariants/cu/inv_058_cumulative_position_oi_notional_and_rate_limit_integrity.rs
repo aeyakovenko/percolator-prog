@@ -42,6 +42,9 @@ use super::*;
 #[path = "inv_058_liquidation_lifecycle.rs"]
 mod liquidation_lifecycle;
 
+#[path = "inv_058_atomic_oi_fee_handoff.rs"]
+mod atomic_oi_fee_handoff;
+
 use support::{
     fuzz_model::{
         assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,

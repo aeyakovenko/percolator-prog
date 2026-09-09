@@ -3,6 +3,65 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-058/059 fresh-pair OI handoff (2026-09-09)
+
+[`cu/inv_058_atomic_oi_fee_handoff.rs`](cu/inv_058_atomic_oi_fee_handoff.rs), mounted
+by INV-058, adds one PR135-only public LiteSVM selector on base `addad6eb`.
+Eight worlds cross both signs, single/batch no-CPI release/refill route orders,
+and one transaction versus two transactions for the same two economic fills.
+Two owner pairs fill the shared side-OI ceiling; a fee-bearing reduction releases
+capacity for a third, initially flat pair. All six accounts remain below their
+individual caps. Public System/SPL/ATA/wrapper instructions alone create and fund
+the economic accounts; SPL mint authority is revoked at 120,000,000,000 atoms.
+
+Refill-before-release rejects at instruction 2. Release followed by fresh-pair
+overfill rejects at instruction 3, after one successful fee-bearing wrapper call.
+Both frame every compiled account and all fixture economic accounts, including
+data, metadata and lamports, except the exact separate payer signature fee.
+The original reduction/exact-refill instructions then succeed without epoch
+rebinding. An input-only ledger checks positions, unit ADL indices, side OI,
+ceil risk notional, position epochs, capital, per-domain insurance and SPL supply
+at every accepted economic prefix and rejected boundary. The nonintegral fill
+has ceil notional 73; the independent two-stage 137-bps oracle charges two atoms
+per trader, versus one if the first ceil were omitted. Only eight fee atoms
+survive, irrespective of retries or transaction packing. Decoded handoff economics
+match across packing choices; zero-fee flattening and six payouts per world leave
+zero OI, zero capital, eight insurance/vault atoms and 119,999,999,992 paid atoms.
+
+**Non-duplicate:** this composes fresh-pair aggregate-cap admission with rollback
+of an earlier fee-bearing release and transaction-boundary partitioning. It does
+not split trade quantities, reuse row411 fee-policy bundles, cross zero/ADL,
+or partition liquidation/minimum fees. Batch routes have one leg. Residual gaps:
+existing-leg increases, CPI, multi-asset/maximum shapes, nonzero PnL/funding,
+elapsed rate limits and liquidation/maintenance episodes. An initial existing-leg
+candidate unexpectedly accepted a branch expected to reject; that domain remains
+unresolved and is **not certified by this fresh-pair witness**. No production,
+Cargo/engine pins, invariant statuses or proof claims change.
+
+Validation used a private cache copy, then rebuilt the unchanged wrapper with
+platform-tools v1.52. Its SHA-256 remains
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The unchanged adjacent-selector matcher has SHA-256
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Exact commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-inv058-059-history-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partitions -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_052_split_merge_invariance::v16_program_split_trade_matches_aggregate_trade_economics \
+  inv_059_fee_fragmentation_bound::v16_program_minimum_fee_episode_histories_match_aggregate_close
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: new selector **1/1 PASS**, eight worlds, 16 exact rollbacks and 48 payouts;
+adjacent selectors **2/2 PASS**. Peak CU: rejection **217,770** (<690,000),
+accepted trade/partition **272,132** (single route under 750,000; packed route
+under 1,500,000), custody **50,876** (<300,000). Format and diff checks passed.
+
 ## INV-087/088 liveness read contract (2026-09-09)
 
 [`cu/inv_088_liveness_read_contract.rs`](cu/inv_088_liveness_read_contract.rs), mounted
