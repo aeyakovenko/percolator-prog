@@ -3,6 +3,54 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-087/088 liveness read contract (2026-09-09)
+
+[`cu/inv_088_liveness_read_contract.rs`](cu/inv_088_liveness_read_contract.rs), mounted
+under INV-088, adds one executable **source guard**, not a new SVM history, on PR135
+head `addad6eb`. It checks eight complete policy/profile/Clock predicate bodies,
+all 29 direct member accesses to `last_good_oracle_slot` and
+`permissionless_resolve_stale_slots` (22 receiver/owner classes), and all 20 calls
+to four maturity predicates with exact argument tokens (18 consumer classes).
+The scan excludes only the balanced host-test module, retains the production suffix,
+ignores comments, treats literals as opaque, and fails on external modules/includes.
+
+Nonvacuity: **11/11 in-memory mutations reject**: dead/hardcoded policy, global-for-local
+profile substitution, dead-branch/comment/literal decoys, cached-clock substitution,
+an existing CPI preflight's stale argument, an extra read in an existing writer, and
+new field/predicate consumers after the host-test module. A lexical positive control
+passes. This owns enforcement bodies and read arguments, not the existing persisted-field
+or engine-transition rosters, fee-cursor, locality, or current-observation histories;
+in particular, dead-branch and argument mutations retain the old field/call counts.
+
+Residual gaps: lexical direct-access coverage, not type resolution, macro expansion,
+destructuring/alias dataflow, all summary fields, or proof that every caller uses the
+predicate result correctly. Most caller bodies and mirror-write conditions are not
+locked. Engine proofs, arbitrary histories, maximum shapes and invariant statuses are
+unchanged. No production, Cargo or engine-pin edits; no mutated SBF or fresh SBF build.
+The two existing public LiteSVM controls use a private row424 cache copy, whose
+`src/` and Cargo inputs at `39d05875` equal this base (engine `394fd0bf`). Wrapper
+SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+
+Exact commands from `/tmp/codex-agent-worktrees/pr135-inv087-088-wrapper-summary-20260909`:
+
+```sh
+cp -a /dev/shm/pr135-row424-progress-target /dev/shm/pr135-inv087-088-read-contract-target
+export CARGO_TARGET_DIR=/dev/shm/pr135-inv087-088-read-contract-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_088_global_summaries_are_not_account_local_proofs::liveness_read_contract::v16_program_liveness_read_contract_rejects_dead_policy_and_global_scope_substitution -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_087_no_phantom_controls_or_dead_security_fields::v16_program_configure_permissionless_resolve_gated_and_bounded \
+  inv_074_scope_locality::v16_program_non_base_slot_zero_profile_stale_rejects_trade
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: new selector **1 passed / 0 failed / 0 ignored**; adjacent controls
+**2 passed / 0 failed / 0 ignored**; format and diff checks **PASS**. Only these
+three selectors ran. The existing `solana-client v1.18.26` future-incompatibility
+warning remains; no invariant-status promotion is claimed.
+
 ## INV-031/032/033 mixed reserve payout with a live lien (2026-09-09)
 
 [`cu/inv_033_insurance_backed_lien_single_classification.rs`](cu/inv_033_insurance_backed_lien_single_classification.rs)
