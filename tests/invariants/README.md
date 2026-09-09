@@ -3,6 +3,74 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-020/053/054 disjoint observation histories (2026-09-09)
+
+[`cu/inv_054_certificate_epoch_completeness.rs`](cu/inv_054_certificate_epoch_completeness.rs)
+adds `v16_program_disjoint_observation_histories_recertify_both_trade_participants`.
+Four independently constructed public LiteSVM/SBF histories cross explicit versus
+trade-time refresh with both taker/maker orientations. System, SPL, ATA, and wrapper
+instructions create every economic account and transition; harness inputs are
+limited to signer SOL, Clock, and blockhashes. No program-owned bytes are edited
+or restored. The shared full-refresh oracle operates only on off-chain copies.
+
+The participants initially hold different untraded legs, long asset 1 and short
+asset 2. At slot 2, an authenticated asset-1 mark drops from 1,000,000 to 950,000;
+public refresh settles the first participant's 50,000 loss and issues a current
+certificate. At slot 3, asset 2 rises to 1,050,000 through a second authenticated
+mark. A flat keeper commits the complete market observations, leaving both
+participants byte-identical: the first retains the intermediate certificate and
+settled K snapshot; the second retains its original certificate and unsettled K.
+The test requires strictly ordered certificate epochs and distinct authenticated
+observation slots, with both market legs accrued to the real current slot.
+
+A favorable one-unit asset-0 opening then uses trade-time recertification or follows
+a bounded complete public refresh. Both schedules and participant orders must agree
+on every final certificate field. The shared independent oracle requires exact
+certificate equality; the snapshot oracle independently checks full recomputation
+and frames all non-certificate account state. Input arithmetic additionally requires
+each participant's capital/equity to be 9,950,000, zero PnL/deficit, and gross margin
+of 1,950,000 or 2,050,000. Thus the newer participant's settled loss cannot be charged
+twice, and the older participant's loss cannot be skipped. Position quantities, both
+OI sides, capital totals, zero insurance, exact SPL custody, and whole Accounts for
+the offsetting owner, keeper, mint, vault, wallets, and non-fee signers are checked.
+
+This adds asymmetric certificate ages over **disjoint participant evidence sets**.
+INV-053's structural-delta cases refresh one target's unrelated leg; its multi-leg
+batch case gives both participants the same untouched stale leg. INV-020's staged
+liquidation/reduction and INV-056's mixed admission boundary also share the stale
+leg set. This witness checks the bilateral recertification composition and exact
+once settlement across different observation histories. It adds no omitted-leg,
+stale-refresh scan, fee-only invalidation, or retained mark-exit matrix.
+
+This is sampled row-426 evidence, not closure: row 426 remains OPEN and all invariant
+statuses are unchanged. External providers, incomplete observations, liquidation,
+fees/funding, CPI/batch transports, capacity limits, and arbitrary histories remain
+outside this increment. No production inconsistency was observed in these histories.
+
+Validation uses a fresh default-feature SBF built in private worktree
+`/dev/shm/percolator-inv020-currentness-20260909`, based on `f1a84de5`, with engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336` and locked/offline dependencies. SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new selector passes 1/1: four public histories, eight exact final certificates,
+and peak measured refresh/trade cost 183,989 CU. Its first development run rejected
+an invalid accrual configuration during market initialization; the fixture now uses
+default timing and a public initial crank. The adjacent target-only-lag control
+and invariant index each pass 1/1; targeted rustfmt and whitespace checks pass.
+Cargo reports existing host dead-code warnings and the `solana-client v1.18.26`
+future-incompatibility warning.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" TMPDIR="$PWD/target/tmp"
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_BUILD_JOBS=4 cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_054_certificate_epoch_completeness::v16_program_disjoint_observation_histories_recertify_both_trade_participants -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_054_certificate_epoch_completeness::v16_attack_target_only_lag_invalidates_unrelated_single_trade_cert -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_054_certificate_epoch_completeness.rs
+git diff --check
+```
+
 ## INV-073 terminal provider earnings and late ledger creation (2026-09-09)
 
 [`cu/inv_073_no_permanent_user_lock.rs`](cu/inv_073_no_permanent_user_lock.rs) adds
