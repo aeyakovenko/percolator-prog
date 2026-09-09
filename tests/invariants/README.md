@@ -3,6 +3,67 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## Row 411 retained atomic fee bundles (2026-09-09)
+
+[`stateful/inv_014_retained_fee_bundle.rs`](stateful/inv_014_retained_fee_bundle.rs),
+mounted by INV-014, adds partial stateful public-route evidence for retained
+fee consent across route products. Worktree: `/home/anatoly/percolator-row411`;
+branch: `codex/pr135-row411-fee-consent-20260909`. **Tests/docs only; row 411
+remains OPEN.**
+
+The net-new product is a retained atomic transaction containing two independent
+owner pairs, not another single-CPI taker reproduction. Each pair trades its own
+asset. The 64 worlds cross every ordered pair of `TradeNoCpi`, `BatchTradeNoCpi`,
+`TradeCpi`, and `BatchTradeCpi`, both mixed position orientations, and both
+instruction orders. Each batch instruction contains one leg.
+
+Under a 19-bps policy, the two pairs authorize 503 and 37 bps through transaction
+signers and each LP's public matcher configuration. Three retained transactions
+are signed and simulate successfully. Market authority then passes to a successor
+who raises policy to 38 bps: the high-cap pair remains authorized, while the
+low-cap pair must reject at its own instruction index with exact rollback even
+when the authorized trade executed earlier in the same transaction. Restoring the
+policy lets the original serialized transaction land without rebinding or
+re-signing. An input-only fee oracle checks capital debits, zero PnL, domain
+insurance credits, positions/OI, vault custody, token stock, mint supply, epoch
+advancement, stale consumed delivery rollback, close, and withdrawal endpoints.
+
+This adds bounded INV-005/010/011/014/024/036/047/081 evidence. It does not copy
+or certify PR #432's isolated single-CPI taker enforcement. Residual gaps include
+multi-leg batch aggregate-cap enforcement, partial fills, shared-owner bundles,
+nonzero movement/backing/funding/maintenance fees, arbitrary authority histories,
+expiry, terminal resolution, and full normalized engine-byte equivalence.
+
+Focused validation:
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/pr135-row411-route-product-host
+export PERCOLATOR_FUZZ_SBF=/dev/shm/pr135-row411-route-product-sbf/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_014_delayed_policy_and_policy_epoch_safety::retained_fee_bundle::v16_program_retained_fee_bundle_route_product_rolls_back_authorized_prefix -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_delegated_fee_exit::v16_program_retained_lp_fee_cap_preserves_bilateral_and_delegated_exits \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider \
+  inv_010_out_of_order_safety::v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_orders
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_011_signed_aggregate_economic_bounds::v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically \
+  inv_036_fee_destination_and_policy_version_integrity::v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter \
+  inv_079_public_reachability_evidence::v16_public_instruction_coverage_registry_matches_production_roster
+cargo fmt --all -- --check
+git diff --check
+```
+
+The new selector passed **1/1** over 64 worlds with 128 exact rollbacks and peak
+CU **287,751**. Adjacent stateful selectors passed **3/3**, selected runtime CU
+selectors passed **2/2**, public-evidence selectors passed **4/4**, and formatting
+and diff checks passed in the source worktree. The omitted CU source-composition
+guard is the known current-engine-pin assertion, not a runtime regression.
+
 ## INV-045 public carry and account-settlement order (row 425, 2026-09-09)
 
 [`cu/inv_045_public_carry_order.rs`](cu/inv_045_public_carry_order.rs), mounted by

@@ -37,6 +37,9 @@ use super::*;
 #[path = "inv_014_retained_delegated_fee_exit.rs"]
 mod retained_delegated_fee_exit;
 
+#[path = "inv_014_retained_fee_bundle.rs"]
+mod retained_fee_bundle;
+
 #[test]
 fn v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider() {
     use crate::support::{
