@@ -3,6 +3,90 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-045 reward price through actual catchup (row 422, 2026-09-09)
+
+[`cu/inv_045_reward_catchup_order.rs`](cu/inv_045_reward_catchup_order.rs), mounted
+under INV-045's `accepted_price_reward` child, adds **partial PR135 conformance
+coverage**, not a production finding/fix. Base: `9db8be8899bb432709a3906a0163c137b403518f`
+from `origin/codex/invariant-fidelity-reopen-20260904`. Branch:
+`codex/astra-ultra-row422-inv045-20260909`; worktree:
+`/tmp/codex-agent-worktrees/astra-ultra-row422-inv045-20260909`.
+The root worktree is untouched. **Row 422 remains OPEN**, and all invariant
+verdicts, other reopening rows, production sources, and dependency pins are unchanged.
+
+The parent reward test converges by replacing the raw report with the accepted
+price. This child instead keeps the reported price fixed while the effective
+price actually catches up over three or five slots. **96 public LiteSVM worlds**
+cross upward/downward movement, early/late/fully-caught-up liquidation, keeper
+shares 3,333/10,000 bps, target-first/separate-publication ordering, and retained
+versus renewed equal-price reports. Each chosen liquidation boundary must pay a
+nonzero fee and reward. Conservative liquidation sizing can restore health for
+the remaining catchup, so separate worlds defer the first liquidation to each
+boundary; the test does not assume a new liquidation at every price step.
+
+An input-derived price schedule and the parent's independent two-stage fee
+rounding oracle check the fee for the observed closed quantity. All **64 lagged
+worlds** must distinguish effective-price fees from raw-report fees. Each close
+checks the target debit, unchanged peer, exact keeper share, retained insurance,
+balanced OI, restored health, and unchanged engine/SPL custody. Report timestamps,
+last-good slots, and the effective mark are checked independently. Publication,
+refresh, and the post-catchup fixed point cannot pay unearned rewards. Same-history
+worlds compare per-phase price, quantity, fee, reward, every actor's value, insurance,
+and final custody. The campaign requires **480 exact stale-report rollbacks**,
+bounded healthy retries, **96 owner reductions to flat**, and **96 exact keeper
+SPL withdrawals**. Rollback frames include all constructed economic accounts,
+signers, and reports; the separate network fee payer and runtime accounts are excluded.
+Only System/SPL/ATA/wrapper instructions construct protocol state; Clock and
+legitimate external Pyth fixture accounts are supplied by the harness.
+
+This is neither zero/extreme mark-envelope coverage nor mixed-batch discovery
+capacity coverage. INV-020 retains provider replay/authentication ownership, and
+INV-061 retains engine-selected liquidation sizing and general fee-cap ownership.
+The new matrix uses one asset and direct trades solely for public setup/exit.
+It has no trade-origin mark, stale-Hybrid fallback, CPI route product, funding,
+maintenance, insurance withdrawal, full trader-PnL redemption, maximum shape,
+or arbitrary-history claim. In particular, **trade-driven reward eligibility
+surviving a fresh report until effective-price catchup remains unverified here**.
+The existing freshness-based eligibility predicate is not changed or certified;
+no exploit reproduction, pre-fix/fixed-head result, or row-422 closure is claimed.
+
+Validation uses a private cached host target and default-feature wrapper SBF,
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. The SBF's documented build at
+`30993c0b` has identical `src`, Cargo inputs, and auth-matcher sources to this base
+(`git diff 30993c0b HEAD -- src Cargo.toml Cargo.lock tests/fixtures/auth_matcher`
+is empty). Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The host test binary is compiled in this worktree. No fresh SBF build or broad
+suite is claimed. Initial fixture development incorrectly required liquidation
+at every intermediate step; that assertion was replaced by the independently
+constructed early/late/caught-up worlds described above. Cargo emits its existing
+`solana-client v1.18.26` future-incompatibility warning.
+
+Final focused results: the INV-045 selector passes **2/2** (1,072 filtered,
+45.94s), covering the new 96-world matrix and the unchanged 16-world parent.
+INV-020 replay passes **1/1** (0.42s); INV-061 reward-bound and healthy-fixed-point
+selectors each pass **1/1**. The standalone new selector also passed **1/1**
+(44.70s) before strengthening cross-world comparison to include every phase's
+actor values and insurance. New-matrix maximum crank / owner-exit / withdrawal
+CU is **322,224 / 146,949 / 61,088**, below the enforced
+325,000 / 345,000 / 300,000 guardrails; setup and rejected calls are excluded.
+`cargo fmt --all -- --check` and `git diff --check` pass. Logs are in the private
+target below as `new-selector.log`, `inv045.log`, `inv020.log`,
+`inv061-reward.log`, and `inv061-fixed-point.log`.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-ultra-row422-inv045-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::accepted_price_reward:: -- --nocapture
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::liquidation_observation_replay:: -- --nocapture
+cargo test --locked --offline --test v16_cu v16_program_liquidation_cranker_reward_bounded_by_fee -- --nocapture
+cargo test --locked --offline --test v16_cu v16_program_repeated_partial_liquidation_stops_charging_after_health_restored -- --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-024 terminal role handoff (row 410, 2026-09-09)
 
 [`cu/inv_024_terminal_role_handoff.rs`](cu/inv_024_terminal_role_handoff.rs), mounted

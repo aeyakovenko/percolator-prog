@@ -6,6 +6,9 @@
 
 use super::*;
 
+#[path = "inv_045_reward_catchup_order.rs"]
+mod reward_catchup_order;
+
 const ENTRY: u64 = 1_000_000;
 const ACCEPTED: u64 = 997_600;
 const FEE_BPS: u128 = 5;
