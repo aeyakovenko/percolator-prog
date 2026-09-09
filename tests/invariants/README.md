@@ -82,6 +82,90 @@ git diff --check
 git diff --exit-code b1e11425923984ed08330be500cad8a3b8b89d98 -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support
 ```
 
+## INV-024 composed PnL, reward, and receipt history (2026-09-09)
+
+[`cu/inv_024_pnl_reward_receipt_history.rs`](cu/inv_024_pnl_reward_receipt_history.rs),
+mounted by INV-024, adds one finding-blind public LiteSVM selector from
+`a0431b138b3d3132188324b439e77cca6356305a` on
+`origin/codex/invariant-fidelity-reopen-20260904`. This composes the existing
+trade/PnL and maintenance-reward histories, previously covered separately, with
+backing-expiry preparation and a nonzero terminal receipt. All market, portfolio,
+mint, vault, and owner-token accounts are created through System/SPL/ATA/wrapper
+instructions. No economic state bytes are injected, including during setup.
+
+Four owners retain separate history ledgers. Two one-unit trade rounds produce
+100,001 and 60,003 atoms of PnL with opposite winners and nonintegral signed trade
+fees. Account cranks collect elapsed maintenance once; same-slot closing trades
+cannot recharge it. The fee donor credits the first and second winners exactly
+9 and 18 reward atoms under 3,333/6,667-bps policies. The first winner converts its
+PnL, withdraws that profit plus reward, redeposits 17,003 atoms from the same ATA,
+then loses in the second round. Reward recipients and the senior cohort are
+recertified through public observation-bearing cranks before favorable exits.
+
+`EpisodeClaim` derives amounts solely from deposits, position sizes, authenticated
+price/slot history, and disclosed policies:
+
+```text
+remaining = principal + realized gains outside receipts - attributed losses
+            - disclosed fees + earned fee rewards + terminal receipts - paid
+```
+
+Conversion changes classification, not entitlement. Terminal receipting removes
+the same face from live gains before adding it to receipt entitlement. Redeposit
+does not erase the earlier payout. Every conversion is bounded by both the
+remaining claim and unconverted PnL; every withdrawal/payout is bounded before
+execution and checked against exact resulting owner capital, PnL and SPL atoms.
+All checked transactions also reconcile engine/SPL vault custody, capital, each
+fee destination (including per-charge floor/remainder splits), immutable mint
+supply, owner/incarnation bindings, token metadata, and unrelated portfolio bytes.
+
+The 16-world product mirrors the first winner, settlement order, whole/split early
+payout, and forward/reverse terminal order. Settlement is delayed to the public
+history's exact backing-expiry boundary, 100 slots after resolution. One bounded
+zero-payout `CloseResolved` normalizes the expired bucket; a subsequent close pays
+the 60,003-atom receipt and remaining principal exactly. A freshly signed receipt
+retry preserves the complete economic fixed point. Observation-only mutations
+reject a conserved wrong-owner credit, omitted prior payouts (one atom or all),
+an omitted later loss, and a duplicate receipt payout balanced against another
+owner. None of these sensitivity checks modifies SVM state.
+
+The new selector passes independently: **16 worlds, 664 checked transactions,
+16 conversions, 24 live payouts, 64 terminal payouts, 16 expiry preparations,
+16 receipt retries**, maximum **221,698 CU**, below the 345,000 limit. A fresh
+default-feature SBF build using platform-tools v1.52 has SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The final exact CU selection below passes **3/3**; the invariant-structure
+selection passes **2/2**. Scoped rustfmt, whitespace, and unchanged-production
+checks pass. Existing support dead-code and `solana-client` future-Rust warnings
+remain; the full suite and Kani were not run.
+Development failures corrected fixture parameters, fee timing/destination math,
+required public refresh hints, and the bounded expiry preparation in the test;
+they are not a production TDD red/green finding.
+
+This is **coverage-only**. Production, engine pins, shared support, and invariant
+status metadata are unchanged. Scope remains solvent, one mint/asset, two position
+episodes per trader, zero funding, unclipped fees, and a fully paid receipt; this
+does not close INV-024's arbitrary-history, impaired-receipt, recovery or portfolio
+recreation gaps. No open fix PR branch, test, or diff was used.
+
+Reproduction from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/inv024-composed-entitlement-20260909-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_024_attributed_quote_value_conservation::pnl_reward_receipt_history::v16_program_pnl_rewards_and_receipts_preserve_history_wide_owner_claims \
+  inv_024_attributed_quote_value_conservation::maintenance_policy_entitlement::v16_program_maintenance_policy_interleaving_preserves_each_owners_live_entitlement \
+  inv_024_attributed_quote_value_conservation::recycled_reward_terminal_history::v16_program_recycled_rewards_preserve_owner_atoms_through_ordered_terminal_payouts
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_program_invariant_harnesses_are_test_free_roots \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete
+rustfmt --edition 2021 --check tests/invariants/cu/inv_024_attributed_quote_value_conservation.rs tests/invariants/cu/inv_024_pnl_reward_receipt_history.rs
+git diff --check
+```
+
 ## INV-071/082 released obligation before FinalizeRecovery (2026-09-09)
 
 [`cu/inv_071_recovery_obligation_finalization.rs`](cu/inv_071_recovery_obligation_finalization.rs),

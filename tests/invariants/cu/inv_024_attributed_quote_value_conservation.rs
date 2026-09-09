@@ -23,6 +23,9 @@ mod terminal_role_handoff;
 #[path = "inv_024_terminal_insurance_lifecycle.rs"]
 mod terminal_insurance_lifecycle;
 
+#[path = "inv_024_pnl_reward_receipt_history.rs"]
+mod pnl_reward_receipt_history;
+
 #[test]
 fn v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim() {
     use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::{
