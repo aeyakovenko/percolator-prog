@@ -42,6 +42,208 @@
 
 use super::*;
 
+#[test]
+fn v16_public_transaction_privilege_union_preserves_account_roles_and_retry() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const DEPOSIT: u64 = 101;
+    const WITHDRAW: u128 = 37;
+    let mut env = inv018_public_spl_market(6);
+    let owner = Keypair::new();
+    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    let portfolio_key = Keypair::new();
+    let portfolio = portfolio_key.pubkey();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &portfolio_key,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .unwrap();
+    let token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &env.mint,
+            &token,
+            &env.admin.pubkey(),
+            &[],
+            DEPOSIT,
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .unwrap();
+
+    let sequence = env.portfolio_matcher_sequence(portfolio);
+    let deposit = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(token, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: env.deposit_ix(portfolio, DEPOSIT.into()).encode(),
+    };
+    let withdraw = Instruction {
+        program_id: env.program_id,
+        accounts: [
+            owner.pubkey(),
+            env.market,
+            portfolio,
+            token,
+            env.vault,
+            env.vault_authority,
+            spl_token::ID,
+        ]
+        .into_iter()
+        .map(|key| AccountMeta::new_readonly(key, false))
+        .collect(),
+        data: ProgInstruction::Withdraw {
+            portfolio_id: env.portfolio_id(portfolio),
+            expected_sequence: sequence + 1,
+            amount: WITHDRAW,
+        }
+        .encode(),
+    };
+
+    // Only the deposit supplies privileges in either bundle; the repaired suffix
+    // changes one account key, retaining the same bytes and readonly/unsigned metas.
+    let mut max_cu = 0;
+    for (prefix, alias, explicit_signer, rejection) in [
+        (false, false, false, Some(PercolatorError::ExpectedSigner)),
+        (false, false, true, Some(PercolatorError::ExpectedWritable)),
+        (true, true, false, Some(PercolatorError::InvalidAccountKind)),
+        (true, false, false, None),
+    ] {
+        let mut suffix = withdraw.clone();
+        suffix.accounts[0].is_signer = explicit_signer;
+        if alias {
+            suffix.accounts[2].pubkey = env.market;
+        }
+        let mut ixs = vec![heap_ix(), cu_ix()];
+        if prefix {
+            ixs.push(deposit.clone());
+        }
+        ixs.push(suffix);
+        let mut signers = vec![&env.payer];
+        if prefix || explicit_signer {
+            signers.push(&owner);
+        }
+        env.svm.expire_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &ixs,
+            Some(&env.payer.pubkey()),
+            &signers,
+            env.svm.latest_blockhash(),
+        );
+        assert_eq!(
+            tx.message.header.num_required_signatures as usize,
+            signers.len()
+        );
+        let roles = &tx.message.instructions.last().unwrap().accounts;
+        assert_eq!(
+            tx.message.is_signer(roles[0] as usize),
+            prefix || explicit_signer
+        );
+        for role in &roles[1..=4] {
+            assert_eq!(tx.message.is_writable(*role as usize), prefix);
+        }
+        assert_eq!(roles[1] == roles[2], alias);
+
+        let mut keys = tx.message.account_keys.clone();
+        keys.extend([env.mint, env.admin.pubkey(), portfolio]);
+        keys.sort_unstable();
+        keys.dedup();
+        keys.retain(|key| *key != env.payer.pubkey());
+        let before = account_alias_snapshot(&env, &keys);
+        let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        payer.lamports -=
+            solana_sdk::fee::FeeStructure::default().lamports_per_signature * signers.len() as u64;
+        let rejected = rejection.is_some();
+        let result = env.svm.send_transaction(tx);
+        let meta = if let Some(error) = rejection {
+            let failed = result.expect_err("invalid public account roles must reject");
+            assert_eq!(
+                failed.err,
+                TransactionError::InstructionError(
+                    if prefix { 3 } else { 2 },
+                    InstructionError::Custom(error as u32),
+                )
+            );
+            assert_eq!(account_alias_snapshot(&env, &keys), before);
+            failed.meta
+        } else {
+            let meta = result.expect("correcting only the aliased key must permit the same bundle");
+            for (key, account) in keys.iter().zip(before) {
+                if ![env.market, portfolio, token, env.vault].contains(key) {
+                    assert_eq!(env.svm.get_account(key), account, "success frame: {key}");
+                } else {
+                    assert_eq!(
+                        env.svm.get_account(key).unwrap().lamports,
+                        account.unwrap().lamports
+                    );
+                }
+            }
+            meta
+        };
+        if prefix {
+            assert!(meta
+                .logs
+                .contains(&format!("Program {} success", env.program_id)));
+            assert!(meta
+                .logs
+                .contains(&format!("Program {} success", spl_token::ID)));
+        }
+        assert_eq!(env.svm.get_account(&env.payer.pubkey()), Some(payer));
+        assert_cu_within(
+            "INV-017 transaction privilege union",
+            meta.compute_units_consumed,
+            300_000,
+        );
+        max_cu = max_cu.max(meta.compute_units_consumed);
+        let remaining = if rejected {
+            0
+        } else {
+            DEPOSIT as u128 - WITHDRAW
+        };
+        let group = env.market_state().1;
+        assert_eq!(env.portfolio_state(portfolio).capital.get(), remaining);
+        assert_eq!(group.c_tot, remaining);
+        assert_eq!(group.vault, remaining);
+        assert_eq!(group.insurance, 0);
+        assert_eq!(env.token_amount(env.vault) as u128, remaining);
+        assert_eq!(env.token_amount(token) as u128, DEPOSIT as u128 - remaining);
+        assert_eq!(
+            env.portfolio_matcher_sequence(portfolio),
+            sequence + if rejected { 0 } else { 2 }
+        );
+        assert_eq!(
+            Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+                .unwrap()
+                .supply,
+            DEPOSIT
+        );
+    }
+    println!("INV-017 privilege union: 3 exact rejections, 1 repaired bundle; peak CU {max_cu}");
+}
+
 fn inv017_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)

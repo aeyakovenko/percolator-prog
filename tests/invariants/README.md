@@ -3,6 +3,26 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-017 transaction-wide privileges and account-kind alias (2026-09-09)
+
+[`cu/inv_017_signer_writable_role_and_account_alias_safety.rs`](cu/inv_017_signer_writable_role_and_account_alias_safety.rs)
+adds one public LiteSVM test for transaction-wide signer/writable privilege
+union. Branch: `codex/astra-pr135-inv017-privilege-union-20260909`; separate
+worktree: `/home/anatoly/pr135-account-privileges-20260909`. **Tests/docs
+only; no production, pin, or status changes.**
+
+A readonly unsigned withdrawal rejects `ExpectedSigner`; adding only the owner
+signature rejects `ExpectedWritable`; a prior deposit instruction supplies the
+transaction-wide privileges but a market-as-portfolio alias still rejects
+`InvalidAccountKind` after the deposit and SPL CPI would otherwise have
+succeeded. The repaired bundle changes only the aliased account key and then
+lands, proving the guard is role-specific rather than an always-reject path.
+Every rejected case checks byte/lamport rollback except the fee payer's
+signature fee, plus exact vault, mint, market, portfolio, and token balances.
+
+Residual gaps include other route orderings, higher-arity aliases,
+native/secondary quote rails, and matcher return-data binding.
+
 ## INV-050 ADL maker reduction and taker cross-zero (2026-09-09)
 
 [`cu/inv_050_cross_zero_decomposition.rs`](cu/inv_050_cross_zero_decomposition.rs)
