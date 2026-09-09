@@ -1485,6 +1485,62 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_012_matcher_program_gener
 git diff --check
 ```
 
+## INV-012 retained grant delivery expiry (2026-09-09)
+
+[`stateful/inv_012_retained_grant_expiry.rs`](stateful/inv_012_retained_grant_expiry.rs)
+adds one PR135-only stateful LiteSVM selector: an owner-signed `SetMatcherConfig`
+that is valid when retained must still satisfy `Clock.slot < expiry_slot` when
+delivered. This covers **grant admission**, distinct from the existing retained
+CPI-consumer expiry, grant-incarnation ABA, keeper preservation, owner-episode,
+used-generation and liquidation-revocation tests. Base: `52efb340`; production,
+engine pins, reopening rows and invariant verdicts are unchanged. **INV-012 stays
+REFUTED_CURRENT; rows 412/414 remain OPEN.**
+
+Twelve histories cross single/one-leg-batch CPI, both signs and delivery at slots
+3/4/5 for expiry 4. Each exact retained grant first simulates successfully before
+expiry. Exact/late deliveries and prebuilt, distinct-signature retries require
+`InvalidInstruction` and the shared complete tracked-account/metadata/matcher/SPL/
+economic-lamport rollback frame (network fee payer excluded). The append-only
+authorization oracle checks every public prefix, including unchanged sequence,
+scope, cap, expiry and positions after rejection. The original retained consumer
+then fills under the preserved standing grant. A pre-signed expiry-only repair
+(same owner sequence and tuple, expiry 7) succeeds, followed by a fresh nonzero
+CPI fill; the pre-expiry worlds directly consume the accepted expiry-4 grant.
+No protocol-state injection or LP-grant revocation occurs after public setup.
+
+Residual gaps: re-delivery across authority-revoking episodes, keeper/lifecycle
+or incarnation writers, disabled starting grants, nonzero fees, multi-leg/max
+shapes, arbitrary histories and validator blockhash expiry. The intervening
+authorized LP CPI fill preserves consent; it is not evidence for revocation
+closure or a reproduction/certification of production-fix PR #412.
+
+Validation uses a private copied host target under `/dev/shm` and cached
+default-feature SBF, not a fresh SBF build. `src`, Cargo inputs and auth-matcher
+sources match the documented build at `30993c0b`; engine remains `394fd0bf`.
+Wrapper SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Exact verification commands from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-inv012-retained-expiry-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+git diff --exit-code 30993c0b HEAD -- src Cargo.toml Cargo.lock tests/fixtures/auth_matcher
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::retained_grant_expiry::v16_program_retained_grant_admission_binds_delivery_time_expiry -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
+All three exact selectors pass **1/1** each. The new selector passes twice
+(final 5.42s): **12 histories, 12 live simulations, 48 public transactions,
+16 expired-grant rejections, 8 preserved-grant fills and 12 renewed-grant fills**.
+Final formatting and whitespace checks pass; the initial new-file formatting
+differences were corrected. Existing dead-code/future-incompatibility warnings
+remain. No broad suite, production counterexample or engine proof was run.
+
 ## INV-012 preserving keeper writers (row 412, 2026-09-09)
 
 [`stateful/inv_012_keeper_preservation.rs`](stateful/inv_012_keeper_preservation.rs),

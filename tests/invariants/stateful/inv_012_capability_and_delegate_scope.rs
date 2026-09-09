@@ -49,6 +49,9 @@ mod keeper_preservation;
 #[path = "inv_012_liquidation_revocation.rs"]
 mod liquidation_revocation;
 
+#[path = "inv_012_retained_grant_expiry.rs"]
+mod retained_grant_expiry;
+
 #[derive(Clone, Copy, Debug)]
 enum CpiRoute {
     Single,
