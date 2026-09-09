@@ -3,6 +3,88 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-024 terminal role handoff (row 410, 2026-09-09)
+
+[`cu/inv_024_terminal_role_handoff.rs`](cu/inv_024_terminal_role_handoff.rs), mounted
+by INV-024, adds **net-new partial PR135 coverage** of
+`terminal-submitters-cannot-receive-another-role-attributed-reserve` on unchanged
+production base `4aaf48c1`. Worktree:
+`/tmp/codex-agent-worktrees/row410-inv024-role-attribution-audit-20260909`; branch:
+`codex/row410-inv024-role-attribution-audit-20260909`. **Row 410 remains OPEN.**
+No production, engine pin, shared-helper, or coverage-status changes.
+
+The distinct relation is **resolved independently funded roles + market-authority
+handoff into an existing role + same-transaction reserve payouts + fee-payer role
+aliasing**. Twelve independently constructed worlds cross asset 0/1, incoming
+market authority equal to provider/insurance authority/live insurance operator,
+and separate fee payer versus incoming authority as fee payer. The payer alias
+is with the beneficiary's wallet key, not with an SPL token-account address.
+The old market authority and both reserve holders sign; this does not claim
+signer-independent reserve disposal.
+
+Public funding supplies 41 backing atoms, 59 target-asset insurance atoms, 23
+peer-asset insurance atoms, and 31 user principal atoms. The mint authority is
+disabled. A permissionless resolved payout and owner-signed portfolio deletion
+finish the user's exit before the observed handoff. Backing stays fresh, with
+short-side principal and long-side insurance on each selected asset. The live
+insurance operator is distinct from the terminal insurance beneficiary.
+
+Each world first simulates the payable handoff plus both reserve withdrawals.
+A batch with the same handoff and a successful first reserve payout then rejects
+the second payout's destination at exactly `InvalidTokenAccount`. The incorrect
+destination belongs to the incoming market authority, which may also pay the
+transaction fee. The test checks the real SPL prefix and exact rollback of every
+tracked account, including both authority profiles/epochs and the fee-adjusted
+payer. Restoring only the destination admits the original valid batch with exact
+post-handoff epochs, without helper rebinding or reconstruction of protocol state.
+
+An input-derived per-wallet oracle requires exactly 41/59/0 atoms for provider,
+insurance authority, and operator in every world; user payout remains 31, former
+admin and separate payer receive zero, and precisely 23 peer-insurance atoms stay
+in custody. It checks engine/SPL stocks, each domain, fixed mint supply, unchanged
+unrelated accounts, and both role profiles. Only the market key, its base-asset
+admin/oracle defaults, and base-asset authority epoch follow the handoff. Payer or
+market-authority identity cannot merge the two reserve entitlements.
+
+INV-024's maintenance/recycled-reward/owner-exit histories do not hand off market
+authority over resolved reserves. INV-067's provider/insurance retry matrix has
+fixed distinct roles and no same-transaction authority change; its receipt and
+late-expiry tests own different claim identities. INV-005's default-role handoff
+and shutdown ABA tests do not own this independently funded resolved-role merge.
+The isolated shutdown-beneficiary fix (`00099722`, also documented in `c4653693`)
+owns the live shutdown fallback and is neither imported nor reproduced here.
+No row-417 receipt or row-418 token-variant/CloseSlab disposition is added.
+
+Only System/SPL/ATA/wrapper instructions create economic state. Harness changes
+are signer SOL, Clock, and blockhashes; no program-owned byte mutation or state
+restoration. Remaining gaps include abandoned/expired shutdown reserves, provider
+earnings, optional attribution ledgers, funded reserve-role succession itself,
+absent beneficiary signatures, receipts, insolvency, alternate quote rails,
+independent payout-order products, final reserve sweep/CloseSlab, maximum shapes,
+and arbitrary histories. No vulnerable/fixed-pin closure is claimed.
+
+The focused selector passes **1/1** (1,071 filtered): **12 worlds, 12 payable
+simulations, 12 exact rollbacks, 24 reserve payouts**. Peak rejected/successful
+batch CU is **46,526 / 69,753**, below the enforced 500,000 ceiling; setup and
+simulations are outside these maxima. Validation uses a private copy of cached
+default-feature SBF SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`,
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Its source/Cargo inputs match
+the row-413 build and this base. Host dependencies and the artifact were copied
+from `/dev/shm/row426-inv020-active-claim-target`; host tests compile in this
+worktree. No SBF rebuild, broad suite, or production counterexample was used.
+The initial compile required the LiteSVM simulation's `VersionedTransaction`
+conversion. Cargo retains its existing `solana-client v1.18.26` warning.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row410-inv024-role-handoff-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_role_handoff::v16_program_terminal_role_handoff_preserves_reserve_beneficiaries_with_aliased_payer -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-020 active claim evidence (row 426, 2026-09-09)
 
 [`cu/inv_020_active_claim_evidence.rs`](cu/inv_020_active_claim_evidence.rs), mounted
