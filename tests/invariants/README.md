@@ -3,6 +3,61 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-045 public carry and account-settlement order (row 425, 2026-09-09)
+
+[`cu/inv_045_public_carry_order.rs`](cu/inv_045_public_carry_order.rs), mounted by
+the existing INV-045 CU owner, adds partial public LiteSVM conformance coverage.
+Branch: `codex/pr135-row425-public-carry-order-20260909`; isolated worktree:
+`/home/anatoly/percolator-pr135-row425-public-carry-order`. **Tests/docs only; no
+production mismatch or fix. Row 425 remains OPEN.**
+
+The 48 bounded histories cross opposite mark directions, single versus two-asset
+batch no-CPI routes, aggregate versus split reductions, three account-crank
+placements, and forward/reverse asset and owner order. Four funded owners open
+unequal positions on two assets while authenticated targets remain 20 atoms away
+from their anchors. The 24-bps per-slot cap crosses its first atoms at different
+slots, so accepted price and carry are checked independently from public inputs:
+
+```text
+cap numerator = anchor * 24 * elapsed slots
+accepted price = anchor +/- floor(cap numerator / 10_000)
+carry = cap numerator % 10_000
+owner entitlement += signed lots before the move * accepted price change
+raw entitlement = capital + settled PnL
+                + sum(abs(basis_q) * (side K - leg K snapshot) / (POS_SCALE * ADL_ONE))
+```
+
+Every post-setup program call compares raw state with that input ledger: side K,
+zero funding/B/pending obligations, OI, per-owner entitlement, raw capital,
+positive-PnL totals, SPL mint, wallets, and vault. Nonzero latent PnL must occur,
+so global accrual cannot stand in for account-local settlement. Split and aggregate
+reductions must land at the same economic endpoint; accepted cranks must change
+state; tolerated non-progress errors must roll back the complete market, portfolio,
+mint, vault, and wallet frame. Host-only mutation checks demonstrate that the
+oracle catches a balanced one-atom wrong-owner transfer and a discarded carry.
+
+This is partial evidence for INV-024/025/038/041/045/052/071/085/086/088. It
+does not cover due-accrual trade-first execution, CPI/delegated routes, fractional
+position lots, fees/funding, target replacement/reversal/catchup, backing/payouts,
+arbitrary histories, or maximum shape. It does not duplicate row419 pending cohorts,
+row417 late-expiry claims, or residual partition suites.
+
+Focused validation:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-row425-public-carry-order-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::v16_program_row425_public_carry_entitlement_is_partition_and_order_equivalent -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::custody_cap_carry::v16_program_custody_route_words_preserve_pending_fractional_carry -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_052_split_merge_invariance::v16_program_split_trade_matches_aggregate_trade_economics -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
+The new selector passed **1/1** over **48 histories** with maximum measured
+transition CU **376,801**. The neighboring custody-carry and split-trade controls
+each passed **1/1**. Formatting and diff checks passed in the source worktree.
+
 ## Row 424 persisted scan and authenticated maturity (2026-09-09)
 
 [`cu/inv_071_terminal_cursor_time.rs`](cu/inv_071_terminal_cursor_time.rs), mounted by

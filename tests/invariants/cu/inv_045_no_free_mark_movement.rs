@@ -50,6 +50,9 @@ mod late_stale_crank_rollback;
 #[path = "inv_045_custody_cap_carry.rs"]
 mod custody_cap_carry;
 
+#[path = "inv_045_public_carry_order.rs"]
+mod public_carry_order;
+
 #[test]
 fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
     const MARK: u64 = 100;
