@@ -3,6 +3,76 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-019 retained CPI return freshness (2026-09-09)
+
+[`cu/inv_019_retained_return_freshness.rs`](cu/inv_019_retained_return_freshness.rs)
+adds one test beneath the existing INV-019 owner. Four worlds cross single/context
+and one-leg batch/runtime-return transports with live and expired retained grants.
+Two independently authorized portfolio pairs share one matcher program/context, but
+use different delegates, asset generations, signed quantities (+2/-3), and prices
+(100/200). Both requests are signed before changing matcher behavior or Clock.slot,
+and their exact transaction first simulates successfully at the second grant's E-1.
+
+The new coverage is the composition of **distinct requests, successful prefix CPI,
+retained capability deadline, return freshness, and transaction rollback**:
+
+- At E-1, the fixture emits an honest first response and returns success without
+  writing on the second call. The second wrapper instruction rejects with exactly
+  `InvalidAccountData` for single CPI or `InvalidInstruction` for batch CPI. Both
+  matcher invocations succeeded, so a pre-CPI identity guard cannot satisfy the test.
+- At E, the first trade still succeeds, but the second grant rejects as
+  `Unauthorized` before its matcher invocation. The earlier response cannot rescue
+  the expired request. The first trade, request counter, matcher context, all four
+  portfolios, and all SPL/owner/rent accounts roll back together in both histories.
+- A public owner renewal increments only the expired grant's sequence; its retained
+  request is updated only for that sequence. Fresh responses still reject a one-atom
+  tighter second sale-price limit after both CPIs, with the same complete rollback.
+  The exact-price retry commits both fills. Typed response fields bind request 2,
+  the second LP delegate, asset, quantity, oracle price, and execution price; positions,
+  generations, OI, epochs, capability sequences/deadlines, and custody reconcile.
+
+Disjoint portfolio pairs prevent the prefix's position-epoch advance from causing an
+unrelated pre-CPI rejection. The batch responses have equal lengths. Every failed
+transaction checks the exact failing instruction and error, matcher invocation and
+success counts, and complete economic account frames. Only the separate network fee
+payer is excluded. Setup uses the existing public System/SPL/ATA market constructor,
+System-created portfolios/context, public deposits/grants, and the unchanged fixture's
+owner-authorized controls. There is no state byte injection, shared helper/fixture
+change, production change, dependency change, or invariant-status promotion.
+
+**Boundary.** This is a finite two-request composition. Foreign nested producers are
+covered by the existing INV-019 test, not extended here. Cross-market substitution,
+portfolio/context recreation, mixed transports, multi-leg/maximum-size batches,
+partial fills, nonzero fees/funding/backing, and subsequent exits remain outside this
+increment. It adds no standalone capability-scope or stale-sequence rejection test.
+
+**Validation.** Base `718f0ea3e107628560e7644198d49d0a489f0fd8`, from the specified
+local branch; private worktree and independent Git metadata under `/dev/shm`.
+Fresh default-feature wrapper and unchanged hostile-matcher SBF builds pass offline
+with platform-tools v1.52 and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Wrapper SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Matcher SHA-256: `e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`.
+Focused test: **1 passed, 0 failed, 1,130 filtered**, 2.33s; **4 worlds, 8 exact
+rollbacks, 8 committed fills**, peak **846,058 CU**, under the 1,400,000-CU bundle
+limit. Invariant index: **1 passed, 0 failed, 122 filtered**. Formatting and working/
+staged whitespace checks pass. Existing fixture deprecation, regression-target dead
+code, and solana-client future-compatibility warnings remain. No broad suite was run;
+no external findings were consulted.
+
+Exact commands from `/dev/shm/percolator-pr135-inv019-20260909`:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" TMPDIR="$PWD/target/tmp" CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:/home/anatoly/.cache/solana/v1.52/platform-tools/llvm/bin:/home/anatoly/.local/share/solana/install/active_release/bin:/home/anatoly/.cargo/bin:/usr/local/bin:/usr/bin:/bin cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir target/deploy -- --locked
+env PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:/home/anatoly/.cache/solana/v1.52/platform-tools/llvm/bin:/home/anatoly/.local/share/solana/install/active_release/bin:/home/anatoly/.cargo/bin:/usr/local/bin:/usr/bin:/bin cargo build-sbf --manifest-path tests/fixtures/hostile_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/hostile_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_019_cpi_invocation_and_return_data_binding::retained_return_freshness::v16_program_retained_cpi_bundle_binds_fresh_returns_across_expiry_and_rollback -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-023/083 inherited source-roster repair (2026-09-09)
 
 Coverage-only repair based exclusively on the allowed local

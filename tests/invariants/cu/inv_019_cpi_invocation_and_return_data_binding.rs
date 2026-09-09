@@ -22,6 +22,9 @@
 
 use super::*;
 
+#[path = "inv_019_retained_return_freshness.rs"]
+mod retained_return_freshness;
+
 fn inv019_function_body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start = source
         .find(start)
