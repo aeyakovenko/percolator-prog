@@ -3,6 +3,77 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-028 historical and latent settlement capacity (row 423, 2026-09-09)
+
+[`cu/inv_028_historical_latent_capacity.rs`](cu/inv_028_historical_latent_capacity.rs),
+mounted by INV-028, adds passing public-route resource-sufficiency coverage from integration
+base `d98b80ec`. Development used the isolated worktree
+`/tmp/codex-agent-worktrees/row423-inv028-admission-resources-20260908` on
+`codex/row423-inv028-admission-resources-20260908`; the coordinator checkout was not modified.
+No production source, engine pin, shared helper, or ledger status changed. **Row 423 remains OPEN**.
+This is not production-regression, parent-red/fixed-green, or independent-discovery evidence.
+No open PR diffs were inspected.
+
+The missing positive partition retains **24 or 26 value-bearing historical source records**
+while admitting **two or one new positions**, respectively, without first converting those
+claims. Both future domains per new asset fit the same 28-domain budget. The new positions
+initially have no source records; two favorable authenticated mark legs separated by a
+cross-zero trade materialize all 28 records while preserving every historical claim exactly.
+All exposure then closes, the entire claim converts, and both owners withdraw their complete
+input-derived entitlement and close their portfolios. Custody and all claim/backing stocks end
+at zero. This differs from INV-028's full-table rejection matrix and INV-077's capacity-reclamation
+witness, which clears the historical claims before admitting new latent risk.
+
+The product crosses two historical occupancies, two signed orientations, two correlated
+history/observation/settlement/payout orders, and four route rotations: **32 worlds and 4,152
+counted history calls**, excluding bootstrap. Admission, cross-zero transition, and exit each
+exercise single/batch CPI/no-CPI. The two-new-position batch cells use two real legs, with unequal
+7/11-unit exposures. Historical claims have unequal 1/2/3-unit faces. System/SPL/ATA instructions
+create and fund the market, portfolios, mint, and token accounts; the authenticated matcher
+context is System-created. Bilateral trades revoke its grant, so CPI phases explicitly re-enable
+it with owner-signed public `SetMatcherConfig`. No initialized account bytes or private engine
+state are edited; the harness supplies Clock and signer funding only.
+
+An input-history oracle checks exact source attribution and allowed settlement prefixes, local
+claim-to-PnL equality, backing-to-principal debits, domain credit caps, matched exposure/OI,
+custody, and mint supply after every counted pre-conversion call. Its resource census unions
+occupied records with both future domains of each live leg. Each economic crank strictly lowers
+pending authenticated slots plus input-derived unsettled value, reaching its endpoint within
+four calls per owner. Conversion and both payout orders reconcile exact owner balances, frame
+the other portfolio, and leave no source/backing stock or materialized portfolios.
+
+Scope is fourteen configured first-generation assets, at most two simultaneous active legs,
+zero fees/funding, no liens or external provider/insurance reserves, honest one-atom AuthMarks,
+and participating owners. Admission beyond this supported union, more distinct historical assets,
+generation reuse, expiry/Recovery/resolution, missing signers, fourteen simultaneous active legs,
+other settlement-resource classes, and arbitrary histories remain outside this increment.
+No duplicate or rejection-only probe was added. Development corrected an invalid initial
+solvency-envelope configuration and a revoked matcher grant; neither was a production finding.
+
+Verification: the exact new selector passed **1/1**, 1,060 filtered, in **60.32 seconds**.
+Observed peak CU (trade/crank/conversion/withdrawal/close) was
+**1,046,241 / 588,417 / 712,288 / 46,454 / 26,540**. The source-capacity paths assert a
+1,375,000-CU bound and custody/close assert 300,000 CU. The existing public SPL bootstrap control
+`inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_public_withdraw_rejects_identical_noncanonical_vault_then_retries`
+also passed 1/1. No broad suite or engine-proof run is claimed.
+
+Both SBF artifacts were rebuilt offline from this worktree with default features, platform-tools
+v1.52, cached dependencies, and the unchanged engine pin `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Wrapper SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Authenticated matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The private Cargo target below avoids both root-disk build output and shared test-binary races.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row423-inv028-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$PWD/target/deploy" --offline -- --locked
+cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::v16_program_historical_and_latent_domains_share_bounded_settlement_capacity -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_028_historical_latent_capacity.rs
+git diff --check
+```
+
 ## INV-014 retained delegated-fee exit product (row 411, 2026-09-08)
 
 [`stateful/inv_014_retained_delegated_fee_exit.rs`](stateful/inv_014_retained_delegated_fee_exit.rs)

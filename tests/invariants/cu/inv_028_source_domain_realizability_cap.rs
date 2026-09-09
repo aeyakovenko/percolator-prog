@@ -43,6 +43,9 @@
 
 use super::*;
 
+#[path = "inv_028_historical_latent_capacity.rs"]
+mod historical_latent_capacity;
+
 #[path = "inv_028_deferred_claim_backing.rs"]
 mod deferred_claim_backing;
 
