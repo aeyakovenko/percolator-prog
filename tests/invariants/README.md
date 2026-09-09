@@ -96,6 +96,118 @@ cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-thread
   inv_071_crank_progress::v16_program_completed_terminal_hint_replay_preserves_remaining_crank_rank
 cargo fmt --all -- --check
 git diff --check
+## INV-055/065 mixed lifecycle batch admission (2026-09-09)
+
+[`cu/inv_055_mixed_lifecycle_batches.rs`](cu/inv_055_mixed_lifecycle_batches.rs),
+mounted from the existing INV-055 CU file, adds one finding-blind, coverage-only
+LiteSVM/SBF matrix. Base: `origin/codex/invariant-fidelity-reopen-20260904` at
+`b981af93bf32ff41c5a19b4944bbe6bb8b8f229f`; engine:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Worktree:
+`/dev/shm/percolator-inv055-065-20260909`. No open PR branches, diffs, tests, or
+other worktree artifacts were inspected or copied. The root checkout's files
+were not edited. Production, Cargo manifests/lockfiles, shared helpers, fixtures,
+and invariant statuses are unchanged.
+
+**Under-covered product and non-duplicate value.** The INV-055/065 coverage map
+below owns isolated four-transport reset/retired admission and separate lifecycle
+progress/locality histories. The existing
+`v16_attack_batch_nocpi_mixed_exit_and_fresh_open_rejects_atomically` covers only
+no-CPI, one leg order, and two assets sharing DrainOnly or Recovery. This increment
+crosses **mixed batch admission x different asset states x both leg orders x both
+batch transports x both signs**, with a real independent pair's reset residue or
+retired trading history. The net-new obligation is that a permitted sibling exit
+cannot admit a forbidden opening in the same batch, nor become unavailable after
+that batch rejects. Existing single-leg transport and restart/reuse censuses are
+supporting controls, not new coverage claims.
+
+**Guarantee.** Forty independently constructed worlds use BatchTradeNoCpi or
+BatchTradeCpi, both signed orientations, both supplied leg orders, and five target
+states (eight worlds each): Active/Normal, DrainOnly, Active/ResetPending,
+Recovery/ResetPending, and Retired. The market stays Live. Asset 0 has three lots
+in a DrainOnly pair; asset 1 has zero effective OI and is initially absent from
+that pair. Another pair previously traded two lots on asset 1. Public unilateral
+reduction leaves its nonzero prior-epoch leg in reset/recovery worlds; a public
+bilateral close clears it in the other worlds before any retirement.
+
+The mixed instruction closes asset 0 and opens one opposite-signed lot on asset 1.
+Both that instruction and its standalone exit/open payloads bind all portfolio
+episodes and generation IDs before the first submission. The eight Active
+controls must execute both legs and then close the new exposure. In each of the
+32 restricted worlds, both standalone opening and mixed batch must fail at the
+exact `EngineLockActive` instruction error. All compiled batch keys and fixture
+Accounts, including absent PDAs, matcher context, executable metadata, economic
+signer lamports and SPL custody, roll back exactly. The dedicated payer Account
+differs only by the independently checked signature fee. This does not claim
+that an internal batch prefix executed before its lifecycle precheck.
+
+After rejection, the pre-bound exit payload commits without regeneration. It
+removes both owners' asset-0 legs and OI while preserving the complete asset-1
+runtime asset record and oracle profile, its other two portfolios, and
+nonparticipating Accounts.
+Each reset/recovery world then requires exactly one permissionless crank to
+detach the old leg, followed by one public side finalization. Both preserve the
+sibling asset and other owners; finalization keeps the target generation and
+restores Normal sides. Active reset cleanup permits a fresh same-transport
+roundtrip, but Recovery cleanup still rejects fresh risk. Every world finishes
+flat with zero OI/stored-position counts and four successful principal withdrawals.
+
+The unchanged INV-018 public constructor plus local System/SPL/ATA/wrapper setup
+creates all economic accounts and the finite 4,000-atom supply; mint authority is
+revoked. Matcher context creation/authorization uses its public initialization
+and wrapper capability instruction. Only infrastructure payer/admin lamports are
+airdropped by the constructor; economic owners receive System transfers. There
+is no program-owned byte mutation, state restoration or direct engine transition.
+An input-derived oracle checks each owner's capital plus wallet equals 1,000,
+zero PnL/reserved PnL/insurance, aggregate capital, and engine/SPL custody after
+each checked batch, completed cleanup pair and withdrawal. All 4,000 atoms end in
+owner wallets; no backing or insurance subsidy is needed. CPI fee/slippage caps
+are exactly zero and the unchanged authorization matcher returns at-mark fills.
+
+**Remaining gaps.** This is finite integration evidence, not INV-055/065 closure.
+It does not cover asset-slot permutations, independently varying the exit and reset
+signs, shared-portfolio reset prerequisites, global Recovery/Resolved modes,
+restart/reactivation or retained old-generation delivery, nonzero fees/PnL or
+mark movement, funding/backing/expiry, close-ledger overlap, arbitrary histories,
+mixed transaction words, single-trade transport products, or maximum shapes. No
+engine proof or broad suite was run, and no finding or invariant-status promotion
+is claimed.
+
+**Validation.** Fresh default-feature wrapper and unchanged auth-matcher SBF builds
+used platform-tools v1.52, offline. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host tests were compiled from scratch in this worktree. Final focused run:
+**1 passed, 0 failed**, 1,120 filtered, 18.09s; **40 worlds, 64 accepted batches,
+72 exact rejections, 16 cranks, 16 finalizations and 160 withdrawals**. Its peak
+checked CU is **264,148**; batch/crank/custody guards are
+750,000/325,000/300,000. Final adjacent run: **8 passed, 0 failed**, 1,113 filtered,
+8.99s. Fmt, staged/unstaged diff-whitespace and unchanged-production/shared-helper
+checks pass. Development corrected two test-side API names and an invalid use of the
+current-epoch quantity helper on deliberately prior-epoch residue; the replacement
+asserts the exact epoch increment and zero aggregate OI. No admission or economic
+assertion required a production change. The existing `solana-client` future-Rust
+warning remains. Exact commands from this worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv055-065-20260909-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+(cd tests/fixtures/auth_matcher && env -u CARGO_TARGET_DIR cargo build-sbf --tools-version v1.52 --offline)
+cargo test --locked --offline --test v16_cu mixed_lifecycle_batches -- --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_055_state_indexed_admission::v16_attack_batch_nocpi_mixed_exit_and_fresh_open_rejects_atomically \
+  inv_055_state_indexed_admission::v16_program_reset_pending_admission_matrix_rejects_risk_then_restores_trade \
+  inv_055_state_indexed_admission::v16_program_retired_slot_reactivation_restores_fresh_generation_trade_admission \
+  inv_065_reset_recovery_and_retired_state_isolation::v16_program_reset_pending_rejects_fresh_counterparty_and_completes_recovery \
+  inv_057_risk_reduction_availability::funded_owner_routes::v16_program_funded_reset_with_live_sibling_has_owner_exit \
+  inv_057_risk_reduction_availability::funded_owner_routes::v16_program_funded_recovery_forfeits_only_unbooked_junior_gain \
+  inv_071_crank_progress::recovery_obligation_finalization::v16_program_recovery_releases_obligation_before_exact_finalization_and_payout \
+  inv_073_no_permanent_user_lock::v16_program_restarted_asset_with_retained_live_leg_has_bounded_stale_exit
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git diff --quiet origin/codex/invariant-fidelity-reopen-20260904 -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support tests/fixtures
 ```
 
 ## INV-047 inventory and owner-cashflow partitions (2026-09-09)
