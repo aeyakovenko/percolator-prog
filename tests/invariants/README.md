@@ -54,15 +54,12 @@ git diff --check
 git diff --exit-code b8dbd09e -- src Cargo.toml Cargo.lock kani tests/invariants/kani tests/invariants/kani_assumption_inventory.tsv tests/invariants/public_sbf/inv_079_public_reachability_evidence.rs tests/invariants/invariant_status.tsv tests/invariants/coverage_reopenings.tsv
 ```
 
-Results: new selector **1 passed, 0 failed**, 1,098 filtered (0.43s), peak checked CU
-**165,079**; controls **1 passed, 1 failed**, 1,097 filtered (0.38s). The public control
-passes. The unchanged inventory control records INV-022 lines 1670/1671, while the actual
-source has 1698/1699. Running that exact selector alone in a fresh, untouched worktree at
-`b8dbd09e` (`/dev/shm/pr135-inv084-assumption-baseline-b8dbd09e`) reproduces **0 passed,
-1 failed**, 1,097 filtered (0.00s); the stale inventory is not repaired in this increment.
-A post-baseline cached run selected zero tests and was discarded; the package clean above
-forces a fresh host build before the final new-selector result.
-Format, diff and unchanged-input checks pass. Only the existing `solana-client v1.18.26`
+Results after integration: new selector **1 passed, 0 failed**, 1,099 filtered (0.42s),
+peak checked CU **165,079**; controls **2 passed, 0 failed**, 1,098 filtered (0.38s).
+The pre-existing assumption inventory drift for INV-022 moved from lines 1670/1671 to
+1698/1699 and is repaired in the following PR135 commit. A pre-repair baseline run
+reproduced the stale inventory failure; after the inventory refresh, format, diff and
+unchanged-input checks pass. Only the existing `solana-client v1.18.26`
 future-compatibility warning remains.
 
 ## INV-066/067/068 co-owned stale-tail rollback (2026-09-09)
