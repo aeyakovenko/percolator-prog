@@ -26,6 +26,9 @@
 
 use super::*;
 
+#[path = "inv_047_fee_leg_partition.rs"]
+mod fee_leg_partition;
+
 #[derive(Debug, PartialEq, Eq)]
 struct OneLegRouteSnapshot {
     vault: u128,

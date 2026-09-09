@@ -3,6 +3,68 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-047/052 two-asset fee-leg partition (2026-09-09)
+
+[`cu/inv_047_fee_leg_partition.rs`](cu/inv_047_fee_leg_partition.rs), mounted by
+INV-047, adds one PR135-only selector on `c2e292fa`. Eight identical public fixtures
+cross both mixed position orientations with two-leg BatchTradeNoCpi/BatchTradeCpi
+and two separate TradeNoCpi/TradeCpi instructions. System/SPL/ATA/wrapper calls
+construct all economic accounts; the unchanged public auth-matcher fixture supplies
+exact quotes. No economic state is injected. Whole legs, not their quantities,
+are partitioned, so their nonintegral notional/fee ceilings must remain identical.
+
+An input-only oracle checks each accepted prefix: notionals `[73,217]`, 137-bps
+fees `[2,3]` per trader, domain credits `[2,2,3,3]`, zero PnL, exact positions/OI,
+unit ADL indices, cached equity/notional, capital, insurance and SPL custody/supply.
+The first fee is two atoms, versus one without the intermediate notional ceiling.
+Both batch-CPI worlds reject a four-atom aggregate fee cap after successful matcher
+CPI, roll back every compiled and fixture account, then accept the exact five-atom
+cap. Network signature fees are checked separately on the dedicated payer.
+
+All 18 tracked account frames compare byte/metadata/lamport-exact across routes
+after normalizing only the CPI request counter, decoded single-CPI return cache,
+maker enabled/expiry fields, and the singles' one additional position epoch.
+Their original values are asserted first; matcher tuple/sequence/fee cap, engine
+state, fees and custody are not normalized. Public fixed identities avoid owner,
+mint, market or account-address normalization.
+
+**Non-duplicate:** INV-047's existing four-route comparison has one leg; INV-011's
+heterogeneous whole-leg partitions are CPI-only numerical projections. This adds
+their multi-asset cross-transport, complete-frame intersection, not another
+fresh-pair OI handoff, retained fee bundle, ADL cross-zero or split-quantity trade.
+Residual gaps: reordered/pre-existing legs, partial fills, quantity fragmentation,
+nonzero spread/PnL/funding/backing/maintenance, elapsed histories and maximum shapes.
+Production, Cargo/engine pins and invariant statuses are unchanged.
+
+Validation reused a private row412 cache copy, not a fresh SBF build. Production,
+Cargo and matcher sources match the documented `39d05875` artifact checkpoint.
+Wrapper SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+New selector: **1 passed**, 1,100 filtered, 3.21s; **8 worlds / 12 commits /
+2 exact rejections**. Peak CU (no-CPI batch, CPI batch, no-CPI single, CPI single):
+`206372 / 227780 / 145434 / 164949`; rejection `211319`, all bounded by `345000`.
+Adjacent controls: **2 passed**, 1,099 filtered, 5.65s. Fmt and diff checks pass.
+Development corrected test API/ABI expectations and trade-side fee attribution;
+no production change or relaxed economic/frame comparison was needed. Only the
+three selectors below ran; the existing `solana-client` future-Rust warning remains.
+
+Commands from `/tmp/codex-agent-worktrees/pr135-equivalent-partition-20260909`:
+
+```sh
+cp -a /dev/shm/pr135-row412-verify2 /dev/shm/pr135-equivalent-partition-20260909-target
+mkdir -p tests/fixtures/auth_matcher/target/deploy
+cp /tmp/codex-agent-worktrees/percolator-invariant-fidelity/tests/fixtures/auth_matcher/target/deploy/auth_matcher.so tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+export CARGO_TARGET_DIR=/dev/shm/pr135-equivalent-partition-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_047_equivalent_route_semantics::fee_leg_partition::v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_047_equivalent_route_semantics::v16_program_fee_charged_close_matches_single_and_one_leg_batch_routes \
+  inv_052_split_merge_invariance::v16_program_split_fee_close_has_bounded_rounding_and_exact_custody
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-063/078 spent backing across expiry (2026-09-09)
 
 [`cu/inv_063_spent_backing_expiry.rs`](cu/inv_063_spent_backing_expiry.rs), mounted by
