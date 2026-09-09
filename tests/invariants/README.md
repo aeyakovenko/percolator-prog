@@ -3,6 +3,82 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-021 funded lifecycle atomicity (2026-09-09)
+
+[`cu/inv_021_funded_lifecycle_atomicity.rs`](cu/inv_021_funded_lifecycle_atomicity.rs),
+mounted by INV-021, adds one finding-blind public LiteSVM selector on base
+`216228d6ee93311d28f9047dab68e75bdf971bcd`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. It uses only the requested base and
+its pinned dependencies, not open fix PR branches, tests, or diffs. Public
+System/SPL/ATA/wrapper instructions create every economic account and mint/deposit
+2,035 finite tokens; mint authority is revoked. No account-byte injection,
+restoration, external oracle fixture, or direct engine transition is used.
+
+Two worlds alternate exact canonical-size rent with one surplus lamport. A public
+matched trade and inverse trade leave a 50-token source claim and a solvent
+950-token counterparty. The first bundle creates an undersized portfolio, grows
+it through InitPortfolio, and withdraws all 950 tokens for the counterparty.
+Two subsequent bundles each withdraw a funded incarnation's complete 7- or
+11-token balance, close it, System-refund the same address, and initialize it for
+a different owner. All three bundles append an SPL transfer one token beyond
+the just-paid owner's balance. The transfer fails with exact
+`TokenError::InsufficientFunds` at instruction 5 or 6, after the lifecycle and
+SPL-paying prefix. Each complete prefix succeeds in noncommitting simulation
+before the rejection, then commits unchanged on retry.
+
+Every rejection compares complete Accounts for every compiled and fixture key,
+including absent-to-created rollback, data lengths, metadata, rent, mint, custody,
+claimant, counterparty and owner balances. The dedicated payer loses exactly its
+signature fee; rent funding comes from separately framed nonpayer owners. Each
+successful lifecycle step compares the complete decoded engine market, allowing
+only the independently calculated count, capital and vault deltas. The wrapper
+configuration allows only the expected monotonic next-portfolio-ID increment.
+The surviving claimant remains Account-exact; the exited peer is Account-exact
+through reuse. Rent reaches only the slab, new incarnations have canonical size,
+fresh IDs and empty value/position/claim/receipt/close/capability state, and the
+final empty incarnation remains closeable. Finally the surviving owner converts
+and withdraws its entire 1,050-token principal-plus-claim entitlement. Owner token
+balances are `[1050,950,7,11,0]`, aggregate capital/claims are zero, and the original
+17 backing tokens remain in custody with fixed supply reconciled.
+
+**Non-duplicate:** the existing surviving-claim lifecycle has no late transfer
+failure, while the atomic reuse control has no funded SPL-paying exit or surviving
+claim. This adds their missing transaction-atomic composition, repeated owner
+handoff, and all-public economic genesis. It is **coverage-only**, not a production
+finding or invariant-status promotion. The generic lifecycle generator remains
+open: this covers one canonical shape, one source/side, zero fees/funding, two
+rent boundaries, and SPL suffix failure, not arbitrary schedules, maximum shapes,
+nonzero matcher capability histories, or a failure inside the wrapper's own CPI.
+
+Validation: fresh default-feature SBF build with platform-tools v1.52; SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new selector passes alone: **1 passed, 0 failed**, two worlds, six exact late
+SPL rejections and six successful retries. The grouped run with the three adjacent
+controls below passes: **4 passed, 0 failed, 1,103 filtered**. Peak composed CU
+across runs is **393,758**, below the 600,000 guard. Scoped rustfmt, diff checks,
+and unchanged-production checks pass. No production, engine pin, shared harness,
+or status file changes; no broad suite or Kani run. The existing `solana-client`
+future-Rust compatibility warning remains.
+
+Commands from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/inv021-funded-portfolio-lifecycle-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_021_account_creation_reallocation_close_rent_and_lamport_safety::funded_lifecycle_atomicity::v16_program_funded_lifecycle_spl_suffix_rollback_preserves_claim_and_rent -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_021_account_creation_reallocation_close_rent_and_lamport_safety::funded_lifecycle_atomicity::v16_program_funded_lifecycle_spl_suffix_rollback_preserves_claim_and_rent \
+  inv_021_account_creation_reallocation_close_rent_and_lamport_safety::v16_program_portfolio_growth_close_and_reuse_preserve_unrelated_claim_exit \
+  inv_021_account_creation_reallocation_close_rent_and_lamport_safety::v16_program_undersized_init_grows_account_then_close_sweeps_rent_exactly \
+  inv_021_account_creation_reallocation_close_rent_and_lamport_safety::v16_program_funded_close_rejects_exact_rollback_and_remains_withdrawable
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_021_funded_lifecycle_atomicity.rs
+git diff --check
+git diff --exit-code 216228d6ee93311d28f9047dab68e75bdf971bcd -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support
+```
+
 ## INV-056 observation membership after public slot reuse (2026-09-09)
 
 [`cu/inv_056_observation_membership.rs`](cu/inv_056_observation_membership.rs),
@@ -8692,6 +8768,10 @@ These untested coverage gaps are not findings and receive no severity/impact lab
    public-route composition, not the missing generator: shape/role interleavings and CPI/transfer
    rollback remain open. Initial market, blank claimant accounts, and external SPL fixtures use
    `V16CuEnv`; no initialized wrapper or engine state is injected for the lifecycle under test.
+   The [funded lifecycle atomicity increment](#inv-021-funded-lifecycle-atomicity-2026-09-09)
+   additionally covers repeated close/refund/reinit and undersized creation composed with actual
+   funded withdrawals, exact late-SPL rollback and identical-prefix retries, using all-public
+   economic genesis. It narrows the transfer-rollback gap without supplying the general generator.
 
 Each TODO needs an invariant-owned executable entrypoint naming its reusable generator, independent
 oracle, route/partition domain, and secondary owners. Shared helpers may stay in `tests/support/`;
