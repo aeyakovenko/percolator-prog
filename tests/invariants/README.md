@@ -1182,6 +1182,91 @@ rustfmt --edition 2021 --check tests/invariants/stateful/inv_012_owner_episode_r
 git diff --check
 ```
 
+## INV-028 retained-domain position episodes (row 423, 2026-09-09)
+
+[`cu/inv_028_retained_domain_episodes.rs`](cu/inv_028_retained_domain_episodes.rs),
+mounted under the existing `historical_latent_capacity` fixture, adds one public LiteSVM
+probe from latest fetched PR135 base `c90076ab733fcf423d94772b9174e8ac31a8d77b`.
+Branch: `codex/pr135-row423-history-admission-20260909`; isolated worktree:
+`/home/anatoly/percolator-pr135-row423-history-admission`.
+**Row 423 remains OPEN.** No production, dependency, engine-proof, status-ledger or existing
+test-body changes, old PR fixes, or production-bug reproduction are included.
+
+The distinct relation is **full historical occupancy -> detached price/accrual progress ->
+same-domain position admission -> new value settlement -> partial/final DrainOnly reduction ->
+complete funded payout**, without any claim conversion or capacity reclamation before exit.
+The existing admission-order test reopens/closes an old asset at an unchanged price before its
+new-domain rejection; it does not settle new value or pay out that continuation. The historical
+and concurrent latent tests materialize previously absent source records. INV-077's reclamation
+test clears the table before reuse. INV-089's retired-slot test crosses the active-leg cap,
+not this retained-source boundary. Their test bodies are unchanged and not duplicated here.
+
+Fourteen public two-sided histories leave both owners flat and the winner with all **28 positive,
+unliened source records**, totaling **54 atoms**. While flat, assets 0 and 13 receive opposite
+one-atom AuthMark changes. Owner-signature-free cranks strictly decrease pending authenticated
+asset slots within 32 attempts, with no new claims or principal changes. Reopening the same
+portfolios in unequal 6/10-unit opposing positions must advance their position epochs without
+changing portfolio identity, historical claims, principal, or custody. Both future domain pairs
+are already occupied, so no additional source slot is needed.
+
+Subsequent one-atom favorable marks must add exactly **6 and 10 atoms** to the correct existing
+domains, preserving the other 26 claims and all 28 occupied records. The shared input-history
+oracle checks claim/backing prefixes, domain credit caps, principal/PnL, exact OI, SPL custody,
+and mint supply after every counted pre-conversion transition. Each value-settlement crank
+strictly decreases authenticated accrual plus input-derived economic debt, within four calls
+per owner. Both assets then enter DrainOnly with byte-identical portfolio frames. Half-size
+and final matched reductions preserve the complete source-record array. Conversion, withdrawal
+and portfolio deletion pay exactly **1,000,070 / 999,930 atoms**, clearing all claim/backing
+stock, OI, principal, insurance, vault balance and materialized portfolios, with unchanged mint.
+
+The eight worlds cross single/two-leg-batch no-CPI routes, both position orientations, and
+forward/reverse asset order. Asset, observation and settlement ordering are correlated within
+each world; payout reverses that world's settlement order. Total counted post-funding public
+calls: **1,156**. Setup uses only System/SPL/ATA/matcher/wrapper instructions, with Clock and
+signer funding supplied by LiteSVM. No program-owned bytes or direct engine state are injected.
+The inherited matcher context is publicly initialized but no CPI trades are exercised here.
+
+This checks the interaction of supported resource admission (INV-028), no phantom value from
+readiness/episode changes (INV-044), DrainOnly reduction (INV-057), funded owner exit (INV-073),
+and bounded required work (INV-077). An erroneous duplicate-domain capacity charge, claim
+replacement, stale entry accrual, or blocked supported reduction/payout would fail these
+oracles in this history. **No public-interface bug was observed.** This is positive conformance
+evidence, not proof against arbitrary LoF/DoS or a claim that every accepted risk reserves all
+future resources. Previously absent concurrent latent domains, partial reclamation/refill,
+fees/funding/fractional quantities, liens/expiry, missing signers, Recovery/resolution/receipts
+(INV-078), retired-generation reuse (INV-089), CPI routes, maximum active-leg/market/feed
+products, and arbitrary histories remain open. Only two legs are simultaneously active.
+
+Validation uses private copies of cached default-feature SBF artifacts; source, Cargo inputs
+and matcher sources match the documented `30993c0b` build, with engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host tests compile in this worktree using a private copied dependency cache under `/dev/shm`;
+no SBF rebuild, shared-target mutation, broad suite or engine-proof run is claimed.
+
+The new exact selector passes **1/1** (1,081 filtered) in **17.30s**; the adjacent existing
+capacity-admission-order control passes **1/1** in **3.65s**. Peak CU for trade / crank /
+conversion / withdrawal / close / flat mark / lifecycle is
+**1,115,686 / 561,549 / 712,232 / 46,454 / 26,540 / 6,120 / 7,617**.
+Trade/crank maxima include history construction and the continuation; the mark maximum covers
+only the detached pre-admission marks. Bootstrap and inherited history/settlement mark-writer
+CU are excluded. Source paths stay below 1,375,000 CU and custody/close below 300,000 CU,
+under the normal 1,400,000 transaction ceiling. Initial compilation caught a test-only
+portfolio-ID accessor mistake, corrected to the existing wrapper helper; no runtime assertion
+or production guard was weakened. Cargo emits the existing `solana-client v1.18.26`
+future-incompatibility warning. Formatting and Git whitespace checks pass.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-row423-history-admission-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+# PERCOLATOR_FUZZ_SBF is unset; the harness loads $CARGO_TARGET_DIR/deploy/percolator_prog.so.
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::retained_domain_episodes::v16_program_full_history_reused_episodes_preserve_claims_and_drain_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-028 concurrent latent cohorts (row 423, 2026-09-09)
 
 [`cu/inv_028_concurrent_latent_capacity.rs`](cu/inv_028_concurrent_latent_capacity.rs),
