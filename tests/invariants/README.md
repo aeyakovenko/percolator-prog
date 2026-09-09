@@ -3,6 +3,43 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-045/031/036 paid CPI marks through source liens and fees (2026-09-09)
+
+[`stateful/inv_045_paid_mark_source_lien.rs`](stateful/inv_045_paid_mark_source_lien.rs)
+adds one test in the existing INV-045 stateful owner:
+`v16_program_paid_cpi_mark_repricing_burns_source_liens_and_preserves_retained_exit`.
+It exercises a public flow where an existing provider-backed source lien and earned
+backing fee survive paid CPI mark repricing, lien-burning catch-up, retained owner
+exit, provider earnings withdrawal, owner PnL conversion, and SPL withdrawal.
+Production, Cargo, engine, shared helpers, fixture sources, and invariant statuses
+are unchanged.
+
+Four LiteSVM/SBF histories cross EWMA/stale-Hybrid discovery with provider payout
+before and after the retained owner exit. A favorable observation creates a real
+source claim; a later backed risk increase creates both liened and unliened claim
+stock plus provider fee earnings. A separate CPI reduction at a one-atom matcher
+quote moves the mark inside the independent elapsed-price envelope and charges the
+movers enough insurance to cover the open-interest externality. The test asserts
+existing backing buckets, liens, and provider earnings do not subsidize discovery.
+
+Public catch-up then consumes free and liened claim face exactly, preserving local
+reserved support and aggregate backing-lien counters. The strict retained exit
+rejects after matcher success with exact economic-account rollback; the permissive
+retained exit lands with the original signed bytes. Both payout orders converge:
+the provider receives exactly the earned fee, the owner converts the fully supported
+residual claim and withdraws the exact SPL amount, both pairs flatten, source liens
+clear, paid movement insurance remains in the market, vault custody and mint supply
+reconcile, and public stock/encumbrance censuses pass.
+
+This is distinct from the retained mark-exit test, which had no source liens or
+provider fees, and from the INV-036 fee-destination test, which used authenticated
+repricing rather than paid CPI discovery. Remaining gaps include opposite-side and
+insurance-backed liens, mixed domains, expiry/refill, other supported transports,
+funding/maintenance, lifecycle/terminal receipts, maximum shape, and arbitrary
+histories. Focused validation passed: four worlds, four strict refusals, four owner
+withdrawals, four provider payouts, peak 533,539 CU; invariant index, formatting,
+and whitespace checks passed.
+
 ## INV-019/047 retained grants across contexts and mixed transports (2026-09-09)
 
 [`stateful/inv_047_retained_mixed_transport.rs`](stateful/inv_047_retained_mixed_transport.rs)

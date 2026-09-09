@@ -88,6 +88,9 @@ use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint}
 #[path = "inv_045_retained_mark_exit.rs"]
 mod retained_mark_exit;
 
+#[path = "inv_045_paid_mark_source_lien.rs"]
+mod paid_mark_source_lien;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AcceptedMarkMode {
     AuthMark,
