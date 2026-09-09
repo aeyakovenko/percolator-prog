@@ -79,6 +79,113 @@ git diff --check
 git diff --exit-code 216228d6ee93311d28f9047dab68e75bdf971bcd -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support
 ```
 
+## INV-012 retained scope products (finding-blind coverage, 2026-09-09)
+
+[`cu/inv_012_retained_scope_product.rs`](cu/inv_012_retained_scope_product.rs)
+is mounted through the existing INV-012 joint-incarnation child. It was developed
+only from `origin/codex/invariant-fidelity-reopen-20260904` at
+`ab5dc7f114559c359abcc69cb5d72231833bc790`, its invariant statements, public ABI,
+and existing base fixtures. No open PR branch, diff, or holdout test was consulted.
+This is coverage-only evidence: no production finding, invariant-status promotion,
+or closure of an open obligation is claimed. Production, Cargo inputs, fixtures,
+and `tests/support` are unchanged.
+
+**Guarantees exercised:**
+
+- Sixteen worlds cross taker/LP same-address, same-owner portfolio reuse, both
+  orders of portfolio/asset replacement, both retained CPI routes, and both size
+  signs. The LP's identical matcher/delegate tuple is explicitly disabled and
+  re-enabled. A previously live signed request rejects after replacement. Every
+  proper subset of repaired portfolio ID, asset identity, and grant sequence
+  rejects on both the original and substituted CPI route. The three one-stale-field
+  cases isolate each binding; unchanged position epochs cannot mask them.
+- Four further worlds compose a real same-program context/delegate A -> B -> A
+  grant history with market-admin A -> B -> A. The exact retained admin handoff
+  rejects under the new authority epoch, while the exact retained owner-delegated
+  CPI request still succeeds in simulation. Portfolio and matcher bytes remain
+  unchanged by the admin cycle. The CPI ABI carries `matcher_sequence`, not a
+  market-admin `authority_epoch`; these are deliberately not conflated.
+- With current IDs, episodes and grant sequence, substituting only the context,
+  delegate, or publicly initialized second slab rejects before matcher CPI.
+  Substituting the previously authorized canonical context/delegate pair separately
+  reaches the grant's `Unauthorized` guard. A different live asset's `market_id`
+  also rejects. In this ABI `market_id` is the generation-bound asset identity;
+  retired-generation reuse and wrong-live-instrument identity are distinct cases,
+  not two independently writable generation fields.
+- Disabled grants reject freshly bound consumers. Re-enabling the same tuple
+  cannot revive old consumers on either CPI route. Retained consumers are live at
+  slot 3 and reject at expiry slot 4 and slot 5; separate unsent transports carry
+  identical wrapper consent. Rebuilding a request after expiry cannot renew the
+  grant. Only owner renewal restores funded consumption.
+- Every rejection checks the exact application error and instruction index, no
+  matcher invocation, and complete Account rollback for the market, portfolios,
+  contexts/delegates, SPL mint/vault/owner accounts, and owner/admin lamports.
+  Extra substituted accounts are also framed; only the independent network fee
+  payer is excluded. Every world ends with actual opposite-route entry/exit,
+  position/OI and custody assertions, and full withdrawal by both owners.
+
+**Why non-duplicate:** the base's joint product replaces assets and regrants, but
+does not add recycled taker/LP portfolio identity to the repair conjunction. The
+base's context/expiry and authority witnesses do not compose admin-epoch isolation,
+same-program context return, single-field slab substitution, disabled-current
+consumers, and delayed cross-route delivery in these same funded worlds. Existing
+public System/SPL/ATA construction and economic oracles are reused, not copied
+into shared helpers. There is no `set_account`, program-owned byte mutation,
+snapshot restoration, or direct engine transition in the added tests.
+
+**Still open:** this bounded one-leg, flat-before-replacement product is not
+exhaustive over multi-leg/max-shape transactions, nonzero fees or slippage,
+authority-role histories, owner changes, whole-market reincarnation, program
+upgrades, or arbitrary economic lifecycles. The second-slab case changes one
+account meta; it does not establish safety for every coherently substituted
+cross-market tuple. The authority positive control executes in simulation before
+the later grant writers; it is not a landed fill during the admin cycle.
+
+**Validation:** fresh default-feature wrapper and unchanged auth-matcher SBF
+builds in this task's private worktree, platform-tools v1.52, locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SHA-256:
+
+- Wrapper: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+- Auth matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Focused result: **2 passed, 0 failed**, 20 worlds, 64 live matcher simulations
+(plus four live admin-handoff simulations), 328 landed rejections, 40 funded fills,
+and 40 final full owner withdrawals. The last focused run observed peak rejection
+CU **114,212**, fill CU **435,735**, and final custody CU **143,268**. Adjacent
+controls below: **9 passed, 0 failed**. No broad suite or Kani run is claimed.
+The first matcher artifact write hit ENOSPC on `/home`; only this worktree was
+moved to `/dev/shm`, then the build succeeded. Initial compile/fixture mistakes
+(including a nonzero fee cap on explicit disable) were corrected in the new test
+only. The existing `solana-client v1.18.26` future-incompatibility warning remains.
+
+Exact reproducible commands from `/dev/shm/percolator-prog-inv012-coverage`:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/inv012-capability-coverage-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir tests/fixtures/auth_matcher/target/deploy --offline -- --locked
+sha256sum "$CARGO_TARGET_DIR/deploy/percolator_prog.so" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu retained_scope_product -- --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::v16_program_joint_replacements_require_every_bound_incarnation \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::matcher_program_generation::v16_program_matcher_program_roundtrips_compose_with_asset_reuse \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::used_generation_lifecycle::v16_program_used_asset_reuse_with_live_sibling_preserves_authorized_exit \
+  inv_012_capability_and_delegate_scope::v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes \
+  inv_012_capability_and_delegate_scope::v16_program_disabled_lp_matcher_config_blocks_all_cpi_fills \
+  inv_012_capability_and_delegate_scope::v16_program_non_owner_cannot_revoke_lp_matcher_capability \
+  inv_012_capability_and_delegate_scope::v16_program_issue406_matcher_trade_routes_preserve_only_participating_lp_capability \
+  inv_012_capability_and_delegate_scope::v16_attack_nocpi_trades_still_require_lp_owner_signature \
+  inv_012_capability_and_delegate_scope::retained_cross_asset_episode::v16_program_retained_exit_rejects_cross_asset_episode_under_live_matcher_grant
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code origin/codex/invariant-fidelity-reopen-20260904 -- src Cargo.toml Cargo.lock tests/support tests/fixtures
+```
+
+The format check, whitespace check, and protected-path comparison all pass.
+
 ## INV-056 observation membership after public slot reuse (2026-09-09)
 
 [`cu/inv_056_observation_membership.rs`](cu/inv_056_observation_membership.rs),

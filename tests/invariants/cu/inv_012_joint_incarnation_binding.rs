@@ -13,6 +13,9 @@ mod matcher_program_generation;
 #[path = "inv_012_used_generation_lifecycle.rs"]
 mod used_generation_lifecycle;
 
+#[path = "inv_012_retained_scope_product.rs"]
+mod retained_scope_product;
+
 const CAPITAL: u128 = 1_000_000;
 const PRICE: u64 = 100;
 const SLOT: u64 = 1;
