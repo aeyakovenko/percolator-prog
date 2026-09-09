@@ -302,6 +302,69 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_012_joint_incarnation_bin
 git diff --check
 ```
 
+### Alternate matcher programs crossed with asset reuse (2026-09-09)
+
+[`cu/inv_012_matcher_program_generation.rs`](cu/inv_012_matcher_program_generation.rs)
+is mounted beneath the joint-incarnation owner to reuse its public construction and
+position/OI/custody oracle. It was developed from PR135 base `4fa7267f` in
+`/tmp/codex-agent-worktrees/row414-inv012-matcher-program-domains-20260909`, on branch
+`codex/row414-inv012-matcher-program-domains-20260909`.
+**Net-new PR135 invariant coverage only; row 414 remains OPEN.** No production source,
+engine pin/proof, shared helper, fixture source, or ledger status changes. This is not a
+production finding or a duplicate execution of the #414 fix regression.
+
+The existing stateful `v16_program_replaced_matcher_scope_histories_bind_both_cpi_consumers`
+already owns isolated alternate-program/ABA histories; the parent above owns same-tuple
+grant renewal crossed with asset generations. This increment adds their missing product:
+**A -> B -> A matcher-program grants with asset reuse before, between, or after the switches**,
+both signed orientations, and both batch leg orders, for **12 worlds**. A and B load the same
+honest matcher ELF at distinct program IDs, with distinct System-created, owner-initialized
+contexts and canonical delegates. This tests program-address domains, not executable upgrades.
+
+Every world retains two single requests and a real unequal, opposite 3/7-unit two-leg batch
+under each program's independently live grant. Every replacement prefix simulates those exact
+signed transactions. Asset 2 remains unreplaced, providing a live unaffected-leg control before
+grant replacement. After returning to A, all distinct old/current generation and grant-sequence
+combinations are crossed with both canonical program/context/delegate tuples. Generation,
+sequence, and tuple mismatches require exact typed errors before either matcher CPI, with full
+tracked economic-account and lamport rollback excluding only the separate network fee payer.
+Original A and B transactions are also submitted unchanged; all current requests remain live.
+No position episode, portfolio ID, expiry, fee cap, price movement, or blockhash expiry masks
+the identity checks.
+
+Both actual matcher programs then commit fills and opposite-transport exits; displaced program,
+context, and delegate accounts stay unchanged. The inherited event-derived oracle checks exact
+positions/OI, capital and SPL custody, and both owners withdraw their full collateral in both
+payout orders. No initialized-account byte edits or engine proofs are used.
+
+Final exact-selector result: **1 passed, 0 failed, 1,065 filtered**, **10.37s**;
+**116 successful simulations, 160 rejecting simulations, 240 submitted rejections,
+72 committed fills/exits, and 24 full withdrawals**. Observed maximum CU in that run
+(writer / rejection / fill-exit / withdrawal): **112,339 / 108,651 / 452,754 / 141,768**.
+The existing custody and multi-asset trade budgets are asserted. The only development failure
+was a fixture Rust borrow error, corrected before execution. No broad suite or production
+counterexample run is claimed.
+
+Scope remains one empty non-base asset reuse, two fixed portfolios/owners, fixed-price honest
+AuthMarks, zero realized fees/funding, and two program-address domains. Whole-market,
+portfolio/owner replacement, nonempty lifecycle histories, base-asset restart, maximum shape,
+arbitrary histories, and matcher-code upgrades remain outside this increment.
+
+The host run reused the existing `/dev/shm` Cargo cache below. Worktree-local SBF files were
+copied from the source-identical row413 wrapper and original row414 auth-matcher builds;
+`src`, Cargo inputs and matcher fixture source match this base. Their verified SHA-256 values
+are the same `5029cc34...42e83e` wrapper and `50e53226...df93` matcher recorded in full above.
+No fresh SBF rebuild is claimed; the engine remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row413-inv027-generic-coverage-20260909-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::matcher_program_generation::v16_program_matcher_program_roundtrips_compose_with_asset_reuse -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_012_matcher_program_generation.rs
+git diff --check
+```
+
 ## INV-012 owner-episode revocation (row 412, 2026-09-09)
 
 [`stateful/inv_012_owner_episode_revocation.rs`](stateful/inv_012_owner_episode_revocation.rs),

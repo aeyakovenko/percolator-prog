@@ -7,6 +7,9 @@
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
+#[path = "inv_012_matcher_program_generation.rs"]
+mod matcher_program_generation;
+
 const CAPITAL: u128 = 1_000_000;
 const PRICE: u64 = 100;
 const SLOT: u64 = 1;
