@@ -105,6 +105,118 @@ new witnesses. It remains an inherited metadata/review gap, not a changed gate o
 a passing certification. Formatting and diff checks pass. The initial two-test
 development selector also passed (79.23s) before retries moved ahead of the final
 completion schedule; final results above include the stronger unresolved retries.
+## INV-005/024/027 funded backing succession (rows 410/416, 2026-09-09)
+
+[`cu/inv_005_funded_backing_succession.rs`](cu/inv_005_funded_backing_succession.rs),
+mounted by INV-005, adds partial generic PR135 coverage on base
+`95a4cf98a1afb4e8326eb85df07433f6311dc087`, fetched from
+`origin/codex/invariant-fidelity-reopen-20260904`. Branch:
+`codex/astra-ultra-pr135-410-416-20260909`; isolated clone:
+`/home/anatoly/astra-ultra-pr135-410-416-20260909`. The original workspace is
+untouched. **Rows 410/416 remain OPEN**; all invariant statuses, production code,
+engine pins, and existing tests remain unchanged. No new production finding,
+exploit reproduction, or production-fix branch is claimed.
+
+The distinct relation is **paid backing prefix + incumbent-consented funded role
+succession + historical provider telemetry + terminal role partition**. Eight
+public LiteSVM histories cross asset 0/1, both long/short payout orders, and
+succession before/after resolution. The successor already holds the live insurance
+operator role, but is neither the cold admin nor the terminal insurance authority.
+The market authority never changes. This is not the existing INV-005 retained
+empty-insurance-management or INV-024 terminal market-authority-handoff matrix;
+nor does the backing depletion/refunding test transfer a still-funded role.
+
+Public System/SPL/ATA/wrapper instructions construct all accounts and economic
+state. Minted endowments supply long/short backing 41/59, target/peer insurance
+23/31, and unrelated user principal 37, with SPL mint authority disabled before
+wrapper funding. The provider
+withdraws a 13/17 live prefix through its two ledgers. A correctly signed current
+cold-admin handoff rejects atomically; incumbent consent transfers only the unpaid
+28/42 backing, without changing any economic state. Permissionless resolved payout
+and owner-signed deletion return the user's exact principal and portfolio rent to
+their respective destinations. The successor's old-ledger attempts reject, while
+no-ledger payouts discharge both remaining domains in nonzero tranche/one-atom
+tails. Between domains, its live insurance-operator role cannot pay it terminal
+insurance; the separate insurance authority receives exactly that reserve.
+
+An input-derived payout history checks every post-funding attempt: exact wallet
+owner/mint/amount, engine/SPL custody, capital, domain backing and insurance,
+zero liens/earnings, fixed supply, configured roles, and scope-local epochs.
+Complete ledger expectations come from deposits and the incumbent's paid prefix,
+not observed counters. Historical ledgers retain incumbent attribution and 70
+unpaid telemetry atoms even after the successor's exit; those counters do not
+constitute another withdrawable claim. Every rejection compares complete tracked
+accounts, including economic signers, ledgers, program accounts, and the separately
+fee-adjusted payer, and requires no token CPI. Successful operations frame unrelated
+accounts; portfolio deletion checks exact rent transfer. Final wallet amounts are
+30/70/23/37/0 for incumbent/successor/insurer/user/admin, with 31 peer-insurance
+atoms still in custody.
+
+This is a fresh, unencumbered, no-position backing fixture. INV-027 evidence is
+limited to unchanged unrelated senior capital and its exact exit, not junior/senior
+competition. Funded-oracle containment (row 416), abandoned/expired shutdown
+beneficiaries (row 410), provider earnings, liens/impairment, claims/receipts,
+refunding after succession, absent incumbent signatures, alternate quote rails,
+final reserve disposition/CloseSlab, maximum shapes, and arbitrary histories remain
+open. INV-020/036/055/081 receive no new certification or whole-route claim here.
+The documented funded-oracle and shutdown-beneficiary production-fix work is not
+imported or reproduced.
+
+Validation uses a private copy of the cached default-feature SBF and a host test
+binary compiled in this clone, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. The documented artifact build at
+`30993c0b` has identical production, Cargo, and matcher sources to this base:
+`git diff 30993c0b HEAD -- src Cargo.toml Cargo.lock tests/fixtures/auth_matcher`
+is empty. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+No SBF rebuild or engine proof was run. The first fixture compile supplied the
+wrong ResolveMarket field; it now supplies the raw current generation frontier.
+Cargo retains its existing `solana-client v1.18.26` future-incompatibility warning.
+
+Results: the new selector passes **1/1**, with **8 histories, 8 consensual
+handoffs, 32 exact rollbacks, 56 reserve payouts, and 8 user exits**. All measured
+calls are below the enforced 300,000 CU ceiling; setup is excluded. The complete
+INV-005 selector reports **47 passed / 1 failed**: only
+`v16_program_adversarial_role_containment_matrix_is_source_complete` fails its
+pre-existing certified-engine-pin assertion (`495a5590` versus current `394fd0bf`).
+The unchanged retained-insurance and backing-refunding tests pass in that run.
+The adjacent INV-024 terminal-handoff selector passes **1/1** (12 worlds), and
+INV-027's stale-reserve principal/flat-exit selector passes **1/1**.
+
+The machine-status selector fails the pre-existing INV-058 projection:
+`invariant_status.tsv` supplies no counterexample while the expected set is
+`{427}`. Both guard failures were reproduced on clean detached base `95a4cf98`
+at `/dev/shm/astra-ultra-pr135-410-416-baseline`, within this clone's own worktree
+metadata, with no source edits. The status check was explicitly rebuilt there
+after cleaning only this private target's package artifacts. These failures are
+not relaxed or fixed here. The metadata harness also emits existing dead-code
+warnings. `cargo fmt --all -- --check`, `git diff --check`, and the no-change
+check for production, dependency pins, status ledgers, and the two excluded test
+modules pass. No repository-wide test suite was run.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-ultra-pr135-410-416-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::funded_backing_succession:: -- --nocapture
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding:: -- --nocapture
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_role_handoff:: -- --nocapture
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::v16_program_loss_stale_reserve_matrix_preserves_senior_stocks_and_flat_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code 95a4cf98 -- src Cargo.toml Cargo.lock tests/invariants/invariant_status.tsv tests/invariants/coverage_reopenings.tsv tests/invariants/cu/inv_005_retained_insurance_management.rs tests/invariants/cu/inv_024_terminal_role_handoff.rs
+```
+
+Baseline commands, using the same private target and build-profile environment:
+
+```sh
+cd /dev/shm/astra-ultra-pr135-410-416-baseline
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::v16_program_adversarial_role_containment_matrix_is_source_complete -- --exact --nocapture
+cargo clean --target-dir "$CARGO_TARGET_DIR" -p percolator-prog
+cargo test --locked --offline --test v16_program_fuzz_regressions v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --nocapture
+git diff --exit-code
+```
 
 ## INV-045 reward price through actual catchup (row 422, 2026-09-09)
 
