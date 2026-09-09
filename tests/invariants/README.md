@@ -3,6 +3,26 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-050 ADL maker reduction and taker cross-zero (2026-09-09)
+
+[`cu/inv_050_cross_zero_decomposition.rs`](cu/inv_050_cross_zero_decomposition.rs)
+adds one public LiteSVM matrix for
+`adl-effective-maker-reduction-cannot-authorize-taker-cross-zero`. Branch:
+`codex/pr135-adl-cross-zero-20260909`; separate worktree:
+`/home/anatoly/worktrees/pr135-adl-cross-zero-20260909`. **Tests/docs only; no
+production, pin, status, or reopening-ledger changes.**
+
+The four trade transports reject taker-close-plus-one, exact-maker-effective
+close, and maker-raw-plus-one requests with complete market, portfolio, owner,
+matcher, and SPL rollback. The valid exact taker close remains live and the test
+independently reconstructs ceiled effective quantities, side OI, stored counts,
+loss weights, positions, equity, custody, and health. This is distinct from
+same-side post-liquidation admission, split-trade ADL, rebalance OI,
+resolved-clear ADL, row425 carry, and row412 capability tests.
+
+Residual gaps include nonzero INV-039 pending losses, mirrored/multiple ADL
+ratios, multi-asset batches, fees/funding, and terminal exits.
+
 ## INV-025 active reserve-swap stock attribution (2026-09-09)
 
 [`cu/inv_025_active_reserve_swap.rs`](cu/inv_025_active_reserve_swap.rs), mounted
