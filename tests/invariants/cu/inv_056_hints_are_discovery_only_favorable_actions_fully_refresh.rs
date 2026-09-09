@@ -30,6 +30,9 @@
 
 use super::*;
 
+#[path = "inv_056_observation_membership.rs"]
+mod observation_membership;
+
 #[test]
 fn v16_program_discovery_hint_surface_is_permissionless_crank_only() {
     const CALLER_INPUT_ROSTER: &str = include_str!("../inv_023_caller_input_roster.tsv");

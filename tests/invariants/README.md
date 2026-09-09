@@ -3,6 +3,85 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-056 observation membership after public slot reuse (2026-09-09)
+
+[`cu/inv_056_observation_membership.rs`](cu/inv_056_observation_membership.rs),
+mounted by INV-056, adds one finding-blind public LiteSVM selector on base
+`b1e11425923984ed08330be500cad8a3b8b89d98`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Four independently constructed worlds
+cross both position directions with forward/reverse honest observation order.
+System/SPL/ATA/wrapper instructions create every economic account, deposit finite
+funds, revoke mint authority, append asset 3, and authenticate all marks. There is
+no account-byte injection/restoration, external oracle fixture, or direct engine
+transition. Only the requested base and its pinned dependencies supplied code;
+no open fix branch, test, or diff supplied this increment.
+
+An input-only event book derives the observation set from accepted opening,
+closing, and replacement trades plus signed AuthMark inputs. It has no environment,
+certificate, currentness, or selector dependency. Closing asset 0 and opening asset
+3 publicly reuses the same physical portfolio leg slot: the former complete roster
+`[0,1]` becomes `[1,3]`. The derived set is already nonempty with all certificate
+epochs current, and does not change when later signed marks stale that certificate.
+Both remaining positions lose value, independently calculated as 10 and 50 atoms.
+
+The exact later-over-margin request first succeeds in public SBF simulation before
+the losses, with no committed-state change. A previously accepted AuthMark packet
+cannot restore its old price (`EngineStale`). Empty hints, either single omission,
+the retired roster, and unrelated-asset hints return `EngineNonProgress`; a repeated
+lesser-loss hint returns `InvalidInstruction`. Each is composed with full peer
+refresh and a favorable third-leg trade. Every rejection checks the exact error
+and instruction index plus complete Account rollback for all compiled and fixture
+accounts, including metadata and lamports; the payer's exact signature fee is separate.
+
+The complete honest bundle executes both refreshes before a trade one position
+quantum above one lot fails at instruction 4 with `EngineInvalidConfig`. Independent
+double-ceiling arithmetic makes that quantum exactly one extra margin atom. Both
+refreshes roll back with the suffix. Retrying with exactly one lot succeeds at
+equity/IM/MM `206/206/206` or `214/214/214`. Both owners' certificate lanes/epochs,
+positions, OI, zero funding, unit ADL, finite SPL supply, vault stock and unrelated
+account frames are checked. Forward/reverse worlds compare the complete decoded
+engine-market output, all three certificates, and all capital/PnL pairs after
+normalizing only random market identity on a local comparison copy.
+
+**Non-duplicate:** existing INV-056 mixed-feed and INV-047 hint/admission matrices
+keep portfolio membership fixed. This adds actual leg-slot reuse, a stale former
+membership roster, retained authenticated input, and late atomic admission failure
+against an event-derived observation set. Scope is two active non-base AuthMarks,
+a three-leg no-CPI outcome, zero fees/funding and no liens. External feed tails,
+pending funding/close histories, other favorable transports, arbitrary histories,
+and protocol maximum shapes remain outside this probe. This is **coverage-only**;
+no production change, engine pin change, or invariant-status promotion.
+
+Validation: fresh default-feature SBF build with platform-tools v1.52, SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new selector passes alone and with three adjacent controls: **4 passed,
+0 failed, 1,101 filtered**. New probe: **4 worlds, 32 exact rejections, 4 honest
+commits**, peak composed CU **835,800**, below the 995,000 guard and 1.4M runtime
+limit. Two development setup runs exceeded InitMarket CU with 500-bps maintenance
+margin and a 500-bps move cap; the final fixture uses the established 1,000-bps
+IM/MM parameters. No observation/admission assertion required a production fix.
+Scoped rustfmt, diff checks, and unchanged-production checks pass. No broad suite
+or Kani run; the existing `solana-client` future-Rust compatibility warning remains.
+
+Commands from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/inv056-observation-completeness-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::observation_membership::v16_program_rotated_observation_roster_preserves_favorable_admission -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::observation_membership::v16_program_rotated_observation_roster_preserves_favorable_admission \
+  inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::v16_bpf_inv056_mixed_observations_preserve_full_refresh_trade_boundary \
+  inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::v16_program_discovery_hint_surface_is_permissionless_crank_only \
+  inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::v16_program_no_hint_favorable_route_roster_is_source_complete
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_056_observation_membership.rs
+git diff --check
+git diff --exit-code b1e11425923984ed08330be500cad8a3b8b89d98 -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support
+```
+
 ## INV-071/082 released obligation before FinalizeRecovery (2026-09-09)
 
 [`cu/inv_071_recovery_obligation_finalization.rs`](cu/inv_071_recovery_obligation_finalization.rs),
