@@ -3,6 +3,101 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-020 retained resolution and independent clocks (2026-09-09)
+
+[`cu/inv_020_retained_resolution_clock.rs`](cu/inv_020_retained_resolution_clock.rs),
+mounted from the existing INV-020 CU file, adds one finding-blind, coverage-only
+LiteSVM/SBF selector on `origin/codex/invariant-fidelity-reopen-20260904` at
+`b981af93bf32ff41c5a19b4944bbe6bb8b8f229f`. Worktree:
+`/dev/shm/percolator-inv020-20260909`. No open PR branches, diffs, tests, or other
+worktree artifacts were inspected or copied. Only tests/docs change; production,
+Cargo inputs, shared helpers, engine pin, and invariant/status ledgers do not.
+
+**Guarantee.** Six independently constructed worlds cross caller-slot hints
+`0`/`u64::MAX` with the following external Pyth reports. The initial accepted
+observation is price 100, publish time 100, authenticated slot 1; the permissionless
+resolve interval is five slots. Two owners each deposit 1,000 SPL atoms and open
+opposite one-unit positions. All bundles land at authenticated slot 5.
+
+| Report price / publish time | Clock Unix time | Provider age | Committed good slot | Resolve slot | Owner payouts |
+| --- | --- | --- | --- | --- | --- |
+| 100 / 100, unchanged | 160 | 60 seconds, admitted | 1 | 6 | 1,000 / 1,000 |
+| 110 / 101, newer | 161 | 60 seconds, admitted | 5 | 10 | 1,010 / 990 |
+| 110 / 101, newer | 162 | 61 seconds, rejected | 1 | 6 | 1,000 / 1,000 |
+
+The crank/resolve bundle is encoded and signed before Clock advances. Valid
+prefixes reach the resolver's `OracleStale` refusal at instruction 3; invalid
+reports reject at instruction 2. Every failure restores complete tracked Accounts,
+including metadata, both portfolios/certificates, market/profiles, custody, reports,
+signers, Clock, and transaction account keys. The separate payer changes by the
+exact network fee only. Retried wrapper metas/data remain identical; only transport
+blockhash/signature is renewed. Four standalone cranks in each admitted world
+strictly advance the one-slot accrual rank to slot 5 without renewing an unchanged
+report. Accepted marks remain inside the input-derived 100..accepted-price interval
+and finish at the accepted endpoint, with both OI lanes unchanged and no SPL movement.
+
+The retained resolver rejects before expiry, including the original deadline and
+renewed deadline minus one in the new-report worlds. At the exact committed-epoch
+deadline it resolves despite earlier cached engine time, without an oracle tail.
+Repeated resolution rejects exactly. Unsigned `CloseResolved` rejects inside the
+one-slot owner window; its identical instruction succeeds at exact window expiry.
+Bounded loser-first closes settle both real positions and pay the independently
+derived values above into existing public ATAs. Terminal OI, capital, and vault are
+zero; frozen price/resolve slot, mint supply, reports, and total custody reconcile.
+
+**Non-duplicate value.** The active-claim and staged-action sections below leave
+terminal payouts outside their scope. INV-020's unchanged-report withdrawal window
+does not retain a signed atomic crank/resolve bundle, roll back an otherwise valid
+observation prefix, or cross provider-second admission into terminal owner-window
+expiry and complete funded payouts. INV-071's completed-hint replay owns terminal
+cursor progress, not the Live observation-epoch decision that sets resolution time.
+This composes those boundaries rather than adding another provider parser corpus.
+
+System/SPL/ATA/wrapper instructions allocate, initialize, fund, trade, crank, resolve,
+and pay. Airdrops fund signer SOL; only Clock and external provider reports are
+harness inputs. No program-owned byte mutation, snapshot restoration, direct engine
+transition, or production finding/fix is used. Remaining gaps: other providers and
+composites, multiple assets, CPI/batch transports, nonzero fees/funding, paid EWMA,
+partial receipts/backing, arbitrary delivery orders/histories, maximum shapes,
+blockhash-expiration behavior, and universal invariant closure. The finite matrix
+uses one price direction and one terminal account order; no status promotion.
+
+**Validation.** Fresh default-feature SBF build with platform-tools v1.52 and the
+locked engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; private host target, no
+artifact reuse. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Focused selector: **1 passed, 1,120 filtered; 6 worlds, 30 exact rejections,
+12 funded terminal exits; peak across passing runs 217,880 CU** (500,000 guardrail;
+last run 213,380 CU). Peak includes
+measured rejected bundles, standalone cranks/resolves, and payouts, not setup.
+The five adjacent selectors below pass **5/5, 1,116 filtered**; their largest
+reported CU is 290,097 (INV-045 crank). Formatting and whitespace checks pass.
+The first development run reached resolution but attempted an unsigned close
+inside its owner window; the corrected fixture explicitly checks that refusal
+and advances Clock to exact expiry. No production counterexample is claimed.
+Cargo emits the existing `solana-client v1.18.26` future-incompatibility warning.
+No broad suite, matcher rebuild, fuzz campaign, or Kani proof run is claimed.
+
+Exact commands, from the worktree above:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv020-20260909-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+mkdir -p "$CARGO_TARGET_DIR/tmp"
+export TMPDIR="$CARGO_TARGET_DIR/tmp" CARGO_BUILD_JOBS=4
+cargo test --locked --offline --test v16_cu --no-run
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::retained_resolution_clock::v16_program_retained_crank_resolution_uses_only_committed_clock_provenance -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::v16_program_unchanged_oracle_report_cannot_renew_withdrawal_window \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::v16_program_hybrid_soft_stale_boundary_uses_clock_not_caller_slot \
+  inv_045_no_free_mark_movement::custody_cap_carry::v16_program_custody_route_words_preserve_pending_fractional_carry \
+  inv_056_hints_are_discovery_only_favorable_actions_fully_refresh::v16_bpf_inv056_mixed_observations_preserve_full_refresh_trade_boundary \
+  inv_071_crank_progress::v16_program_completed_terminal_hint_replay_preserves_remaining_crank_rank
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-047 inventory and owner-cashflow partitions (2026-09-09)
 
 [`cu/inv_047_inventory_cashflow_partitions.rs`](cu/inv_047_inventory_cashflow_partitions.rs),

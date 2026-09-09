@@ -31,6 +31,9 @@
 //! prefix, recertification, and rewarded liquidation or bilateral owner reduction. Incomplete
 //! schedules must reject atomically while observations remain pending, then match full-current
 //! action outcomes once the complete evidence has been committed.
+//! The `retained_resolution_clock` child crosses signed crank/resolve bundle rollback with
+//! provider-second freshness, bounded slot catchup, committed-epoch terminal maturity, and
+//! exact permissionless payout after the authenticated owner window expires.
 //! An independent typed parser model covers 726 boundary words, 15,552 structural/semantic
 //! combinations, and 12,288 seeded valid layouts. An independent overflow-free confidence oracle
 //! compares all 65,536 basis-point settings across wide carry and overflow operands.
@@ -61,6 +64,9 @@ mod active_claim_evidence;
 
 #[path = "inv_020_staged_action_observations.rs"]
 mod staged_action_observations;
+
+#[path = "inv_020_retained_resolution_clock.rs"]
+mod retained_resolution_clock;
 
 #[test]
 fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
