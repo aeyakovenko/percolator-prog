@@ -3,6 +3,92 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-066/067 receipt transaction partitions (2026-09-09)
+
+[`cu/inv_067_receipt_partition_confluence.rs`](cu/inv_067_receipt_partition_confluence.rs),
+mounted from the existing INV-067 CU file, adds two finding-blind, coverage-only
+selectors on base `1aba1f8b7c032bf135eae75c4d11b35de34e2fc9`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Only the requested base and pinned
+dependencies were used; no open PR branches, diffs or tests were inspected or copied.
+The unchanged `late_expiry::World::before_receipts` constructs all economic state
+through System/SPL/ATA/wrapper instructions. Read-only LiteSVM simulation identifies
+the next paying CloseResolved instruction; only preceding nonpaying public cleanup
+steps are committed. No account injection, poststate installation, direct engine
+transition, production/Cargo edit or shared-helper edit is involved.
+
+**Guarantee:** eight schedules cross both unequal junior claimant orders, early/late
+second receipt replacement, and singleton/atomic transaction partitions. The clean
+selector and the rejected-suffix selector each execute all eight schedules. An
+input-derived integer oracle checks the immutable slot-12 snapshot identity, exact
+bound-to-receipt replacement, conserved 3,000-face denominator, claimant-local floors,
+capital, receipt identity/paid value, SPL custody and unrelated full-account frames.
+The independently backed domain releases 350 atoms at slot 13, moving distributable
+stock from 501 to 851; already-receipted claims receive only their 82- or 151-atom due,
+while a delayed receipt receives its complete current floor without re-counting face.
+
+For every nonempty prefix of each chosen transaction, the rollback selector appends
+an intentionally undecodable System instruction. Its exact InvalidInstructionData
+index and wrapper/SPL success counts prove the preceding instructions executed.
+Every tracked economic Account, including metadata and lamports, must be unchanged;
+the separate network-fee payer and runtime sysvars are excluded. The identical valid
+prefix then commits. Fresh-blockhash duplicate top-ups pay zero, and a bounded public
+crank continuation must settle every claimant before all five portfolios close with
+exact rent transfer. Every schedule ends at payouts `[1198, 0, 1283, 0, 1368]`, zero
+remaining claim/capital/senior stocks and portfolio count, two designated rounding
+atoms in custody, and one never-deposited provider atom. Complete terminal payout
+ledgers and source/reservation stocks are compared across schedules.
+
+**Non-duplicate value:** the base's late-materialization test compares separate
+successful calls; its crank/top-up matrix batches handlers against an existing
+receipt. This increment moves receipt **creation and bound replacement**, including
+its first SPL payment, across commit boundaries and rejects every prefix of those
+words. Delayed worlds additionally roll back expiry normalization, an existing
+claimant's partial top-up, and another claimant's first receipt in one transaction.
+The unchanged seed, payout arithmetic and terminal drain are supporting controls,
+not new fixture/discovery claims. This is finite integration/metamorphic evidence,
+not exhaustive reachability, independent finding rediscovery or certification.
+
+**Validation:** fresh default-feature wrapper SBF built offline in the isolated
+`/dev/shm/percolator-inv066-067-20260909` checkout, with platform-tools v1.52;
+SHA-256 `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Host tests also compiled there from scratch. No other worktree's test artifacts or
+SBF were copied; no matcher is required. Commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/inv066-067-path-coverage-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu receipt_partition_confluence -- --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_038_rounding_and_ratio_conservation::v16_program_social_loss_aggregate_and_chunked_routes_converge_exactly \
+  inv_066_resolved_payout_fairness_and_order_independence::v16_program_late_receipt_materialization_preserves_snapshot_entitlements \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once \
+  inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_same_owner_receipts_keep_independent_topups_and_terminal_replays
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: final focused run **2 passed, 0 failed** (19.13s); adjacent controls
+**5 passed, 0 failed** (15.83s).
+The two new selectors cover 16 worlds, 56 rejected suffixes (24 containing receipt
+replacement and 38 containing positive SPL payments), 200 live no-op top-up calls,
+80 terminal no-op calls and 80 portfolio closes. Maximum measured suffix CU was
+526,871 against a 600,000 ceiling; simulation and portfolio-close ceilings are
+300,000. Format and diff checks pass. Only the existing `solana-client v1.18.26`
+future-compatibility warning was emitted.
+
+**Remaining gaps:** one fixed three-claimant/five-portfolio, single-mint NoCpi
+history, one late stock release, two permuted junior claimants, two transaction
+partition shapes, and one generic suffix error. No arbitrary amounts, additional
+partial release stages, semantic wrapper/CPI failure taxonomy, Recovery/forfeiture,
+reincarnation, co-owned destinations, cross-rail payments, maximum-account shapes,
+provider/asset/slab retirement or final rounding burn is newly covered. No broad
+suite, formal proof or invariant-status promotion is claimed.
+
 ## INV-021 funded lifecycle atomicity (2026-09-09)
 
 [`cu/inv_021_funded_lifecycle_atomicity.rs`](cu/inv_021_funded_lifecycle_atomicity.rs),

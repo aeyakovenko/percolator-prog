@@ -32,6 +32,9 @@
 
 use super::*;
 
+#[path = "inv_067_receipt_partition_confluence.rs"]
+mod receipt_partition_confluence;
+
 #[path = "inv_067_terminal_claim_late_expiry.rs"]
 pub(super) mod late_expiry;
 
