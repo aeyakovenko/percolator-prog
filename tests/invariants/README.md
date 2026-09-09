@@ -3,6 +3,127 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-036 earned source fees across retained bounds (2026-09-09)
+
+`v16_program_retained_source_fees_survive_repricing_policy_and_settlement_orders`
+is mounted in the existing
+[`stateful/inv_036_fee_destination_and_policy_version_integrity.rs`](stateful/inv_036_fee_destination_and_policy_version_integrity.rs).
+This finding-blind candidate starts only from
+`origin/codex/invariant-fidelity-reopen-20260904` at
+`f01f173625d72237893a2ad608a5f3f52a0f25a1`, in the independent checkout
+`/dev/shm/pr135-invariant-product-20260909`. No open PR branches, issues, diffs,
+or external test corpora were used. The coordinator checkout and its Git metadata
+were not modified. Production, shared helpers, fixtures, Cargo files, the engine
+pin, and invariant verdicts remain unchanged. The public-trace consumer census
+changes from 100 to 103: the clean base already has 102 immediately validated
+consumers, and this test adds one more.
+
+**Guarantee.** Sixteen public LiteSVM/SBF worlds cross single-CPI/bilateral source
+fee creation, single-CPI/bilateral retained exits, policy-before/after-repricing,
+and provider payout before/after the accepted exit. An independent provider funds
+the source bucket. A positive claim is consumed under an explicit 3,333-bps
+backing-fee cap, creating a nonzero utilization fee and real source lien. The test
+checks the fee's exact ceiling against lien atoms, the payer's exact capital debit,
+and the stock/encumbrance censuses before retaining any tested request.
+
+Every retained transaction verifies its signatures, fits the packet limit, and
+successfully simulates in its original state. The subsequent authenticated mark
+change is adverse to the long owner's sale. A higher base-fee policy cannot replace
+the retained zero-fee participant consent; a superseded zero-fee control cannot
+overwrite that policy. After an authorized restoration of the zero base fee, the
+stricter retained price limit still rejects. Both trade refusals occur at the last
+instruction of a bundle whose prefix has successfully transferred the earned fee
+to its provider. The price refusal also requires successful matcher execution.
+Initial successful simulations preserve the tracked frame. Actual rejected delivery
+preserves exact tracked Account data, metadata, economic signer lamports, matcher
+state and SPL custody; the separate network payer is excluded from that raw frame.
+
+A separately pre-signed, sufficiently permissive exit then succeeds without
+re-signing, either through the same CPI transport or the bilateral alternative.
+The independently retained provider withdrawal pays precisely the original earned
+fee, before or after that exit. Endpoints compare each trader's capital plus PnL,
+provider SPL credit, vault debit, zero residual fee earnings, zero OI, insurance,
+and fixed mint supply. The mark-input ledger derives the owner's 3,950-atom PnL
+independently of deployed settlement arithmetic. All captured public transactions
+validate construction, custody and rollback evidence. This is bounded additional
+evidence for INV-014/024/036/047/081, not whole-invariant closure.
+
+**Non-duplicate value.** The existing INV-036 source-fee consent matrix reprices
+before retaining its consuming request; it does not carry an already-earned fee
+through subsequent repricing and a paid-prefix refusal. INV-014's
+`v16_retained_cpi_price_limit_survives_oracle_policy_change` has zero fees and a
+deposit prefix. Its retained delegated-fee exit matrix has constant marks and no
+source liens. INV-036's retained redirect bundle owns trading-fee redirection, not
+provider utilization earnings. INV-052's backing-fee partition matrix owns
+account/domain partition rounding and expiry, without these retained price/control
+requests. The new value is their bounded temporal composition with a real source
+fee stock, not another standalone fee-cap or arithmetic test.
+
+**Gaps.** One source domain, one orientation, integral quantities and authenticated
+marks only. No claim is made for trade-driven paid-mark discovery (INV-045), new
+source-fee creation after retention, source-policy/recipient succession, arbitrary
+fee splits or fragmentation (INV-052/059), opposite-side or multi-asset bounds,
+maximum shapes, complete owner SPL exits, or engine proofs. A candidate batch exit
+failed its initial executability control on the source-lien-bearing fixture and
+was removed, not counted as a post-policy refusal or diagnosed as a new finding.
+The retained batch-source product remains outside this increment.
+
+**Validation.** Default-feature program and local authenticated matcher SBFs were
+built offline from this checkout with platform-tools v1.52 and the locked cached
+dependencies. Their SHA-256 values are respectively
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e` and
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Final candidate: **1/1 passed**, 16 worlds, 48 exact refusals, 12.14 s. Every
+world settles exactly **875 source-fee atoms** to the provider; final owner values
+are **55,577 / 1,996,050 atoms** and remaining SPL vault custody is **2,151,627**.
+Nine adjacent selectors passed: four stateful, four CU, and the existing public
+source-fee cap certification. Five metadata selectors passed, including the
+invariant charter/index, full trace-consumer validation, audit summary, and public
+instruction/special-method registries. Full `cargo fmt --all -- --check`, scoped
+rustfmt, and staged/unstaged `git diff --check` pass. No broad suite or engine
+proof was run. Only cached host harnesses were rebuilt for final checks.
+
+Two unrelated checks remain failing and were confirmed on the clean, detached
+same-base checkout `/dev/shm/pr135-invariant-baseline-20260909`: INV-047's
+`v16_program_nonzero_fee_trade_routes_are_byte_exact_after_transport_normalization`
+reports CPI/no-CPI divergence at lots=1, long=true, fee_bps=1;
+`v16_machine_invariant_status_is_authoritative_and_nonoverclaiming` reports the
+existing stale INV-058 counterexample projection. Neither is repaired or claimed
+as a discovery here. The base trace-census test separately confirmed 102 actual
+consumers versus its stale literal 100; this increment's literal 103 now passes.
+When sharing the private target cache between these two checkout paths, each
+path-sensitive harness was forced to rebuild before relying on its result.
+
+Reproduction environment and focused selector:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_036_fee_destination_and_policy_version_integrity::v16_program_retained_source_fees_survive_repricing_policy_and_settlement_orders -- --exact --nocapture
+```
+
+Executed adjacent selectors (each uses the owning invariant module as its prefix):
+
+| Harness | Invariant | Exact test function |
+| --- | --- | --- |
+| stateful | 014, `retained_delegated_fee_exit` submodule | `v16_program_retained_lp_fee_cap_preserves_bilateral_and_delegated_exits` |
+| stateful | 024 | `v16_program_all_trade_route_pairs_preserve_realized_pnl_owner_attribution` |
+| stateful | 045 | `v16_program_trade_driven_mark_route_orders_converge_economically` |
+| stateful | 052 | `v16_program_backing_fee_partitions_are_conservative_and_value_exact` |
+| CU | 014 | `v16_retained_cpi_price_limit_survives_oracle_policy_change` |
+| CU | 036 | `v16_program_retained_redirect_bundle_preserves_fee_rounding_and_policy_order` |
+| CU | 059 | `v16_program_minimum_fee_episode_histories_match_aggregate_close` |
+| CU | 081, `fee_resolution_atomicity` submodule | `v16_program_retained_withdrawal_rolls_back_fee_resolution_and_paid_prefix` |
+| public SBF | 036 | `v16_program_retained_source_fee_caps_bind_every_single_trade_role` |
+
+The five passing public-SBF metadata functions in
+`inv_079_public_reachability_evidence` are
+`v16_every_public_trace_consumer_validates_reachability_evidence`,
+`v16_invariant_charter_and_index_are_complete`,
+`v16_invariant_audit_summary_matches_every_verdict_row`,
+`v16_special_verification_method_registry_matches_charter`, and
+`v16_public_instruction_coverage_registry_matches_production_roster`.
+
 ## INV-034/074/088 stale scope and last-touch order (2026-09-09)
 
 The local `stale_touch_order` module in
