@@ -18,8 +18,10 @@
 //! A separate portfolio-withdrawal history restores capital and SPL custody by redepositing the
 //! exact payout. Duplicate and mixed deposit/withdraw bundles roll back their successful prefix;
 //! neither restored balances nor a fresh owner sequence can revive the retained withdrawal.
+//! The stock-history sibling generates mixed deposit/reward/custody replenishment schedules,
+//! checking an independent value model after partial payouts and late SPL rollback/retry.
 //! This does not certify insurance-withdrawal stock binding (counterexample 415 remains open).
-//! This is bounded asset-0 evidence using fresh blockhash envelopes around retained instruction
+//! This is bounded asset-0 evidence using signature-distinct envelopes around retained instruction
 //! bytes, not detached-signature, durable-nonce, or arbitrary-history coverage.
 
 use super::*;
@@ -28,6 +30,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "inv_008_passive_reward_stock.rs"]
 mod passive_reward_stock;
+
+#[path = "inv_008_withdrawal_stock_history.rs"]
+mod withdrawal_stock_history;
 
 fn braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source

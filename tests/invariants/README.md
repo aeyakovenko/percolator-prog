@@ -2388,6 +2388,77 @@ custody bound. Formatting and whitespace checks passed. Only the existing `solan
 future-compatibility warning appeared. This is focused cached-artifact conformance, not a fresh
 SBF build or full `v16_cu`/public-SBF/stateful suite certification.
 
+### INV-008 generated withdrawal-stock histories (row415)
+
+`withdrawal_stock_history::v16_program_generated_withdrawal_stock_histories_preserve_first_execution_budget`
+in [`cu/inv_008_withdrawal_stock_history.rs`](cu/inv_008_withdrawal_stock_history.rs)
+adds a stateful LiteSVM owner for mixed replenishment and transaction-failure histories. It uses
+the existing public System/SPL/ATA/wrapper fixture without program-state injection, private
+engine calls or account restoration. The tested suffix bypasses instruction-binding adapters.
+
+The first retained withdrawal exhausts its original capital. Signature-distinct standalone
+copies are signed before that first execution and remain frozen in the same blockhash window.
+Subsequent rounds compose three distinct stock transitions: owner-signed deposit (capital and
+custody), permissionless maintenance reward (capital without custody or recipient sequence
+advance), and direct SPL transfer to the vault (custody surplus without owner credit).
+Twelve mandatory histories cross all six replenishment orders with both orders of a retained
+withdrawal and a replenishment in one transaction. Thirty-two ChaCha-seeded shrinkable histories
+vary one to four rounds, initial capital 1..17, replenishment inputs 1..97 (deposits/transfers
+are at least the original withdrawal amount), reward shares 3333/10000 bps, half/full payouts,
+and zero to two late failures per payout. Each donor is publicly funded with 1003 atoms; the
+recipient starts the suffix with 4096 external atoms and an untouched owner holds 103 atoms.
+Mint authority is revoked before the tested suffix. All suffix activity stays at slot 8.
+
+An independent prefix model reconstructs every owner's capital and SPL balance, cumulative
+deposits/payouts, passive fees/rewards, insurance, accounting vault, custody surplus, mint
+supply, and owner sequence. It also frames portfolio identities, position epochs, controls,
+and an unrelated owner. A late insufficient-funds SPL instruction must follow a successful
+wrapper withdrawal and successful token CPI; exact account rollback leaves the unchanged
+withdrawal usable. Replenishment/stale bundles check the precise failing index and actual
+completed wrapper/SPL prefixes. Every rejection restores all fixture and compiled non-payer
+accounts, including metadata/lamports; the payer changes only by its exact signature fee.
+After replenishment, fresh consent must pay at least the retained amount. The final payout
+equals original capital plus committed deposits and rewards; custody-only replenishment stays
+in the vault. This is stock attribution and progress evidence, not another uniqueness matrix.
+
+Scope remains portfolio `Withdraw`. Half payouts are distinct newly authorized withdrawals,
+not successful partial execution of one withdrawal authorization. INV-009 owns partial trade
+fills; INV-011/024/031/064 tests below are unchanged compatibility selectors, not new coverage
+claims for those rows. Insurance's signed-stock binding, arbitrary histories, expiry, durable
+nonces, and other withdrawal families remain open. Row415 and the statuses of
+INV-008/010/011/024/031/064 are unchanged; no production fix or pre-fix vulnerability
+reproduction is claimed.
+
+Verification on 2026-09-09, branch `codex/astra-row415-inv008-stateful-20260909`, based on
+`origin/codex/invariant-fidelity-reopen-20260904` at `9db8be88`:
+
+```sh
+cd /dev/shm/astra-row415-inv008-stateful-20260909
+cargo build-sbf --tools-version v1.52 --sbf-out-dir target/deploy --offline -- --locked
+cargo build-sbf --manifest-path tests/fixtures/hostile_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir tests/fixtures/hostile_matcher/target/deploy --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay:: -- --nocapture
+cargo test --locked --offline --test v16_cu inv_009_partial_fill_and_retry_accounting::v16_program_bounded_partial_failure_retry_schedules_preserve_every_prefix -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_011_signed_aggregate_economic_bounds::v16_attack_convert_released_pnl_respects_caller_cap -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_liquidation_spent_insurance_cannot_be_withdrawn_again -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_064_insurance_withdrawal_policy_equivalence::v16_program_insurance_withdrawal_schedules_preserve_asset_allowance_and_exact_retry -- --exact --nocapture
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_008_intent_uniqueness_and_bounded_replay.rs tests/invariants/cu/inv_008_withdrawal_stock_history.rs
+git diff --check
+sha256sum target/deploy/percolator_prog.so
+```
+
+The fresh default-feature wrapper SBF hash is
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+INV-008 passed 9/9: the new test checked 44 worlds and 1333 transactions, including 668 stale
+rollbacks and 177 late SPL rollbacks, with maximum 116936 CU below the 300000 custody bound.
+Each of the five compatibility selectors passed 1/1; INV-009 additionally reported 64 histories,
+192 fills, 192 short-fill rejections and 384 stale rejections. The INV-011 selector is an
+existing injected-state cap check, not additional public reachability evidence. Formatting and
+diff checks passed. The initial baseline attempt lacked the local SBF artifact, and the first
+new-test compilation needed a closure-borrow correction; both were resolved before these runs.
+Only existing Solana dependency compatibility/deprecation warnings remained. No full suite,
+Kani run, or production TDD result is implied.
+
 ## Wrapper custody checkpoint (2026-09-08)
 
 Finding-blind additions based on `origin/codex/invariant-fidelity-reopen-20260904` at

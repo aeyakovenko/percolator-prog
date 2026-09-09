@@ -5,7 +5,7 @@ tag	variant	disposition	boundary
 0	InitMarket	init-once	Canonical account initialization gates repeat execution.
 1	InitPortfolio	init-once	Canonical account initialization and monotonic portfolio allocation gate repeats.
 3	Deposit	retry:Deposit	Shared owner-state sequence is exercised by the retry matrix; CU v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody preserves an unconsumed redeposit through both stale-withdrawal bundle orders.
-4	Withdraw	retry:Withdraw	Shared owner-state sequence is exercised by the retry matrix and CU v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody, including funded stale retries, exact successful-prefix rollback and fresh-intent liveness.
+4	Withdraw	retry:Withdraw	Shared owner-state sequence is exercised by the retry matrix and CU v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody; v16_program_generated_withdrawal_stock_histories_preserve_first_execution_budget adds mixed deposit/reward/custody replenishment orders, partial payouts, late SPL rollback, exact stock attribution and unchanged-request progress.
 5	PermissionlessCrank	state-derived	Permissionless work is selected from current state and must make bounded progress or reject.
 6	TradeNoCpi	retry:TradeNoCpi	Both portfolio incarnations and position episodes are exercised by the retry matrix.
 8	ClosePortfolio	incarnation-episode	Portfolio incarnation, owner-state sequence, and position episode bind the close.
