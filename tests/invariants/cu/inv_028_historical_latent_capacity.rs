@@ -7,6 +7,9 @@ use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 use std::collections::BTreeSet;
 
+#[path = "inv_028_concurrent_latent_capacity.rs"]
+mod concurrent_latent_capacity;
+
 const ASSETS: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
 const DOMAINS: usize = percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS;
 const CAPITAL: u128 = 1_000_000;

@@ -564,6 +564,82 @@ rustfmt --edition 2021 --check tests/invariants/stateful/inv_012_owner_episode_r
 git diff --check
 ```
 
+## INV-028 concurrent latent cohorts (row 423, 2026-09-09)
+
+[`cu/inv_028_concurrent_latent_capacity.rs`](cu/inv_028_concurrent_latent_capacity.rs),
+mounted under INV-028's `historical_latent_capacity` module, adds **net-new partial coverage**
+from PR135 base `0108982c`. Worktree:
+`/tmp/codex-agent-worktrees/row423-inv028-concurrent-latent-20260909`; branch:
+`codex/row423-inv028-concurrent-latent-20260909`. **Row 423 remains OPEN.**
+No production, engine, shared-harness, dependency or status-ledger changes; this is not a
+production finding/fix, vulnerable-parent reproduction or whole-invariant closure.
+
+The distinct relation is **all-leg admission before source growth**, with **fourteen active
+legs throughout settlement**, rather than historical claims followed by one/two new positions.
+Every position initially has zero source records. First cohorts of 1, 7, 13 or 14 assets settle
+both favorable sides across a cross-zero trade without flattening any leg. Other admitted
+positions remain latent as occupied source records grow to 2, 14 or 26. The remaining cohort
+must then materialize both of its future domains without displacing any earlier claim. The
+unsplit control materializes all fourteen initially favorable domains in one observation cohort.
+Every schedule reaches fourteen active legs and twenty-eight positive source records before exit.
+
+The four cohort partitions cross forward/reverse asset order and independently winner-/loser-first
+settlement: **16 worlds, 1,356 post-funding public calls**. Admission, observation and matched-trade
+orders share the asset permutation; the return-mark settlement and payout orders reverse the
+initial owner order. Signed positions alternate by asset, with unequal 1/2/3/4/5-unit magnitudes.
+The existing input-history oracle checks per-domain claim/backing prefixes, principal debits,
+credit caps, exact OI, custody and mint supply after every pre-conversion call. New frontier checks
+require all fourteen legs to remain active, exact historical attribution, zero claims on still-latent
+assets, and a 28-domain union of materialized and future resources. Decoded economic endpoints
+compare across all worlds. Full flattening, conversion, withdrawal and portfolio deletion pay
+exactly **1,000,080 / 999,920 atoms**, leaving no claim/backing stock, OI, vault balance or
+materialized portfolios.
+
+The existing row423 historical-first test is reused as a private fixture/oracle, not duplicated
+or widened. Its original test body is unchanged. INV-077's max-source fixture instead builds
+each asset's two-sided history sequentially as the active set grows. Consumed/deferred backing
+cap tests measure backing eligibility, not this concurrent sparse-resource relation. The new
+test uses only System/SPL/ATA/wrapper routes; its inherited bootstrap also System-creates an
+authenticated matcher context, but measured trades are single-leg `TradeNoCpi`. No populated
+account bytes or direct engine state are edited.
+
+Large portfolios require current certificates before trading. Additional public cranks strictly
+reduce pending active-asset slots plus the number of noncurrent owner certificates, frame the
+other portfolio, and finish within 32 scheduler iterations per trade. The parent settlement oracle
+still requires strict economic/accrual rank descent and at most four calls per owner per mark
+cohort. The initial development run omitted this currentness preparation and stopped at the
+existing `EngineStale` guard; adding the required public refresh produced the passing continuation.
+No rejection was reclassified as a successful exit, and no assertion or production guard was removed.
+
+Scope is fourteen first-generation AuthMark assets, integral quantities and one-atom favorable
+marks, two cooperating owners, zero fees/funding/liens and no external backing/insurance.
+Conversion occurs only after all legs flatten. Fractional cross-domain rounding, interleaved
+conversion before other-domain settlement, actual backing depletion after admission, other trade
+transports, generations/reuse, expiry/Recovery/resolution, absent signers, maximum market size,
+other settlement-resource classes and arbitrary histories remain outside this increment.
+
+Focused validation passes **1/1** twice (1,069 filtered), in **32.20s / 33.69s**. Observed peak CU for
+trade / crank (including readiness) / conversion / withdrawal / close is
+**922,611 / 1,040,847 / 712,188 / 47,954 / 26,540**, below the enforced 1,375,000 source-path
+and 300,000 custody/close limits. Bootstrap and authenticated mark-writer CU are excluded.
+`cargo fmt --all -- --check` and `git diff --check` pass. No broad suite was run.
+Validation uses private copies of the historical fixture's cached default-feature SBF artifacts;
+`src`, Cargo inputs and matcher fixture sources match its `360d98df` baseline exactly, with
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host tests compile in the new worktree; no SBF rebuild or engine-proof run is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row423-inv028-concurrent-latent-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::concurrent_latent_capacity::v16_program_concurrent_latent_cohorts_preserve_full_shape_settlement_and_exit -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-028 historical and latent settlement capacity (row 423, 2026-09-09)
 
 [`cu/inv_028_historical_latent_capacity.rs`](cu/inv_028_historical_latent_capacity.rs),
