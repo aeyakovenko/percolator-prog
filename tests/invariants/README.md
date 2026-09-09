@@ -3,6 +3,109 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-047 inventory and owner-cashflow partitions (2026-09-09)
+
+[`cu/inv_047_inventory_cashflow_partitions.rs`](cu/inv_047_inventory_cashflow_partitions.rs),
+mounted from the existing INV-047 CU file, adds two finding-blind, coverage-only
+selectors on `origin/codex/invariant-fidelity-reopen-20260904` at
+`c8801cc28d0e88db6f67dc468cb3662bf83cf5c6`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. An independent Git checkout and fresh
+build outputs live under `/dev/shm`; the root checkout and its Git metadata were
+not changed. No open PR branches, diffs, tests, or other worktree artifacts were
+inspected or copied. Economic setup uses System/SPL/ATA/wrapper instructions;
+only the infrastructure payer receives an airdrop. There is no account injection,
+snapshot restoration, direct engine transition, production/Cargo change, shared
+helper change, or invariant-status promotion.
+
+**Guarantee.** Each selector rebuilds 32 worlds: both position orientations, both
+signed leg orders, all four single/batch CPI/no-CPI trade transports, and individual
+versus atomic-composite transaction boundaries. Within each orientation, all 21
+tracked starting keys, including absent accounts, metadata and lamports, compare
+exactly before execution.
+Public trades establish asset lots `[3,-2,5]` in physical slot order `[2,0,1]` (or
+their sign mirror). The common owner intent deposits 211 atoms into the taker's
+trading portfolio, closes asset 0 by three lots and flips asset 1 by three lots,
+then withdraws 73 atoms from that owner's separately funded 97-atom flat sibling.
+`Withdraw` is flat-only: this does not claim an exposed portfolio can withdraw.
+Asset 2's five-lot exposure and complete leg/market state must remain unchanged.
+The entire instruction word, including future position episodes, is bound before
+the first submission; partitioned calls and retries do not regenerate payloads
+from intermediate state. CPI uses the maker's public LP authorization and
+137-bps fee consent, with exact batch fee/slippage caps of 10/0 atoms.
+
+An input-only oracle checks every accepted transaction boundary: exact per-owner
+capital and wallet balances, three portfolios, PnL, active-leg counts, signed
+positions, OI, ADL indices, domain fee credits, mint supply and revoked authority,
+and SPL/engine custody. Each leg charges five atoms per trader; final insurance is
+20, vault is 2,000,235, capital total is 2,000,215, and the owner's wallet holds 73.
+Within each signed leg order, all transports converge to byte-exact complete
+market-engine and portfolio-engine regions, including cached state, and SPL data.
+No economic byte or protocol fee is normalized. Wrapper configuration, matcher
+tuple/fee cap, owner sequences, position episodes, enabled/expiry state, and the
+single-CPI decoded return cache have separate exact route-specific postconditions.
+For each transport, direct and composite routes additionally compare every tracked
+Account byte and metadata field, adjusting only the dedicated payer's documented
+network fee (`required signatures * FeeStructure::default().lamports_per_signature`).
+Each debit of that payer is independently checked; economic-owner lamports are exact.
+
+The retry selector appends an undecodable System instruction to each selected
+transaction. Its exact `InvalidInstructionData` index plus wrapper and matcher
+success counts establish that the whole valid prefix executed before rejection.
+All compiled transaction keys plus all fixture keys roll back byte/metadata-exact,
+apart from the checked network fee. The identical valid instruction payloads then
+commit with a fresh signed transaction envelope. In composite worlds this rolls
+back both SPL transfers, pre-existing-leg close/flip, fees, and transport controls
+together. Runtime sysvars and transaction-history internals are not compared.
+
+**Non-duplicate value.** The existing INV-047/052 fee-leg partition explicitly leaves
+pre-existing/reordered legs open; it starts flat and compares trade-only words.
+The older mixed-position planner is no-CPI, fee-free, and lacks custody-changing
+transaction compositions. This adds their pre-existing-inventory/cross-transport
+intersection with same-owner, different-portfolio cashflows and exact failed-word
+retry. It does not repeat the one-leg fee matrix or the open/close route-pair census.
+Remaining gaps: arbitrary inventory and leg permutations, quantity fragmentation,
+partial fills, mixed transports within one word, elapsed-time/mark/funding/PnL or
+backing/maintenance histories, foreign markets, terminal lifecycle composites,
+maximum shapes, and replay after a successful commit. Physical-slot bytes are not
+compared between differently ordered signed words. This is finite integration and
+metamorphic evidence, not full INV-047 closure or an engine proof.
+
+**Validation.** Fresh default-feature wrapper and unchanged auth-matcher SBF builds
+used platform-tools v1.52, offline. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host tests were compiled from scratch in this checkout. Focused run: **2 passed,
+0 failed**, 1,117 filtered, 29.15s; **64 worlds / 144 commits / 72 suffix rejections**.
+Peak accepted/rejected CU: **614,014 / 614,164**, both below 1,400,000. Adjacent
+INV-024/045/047/052/081 controls: **5 passed, 0 failed**, 1,114 filtered, 42.07s.
+Development runs caught a test-side integer type mismatch, missing account metas,
+and an invalid exposed-withdrawal fixture (a non-progress crank is not a remedy);
+the final fixture uses the documented flat sibling without weakening the economic
+or rollback assertions. The existing `solana-client` future-Rust warning remains.
+Fmt, diff-whitespace, and unchanged-production/shared-helper checks pass.
+No broad suite or Kani run is claimed. Exact commands from
+`/dev/shm/percolator-inv047-routes-20260909`:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv047-routes-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+(cd tests/fixtures/auth_matcher && env -u CARGO_TARGET_DIR cargo build-sbf --tools-version v1.52 --offline)
+cargo test --locked --offline --test v16_cu inventory_cashflow_partitions -- --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_047_equivalent_route_semantics::fee_leg_partition::v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles \
+  inv_024_attributed_quote_value_conservation::v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim \
+  inv_045_no_free_mark_movement::public_carry_order::v16_program_row425_public_carry_entitlement_is_partition_and_order_equivalent \
+  inv_052_split_merge_invariance::v16_program_split_fee_close_has_bounded_rounding_and_exact_custody \
+  inv_081_success_state_validity_over_complete_public_routes::fee_resolution_atomicity::v16_program_retained_withdrawal_rolls_back_fee_resolution_and_paid_prefix
+cargo fmt --all -- --check
+git diff --check
+git diff --quiet origin/codex/invariant-fidelity-reopen-20260904 -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support tests/fixtures
+```
+
 ## INV-066/067 receipt transaction partitions (2026-09-09)
 
 [`cu/inv_067_receipt_partition_confluence.rs`](cu/inv_067_receipt_partition_confluence.rs),
