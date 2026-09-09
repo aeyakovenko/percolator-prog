@@ -388,6 +388,59 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## Row 418 mixed native/SPL terminal disposition (2026-09-09)
+
+[`cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs`](cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs)
+extends `v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent`
+with four net-new worlds: native primary or secondary, crossed with either resolved-payout
+rail. It retains the eight existing non-native decimal/payout worlds and their common oracle.
+The existing single-native-vault sync/redemption witness is unchanged, not duplicated.
+
+Each world publicly deposits 1,200 primary atoms, tops up 300 insurance atoms, and supplies
+17 primary surplus atoms plus 1,800 secondary liquidity atoms. Live withdrawal (137 atoms)
+and insurance withdrawal use the rail opposite the remaining resolved user payout (1,063
+atoms). Cross-rail payment releases primary backing as surplus, never a second claim.
+The same oracle checks every token amount, mint supply, owner, native reserve, lamport backing,
+booked capital/insurance, both vault closures, and exact market/portfolio/tombstone rent.
+Native mint supply remains zero; funded wrapped atoms are counted separately. Native token
+principal must leave via SPL transfers and cannot be included in the authority's rent refund.
+
+Before committing the terminal sequence, the existing late-SPL-error suffix checks exact
+rollback of both vault closes, resolved payout, portfolio close, insurance withdrawal, and
+tombstone write, including native backing lamports. The subsequent four successful public
+terminal instructions must finish within the existing per-step bound. Native-secondary setup
+uses public `UpdateBaseUnitMints` and reuses the bootstrap's empty native ATA. The existing
+INV-081 helper supplies LiteSVM's missing native-mint genesis account; no private state bytes
+are edited and no new account-injection helper is added.
+
+Classification: **net-new, non-duplicative coverage-only increment** for
+`all-supported-quote-token-variants-have-a-bounded-terminal-disposition`, not whole-property
+closure. Insurance is withdrawn before `CloseSlab`, so no native burn/retirement fix is needed.
+PR #418's single-native unbudgeted-insurance retirement/incinerator test and engine proofs
+are not duplicated or rerun. Remaining native insurance retirement belongs to #418. Row 418
+stays OPEN, and invariant verdicts stay unchanged; arbitrary histories, mutable/freeze-authority
+mints, receipts, trade/PnL histories, and maximum shapes are not newly covered here.
+
+Verification on base `2e722773` rebuilt unchanged default-feature production code with
+platform-tools v1.52; SBF SHA-256 is
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The exact selector passed **1/1 tests, 12/12 worlds** in 4.85 seconds (1,061 filtered).
+New mixed worlds peaked at **79,303 CU/step** and **183,100 CU/rollback transaction**;
+the full selector peaked at 85,214 and 200,921 CU respectively, below asserted 150,000/300,000
+limits. An initial setup-only run hit `AlreadyProcessed` when recreating the bootstrap native
+ATA; reusing that existing public account fixed the fixture, with no production edits.
+
+From `/tmp/codex-agent-worktrees/row418-inv070-quote-variants-20260909`:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row418-inv070-quote-variants-20260909-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$PWD/target/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent -- --exact --nocapture
+git diff --check
+```
+
 ## Row 418 native-quote terminal disposition (2026-09-08)
 
 [`cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs`](cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs)

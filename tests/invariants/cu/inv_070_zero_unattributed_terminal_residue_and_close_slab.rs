@@ -471,6 +471,7 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
     use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::{
         inv018_create_public_spl_mint, inv018_public_spl_market,
     };
+    use super::inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market;
     use solana_sdk::{
         fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
     };
@@ -488,12 +489,25 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
         vault: Pubkey,
         user_token: Pubkey,
         admin_token: Pubkey,
-        supply: u64,
+        funded: u64,
     }
 
-    for decimals in [0, 6, 9, u8::MAX] {
+    // Keep the existing decimal product; mixed rails add native custody in either
+    // position without repeating the single-native-vault sync/redemption witness.
+    for (decimals, native_rail) in [
+        (0, None),
+        (6, None),
+        (9, None),
+        (u8::MAX, None),
+        (spl_token::native_mint::DECIMALS, Some(0)),
+        (spl_token::native_mint::DECIMALS, Some(1)),
+    ] {
         for payout_rail in 0..2 {
-            let mut env = inv018_public_spl_market(decimals);
+            let mut env = if native_rail.is_some() {
+                inv081_public_native_market()
+            } else {
+                inv018_public_spl_market(decimals)
+            };
             let owner = Keypair::new();
             env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
             let mut peak_step_cu = env.init_market_cu;
@@ -503,16 +517,46 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
             };
             check_step("public InitMarket", env.init_market_cu);
 
-            let secondary_mint = inv018_create_public_spl_mint(
+            let added_mint = inv018_create_public_spl_mint(
                 &mut env.svm,
                 &env.payer,
                 env.admin.pubkey(),
                 decimals,
             );
-            check_step(
-                "public UpdateBaseUnitMints",
-                env.update_base_unit_mints_with_cu(env.mint, secondary_mint),
-            );
+            let secondary_mint = if native_rail == Some(1) {
+                // Publicly move the empty bootstrap native vault to the secondary
+                // role; only the host's account handles change after this succeeds.
+                check_step(
+                    "public UpdateBaseUnitMints native secondary",
+                    env.send(
+                        ProgInstruction::UpdateBaseUnitMints {
+                            primary_mint: added_mint.to_bytes(),
+                            secondary_mint: env.mint.to_bytes(),
+                            authority_epoch: env.control_sequences(0).authority_epoch,
+                        },
+                        vec![
+                            AccountMeta::new(env.admin.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new_readonly(added_mint, false),
+                            AccountMeta::new_readonly(env.mint, false),
+                            AccountMeta::new_readonly(env.vault, false),
+                        ],
+                        &[&env.admin.insecure_clone()],
+                    )
+                    .unwrap(),
+                );
+                let native_mint = env.mint;
+                env.mint = added_mint;
+                env.vault =
+                    create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, env.mint);
+                native_mint
+            } else {
+                check_step(
+                    "public UpdateBaseUnitMints",
+                    env.update_base_unit_mints_with_cu(env.mint, added_mint),
+                );
+                added_mint
+            };
             let portfolio_key = Keypair::new();
             system_create_account_for_test(
                 &mut env.svm,
@@ -542,6 +586,8 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
             for (rail, mint) in [env.mint, secondary_mint].into_iter().enumerate() {
                 let vault = if rail == 0 {
                     env.vault
+                } else if native_rail == Some(1) {
+                    canonical_vault_ata(env.vault_authority, mint)
                 } else {
                     create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, mint)
                 };
@@ -549,50 +595,61 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
                     create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), mint);
                 let admin_token =
                     create_ata_for_test(&mut env.svm, &env.payer, env.admin.pubkey(), mint);
-                let mut funding = vec![spl_token::instruction::mint_to(
-                    &spl_token::ID,
-                    &mint,
-                    &admin_token,
-                    &env.admin.pubkey(),
-                    &[],
-                    if rail == 0 {
-                        INSURANCE + SURPLUS
+                let native = native_rail == Some(rail);
+                assert_eq!(mint == spl_token::native_mint::ID, native);
+                let admin_funding = if rail == 0 {
+                    INSURANCE + SURPLUS
+                } else {
+                    SECONDARY_RESERVE
+                };
+                let mut funding = Vec::new();
+                for (destination, amount) in [
+                    (admin_token, admin_funding),
+                    (user_token, if rail == 0 { DEPOSIT } else { 0 }),
+                ] {
+                    if amount == 0 {
+                        continue;
+                    }
+                    if native {
+                        funding.extend([
+                            system_instruction::transfer(&env.admin.pubkey(), &destination, amount),
+                            spl_token::instruction::sync_native(&spl_token::ID, &destination)
+                                .unwrap(),
+                        ]);
                     } else {
-                        SECONDARY_RESERVE
-                    },
-                )
-                .unwrap()];
-                if rail == 0 {
+                        funding.push(
+                            spl_token::instruction::mint_to(
+                                &spl_token::ID,
+                                &mint,
+                                &destination,
+                                &env.admin.pubkey(),
+                                &[],
+                                amount,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                }
+                if !native {
                     funding.push(
-                        spl_token::instruction::mint_to(
+                        spl_token::instruction::set_authority(
                             &spl_token::ID,
                             &mint,
-                            &user_token,
+                            None,
+                            spl_token::instruction::AuthorityType::MintTokens,
                             &env.admin.pubkey(),
                             &[],
-                            DEPOSIT,
                         )
                         .unwrap(),
                     );
                 }
-                funding.push(
-                    spl_token::instruction::set_authority(
-                        &spl_token::ID,
-                        &mint,
-                        None,
-                        spl_token::instruction::AuthorityType::MintTokens,
-                        &env.admin.pubkey(),
-                        &[],
-                    )
-                    .unwrap(),
-                );
                 send_raw_ixs(&mut env.svm, &env.payer, funding, &[&env.admin]).unwrap();
                 rails.push(Rail {
                     mint,
                     vault,
                     user_token,
                     admin_token,
-                    supply: if rail == 0 {
+                    funded: if rail == 0 {
                         DEPOSIT + INSURANCE + SURPLUS
                     } else {
                         SECONDARY_RESERVE
@@ -655,6 +712,9 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
 
             // Only predetermined payments drive this oracle. In particular, primary
             // backing discharged via the secondary rail becomes surplus, not a second claim.
+            let token_rent = env
+                .svm
+                .minimum_balance_for_rent_exemption(TokenAccount::LEN);
             let assert_stock = |env: &V16CuEnv,
                                 user_paid: [u64; 2],
                                 insurance_paid: [u64; 2],
@@ -669,14 +729,15 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
                     SECONDARY_RESERVE - secondary_paid,
                 ];
                 for (rail, accounts) in rails.iter().enumerate() {
+                    let native = native_rail == Some(rail);
                     let mint_account = env.svm.get_account(&accounts.mint).unwrap();
                     let mint = Mint::unpack(&mint_account.data).unwrap();
                     assert_eq!(mint_account.owner, spl_token::ID);
-                    assert_eq!(mint.supply, accounts.supply);
+                    assert_eq!(mint.supply, if native { 0 } else { accounts.funded });
                     assert_eq!(mint.decimals, decimals);
                     assert_eq!(mint.mint_authority, COption::None);
                     assert_eq!(mint.freeze_authority, COption::None);
-                    let mut observed_supply = 0;
+                    let mut tracked_tokens = 0;
                     for (key, wallet, expected) in [
                         (accounts.user_token, owner.pubkey(), user_paid[rail]),
                         (
@@ -705,14 +766,26 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
                         assert_eq!(token.mint, accounts.mint);
                         assert_eq!(token.owner, wallet);
                         assert_eq!(token.state, AccountState::Initialized);
-                        assert_eq!(token.is_native, COption::None);
+                        assert_eq!(
+                            token.is_native,
+                            if native {
+                                COption::Some(token_rent)
+                            } else {
+                                COption::None
+                            }
+                        );
+                        assert_eq!(
+                            token_account.lamports,
+                            token_rent + if native { expected } else { 0 },
+                            "exact rent and backing on rail {rail}, account {key}"
+                        );
                         assert_eq!(token.delegate, COption::None);
                         assert_eq!(token.close_authority, COption::None);
                         assert_eq!(token.amount, expected, "rail {rail}, account {key}");
-                        observed_supply += token.amount;
+                        tracked_tokens += token.amount;
                     }
                     assert_eq!(
-                        observed_supply, accounts.supply,
+                        tracked_tokens, accounts.funded,
                         "every atom classified on rail {rail}"
                     );
                     assert_eq!(
@@ -828,7 +901,7 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
                     &rails[0].admin_token,
                     &owner.pubkey(),
                     &[],
-                    rails[0].supply + 1,
+                    rails[0].funded + 1,
                 )
                 .unwrap(),
             );
@@ -883,7 +956,18 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
             let portfolio_rent = env.svm.get_account(&portfolio).unwrap().lamports;
             let vault_rent: u64 = rails
                 .iter()
-                .map(|rail| env.svm.get_account(&rail.vault).unwrap().lamports)
+                .enumerate()
+                .map(|(rail, accounts)| {
+                    let account = env.svm.get_account(&accounts.vault).unwrap();
+                    let token = TokenAccount::unpack(&account.data).unwrap();
+                    // Wrapped principal leaves through SPL transfers, never as a rent refund.
+                    account.lamports
+                        - if native_rail == Some(rail) {
+                            token.amount
+                        } else {
+                            0
+                        }
+                })
                 .sum();
             let admin_lamports = env.svm.get_account(&env.admin.pubkey()).unwrap().lamports;
             let owner_lamports = env.svm.get_account(&owner.pubkey()).unwrap().lamports;
@@ -929,7 +1013,7 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
                 env.svm.get_account(&owner.pubkey()).unwrap().lamports,
                 owner_lamports
             );
-            println!("INV-070 decimals={decimals}, payout_rail={payout_rail}: peak step {peak_step_cu} CU, terminal rollback {} CU",
+            println!("INV-070 decimals={decimals}, native_rail={native_rail:?}, payout_rail={payout_rail}: peak step {peak_step_cu} CU, terminal rollback {} CU",
                 failure.meta.compute_units_consumed);
         }
     }
