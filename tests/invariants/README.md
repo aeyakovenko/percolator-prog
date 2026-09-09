@@ -3,6 +3,58 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-069 expired residue across slot reuse (2026-09-09)
+
+[`cu/inv_069_terminal_normalization_and_retirement.rs`](cu/inv_069_terminal_normalization_and_retirement.rs)
+adds one public LiteSVM lifecycle on base `82fe477d`, branch
+`codex/pr135-inv069-reused-residue-20260909`, in the fresh worktree
+`/home/anatoly/pr135-inv073-close-residue-20260909`. **PR135 tests/docs only;
+production, engine pins, and invariant statuses unchanged.**
+
+Public System/SPL/ATA/wrapper instructions fund 307 backing atoms and donate 17
+unbooked atoms. Exact-expiry retirement clears both source/bucket records but
+preserves custody. Market-authority reuse installs a new generation and a different
+provider, whose fresh 401 atoms cannot absorb the old residue: a 402-atom withdrawal
+rejects at instruction 2 with `EngineLockActive` and complete compiled-account plus
+mint/old-provider byte, metadata, and lamport rollback, except the exact payer fee.
+The same current-generation request for 401 succeeds, retirement succeeds again,
+and one `CloseSlab` burns exactly 307, sweeps exactly 17, and refunds exact rent.
+Input-derived SPL balances/supply, raw market stock/reservation censuses, canonical
+empty retired records, and an unchanged unrelated asset slot check the history.
+This extends the existing retirement and reused-slot fee-policy witnesses with
+cross-generation residue disposition, not late-expiry claims, quote variants,
+cursor maturity, drain exits, or closed-destination recovery.
+
+Residual gaps: one long-side domain and two generations; no user positions,
+receipts, earnings, liens, fractional residue, permissionless reuse, alternate
+quote rails, maximum shapes, or arbitrary histories. Administrative progress uses
+the market authority and the new provider. No invariant-status promotion or fresh
+SBF build is claimed. The private cache copy's SBF has SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+its source worktree at `39d05875` has identical `src/`, `Cargo.toml`, and `Cargo.lock`.
+
+Exact commands from the fresh worktree (copy is first-use setup):
+
+```sh
+cp -a /dev/shm/pr135-row424-progress-target /dev/shm/pr135-inv069-reused-residue-target
+export CARGO_TARGET_DIR=/dev/shm/pr135-inv069-reused-residue-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_069_terminal_normalization_and_retirement::v16_program_reused_asset_keeps_expired_residue_out_of_new_provider_principal -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_069_terminal_normalization_and_retirement::v16_program_reused_asset_keeps_expired_residue_out_of_new_provider_principal \
+  inv_069_terminal_normalization_and_retirement::v16_program_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate \
+  inv_063_backing_expiry_normalization::v16_program_retire_staggered_backing_expiry_is_atomic_across_siblings \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: isolated new selector **1/1**, focused group **4/4**, final format and
+whitespace checks **PASS**. New-selector peak checked step: **42,561 CU** isolated,
+**36,561 CU** in the warmed group, below 300,000. Initial formatting differences
+were corrected; the existing `solana-client` future-incompatibility warning remains.
+
 ## INV-017 transaction-wide privileges and account-kind alias (2026-09-09)
 
 [`cu/inv_017_signer_writable_role_and_account_alias_safety.rs`](cu/inv_017_signer_writable_role_and_account_alias_safety.rs)
