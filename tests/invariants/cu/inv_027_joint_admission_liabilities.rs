@@ -24,7 +24,7 @@ fn requirement(size: i128) -> u128 {
     (notional * u128::from(MARGIN_BPS)).div_ceil(10_000)
 }
 
-fn public_portfolio(env: &mut V16CuEnv, owner: &Keypair) -> Pubkey {
+pub(super) fn public_portfolio(env: &mut V16CuEnv, owner: &Keypair) -> Pubkey {
     env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
     let key = Keypair::new();
     system_create_account_for_test(
@@ -48,7 +48,12 @@ fn public_portfolio(env: &mut V16CuEnv, owner: &Keypair) -> Pubkey {
     key.pubkey()
 }
 
-fn public_deposit(env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey, amount: u128) -> Pubkey {
+pub(super) fn public_deposit(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    amount: u128,
+) -> Pubkey {
     let token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
     send_raw_tx(
         &mut env.svm,

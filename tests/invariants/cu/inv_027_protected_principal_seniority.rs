@@ -44,6 +44,9 @@ mod maintenance_terminal_seniority;
 #[path = "inv_027_joint_admission_liabilities.rs"]
 mod joint_admission_liabilities;
 
+#[path = "inv_027_flat_admission_liabilities.rs"]
+mod flat_admission_liabilities;
+
 const ISSUE408_FEE_PER_SLOT: u128 = 1_000;
 const ISSUE408_AGED_SLOT: u64 = 500;
 const ISSUE408_MOVE_SLOT: u64 = 542;
