@@ -26,6 +26,8 @@
 //! routes and repeated reports, attributing fees and keeper payouts at each committed-price prefix.
 //! The `late_stale_crank_rollback` child composes paid CPI discovery with a late stale-feed
 //! rejection, then fresh observation recovery and a mixed-mode no-CPI batch reversal.
+//! The `custody_cap_carry` child frames two unequal pending carries across deposit,
+//! withdrawal, maintenance, and insurance words before/after canonical public cranks.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -44,6 +46,9 @@ mod interleaved_cap_carry;
 
 #[path = "inv_045_late_stale_crank_rollback.rs"]
 mod late_stale_crank_rollback;
+
+#[path = "inv_045_custody_cap_carry.rs"]
+mod custody_cap_carry;
 
 #[test]
 fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {

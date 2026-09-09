@@ -3,6 +3,61 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-045 custody-route carry composition (row 425, 2026-09-09)
+
+[`cu/inv_045_custody_cap_carry.rs`](cu/inv_045_custody_cap_carry.rs), mounted by INV-045,
+adds **net-new partial PR135 coverage** for
+`all-economic-routes-preserve-canonical-fractional-accrual-carry` on unchanged base
+`2e722773daf71d457fde8634d7b509742d8d5e25`. Worktree:
+`/tmp/codex-agent-worktrees/row425-inv045-carry-coverage-20260909`; branch:
+`codex/row425-inv045-carry-coverage-20260909`. **Row 425 remains OPEN.** No production,
+engine pin/proof, shared helper, or status-ledger changes are included.
+
+The existing interleaved-trade witness owns crank-first trade reductions and reward attribution;
+PR #425 owns the production trade-before-crank accrual shortcut and its terminal-entitlement
+regression. This increment instead checks successful **Deposit, Withdraw, SyncMaintenanceFee,
+and TopUpInsurance** words with pending carry, without a position-changing interruption.
+It neither reruns that finding nor claims to close its missing dimension.
+
+The public product has **32 worlds**: two price directions, four route rotations, forward/reverse
+word order, and custody before/after the crank boundary. Two exposed AuthMark assets start at
+100/125 with unequal 7/11-unit positions. Independent input-derived quotient/remainder equations
+bind every checked canonical prefix; the distinct per-slot capacities cross their first price
+atoms at slots five/four and finish with carry 2,000/5,000. Each of **640 custody calls** frames
+both complete oracle profiles and both exposed portfolio accounts, checks the exact flat-owner
+capital/SPL delta and once-per-slot fee, and reconciles capital, settled PnL, insurance, vault,
+and all minted quote tokens. **320 cranks** settle both owners to exact input-derived values;
+all sixteen schedules for each direction converge to identical actor values and custody.
+Setup is excluded from these call counts. System/SPL/ATA/wrapper instructions construct every
+economic account; only Clock and signer funding are supplied by the harness. There are no private
+state byte edits or direct engine transitions.
+
+The exact selector passes **1/1** (1,062 filtered) on both runs, in **18.61s / 19.15s**.
+Maximum CU across the passing runs:
+deposit **53,023**, withdrawal **74,832**, maintenance **55,352**, insurance top-up **39,169**,
+and crank **290,097**. Custody calls assert the existing 300,000-CU budget; the two-asset crank
+asserts the 1,400,000 transaction ceiling. These are sampled shapes, not maximum-CU evidence.
+The state remains live with exposure; terminal payout, nonzero funding, other custody rails,
+all route permutations, arbitrary histories, and trade-before-crank closure remain outside scope.
+
+Validation uses a private copy of cached default-feature SBF SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`, not a fresh SBF build.
+The source/Cargo files match the artifact's row-414/424 production base and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Build inputs were copied from
+`/dev/shm/row424-inv070-target` into the private `target/`; host tests compile in this worktree.
+An initial direct-rustc cache selection failed on dependency variants; subsequent ordinary Cargo
+runs corrected two test-oracle mistakes (omitted settled PnL and an unsigned wallet delta).
+Neither was a production finding. No engine proof, parent-red/fixed-green run, or broad suite is claimed.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::custody_cap_carry::v16_program_custody_route_words_preserve_pending_fractional_carry -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_045_custody_cap_carry.rs
+git diff --check
+```
+
 ## INV-012 joint incarnation binding (row 414, 2026-09-09)
 
 [`cu/inv_012_joint_incarnation_binding.rs`](cu/inv_012_joint_incarnation_binding.rs),
