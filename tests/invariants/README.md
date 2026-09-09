@@ -676,6 +676,88 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
+## INV-020 staged account-action observations (row 426, 2026-09-09)
+
+[`cu/inv_020_staged_action_observations.rs`](cu/inv_020_staged_action_observations.rs)
+adds one net-new public LiteSVM test for PR135, mounted by the INV-020 owner.
+Worktree: `/tmp/codex-agent-worktrees/pr135-row426-current-observation-20260909`;
+branch: `codex/pr135-row426-current-observation-20260909`. The starting base was
+the freshly fetched `c90076ab` head of `origin/codex/invariant-fidelity-reopen-20260904`;
+the final commit is rebased onto refreshed head `73d64018`. Production and Cargo
+inputs are identical across those bases.
+**Row 426 remains OPEN.** No production, engine-pin, shared-harness, invariant-status,
+or finding-status changes. This is bounded conformance evidence, not closure.
+
+The distinct relation is **market-only prefix -> account recertification -> rewarded
+liquidation or bilateral owner reduction**, replayed from identical public snapshots:
+
+- System, SPL, ATA, and wrapper instructions construct the two-leg Hybrid/AuthMark
+  market, three funded portfolios, and custody. Only Clock and external Pyth report
+  fixtures are supplied by the harness. Replay restores captured whole Accounts
+  verbatim, including Clock; no initialized protocol fields are fabricated or edited.
+- The first 32-slot bounded prefix changes the market but leaves all three portfolios
+  byte-identical. The short's original healthy certificate is explicitly stale.
+- Four schedules cross each of two account actions: full observations, reversed full
+  observations, empty hints, and Hybrid-only hints. The two incomplete schedules
+  each reject twice with `EngineNonProgress` and full Account equality, including
+  both assets, all portfolios/certificates, custody, reports, non-fee signers, and Clock.
+  Only the network fee payer and runtime/program accounts are outside this frame.
+- A complete-current retry reaches the same whole-account snapshot in every schedule.
+  Independent input arithmetic requires short capital/equity 130,000, gross initial
+  and maintenance margin 209,000, deficit 79,000, and no premature liquidation reward.
+  Every certificate epoch and active bitmap must match the current market/account.
+- Once evidence is current, the same four hint sets produce byte-identical rewarded
+  partial-liquidation outcomes. Independent assertions bind the remaining short
+  quantity to both OI lanes, recompute margin, require zero residual deficit, reconcile
+  the penalty/reward/insurance split and capital census, and forbid SPL movement.
+- For owner reduction, the full control explicitly refreshes the still-stale peer;
+  the other schedules rely on trade-time full recertification. All four final frames
+  match exactly, with the first leg closed, the second unchanged, short margin 105,000,
+  long attributed value 10,090,000, unchanged custody, and no keeper reward.
+
+This supplies sampled evidence for INV-020/056 observation confinement, INV-053/054
+certificate equivalence, INV-061 liquidation continuation, INV-071/072 bounded retry
+and order robustness, INV-024 attributed value, and INV-081/086 post-state/reference
+relations. It does not duplicate INV-020 active-claim conversion, INV-045 reward
+catchup, or INV-077 composite-feed capacity products.
+
+Residual gaps: this is **not a symmetric single-omission matrix**. An exploratory
+omitted-Hybrid certificate comparison was not equivalent; work stopped before any
+value-moving continuation from that state. That schedule is not retained as passing
+evidence and is neither resolved nor certified here. Direct stale-safe reduction
+before complete market observations, released-PnL conversion, CPI/batch transports,
+funding/maintenance, other providers, multi-episode liquidation, terminal payouts,
+and arbitrary/max-shape histories remain outside this increment. The test does not
+claim that all risk-reducing actions must reject before an explicit crank.
+
+Validation uses a freshly built default-feature wrapper SBF with platform-tools
+v1.52 and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Host dependencies were copied to a private `/dev/shm` target; the test binary is
+compiled from this worktree. No production red/green fix is claimed. Fixture
+development corrected rejected minimum-margin parameters, an overly strong
+stale-safe-reduction rejection assumption, and a one-leg CU guardrail used for a
+two-leg action. Final bounds are 325,000 CU for prefix/refresh and 500,000 for actions.
+The new test passes with **8 equivalent outcomes and 8 exact atomic rejections**;
+prefix/refresh/action peaks are **182,468 / 283,801 / 380,553 CU**. Cargo emits the
+existing `solana-client v1.18.26` future-incompatibility warning.
+
+The new exact selector and each adjacent selector below pass **1/1** on the rebased
+head. `cargo fmt --all -- --check` and `git diff --check` also pass. No broad suite,
+Kani, matcher-artifact rebuild, or maximum-shape campaign is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-row426-current-observation-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::v16_program_staged_observations_match_current_liquidation_and_reduction -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::current_health_evidence:: -- --nocapture
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::liquidation_observation_replay:: -- --nocapture
+cargo test --locked --offline --test v16_cu v16_bpf_inv056_mixed_observations_preserve_full_refresh_trade_boundary -- --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-005 backing-role depletion and refilling (row 416, 2026-09-09)
 
 [`cu/inv_005_backing_role_refunding.rs`](cu/inv_005_backing_role_refunding.rs), mounted

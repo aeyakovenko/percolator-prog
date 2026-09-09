@@ -27,6 +27,10 @@
 //! The `active_claim_evidence` child keeps a closed-source claim payable while another asset
 //! stays active: same-slot target lag and unrelated updates gate cached conversion independently
 //! of explicit/trade-time recertification; authenticated catchup restores the live conversion.
+//! The `staged_action_observations` child compares exact public snapshots through a market-only
+//! prefix, recertification, and rewarded liquidation or bilateral owner reduction. Incomplete
+//! schedules must reject atomically while observations remain pending, then match full-current
+//! action outcomes once the complete evidence has been committed.
 //! An independent typed parser model covers 726 boundary words, 15,552 structural/semantic
 //! combinations, and 12,288 seeded valid layouts. An independent overflow-free confidence oracle
 //! compares all 65,536 basis-point settings across wide carry and overflow operands.
@@ -54,6 +58,9 @@ mod chunked_observation_admission;
 
 #[path = "inv_020_active_claim_evidence.rs"]
 mod active_claim_evidence;
+
+#[path = "inv_020_staged_action_observations.rs"]
+mod staged_action_observations;
 
 #[test]
 fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
