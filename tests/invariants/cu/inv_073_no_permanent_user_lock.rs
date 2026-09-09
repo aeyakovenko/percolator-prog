@@ -40,6 +40,12 @@
 //! asset's Recovery/restart, reopens the new generation on the opposite side, and lands discovery
 //! hints retained before shutdown. Both hint orders and both payout orders must finish bounded
 //! terminal accrual and unsigned economic exits with identical, input-derived entitlements.
+//!
+//! `v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts` consumes insurance
+//! through resolved bankruptcy, then proves ranked unsigned exits, exact source/receipt payout
+//! arithmetic, retained insurance/backing custody, and full rollback for both payout aliases.
+//! It covers exhausted and partially spent budgets on either asset; B booking and retirement
+//! remain outside this finite witness.
 
 use super::*;
 
@@ -48,6 +54,9 @@ mod mixed_backing_expiry_exit;
 
 #[path = "inv_073_recovery_claim_liability_exit.rs"]
 mod recovery_claim_liability_exit;
+
+#[path = "inv_073_spent_insurance_terminal_exit.rs"]
+mod spent_insurance_terminal_exit;
 
 #[test]
 fn v16_program_restarted_asset_with_retained_live_leg_has_bounded_stale_exit() {

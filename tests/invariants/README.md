@@ -3,6 +3,86 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-067/071/073/078 spent-insurance terminal user exits (2026-09-09)
+
+[`cu/inv_073_spent_insurance_terminal_exit.rs`](cu/inv_073_spent_insurance_terminal_exit.rs)
+adds one test under the existing INV-073 owner:
+`v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts`.
+Base: the authorized branch's locally recorded pushed head
+`50ecb129a4e353a5f16440d989e988d71eb58134`. All work and fresh build artifacts
+are in `/dev/shm/pr135-liveness-partial-20260909`, with independent Git metadata.
+No GitHub queries, other PR branches, holdouts, or external reports were used.
+Production, Cargo, engine, shared helpers, fixture sources, and invariant verdicts
+are unchanged.
+
+Eight public LiteSVM/SBF worlds cross asset 0/1, insurance funding of 200/251,
+and profitable-owner/idle-owner payout order. System, ATA, SPL, and wrapper
+instructions create three portfolios, fund deposits `[1000,100,137]`, and add
+113 insurance atoms on the other asset. Mint authority is revoked. Ten lots
+move from 100 to 130 through authenticated observations. Public settlement
+books a 300-atom gain and consumes the losing owner's 100 principal, leaving
+a 200-atom deficit. Authenticated stale resolution at slot 40 requires only
+an unrelated fee payer; the owner-only window ends at slot 43.
+
+The unsigned debtor close consumes exactly 200 atoms from the paired insurance
+domain, with zero B increments. Historical spent counters then remain nonzero
+while both other owners exit in either order, even when the affected insurance
+budget is exhausted. Every successful close/crank strictly decreases a decoded
+lexicographic rank over negative PnL, stored legs, source entries, capital,
+positive PnL, and terminal status. The test caps each account at eight calls;
+each observed exit takes one. Transactions verify a sole unrelated payer
+signature, packet size, and the actual 325,000-CU limit.
+
+Exact public-input arithmetic accounts for source-rate quantization:
+`floor(300 * floor(100 * CREDIT_RATE_SCALE / 300) / CREDIT_RATE_SCALE) = 99`
+atoms convert into capital. The remaining 201-atom terminal face receives the
+200-atom insurance residual and clears at its terminal haircut rate. Payouts
+are exactly `[1299,0,137]`; remaining custody is 113/164 insurance atoms plus
+one senior source-backing atom. The test checks the exact snapshot, rate,
+receipted bound, cleared receipt, consumed backing/provider receivable,
+remaining backing, zero capital/OI/source claims, fixed supply, and SPL vault
+reconciliation. That remaining backing atom is not unclassified rounding dust.
+
+Both close/crank aliases reject inside the owner window, against a valid
+same-mint destination belonging to the reserve owner at the paying step, and
+on terminal replay. Read-only SBF simulation identifies the paying instruction;
+the destination failure follows internal payout computation. Every rejection
+preserves all tracked economic Accounts, including metadata, signer lamports,
+Clock, portfolios, and SPL custody; only the network fee payer is excluded.
+Successful calls also frame unrelated Accounts exactly.
+
+This covers actual spent insurance and terminal bankruptcy accounting, beyond
+the existing unspent-insurance receipt matrix. It adds neither transaction
+partition confluence nor Recovery/deferred-live-liability coverage. Remaining
+gaps include insufficient insurance requiring B booking, pending partial-receipt
+top-ups, nonzero fees/funding, native quote, multiple exposed assets per owner,
+maximum shapes, arbitrary schedules, mechanical portfolio deletion, and reserve
+retirement. No production bug or universal invariant closure is claimed.
+
+Validation: fresh default-feature SBF with platform-tools v1.52, locked/offline;
+SHA-256 `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Focused test: **1 passed**, eight worlds, 24 successful continuations, 96 exact
+rollbacks, peak **319,589 CU**. Invariant index: **1 passed**. Formatting and
+whitespace checks pass. During development, the initial 1,300-atom payout
+expectation was corrected using the source-rate and senior-backing accounting
+above; no failing production behavior was confirmed. Existing regression-target
+dead-code and solana-client future-compatibility warnings remain. No broad suite
+was run.
+
+Commands from the private checkout:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::spent_insurance_terminal_exit::v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+```
+
 ## INV-045/046/047 retained exits after paid source repricing (2026-09-09)
 
 [`stateful/inv_045_retained_mark_exit.rs`](stateful/inv_045_retained_mark_exit.rs)
