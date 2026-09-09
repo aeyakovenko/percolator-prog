@@ -3,6 +3,79 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-071/082 released obligation before FinalizeRecovery (2026-09-09)
+
+[`cu/inv_071_recovery_obligation_finalization.rs`](cu/inv_071_recovery_obligation_finalization.rs),
+mounted by INV-071, adds one public LiteSVM selector on base
+`98cd3c212d8eebbf72c57b4ff06cbbf56cf5f2e6`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. System/SPL/ATA and wrapper instructions
+create all accounts, mint/deposit 2,012 atoms, open two independent matched pairs,
+and shut down both assets through the market authority. No account-state bytes
+are injected; serialization is used only on local expected-account copies.
+
+Both long/short orientations retain a zero-basis, `POS_SCALE`-weight obligation
+on asset 0. Its solvent peer exits at the unchanged price, making that obligation
+releasable. An independent asset-1 debtor retains a one-atom bankruptcy residual;
+an unsigned, empty-hint crank after its authenticated expiry declares market
+Recovery. The target's next crank must remove its released obligation **without
+finalizing Recovery**. Only the following crank selects the concrete
+`FinalizeRecovery` continuation, with Clock advanced nine slots and caller slot
+zero. This exercises the released-obligation branch before finalization, unlike
+the existing expired-close/B-stale witness's immediate Recovery-to-Resolved step.
+
+The independent target-local lexicographic rank is `(market phase, retained leg
+count, capital)`, with Live/Recovery/Resolved phases `2/1/0`. Exact observed ranks:
+`(2,1,1000) -> (1,1,1000) -> (1,0,1000) -> (0,0,1000) -> (0,0,0)`.
+Every accepted crank strictly lowers it; Clock advancement itself earns no rank
+credit. Complete serialized comparisons permit only the declared market fields,
+then the mirrored stored/pending/loss-weight aggregates and target leg/bitmap/cert
+invalidation, then mode/current/resolution slots and loss-stale clearing.
+Finalization frames every portfolio, frozen asset clock/index, wrapper profile,
+mint, vault, destination and tracked nonpayer authority, including the independent
+close and its asset. No engine selector, continuation, or modeled decrement is
+called by the expected-state/rank oracle.
+
+Finalization starts a fresh five-slot owner window: at deadline minus one, a
+future caller slot still rejects with `ExpectedSigner` and exact rollback. At the
+exact Clock deadline, caller slot zero pays the target exactly 1,000 atoms without
+its owner's signature. Complete token-account comparisons allow only vault
+`2012 -> 1012` and destination `0 -> 1000`; aggregate capital falls by exactly
+1,000, the target is economically terminal, and a retry returns
+`EngineNonProgress` with exact rollback. The dedicated payer's transaction fees
+are excluded from the frame. The other three portfolios are framed, not drained.
+
+Validation: a **fresh default-feature SBF build** with platform-tools v1.52 passes;
+SHA-256 `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new selector passes both alone and with the two adjacent controls below:
+**3 passed, 0 failed, 1,100 filtered**. New probe: two worlds, eight successful
+cranks, four exact rejections, two exact payouts, maximum observed **95,129 CU**
+across reruns, under the 325,000 limit. Scoped rustfmt and diff checks pass. The existing
+`solana-client` future-Rust warning remains; no Kani harness was run.
+
+This is **coverage-only**, not a production fix or closure of the documented
+general concrete `FinalizeRecovery` rank-proof link. It covers one released
+obligation per target in both sides, one recovery reason, zero funding/fees and
+a full principal payout. Arbitrary histories, competing cleanup classes,
+partial/junior receipts, other recovery reasons and supported maximum shapes
+remain outside this probe. Engine/API pins and invariant statuses are unchanged;
+the Live/Resolved selector model's exclusion of `FinalizeRecovery` is unchanged.
+
+Commands from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/inv071-finalize-recovery-public-20260909-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_071_crank_progress::recovery_obligation_finalization::v16_program_recovery_releases_obligation_before_exact_finalization_and_payout -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_071_crank_progress::recovery_obligation_finalization::v16_program_recovery_releases_obligation_before_exact_finalization_and_payout \
+  inv_071_crank_progress::v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_progress \
+  inv_071_crank_progress::v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves
+rustfmt --edition 2021 --check tests/invariants/cu/inv_071_recovery_obligation_finalization.rs
+git diff --check
+```
+
 ## INV-047/052 two-asset fee-leg partition (2026-09-09)
 
 [`cu/inv_047_fee_leg_partition.rs`](cu/inv_047_fee_leg_partition.rs), mounted by

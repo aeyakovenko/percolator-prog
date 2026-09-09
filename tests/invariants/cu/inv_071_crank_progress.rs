@@ -21,6 +21,9 @@ use super::*;
 #[path = "inv_071_terminal_cursor_time.rs"]
 mod terminal_cursor_time;
 
+#[path = "inv_071_recovery_obligation_finalization.rs"]
+mod recovery_obligation_finalization;
+
 fn inv071_close_pending(ledger: CloseProgressLedgerV16) -> bool {
     ledger.active && !ledger.finalized && !ledger.canceled && ledger.residual_remaining != 0
 }
