@@ -180,6 +180,65 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_008_passive_reward_stock.
 git diff --check
 ```
 
+## INV-045 mixed spent/unspent batch capacity (2026-09-09)
+
+[`cu/inv_045_staggered_mark_envelope.rs`](cu/inv_045_staggered_mark_envelope.rs) adds
+**net-new partial PR135 coverage**, not a production finding/fix, on base `bd15c4e2`.
+Worktree: `/tmp/codex-agent-worktrees/inv045-carry-route-boundaries-20260909`;
+branch: `codex/inv045-carry-route-boundaries-20260909`. Production code, engine pin,
+shared helpers, and coverage-status ledgers are unchanged; row 425 remains OPEN.
+
+The distinct relation is a **single reduction followed by a batch containing both an
+already-updated asset and an asset with unspent discovery capacity**. The original
+staggered test starts with both assets unspent; the interleaved-cap and accepted-price
+reward histories do not put unequal discovery eligibility in one multi-asset trade.
+Row425's custody words do not change positions. This addition does not duplicate or
+certify their fractional-accrual-carry or reward-provenance obligations.
+
+**16 worlds** cross either first single-traded asset, both batch leg orders, both
+opposed price directions, and interleaved versus batch-first schedules. EWMA marks
+1,000,000/2,000,000 have ages five/two at slot six, straddling the three-slot accrual
+horizon. First reports are raw price `1`/`MAX_ORACLE_PRICE`; later same-slot reports
+reverse those extremes. Each world executes two singles and two two-asset batches:
+**64 checked transaction prefixes, 96 reduction legs, eight mixed-capacity batches**.
+The final repeated batch has neither asset eligible for another discovery update.
+
+An input-only clamp/EWMA/exhaustive fee oracle requires the unspent asset to move by
+its exact independently paid amount and the spent asset to retain its mark and slot,
+regardless of batch order. Every prefix checks raw targets, effective prices, both
+sides' exact OI/positions, each owner's exact fee debit and zero settled PnL, insurance
+and its nonwithdrawable classification, capital totals, vault accounting, and complete
+mint/vault/wallet/signer account frames. All eight schedules per direction converge on
+identical mark/slot/target/carry fields and owner economics. System/SPL/ATA/wrapper
+instructions construct the economic state; no initialized state bytes are injected.
+
+The final selector passes **1/1** (1,068 filtered), in **7.05s**. Peak measured single /
+batch CU: **273,919 / 345,697**, bounded by the existing multi-asset trade ceiling;
+setup CU is excluded. Only the new exact selector ran. Initial development corrected
+test-helper types and excluded independent authority keys from cross-world comparison;
+neither was a production finding. Full formatting and whitespace checks pass.
+Validation reuses cached default-feature SBF SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`, with matching
+source/Cargo inputs and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+There is no SBF rebuild or unchanged-suite rerun. The private host target was copied
+from `/dev/shm/row422-inv045-target`; after validation the private target below is
+inactive and may be deleted. Shared targets/artifacts were not modified or cleaned.
+
+Remaining gaps: CPI/Hybrid mixed-eligibility batches, raw-zero rejection, nonzero
+funding/maintenance, undercollectible fees, custody mutations, canonical catchup and
+terminal payouts, maximum shapes, and arbitrary histories. The final live positions
+retain pending paid targets; this test makes no terminal-entitlement or new nonzero
+fractional-carry claim.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/inv045-mixed-capacity-20260909-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/pr135-sbf-verify/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::staggered_mark_envelope::v16_program_mixed_spent_unspent_batch_capacity_is_asset_local -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-045 custody-route carry composition (row 425, 2026-09-09)
 
 [`cu/inv_045_custody_cap_carry.rs`](cu/inv_045_custody_cap_carry.rs), mounted by INV-045,
