@@ -33,6 +33,9 @@
 
 use super::*;
 
+#[path = "inv_005_backing_role_refunding.rs"]
+mod backing_role_refunding;
+
 fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)

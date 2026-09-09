@@ -3,6 +3,63 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-005 backing-role depletion and refilling (row 416, 2026-09-09)
+
+[`cu/inv_005_backing_role_refunding.rs`](cu/inv_005_backing_role_refunding.rs), mounted
+by INV-005, adds **net-new partial PR135 coverage** on base `b421fed9` from
+`origin/codex/invariant-fidelity-reopen-20260904`. Worktree:
+`/tmp/codex-agent-worktrees/row416-inv005-containment-revisit-20260909`; branch:
+`codex/row416-inv005-containment-revisit-20260909`. **Row 416 remains OPEN.**
+The prior funded-oracle production blocker and production-fix PR #416 are not retested
+or claimed fixed. No production, dependency, engine-proof, shared-harness, or status-ledger edits.
+
+The distinct relation is **funded -> two-domain depletion -> empty-role handoff ->
+new-holder refill -> depletion -> empty-role handoff**, with protection at every
+one-atom tail. The prior three-role principal matrix covers a funded rejection followed
+by the incumbent's exit; the existing backing ABA test covers stale withdrawal and
+cross-asset SPL/ledger-prefix rollback. Neither exercises loss and restoration of the
+cold-admin funding gate through both side-domain exits and a successor's new funding.
+This is not another retained-request ABA certification.
+
+Four worlds cross base/non-base asset and both long/short drain orders. Independently
+funded 17/29-atom backing buckets must both empty before the cold admin can configure
+the role. A 13-atom successor refill restores the guard, including its final atom.
+Throughout, 31 atoms of peer-asset backing and 23 atoms of same-asset insurance remain
+untouched and cannot falsely keep the empty backing role locked. Both holders recover
+their exact input principal. All 24 rejecting handoffs use current epochs, require
+`EngineLockActive`, and check complete market/mint/vault/wallet/signer rollback apart
+from the exact separate payer fee. Eight admitted handoffs change only the intended
+profile role and increment that asset's epoch once; both profiles/sequences and the
+complete decoded economic state are checked. No handoff invokes SPL. Every non-setup
+principal transfer reconciles the input-derived side balances, vault, wallets, and fixed mint supply.
+
+System/SPL/ATA/wrapper instructions create and fund every economic account. The harness
+only loads programs, funds signer SOL, and changes blockhashes; there are no private
+state-byte edits or direct engine transitions. Scope is live fresh backing with zero
+positions, liens, impairment, utilization earnings, and fees. Insurance-role succession,
+funded oracle control, retained messages, optional telemetry ledgers, terminal disposal,
+maximum shapes, and arbitrary histories remain outside this increment.
+
+The smallest exact selector passes **1/1** (1,063 filtered; four histories; final run 1.59s).
+Observed maximum CU across passing runs: backing transfers **34,831**, funded handoff rejection **2,071**,
+empty-role handoff **2,249**, each below the enforced 300,000-CU custody ceiling.
+Setup is excluded from these maxima. Validation uses a private copy of cached
+default-feature SBF SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e` from
+`/dev/shm/row424-inv070-target`, whose source/Cargo inputs match this base and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Host tests compile in the new worktree;
+no SBF rebuild, broad suite, production counterexample, or engine proof is claimed.
+The initial setup run attempted to activate an already initialized asset; removing that
+redundant fixture call restored the public history, with no production change.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::backing_role_refunding::v16_program_backing_role_containment_tracks_both_domains_through_refunding -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_005_backing_role_refunding.rs
+git diff --check
+```
+
 ## INV-027 joint admission liabilities (row 413, 2026-09-09)
 
 [`cu/inv_027_joint_admission_liabilities.rs`](cu/inv_027_joint_admission_liabilities.rs),
