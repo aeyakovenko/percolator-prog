@@ -110,6 +110,149 @@ git diff --cached --check
 sha256sum "$CARGO_TARGET_DIR/deploy/percolator_prog.so"
 ```
 
+## INV-083/023 scalar and discovery boundary products (2026-09-09)
+
+Finding-blind, coverage-only increment based exclusively on
+`origin/codex/invariant-fidelity-reopen-20260904` at
+`f01f173625d72237893a2ad608a5f3f52a0f25a1`. Private worktree:
+`/dev/shm/pr135-invariant-QdYuQbjo/worktree`, with separate private bare Git
+metadata. Only that allowed local remote-tracking ref was fetched. The primary
+checkout and its Git metadata were not changed; no holdout PR branch, issue,
+diff, or test source was inspected, fetched, or copied.
+
+The existing [INV-083 CU file](cu/inv_083_boundary_completeness.rs) and
+[INV-023 CU file](cu/inv_023_caller_input_confinement_for_derived_safety_state.rs)
+each gain two `v16_program_boundary_product_*` tests. The class roster gains
+explicit witnesses; field/profile counts and invariant statuses are unchanged.
+Production, shared helpers, fixtures, Cargo inputs, and the engine pin are unchanged.
+
+**Exact products and non-duplicate value:**
+
+- **24 retained backing worlds:** domain `{0,1}` x amount `{0,1}` x expiry
+  `E={7,u64::MAX-1}` x authenticated landing `{E-1,E,E+1}`. Each world rejects
+  intent zero, commits intent one with zero amount/expiry, signs intent `MAX-1`
+  before expiry, and simulates its successful pre-expiry control. The same signed
+  transaction then lands without re-signing at the selected boundary. Only a
+  nonzero expired amount rejects. A zero-amount/zero-expiry `MAX` intent commits;
+  `{0,1,MAX-1,MAX}` subsequently reject on the sibling domain. A transport-resigned
+  retry retains the original instruction bytes and also rejects. INV-028 already
+  covers ordinary zero/equal-expiry inputs, INV-063 covers expiry consumers, and
+  INV-008 owns retained retry families. This increment adds their previously
+  untested near-maximum expiry/terminal-ID/zero-value/sibling-domain product,
+  with exact funded backing and SPL effects rather than a new field census.
+- **Nine policy/amount worlds:** seven trade-fee values
+  `{0,1,9999,10000,10001,u64::MAX-1,u64::MAX}` x proposed policy IDs
+  `{0,1,MAX-1,MAX}`, followed by an exact valid/stale `MAX` retry. The engine slot
+  remains byte-identical and the oracle sequence remains zero. Two more worlds
+  cross backing domain `{0,1}` with amounts
+  `{u64::MAX-1,u64::MAX,u64::MAX+1,u128::MAX-1,u128::MAX}`, terminal intent `MAX`,
+  and live expiry 6 at Clock slot 5. Representable insufficient balances and
+  unrepresentable amounts have distinct exact errors; neither consumes the ID.
+  Zero at `MAX-1` and one atom at `MAX` then commit. INV-014's ordinary sequence
+  gaps and INV-058's deposit/withdraw transport limits do not execute this
+  top-up/policy terminal-ID product.
+- **32 EWMA worlds:** price `{MAX_ORACLE_PRICE-1,MAX_ORACLE_PRICE}` x halflife
+  `{0,1,u64::MAX-1,u64::MAX}` x minimum fee with the same four values. Each world
+  sends caller slot/observation-ID pairs `{(0,1),(1,2),(MAX-1,MAX-1),(MAX,MAX)}`
+  with authenticated slot fixed at 7. Valid fields persist exactly, price/mark
+  timestamps come from Clock, economic stocks/OI remain zero, and the trade-fee
+  lane remains untouched. Zero halflife rejects without consuming an ID; a final
+  AuthMark request at price one and ID `MAX` succeeds only in those rejected
+  worlds. INV-020's ordinary clock and scalar controls and INV-014's cross-mode
+  supersession do not cross both full-width EWMA fields with maximum price and
+  terminal sequence. Caller slot and sequence are paired, not independently crossed.
+- **36 crank worlds:** observation count `{0,1,13,14,15,16,17,254,255}` x caller
+  slot `{0,1,u64::MAX-1,u64::MAX}` on a publicly initialized 14-slot manual market
+  with a flat portfolio. For each nonempty word, final `oracle_accounts` counts
+  `{1,254,255}` reject exactly, then zero is tested. Up to thirteen valid hints
+  precede an invalid tail in supported shapes. Counts 15/16 reach the first
+  unconfigured asset, so their tail-count validity is intentionally masked by
+  scope rejection; 17/254/255 reject at decode. Empty discovery rejects with
+  `EngineNonProgress`. A one-hint retry remains live after every empty/oversized
+  word. Accepted shapes reach the same explicit slot/stock/capital frame
+  across caller timestamps and observed assets advance to Clock slot 1. This
+  complements INV-072's three-asset word/order matrix and INV-077's 14-exposure
+  liquidation measurements with configured-scope and wire-decode limits, adjacent
+  counts, wire maxima, and extreme caller/count combinations.
+
+All tested calls execute the default-feature SBF wrapper in LiteSVM. The unchanged
+INV-018 constructor and public System/SPL/ATA/wrapper instructions create the
+markets, portfolios, and tokens. Backing worlds mint exactly three atoms and
+revoke mint authority before testing. Only the harness Clock is set directly;
+there are no engine calls, program-owned byte injections, or account restorations.
+Rejected deliveries compare complete Accounts for every compiled transaction key,
+mint/vault/Clock, including metadata and economic signer lamports. Only the payer's
+independently calculated signature fee changes. Both successes and rejections have
+CU ceilings and exact result assertions, not generic `is_err()` acceptance.
+
+**Remaining gaps:** this is not universal field-product closure or a status
+promotion. It does not cover matcher capability expiry/fee caps or CPI tail fanout,
+batch slippage/fee caps crossed with retained position identities, external-oracle
+feed/confidence/exponent/staleness fields, nonzero backing-fee/share policies,
+nonzero positions/PnL/funding during these calls, maximum-exposure crank work,
+or successful 16-distinct-hint discovery on a larger configured market.
+Near-overflow arithmetic here concerns admission/transport/caller-time confinement,
+not an engine arithmetic proof. No broad suite, Kani, or holdout validation is claimed.
+
+**Validation:** fresh offline, locked SBF and host builds in the private target,
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Focused result: **4 passed, 0 failed, 1,124 filtered**, 37.87s, **101 public
+worlds**. Peaks: retained expiry **44,736 CU**, policy/amount **34,313 CU**, EWMA
+**4,407 CU**, crank **130,257 CU**, below the unchanged 300,000 custody / 325,000
+crank ceilings. Random account addresses can vary measured CU.
+
+Adjacent result: **9 passed, 2 failed, 1,117 filtered**, 18.29s. Both failures
+reproduce unchanged at the exact base in the clean private detached worktree
+`/dev/shm/pr135-invariant-QdYuQbjo/baseline` (**0 passed, 2 failed, 1,122 filtered**):
+`v16_program_caller_input_roster_owns_every_production_field` reports missing
+`BatchTradeCpi.max_fee_atoms`, `BatchTradeCpi.max_slippage_atoms`, and
+`SetMatcherConfig.expiry_slot`; `v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness`
+reports roster-derived count **236** versus locked **234**. These are inherited
+inventory gaps, not evidence that the fields lack all tests. They are left
+explicitly unresolved; this increment does not repair or relax the census.
+The invariant index passes (**1 passed, 122 filtered**). Formatting, whitespace,
+and unchanged-production/shared-helper/fixture/Cargo checks pass. Existing
+`solana-client` future-incompatibility and regression-target dead-code warnings remain.
+
+Test development corrected the 14-portfolio/16-hint-cap distinction, attempted
+append-fixture setup, empty-discovery NonProgress expectation, and the fixture's
+one-slot accrual interval. No failed candidate is retained as a production finding;
+successful 16-distinct-hint discovery remains a gap, not a claimed accepted cell.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-invariant-QdYuQbjo/target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env CARGO_BUILD_JOBS=2 cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu boundary_product_ -- --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_083_boundary_completeness::v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness \
+  inv_083_boundary_completeness::v16_program_boundary_roster_maps_required_classes_to_owned_tests \
+  inv_023_caller_input_confinement_for_derived_safety_state::v16_program_caller_input_roster_owns_every_production_field \
+  inv_023_caller_input_confinement_for_derived_safety_state::v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes \
+  inv_023_caller_input_confinement_for_derived_safety_state::v16_program_duplicate_crank_hint_after_valid_hint_rolls_back_partial_state \
+  inv_023_caller_input_confinement_for_derived_safety_state::v16_program_out_of_range_crank_hint_after_valid_hint_rolls_back_partial_state \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_control_sequences_accept_gaps_reject_replays_and_keep_lanes_independent \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_oracle_modes_share_one_supersession_sequence \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::v16_bpf_configure_and_push_ewma_mark_are_bounded_and_clock_authenticated \
+  inv_028_source_domain_realizability_cap::v16_attack_backing_bucket_topup_withdraw_input_gates \
+  inv_072_order_robust_crankability::v16_program_crank_hint_matrix_preserves_or_discovers_canonical_progress
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git diff --quiet origin/codex/invariant-fidelity-reopen-20260904 -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support tests/fixtures
+```
+
+The inherited census failures were confirmed with the same environment, from the
+clean `baseline` worktree, using only these exact selectors:
+
+```sh
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_023_caller_input_confinement_for_derived_safety_state::v16_program_caller_input_roster_owns_every_production_field \
+  inv_083_boundary_completeness::v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness
+```
+
 ## INV-008/009/010 retained partial transaction words (2026-09-09)
 
 [`cu/inv_009_retained_partial_words.rs`](cu/inv_009_retained_partial_words.rs),
