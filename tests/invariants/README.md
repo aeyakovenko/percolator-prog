@@ -3,6 +3,113 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-034/074/088 stale scope and last-touch order (2026-09-09)
+
+The local `stale_touch_order` module in
+[`cu/inv_074_scope_locality.rs`](cu/inv_074_scope_locality.rs) adds finding-blind,
+coverage-only LiteSVM/SBF evidence. The private worktree is
+`/dev/shm/percolator-inv034-074-088-PtJaqa/worktree`, based solely on
+`origin/codex/invariant-fidelity-reopen-20260904` at
+`f01f173625d72237893a2ad608a5f3f52a0f25a1`. Its private bare repository fetched
+only that local remote-tracking ref. The original checkout and its Git metadata
+were not modified; no open PR branches, issues, diffs, or tests supplied source
+material. Only this README and the existing INV-074 CU owner change. Production,
+shared helpers, dependencies, fixtures, role/locality rosters, and invariant
+statuses are unchanged. No invariant status promotion is implied.
+
+**Non-duplicate value.** The existing
+`v16_bpf_stale_asset_does_not_block_current_unrelated_trade` owns one current-asset
+open beside a stale asset. INV-034's role roster owns foreign-account rejection;
+INV-088's position scans own aggregate consistency after position changes. This
+increment instead crosses **scope placement x asset-index placement x last-touch
+order x no-CPI transport**, with repeated local decisions and complete funded
+exits in each history. It neither copies a role census nor repeats the existing
+reset/recovery/receipt locality products.
+
+**Guarantee.** Two executable tests each run eight worlds:
+`v16_program_stale_domain_touch_order_preserves_local_admission_and_funded_exit`
+and `v16_program_stale_instance_touch_order_preserves_independent_custody`.
+Six independently owned portfolios each deposit 1,000,000 atoms. An exposed
+asset remains behind authenticated slot 8 while a disjoint scope is current.
+The affected asset occupies index 0 or 1. The second scope is either the other
+asset of the same market, or the **same asset index in an independent market
+sharing the quote mint, admin, VM, and clock**, with distinct canonical vaults.
+Both stale-first/current-first touch orders and TradeNoCpi/one-leg BatchTradeNoCpi
+run. The same-instance test requires both `loss_stale_active` boolean values to
+occur while a complete decoded leg scan still identifies the affected accounts'
+local lag. That touched-asset hint is not asserted to be a complete global lock.
+
+In every world, three attempts to increase the stale asset's exposure return
+exact `EngineLockActive`, before/between unrelated trades and after unrelated
+withdrawals. Every rejection preserves complete tracked economic Accounts,
+owners, mint, custody, and Clock; the payer changes only by three signature fees.
+The current pair opens and fully closes, and both owners plus its funded flat
+crank account withdraw all principal. Those actions preserve the stale engine
+slot and affected portfolio/token Accounts byte-for-byte; cross-instance checks
+also preserve the entire other market, vault, and crank portfolio/token Accounts.
+Bounded public cranks then catch up only the affected asset, the previously
+rejected trade shape succeeds, and that pair closes and all remaining principal
+exits. No rejection of the unrelated funded scope is excused by a global flag.
+
+After each tested transition, an input-derived position/capital oracle checks
+every portfolio, both side OI/count lanes of every configured asset in each
+instance, zero PnL/insurance, exact per-instance vault/capital totals, all owner
+SPL payouts, and the finite six-million-atom mint supply. The constructor reuses
+the unchanged public INV-018 market helper; System, ATA, SPL, and wrapper
+instructions create, initialize, fund, and advance all economic accounts. Mint
+authority is revoked before the tested history. There is no direct mutation of
+program-owned bytes, direct engine transition, or snapshot restoration. Selecting
+an instance only changes the host sender's account tuple.
+
+**Remaining gaps.** These are disjoint, well-capitalized cohorts, constant mark
+100, zero funding/fees/PnL, two asset slots, and single-leg no-CPI batches. They do
+not cover CPI, shared-portfolio current-asset admission, nonzero claims/liens,
+provider backing/insurance withdrawals under simultaneous liabilities, multiple
+stale assets, or the cross-product with ResetPending/Recovery/active receipts.
+In particular, completeness of a global blocker for those liability-bearing
+routes is not established by this matrix. No universal closure, broader suite,
+or Kani result is claimed.
+
+**Validation.** Fresh default-feature SBF build, platform-tools v1.52, locked and
+offline, engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; fresh private host
+target. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Focused: **2 passed, 0 failed, 1,124 filtered**, 4.20s; **16 worlds, 48 exact
+rejections, 80 accepted trades including setup, 96 full-principal withdrawals**.
+Peak measured crank/trade/withdraw CU: **144,306** in both scope placements.
+Adjacent selectors: **9 passed, 0 failed, 1,117 filtered**, 0.47s.
+Invariant index: **1 passed, 0 failed, 122 filtered**. Formatting and whitespace
+checks pass. Existing fuzz-support dead-code and solana-client future-compatibility
+warnings remain. No production bug candidate was found. Development corrected a
+test-only borrow, selected the actual `EngineLockActive` error instead of
+`EngineStale`, and removed an over-strong premise that a fully capital-backed
+current-asset opening on a mixed portfolio must reject. The engine's conservative
+margin lane permits that opening; its success was not a production finding.
+
+Commands from the private worktree (no matcher fixture is needed):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv034-074-088-PtJaqa/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu stale_touch_order -- --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_074_scope_locality::v16_bpf_stale_asset_does_not_block_current_unrelated_trade \
+  inv_074_scope_locality::v16_attack_per_asset_funding_isolation \
+  inv_074_scope_locality::v16_program_public_asset_close_does_not_global_lock_unrelated_base_users \
+  inv_034_domain_and_instance_isolation::v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance \
+  inv_034_domain_and_instance_isolation::v16_attack_asset1_insolvency_cannot_drain_asset0_backing \
+  inv_088_global_summaries_are_not_account_local_proofs::v16_program_per_asset_crank_isolation \
+  inv_088_global_summaries_are_not_account_local_proofs::v16_program_same_asset_summary_preserves_other_portfolios_after_one_pair_exits \
+  inv_088_global_summaries_are_not_account_local_proofs::v16_program_batch_nocpi_updates_each_asset_summary_from_portfolio_scan \
+  inv_054_certificate_epoch_completeness::v16_attack_target_only_lag_invalidates_unrelated_single_trade_cert
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+sha256sum "$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+```
+
 ## INV-008/009/010 retained partial transaction words (2026-09-09)
 
 [`cu/inv_009_retained_partial_words.rs`](cu/inv_009_retained_partial_words.rs),
