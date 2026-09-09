@@ -378,6 +378,63 @@ whitespace checks **PASS**. New-selector peak checked step: **42,561 CU** isolat
 **36,561 CU** in the warmed group, below 300,000. Initial formatting differences
 were corrected; the existing `solana-client` future-incompatibility warning remains.
 
+## INV-046 mirrored non-base Hybrid sibling exit (2026-09-09)
+
+One new public LiteSVM history in
+[`cu/inv_046_trade_availability_without_unsafe_mark_admission.rs`](cu/inv_046_trade_availability_without_unsafe_mark_admission.rs),
+based on PR135 `b8dbd09e`, branch `codex/pr135-inv046-sibling-exit-20260909`,
+worktree `/tmp/codex-agent-worktrees/pr135-inv046-sibling-exit-20260909`.
+**Tests/docs only; production, Cargo/engine pins and invariant statuses unchanged.**
+
+System/SPL/ATA/wrapper instructions fund an owner short one unit on asset 0 and
+long two units on asset 1, with independent Hybrid feeds. Provider accounts are
+read-only input fixtures, not end-to-end provider publication evidence. An observer
+admits asset 1's bounded 1,000,000 -> 950,000 move, leaving the owner's certificate
+epoch-stale. A fresh valid asset-0 update followed by a zero-price asset-1 report
+rejects `OracleInvalid`: all 19 tracked accounts roll back exactly, with only the
+payer's one-signature fee deducted. Without further observation, admin action or
+counterparty signature, the owner reduces asset 1 twice, preserving the entire
+asset-0 state, then closes asset 0. Each step checks exact per-asset OI, capital,
+custody, frozen admitted profiles, explicit combined health lanes and the independent
+current-certificate model. The 100,000-atom loss is booked once; 1,900,000 atoms
+withdraw, leaving 2,100,000 in the vault and reconciling the 4,000,000 SPL supply.
+Withdrawal exactly invalidates the flat certificate; untouched accounts stay unchanged.
+
+Unlike the existing single-asset short history, this covers a losing non-base
+long, a live opposite-side sibling's health contribution, and a later invalid feed
+in one observation set. It composes, rather than repeats, INV-045 price bounds,
+INV-053 multi-leg certificates and INV-057 local owner reduction. Residual gaps:
+other provider types, fees/funding/backing, more than two assets, long outages,
+counterparty claim settlement and terminal cleanup. No general exit theorem is claimed.
+
+Validation uses a private copy of the existing cache. Its recorded SBF source
+checkout `/home/anatoly/percolator-pr135-row424` matches `src/v16_program.rs`,
+`Cargo.toml` and `Cargo.lock` byte-for-byte (engine `394fd0bf`); no fresh SBF build.
+SBF SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Exact commands from the new worktree (copy is first-use setup):
+
+```sh
+cp -a /dev/shm/pr135-owner-exit-boundary-target /dev/shm/pr135-inv046-sibling-exit-target
+export CARGO_TARGET_DIR=/dev/shm/pr135-inv046-sibling-exit-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_046_trade_availability_without_unsafe_mark_admission::v16_program_invalid_non_base_hybrid_report_preserves_mirrored_sibling_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_046_trade_availability_without_unsafe_mark_admission::v16_program_invalid_non_base_hybrid_report_preserves_mirrored_sibling_exit \
+  inv_046_trade_availability_without_unsafe_mark_admission::v16_program_invalid_hybrid_report_preserves_stale_owner_only_exit \
+  inv_053_full_health_recertification_equivalence::v16_program_rounded_nontraded_lag_full_refresh_preserves_exact_trade_boundary
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: new selector **1 passed / 0 failed / 1098 filtered**; focused group
+**3 passed / 0 failed / 1096 filtered**; format and diff checks **PASS**.
+New-history CU: observation **151,887**, rejection **124,561** (limit 325,000);
+reductions **267,083 / 243,814 / 196,193**, withdrawal **140,240** isolated /
+**134,240** warmed (limit 300,000).
+Initial helper-index and post-withdrawal certificate expectations were corrected
+before final runs. The existing `solana-client` future-incompatibility warning remains.
+
 ## INV-046 invalid Hybrid report and stale owner-only exit (2026-09-09)
 
 [`cu/inv_046_trade_availability_without_unsafe_mark_admission.rs`](cu/inv_046_trade_availability_without_unsafe_mark_admission.rs)
