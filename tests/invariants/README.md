@@ -76,6 +76,72 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_071_recovery_obligation_f
 git diff --check
 ```
 
+## INV-041 equal-claim replacement allocation (2026-09-09)
+
+[`cu/inv_041_equal_claim_refill_order.rs`](cu/inv_041_equal_claim_refill_order.rs),
+mounted by INV-041, adds one public LiteSVM selector on base `98cd3c21`. Twelve
+worlds cross both three-position close directions with every `3!` claim-conversion
+order. System/SPL/ATA/wrapper calls construct four 1,000-atom portfolios, three equal
+50-atom claims, 17 initial backing atoms and 19 insurance atoms. Mint authority is
+revoked; there is no economic account-byte injection, matcher or open-fix-PR input.
+
+At exact backing expiry, bounded keeper cranks normalize 167 unused atoms without
+burning the claims. A 75-atom replacement supports exactly half the 150-atom face.
+An input-only oracle checks every conversion/withdrawal prefix: each claimant gets
+25 atoms, remaining faces and fresh support fall proportionally, spent backing and
+provider receivables rise once, liens stay zero, and insurance plus the sibling
+domain stay unchanged. Local claim census, capital, PnL, fees, OI, SPL custody and
+fixed mint supply are checked independently. Untouched portfolios remain byte-exact.
+
+Every world first simulates an exact-cap bundle containing a conversion, actual SPL
+withdrawal, sibling certificate refresh and second conversion. Lowering only the
+second cap from 25 to 24 rejects with `EngineLockActive` at instruction 5. Every
+compiled/fixture account rolls back byte/metadata/lamport-exact; the dedicated payer's
+signature fee is checked separately. Exact-cap single-instruction retries then pay
+`[1025,1025,1025,850]`, leaving zero capital and 186 vault atoms. Complete decoded
+market states compare equal across worlds after normalizing only random market
+identity; no economic fields, source epochs or insurance budgets are normalized.
+
+**Non-duplicate:** INV-029's live claim census does not cross expiry/replacement with
+three claimant permutations and a SPL-paying rejected cap bundle. INV-063's spent
+backing history has an already-paid claimant and fixed conversion order. This probe
+keeps all three equal claims unpaid until scarce replacement support is available.
+Residual gaps: one source/side, exact half-rate arithmetic, zero fees/funding/liens,
+two close directions rather than every close permutation, no insurance consumption,
+terminal receipt settlement or maximum shapes. The 167 expired atoms and 19 insurance
+atoms remain in custody, not drained. This is coverage-only, not a production finding
+or invariant-status promotion; production, Cargo/engine pins and shared harnesses
+are unchanged.
+
+Validation uses a private copy of the existing default-feature SBF/cache, not a fresh
+SBF build. `src`, `Cargo.toml` and `Cargo.lock` match its documented `39d05875`
+checkpoint (engine `394fd0bf`). Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Development corrected the test's missing sibling refresh and accounted for that
+refresh in the composed CU guard; neither was a production counterexample.
+Final new-selector run: **1 passed**, 1,102 filtered, 8.27s; **12 worlds / 12 atomic
+cap rejections**, peak rejection/withdrawal CU `633229 / 143255`. Adjacent controls:
+**3 passed**, 1,100 filtered, 12.97s. Scoped rustfmt, diff and unchanged-production
+checks pass. No broad suite or engine-proof run; the existing `solana-client`
+future-Rust compatibility warning remains.
+
+Commands from `/home/anatoly/worktrees/inv041-allocation-permutation-20260909`:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/inv041-allocation-permutation-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_041_deterministic_allocation_and_caller_order_independence::equal_claim_refill_order::v16_program_equal_claim_refill_permutations_preserve_allocation_and_atomic_caps -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_041_deterministic_allocation_and_caller_order_independence::v16_attack_force_close_dust_chunking_is_value_path_independent \
+  inv_041_deterministic_allocation_and_caller_order_independence::v16_program_four_party_recovery_exit_orders_are_economically_identical \
+  inv_063_backing_expiry_normalization::spent_backing_expiry::v16_program_spent_backing_expiry_preserves_unpaid_claim_and_refill_exit
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_041_*.rs
+git diff --check
+git diff --exit-code 98cd3c21 -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support
+```
+
 ## INV-047/052 two-asset fee-leg partition (2026-09-09)
 
 [`cu/inv_047_fee_leg_partition.rs`](cu/inv_047_fee_leg_partition.rs), mounted by
