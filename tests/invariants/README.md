@@ -3,6 +3,132 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-008/009/010 retained partial transaction words (2026-09-09)
+
+[`cu/inv_009_retained_partial_words.rs`](cu/inv_009_retained_partial_words.rs),
+mounted from the existing INV-009 CU file, adds finding-blind, coverage-only
+LiteSVM/SBF evidence on `origin/codex/invariant-fidelity-reopen-20260904` at
+`1bba9fed1f1f5d1a293b7c54fab0f93349e72ad2`. Worktree:
+`/dev/shm/percolator-inv008-010-coverage-20260909`. Its private bare repository
+fetched only the requested base ref. Neither the root checkout nor its Git
+metadata was changed; no open PR branches, diffs, or tests were inspected/copied.
+Only this documentation, the new test module, and its mount change. Production,
+Cargo inputs, shared helpers, fixtures, engine pin, and invariant statuses do not.
+
+**Under-covered product and non-duplicate value.** The existing INV-008 family
+and ordered-route matrices own full-fill duplicate bundles. The
+[INV-009 failure/retry and generated-budget owners](#inv-009-executing-evidence-and-f-plan)
+own standalone rejected fills and post-success stale/residual route pairs, but
+do not execute a partial and its next-episode residual inside a transaction that
+later fails. This increment crosses **nonintegral partial execution x retained
+future-episode residual x transaction suffix rollback x duplicate/delayed route
+delivery**. It does not repeat the standalone ratio or full-fill route census.
+
+**Guarantee.** Sixteen independent public worlds cross both signs, matcher ratios
+127/255 and 254/255, and all four single/batch CPI/no-CPI residual transports.
+The original single-CPI request binds signed quantity
+`+/- (255 * POS_SCALE + POS_SCALE / 2 + 1)`; the alternate encoding binds the
+same quantity and initial episodes. A separately signed residual binds exactly
+the input-derived unfilled quantity and both next episodes. All instruction
+words and their initial signatures are constructed before any tested delivery.
+They fit the public transaction packet limit. Retries clone those transactions,
+renew only blockhash/signatures, verify the signatures, and compare the entire
+compiled message after normalizing only its blockhash. This is wrapper-consent
+evidence, not a claim that a previously failed transaction signature can re-land.
+
+Each world checks these delivery boundaries:
+
+- The future residual rejects before the original partial has landed.
+- `[partial, partial]` and `[partial, full-capacity control, alternate old request]`
+  reach the exact stale-episode suffix and roll back the partial and matcher writes.
+- `[partial, full-capacity control, residual, SPL transfer]` reaches the final
+  one-atom transfer from an empty funded-owner wallet. Exact SPL InsufficientFunds
+  proves that both valid trade instructions returned success before full rollback.
+- The retained partial then commits its exact decoded matcher fill. Its duplicate
+  and alternate old encoding reject, including after full matcher capacity returns.
+- `[residual, delayed old partial]` and `[residual, residual]` roll back the valid
+  residual prefix. The unchanged retained residual subsequently commits exactly.
+- After completion, both old encodings and the residual still reject with no
+  further economic execution or fee debit.
+
+After every checked transaction, an input-derived oracle verifies each owner's
+capital, zero PnL, signed position, stable portfolio incarnation, exact episode
+increments, both OI lanes, per-domain/aggregate insurance, c_tot, vault, owner SPL
+balances, and the finite mint supply. Per-owner fees are independently computed as
+`ceil(ceil(abs(fill) * 100 / POS_SCALE) * 100 / 10000)` for each committed fill.
+The plan's remaining quantity and fee budget after the partial are exact; batch-CPI
+residual consent carries that exact fee cap and a zero adverse-slippage cap.
+The original one-shot authorization has **zero** remaining allowance after its
+nonzero partial, despite the nonzero unfilled plan. No persistent multi-intent
+allowance is implied for singles/no-CPI. Every rejected word restores complete
+tracked Accounts, including all transaction keys, absent PDAs, metadata, economic
+signer lamports, matcher context, custody, and Clock. The separate payer changes
+only by its independently calculated network signature fee.
+
+The unchanged public INV-018 constructor and local System/SPL/ATA/wrapper
+instructions allocate, initialize, fund, configure, deposit, and trade. Economic
+owners receive System transfers, mint authority is revoked after funding, and the
+existing matcher fixture's public owner-authorized controls select only valid
+partial/full fills. There is no direct engine transition, program-owned byte
+mutation, snapshot restoration, or production finding/fix.
+
+**Remaining gaps.** One asset, fixed mark 100 and fee 100 bps, no elapsed time,
+funding, PnL, or nonzero slippage; one partial followed by one residual; the alternate
+old and residual routes are correlated rather than independently crossed. Longer
+or randomized histories, multi-leg residuals, other rejected suffix families,
+changing authority/policy/oracles, maximum quantity/shape, close/withdrawal payouts,
+durable nonces/detached consent, and persistent partial-budget protocols remain
+outside this finite matrix. It is not universal invariant closure or an F-method
+status promotion. No broad suite or Kani proof run is claimed.
+
+**Validation.** Fresh default-feature wrapper and unchanged hostile/auth matcher
+SBF builds use platform-tools v1.52, offline, with locked wrapper/host dependencies
+and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Host compilation uses a
+private fresh target. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+partial matcher:
+`e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`;
+adjacent-control auth matcher:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Development corrected the test-only matcher field name `exec_price_e6` before
+execution. The existing hostile-matcher deprecation and `solana-client v1.18.26`
+future-incompatibility warnings remain. Final focused result: **1 passed, 0 failed,
+1,122 filtered**, 7.62s; **16 worlds, 48 accepted transactions (32 fills and 16
+public capacity controls), 176 exact rejections, peak 331,577 CU** against a
+1,400,000 transaction ceiling. The earlier module-selector run also passed (peak
+330,421 CU). Adjacent selectors: **8 passed, 0 failed, 1,115 filtered**, 100.39s;
+the INV-009 control reported 64 histories and 464,951 peak fill CU, and INV-011
+reported 127 worlds, 182 commits and 325 cap rejections. Formatting, staged/unstaged
+whitespace, and unchanged-production/shared-helper checks pass.
+
+Exact commands from the worktree above (fixture builds run from their stated
+directories):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv008-010-coverage-20260909-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+(cd tests/fixtures/hostile_matcher && env -u CARGO_TARGET_DIR cargo build-sbf --tools-version v1.52 --offline)
+(cd tests/fixtures/auth_matcher && env -u CARGO_TARGET_DIR cargo build-sbf --tools-version v1.52 --offline)
+export CARGO_BUILD_JOBS=4
+cargo test --locked --offline --test v16_cu --no-run
+cargo test --locked --offline --test v16_cu retained_partial_words -- --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_009_partial_fill_and_retry_accounting::retained_partial_words::v16_program_retained_partial_words_preserve_one_shot_and_residual_budgets -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_003_portfolio_incarnation_binding::v16_portfolio_incarnation_id_separates_close_and_reuse \
+  inv_004_position_episode_binding::v16_program_position_episode_matrix_rejects_stale_consent_fixed_case \
+  inv_008_intent_uniqueness_and_bounded_replay::v16_insurance_failed_bundle_retry_stays_consumed_after_alternate_route \
+  inv_009_partial_fill_and_retry_accounting::v16_program_partial_fill_invalidates_every_stale_route_and_allows_every_fresh_residual \
+  inv_009_partial_fill_and_retry_accounting::v16_program_bounded_partial_failure_retry_schedules_preserve_every_prefix \
+  inv_010_out_of_order_safety::v16_program_matcher_mutation_order_rejects_revoked_capability_fixed_case \
+  inv_011_signed_aggregate_economic_bounds::v16_program_generated_signed_leg_partitions_are_order_independent \
+  inv_047_equivalent_route_semantics::v16_program_one_leg_batch_nocpi_matches_single_nocpi_fee_trade
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git diff --quiet origin/codex/invariant-fidelity-reopen-20260904 -- src Cargo.toml Cargo.lock tests/v16_cu.rs tests/support tests/fixtures
+```
+
 ## INV-020 retained resolution and independent clocks (2026-09-09)
 
 [`cu/inv_020_retained_resolution_clock.rs`](cu/inv_020_retained_resolution_clock.rs),

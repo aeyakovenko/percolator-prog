@@ -27,6 +27,9 @@
 
 use super::*;
 
+#[path = "inv_009_retained_partial_words.rs"]
+mod retained_partial_words;
+
 const FLAGGED_PARTIAL_MODE: u8 = 15;
 const ASYMMETRIC_BATCH_PARTIAL_MODE: u8 = 16;
 
