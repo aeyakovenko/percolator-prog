@@ -16,6 +16,8 @@
 //! and return to the original tuple.
 //! The owner-episode child adds partial/full reduction and released-PnL
 //! conversion with retained consumers on a separate live asset.
+//! The keeper child preserves retained consumers through fee collection and
+//! healthy mark settlement, without owner reauthorization or position changes.
 
 use crate::support::v16_svm::{MarketConfig, TxSuccess, V16Svm, ASSET_COUNT, TX_CU_LIMIT};
 use percolator::POS_SCALE;
@@ -40,6 +42,9 @@ use solana_sdk::{
 
 #[path = "inv_012_owner_episode_revocation.rs"]
 mod owner_episode_revocation;
+
+#[path = "inv_012_keeper_preservation.rs"]
+mod keeper_preservation;
 
 #[derive(Clone, Copy, Debug)]
 enum CpiRoute {

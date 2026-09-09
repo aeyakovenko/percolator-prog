@@ -365,6 +365,68 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_012_matcher_program_gener
 git diff --check
 ```
 
+## INV-012 preserving keeper writers (row 412, 2026-09-09)
+
+[`stateful/inv_012_keeper_preservation.rs`](stateful/inv_012_keeper_preservation.rs),
+mounted by the existing INV-012 stateful owner, adds the **preserving keeper partition** of
+the [remaining lifecycle/writer axis](#inv-012-implementation-readiness). Development starts
+from `origin/codex/invariant-fidelity-reopen-20260904` at `4fa7267f`, in
+`/tmp/codex-agent-worktrees/row412-inv012-lifecycle-consumers-20260909` on
+`codex/row412-inv012-lifecycle-consumers-20260909`.
+**PR135-only, net-new bounded coverage; row 412 remains OPEN.** No production code, engine
+pin/proof, shared oracle/helper implementation, or ledger status changes.
+
+The existing owner-episode product below owns reduction/conversion revocation; the direct
+INV-012 liquidation/force-close cases own position-changing keeper regressions. This increment
+instead composes **healthy `PermissionlessCrank` settlement and `SyncMaintenanceFee`** after
+retaining an executable CPI request. It is neither retained `SetMatcherConfig` re-delivery
+nor a reproduction, fix, or certification of production-fix PR #412.
+
+The finite product crosses both keeper orders at authenticated slots 2/3, retained taker,
+retained LP and unrelated portfolio scope, both position signs, and single/one-leg-batch CPI:
+**24 histories, 452 checked public wrapper transactions, no skipped cells**. Each subject has
+a publicly opened 12-unit position on asset 0; the retained nonzero consumer targets asset 1.
+An independent input-derived oracle requires the signed 60-atom mark effect and exactly
+14 atoms of two-slot maintenance, including maintenance collected by the settlement crank.
+Public unrelated cranks advance both asset frontiers; Clock advancement alone is not fee
+accrual. Each writer must preserve grant disposition, sequence, cap, expiry, live tuple,
+episode and exact position vector under the unchanged append-only authorization oracle.
+No regrant occurs after request retention.
+
+All **48 initially/finally live simulations** preserve the complete economic-account frame;
+all **24 identical retained signed transactions** subsequently install exact nonzero positions.
+The normal CPI effect preserves the LP grant and revokes the taker's, leaving unrelated scope
+untouched. Subject keeper calls preserve other portfolio accounts including metadata/lamports,
+matcher contexts, SPL custody and supply. **48 successful fee retries are exact account-frame
+no-ops**, excluding only the separate
+network fee payers. Every checked wrapper call validates the public trace and one-instruction
+boundary. Existing initial account/token fixtures are reused; no initialized program-state bytes
+are edited. Already-current subject certificates need no redundant crank; no product cell is omitted.
+
+The exact selector passes **1/1** in 12.90s (294 filtered). Peak measured successful transaction and
+simulation CU are **211,937**; keeper peak is **192,522**, with a new 300,000-CU bounded-shape
+ceiling. Bootstrap and pre-retention grant CU are excluded. This is not maximum-shape or
+worst-case evidence. Initial local failures corrected fee-frontier, same-slot mark-settlement,
+and crank-collected-fee assumptions in the test oracle; none was an authorization finding.
+No rejected/stale request, revoking keeper, Recovery/cure/close, liquidation/force-close,
+retained grant re-delivery, arbitrary writer word, expiry boundary or incarnation-replacement
+coverage is claimed by this slice. No broad suite, engine proof or parent-red/fixed-green run.
+
+Validation uses private copies of the cached default-feature SBF and Cargo build inputs from
+`/dev/shm/row424-inv070-target`, plus the matching deployed matcher from the prior row-412
+worktree. No SBF rebuild is claimed. Production/Cargo, fixture and shared-harness sources match
+`d309de32`; the engine remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Wrapper SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::keeper_preservation::v16_program_retained_capability_survives_non_position_keeper_words -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_012_keeper_preservation.rs
+git diff --check
+```
+
 ## INV-012 owner-episode revocation (row 412, 2026-09-09)
 
 [`stateful/inv_012_owner_episode_revocation.rs`](stateful/inv_012_owner_episode_revocation.rs),
