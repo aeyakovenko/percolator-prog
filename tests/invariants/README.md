@@ -3,6 +3,75 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-045/046/047 retained exits after paid source repricing (2026-09-09)
+
+[`stateful/inv_045_retained_mark_exit.rs`](stateful/inv_045_retained_mark_exit.rs)
+adds one test, mounted in the existing INV-045 stateful owner:
+`v16_program_retained_exits_survive_extreme_paid_mark_source_repricing`.
+It starts from committed branch tip `ec04e4f9cf5e0b8546381148d85d996ec4ed1c38`
+in the independent private checkout
+`/dev/shm/pr135-inv045-047-coverage-20260909`. Production, Cargo, the pinned
+engine, shared helpers, fixture sources, and invariant verdicts are unchanged.
+
+Sixteen LiteSVM/SBF worlds cross EWMA/Hybrid after-hours discovery, long/short
+owners, single/batch bilateral mark movers, and single/batch CPI retained exits.
+A favorable public observation first materializes the owner's positive source
+claim and its counterparty's capital loss. The owner retains both strict and
+permissive exits; both verify signatures, fit the transaction packet, and execute
+successfully in read-only SBF simulations before repricing.
+
+A separate pair then reduces exposure at raw price `1` or `MAX_ORACLE_PRICE`.
+The owner's account bytes remain unchanged during this third-party transition.
+Movement must be nonzero and adverse, stay within the independent elapsed-price
+envelope, stage the new target, and collect bilateral capital debits exactly equal
+to insurance growth and sufficient for the open-interest externality. Public
+catch-up consumes part of the original source claim and creates a positive claim
+for the former losing counterparty. Exact claim quantities and marked owner values
+follow the position/price ledger, with stock and encumbrance censuses at the
+settlement checkpoints.
+
+After repricing, the strict retained exit fails at its trade instruction with
+`InvalidInstruction` after successful matcher execution. Every tracked economic
+Account, including its metadata, signer lamports, matcher state, foreign portfolio,
+and SPL custody, rolls back exactly; the separate transaction fee payer is
+excluded. The permissive exit then executes with its original signed bytes. Both
+pairs flatten, refresh publicly between claimants, convert released support, and
+withdraw all available capital. An independent BigUint calculation reconstructs
+each unliened domain's credit rate from backing and total claims, applies
+whole-atom rounding, and checks the exact conversion and SPL payout. This includes
+real source discounts: marked PnL face is not asserted to be fully withdrawable.
+Endpoints have zero OI, capital, PnL, and source claims, fixed mint supply, exact
+remaining vault custody, and all paid movement fees still in insurance.
+
+This adds temporal retained-consent/source-state/exit coverage. It does not repeat
+the scalar boundary matrix or compare route-order convergence. Remaining gaps: one
+asset and integral lots, one claimant order, no source liens or backing fees, no
+CPI-driven extreme quote, no retained bilateral owner exit, no funding or
+maintenance charges, no lifecycle transition or terminal receipt, no maximum
+shape, arbitrary history, or engine proof. No invariant status is promoted.
+
+Validation reuses private copies of the documented same-source default-feature
+program SBF and authenticated matcher, with SHA-256 values
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e` and
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+`git diff f01f173625d72237893a2ad608a5f3f52a0f25a1 HEAD -- src Cargo.toml Cargo.lock tests/fixtures/auth_matcher`
+is empty before the coverage commit. Host harnesses are rebuilt in this private
+checkout; no SBF rebuild or broad suite is claimed. The focused test passes 16
+worlds, 16 strict refusals, 64 withdrawals, and 32 discounted conversions.
+Measured continuation peak is 286,169 CU, movement peak 167,850 CU, and retained
+exit peak 286,169 CU, all below the 1,400,000 transaction limit.
+
+Exact final checks from the private checkout:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_045_no_free_mark_movement::retained_mark_exit::v16_program_retained_exits_survive_extreme_paid_mark_source_repricing -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-071/073/078 Recovery claims with deferred live liabilities (2026-09-09)
 
 [`cu/inv_073_recovery_claim_liability_exit.rs`](cu/inv_073_recovery_claim_liability_exit.rs),

@@ -85,6 +85,9 @@ use crate::support::v16_svm::{MarketConfig, PublicTerminalClassification, TxSucc
 use percolator::POS_SCALE;
 use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint};
 
+#[path = "inv_045_retained_mark_exit.rs"]
+mod retained_mark_exit;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AcceptedMarkMode {
     AuthMark,
