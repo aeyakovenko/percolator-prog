@@ -1498,6 +1498,86 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## Row 418 quote variants at public market capacity (2026-09-09)
+
+[`cu/inv_077_terminal_quote_variants.rs`](cu/inv_077_terminal_quote_variants.rs), mounted
+under INV-077, adds `v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity`.
+Its common oracle crosses six quote configurations with 255, 256, 257, and the maximum
+5,782 configured assets: mintable SPL, fixed-supply SPL, native, fixed SPL/SPL,
+native/fixed SPL, and fixed SPL/native. The adjacent account length must exceed 10 MiB,
+so the largest shape cannot silently become a nonmaximum fixture after a layout change.
+
+The INV-018 and INV-081 public bootstraps now accept an optional preallocated market
+capacity; their existing entry points retain their previous default sizes and funding.
+System creates rent-funded accounts, every configured asset is publicly activated, and
+all mint/ATA/funding operations use SPL/System instructions. The existing native genesis
+fixture is the only supplied token state. Preallocation is storage capacity, not injected
+configured assets, backing, portfolio state, or balances. In-instruction growth realloc is
+not measured by this witness.
+
+Every world deposits 1,009 primary atoms, resolves, returns exactly those atoms through
+unsigned `CloseResolved`, and closes the owner's portfolio. The independent input-derived
+oracle checks the complete funded user token account, including native backing lamports,
+and distinguishes native supply zero from minted supply and retained/revoked mint authority.
+It then requires **one** successful `CloseSlab` below 300,000 CU, both canonical vaults
+reclaimed when configured, exact tombstone rent and authority refund, and unchanged mint,
+user, destination, portfolio, and vault-authority frames. Empty booked custody takes the
+no-scan fast path even beyond the 256-asset scan boundary; a successful cursor-only return
+would fail this oracle. Construction, user exit, and final close each have a 300,000-CU
+assertion where the shared helpers expose transaction CU.
+
+This is a net-new token-variant by public-capacity **empty-terminal** disposition product,
+not another malformed-account, donation, or terminal-residue test. Existing single-native
+sync/redemption and mixed-rail stock tests retain ownership of nonempty raw custody.
+The already isolated native residual-retirement fix `5d0ecb84` and its TDD predecessor
+`9abea9dc` are not imported or duplicated. The requested base does not include that fix;
+this green empty-terminal witness cannot establish residual retirement on that base.
+No new production finding is claimed. Row 418 remains OPEN and all nine affected invariant
+status entries remain unchanged. Residual gaps include native booked-residue retirement,
+freezable mints, occupied maximum-shape claims/backing, secondary-rail user payout at maximum
+capacity, and arbitrary token/history products. Authorities needed for administration still
+participate; only the resolved economic payout is permissionless.
+
+Verification uses base `626789fa5ce950584acf154c232915e372fa1593`, engine `394fd0bf`,
+and a fresh default-feature platform-tools v1.52 SBF build with SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+An initial storage-growth setup stopped at `InvalidRealloc`; public preallocation follows
+the existing capacity-fixture pattern. A second exploratory assertion expected a scan
+continuation at 257 assets, but the empty market correctly closed immediately. Neither
+fixture/oracle correction is a production regression or evidence of a new LoF/DoS finding.
+
+Final results: the new selector passed **1/1 tests, 24/24 worlds** in 293.09 seconds;
+every world closed in one call. Observed final-close peak was **37,203 CU**, and measured
+construction/user-exit peak was **214,735 CU**, both below 300,000. The eight exact neighboring
+selectors below passed **8/8** in 9.20 seconds. Targeted rustfmt and `git diff --check` passed.
+Only the existing `solana-client` future-incompatibility warning was emitted. Full-suite and
+Kani execution were not part of this focused run.
+
+From `/home/anatoly/percolator-prog-astra-row418`:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-ultra-row418-build
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity -- --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_primary_mint_decimals_preserve_exact_raw_atom_accounting \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_program_spl_account_parser_is_single_gateway_and_reuses_validated_state \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_public_withdraw_rejects_identical_noncanonical_vault_then_retries \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_close_slab_refunds_exact_vault_and_market_excess_rent_after_normal_exit \
+  inv_077_bounded_work_and_maximum_shape_compute::v16_cu_custody_and_resolution_paths_are_bounded \
+  inv_081_success_state_validity_over_complete_public_routes::v16_program_native_quote_roundtrip_preserves_lamports_rent_and_unsynced_value
+rustfmt --edition 2021 --check --config skip_children=true \
+  tests/invariants/cu/inv_077_terminal_quote_variants.rs \
+  tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs \
+  tests/invariants/cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs \
+  tests/invariants/cu/inv_081_success_state_validity_over_complete_public_routes.rs
+git diff --check
+```
+
 ## Row 418 mixed native/SPL terminal disposition (2026-09-09)
 
 [`cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs`](cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs)

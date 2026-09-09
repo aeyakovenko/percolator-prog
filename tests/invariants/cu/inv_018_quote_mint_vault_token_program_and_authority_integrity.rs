@@ -5227,6 +5227,15 @@ pub(super) fn inv018_public_spl_market_with_params(
     decimals: u8,
     params: V16CuMarketParams,
 ) -> V16CuEnv {
+    inv018_public_spl_market_with_capacity(decimals, params, params.max_portfolio_assets as usize)
+}
+
+pub(super) fn inv018_public_spl_market_with_capacity(
+    decimals: u8,
+    params: V16CuMarketParams,
+    capacity: usize,
+) -> V16CuEnv {
+    assert!(capacity >= params.max_portfolio_assets as usize);
     let mut svm = LiteSVM::new();
     let program_id = percolator_prog::id();
     svm.add_program(
@@ -5250,13 +5259,23 @@ pub(super) fn inv018_public_spl_market_with_params(
     let mint = inv018_create_public_spl_mint(&mut svm, &payer, admin.pubkey(), decimals);
 
     let market = Keypair::new();
-    system_create_account_for_test(
+    let market_len = state::market_account_len_for_capacity(capacity).unwrap();
+    let market_rent = svm
+        .minimum_balance_for_rent_exemption(market_len)
+        .max(1_000_000_000);
+    send_raw_tx(
         &mut svm,
         &payer,
-        &market,
-        state::market_account_len_for_capacity(params.max_portfolio_assets as usize).unwrap(),
-        program_id,
-    );
+        system_instruction::create_account(
+            &payer.pubkey(),
+            &market.pubkey(),
+            market_rent,
+            market_len as u64,
+            &program_id,
+        ),
+        &[&market],
+    )
+    .expect("public System market creation");
     let vault_authority =
         Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
     let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint);

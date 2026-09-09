@@ -362,6 +362,10 @@ fn v16_program_public_route_oracle_checks_success_and_reject_frames_fixed_case()
 }
 
 pub(super) fn inv081_public_native_market() -> super::V16CuEnv {
+    inv081_public_native_market_with_capacity(1)
+}
+
+pub(super) fn inv081_public_native_market_with_capacity(capacity: usize) -> super::V16CuEnv {
     use super::*;
 
     let mut svm = LiteSVM::new();
@@ -397,13 +401,23 @@ pub(super) fn inv081_public_native_market() -> super::V16CuEnv {
     .unwrap();
     let params = V16CuMarketParams::default();
     let market = Keypair::new();
-    system_create_account_for_test(
+    let market_len = state::market_account_len_for_capacity(capacity).unwrap();
+    let market_rent = svm
+        .minimum_balance_for_rent_exemption(market_len)
+        .max(1_000_000_000);
+    send_raw_tx(
         &mut svm,
         &payer,
-        &market,
-        state::market_account_len_for_capacity(1).unwrap(),
-        program_id,
-    );
+        system_instruction::create_account(
+            &payer.pubkey(),
+            &market.pubkey(),
+            market_rent,
+            market_len as u64,
+            &program_id,
+        ),
+        &[&market],
+    )
+    .expect("public System native market creation");
     let vault_authority =
         Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
     let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint);
