@@ -40,6 +40,9 @@ mod transfer_route;
 #[path = "inv_039_pending_loss_close_reopen.rs"]
 mod close_reopen;
 
+#[path = "inv_039_pending_loss_resolved_histories.rs"]
+mod resolved_histories;
+
 const ATTRIBUTION_DEPOSITS: [u128; 5] = [200_000, 180_000, 300_000, 250_000, 777];
 const ATTRIBUTION_PRICE_MOVES: [i128; 2] = [30_000, 20_000];
 

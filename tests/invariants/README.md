@@ -3,6 +3,109 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-039 pending cohorts through resolution (row 419, 2026-09-09)
+
+[`cu/inv_039_pending_loss_resolved_histories.rs`](cu/inv_039_pending_loss_resolved_histories.rs),
+mounted by the existing INV-039 CU owner, adds **partial public LiteSVM coverage**,
+not a production finding or fix. Base: `95a4cf98` from
+`origin/codex/invariant-fidelity-reopen-20260904`; branch:
+`codex/astra-ultra-row419-inv039-20260909`; isolated worktree:
+`/tmp/codex-agent-worktrees/astra-ultra-row419-inv039-20260909`.
+Root files, production code, dependencies, all invariant verdicts and reopening
+rows are unchanged. **Row 419 remains OPEN; INV-039 remains REFUTED_CURRENT.**
+The previously documented quarantined order-attribution case was not rerun or
+reclassified, and these passing solvent histories do not discharge it.
+
+Two independent asset cohorts each publicly acquire a zero-basis pending holder
+and an opposing unbooked debtor. Resolution occurs with neither debtor settled,
+or after settling just one of them; both retained holders cross resolution.
+The deterministic matrix covers **144 worlds**: all 24 first-touch orders of the
+four cohort actors, three settlement/resolution placements, and two mirrored side
+orientations. A funded bystander rotates through five insertion positions, which
+is sampling rather than the full 120-order product. Each close is immediately
+retried, including holder-first waiting states. All worlds reconcile to the same
+input-derived owner payouts, then delete the portfolios in reverse close order.
+
+The shrinkable generator varies 1..=3 integral lots, 1..=20,000-atom price moves,
+side orientation, settlement placement, five-actor close priority, and a 0..=16
+additional-close prefix before the mandatory completion schedule. It defaults
+to 16 cases (`PERCOLATOR_INV039_HISTORY_CASES`), permits 64 shrink iterations, and
+persists failures in `proptest-regressions/inv_039_resolved_histories.txt`.
+Final validation ran **64 generated histories**. The deterministic scalar pair
+includes a one-atom debt and an unequal 39,998-atom debt.
+
+The independent economic oracle uses input lots times price movement, not the
+engine's settlement or rounding routines. After each close it checks, separately
+for every owner:
+
+```text
+remaining capital + PnL + unpaid receipt face + destination SPL tokens
+    = initial deposit + booked credit - booked debit
+```
+
+A successful debtor close must book its original debit and remove its one solvent
+leg. Detaching a holder cannot count as payment of the opposing debtor: while
+that debt remains, the exact credit and senior capital stay attributed, no receipt
+or token payout is allowed, and the payout snapshot remains uncaptured. The parent
+INV-039 census independently checks each retained leg's owner/domain/side, basis,
+loss weight, pending count, aggregate capital/PnL, mint supply and vault custody.
+Every rejected close must restore the full tracked frame; every successful close
+must preserve foreign accounts. The distinct network fee payer is excluded.
+Setup uses only System/SPL/ATA and wrapper instructions, with authenticated public
+mark updates and harness Clock advancement. No engine or program-account injection
+constructs a pending obligation.
+
+Duplicate boundary: the parent's two-domain test releases both obligations before
+resolution, and its resolved-detach test has one cohort and one close order.
+This child carries both holders across resolution, checks attribution at every
+mixed close prefix, and adds shrinkable histories. It does not add another exact
+residual partition, general crank-rank, or partial-receipt exact-once oracle.
+Residual gaps include bankruptcy/B-loss and ADL, fractional quantities, nonzero
+fees/funding, shared-domain cohorts or mixed debtor/creditor roles on one account,
+CPI opening-route products, provider backing/expiry, deletion while other debts
+remain, maximum shape, and unbounded histories. The fixed terminal suffix is not
+a general proof of permissionless progress.
+
+Validation used a private copied host target and cached default-feature SBF. The
+documented SBF build at `30993c0b` has identical `src`, Cargo inputs and auth-matcher
+sources to this base (`git diff 30993c0b HEAD -- src Cargo.toml Cargo.lock
+tests/fixtures/auth_matcher` is empty). Engine:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host tests were compiled in this worktree. No fresh SBF build or broad-suite run
+is claimed. Existing stateful dead-code warnings and the `solana-client v1.18.26`
+future-incompatibility warning remain.
+
+Exact test environment and focused commands (run from the isolated worktree):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-ultra-row419-inv039-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+PERCOLATOR_INV039_HISTORY_CASES=64 cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability:: -- --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv037_partition_oracle_counts_value_once_and_excludes_retired_face_metadata -- --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz v16_program_deposit_preserves_flat_pending_obligation_and_close_partition -- --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz v16_program_cured_close_releases_counterparty_obligation -- --nocapture
+cargo test --locked --offline --test v16_cu v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once -- --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz v16_program_rebalance_then_terminal_exit_preserves_position_attribution -- --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz v16_program_reference_model_dimension_composition_is_source_complete -- --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results in that order: **7/7 pass** (1,070 filtered, 76.30s), **1/1 pass** (0.00s),
+**1/1 pass** (1.42s), **1/1 pass** (0.75s), **1/1 pass** (4.48s), **1/1 pass**
+(2.07s), then **0/1, exit 101** for the existing INV-086 source-composition gate.
+That gate expects engine `495a5590c97055bd71c6f94d849ff0298f243145`, finding zero
+rather than two matching manifest entries at line 1827. Its source and both Cargo
+inputs are byte-identical to base `95a4cf98`; the assertion fails before examining
+new witnesses. It remains an inherited metadata/review gap, not a changed gate or
+a passing certification. Formatting and diff checks pass. The initial two-test
+development selector also passed (79.23s) before retries moved ahead of the final
+completion schedule; final results above include the stronger unresolved retries.
+
 ## INV-045 reward price through actual catchup (row 422, 2026-09-09)
 
 [`cu/inv_045_reward_catchup_order.rs`](cu/inv_045_reward_catchup_order.rs), mounted
