@@ -3,6 +3,52 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-068 atomic receipt retry accounting (2026-09-09)
+
+[`stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs`](stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs)
+adds `collateral_rails::v16_program_atomic_receipt_retries_pay_once_across_collateral_rails`.
+Four public LiteSVM/SBF histories cross the first payout handler (claim or close)
+with the first collateral rail (primary or secondary). At each of two backing
+expiries, one transaction pairs the positive payout with the other payout handler
+on the opposite rail.
+Both instructions succeed with exactly one SPL transfer, and the unchanged receipt
+face, cumulative payment, recipient delta, and vault debit match the existing
+independent stock/owner oracle. A signature-distinct replay of the bundle preserves
+the entire economic account frame, including both mint inventories.
+
+The invalid variant substitutes the owner in the second instruction.
+Its exact instruction-2 `Unauthorized` error follows successful wrapper and
+SPL execution; the full economic account frame must roll back, leaving the original
+payout bundle claimable. Network fees are excluded by the existing frame helper.
+Per-mint custody and supplies reconcile after each release, rejection, payment,
+and replay, and all four histories converge on identical market/portfolio bytes,
+owner payments, reserve supplier balance, and combined custody.
+
+This adds atomic duplicate-payout accounting to the existing separate-transaction
+retry matrix. It stops at the partial receipt after two releases; terminal drain,
+multiple claimants, and arbitrary transaction lengths remain separate coverage.
+
+Validation uses fresh default-feature program and authenticated matcher SBF builds
+from the private worktree, with locked/offline dependencies and platform-tools
+v1.52. The focused test passes: **1 passed, 303 filtered**, four worlds, eight exact
+top-ups, eight atomic owner-mismatch refusals, and 24 no-op payout instructions.
+For this partial receipt, `CloseResolved` also succeeds without payment when the
+current entitlement is already paid; both handler orders are valid retries.
+Program SBF SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Matcher SBF SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" -- --locked
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_068_receipt_uniqueness_and_monotonic_topups::collateral_rails::v16_program_atomic_receipt_retries_pay_once_across_collateral_rails -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-045/031/036 paid CPI marks through source liens and fees (2026-09-09)
 
 [`stateful/inv_045_paid_mark_source_lien.rs`](stateful/inv_045_paid_mark_source_lien.rs)

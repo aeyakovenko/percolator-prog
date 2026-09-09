@@ -34,6 +34,9 @@
 //! Its retained-payout extension composes positive-payout rollback, later raw custody,
 //! recipient rejection, and signature-distinct retries without increasing the original face.
 //! The same stock/owner oracle separates donated tokens from attributed backing releases.
+//! The atomic retry product pairs both payout handlers on opposite rails in one transaction.
+//! They consume the due once; an owner mismatch in the second instruction rejects and rolls
+//! back the preceding SPL payout before the original bundle can be retried.
 
 use super::*;
 
@@ -765,6 +768,143 @@ mod collateral_rails {
         eprintln!(
             "INV-066/067/068 collateral rails: 8 worlds, 16 positive partial top-ups, \
             8 exact liquidity rejections, 32 partial and 80 terminal cross-rail no-op retries"
+        );
+    }
+
+    #[test]
+    fn v16_program_atomic_receipt_retries_pay_once_across_collateral_rails() {
+        let mut baseline = None;
+        for first_close in [false, true] {
+            for first_secondary in [false, true] {
+                let mut env =
+                    public_resolved_receipt_seed_with_setup([97, 103], 14, Some(install_secondary))
+                        .unwrap();
+                let mut reserve = Reserve::new(&mut env);
+                let mut oracle = Oracle::new(&env);
+                reserve.fund(&mut env, RESERVE_BUDGET);
+                oracle.check(&env, &reserve);
+                let first = payout_instruction(&env, &reserve, 0, first_secondary, first_close);
+                let retry = payout_instruction(&env, &reserve, 0, !first_secondary, !first_close);
+                let mut invalid_retry = retry.clone();
+                invalid_retry.accounts[0] =
+                    AccountMeta::new_readonly(env.actors[1].signer.pubkey(), false);
+
+                for (index, domain) in [3, 5].into_iter().enumerate() {
+                    env.warp_to_slot(13 + index as u64);
+                    let released = [97 + 250, 103 + 2 * 5 * 4][index];
+                    assert_eq!(
+                        env.primary_market_state().1.source_credit[domain]
+                            .fresh_reserved_backing_num,
+                        released * BOUND_SCALE
+                    );
+                    let before_release = frame(&env, &reserve);
+                    env.close_resolved_primary_signed(2)
+                        .expect("public backing release before atomic receipt retries");
+                    assert_frame_except(
+                        &before_release,
+                        &env,
+                        &[env.market, env.actors[2].portfolio],
+                    );
+                    oracle.residual += released;
+                    oracle.check(&env, &reserve);
+                    let prior_paid = oracle.paid[0];
+                    let target = oracle.target(0);
+                    let due = target - prior_paid;
+                    assert!(due > 0 && target < FACES[0]);
+
+                    let before = frame(&env, &reserve);
+                    let error = send(&mut env, vec![first.clone(), invalid_retry.clone()], &[])
+                        .expect_err("wrong-owner retry rejects after the first payout");
+                    assert_eq!(
+                        error.err,
+                        TransactionError::InstructionError(
+                            2,
+                            InstructionError::Custom(PercolatorError::Unauthorized as u32)
+                        )
+                    );
+                    for program in [env.program_id, spl_token::ID] {
+                        assert_eq!(
+                            error
+                                .meta
+                                .logs
+                                .iter()
+                                .filter(|log| *log == &format!("Program {program} success"))
+                                .count(),
+                            1,
+                            "the positive payout must execute before the invalid suffix"
+                        );
+                    }
+                    assert_eq!(frame(&env, &reserve), before, "atomic payout rollback");
+                    oracle.check(&env, &reserve);
+
+                    let destination = first.accounts[3].pubkey;
+                    let vault = first.accounts[4].pubkey;
+                    let destination_before = env.token_amount(destination);
+                    let vault_before = env.token_amount(vault);
+                    let accepted = send(&mut env, vec![first.clone(), retry.clone()], &[])
+                        .expect("positive payout followed by the opposite-rail payout handler");
+                    assert_frame_except(
+                        &before,
+                        &env,
+                        &[env.market, env.actors[0].portfolio, destination, vault],
+                    );
+                    let receipt = env
+                        .primary_portfolio(0)
+                        .resolved_payout_receipt
+                        .try_to_runtime()
+                        .unwrap();
+                    assert_eq!(receipt.paid_effective, target);
+                    assert_eq!(receipt.paid_effective - prior_paid, due);
+                    assert_eq!(
+                        u128::from(env.token_amount(destination) - destination_before),
+                        due
+                    );
+                    assert_eq!(u128::from(vault_before - env.token_amount(vault)), due);
+                    for (program, successes) in [(env.program_id, 2), (spl_token::ID, 1)] {
+                        assert_eq!(
+                            accepted
+                                .logs
+                                .iter()
+                                .filter(|log| *log == &format!("Program {program} success"))
+                                .count(),
+                            successes,
+                            "both handlers execute but only one SPL payout occurs"
+                        );
+                    }
+                    oracle.check(&env, &reserve);
+
+                    let before_retry = frame(&env, &reserve);
+                    let replay = send(&mut env, vec![first.clone(), retry.clone()], &[])
+                        .expect("both-rail payout bundle is an exact no-op after payment");
+                    assert_ne!(replay.signature, accepted.signature);
+                    assert_eq!(frame(&env, &reserve), before_retry);
+                    assert!(!replay
+                        .logs
+                        .contains(&format!("Program {} success", spl_token::ID)));
+                    oracle.check(&env, &reserve);
+                }
+
+                let outcome = Outcome {
+                    market: env.market_data(false),
+                    portfolios: env.all_primary_portfolio_data(),
+                    paid: oracle.paid,
+                    combined_custody: u128::from(env.token_amount(env.vault))
+                        + u128::from(env.token_amount(reserve.vault)),
+                    reserve_supplier: env.token_amount(reserve.source),
+                };
+                if let Some(expected) = &baseline {
+                    assert_eq!(
+                        &outcome, expected,
+                        "first_close={first_close}, first_secondary={first_secondary}"
+                    );
+                } else {
+                    baseline = Some(outcome);
+                }
+            }
+        }
+        eprintln!(
+            "INV-068 atomic receipt retries: 4 worlds, 8 exact top-ups, \
+            8 late owner rejections with full payout rollback, 24 cross-rail no-op payouts"
         );
     }
 
