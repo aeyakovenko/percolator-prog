@@ -19,6 +19,9 @@
 
 use super::*;
 
+#[path = "inv_075_atomic_close_handoff.rs"]
+mod atomic_handoff;
+
 fn inv075_close_episode_key(
     ledger: CloseProgressLedgerV16,
 ) -> (u64, u32, u64, SideV16, u128, u64, u64) {

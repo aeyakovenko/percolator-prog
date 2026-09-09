@@ -3,6 +3,63 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-075/076 atomic close handoff (2026-09-09)
+
+[`cu/inv_075_atomic_close_handoff.rs`](cu/inv_075_atomic_close_handoff.rs), mounted
+by INV-075, adds one public LiteSVM history on supplied-worktree head `77439c85`.
+Fresh branch: `codex/pr135-close-episode-atomicity-20260909`; worktree:
+`/tmp/codex-agent-worktrees/pr135-close-episode-atomicity-20260909`.
+**PR135 tests/docs only; production, Cargo/engine pins and statuses unchanged.**
+
+Public System/SPL/ATA/wrapper instructions fund four portfolios with 24 fixed-supply
+atoms and create two same-domain, two-atom close liabilities. At fixed slot 4,
+starting the second close before finalizing the first rejects `EngineLockActive`.
+The forward bundle tentatively finalizes the first and starts the second, but a
+repeated second-owner instruction carries the now-stale position epoch and rejects
+`EngineProvenanceMismatch` at instruction 4, after exactly two wrapper successes.
+Both failures restore every compiled/fixture account's bytes, metadata and lamports,
+including both ledgers, barriers, epochs, counterparties and SPL custody, except the
+exact payer signature fee. Removing only the repeated tail admits the original
+two-instruction prefix; a payer-only crank then finalizes the new barrier owner.
+
+An input-derived oracle checks four loss atoms booked exactly once, zero final
+residual/barriers, immutable episode keys, exact B numerator/remainder, retained
+basis/OI/weights/counts, capital census, and all 24 SPL atoms. Both portfolio-local
+close IDs are 1: ownership is not inferred from a globally unique close ID. This
+adds same-transaction pre-expiry ownership handoff and stale-tail atomicity, not
+the existing contention-through-expiry, same-asset drift, active-close priority,
+or terminal-payout matrices. Residual gaps: mirrored/unequal/multiple domains,
+later same-portfolio episodes, funding/fees, backing/insurance/cure deposits,
+fractional B, subsequent B settlement and position/payout cleanup, arbitrary
+histories and maximum shapes. No invariant-status promotion or proof claim.
+
+Validation reused a private copy of the row424 Cargo/SBF cache; its source checkout
+matches `src/`, `Cargo.toml` and `Cargo.lock` byte-for-byte (engine `394fd0bf`). No
+fresh SBF build or matcher is claimed. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Exact commands from the fresh worktree (copy is first-use setup):
+
+```sh
+cp -a /dev/shm/pr135-row424-progress-target /dev/shm/pr135-close-episode-atomicity-target
+export CARGO_TARGET_DIR=/dev/shm/pr135-close-episode-atomicity-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_075_close_priority_ownership_and_episode_integrity::atomic_handoff::v16_program_atomic_close_handoff_rolls_back_stale_continuation -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_075_close_priority_ownership_and_episode_integrity::v16_program_competing_close_starts_exhaust_both_landing_orders \
+  inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_public_close_zero_cure_rejects_atomically_and_terminal_progress_remains
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: new selector **1/1 PASS** on both runs (0.49s each), adjacent selectors
+**2/2 PASS** (1.44s), formatting and whitespace checks **PASS**.
+New close-sequence peak: **224,974 CU**;
+checked bounds are 300,000 for the first forfeit, 325,000 for the final crank,
+625,000 for the accepted bundle and 925,000 for the rejected bundles.
+Only these three selectors were run.
+The existing `solana-client` future-incompatibility warning remains.
+
 ## INV-010 retained single-CPI quote ordering (2026-09-09)
 
 [`cu/inv_010_out_of_order_safety.rs`](cu/inv_010_out_of_order_safety.rs) adds one
