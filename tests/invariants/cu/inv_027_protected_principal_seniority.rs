@@ -20,6 +20,9 @@
 //! accrual and resolution. Live withdrawal and terminal payout return the same independently
 //! computed principal, and exact-rollback insurance probes enforce user disposition before fees
 //! leave custody, including the zero-capital, still-materialized-portfolio boundary.
+//! The joint-admission sibling composes uncollected maintenance with rounded nontraded target
+//! lag at an exact risk boundary, comparing direct admission to public crank settlement on
+//! all four transports and either constrained party. It does not cover flat first-risk fees.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -32,6 +35,9 @@ mod recovery_forfeit_seniority;
 
 #[path = "inv_027_maintenance_terminal_seniority.rs"]
 mod maintenance_terminal_seniority;
+
+#[path = "inv_027_joint_admission_liabilities.rs"]
+mod joint_admission_liabilities;
 
 const ISSUE408_FEE_PER_SLOT: u128 = 1_000;
 const ISSUE408_AGED_SLOT: u64 = 500;

@@ -3,6 +3,69 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-027 joint admission liabilities (row 413, 2026-09-09)
+
+[`cu/inv_027_joint_admission_liabilities.rs`](cu/inv_027_joint_admission_liabilities.rs),
+mounted by INV-027, adds a passing bounded composition of
+`all-accrued-liabilities-precede-every-risk-increasing-admission` on unchanged PR135 production
+code at `30993c0b`. Worktree: `/tmp/codex-agent-worktrees/row413-inv027-generic-coverage-20260909`;
+branch: `codex/row413-inv027-generic-coverage-20260909`.
+**Classification: net-new PR135-only coverage, not a production finding/fix. Row 413 remains OPEN.**
+
+Sixteen worlds cross four trade transports, either constrained party (including the unsigned
+CPI maker), and direct admission versus explicit `PermissionlessCrank` settlement. Both traders
+already hold a 10.1-unit position on the nontraded asset. An empty keeper advances slots 1 to 4
+at price 100 without touching either trader. Each owes `3 * 7 = 21` atoms of uncollected fees.
+A same-slot authenticated target of 99 or 101 creates adverse lag only for the constrained party,
+without changing effective price, K/F, or PnL. The input-derived lag is `ceil(10.1 * 1) = 11`.
+
+The constrained owner deposits 143 atoms. After fees, equity 122 exactly covers old-leg IM 101,
+lag 11, and new-asset IM 10. One extra position quantum requires 123 and must reject with typed
+`EngineInvalidConfig`, including complete tracked economic-account/lamport rollback. Omitting
+either obligation or rounding lag down would admit that request; double charging would prevent
+the exact-limit control. Both current certificates equal independent lane/key accounting and
+the explicit public-settlement control across schedules and transports. Fees total 42 and credit
+canonical asset-zero insurance domains 20/22, independent of the pre-existing asset-one leg.
+Exact capital, fee cursors/debt, PnL, positions/OI, custody/mint supply, unrelated-account frames,
+and retained nontraded lag are checked. Two final current-state cranks per world return
+`EngineNonProgress` with exact rollback, excluding only the separate network-fee payer.
+
+This is not the flat first-risk red/green regression in #430 or older #413; neither fix nor
+regression was imported or executed. INV-060 already owns maintenance-only admission, and
+INV-053's combined fee/lag matrix explicitly collects fees and refreshes before trading. Its
+rounded-lag boundary has zero fees. Those standalone partitions are not duplicated here: the
+new obligation is their still-pending conjunction at admission on both parties.
+Only System/SPL/ATA/matcher/wrapper instructions construct economic state. No initialized-state
+byte edits, production/dependency changes, engine proofs, shared-helper edits, or status promotion.
+Flat first opens, funding/marked losses/pending close obligations, additional risk-delta shapes,
+multi-leg batches, resource impairment, exits, arbitrary histories, and maximum shapes remain open.
+
+Validation: default-feature wrapper and auth-matcher SBF rebuilt offline in this worktree with
+platform-tools v1.52 and unchanged engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Wrapper SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The smallest exact selector passes **1/1** twice (1,062 filtered), **16 rejections, 16 admissions,
+32 fixed-point rollbacks** per run, in 7.91s and 7.99s. Maximum CU across both runs for observation / explicit settlement /
+margin rejection / admission: **148,633 / 260,721 / 568,083 / 613,085**, within 325,000 / 750,000
+crank / trade bounds. Bootstrap, mark writers, matcher setup, and final fixed-point rejection CU
+are outside these maxima; this is not a maximum-shape claim. No broad suite was run.
+The initial development run stopped at the explicit control's `SyncMaintenanceFee` call because
+retained target lag guards that instruction. The control now uses public crank collection and
+refresh; no admission assertion was weakened. The fee oracle was also corrected to the canonical
+base-asset destination before the passing run. Cargo emits its existing `solana-client v1.18.26`
+future-incompatibility warning.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir target/deploy --offline -- --locked
+cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir tests/fixtures/auth_matcher/target/deploy --offline -- --locked
+CARGO_TARGET_DIR=/dev/shm/row413-inv027-generic-coverage-20260909-target cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_joint_accrued_liabilities_precede_risk_admission -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_027_joint_admission_liabilities.rs
+git diff --check
+```
+
 ## INV-008 passive reward stock (row 415, 2026-09-09)
 
 [`cu/inv_008_passive_reward_stock.rs`](cu/inv_008_passive_reward_stock.rs), mounted by
