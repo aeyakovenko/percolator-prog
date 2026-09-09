@@ -451,6 +451,114 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
+## INV-005/024/036/081 terminal insurance lifecycle (row 410, 2026-09-09)
+
+[`cu/inv_024_terminal_insurance_lifecycle.rs`](cu/inv_024_terminal_insurance_lifecycle.rs),
+mounted by INV-024, adds one **net-new partial public LiteSVM test** for row 410.
+Initial fetched base: `b5547380402a3d2a2d8ebde34cc5ac3c724781b5` from
+`origin/codex/invariant-fidelity-reopen-20260904`; rebased and revalidated on
+latest fetched head `2aff94d27f0b9c589f691e05293ec77f2cad45dc` (two intervening
+tests/docs-only commits). Isolated worktree:
+`/home/anatoly/percolator-prog-row410`; branch:
+`codex/pr135-row410-terminal-attribution-20260909`. **Row 410 remains OPEN.**
+Production code, engine/dependency pins, shared helpers and invariant verdicts are
+unchanged. This is coverage, not a production red/green finding or closure claim.
+
+The new relation is **live insurance-operator payout + fee-bearing resolution +
+portfolio dematerialization + funded insurance-beneficiary succession**. Four
+histories cross beneficiary handoff before resolution versus after the first
+terminal reserve payout, and insurance operator versus unrelated backing provider
+as transaction submitter/fee payer. Market authority and backing authority never
+change. The live operator remains distinct from both insurance beneficiaries.
+
+Public inputs fund 47 target-insurance atoms, 31 peer-insurance atoms, 43 fresh
+backing atoms and 211 user-capital atoms. Mint authority is disabled at supply
+332. A three-atom maintenance rate charges 15 at slot 5 and 18 more during the
+permissionless terminal payout at slot 111, capped at resolution slot 11. The
+oracle computes these charges, each long/short budget split and the user's
+178-atom entitlement from inputs, never observed fees or payout deltas. The live
+operator receives 13 atoms; its paid prefix is not a successor claim.
+
+- A raw one-atom operator withdrawal is successfully simulated after any early
+  handoff. Resolution changes neither its bytes/metas nor its authority epoch.
+  After user payout and deletion, the identical request rejects `Unauthorized`.
+- The same beneficiary-signed 17-atom request rejects `EngineLockActive` both
+  while capital remains and after capital is paid but the empty portfolio still
+  exists. Owner-signed deletion transfers exact portfolio rent to the market;
+  that unchanged reserve request then succeeds. Only the user payout is claimed
+  permissionless: neither user, reserve beneficiary nor admin signs that step.
+- The incumbent explicitly transfers the funded insurance role with successor
+  consent. Fresh-epoch former-beneficiary, operator, provider and market-admin
+  withdrawals all reject `Unauthorized`, as does successor access to the peer
+  asset. This distinguishes current economic authority from stale-epoch errors.
+- Successor withdrawal of 51 rejects `EngineLockActive` although the vault can
+  pay it: only 50 target-insurance atoms remain. Valid 19+31 payouts cross the
+  long/short budget boundary; a final one-atom attempt cannot consume the 43
+  backing or 31 peer-insurance atoms left in custody.
+
+Every one of the 76 post-setup transactions checks input-derived individual SPL
+balances, capital, fees, insurance budgets, vault stock and fixed supply against
+raw account post-state. Role profiles, control sequences, portfolio owner/fee
+cursor, materialization count, resolution slot, fee policy and the complete
+unchanged backing/source arrays are checked too. Rejections preserve every
+tracked account exactly except the independently computed network fee; successful
+steps frame all accounts outside their declared write scope. Final wallet amounts
+are incumbent/operator/successor/user/provider/admin = `17/13/50/178/0/0` for late
+handoff or `0/13/67/178/0/0` for early handoff. These distinguish conserving
+wrong-owner payouts and prevent a paid prefix from being counted twice.
+
+The existing INV-024 terminal-role test owns market-authority merging, signer
+aliasing and same-transaction destination rollback over already-resolved fixed
+stocks. INV-005 funded backing succession owns provider principal/telemetry, not
+this live-operator-to-terminal-beneficiary switch or late fee revenue. Retained
+insurance management owns empty-consent stock rechecks and ordered two-role
+succession, not this lifecycle and owner-entitlement history. Recycled rewards
+owns user reward cycles, not funded reserve succession. No row-418 quote variant,
+slab sweep or tombstone matrix is duplicated.
+
+Only public System/SPL/ATA/wrapper instructions create economic state. Harness
+changes are signer SOL, Clock and blockhashes; no program-owned byte mutation,
+engine mutation, state restoration or optional ledger is used. Remaining gaps:
+abandoned/matured shutdown fallback and escheat, absent reserve-holder consent,
+insurance spending/impairment, provider earnings, receipts/Recovery, nonzero
+cranker-share policies, larger amount/order products, asset reuse, alternate
+quote rails and final reserve disposal/CloseSlab. This is not a full INV-081
+success-state theorem or an engine-proof rerun.
+
+Validation uses a private `/dev/shm` target seeded with
+`cp -a /dev/shm/pr135-row424-progress-target /dev/shm/pr135-row410-attribution-target`,
+then a fresh same-worktree default-feature SBF build. Program SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No matcher is used.
+The first host compile caught a test-only closure borrow conflict, corrected by
+capturing copied account keys; no runtime conformance failure was observed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-row410-attribution-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_insurance_lifecycle::v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attribution -- --exact --nocapture
+cargo test --locked --offline --test v16_cu terminal_insurance_lifecycle:: -- --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_024_attributed_quote_value_conservation::terminal_insurance_lifecycle::v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attribution \
+  inv_024_attributed_quote_value_conservation::terminal_role_handoff::v16_program_terminal_role_handoff_preserves_reserve_beneficiaries_with_aliased_payer \
+  inv_005_authority_incarnation_binding::funded_backing_succession::v16_program_funded_backing_succession_preserves_paid_prefix_and_terminal_role_partition \
+  inv_005_authority_incarnation_binding::retained_insurance_management::v16_program_retained_empty_insurance_management_rechecks_stock_before_ordered_succession \
+  inv_024_attributed_quote_value_conservation::recycled_reward_terminal_history::v16_program_recycled_rewards_preserve_owner_atoms_through_ordered_terminal_payouts
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code origin/codex/invariant-fidelity-reopen-20260904 -- src Cargo.toml Cargo.lock tests/invariants/invariant_status.tsv tests/invariants/open_findings.tsv tests/invariants/coverage_reopenings.tsv
+```
+
+The new exact selector passes **1/1**: **four worlds, 36 successful transactions,
+40 exact rejected transactions and four live-payable simulations**. Success/rejection
+peak CU in the post-rebase five-selector run is **102,046 / 20,337**, below the enforced
+300,000 ceiling (key-dependent PDA derivation varies between worlds). Setup and
+simulations are outside these transaction/CU counts. The five-selector focused
+run passes **5/5 in 17.12 s**; fmt, diff and production/status identity checks pass.
+The short selector also passes **1/1** on the rebased head. Cargo emits only its existing
+`solana-client v1.18.26` future-incompatibility warning. No broad suite was run.
+
 ## INV-024 terminal role handoff (row 410, 2026-09-09)
 
 [`cu/inv_024_terminal_role_handoff.rs`](cu/inv_024_terminal_role_handoff.rs), mounted

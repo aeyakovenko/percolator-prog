@@ -20,6 +20,9 @@ mod recycled_reward_terminal_history;
 #[path = "inv_024_terminal_role_handoff.rs"]
 mod terminal_role_handoff;
 
+#[path = "inv_024_terminal_insurance_lifecycle.rs"]
+mod terminal_insurance_lifecycle;
+
 #[test]
 fn v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim() {
     use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::{
