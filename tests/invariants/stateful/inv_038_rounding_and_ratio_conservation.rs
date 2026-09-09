@@ -54,6 +54,10 @@
 //! INV-068's generated terminal-drain test reuses this history with eager or terminal-only
 //! top-ups and both owner/continuation orders. Its independent checkpoint observer checks
 //! terminal entitlements through all five public portfolio closes and stale-claim rollback.
+//! `mixed_residue::v16_program_mixed_support_receipts_preserve_exact_residue_attribution`
+//! consumes a still-Fresh source between backing expiry and the second receipt settlement.
+//! Its input-origin cash oracle tracks the shrinking claim denominator, both owners' exact
+//! payouts and explicit non-user residue classes through eager/deferred claim schedules.
 //! Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -63,6 +67,8 @@
 //! partitions above; they do not close unrelated social-loss or backing-ratio products.
 
 use super::*;
+#[path = "inv_038_mixed_residue.rs"]
+mod mixed_residue;
 use crate::support::{
     fuzz_model::{
         assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,

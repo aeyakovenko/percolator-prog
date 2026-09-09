@@ -10539,6 +10539,71 @@ using cached SBF `230b6db1` and matcher `50e53226`, with no rebuild. INV-038 now
 389 suffix attempts, 99 exact rejections and 44 nonzero payouts; the 11 new coalesced worlds add
 119 attempts, 33 rejections and 11 payouts. `cargo fmt --check` and `git diff --check` pass.
 
+**Mixed-support cash-residue increment, base `a0431b13`, 2026-09-09:**
+[`inv_038_mixed_residue.rs`](stateful/inv_038_mixed_residue.rs), mounted by the stateful INV-038
+owner, adds `mixed_residue::v16_program_mixed_support_receipts_preserve_exact_residue_attribution`.
+This is finding-blind, coverage-only evidence from the requested base; no open fix branch,
+test or diff was inspected. Unlike the existing two-expiry cadence/terminal-drain schedules,
+the second claimant consumes a still-Fresh source **before** its expiry. Three bounded public
+continuations at slot 13 expire domain 3, retain its haircut face, and allocate domain 5 support
+before settling/paying the second receipt. Domain 5's authenticated deadline remains slot 17.
+The common denominator shrinks after the first claimant has already received a floor payment.
+
+The independent observer derives its origins from the reused public seed's deposits, provider
+top-ups and integer trade history, not observed payout rates or vault-minus-stock residuals:
+`X = 3278 + b0 + b1`, initial common pool `211`, domain-3 release `250 + b0`, and Fresh domain-5
+support `S = 40 + b1`. Initial faces are `1000` and `1200`; after support allocation the second
+face is `1200 - S`, the common pool is `R = 461 + b0`, and denominator `D = 2200 - S`.
+For each owner, bounded native integer arithmetic computes `Fi * R = Ai * D + ri`, `0 <= ri < D`.
+The explicit observer classes are `SettlementRoundingResidue = (r0 + r1) / D` and
+`UnallocatedProtocolSurplus = 0`; the remainder sum must be atom-aligned and
+`R = A0 + A1 + SettlementRoundingResidue + UnallocatedProtocolSurplus` exactly.
+Every suffix transaction reconciles the full external origin with paid allocations, remaining
+principal, committed support, unpaid common-pool allocations and these residue classes.
+
+Both owner destinations, capital, PnL, reserved face, immutable receipt, source claim/backing
+amounts and rates, insurance budgets, earnings, engine/SPL custody, token supply and unrelated
+account frames are checked. Consumed backing/provider-receivable metadata is explicitly excluded
+from cash. Observation-only mutations reject wrong-owner payment, residue promoted to capital,
+insurance or backing, a dropped cash-residue atom, a conserved extra payout, and a conserved
+underpayment using the obsolete denominator. No LiteSVM account bytes are mutated. Two extra
+one-atom withdrawals reject with exact rollback; duplicate terminal claims are exact no-ops.
+An already-cleared eager receipt's close is allowed only as exact `EngineNonProgress` rollback.
+
+The finite matrix uses backing pairs `[1,1]`, `[127,3]`, `[199,159]`, `[15,35]`, eager/deferred
+first-owner claims, and owner-signed `CloseResolved`/resolved-crank source continuations. All
+cadence/transport endpoints compare tracked account bytes exactly. The last pair is the
+zero-residue control. Validation passes **16 worlds, 168 public attempts, 40 exact rejections**,
+with **12 one-atom residue endpoints**, four zero-residue endpoints, and maximum observed CU
+**246,847**. No user capital or unpaid payout remains at these endpoints; residual custody is
+exactly the independently attributed rounding residue. Portfolios are not dematerialized and
+market retirement, later epochs, nonzero funding and arbitrary mixed histories remain unclaimed.
+The residue classes are observer accounting, not newly persisted fields or a generic engine
+arithmetic proof. The reused live construction is public but not individually observed here.
+INV-038/AUDIT-038 status and method labels remain unchanged.
+
+Validation uses a private host-cache copy and **fresh default-feature SBF builds** in the isolated
+worktree, with platform-tools v1.52 and the locked engine `394fd0bf`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`; matcher:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The new selector and the two adjacent receipt selectors below pass together; no broad suite or
+production red/green fix is claimed. Development corrections were a test-side POD type name and
+the expected already-cleared close rejection, not production failures.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/inv038-mixed-residue-20260909-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir tests/fixtures/auth_matcher/target/deploy --offline -- --locked
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture \
+  inv_038_rounding_and_ratio_conservation::mixed_residue::v16_program_mixed_support_receipts_preserve_exact_residue_attribution \
+  inv_038_rounding_and_ratio_conservation::v16_program_generated_receipt_histories_preserve_deferred_rounding \
+  inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_generated_receipt_histories_preserve_terminal_drain
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_038_mixed_residue.rs tests/invariants/stateful/inv_038_rounding_and_ratio_conservation.rs
+git diff --check
+```
+
 **Remaining gap / next owner:** the same stateful INV-038 module now has a reusable seed and
 observer for extending this bounded slice. Fresh booking after the denominator change, alternate
 side/chunk/order schedules, generated mixed-route histories, residue-origin observation during
@@ -10547,8 +10612,9 @@ funding/receipt interleavings, multi-claimant residue ownership, additional asse
 original receipt-cadence slice fixes the live prefix, two expiry events, one claimant and fully
 reserved backing; it does not vary authenticated expiry order, source allocation policy or trade
 transports. Its generated terminal-drain extension is separately owned by INV-068 below.
-Neither slice produces new cash-residue classification
-evidence: the broader oracle must still attribute cash residue only to `SettlementRoundingResidue`
+The earlier B/receipt-cadence slices do not independently classify cash residue. The new
+mixed-support observer supplies that attribution only for its bounded two-claimant history;
+the broader oracle must still attribute cash residue only to `SettlementRoundingResidue`
 or `UnallocatedProtocolSurplus`. Reuse INV-010/052/085; do not repeat their partition products or
 arithmetic proofs. Reordered authenticated events require explicit noncommuting envelopes.
 
