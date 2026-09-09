@@ -35,6 +35,7 @@ struct AccountLivenessRank {
 struct TerminalAdministrationRank {
     economic_work: u128,
     materialized_portfolios: u128,
+    // Payable terminal principal/earnings; expiry normalization belongs to the slab scan.
     provider_cleanup: u128,
     insurance_cleanup: u128,
     asset_cleanup: u128,
@@ -80,8 +81,6 @@ fn inv082_terminal_step_requires_signer(step: TerminalAdministrationStep) -> boo
     matches!(
         step,
         TerminalAdministrationStep::PortfolioMechanicalClose
-            | TerminalAdministrationStep::ProviderCleanup
-            | TerminalAdministrationStep::InsuranceCleanup
             | TerminalAdministrationStep::AssetRetire
             | TerminalAdministrationStep::TerminalSlabProgress
             | TerminalAdministrationStep::CloseSlab
@@ -381,7 +380,13 @@ fn kani_inv082_terminal_administration_is_finite_and_not_permissionless() {
     );
     assert_eq!(
         inv082_terminal_step_requires_signer(selected),
-        before.economic_work == 0 && before != TerminalAdministrationRank::default()
+        before.economic_work == 0
+            && (before.materialized_portfolios != 0
+                || (before.provider_cleanup == 0
+                    && before.insurance_cleanup == 0
+                    && (before.asset_cleanup != 0
+                        || before.terminal_scan_work != 0
+                        || before.market_account_open != 0)))
     );
     assert_eq!(after.economic_work, before.economic_work.saturating_sub(1));
 }

@@ -5076,6 +5076,25 @@ Results: isolated new selector **1/1**, combined focused run **3/3**, formatting
 and whitespace checks pass. Peak new-test exit CU: **219,404**. The existing
 `solana-client` future-incompatibility warning remains.
 
+## INV-073 terminal reserve consent (rows 420/421, 2026-09-09)
+
+[`cu/inv_073_terminal_provider_earnings.rs`](cu/inv_073_terminal_provider_earnings.rs)
+and the INV-073/INV-067 owners cover the wrapper-only conformance fix that
+permits canonical unsigned terminal reserve payouts while preserving live-mode
+signer requirements. Branch: `codex/astra-ultra-inv073-terminal-progress-20260909`.
+
+The public matrix creates real trading/source claims, reaches terminal reserve
+payment through public wrapper routes, and checks that unsigned terminal
+progress does not require the former live account owner while malformed,
+live-mode, or noncanonical attempts still reject with exact rollback. This is a
+focused terminal-liveness fix and regression, not a broad reclassification of
+all terminal cleanup as permissionless.
+
+Remaining gaps include broader terminal-policy products, provider-principal
+expiry/scanner interleavings, late receipts, optional-ledger products,
+secondary quote rails, and maximum-shape terminal sweeps. Rows 420/421 remain
+open for full invariant closure.
+
 ## INV-017 transaction-wide privileges and account-kind alias (2026-09-09)
 
 [`cu/inv_017_signer_writable_role_and_account_alias_safety.rs`](cu/inv_017_signer_writable_role_and_account_alias_safety.rs)

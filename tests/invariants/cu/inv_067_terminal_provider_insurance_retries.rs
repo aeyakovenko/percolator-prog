@@ -23,6 +23,29 @@ fn v16_program_absent_provider_preserves_user_order_and_operator_free_insurance_
 }
 
 fn run_terminal_provider_and_insurance(absent_provider: bool) {
+    verify_terminal_provider_and_insurance_disposition_with_absent_provider(
+        true,
+        &[false, true],
+        absent_provider,
+    );
+}
+
+pub(crate) fn verify_terminal_provider_and_insurance_disposition(
+    terminal_signed: bool,
+    orders: &[bool],
+) {
+    verify_terminal_provider_and_insurance_disposition_with_absent_provider(
+        terminal_signed,
+        orders,
+        false,
+    );
+}
+
+fn verify_terminal_provider_and_insurance_disposition_with_absent_provider(
+    terminal_signed: bool,
+    orders: &[bool],
+    absent_provider: bool,
+) {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
     use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
@@ -30,7 +53,7 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
     const REMAINDER: [u64; 2] = [BACKING - FIRST[0], INSURANCE - FIRST[1]];
 
     let mut peak_cu = 0;
-    for insurance_first in [false, true] {
+    for &insurance_first in orders {
         let mut env = inv018_public_spl_market_with_params(
             0,
             V16CuMarketParams {
@@ -80,6 +103,62 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
         let recipients = [&owners[0], &owners[1], &provider, &insurer, &admin];
         let tokens = recipients
             .map(|owner| create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint));
+        let mut restricted = [Vec::new(), Vec::new()];
+        if !terminal_signed {
+            for role in 0..2 {
+                for close_authority in [false, true] {
+                    let token = Keypair::new();
+                    system_create_account_for_test(
+                        &mut env.svm,
+                        &env.payer,
+                        &token,
+                        TokenAccount::LEN,
+                        spl_token::ID,
+                    );
+                    send_raw_tx(
+                        &mut env.svm,
+                        &env.payer,
+                        spl_token::instruction::initialize_account3(
+                            &spl_token::ID,
+                            &token.pubkey(),
+                            &env.mint,
+                            &recipients[role + 2].pubkey(),
+                        )
+                        .unwrap(),
+                        &[],
+                    )
+                    .unwrap();
+                    let instruction = if close_authority {
+                        spl_token::instruction::set_authority(
+                            &spl_token::ID,
+                            &token.pubkey(),
+                            Some(&operator.pubkey()),
+                            spl_token::instruction::AuthorityType::CloseAccount,
+                            &recipients[role + 2].pubkey(),
+                            &[],
+                        )
+                    } else {
+                        spl_token::instruction::approve(
+                            &spl_token::ID,
+                            &token.pubkey(),
+                            &operator.pubkey(),
+                            &recipients[role + 2].pubkey(),
+                            &[],
+                            1,
+                        )
+                    }
+                    .unwrap();
+                    send_raw_tx(
+                        &mut env.svm,
+                        &env.payer,
+                        instruction,
+                        &[recipients[role + 2]],
+                    )
+                    .unwrap();
+                    restricted[role].push(token.pubkey());
+                }
+            }
+        }
         for (token, amount) in
             tokens
                 .into_iter()
@@ -245,6 +324,7 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
         let mut frame_keys = vec![env.market, env.vault, env.mint, operator.pubkey()];
         frame_keys.extend(portfolios);
         frame_keys.extend(tokens);
+        frame_keys.extend(restricted.iter().flatten().copied());
         frame_keys.extend(recipients.map(|owner| owner.pubkey()));
         let frame = |env: &V16CuEnv| {
             frame_keys
@@ -281,6 +361,14 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
                 &all_signers,
                 env.svm.latest_blockhash(),
             );
+            if signers.is_empty() {
+                assert_eq!(tx.message.header.num_required_signatures, 1);
+                assert_eq!(tx.message.account_keys[0], env.payer.pubkey());
+                assert!(recipients
+                    .iter()
+                    .all(|owner| owner.pubkey() != env.payer.pubkey()));
+                assert_ne!(operator.pubkey(), env.payer.pubkey());
+            }
             env.svm.send_transaction(tx)
         };
         let withdraw = |env: &V16CuEnv, insurance: bool, amount: u64| {
@@ -411,6 +499,18 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
         }
         let terminal = env.market_state().1;
         assert_eq!(terminal.materialized_portfolio_count, 0);
+        // INV-073 owns the unsigned product; INV-067 retains its signed retry product.
+        let retained = retained.map(|mut instruction| {
+            instruction.accounts[0].is_signer = terminal_signed;
+            instruction
+        });
+        let terminal_signers = |role: usize| -> Vec<&Keypair> {
+            if terminal_signed {
+                vec![authorities[role]]
+            } else {
+                vec![]
+            }
+        };
         assert_eq!(
             terminal.source_backing_buckets[3].fresh_unliened_backing_num,
             u128::from(BACKING) * BOUND_SCALE
@@ -460,7 +560,7 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
         let mut paid = [0u64; 2];
         for role in order {
             let before = frame(&env);
-            let meta = land(&mut env, &[retained[role].clone()], &[authorities[role]])
+            let meta = land(&mut env, &[retained[role].clone()], &terminal_signers(role))
                 .expect("retained withdrawal becomes payable only after user exits");
             assert_cu_within(
                 "INV-067 terminal first withdrawal",
@@ -479,10 +579,33 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
                 }
             }
             partition(&env, paid);
+            if !terminal_signed {
+                for destination in restricted[role].iter().copied().chain([tokens[3 - role]]) {
+                    let mut invalid = retained[role].clone();
+                    invalid.accounts[2].pubkey = destination;
+                    reject(
+                        &mut env,
+                        &[invalid],
+                        &[],
+                        2,
+                        PercolatorError::InvalidTokenAccount,
+                    );
+                }
+                let mut wrong_beneficiary = retained[role].clone();
+                wrong_beneficiary.accounts[0].pubkey = admin.pubkey();
+                wrong_beneficiary.accounts[2].pubkey = tokens[4];
+                reject(
+                    &mut env,
+                    &[wrong_beneficiary],
+                    &[],
+                    2,
+                    PercolatorError::Unauthorized,
+                );
+            }
             reject(
                 &mut env,
                 &[retained[role].clone()],
-                &[authorities[role]],
+                &terminal_signers(role),
                 2,
                 PercolatorError::EngineLockActive,
             );
@@ -492,11 +615,12 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
         // overdraw rejects. The whole prefix must roll back, leaving its remainder payable.
         for role in order {
             let other = 1 - role;
-            let remainder = withdraw(&env, role == 1, REMAINDER[role]);
+            let mut remainder = withdraw(&env, role == 1, REMAINDER[role]);
+            remainder.accounts[0].is_signer = terminal_signed;
             let rejected = reject(
                 &mut env,
                 &[remainder.clone(), retained[other].clone()],
-                &authorities,
+                if terminal_signed { &authorities } else { &[] },
                 3,
                 PercolatorError::EngineLockActive,
             );
@@ -514,7 +638,7 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
                 500_000,
             );
             peak_cu = peak_cu.max(rejected.compute_units_consumed);
-            let meta = land(&mut env, &[remainder.clone()], &[authorities[role]])
+            let meta = land(&mut env, &[remainder.clone()], &terminal_signers(role))
                 .expect("unchanged remainder pays after rollback");
             assert_cu_within(
                 "INV-067 terminal remainder retry",
@@ -528,7 +652,7 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
                 reject(
                     &mut env,
                     &[instruction],
-                    &[authorities[role]],
+                    &terminal_signers(role),
                     2,
                     PercolatorError::EngineLockActive,
                 );
@@ -549,11 +673,25 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
             0
         );
 
-        let cu = env.withdraw_insurance_domain_to_admin_token_with_cu(
-            tokens[4],
-            0,
-            u128::from(UNRELATED_INSURANCE),
-        );
+        let admin_signers = [&admin];
+        let cu = env
+            .send(
+                env.withdraw_insurance_asset_instruction(
+                    admin.pubkey(),
+                    0,
+                    UNRELATED_INSURANCE.into(),
+                ),
+                vec![
+                    AccountMeta::new_readonly(admin.pubkey(), terminal_signed),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(tokens[4], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                if terminal_signed { &admin_signers } else { &[] },
+            )
+            .expect("remaining canonical insurance has the same public terminal disposition");
         assert_cu_within("INV-067 unrelated terminal insurance", cu, CUSTODY_CU_LIMIT);
         peak_cu = peak_cu.max(cu);
         assert_eq!(
@@ -565,7 +703,7 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
         custody(&env);
         env.close_slab_with_cu();
         assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
-        println!("INV-067 provider/insurance order insurance_first={insurance_first}: users=2000 backing={BACKING} insurance={INSURANCE} unrelated={UNRELATED_INSURANCE}; zero vault residue");
+        println!("INV-067/073 terminal_signed={terminal_signed} insurance_first={insurance_first}: users=2000 backing={BACKING} insurance={INSURANCE} unrelated={UNRELATED_INSURANCE}; zero vault residue");
     }
     if !absent_provider {
         println!("INV-067 provider/insurance terminal suffix peak CU {peak_cu}");
