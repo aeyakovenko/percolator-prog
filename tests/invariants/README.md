@@ -3,6 +3,63 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-045 fractional target reversal and neutral reduction (2026-09-09)
+
+[`cu/inv_045_no_free_mark_movement.rs`](cu/inv_045_no_free_mark_movement.rs) adds
+`v16_program_fractional_target_reversal_commutes_with_neutral_reduction`.
+Eight public LiteSVM/SBF histories cross both mark directions, eager/endpoint-only
+cranks, and a zero-fee one-lot reduction before/after authenticated target reversal.
+The reduction-first schedule settles long then short; the other settles short then
+long. System/SPL/ATA/wrapper instructions construct all protocol and token accounts;
+only signer SOL, Clock and blockhashes are harness-supplied. Mint authority is revoked.
+
+Seven matched lots start at price 100 with a 24-bps cap and zero funding/fees.
+At slot 6, the input numerator `100 * 24 * 6 = 14,400` gives price `100 +/- 1`
+and carry 4,400. Reducing one lot at that committed price preserves each owner's
+value and the existing carry. Reversing the target resets carry to zero. Five more
+slots from the retained cap anchor 100 yield numerator 12,000, price 100, carry
+2,000, six remaining lots and owner entitlements `100,003 +/- 1` / `200,009 -/+ 1`.
+Every checkpoint checks exact K, OI, zero funding/B/pending cohorts, settled plus
+unsettled owner value, capital/positive-PnL totals, insurance and fixed SPL custody.
+
+At reversal, a valid `PushAuthMark` followed by a zero-price publication rejects
+exactly instruction 3 `OracleInvalid` after one successful wrapper instruction.
+All eleven tracked Accounts roll back, including the target, nonzero carry and
+observation sequence; the payer loses only the calculated two-signature fee.
+The identical valid publication then succeeds. Each direction's four schedules
+converge on the same independently predicted endpoint.
+
+Row425 public carry-order coverage holds targets fixed; INV-052's direct reset
+witness changes targets before any effective price movement. Its generated target
+histories compare crank cadence without an interleaved reduction/publication order
+or this atomic reset rollback. This increment composes those missing transitions
+after a real price atom. Paid-source liens, retained exits, staggered EWMA envelopes,
+composite rounding, due-accrual trade-first execution, fractional positions, funding,
+payouts and maximum shapes remain outside this witness. Row 425 stays OPEN and
+invariant statuses are unchanged. No production inconsistency was observed; initial
+validation corrected the test's assumption that publication re-anchors the cap.
+
+Validation uses a fresh default-feature SBF build in private worktree
+`/dev/shm/percolator-inv045-carry-20260909`, base `f1a84de53c3f30459cef0cf7a32aa56574f2cffc`,
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, platform-tools v1.52.
+The new test passes 1/1 across eight histories and eight exact suffix rollbacks,
+with peak 221,377 CU under 1,400,000. Both adjacent exact selectors and the invariant
+index pass, as do targeted rustfmt and whitespace checks. Program SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 TMPDIR=/dev/shm
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::v16_program_fractional_target_reversal_commutes_with_neutral_reduction -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_052_split_merge_invariance::v16_program_target_change_resets_prior_price_movement_remainder -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::v16_program_row425_public_carry_entitlement_is_partition_and_order_equivalent -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_045_no_free_mark_movement.rs
+git diff --check
+```
+
+
 ## INV-020/053/054 disjoint observation histories (2026-09-09)
 
 [`cu/inv_054_certificate_epoch_completeness.rs`](cu/inv_054_certificate_epoch_completeness.rs)
