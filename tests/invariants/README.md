@@ -3,6 +3,42 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-019/047 retained grants across contexts and mixed transports (2026-09-09)
+
+[`stateful/inv_047_retained_mixed_transport.rs`](stateful/inv_047_retained_mixed_transport.rs)
+adds one test under the existing INV-047 stateful owner:
+`v16_program_retained_grants_bind_context_across_mixed_transport_reductions`.
+It covers public retained matcher grants across unrelated custody activity, occupied
+foreign matcher contexts, CPI/no-CPI and single/batch reductions, exact refusal
+rollback, and normalized route-equivalent economics. Production, Cargo, engine,
+shared helpers, fixture sources, and invariant verdicts are unchanged.
+
+Eight LiteSVM/SBF worlds cross long/short owners with all trade transport variants.
+Two LPs retain signed matcher grants, execute real CPI fills through their own
+contexts on different assets, then attempt a retained CPI request with the same
+wrapper payload but a substituted occupied foreign context and correctly derived
+target PDA. The substituted request rejects `Unauthorized` before matcher invocation,
+proving stale or foreign return state cannot expand another LP's grant. The original
+signed reduction remains usable and converges to byte-identical normalized economics
+across transports: paired five-lot positions, matched OI, exact bilateral fee
+debits, insurance growth, fixed token supply, public stock/encumbrance census, and
+zero out-of-band economic mutations.
+
+The test also proves the bilateral reduction revokes the capability for no-CPI
+routes while preserving a valid current-epoch CPI path only when the grant remains
+enabled. All refusals compare economic Accounts, Clock, instruction accounts, account
+metadata, and signer lamports, excluding only the network fee payer. This is distinct
+from the retained two-CPI freshness/expiry coverage: it focuses on grant scope,
+context substitution, and mixed transport equivalence rather than silent return-data
+reuse in a two-CPI transaction.
+
+Remaining gaps include cross-market substitution, context/portfolio recreation,
+multi-leg or maximum-shape batches, fractional or partial fills, nonzero spreads,
+funding/backing/source claims, expired grants, and complete exits. Both invariants
+remain `OPEN_EVIDENCE`; no universal route or identity closure is claimed. Focused
+validation passed: 8 worlds, 72 accepted public transactions, 12 exact refusals,
+peak 164,809 CU; invariant index, formatting, and whitespace checks passed.
+
 ## INV-067/071/073/078 spent-insurance terminal user exits (2026-09-09)
 
 [`cu/inv_073_spent_insurance_terminal_exit.rs`](cu/inv_073_spent_insurance_terminal_exit.rs)

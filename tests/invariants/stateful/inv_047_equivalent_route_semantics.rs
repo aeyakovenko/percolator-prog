@@ -46,6 +46,9 @@ use percolator_prog::{
 use proptest::prelude::*;
 use solana_sdk::{account::Account, pubkey::Pubkey, signature::Signer};
 
+#[path = "inv_047_retained_mixed_transport.rs"]
+mod retained_mixed_transport;
+
 const TAKER: usize = 0;
 const MAKER: usize = 1;
 const MATCHER_RETURN_CACHE_LEN: usize = 64;
