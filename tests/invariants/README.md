@@ -3,6 +3,78 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-020 active claim evidence (row 426, 2026-09-09)
+
+[`cu/inv_020_active_claim_evidence.rs`](cu/inv_020_active_claim_evidence.rs), mounted
+by INV-020, adds **net-new partial PR135 coverage**, not a production finding/fix,
+on base `0108982c00ebb4946d1c1f383eb80bfdd7339ce3`. Worktree:
+`/tmp/codex-agent-worktrees/row426-inv020-active-claim-evidence-20260909`; branch:
+`codex/row426-inv020-active-claim-evidence-20260909`. **Row 426 remains OPEN.**
+No production, engine pin/proof, shared-helper, or status-ledger changes.
+
+The distinct relation is **payable closed-source claim + unrelated active Hybrid
+exposure + cached conversion versus full-refresh reduction**. Existing INV-054
+conversion controls are flat; INV-020's pending-EWMA conversion rejection retains
+exposure to the claim's own source and lacks a payable active-claim control.
+INV-053/056 cover trade admission/full recertification, not consumption of a
+separate released claim while the refreshed asset stays open. Current-health,
+omitted-rescue, liquidation-replay, and maximum chunked-admission tests are not
+duplicated, and no new timestamp-fault or missing-observation matrix is claimed.
+
+Four independently constructed worlds cross long/short Hybrid exposure with
+explicit versus trade-time refresh. Closing a ten-unit AuthMark position earns
+exactly 50 atoms. A signed conversion simulation succeeds while a separate
+one-unit Hybrid leg remains open, excluding an inherently unpayable-claim test.
+In the same authenticated slot, an independent keeper accepts an adverse Hybrid
+target without changing effective price or K/F. Another successful AuthMark
+update on an unheld asset changes the global epoch but leaves the claimant bytes
+unchanged. Cached conversion must reject exactly with `EngineStale`.
+
+Explicit public refresh and on-demand half-position reduction both produce
+independently checked current certificates, retaining the exact adverse lag
+margin. Conversion still rejects with `EngineLockActive`: current certificate
+keys alone do not authorize a favorable action against pending target evidence.
+There are ten checked rejection transactions, each framing every tracked market,
+portfolio, mint, vault, wallet, provider, and signer account exactly, with the
+separate payer's two-signature network fee accounted for. Current authenticated
+catchup and a bounded public settlement/recertification cycle then settle the
+remaining half-unit's five-atom loss. Each owner converts the exact remaining
+45-atom claim while that half-unit stays open. Independent per-owner value,
+capital/PnL, margin, OI, custody, and unchanged-account checks bind the result;
+both schedules converge on the same economic values and global epochs.
+
+Only System/SPL/ATA/wrapper instructions construct economic accounts and mutate
+protocol state. The harness supplies signer SOL, Clock, and external Pyth reports;
+no initialized protocol-account byte edits or snapshot restoration. Remaining
+gaps include liquidation/rewards, missing/invalid observation products on this
+claim route, CPI/batch transports, other providers, fees/funding, backed liens,
+maximum shapes, arbitrary histories, and row-426 vulnerable/fixed-pin closure.
+The active exposure deliberately remains open; this is not a terminal-exit test.
+
+The focused selector passes **1/1** (1,069 filtered), with **4 worlds, 4 payable
+simulations, 10 exact rejections, and 4 conversions**. Peak measured refresh /
+reduction / rejection / conversion CU: **212,899 / 316,737 / 130,910 / 189,316**,
+within 325,000 / 750,000 / 300,000 / 300,000 limits. Setup and initial simulations
+are outside these maxima. Validation uses a private copy of the default-feature
+SBF built in the row-413 worktree, with matching `src`, Cargo manifest/lock, and
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Host dependencies were copied into the private target below; the test binary is
+compiled in this worktree. No SBF build or broad suite rerun. Development failures
+were setup/control corrections: initially the Hybrid asset needed public slot
+catchup, and final conversion required completion of cross-account settlement.
+Neither is claimed as a production counterexample. Cargo emits its existing
+`solana-client v1.18.26` future-incompatibility warning.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row426-inv020-active-claim-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::active_claim_evidence::v16_program_active_claim_conversion_distinguishes_current_cert_from_complete_evidence -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-005 backing-role depletion and refilling (row 416, 2026-09-09)
 
 [`cu/inv_005_backing_role_refunding.rs`](cu/inv_005_backing_role_refunding.rs), mounted

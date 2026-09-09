@@ -24,6 +24,9 @@
 //! liquidation route before current evidence refreshes the target and reduces real exposure.
 //! The `chunked_observation_admission` child distinguishes maximum market-only catchup from
 //! complete mixed-mode evidence, with exact rollback, live trade continuations, and funded exit.
+//! The `active_claim_evidence` child keeps a closed-source claim payable while another asset
+//! stays active: same-slot target lag and unrelated updates gate cached conversion independently
+//! of explicit/trade-time recertification; authenticated catchup restores the live conversion.
 //! An independent typed parser model covers 726 boundary words, 15,552 structural/semantic
 //! combinations, and 12,288 seeded valid layouts. An independent overflow-free confidence oracle
 //! compares all 65,536 basis-point settings across wide carry and overflow operands.
@@ -48,6 +51,9 @@ mod liquidation_observation_replay;
 
 #[path = "inv_020_chunked_observation_admission.rs"]
 mod chunked_observation_admission;
+
+#[path = "inv_020_active_claim_evidence.rs"]
+mod active_claim_evidence;
 
 #[test]
 fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
