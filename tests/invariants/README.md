@@ -63,6 +63,59 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
+## INV-073 terminal insurance with a former beneficiary ledger (2026-09-09)
+
+[`cu/inv_073_no_permanent_user_lock.rs`](cu/inv_073_no_permanent_user_lock.rs)
+adds `v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger`.
+One public System/SPL/wrapper history funds long/short insurance budgets of 19/28
+atoms, revokes mint authority, initializes insurance telemetry, resolves, and
+consensually transfers the funded beneficiary role. The ledger remains bound to
+the former beneficiary; the live operator and market authority are distinct roles.
+
+A transaction first withdraws 23 atoms, then requests the remaining 24 with that
+stale optional ledger attached. The suffix rejects exactly `Unauthorized` at
+instruction index 3, after one successful SPL transfer. All eleven tracked accounts
+roll back exactly, including both domain budgets and the ledger; the payer loses
+only the independently calculated two-signature network fee. The identical payment
+bytes and required account metas succeed when the optional ledger is omitted.
+Only the current beneficiary and fee payer sign these payments, and neither the
+former beneficiary nor operator appears in their account lists.
+
+The current beneficiary receives all 47 atoms; insurance, budgets and engine/SPL
+vault balances reach zero while the old ledger remains byte-identical. Subsequent
+market-authority-signed `CloseSlab` closes the SPL vault and leaves a rent-exact
+tombstone, returning all excess market/vault lamports to that authority. Supply is
+fixed at 47 and neither former beneficiary nor market authority receives tokens.
+All economic state comes from normal public instructions, without program-owned
+byte mutation, state restoration, or engine mutation.
+
+INV-064's ledger-history test keeps one beneficiary across resolution. INV-005's
+retained-insurance management test stays Live and omits the old ledger on payout.
+This increment composes a rejected stale ledger with an atomic payment prefix,
+terminal beneficiary-only payout, and slab close. It adds no spent-insurance,
+provider retry, receipt, or mixed Recovery/Active lifecycle. Beneficiary consent
+and availability and the market authority for mechanical closure are explicit
+assumptions; arbitrary insurance claims and missing-beneficiary progress remain
+outside this witness. Row 421 remains OPEN and invariant dispositions are unchanged.
+
+Validation uses a fresh default-feature SBF build from the private worktree at
+base `30cf2daa`, with platform-tools v1.52 and locked/offline dependencies. The new
+test passes: rejection 57,480 CU, payment 69,757 CU, slab close 22,106 CU. Both
+adjacent controls and the invariant index pass (one selected test per invocation).
+Targeted rustfmt and `git diff --check` pass. No production behavior contradicted
+the asserted bounded obligation. SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_064_insurance_withdrawal_policy_equivalence::v16_program_insurance_withdrawal_ledger_history_is_economically_transparent -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::retained_insurance_management::v16_program_retained_empty_insurance_management_rechecks_stock_before_ordered_succession -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+```
+
 ## INV-068 atomic receipt retry accounting (2026-09-09)
 
 [`stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs`](stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs)
