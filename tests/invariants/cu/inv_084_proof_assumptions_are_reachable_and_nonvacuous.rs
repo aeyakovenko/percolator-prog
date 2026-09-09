@@ -15,6 +15,9 @@
 
 use super::*;
 
+#[path = "inv_084_deposit_assumption_contract.rs"]
+mod deposit_assumption_contract;
+
 const INV_084_KANI_ROOT: &str = include_str!("../../../kani/v16_kani.rs");
 const INV_084_ASSUME_INVENTORY: &str = include_str!("../kani_assumption_inventory.tsv");
 const INV_084_INVENTORY_HEADER: &str = "file\tline\towner_invariant\towning_proof\tassumption_predicate\tproof_witness\tclassification\tpublic_evidence";

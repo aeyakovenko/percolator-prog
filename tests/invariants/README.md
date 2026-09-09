@@ -3,6 +3,68 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-084 deposit assumption contract (2026-09-09)
+
+[`cu/inv_084_deposit_assumption_contract.rs`](cu/inv_084_deposit_assumption_contract.rs),
+mounted by INV-084, adds one PR135-only selector on `b8dbd09e`. It locks the complete
+two-proof INV-013 Kani module, including imports, attributes, independent symbolic
+inputs, assumption conjunction and unconditional claims. One macro generates the
+deposit proof's expected source and executable host replay: symbolic inputs become
+public-state arguments and assumptions become assertions, never skipped cases.
+Public System/SPL/ATA/wrapper calls construct two IDs and eight distinct input tuples:
+first/repeated deposits at epoch zero, live long/short deposits at epoch one, and flat
+post-trade deposits at epoch two. Every deposit matches the replayed sequence transition,
+preserves ID/epoch and moves exact SPL/capital value. Two withdrawals return all
+2,000,102 atoms; mint authority is revoked. No economic account bytes are injected.
+
+**Non-duplicate:** this checks input/claim-path fidelity, not a new close-binding rule,
+public-reachability registry or exact rollback census. All **12 in-memory mutations**
+reject: three concrete inputs, two joint restrictions, epoch masking, early return with
+an unrelated cover, dropped assumption, inactive proof, vacuous claim and comment/literal
+substitutes. Five explicitly preserve the existing assumption inventory and all five
+function-category facts. A nested-comment/spacing positive control passes. No Kani,
+production, Cargo/engine-pin, shared-fixture or status-ledger changes.
+
+Residual gaps: lexical source matching, not Rust name resolution or macro expansion;
+semantic refactors require deliberate contract review. Only the deposit proof is replayed,
+over eight tuples, not the full input product, maximal IDs/sequences/epochs, other harness
+assumptions, CPI, Recovery, retained-close execution or arbitrary histories. No engine
+arithmetic claim, Kani run, SBF rebuild, broad suite or status promotion.
+
+Validation uses a private copy of the row424 cache; its `39d05875` production/Cargo inputs
+equal `b8dbd09e`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+adjacent-control matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Commands from `/tmp/codex-agent-worktrees/pr135-inv084-assumption-nonvacuity-20260909`:
+
+```sh
+cp -a /dev/shm/pr135-row424-progress-target /dev/shm/pr135-inv084-assumption-nonvacuity-target
+export CARGO_TARGET_DIR=/dev/shm/pr135-inv084-assumption-nonvacuity-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p tests/fixtures/auth_matcher/target/deploy
+cp /tmp/codex-agent-worktrees/percolator-invariant-fidelity/tests/fixtures/auth_matcher/target/deploy/auth_matcher.so tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo clean -p percolator-prog --profile dev
+cargo test --locked --offline --test v16_cu inv_084_proof_assumptions_are_reachable_and_nonvacuous::deposit_assumption_contract::v16_program_deposit_proof_contract_admits_public_epoch_sequence_product -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_084_proof_assumptions_are_reachable_and_nonvacuous::v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried \
+  inv_084_proof_assumptions_are_reachable_and_nonvacuous::v16_program_explicit_kani_guard_domains_are_publicly_reachable_and_fail_closed
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code b8dbd09e -- src Cargo.toml Cargo.lock kani tests/invariants/kani tests/invariants/kani_assumption_inventory.tsv tests/invariants/public_sbf/inv_079_public_reachability_evidence.rs tests/invariants/invariant_status.tsv tests/invariants/coverage_reopenings.tsv
+```
+
+Results: new selector **1 passed, 0 failed**, 1,098 filtered (0.43s), peak checked CU
+**165,079**; controls **1 passed, 1 failed**, 1,097 filtered (0.38s). The public control
+passes. The unchanged inventory control records INV-022 lines 1670/1671, while the actual
+source has 1698/1699. Running that exact selector alone in a fresh, untouched worktree at
+`b8dbd09e` (`/dev/shm/pr135-inv084-assumption-baseline-b8dbd09e`) reproduces **0 passed,
+1 failed**, 1,097 filtered (0.00s); the stale inventory is not repaired in this increment.
+A post-baseline cached run selected zero tests and was discarded; the package clean above
+forces a fresh host build before the final new-selector result.
+Format, diff and unchanged-input checks pass. Only the existing `solana-client v1.18.26`
+future-compatibility warning remains.
+
 ## INV-066/067/068 co-owned stale-tail rollback (2026-09-09)
 
 [`cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs`](cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs)
