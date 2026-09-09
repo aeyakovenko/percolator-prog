@@ -3,6 +3,73 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-012 joint incarnation binding (row 414, 2026-09-09)
+
+[`cu/inv_012_joint_incarnation_binding.rs`](cu/inv_012_joint_incarnation_binding.rs),
+mounted by INV-012, adds the joint-replacement partition of
+`capabilities-bind-every-replaceable-economic-object-incarnation`. It was developed from
+`d309de32` in `/tmp/codex-agent-worktrees/row414-inv012-incarnation-20260909` on
+`codex/row414-inv012-incarnation-20260909`. **PR135-only coverage; row 414 remains OPEN.**
+No production source, engine pin/proof, shared helper, or ledger status changes, and no
+coordinator-worktree edits. This is not a production finding or a fix PR.
+
+INV-002 already owns isolated reuse and generated mixed-generation batches; INV-012 already
+owns grant renewal and force-close revocation separately. The new product replaces **two asset
+generations plus the same-tuple matcher grant in all six orders**, with both signed orientations
+and both batch leg orders: **24 worlds**. Each world retains two single-CPI requests and a real
+two-leg batch (unequal opposite 3/7-unit quantities), initially successfully simulates each
+exact signed transaction, and checks its disposition after every replacement prefix. An
+unrelated asset replacement leaves the unaffected single request executable until its own
+generation or grant changes.
+
+After all replacements, the test checks four identity combinations per single route and eight
+per batch. Every proper subset of current bindings is submitted and rejects; fully current
+combinations simulate successfully. Fresh generation fields cannot substitute for current grant authority, nor vice versa;
+both batch legs are independently necessary. Original retained transactions are submitted
+unchanged; repair variants are newly signed with only the selected generation/sequence fields
+changed. The oracle tracks input/event-derived generations, grant sequence, positions, and
+position epochs. Exact typed errors distinguish generation mismatch from stale grant, and all
+rejections occur before matcher CPI with complete economic account/lamport rollback, excluding
+only the separate network fee payer. Portfolio IDs, position epochs, matcher tuple/context,
+fee cap, and expiry remain unchanged through the replacement history. The blockhash is retained
+throughout; authenticated slots 1-3 respect activation cooldown and stay below grant expiry 100.
+
+System/SPL/ATA instructions create and fund every economic account; the matcher context is
+System-created and owner-initialized. Lifecycle, grant, mark, trade, and withdrawal changes use
+public wrapper instructions, with no initialized-account byte edits. Fully current positive
+controls execute on both CPI transports, exit through the other transport, reconcile exact
+matched positions/OI and unchanged capital, and withdraw both owners' entire input collateral
+in both payout orders. The final custody balance is zero.
+
+The exact selector passes **1/1** on both runs (16.59s and 16.35s), 1,061 filtered, with **160 live simulations, 200 rejecting
+simulations, 312 submitted rejections, 56 committed fills/exits, and 48 full withdrawals**.
+Observed maximum CU across those runs (writer / rejection / fill / withdrawal):
+**112,342 / 108,601 / 454,262 / 144,768**. Rejection and withdrawal assert the existing custody
+budget; positive routes assert the existing multi-asset trade budget. No broad suite, Kani,
+engine proof, vulnerable-parent run, or duplicate PoC execution is claimed. Development corrected
+a Rust fixture borrow and an attempted same-slot reactivation; neither was a production finding.
+
+Scope is two non-base empty-asset replacements, one same-tuple regrant, two fixed portfolios,
+honest AuthMarks at unchanged prices, and zero realized fees/funding. Whole-market, portfolio,
+owner, matcher-context/program replacement, base-asset restart, nonempty lifecycle histories,
+maximum shape, and arbitrary histories remain outside this increment.
+
+Both SBF artifacts were rebuilt offline in this worktree with default features, platform-tools
+v1.52, and the unchanged engine pin `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Wrapper SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo build-sbf --tools-version v1.52 --sbf-out-dir target/deploy --offline -- --locked
+cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir tests/fixtures/auth_matcher/target/deploy --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::v16_program_joint_replacements_require_every_bound_incarnation -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_012_joint_incarnation_binding.rs
+git diff --check
+```
+
 ## INV-028 historical and latent settlement capacity (row 423, 2026-09-09)
 
 [`cu/inv_028_historical_latent_capacity.rs`](cu/inv_028_historical_latent_capacity.rs),

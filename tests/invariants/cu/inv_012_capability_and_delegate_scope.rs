@@ -30,11 +30,17 @@
 //! episode before CPI even though the requested leg and grant are unchanged; refreshing only
 //! that episode restores the exit. This is sampled evidence for the remaining 412/414 scope
 //! obligations, not closure of generation/incarnation or arbitrary lifecycle histories.
+//! The joint-incarnation product composes two asset replacements with same-tuple regrant in
+//! every order. Both CPI consumers reject every proper subset of refreshed bindings, while
+//! fully current requests retain funded entry, cross-route exit, and complete owner withdrawal.
 
 use super::*;
 
 #[path = "inv_012_retained_cross_asset_episode.rs"]
 mod retained_cross_asset_episode;
+
+#[path = "inv_012_joint_incarnation_binding.rs"]
+mod joint_incarnation_binding;
 
 fn issue406_matcher_inventory(data: &[u8]) -> i128 {
     i128::from_le_bytes(data[160..176].try_into().unwrap())
