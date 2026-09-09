@@ -24,6 +24,8 @@
 //! `v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements` pays
 //! real trading claims before distinct asset-1 providers exit, checks retained withdrawals and
 //! atomic payout rollback against still-funded unrelated insurance, and reconciles every SPL atom.
+//! `v16_program_receipt_terminal_suffix_partitions_rounding_burn_surplus_and_rent` carries
+//! completed receipt floors through the actual mint burn, raw-surplus sweep and slab tombstone.
 //!
 //! Guarantee boundary: this is one adversarial public lifecycle matrix, not an exhaustive proof of
 //! every terminal residual partition.
@@ -38,6 +40,9 @@ mod provider_insurance_retries;
 
 #[path = "inv_067_receipt_rail_liquidity.rs"]
 mod receipt_rail_liquidity;
+
+#[path = "inv_067_receipt_terminal_disposition.rs"]
+mod receipt_terminal_disposition;
 
 #[test]
 fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {

@@ -1034,6 +1034,72 @@ metadata guards **6/6 passed** (117 filtered) in 0.06 seconds. The eight new his
 150,000/300,000 CU ceilings. Scoped rustfmt and `git diff --check` passed. Existing shared-test
 dead-code and Solana future-compatibility warnings remain. No broad suite or engine proof was run.
 
+## INV-067 receipt terminal disposition (2026-09-09)
+
+[`cu/inv_067_receipt_terminal_disposition.rs`](cu/inv_067_receipt_terminal_disposition.rs)
+adds one INV-067-owned public-route selector on unchanged PR135 production code, based on
+`origin/codex/invariant-fidelity-reopen-20260904` at `4fa7267f` in
+`/tmp/codex-agent-worktrees/row417-inv067-terminal-suffix-20260909`.
+**Classification: net-new passing terminal-drain coverage, not a production fix or a new
+counterexample. Row 417 remains OPEN.**
+
+The existing generated receipt histories explicitly stop at portfolio deletion and leave
+residual-vault classification and `CloseSlab` open. The existing shared-liquidity test likewise
+leaves two booked rounding atoms without terminal sweeping. This test reuses the unchanged
+public `late_expiry::World::before_receipts` seed, credits neither its late-expiry setup nor
+shared-liquidity competition as new coverage, and composes receipt completion with final
+custody destruction. Eight bounded histories cross eager/deferred top-ups, forward/reverse
+owner cleanup, and zero/one raw SPL surplus atom transferred by the provider after user exit.
+
+Independent input arithmetic fixes three claim faces at 700/1,000/1,300, senior capital at
+1,000 each, and final residual at 851. Every completion reaches owner payouts
+1,198/0/1,283/0/1,368: **3,852 minted = 3,849 user payout + 2 burned rounding + 1 provider**.
+The never-deposited provider atom either stays outside custody or enters as raw surplus and
+is swept back; it never becomes booked backing or another receipt payment. This joins the
+receipt-floor remainder to the actual SPL mint supply decrease, not just a vault remainder.
+
+The suffix checks owner-local payout monotonicity/ceilings, present receipt face/prior bound
+and paid-counter agreement, exact terminal retries, unrelated account frames, custody/supply,
+and every portfolio's exact rent return with only the decoded materialized-count decrement.
+Final closure burns exactly two atoms, sweeps only raw stock, deletes vault custody, preserves
+all paid owner accounts, retains canonical tombstone rent, and refunds exactly market excess
+plus vault rent. Tracked economic lamports are conserved; only the separate network-fee payer
+and runtime accounts are excluded. All setup and economic changes use System/SPL/ATA/wrapper
+instructions; there are no private program-state writes or engine proofs.
+
+Verification: **1/1 exact test passed, 8 worlds, 40 portfolio closes, 8 slab calls**, 1,065
+filtered, in 8.55 seconds on the final repeat. Peak suffix **161,045 CU**, peak `CloseSlab`
+**41,174 CU** (38,174 on the earlier pass), below
+the enforced 200,000-CU suffix limit. The first run exposed an overstrict test assertion:
+an already-paid receipt can be a successful `CloseResolved` no-op while peers still need
+cleanup. Such a no-op now requires an exactly paid receipt and no SPL transfer; the bounded
+completion and final-disposition assertions remain mandatory. No production change was needed.
+
+The run reused default-feature SBF
+`/dev/shm/pr135-sbf-verify/deploy/percolator_prog.so`, SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`, matching the documented
+fresh build for the earlier row-417 worktree. `src`, `Cargo.toml`, and `Cargo.lock` are identical
+to that worktree's documented base `11f8c0ac`; no SBF rebuild is claimed. The cached Cargo target
+was reused, and Cargo compiled this worktree's test before executing exactly the new selector.
+From this worktree:
+
+```sh
+PERCOLATOR_FUZZ_SBF=/dev/shm/pr135-sbf-verify/deploy/percolator_prog.so \
+CARGO_TARGET_DIR=/dev/shm/pr135-row417-verify \
+CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_terminal_disposition::v16_program_receipt_terminal_suffix_partitions_rounding_burn_surplus_and_rent -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_067_receipt_terminal_disposition.rs
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs
+git diff --check
+git diff --exit-code 4fa7267f -- src Cargo.toml Cargo.lock tests/support kani tests/invariants/kani
+```
+
+This is a fixed five-owner, classic-SPL terminal suffix, not arbitrary top-up words, additional
+claimant faces, multiple reordered stock reclassifications, Recovery/insurance composition,
+other collateral rails, signer-free cleanup, maxima, or row-417 closure. Existing receipt
+identity/liquidity matrices and engine proofs retain their separate ownership. No broad suite
+or invariant-status promotion is claimed.
+
 ## INV-067 shared secondary liquidity after late expiry (2026-09-08)
 
 Tests/docs-only coverage for reopening **417**, based on
