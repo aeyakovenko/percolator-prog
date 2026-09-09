@@ -3,6 +3,72 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-082 keeper reconstruction of a closed payout destination (2026-09-09)
+
+[`cu/inv_082_terminal_destination_recovery.rs`](cu/inv_082_terminal_destination_recovery.rs),
+mounted by INV-082, adds one bounded environmental-completion increment, with
+adjacent INV-071/073/078 permissionless-disposition evidence. Base: `3a606309`;
+branch: `codex/astra-inv082-terminal-permissionless-20260909`; separate worktree:
+`/home/anatoly/worktrees/astra-inv082-terminal-permissionless-20260909`.
+**PR135 tests/docs only; production, engine pins and invariant statuses unchanged.**
+
+Two public System/ATA/SPL/wrapper histories swap `CloseResolved` and
+`PermissionlessCrank` between two owners with 101/37-atom deposits. One owner
+closes the empty deposit ATA; both publicly drain their system-account lamports.
+Only the keeper signs thereafter, including stale resolution. At owner-window
+expiry minus one, ATA creation succeeds inside a transaction whose payout rejects
+with `ExpectedSigner`: complete compiled-account plus fixture snapshots restore
+the creation, rent and economic state. At exact expiry, payout to the still-closed
+destination rejects with `InvalidTokenAccount` and exact rollback. The unaffected
+owner receives 37 atoms independently; keeper-funded ATA recreation plus payout
+then delivers the remaining 101 atoms in one transaction. Both completed-account
+retries reject exactly with `EngineNonProgress`.
+
+The oracle binds each input deposit to remaining capital plus actual owner SPL
+payout, checks the unpaid-capital descent `138 -> 101 -> 0`, reconciles engine/SPL
+vault and capital totals, preserves the 138-atom mint supply, frames unrelated
+accounts, and checks payer fees separately from exact successful ATA rent. Both
+owner system accounts remain closed; two economically terminal portfolios remain
+materialized. No economic bytes are injected. Unlike the existing drained-owner
+controls, the destination itself is closed; unlike INV-018's delegated destination,
+recovery needs no owner revocation. This does not duplicate terminal provider
+earnings, row424 cursors, row417 late-expiry claims, row418 quote variants or row423
+DrainOnly exit.
+
+Residual gaps: exposed positions, fees/funding, partial receipts, multiple missing
+destinations, arbitrary custody histories, other quote rails and maximum shapes.
+Configured authenticated Clock deadlines, classic SPL/ATA availability and keeper
+transaction/rent funding are explicit prerequisites. Account deletion, provider
+cleanup and retirement are not permissionless completion claims; no engine proof
+or full liveness theorem is added.
+
+Validation reuses a private copy of the row424 host/SBF cache; its production and
+Cargo inputs match this base (engine `394fd0bf`). No SBF rebuild is claimed.
+Program SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Exact commands from the separate worktree (cache copy is first-use setup):
+
+```sh
+cp -a /dev/shm/pr135-row424-progress-target /dev/shm/astra-inv082-terminal-permissionless-target
+export CARGO_TARGET_DIR=/dev/shm/astra-inv082-terminal-permissionless-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_082_state_indexed_liveness_theorem::terminal_destination_recovery::v16_program_missing_destination_has_keeper_only_terminal_recovery -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_082_state_indexed_liveness_theorem::terminal_destination_recovery::v16_program_missing_destination_has_keeper_only_terminal_recovery \
+  inv_071_crank_progress::v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account \
+  inv_073_no_permanent_user_lock::v16_attack_permissionless_close_resolved_survives_drained_owner_system_account \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_public_destination_delegation_is_route_scoped_and_revocation_restores_payout
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: new selector **1/1**, combined focused run **4/4**; new coverage has two
+worlds, 14 keeper-only transactions, six successes, eight exact rollbacks and four
+exact owner payouts, with peak **121,864 CU**. Formatting and whitespace checks
+pass. Initial test-only compile/closed-account-representation assertions were
+corrected; no production mismatch was observed. The existing `solana-client`
+future-incompatibility warning remains.
+
 ## INV-012 liquidation and retained sibling capability (row 412, 2026-09-09)
 
 [`stateful/inv_012_liquidation_revocation.rs`](stateful/inv_012_liquidation_revocation.rs),
