@@ -3,6 +3,126 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-023/083 inherited source-roster repair (2026-09-09)
+
+Coverage-only repair based exclusively on the allowed local
+`origin/codex/invariant-fidelity-reopen-20260904` at
+`919fa686836d72b8fa3f5815a47f7657f1478176`. Private worktree:
+`/dev/shm/percolator-pr135-inv023083.JIfXRJ/worktree`, backed by separate private
+bare Git metadata. The primary checkout and its Git metadata were not modified.
+No open PR branch, issue, diff, or holdout test was inspected, fetched, or copied.
+
+**Resolution.** The source-complete census is **239 field-or-no-data subjects:
+236 named fields and three unit-variant markers**, across the unchanged 49
+instruction variants and three nested public input structs (52 types). The
+no-data markers belong to `InitPortfolio`, `SyncInsuranceLedger`, and
+`ClaimResolvedPayoutTopup`. This supersedes older 230/234-field totals elsewhere
+in this historical log, not their recorded test-run results.
+
+- `BatchTradeCpi.max_slippage_atoms` and `max_fee_atoms` are public `u128`
+  instruction fields. The decoder reads both, the encoder writes both, and the
+  dispatcher passes both to `handle_batch_trade_cpi`. Slippage is accumulated
+  against the signed cap using authenticated landing prices; the shared batch
+  executor rejects `outcome.fee_a > cap`. Both gain `SIGNED_ECONOMIC` roster
+  ownership and map to the existing `amount` boundary profile.
+- `SetMatcherConfig.expiry_slot` is a public `u64` instruction field with
+  decode/encode/dispatch support. Configuration admission uses `Clock.slot`,
+  persists the exact deadline, and both CPI consumers require a live stored
+  capability (`expiry_slot != 0 && Clock.slot < expiry_slot`). It gains
+  `SIGNED_CONFIG` ownership and maps to the existing `expiry` profile.
+- The inherited roster already contained 236 subjects but omitted these three.
+  Its original **236 versus 234** failure was a separate stale `replay` profile
+  lock: **22**, not 20. The source and existing roster include both CPI routes'
+  `account_b_matcher_sequence` fields, in addition to four expected sequences,
+  three intent IDs, seven policy sequences, and six observation sequences. Both
+  routes pass the matcher sequence to the shared pre-CPI equality guard. The final
+  locks are total **239**, `amount` **25**, `expiry` **2**, and `replay` **22**.
+  All other profile counts, including `basis-points` **21**, stay exact.
+
+**Executable ownership, without duplicate tests.** The new cap row points to
+`v16_program_generated_signed_leg_partitions_are_order_independent` in INV-011:
+its existing independent economic oracle exercises heterogeneous signed batches,
+rejects each one-atom-tight aggregate cap with exact `InvalidInstruction` and
+whole-account rollback, and accepts the exact bounds through reordered and
+partitioned continuations. The expiry row points to
+`v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes` in
+INV-012: both routes accept at E-1, reject at E/E+1 without changing the market,
+portfolios, or matcher context, reject an equal-slot regrant, and accept a fresh
+owner renewal. Five class-roster rows expose the cap threshold-minus-one/exact
+threshold and matcher E-1/E/E+1 witnesses. Here cap `max` means the signed
+economic threshold, not `u128::MAX`.
+
+No LiteSVM test, production code, helper, fixture source, dependency, engine pin,
+or invariant status changes. Source-set equality, uniqueness, evidence checks, all
+20 profile counts, all eleven required boundary classes, and INV-023's exact
+INV-083 composition lock remain enforced. The existing full-portfolio retained
+capability test additionally checks stale-sequence rejection before CPI and a
+sequence-only refreshed exit; the existing source-composition tests bind both CPI
+sequence consumers and both aggregate cap guards.
+
+**Remaining gaps.** This repairs inventory ownership, not universal field or
+cross-product coverage. These selected witnesses do not exhaust full-width
+cap/expiry values, every zero/one/maximum configuration product, cap budgets
+crossed with retained position identities and grant expiry, matcher tail fanout,
+external-oracle configurations, or nonzero funding/backing-policy histories. The
+earlier scalar/discovery product's other documented gaps remain. Existing decoder
+Kani and stateful witnesses are referenced, not newly proved or rerun. No broad
+suite, new semantic closure, status promotion, or holdout validation is claimed.
+
+**Validation.** The two exact roster selectors reproduced unchanged at the base:
+**0 passed, 2 failed, 1,128 filtered**; missing exactly the three fields above, no
+stale rows, and count 236 versus 234. After repair: **2 passed, 0 failed, 1,128
+filtered**, 0.01s. The focused selection reports **6 passed, 1 failed, 1,123
+filtered**, 61.04s. Both newly linked public witnesses pass. The cap test executes
+16 fixed-boundary plus 32 seeded histories: **127 worlds, 182 commits, 325 cap
+rejections**, peak **280,961 CU**. The retained full-portfolio control also
+passes: open/live/stale/fresh **875,316/1,177,622/111,027/1,177,622 CU**. The
+matcher source roster, alternate-entrypoint composition lock, and boundary class
+roster pass. The invariant index passes: **1 passed, 0 failed, 122 filtered**.
+Formatting and working/staged whitespace checks pass; production, shared helpers,
+fixture sources, Cargo inputs, witness bodies, and invariant statuses are
+unchanged against the allowed base.
+
+**Remaining validation failure:**
+`v16_program_signed_aggregate_bound_composition_is_source_complete` stops at the
+inherited `assert_certified_engine_pin` gate in `tests/v16_cu.rs`, before its
+aggregate-guard assertions. That gate expects
+`495a5590c97055bd71c6f94d849ff0298f243145`, whereas the unchanged Cargo inputs
+pin `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Unchanged-source comparison to
+the allowed base confirms this is independent of the roster edits; no second
+baseline build or recertification is claimed. The gate and engine pin are not
+modified or bypassed. This focused selection is therefore **not wholly green**.
+
+Locked/offline builds use platform-tools v1.52 and the pinned engine above. After
+the initial private host build, validations reuse that target; only the required
+wrapper and in-snapshot auth-matcher SBF artifacts were built. No external matcher
+checkout or other worktree's build artifacts were used. Existing solana-client
+future-incompatibility and regression-target dead-code warnings remain. The
+earlier four scalar/discovery product tests were not rerun.
+
+Exact commands from the private worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-pr135-inv023083.JIfXRJ/target
+export TMPDIR=/dev/shm/percolator-pr135-inv023083.JIfXRJ
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_023_caller_input_confinement_for_derived_safety_state::v16_program_caller_input_roster_owns_every_production_field \
+  inv_083_boundary_completeness::v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_011_signed_aggregate_economic_bounds::v16_program_generated_signed_leg_partitions_are_order_independent \
+  inv_012_capability_and_delegate_scope::v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes \
+  inv_012_capability_and_delegate_scope::v16_program_full_portfolio_retained_capability_rejects_before_cpi_and_fresh_exit_fits \
+  inv_011_signed_aggregate_economic_bounds::v16_program_signed_aggregate_bound_composition_is_source_complete \
+  inv_012_capability_and_delegate_scope::v16_program_matcher_capability_route_roster_binds_every_current_scope \
+  inv_023_caller_input_confinement_for_derived_safety_state::v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes \
+  inv_083_boundary_completeness::v16_program_boundary_roster_maps_required_classes_to_owned_tests
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-036 earned source fees across retained bounds (2026-09-09)
 
 `v16_program_retained_source_fees_survive_repricing_policy_and_settlement_orders`
