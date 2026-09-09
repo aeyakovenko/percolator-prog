@@ -332,3 +332,279 @@ fn v16_program_matcher_mutation_order_rejects_revoked_capability_fixed_case() {
         "matcher mutation order invariant failed: {protection:?}"
     );
 }
+
+#[test]
+fn v16_program_retained_single_cpi_quote_refresh_preserves_both_landing_orders() {
+    use crate::support::v16_svm::{MarketConfig, V16Svm};
+    use crate::*;
+    use percolator_prog::matcher_abi::read_matcher_return;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const MARK: u64 = 10_007;
+    const FEE_BPS: u64 = 37;
+    const SPREADS: [u64; 2] = [317, 653];
+    let ceil = |n: u128, d: u128| n / d + u128::from(n % d != 0);
+    let mut counts = [0; 3]; // Worlds, committed fills, rejected deliveries.
+    for direction in [-1i128, 1] {
+        for quote_first in [false, true] {
+            let mut env = V16Svm::new(
+                [0x10; 32],
+                MarketConfig {
+                    initial_price: MARK,
+                    ..MarketConfig::default()
+                },
+            );
+            env.update_trade_fee_policy(FEE_BPS).unwrap();
+            env.set_matcher_spreads(1, SPREADS[0], SPREADS[1]).unwrap();
+            let payer = Keypair::new();
+            env.svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
+            let price =
+                MARK * if direction > 0 {
+                    10_000 + SPREADS[1]
+                } else {
+                    10_000 - SPREADS[0]
+                } / 10_000;
+            let mut wider = SPREADS;
+            wider[usize::from(direction > 0)] += 1;
+            let wider_price =
+                MARK * if direction > 0 {
+                    10_000 + wider[1]
+                } else {
+                    10_000 - wider[0]
+                } / 10_000;
+            assert_eq!(i128::from(wider_price) - i128::from(price), direction);
+            let initial_market = env.primary_market_state().1;
+            let initial_capital = [0, 1].map(|i| env.primary_portfolio(i).capital.get());
+            let initial_epochs = [0, 1].map(|i| env.primary_portfolio_position_epoch(i));
+            let initial_sequence = env.primary_portfolio_matcher_sequence(1);
+            let mut keys: Vec<_> = env
+                .all_economic_account_lamports()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect();
+            keys.extend(env.actors.iter().map(|actor| actor.signer.pubkey()));
+            let mutable = [
+                env.market,
+                env.actors[0].portfolio,
+                env.actors[1].portfolio,
+                env.actors[1].matcher_context,
+            ];
+            let passive: Vec<_> = keys
+                .iter()
+                .copied()
+                .filter(|key| !mutable.contains(key))
+                .collect();
+            let frame = |env: &V16Svm, keys: &[Pubkey]| {
+                keys.iter()
+                    .map(|key| env.svm.get_account(key))
+                    .collect::<Vec<_>>()
+            };
+            let initial_passive = frame(&env, &passive);
+            // Quote amounts describe execution, not an SPL transfer. Fees use the fixed mark.
+            let economics = |size: i128, execution_price: u64| {
+                let q = size.unsigned_abs();
+                [
+                    if size > 0 {
+                        ceil(q * u128::from(execution_price), POS_SCALE)
+                    } else {
+                        0
+                    },
+                    if size < 0 {
+                        q * u128::from(execution_price) / POS_SCALE
+                    } else {
+                        0
+                    },
+                    ceil(q * u128::from(execution_price.abs_diff(MARK)), POS_SCALE),
+                    ceil(
+                        ceil(q * u128::from(MARK), POS_SCALE) * u128::from(FEE_BPS),
+                        10_000,
+                    ),
+                ]
+            };
+            let check = |env: &V16Svm, quantity: i128, totals: [u128; 4], fills: u64| {
+                for i in [0, 1] {
+                    let account = env.primary_portfolio(i);
+                    assert_eq!(account.capital.get(), initial_capital[i] - totals[3]);
+                    assert_eq!(account.pnl.get(), 0);
+                    assert_eq!(
+                        env.primary_portfolio_position_epoch(i),
+                        initial_epochs[i] + fills
+                    );
+                    if fills == 0 {
+                        assert!(!has_active_leg_for_asset(&account, 0));
+                    } else {
+                        assert_eq!(
+                            active_leg_for_asset(&account, 0).basis_pos_q,
+                            if i == 0 { quantity } else { -quantity }
+                        );
+                    }
+                }
+                assert_eq!(env.primary_portfolio_matcher_sequence(1), initial_sequence);
+                let market = env.primary_market_state().1;
+                assert_eq!(market.assets[0].effective_price, MARK);
+                assert_eq!(market.assets[0].oi_eff_long_q, quantity.unsigned_abs());
+                assert_eq!(market.assets[0].oi_eff_short_q, quantity.unsigned_abs());
+                assert_eq!(market.c_tot, initial_market.c_tot - 2 * totals[3]);
+                assert_eq!(market.insurance, initial_market.insurance + 2 * totals[3]);
+                assert_eq!(market.vault, initial_market.vault);
+                assert_eq!(market.vault, market.c_tot + market.insurance);
+                assert_eq!(market.vault, u128::from(env.token_amount(env.vault)));
+                assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+                assert_eq!(u128::from(env.mint_supply()), env.initial_token_supply);
+                assert_eq!(frame(env, &passive), initial_passive);
+            };
+            let mut quantity = 0;
+            let mut totals = [0u128; 4];
+            let mut expected = [0u128; 4];
+            check(&env, quantity, totals, 0);
+            for (step, units) in [3, 2].into_iter().enumerate() {
+                let size = direction * (units * POS_SCALE + 1) as i128;
+                let ix = Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new(env.actors[0].signer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(env.actors[0].portfolio, false),
+                        AccountMeta::new(env.actors[1].portfolio, false),
+                        AccountMeta::new_readonly(env.matcher_program, false),
+                        AccountMeta::new(env.actors[1].matcher_context, false),
+                        AccountMeta::new_readonly(env.actors[1].matcher_delegate, false),
+                    ],
+                    data: ProgInstruction::TradeCpi {
+                        account_a_portfolio_id: env.primary_portfolio_id(0),
+                        account_a_position_epoch: env.primary_portfolio_position_epoch(0),
+                        account_b_portfolio_id: env.primary_portfolio_id(1),
+                        account_b_position_epoch: env.primary_portfolio_position_epoch(1),
+                        account_b_matcher_sequence: initial_sequence,
+                        asset_index: 0,
+                        market_id: initial_market.assets[0].market_id,
+                        size_q: size,
+                        fee_bps: FEE_BPS,
+                        limit_price: price,
+                        backing_fee_cap_bps: 0,
+                    }
+                    .encode(),
+                };
+                let sign = |priority| {
+                    Transaction::new_signed_with_payer(
+                        &[
+                            heap_ix(),
+                            cu_ix(),
+                            ComputeBudgetInstruction::set_compute_unit_price(priority),
+                            ix.clone(),
+                        ],
+                        Some(&payer.pubkey()),
+                        &[&payer, &env.actors[0].signer],
+                        env.svm.latest_blockhash(),
+                    )
+                };
+                // Distinct signatures preserve normal runtime deduplication. Both wrapper messages
+                // are signed before the quote writer; the control is never rebuilt after refusal.
+                let retained = sign(0);
+                let probe = sign(1);
+                assert_ne!(retained.signatures, probe.signatures);
+                assert_eq!(
+                    retained.message.instructions[3],
+                    probe.message.instructions[3]
+                );
+                retained.verify().unwrap();
+                probe.verify().unwrap();
+                let wire = bincode::serialize(&retained).unwrap();
+                let before = frame(&env, &keys);
+                env.svm
+                    .simulate_transaction(retained.clone().into())
+                    .expect("initially executable retained request");
+                assert_eq!(frame(&env, &keys), before);
+                if quote_first {
+                    env.set_matcher_spreads(1, wider[0], wider[1]).unwrap();
+                    check(&env, quantity, totals, step as u64);
+                    let before = frame(&env, &keys);
+                    let refusal = TransactionError::InstructionError(
+                        3,
+                        InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
+                    );
+                    let preflight = env
+                        .svm
+                        .simulate_transaction(retained.clone().into())
+                        .expect_err(
+                            "the untouched retained envelope also exceeds the current quote limit",
+                        );
+                    assert_eq!(preflight.err, refusal);
+                    assert_eq!(frame(&env, &keys), before);
+                    let error = env
+                        .svm
+                        .send_transaction(probe)
+                        .expect_err("one quote unit beyond signed limit");
+                    assert_eq!(error.err, refusal);
+                    assert!(
+                        error
+                            .meta
+                            .logs
+                            .iter()
+                            .any(|log| log == &format!("Program {} success", env.matcher_program)),
+                        "matcher must execute before the signed-limit refusal"
+                    );
+                    assert_eq!(
+                        frame(&env, &keys),
+                        before,
+                        "matcher, wrapper, custody and economic lamports roll back"
+                    );
+                    check(&env, quantity, totals, step as u64);
+                    counts[2] += 1;
+                    env.set_matcher_spreads(1, SPREADS[0], SPREADS[1]).unwrap();
+                    check(&env, quantity, totals, step as u64);
+                }
+                assert_eq!(
+                    env.svm.latest_blockhash(),
+                    retained.message.recent_blockhash
+                );
+                assert_eq!(bincode::serialize(&retained).unwrap(), wire);
+                let result = env
+                    .svm
+                    .send_transaction(retained)
+                    .expect("unchanged retained control remains live");
+                assert_cu_within(
+                    "retained single-CPI quote order",
+                    result.compute_units_consumed,
+                    1_400_000,
+                );
+                let ctx = env.svm.get_account(&env.actors[1].matcher_context).unwrap();
+                let fill = read_matcher_return(&ctx.data).unwrap();
+                assert_eq!((fill.exec_size, fill.exec_price_e6), (size, price));
+                quantity += fill.exec_size;
+                for (total, value) in totals
+                    .iter_mut()
+                    .zip(economics(fill.exec_size, fill.exec_price_e6))
+                {
+                    *total += value;
+                }
+                for (total, value) in expected.iter_mut().zip(economics(size, price)) {
+                    *total += value;
+                }
+                assert_eq!(
+                    totals, expected,
+                    "exact cumulative signed quantity/quote/slippage/fee ledger"
+                );
+                check(&env, quantity, totals, step as u64 + 1);
+                counts[1] += 1;
+                if !quote_first {
+                    env.set_matcher_spreads(1, wider[0], wider[1]).unwrap();
+                    check(&env, quantity, totals, step as u64 + 1);
+                    env.set_matcher_spreads(1, SPREADS[0], SPREADS[1]).unwrap();
+                    check(&env, quantity, totals, step as u64 + 1);
+                }
+            }
+            assert_eq!(quantity, direction * (5 * POS_SCALE + 2) as i128);
+            assert_eq!(
+                totals,
+                if direction > 0 {
+                    [53_302, 0, 3_267, 187]
+                } else {
+                    [0, 48_445, 1_592, 187]
+                }
+            );
+            counts[0] += 1;
+        }
+    }
+    assert_eq!(counts, [4, 8, 4]);
+}

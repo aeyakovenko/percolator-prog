@@ -3,6 +3,56 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-010 retained single-CPI quote ordering (2026-09-09)
+
+[`cu/inv_010_out_of_order_safety.rs`](cu/inv_010_out_of_order_safety.rs) adds one
+PR135-only public LiteSVM increment, with supporting INV-009/011 accounting.
+Both trade/LP-quote-writer landing orders and both directions execute two unequal
+nonintegral fills. An LP-signed matcher spread update moves the executable quote
+exactly one price unit outside the retained taker's limit, without changing the
+wrapper grant or either position episode. Quote-first delivery rejects after a
+successful matcher CPI with exact economic-account byte/lamport rollback; public
+quote restoration admits the original retained control. Trade-first delivery
+remains exactly accounted across the later quote update and restoration.
+
+Two envelopes with identical wrapper bytes are signed before each writer. One
+proves actual refusal; the other is simulated before/after the writer and lands
+unchanged after restoration. Failed-signature deduplication is not disabled or
+bypassed; this does not claim that an already failed transaction can re-land.
+Four worlds assert eight fills and four rejected deliveries, exact epochs/OI,
+passive custody/supply, zero PnL, and independently rounded cumulative quotes,
+adverse slippage and fees: buy `[53302, 3267, 187]`, sell `[48445, 1592, 187]`
+(quote, slippage, fee per trader). Network fee payers alone are outside the frame.
+
+This is a matcher quote-writer ordering history, not row411's atomic fee bundles,
+batch aggregate-cap refusal, retained bilateral fee terms, or consumed-trade
+replay. Residual gaps: partial matcher fills, batch routes, arbitrary quote/clock/
+funding histories, durable nonces and persistent residual or aggregate allowances.
+Single-CPI has signed size/price/fee-rate terms, not aggregate atom-cap fields;
+the cumulative ledger is a test oracle, not a new protocol authorization. No
+production, engine-pin, verdict or reopening-ledger changes or proof claims.
+
+Validation uses a private copy of the row424 Cargo/SBF cache (matching production
+and Cargo inputs, engine `394fd0bf`), plus the unchanged row411 auth-matcher SBF.
+No fresh SBF build or broad-suite run. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+auth-matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Result: new selector **PASS** (four worlds), adjacent controls **2/2 PASS**,
+`cargo fmt --all -- --check` and `git diff --check` **PASS**.
+Exact validation commands from `/home/anatoly/percolator-inv009-cumulative-20260909`:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-retained-quote-order-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_010_out_of_order_safety::v16_program_retained_single_cpi_quote_refresh_preserves_both_landing_orders -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_010_out_of_order_safety::v16_program_matcher_mutation_order_rejects_revoked_capability_fixed_case \
+  inv_011_signed_aggregate_economic_bounds::v16_program_tradecpi_limit_price_enforced
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-069 expired residue across slot reuse (2026-09-09)
 
 [`cu/inv_069_terminal_normalization_and_retirement.rs`](cu/inv_069_terminal_normalization_and_retirement.rs)
