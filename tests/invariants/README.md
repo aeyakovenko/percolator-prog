@@ -85,6 +85,77 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
+## INV-005 retained insurance management and succession (row 416, 2026-09-09)
+
+[`cu/inv_005_retained_insurance_management.rs`](cu/inv_005_retained_insurance_management.rs),
+mounted by INV-005, adds **net-new partial PR135 coverage** for
+`correctly-signed-role-management-cannot-seize-an-incumbent-funded-role` on base
+`4aaf48c1`. Worktree: `/tmp/codex-agent-worktrees/row416-inv005-retained-management-20260909`;
+branch: `codex/row416-inv005-retained-management-20260909`. **Row 416 remains OPEN.**
+No production, engine pin/proof, shared-helper, or status-ledger changes.
+
+The distinct relation is **empty-state signed management + later funding with no
+authority-epoch change + separate incumbents' atomic insurance-role succession**.
+The backing depletion/refilling test constructs fresh handoffs and never transfers
+a funded role. The existing three-role principal matrix constructs management
+after funding and ends with the incumbent's exit. Authority ABA coverage changes
+the epoch. None supplies this retained, initially admissible management request
+or the two independent funded incumbents' ordered succession. Funded-oracle
+production-fix coverage is not reproduced or certified here.
+
+Twelve independently constructed worlds cross base-asset long/short insurance,
+both insurance-authority/operator handoff orders, and absent/stale-zero/current
+telemetry. The cold admin, insurance authority, operator, and successor are distinct
+signers. A fully signed two-role management transaction first simulates successfully
+with the subject empty and 19 atoms of peer-asset insurance already funded. The
+insurance authority then deposits 37 or 41 atoms without a ledger. The original
+transaction, including signatures and blockhash, must reject exactly with
+`EngineLockActive`; funding advances only the top-up sequence, not the role epoch.
+An optional ledger is publicly initialized at zero. Omitting synchronization leaves
+it stale; synchronizing observes the exact subject stock as profit while its principal
+and deposit counters remain zero. Neither telemetry history changes role containment.
+
+Both funded incumbents then sign a two-role transfer. Reusing the initial shared
+epoch on the second instruction requires `EngineStale`, rolling back the first
+successfully executed role update. Advancing the second epoch by one admits both
+handoffs in either order, changes only the two intended profile keys and two epoch
+increments, and leaves the complete decoded economic state unchanged. Every
+management rejection frames all tracked market, ledger, mint, vault, wallet, and
+signer accounts exactly; separate payer fees are reconciled by signature count.
+No management transaction invokes SPL. The successor's normal live withdrawal
+then pays the exact consented principal. Input-derived domain budgets, insurance,
+vault, wallets, fixed mint supply, profiles, and sequences preserve the peer stock
+and leave the old optional ledger untouched throughout succession and withdrawal.
+
+Only System/SPL/ATA/wrapper instructions create economic accounts and change protocol
+state. Harness operations load programs, fund signer SOL, and change the blockhash
+before retention; there are no initialized-state byte edits, snapshot restoration,
+or direct engine transitions. This slice has no positions, claims, fees, funding,
+or oracle updates. Non-base subject succession, terminal disposal, telemetry
+migration, cross-role aliasing, maximum shapes, and arbitrary histories remain open.
+
+Validation: the exact selector passes **1/1** (1,071 filtered), with **12 empty-state
+simulations, 24 exact rejections, 12 consensual pairs, and 12 withdrawals**. Measured
+peak rejection / paired handoff / withdrawal CU: **3,903 / 4,051 / 33,547**, below
+the enforced 300,000-CU bound; setup and simulations are excluded from these maxima.
+A private copy of the row-426 cached default-feature SBF and host dependencies is
+used below; its source/Cargo inputs match this branch and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The test binary compiles in this worktree. No SBF rebuild or broad suite was run.
+The initial compile caught a moved error value in the new assertion helper, fixed
+without changing any invariant assertion. Cargo emits its existing
+`solana-client v1.18.26` future-incompatibility warning.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row416-inv005-retained-management-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::retained_insurance_management::v16_program_retained_empty_insurance_management_rechecks_stock_before_ordered_succession -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-020 active claim evidence (row 426, 2026-09-09)
 
 [`cu/inv_020_active_claim_evidence.rs`](cu/inv_020_active_claim_evidence.rs), mounted
