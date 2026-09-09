@@ -284,7 +284,7 @@ impl World {
         world
     }
 
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut world = Self::before_receipts();
         for actor in [0, 4] {
             for _ in 0..8 {

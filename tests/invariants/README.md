@@ -1993,6 +1993,100 @@ rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/i
 git diff --check
 ```
 
+## Retained claims interleaved with expiry normalization (2026-09-09)
+
+PR135 tests/docs-only increment from
+`origin/codex/invariant-fidelity-reopen-20260904` at
+`626789fa5ce950584acf154c232915e372fa1593`, on branch
+`codex/astra-ultra-row417-inv067-late-expiry-20260909` in the isolated worktree
+`/dev/shm/astra-ultra-row417-inv067-late-expiry-20260909`. Production code, engine
+pin, root worktree, reopening statuses and invariant verdicts are unchanged.
+Row 417 remains **OPEN**, and INV-067 remains **REFUTED_CURRENT**. No production
+counterexample was established in this increment.
+
+[`cu/inv_067_receipt_expiry_interleavings.rs`](cu/inv_067_receipt_expiry_interleavings.rs)
+reuses the existing public `late_expiry::World::new` fixture without changing its
+construction. It exhausts the six orderings of two retained unequal claims and
+one expiry normalization, crossed with exact/late Clock slots (13/15) and atomic
+versus separately committed instructions: **24 public histories**. System/SPL/
+ATA/wrapper instructions establish every economic state; LiteSVM supplies only
+programs, signer SOL and Clock. Instructions retain their original wire bytes,
+account keys and recipients throughout the suffix.
+
+The new boundary is a claim executing *before* the stock normalization, although
+Clock has already reached expiry. Its zero-due lookup must not erase its identity
+or pre-consume the future top-up. Normalization can execute first, between the
+claimants, or last, even in the same transaction. Existing INV-067 recipient and
+rail-liquidity histories normalize first; its crank/top-up batch starts after
+normalization has committed; INV-066 varies receipt creation rather than retained
+zero-due calls. Terminal sweeping, receipt dematerialization and shared-owner
+coverage are not duplicated here.
+
+An input-driven prefix oracle credits the 350-atom release only when normalization
+executes, never merely because Clock advanced. The two immutable faces remain
+700/1,300, exact/unreceipted claim totals remain 2,000/1,000, and the snapshot slot
+remains 12. Every committed prefix checks full receipt identity, account/owner/
+market provenance, portfolio ID and position epoch, exact owner-local token
+balances, engine/SPL custody, supply, unrelated account frames, and the number of
+successful wrapper/SPL calls. Within-transaction intermediate values are modeled
+in instruction order; the split histories also check each intermediate account
+state. Catch-up reverses original claimant priority and must yield the same final
+paid values 198/368, adding exactly 82/151 to the original receipts. A final
+fresh-blockhash four-claim batch must preserve the complete tracked frame.
+
+An exploratory unused-reserve fixture was removed, not credited as red/green
+production evidence: its flat winner paid instead of normalizing the unrelated
+reserve, while retaining an active winner hit the snapshot-readiness gate. Neither
+attempt established the intended public receipt prefix. No rejected-only probe
+or production change from those attempts remains.
+
+Residual gaps: fixed five-owner, one-mint, one-expiry history with a remaining
+1,000-face unreceipted claim. This does not establish the generic row417 property
+for every later stock reclassification, the zero-unreceipted-bound boundary,
+unused provider/insurance stock, arbitrary claimant populations, simultaneous
+expiries, Recovery, alternate rails or unbounded histories. Existing adjacent
+tests, not this suffix, own the subsequent terminal drain and stock disposition.
+No broad suite or engine proof was run.
+
+Verification: the new selector passed **1/1** (24.71 s), and the adjacent selectors
+below passed **9/9** (10.23 s). Peak new suffix cost was **491,464 CU**, under the
+enforced 500,000-CU bound. Scoped rustfmt and whitespace checks passed. A private
+default-feature SBF rebuild used platform-tools v1.52, with SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+All build outputs and copied caches are private to this worktree.
+
+An additional two-selector metadata run had **1 pass, 1 failure**: the charter/
+index check passed, but the machine-status check reports INV-058's empty
+counterexample projection versus row 427. Its test source and both TSV inputs
+are byte-identical to base `626789fa` (`git diff --exit-code` passed); this
+unrelated ledger inconsistency is recorded without expanding row417's scope.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+CARGO_TARGET_DIR="$PWD/target/sbf" cargo build-sbf --tools-version v1.52 --sbf-out-dir "$PWD/target/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_expiry_interleavings::v16_program_retained_claims_commute_with_late_expiry_normalization_after_catchup -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=2 \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::late_expiry::v16_program_retained_claim_identity_survives_late_expiry_recipient_rotation_and_atomic_retry \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once \
+  inv_066_resolved_payout_fairness_and_order_independence::v16_program_late_receipt_materialization_preserves_snapshot_entitlements \
+  inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_same_owner_receipts_keep_independent_topups_and_terminal_replays \
+  inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry \
+  inv_063_backing_expiry_normalization::v16_program_post_snapshot_expiry_rejects_stale_trade_then_owner_progresses \
+  inv_029_positive_claim_bounds_never_understate::v16_program_recovery_half_close_preserves_one_atom_claim_bound_through_resolved_payout \
+  inv_038_rounding_and_ratio_conservation::v16_program_public_odd_atom_partitions_conserve_every_atom
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete
+# The preceding metadata run exits 101 for the unchanged INV-058/row427 inconsistency.
+git diff --exit-code 626789fa -- tests/invariants/invariant_status.tsv tests/invariants/coverage_reopenings.tsv tests/invariants/public_sbf/inv_079_public_reachability_evidence.rs
+rustfmt --edition 2021 --check tests/invariants/cu/inv_067_receipt_expiry_interleavings.rs tests/invariants/cu/inv_067_terminal_claim_late_expiry.rs
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs
+git diff --check
+```
+
 ## Terminal claim identity after late expiry (2026-09-08)
 
 One tests/docs-only increment on current branch commit
