@@ -3,6 +3,49 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-012 liquidation and retained sibling capability (row 412, 2026-09-09)
+
+[`stateful/inv_012_liquidation_revocation.rs`](stateful/inv_012_liquidation_revocation.rs),
+mounted by INV-012, adds partial public-route evidence that a retained LP CPI
+capability cannot cross a permissionless liquidation that revokes the LP's
+position episode, while a fresh post-reauthorization sibling-asset fill still
+works. Worktree: `/home/anatoly/percolator-row412`; branch:
+`codex/pr135-row412-retained-capability-20260909`. **Tests/docs only; row 412
+remains OPEN.**
+
+The four worlds cross single and one-leg batch CPI consumers with both LP
+position orientations. Each world signs retained sibling-asset CPI bytes before
+liquidation, drives an authenticated adverse mark and permissionless partial
+liquidation on asset 0, then checks that the old retained bytes reject with
+exact economic-frame rollback. A deposit and current request are still
+insufficient until explicit owner reauthorization, and then a fresh asset-1 fill
+lands without changing the liquidated asset-0 basis, portfolio IDs, asset
+generations, SPL supply, or either participant's quote equity.
+
+This adds bounded INV-004/005/010/012/024/081 evidence. It is not the existing
+issue-406 direct regression, and it does not close recovery/close/cure,
+retained grant re-delivery, nonzero fees/funding, expiry boundaries, multi-leg
+consumers, arbitrary writer histories, or maximum shapes.
+
+Focused validation:
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/pr135-row412-liquidation-target
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture \
+  inv_012_capability_and_delegate_scope::liquidation_revocation::v16_program_row412_liquidation_revokes_retained_sibling_asset_capability \
+  inv_012_capability_and_delegate_scope::v16_program_cpi_trades_bind_matcher_capability_incarnation \
+  inv_012_capability_and_delegate_scope::keeper_preservation::v16_program_retained_capability_survives_non_position_keeper_words
+cargo fmt --all -- --check
+git diff --check
+```
+
+The new selector passed **1/1** over four histories with 52 public
+transactions, 12 authorization rejections with exact rollback, four fresh
+economic fills, and peak CU **253,073**. Adjacent INV-012 controls passed
+**2/2**, and formatting/diff checks passed in the source worktree.
+
 ## Row 411 retained atomic fee bundles (2026-09-09)
 
 [`stateful/inv_014_retained_fee_bundle.rs`](stateful/inv_014_retained_fee_bundle.rs),

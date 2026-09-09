@@ -46,6 +46,9 @@ mod owner_episode_revocation;
 #[path = "inv_012_keeper_preservation.rs"]
 mod keeper_preservation;
 
+#[path = "inv_012_liquidation_revocation.rs"]
+mod liquidation_revocation;
+
 #[derive(Clone, Copy, Debug)]
 enum CpiRoute {
     Single,
