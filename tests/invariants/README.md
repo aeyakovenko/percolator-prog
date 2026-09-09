@@ -3,6 +3,60 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-066/067/068 co-owned stale-tail rollback (2026-09-09)
+
+[`cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs`](cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs)
+adds one PR135-only selector on base `de730039`:
+`v16_program_retired_coowned_receipt_rolls_back_live_sibling_topup_bundle`.
+Two worlds swap CloseResolved/ClaimResolvedPayoutTopup assignments, retaining both
+instructions before the fixed slot-13 release. The 700-face portfolio settles and closes
+while its co-owned 1,300-face sibling retains its original partial receipt and shared ATA.
+The retained bundle pays the live sibling first, then rejects the retired portfolio with
+exactly `NotInitialized` at instruction 3. Logs require one successful wrapper/SPL payout
+prefix; all tracked economic accounts (bytes, metadata and lamports) roll back exactly,
+with only the separately checked payer signature fee charged. The unchanged live instruction
+then pays exactly `floor(1300 * 851 / 3000) - floor(1300 * 501 / 3000) = 151` atoms.
+Receipt identity, cumulative paid value, denominator and custody remain exact. Terminal
+cleanup precedes byte-exact cross-handler replays; all five portfolios close with exact
+rent transfer. Final per-portfolio payouts are `[1198, 0, 1283, 0, 1368]`, leaving two
+rounding atoms and one provider-token atom. Co-owned junior floors sum to 566, not 567.
+All economic state comes from the existing public System/SPL/ATA/wrapper fixture; no
+program-owned bytes are injected or production/engine/status files changed.
+
+**Non-duplicate:** the existing shared-owner test rejects stale claims in separate transactions;
+the payout/close test rejects a premature close of the same live receipt. This adds a
+retired co-owned receipt as the late failure after its still-due sibling pays into their
+aliased destination. It adds no claimant-order permutation, late-expiry, missing-destination,
+provider/insurance retry, or new receipt arithmetic claim. Residual gaps: fixed claimant
+order/faces, one release/mint, NoCpi construction, no Recovery/reuse, other transports,
+maximum shapes, provider/asset/slab retirement or arbitrary histories.
+
+Validation reuses a private row424 cache copy; its production/Cargo inputs at `39d05875`
+match this base (engine `394fd0bf`). No SBF rebuild or broad suite. SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Commands from the fresh `codex/pr135-receipt-identity-partial-topup-20260909` worktree:
+
+```sh
+cp -a /dev/shm/pr135-row424-progress-target /dev/shm/pr135-receipt-identity-partial-topup-target
+export CARGO_TARGET_DIR=/dev/shm/pr135-receipt-identity-partial-topup-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_retired_coowned_receipt_rolls_back_live_sibling_topup_bundle -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_068_receipt_uniqueness_and_monotonic_topups::v16_program_same_owner_receipts_keep_independent_topups_and_terminal_replays \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once
+cargo fmt --all -- --check
+git diff --check
+```
+
+Results: new selector **1 passed, 0 failed**, 1,097 filtered (2.09s); controls **2 passed,
+0 failed**, 1,096 filtered (6.44s). New coverage: two paid-prefix rollbacks, two 151-atom
+retries, four zero-payout replays and ten closes. Peak checked CU **174,257**; two-instruction
+rollback ceiling 600,000, individual payout/cleanup/replay/close ceiling 300,000. Format and
+diff checks pass. Two development runs corrected test expectations for terminal receipt
+clearing and exact `EngineNonProgress` replay; neither changed payout/rollback assertions.
+Only the existing `solana-client v1.18.26` future-compatibility warning remains.
+
 ## INV-058/059 fresh-pair OI handoff (2026-09-09)
 
 [`cu/inv_058_atomic_oi_fee_handoff.rs`](cu/inv_058_atomic_oi_fee_handoff.rs), mounted
