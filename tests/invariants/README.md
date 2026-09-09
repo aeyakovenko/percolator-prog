@@ -3,6 +3,76 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-073 public terminal insurance disposition (row 421, 2026-09-09)
+
+This isolated production-change candidate is based on `origin/main` at
+`d5e2ec6fa727a1049a62851c3be19c638815b4e2`, not the PR135 coverage integration branch.
+The initial PR135 inspection was at `d98b80ec`; both routes required a terminal payout
+signature. No open PR diffs were inspected. The main engine pin remains
+`495a5590c97055bd71c6f94d849ff0298f243145`; no engine, schema, or dependency change is needed.
+The PR135 reopening ledger is not present on this main base and is not copied or promoted.
+Row **421 remains OPEN** pending integration and the coordinator's coverage review.
+
+`WithdrawInsuranceAsset` now requires a signature in Live mode only. In Resolved mode,
+account zero must still identify the recorded insurance beneficiary, its destination must
+have that owner, and an unsigned destination must have neither a delegate nor a separate
+close authority. Existing signed-destination behavior, generation/authority epochs, senior
+capital and materialized-portfolio guards, domain budgets, canonical custody, and optional
+ledger accounting are unchanged. No new instruction or state is introduced.
+
+[`cu/inv_073_terminal_insurance_disposition.rs`](cu/inv_073_terminal_insurance_disposition.rs)
+adds one seeded public System/SPL/ATA/wrapper product: both asset orders, whole/split payouts,
+absent/present optional ledgers, and signed/public submission. Sixteen worlds perform 64
+insurance payouts with the same input-derived outcomes: 1,009 atoms to the senior depositor,
+204/434 atoms to distinct insurance beneficiaries, and zero to the administrator. All four
+long/short budgets are nonzero; split payouts cross a side-budget boundary. Every economic
+step reconciles exact custody, capital, insurance, per-asset allowance, and fixed mint supply.
+Every successful insurance payout strictly decreases outstanding insurance; unrelated complete
+accounts are framed byte-for-byte. Public cases use only the independent transaction fee payer
+as signer. Restricted destinations and a different recipient reject with complete economic
+rollback, then the clean public continuation still pays. These are controls within the positive
+product, not standalone rejection probes.
+
+The user payout is public; empty portfolio deletion and final slab closure are separately signed.
+The source roster and INV-082 rank model now classify terminal insurance as public without
+claiming permissionless retirement. This product is intentionally flat, fee-free, immutable
+classic-SPL, two-asset coverage. Trading, insurance impairment, backing/provider claims,
+receipts, additional quote rails, and maximum shapes are outside this increment.
+
+Classification: **[HARDENING DoS]**, a functional terminal-progress repair. The evidence
+demonstrates a terminal signer dependency and its removal, not independent-user loss or failure
+of every bounded user exit. It is not a new BLOCKER/PRIVILEGED impact claim or whole-invariant
+proof. No duplicate, marginal, or state-injection-only addition is retained. The initial fixture
+assertion was corrected for LiteSVM retaining a closed zero-lamport vault; that failure is not
+production evidence. Existing tests were not deleted or weakened.
+
+Both default-feature SBFs were freshly compiled locally with platform-tools v1.52 and cached
+dependencies. Before SHA-256: `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20`.
+After SHA-256: `03d97754a0d4a55b949f42d2c745886aa18c9158aaaf634aef3cfeebaa7e97b2`.
+The same selector completes eight signed worlds before the parent rejects its first unsigned
+payout with `ExpectedSigner` (2,186 CU). The fixed binary passes all 16 worlds. Seeded peak
+insurance-payout CU is **41,698 unsigned / 41,692 signed**; the measured payout/closure suffix
+peaks at **85,231 CU**, below its 300,000-CU step bound, not a maximum-shape result.
+
+Verification uses a private `/dev/shm` target. The public product and seven compatibility/source
+controls pass, including the existing INV-018 System/SPL/ATA bootstrap, INV-064 full-wind-down,
+live asset uniformity, shared finite budget, and dynamic-domain terminal payout tests, INV-070
+recovery-to-slab-close, and INV-073 terminal source roster. Kani's updated terminal rank harness
+passes all 128 checks and all eight covers. No broad-suite or engine-proof rerun is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row421-terminal-progress-20260909-r1
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+# Build row421-before from the unchanged parent; build row421-after with the route change.
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$PWD/target/row421-after" --offline -- --locked
+export PERCOLATOR_FUZZ_SBF="$PWD/target/row421-after/percolator_prog.so"
+selector=inv_073_no_permanent_user_lock::terminal_insurance_disposition::v16_program_terminal_insurance_public_disposition_preserves_attribution_and_progress
+cargo test --locked --offline --test v16_cu "$selector" -- --exact --nocapture
+# Use row421-before/percolator_prog.so with the unchanged selector for the parent comparison.
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_terminal_disposition_and_administrative_retirement_are_source_complete -- --exact --nocapture
+cargo kani --bin v16-kani --features kani --harness kani_inv082_terminal_administration_is_finite_and_not_permissionless
+```
+
 ## Current goal
 
 Close every tractable gap in INV-001 through INV-089 with the strongest computationally feasible

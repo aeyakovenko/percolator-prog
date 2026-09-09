@@ -6,8 +6,8 @@
 //! lexicographic rank. A second proof exhausts every overlap of the eight actionable-summary flags
 //! and proves that at most seven class-completion steps reach `NoAction`. A third proof keeps
 //! economic disposition separate from physical retirement: under its named signer-fairness
-//! assumptions, each owner/provider/operator/market-authority cleanup step strictly lowers a
-//! finite administrative rank, but none is mislabeled as permissionless economic progress.
+//! assumptions, each cleanup step strictly lowers a finite administrative rank. Terminal
+//! insurance payout is public; owner/provider/market-authority cleanup remains separately classified.
 //!
 //! This is not a duplicate model of engine state. INV-071 source-locks the classifier, selector,
 //! dispatch, and rank contracts to all wrapper callsites and public witnesses; INV-077 owns the
@@ -81,7 +81,6 @@ fn inv082_terminal_step_requires_signer(step: TerminalAdministrationStep) -> boo
         step,
         TerminalAdministrationStep::PortfolioMechanicalClose
             | TerminalAdministrationStep::ProviderCleanup
-            | TerminalAdministrationStep::InsuranceCleanup
             | TerminalAdministrationStep::AssetRetire
             | TerminalAdministrationStep::TerminalSlabProgress
             | TerminalAdministrationStep::CloseSlab
@@ -381,7 +380,11 @@ fn kani_inv082_terminal_administration_is_finite_and_not_permissionless() {
     );
     assert_eq!(
         inv082_terminal_step_requires_signer(selected),
-        before.economic_work == 0 && before != TerminalAdministrationRank::default()
+        before.economic_work == 0
+            && before != TerminalAdministrationRank::default()
+            && (before.materialized_portfolios != 0
+                || before.provider_cleanup != 0
+                || before.insurance_cleanup == 0)
     );
     assert_eq!(after.economic_work, before.economic_work.saturating_sub(1));
 }

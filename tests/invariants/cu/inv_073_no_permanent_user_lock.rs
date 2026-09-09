@@ -31,6 +31,9 @@
 
 use super::*;
 
+#[path = "inv_073_terminal_insurance_disposition.rs"]
+mod terminal_insurance_disposition;
+
 #[test]
 fn v16_stateful_liveness_oracle_has_no_known_failure_quarantine() {
     let model = include_str!("../../support/fuzz_model.rs");
@@ -5003,7 +5006,6 @@ enum Inv073TerminalAuthority {
     PermissionlessMechanical,
     OwnerOrResolvedMarketAuthority,
     BackingAuthorityOrShutdownMarketAuthority,
-    InsuranceAuthorityOrShutdownMarketAuthority,
     MarketAuthority,
 }
 
@@ -5117,10 +5119,10 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
             rank_lane: "insurance-cleanup",
             handler: "fn handle_withdraw_insurance_asset<'a>(",
             transition: "debit_market_insurance_budget_view(",
-            authority: Inv073TerminalAuthority::InsuranceAuthorityOrShutdownMarketAuthority,
+            authority: Inv073TerminalAuthority::PermissionlessEconomic,
             witness_path:
-                "tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs",
-            witness: "v16_program_prior_insurance_frames_all_partial_receipt_orders",
+                "tests/invariants/cu/inv_073_terminal_insurance_disposition.rs",
+            witness: "v16_program_terminal_insurance_public_disposition_preserves_attribution_and_progress",
         },
         Inv073TerminalPhase {
             rank_lane: "asset-cleanup",
@@ -5194,7 +5196,7 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         7,
         "terminal administrative rank lane drift"
     );
-    assert_eq!(authorities.len(), 6, "terminal authority-class drift");
+    assert_eq!(authorities.len(), 5, "terminal authority-class drift");
     assert_eq!(witnesses.len(), 9, "terminal public-witness drift");
 
     assert_eq!(

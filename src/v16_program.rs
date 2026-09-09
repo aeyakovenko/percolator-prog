@@ -10820,7 +10820,6 @@ pub mod processor {
         let vault_authority_ai = account(accounts, 4)?;
         let token_program = account(accounts, 5)?;
         let ledger_ai = accounts.get(6);
-        expect_signer(operator)?;
         expect_writable(market_ai)?;
         expect_writable(dest_token)?;
         expect_writable(vault_token)?;
@@ -10848,6 +10847,11 @@ pub mod processor {
             if mode != MarketModeV16::Live && mode != MarketModeV16::Resolved {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
+            // Live withdrawals require consent. Terminal payout can be submitted publicly,
+            // but the recipient is still checked against the recorded insurance authority.
+            if mode == MarketModeV16::Live {
+                expect_signer(operator)?;
+            }
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
             let vault_balance = verify_withdrawable_token_accounts(
@@ -10856,7 +10860,7 @@ pub mod processor {
                 vault_token,
                 &vault_authority,
                 &cfg,
-                false,
+                !operator.is_signer,
             )?;
             require_token_balance(vault_balance, amount_u64)?;
         }
