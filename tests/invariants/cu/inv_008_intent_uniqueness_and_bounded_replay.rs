@@ -26,6 +26,9 @@ use super::*;
 use crate::support::invariant_discovery::{RetryIntentKind, SupersededIntentKind};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "inv_008_passive_reward_stock.rs"]
+mod passive_reward_stock;
+
 fn braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)

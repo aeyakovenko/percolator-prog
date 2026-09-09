@@ -3,6 +3,63 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-008 passive reward stock (row 415, 2026-09-09)
+
+[`cu/inv_008_passive_reward_stock.rs`](cu/inv_008_passive_reward_stock.rs), mounted by
+INV-008, adds **net-new partial PR135 coverage** for
+`a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution` on unchanged
+base `b421fed9`. Worktree: `/tmp/codex-agent-worktrees/row415-inv008-new-stock-coverage-20260909`;
+branch: `codex/row415-inv008-new-stock-coverage-20260909`. **Row 415 remains OPEN.**
+Production files, engine pin/proofs, shared helpers, and status ledgers are unchanged.
+
+Existing INV-008 coverage restores custody through an owner-signed redeposit, which also
+advances the owner sequence. This increment instead completely withdraws the recipient's
+initial capital, then creates new recipient capital through permissionless maintenance
+rewards from two independently funded portfolios. Those credits preserve the recipient's
+portfolio ID, position epoch, and owner sequence and do not move SPL tokens. Existing
+INV-024 reward-cycle coverage does not compose these credits with consumed withdrawal retries.
+`WithdrawInsuranceAsset` and its retained-stock production fixes remain owned by
+[PR #428](https://github.com/aeyakovenko/percolator-prog/pull/428) and
+[older PR #415](https://github.com/aeyakovenko/percolator-prog/pull/415); neither regression
+is reproduced, adapted, or certified here.
+
+The product crosses 3,333/10,000-bps reward shares, both unequal fee-source orders, and
+immediate/delayed fresh withdrawals: **8 worlds, 108 submitted public transactions,
+64 exact EngineStale rejections, and 56 successful simulations**, excluding setup.
+Five signature-distinct withdrawal variants per world are signed and successfully simulated
+before the first executes. Both reward/retained-withdrawal bundle orders roll back exactly,
+including the successful passive-credit prefix. Standalone retained variants also reject
+against newly funded stock while the same amount and destination simulate successfully with
+current consent. Only fresh intents withdraw the later rewards, including the final remainder.
+The input-derived oracle checks each owner's capital/payouts, per-source fee rounding,
+insurance, custody, supply, and identity/sequence fields. Rejections preserve complete tracked
+account bytes/metadata and economic lamports; network fees are checked separately.
+
+System/SPL/ATA/wrapper instructions construct every economic account, and mint authority is
+revoked before the retained history. Only signer funding and Clock are harness-supplied.
+Scope is three flat portfolios, one SPL mint, fixed fee policy, and no recipient elapsed fee
+during the retained history. Insurance withdrawals, trading/terminal routes, other quote rails,
+arbitrary histories, and maximum shapes remain outside this increment.
+
+The smallest exact selector passes **1/1** twice (1,063 filtered; 3.71s / 3.68s).
+Observed maximum transaction CU across those runs: withdrawal **55,128**, passive credit
+**114,688**, rejection **116,936**, each guarded by the existing 300,000 custody budget.
+Validation uses a private copy of cached default-feature SBF SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`, with source and Cargo
+inputs matching its row-414 production base and unchanged engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Cached build inputs were copied from
+`/dev/shm/row424-inv070-target` into private `target/`; the host test compiled in this worktree.
+No fresh SBF build, broad suite, engine proof, or parent-red/fixed-green run is claimed.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::passive_reward_stock::v16_program_consumed_withdrawal_cannot_spend_passively_created_reward_stock -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/cu/inv_008_passive_reward_stock.rs tests/invariants/cu/inv_008_intent_uniqueness_and_bounded_replay.rs
+git diff --check
+```
+
 ## INV-045 custody-route carry composition (row 425, 2026-09-09)
 
 [`cu/inv_045_custody_cap_carry.rs`](cu/inv_045_custody_cap_carry.rs), mounted by INV-045,
