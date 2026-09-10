@@ -3,6 +3,77 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-045 pending fractional carry through due trade and resolution (2026-09-10)
+
+[`cu/inv_045_no_free_mark_movement.rs`](cu/inv_045_no_free_mark_movement.rs) adds
+`v16_program_pending_fractional_carry_survives_due_trade_and_resolution`.
+Eight public LiteSVM/SBF histories cross both target directions, single/batch
+no-CPI reductions, and the order of a due reduction and canonical crank. The
+terminal owner order also reverses between schedules. System, SPL, ATA and wrapper
+instructions construct all market, portfolio and token state; only signer SOL,
+Clock and blockhashes are harness supplied. Mint authority is revoked.
+
+Seven matched integral lots open at 100 with a 24-bps cap and zero funding/fees.
+A slot-one public crank creates carry 2,400 toward an authenticated target 80/120.
+At slot four, one lot is reduced before/after the crank while movement is still
+sub-atom. The independent integer reference requires stored carry plus unprocessed
+elapsed capacity to equal `100 * 24 * 4 = 9,600`; it does not require a neutral
+trade to advance the accrual cursor. After both slot-four words, carry is exactly
+9,600. At slot six, the cumulative numerator 14,400 commits one price atom and
+retains 4,400. The six remaining lots give owner values `100,003 +/- 6` and
+`200,009 -/+ 6`, including each account's unsettled signed K obligation.
+
+Before the slot-six crank commits, a transaction executes that valid crank and
+then rejects a duplicate-observation suffix at instruction three, `Custom(9)`.
+One successful wrapper invocation proves the consuming prefix ran. All eleven
+tracked Accounts roll back exactly, allowing only the calculated payer signature
+fee. The same valid crank bytes then succeed. Live checkpoints check price, carry,
+K, OI, funding/B, pending cohorts, individual value, capital/positive-PnL stocks,
+insurance and SPL custody against the public-input reference.
+
+Resolution at slot six freezes the effective price and the remaining 4,400 carry.
+Owner-signed `CloseResolved` calls at slot 100 must return exactly each owner's
+predicted value to their existing ATA in either order. Every terminal call checks
+the frozen price/carry, owner payout bounds, capital totals, supply and vault
+conservation; nonprogress retries preserve the complete non-payer frame. Within
+16 rounds, both owners are terminal, OI and economic stocks are zero, and all
+300,012 quote atoms have returned to the correct owners.
+
+This adds due-trade composition and a pending-carry terminal interaction to the
+existing INV-045 public carry-order and target-reversal controls. The former
+precommits each market frontier; the latter reverses a target after committed
+accrual and stops before payouts. This history keeps its target fixed and carries
+the remaining fraction through resolution. It provides bounded evidence adjacent
+to row 425 and INV-010/024/038/041/045/052/071/085/086/088, without advancing their
+status. **Row 425 remains OPEN**: visible price movement during the due trade,
+nonzero funding/fees, fractional positions, CPI, liquidation, multiple assets,
+maximum shapes and arbitrary route histories are outside this witness.
+
+Validation uses a fresh locked/offline default-feature SBF build from base
+`72b9db8dd45f12610d92341f96971f204ec9bd65` in private worktree
+`/dev/shm/pr135-fractional-route-72b9db8`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, platform-tools v1.52. SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The initial draft incorrectly required a neutral trade to advance its cursor;
+the corrected oracle checks the canonical sum of stored and deferred capacity.
+No production inconsistency was observed.
+The final new selector passes all eight histories and eight exact suffix rollbacks
+with peak 214,611 CU under 1,400,000. Both adjacent exact selectors, the charter/index
+check, repository-wide formatting and both whitespace checks pass.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 TMPDIR=/dev/shm
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::v16_program_pending_fractional_carry_survives_due_trade_and_resolution -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::v16_program_fractional_target_reversal_commutes_with_neutral_reduction -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::v16_program_row425_public_carry_entitlement_is_partition_and_order_equivalent -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-045 selected Hybrid reward provenance after catchup (2026-09-10)
 
 [`cu/inv_045_no_free_mark_movement.rs`](cu/inv_045_no_free_mark_movement.rs)
