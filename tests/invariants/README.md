@@ -3,6 +3,89 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-073 absent provider through full expiry retirement (2026-09-10)
+
+[`cu/inv_073_absent_provider_expiry_retirement.rs`](cu/inv_073_absent_provider_expiry_retirement.rs)
+adds `v16_program_absent_provider_staggered_expiry_reaches_funded_terminal_retirement`,
+owned by `inv_073_no_permanent_user_lock::absent_provider_expiry_retirement`.
+This is one bounded row-420 increment: a provider unavailable from the end of funding
+through slab retirement, with no cooperative reserve withdrawal anywhere in the suffix.
+
+The local selector map before this addition was:
+
+| Existing selector | Exact ownership and boundary |
+| --- | --- |
+| `v16_program_absent_provider_preserves_user_order_and_operator_free_insurance_exit` | Both user payout orders and an insurance payout with absent provider/operator; the current insurance beneficiary signs and 401 provider atoms remain in custody. |
+| `v16_program_drain_only_stale_exit_does_not_require_reserve_or_counterparty_signers` | Exposed DrainOnly risk and unsigned timeout payouts; backing and insurance remain attributed. |
+| `v16_program_terminal_provider_earnings_and_lazy_ledger_reach_exact_slab_close` | Earned fees, lazy ledger initialization, and final close; the provider signs principal and earnings withdrawals. |
+| `v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger` | Current beneficiary payout without former beneficiary/operator; the current beneficiary signs. |
+| `v16_program_terminal_expiry_preserves_separate_reserve_beneficiaries` | Expiry normalization and final burn with distinct holders; the provider first signs withdrawal of its live principal and the insurer signs its payout. |
+| `v16_program_dual_quote_provider_expiry_has_bounded_terminal_disposition` | Expired backing and final dual-rail retirement; live provider principal is first withdrawn with its holder's signature. |
+
+The new test constructs a one-asset market, one 1,009-atom funded portfolio, and
+401/307 atoms of backing in the two domains through System, SPL, ATA and wrapper
+instructions. The provider is distinct from the owner, fee payer and market authority;
+its keypair is dropped after funding. Mint authority is revoked. Only signer SOL,
+Clock and blockhashes are supplied by the harness. Two histories reverse the domains'
+slot-9/slot-13 expiry order, preserving the same economic result.
+
+At slot 5 the fee payer alone resolves the stale market; at the slot-6 timeout it
+pays all 1,009 user atoms. The owner then signs deletion of the economically empty
+portfolio. Every suffix transaction checks its actual compiled signer set, signature
+validity, packet size and exact network fee. The provider wallet and destination
+remain unchanged; the authority profile and control sequences remain unchanged until
+the final tombstone, so authority succession is not an escape used by this witness.
+
+Before either expiry, `CloseSlab` rejects with `EngineLockActive`. At the first expiry,
+a bundle executes one successful normalization before its next close rejects on the
+other still-live domain. All tracked and compiled Accounts roll back exactly, with
+only the calculated fee deducted. Retrying the normalization commits its exact domain
+change; the later expiry clears the remaining claim. Both normalization calls preserve
+complete custody Account frames. The third successful slab call burns exactly 708
+atoms, closes the canonical vault and retains the typed tombstone at exact rent.
+The market authority receives precisely the vault rent and market excess, and zero
+quote tokens. All destination Accounts remain exact after the user's payout; the
+mint differs only by the 708-atom supply reduction. Thus `1,717 = 1,009 paid + 708
+retired`, with no residual provider claim and a 150,000-CU bound on each suffix
+transaction, including the two-instruction rollback bundle.
+
+**Rows 420/421 remain OPEN.** This proves expiry-authorized disposition of unused,
+unliened, fee-free provider principal under authenticated finite expiry and an
+available market authority. It does not pay a current fresh provider claim without
+its beneficiary, dispose provider earnings, or establish an absent insurance
+beneficiary's exit. No insurance is funded in this witness. Spent/recredited insurance,
+liened or impaired backing, trading PnL, receipts, recovery, alternate quote rails,
+maximum shapes and arbitrary histories remain outside it. Owner deletion and
+administrator-signed retirement are separate from permissionless user payout.
+No production or invariant-status change is claimed.
+
+Validation uses base `4677a92316b8897a716ba418fe6c61a3ca18a881`, engine `394fd0bf`,
+and a fresh locked/offline default-feature platform-tools v1.52 build in private
+worktree `/home/anatoly/percolator-prog-inv073-row420-421-20260910`.
+The private target is `/dev/shm/inv073-row420-421-20260910-target`; SBF SHA-256 is
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The final exact run passes both worlds with peak 88,357 CU each, four exact rollbacks
+and six successful slab calls in total. Both adjacent exact selectors and the invariant
+charter/index selector pass. Repository formatting and both whitespace checks pass.
+No production inconsistency was observed, no broad suite was run, and no external
+PR material or holdout finding was used as evidence.
+
+Exact worktree, build and validation commands run (the isolated selector preceded
+the final three-selector run; `cargo fmt --all` was run after each test-file edit):
+
+```sh
+git worktree add -b codex/inv073-row420-421-20260910 /home/anatoly/percolator-prog-inv073-row420-421-20260910 origin/codex/invariant-fidelity-reopen-20260904
+env CARGO_TARGET_DIR=/dev/shm/inv073-row420-421-20260910-target CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/inv073-row420-421-20260910-target/deploy -- --locked
+sha256sum /dev/shm/inv073-row420-421-20260910-target/deploy/percolator_prog.so
+cargo fmt --all
+env CARGO_TARGET_DIR=/dev/shm/inv073-row420-421-20260910-target PERCOLATOR_FUZZ_SBF=/dev/shm/inv073-row420-421-20260910-target/deploy/percolator_prog.so CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::absent_provider_expiry_retirement::v16_program_absent_provider_staggered_expiry_reaches_funded_terminal_retirement -- --exact --nocapture
+env CARGO_TARGET_DIR=/dev/shm/inv073-row420-421-20260910-target PERCOLATOR_FUZZ_SBF=/dev/shm/inv073-row420-421-20260910-target/deploy/percolator_prog.so CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_073_no_permanent_user_lock::absent_provider_expiry_retirement::v16_program_absent_provider_staggered_expiry_reaches_funded_terminal_retirement inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_terminal_expiry_preserves_separate_reserve_beneficiaries inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_absent_provider_preserves_user_order_and_operator_free_insurance_exit
+env CARGO_TARGET_DIR=/dev/shm/inv073-row420-421-20260910-target PERCOLATOR_FUZZ_SBF=/dev/shm/inv073-row420-421-20260910-target/deploy/percolator_prog.so CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-073 absent provider and operator through ordered terminal exits (2026-09-10)
 
 [`cu/inv_067_terminal_provider_insurance_retries.rs`](cu/inv_067_terminal_provider_insurance_retries.rs)

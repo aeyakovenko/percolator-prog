@@ -59,8 +59,16 @@
 //! returns the exact reserve and permits slab close without the former beneficiary or operator.
 //! The current beneficiary signs payment and the market authority signs mechanical closure;
 //! this is bounded role-independent evidence, not permissionless retirement or row-421 closure.
+//!
+//! The absent-provider expiry witness pays a funded user and retires both staggered backing
+//! domains with no provider signature after funding. Expiry removes the entire principal claim;
+//! three successful administrator-signed slab calls normalize both domains and burn the residue.
+//! Fresh principal, earnings, and absent insurance beneficiaries remain open in rows 420/421.
 
 use super::*;
+
+#[path = "inv_073_absent_provider_expiry_retirement.rs"]
+mod absent_provider_expiry_retirement;
 
 #[path = "inv_073_mixed_backing_expiry_exit.rs"]
 mod mixed_backing_expiry_exit;
