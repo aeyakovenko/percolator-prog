@@ -5868,6 +5868,73 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## Row 418 dual-rail provider expiry and retirement (2026-09-10)
+
+[`cu/inv_077_terminal_quote_variants.rs`](cu/inv_077_terminal_quote_variants.rs) adds
+`v16_program_dual_quote_provider_expiry_has_bounded_terminal_disposition` under
+`inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants`.
+Four public LiteSVM/SBF histories cross mintable/fixed-supply SPL primary custody
+with fixed-supply SPL/native secondary custody. Each publicly funds 401 atoms of
+live provider principal and 307 atoms of shorter-lived backing, plus 17 unbooked
+primary atoms and 619 secondary reserve atoms. All mints, vaults, funding, rail
+configuration, and backing use System, ATA, SPL, and wrapper instructions. The
+existing INV-081 native-mint genesis fixture is the only supplied token state;
+no program-owned account bytes are injected or modified.
+
+After resolution, a premature `CloseSlab` must reject as `EngineLockActive` with
+every transaction account and both mints restored exactly except the signature
+fee. The provider then withdraws exactly 401 primary atoms. At the shorter
+backing's expiry, one successful `CloseSlab` normalizes its stock without moving
+either rail's custody or supply. A second call retires exactly 307 primary atoms,
+sweeps 17 primary and 619 secondary atoms, closes both canonical vaults, and
+retains the typed market tombstone at exact rent. The primary mint supply falls
+from 725 to 418 regardless of whether mint authority was revoked; secondary SPL
+supply stays 619 and native mint supply stays zero. Complete token/mint account
+frames check amounts, ownership, native backing and reserves. The market authority
+receives exactly the market excess and both vault rents. Native secondary
+redemption separately returns exactly 619 lamports plus destination rent and
+preserves the tombstone, primary payout, both mints, and vault-authority account.
+Every required withdrawal, normalization, close, redemption, and rejected close
+has a 150,000-CU assertion; successful terminal closure requires exactly two calls
+after provider withdrawal and expiry.
+
+The new relation is provider/expired booked stock crossed with dual-rail final
+retirement. INV-070's mixed quote history withdraws all booked insurance before
+closing, while its mixed-maturity retirement history has only one SPL rail.
+The single-native surplus, native live roundtrip, and capacity/empty-terminal
+histories do not exercise this composition. This witness uses a nonnative primary
+mint for retirement and native transfers/closure for the secondary reserve.
+
+Row 418 remains **OPEN**, and INV-018/021/025/069/070/073/077/078/081 verdicts are
+unchanged. This four-world, one-asset, provider-only lifecycle does not establish
+native-primary booked-residue retirement, provider earnings or spent/liened
+backing, absent-authority exits, occupied maximum capacity, or all supported
+token/history products. No portfolio or user payout is needed for this stock
+class. Existing payout tests remain the adjacent controls.
+
+Validation uses base `ff8f74d3a01c6bd961544f10f4eec515e2c57d91`, engine
+`394fd0bf`, and a fresh default-feature platform-tools v1.52 SBF build in private
+worktree `/dev/shm/pr135-terminal-quote-codex-20260910`. Its SHA-256 is
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+
+The new exact selector passes all four worlds, with measured lifecycle peaks of
+55,127/47,574 CU for SPL secondary and 53,715/52,162 CU for native secondary
+(mintable/fixed primary respectively). Both adjacent exact controls pass: the
+two-order mixed-maturity history and all twelve dual-quote payout worlds. The
+charter/index selector also passes. No production inconsistency was observed.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$PWD/target/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_dual_quote_provider_expiry_has_bounded_terminal_disposition -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## Row 418 quote variants at public market capacity (2026-09-09)
 
 [`cu/inv_077_terminal_quote_variants.rs`](cu/inv_077_terminal_quote_variants.rs), mounted
