@@ -7469,6 +7469,69 @@ custody bound. Formatting and whitespace checks passed. Only the existing `solan
 future-compatibility warning appeared. This is focused cached-artifact conformance, not a fresh
 SBF build or full `v16_cu`/public-SBF/stateful suite certification.
 
+### INV-008 retained withdrawal across reserve replacement
+
+`v16_consumed_withdrawal_rails_stay_stale_across_reserve_replacement` in
+[`cu/inv_008_intent_uniqueness_and_bounded_replay.rs`](cu/inv_008_intent_uniqueness_and_bounded_replay.rs)
+adds the consumed-withdrawal / `SwapSecondaryForPrimary` relation. The existing INV-025 active
+reserve-swap owner rejects an overclaim after reserve replacement; the INV-024 mixed-rail owner
+preserves an unconsumed withdrawal through failed payouts. Neither retains consumed withdrawal
+consent across the swap. This case replenishes primary custody through an equal-atom exchange
+against secondary custody, leaving portfolio capital and its sequence unchanged.
+
+Four public System/SPL/ATA/wrapper histories cross withdrawal amounts 1/37 with primary/secondary
+first execution. Both rail variants and every old retry envelope are signed before that first
+execution, with identical withdrawal bytes and rail-specific accounts. Distinct compute-budget
+envelopes keep signatures unique within one blockhash window; no binding adapter rewrites the
+tested payloads. Both orders of a consumed withdrawal and a swap reject with exact `EngineStale`.
+Swap-first failures prove both SPL transfers completed before full account rollback. The
+unchanged swap then succeeds, and both retained withdrawal rails still reject.
+
+A fresh intent changes only the owner sequence. Duplicating it across the two rails rolls back
+the successful first payout, after which its unchanged opposite-rail request pays exactly its
+signed amount. A second swap cannot revive either rail of either consumed intent. Enough owner
+capital and reserve custody remain to fund another full withdrawal throughout the suffix, so
+exhaustion cannot explain rejection. These are fully consumed one-shot withdrawals, not partial
+execution of a persistent allowance.
+
+An input-derived oracle checks each owner's capital and payouts, the reserve authority's equal
+exchange, both mint supplies, every SPL balance, accounting vault and disjoint primary surplus
+after each attempt. Mint authority is revoked before the suffix. Identity, position epoch,
+control sequences and an unrelated funded owner are framed. Rejections restore all fixture and
+compiled non-payer accounts, including bytes, metadata, lamports and absence; the fee payer loses
+only its exact signature fee. Successful swaps preserve complete market and portfolio accounts.
+
+This is bounded INV-008 evidence adjacent to INV-010/011/024/031/064 and reopening row 415.
+Row 415 remains OPEN: insurance stock binding and the ledger's unchanged-oracle/fix evidence
+requirements are not discharged. No production change, status promotion, arbitrary-history
+proof, or coverage of other withdrawal families is claimed. Only local invariant ledgers and
+existing tests supplied the case; no GitHub PRs, issues, branches or open diffs were inspected.
+
+Validation on 2026-09-10 uses a private `/dev/shm` worktree based on local HEAD
+`72b9db8dd45f12610d92341f96971f204ec9bd65`. The fresh default-feature SBF SHA-256 is
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC="$HOME/.cache/solana/v1.52/platform-tools/rust/bin/rustc" \
+  PATH="$HOME/.cache/solana/v1.52/platform-tools/rust/bin:$PATH" CARGO_NET_OFFLINE=true \
+  cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::v16_consumed_withdrawal_rails_stay_stale_across_reserve_replacement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_025_exact_stock_reconciliation::active_reserve_swap::v16_program_active_reserve_swap_preserves_stock_classes_and_owner_claim -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
+The new selector passes four histories / 60 transactions / 44 exact stale rollbacks, with peak
+43976 CU below the 300000 custody bound. The initial SBF invocation needed the cached compiler
+explicitly on PATH; the locked/offline build then succeeded. No production inconsistency was
+observed. This is focused validation, not a full-suite or engine-proof result.
+
 ### INV-008 generated withdrawal-stock histories (row415)
 
 `withdrawal_stock_history::v16_program_generated_withdrawal_stock_histories_preserve_first_execution_budget`

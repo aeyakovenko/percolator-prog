@@ -22,6 +22,9 @@
 //! checking an independent value model after partial payouts and late SPL rollback/retry.
 //! The released-PnL history consumes principal withdrawal before converting a distinct junior
 //! claim, including exact rollback of that reclassification on a stale withdrawal suffix.
+//! The reserve-swap history retains both withdrawal rails before execution, then replaces
+//! secondary custody with primary custody without advancing owner state. Neither rail can
+//! revive the consumed allowance, including when the swap's two SPL transfers precede rejection.
 //! This does not certify insurance-withdrawal stock binding (counterexample 415 remains open).
 //! This is bounded asset-0 evidence using signature-distinct envelopes around retained instruction
 //! bytes, not detached-signature, durable-nonce, or arbitrary-history coverage.
@@ -1060,6 +1063,431 @@ fn v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody() {
         "withdrawal/redeposit: 12 transactions, 9 exact stale rollbacks, max CU={max_cu}; \
          two distinct withdrawals paid {AMOUNT} each, one redeposit returned {AMOUNT}"
     );
+}
+
+#[test]
+fn v16_consumed_withdrawal_rails_stay_stale_across_reserve_replacement() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::{
+        inv018_create_public_spl_mint, inv018_public_spl_market,
+    };
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    let mut transactions = 0;
+    let mut rejections = 0;
+    let mut max_cu = 0;
+    for amount in [1u64, 37] {
+        for first_rail in 0..2 {
+            let capital = 3 * amount + 7;
+            let bystander_capital = 103;
+            let secondary_reserve = capital + bystander_capital + 4 * amount;
+            let admin_funding = 2 * amount;
+            let mut env = inv018_public_spl_market(6);
+            let admin = env.admin.insecure_clone();
+            let secondary =
+                inv018_create_public_spl_mint(&mut env.svm, &env.payer, admin.pubkey(), 6);
+            env.update_base_unit_mints_with_cu(env.mint, secondary);
+            let mints = [env.mint, secondary];
+            let vaults = [
+                env.vault,
+                create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, secondary),
+            ];
+            let owners = [Keypair::new(), Keypair::new()];
+            let wallets = [owners[0].pubkey(), owners[1].pubkey(), admin.pubkey()];
+            let tokens = wallets.map(|wallet| {
+                mints.map(|mint| create_ata_for_test(&mut env.svm, &env.payer, wallet, mint))
+            });
+            let portfolios = std::array::from_fn::<_, 2, _>(|actor| {
+                env.svm.airdrop(&wallets[actor], 1_000_000_000).unwrap();
+                let key = Keypair::new();
+                system_create_account_for_test(
+                    &mut env.svm,
+                    &env.payer,
+                    &key,
+                    env.portfolio_account_len,
+                    env.program_id,
+                );
+                env.send(
+                    ProgInstruction::InitPortfolio,
+                    vec![
+                        AccountMeta::new(wallets[actor], true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(key.pubkey(), false),
+                    ],
+                    &[&owners[actor]],
+                )
+                .unwrap();
+                key.pubkey()
+            });
+            let mut funding: Vec<_> = [
+                (mints[0], tokens[0][0], capital),
+                (mints[0], tokens[1][0], bystander_capital),
+                (mints[0], tokens[2][0], admin_funding),
+                (mints[1], vaults[1], secondary_reserve),
+            ]
+            .map(|(mint, token, atoms)| {
+                spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &mint,
+                    &token,
+                    &admin.pubkey(),
+                    &[],
+                    atoms,
+                )
+                .unwrap()
+            })
+            .into();
+            funding.extend(mints.map(|mint| {
+                spl_token::instruction::set_authority(
+                    &spl_token::ID,
+                    &mint,
+                    None,
+                    spl_token::instruction::AuthorityType::MintTokens,
+                    &admin.pubkey(),
+                    &[],
+                )
+                .unwrap()
+            }));
+            send_raw_ixs(&mut env.svm, &env.payer, funding, &[&admin]).unwrap();
+            for (actor, atoms) in [capital, bystander_capital].into_iter().enumerate() {
+                env.send(
+                    env.deposit_ix(portfolios[actor], atoms.into()),
+                    vec![
+                        AccountMeta::new(wallets[actor], true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolios[actor], false),
+                        AccountMeta::new(tokens[actor][0], false),
+                        AccountMeta::new(vaults[0], false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&owners[actor]],
+                )
+                .unwrap();
+            }
+
+            let ids = portfolios.map(|key| env.portfolio_id(key));
+            let epochs = portfolios.map(|key| env.portfolio_position_epoch(key));
+            let controls = env.control_sequences(0);
+            let mint_frames = mints.map(|key| env.svm.get_account(&key).unwrap());
+            let bystander_frame = env.svm.get_account(&portfolios[1]);
+            let check = |env: &V16CuEnv, paid: [u64; 2], swapped: u64, withdrawals: u64| {
+                let owner_paid = paid.iter().sum::<u64>();
+                assert_eq!(
+                    owner_paid,
+                    withdrawals * amount,
+                    "each consent pays its bound"
+                );
+                let remaining = capital - owner_paid;
+                assert!(
+                    remaining >= amount,
+                    "even spent intents remain fully fundable"
+                );
+                for actor in 0..2 {
+                    let state = env.portfolio_state(portfolios[actor]);
+                    assert_eq!(
+                        state.capital.get(),
+                        u128::from(if actor == 0 {
+                            remaining
+                        } else {
+                            bystander_capital
+                        })
+                    );
+                    assert_eq!(state.pnl.get(), 0);
+                    assert_eq!(state.cancel_deposit_escrow.get(), 0);
+                    assert_eq!(env.portfolio_id(portfolios[actor]), ids[actor]);
+                    assert_eq!(
+                        env.portfolio_position_epoch(portfolios[actor]),
+                        epochs[actor]
+                    );
+                    assert_eq!(
+                        env.portfolio_matcher_sequence(portfolios[actor]),
+                        1 + if actor == 0 { withdrawals } else { 0 }
+                    );
+                }
+                let market = env.svm.get_account(&env.market).unwrap();
+                let header = market_group_header_bytes(&market.data);
+                let stock = u128::from(remaining + bystander_capital);
+                assert_eq!(header.c_tot.get(), stock);
+                assert_eq!(header.vault.get(), stock);
+                assert_eq!(header.materialized_portfolio_count.get(), 2);
+                for zero in [
+                    header.insurance.get(),
+                    header.insurance_domain_budget_remaining_total.get(),
+                    header.source_fresh_backing_total_num.get(),
+                    header.backing_provider_earnings_total.get(),
+                    header.source_claim_bound_total_num.get(),
+                    header.source_insurance_credit_reserved_total_atoms.get(),
+                    header.pnl_pos_tot.get(),
+                ] {
+                    assert_eq!(zero, 0, "custody replacement creates no economic stock");
+                }
+                assert_eq!(env.control_sequences(0), controls);
+                assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+                assert_eq!(env.svm.get_account(&portfolios[1]), bystander_frame);
+
+                let expected_wallets = [paid, [0, 0], [admin_funding - swapped, swapped]];
+                let reserves = [
+                    capital + bystander_capital + swapped - paid[0],
+                    secondary_reserve - swapped - paid[1],
+                ];
+                for rail in 0..2 {
+                    assert_eq!(
+                        env.svm.get_account(&mints[rail]).unwrap(),
+                        mint_frames[rail]
+                    );
+                    let mint = Mint::unpack(&mint_frames[rail].data).unwrap();
+                    assert_eq!(mint.mint_authority, COption::None);
+                    assert_eq!(
+                        mint.supply,
+                        [
+                            capital + bystander_capital + admin_funding,
+                            secondary_reserve
+                        ][rail]
+                    );
+                    let mut total = 0;
+                    for (key, wallet, atoms) in (0..3)
+                        .map(|actor| {
+                            (
+                                tokens[actor][rail],
+                                wallets[actor],
+                                expected_wallets[actor][rail],
+                            )
+                        })
+                        .chain([(vaults[rail], env.vault_authority, reserves[rail])])
+                    {
+                        let account = env.svm.get_account(&key).unwrap();
+                        assert_eq!(account.owner, spl_token::ID);
+                        let token = TokenAccount::unpack(&account.data).unwrap();
+                        assert_eq!(
+                            (token.mint, token.owner, token.amount),
+                            (mints[rail], wallet, atoms)
+                        );
+                        total += token.amount;
+                    }
+                    assert_eq!(total, mint.supply, "independent mint-{rail} custody census");
+                }
+                assert_eq!(
+                    u128::from(reserves[0]),
+                    stock + u128::from(swapped + paid[1]),
+                    "replacement and secondary payouts leave attributed primary surplus"
+                );
+                assert_eq!(expected_wallets[2].iter().sum::<u64>(), admin_funding);
+            };
+            let withdrawal = |env: &V16CuEnv, rail: usize| Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(wallets[0], true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[0], false),
+                    AccountMeta::new(tokens[0][rail], false),
+                    AccountMeta::new(vaults[rail], false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                data: env.withdraw_ix(portfolios[0], amount.into()).encode(),
+            };
+            let retained = [withdrawal(&env, 0), withdrawal(&env, 1)];
+            assert_eq!(retained[0].data, retained[1].data);
+            let swap = Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new_readonly(env.market, false),
+                    AccountMeta::new(tokens[2][0], false),
+                    AccountMeta::new(vaults[0], false),
+                    AccountMeta::new(tokens[2][1], false),
+                    AccountMeta::new(vaults[1], false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                data: ProgInstruction::SwapSecondaryForPrimary {
+                    amount: amount.into(),
+                    authority_epoch: controls.authority_epoch,
+                }
+                .encode(),
+            };
+            let mut nonce = 0;
+            let mut signatures = BTreeSet::new();
+            let mut sign = |env: &V16CuEnv, instructions: &[Instruction]| {
+                nonce += 1;
+                let mut message = vec![
+                    heap_ix(),
+                    ComputeBudgetInstruction::set_compute_unit_limit(1_400_000 - nonce),
+                ];
+                message.extend_from_slice(instructions);
+                let mut signers = vec![&env.payer];
+                for signer in [&owners[0], &admin] {
+                    if instructions
+                        .iter()
+                        .flat_map(|ix| &ix.accounts)
+                        .any(|meta| meta.is_signer && meta.pubkey == signer.pubkey())
+                    {
+                        signers.push(signer);
+                    }
+                }
+                let tx = Transaction::new_signed_with_payer(
+                    &message,
+                    Some(&env.payer.pubkey()),
+                    &signers,
+                    env.svm.latest_blockhash(),
+                );
+                tx.verify().unwrap();
+                assert!(signatures.insert(tx.signatures[0]));
+                tx
+            };
+            // All old envelopes, including the alternate rail, are signed against the same S.
+            let first = sign(&env, &[retained[first_rail].clone()]);
+            let mut ordered = Vec::new();
+            for old in &retained {
+                for swap_first in [false, true] {
+                    let ixs = if swap_first {
+                        [swap.clone(), old.clone()]
+                    } else {
+                        [old.clone(), swap.clone()]
+                    };
+                    ordered.push((sign(&env, &ixs), swap_first));
+                }
+            }
+            let after_swap = retained.each_ref().map(|ix| sign(&env, &[ix.clone()]));
+            let after_second_swap = retained.each_ref().map(|ix| sign(&env, &[ix.clone()]));
+            let frame: Vec<_> = portfolios
+                .into_iter()
+                .chain(mints)
+                .chain(vaults)
+                .chain(tokens.into_iter().flatten())
+                .chain(wallets)
+                .chain([env.market])
+                .collect();
+            let mut execute = |env: &mut V16CuEnv,
+                               tx: Transaction,
+                               failure: Option<(u8, usize, usize)>| {
+                let keys: BTreeSet<_> = frame
+                    .iter()
+                    .chain(&tx.message.account_keys)
+                    .copied()
+                    .collect();
+                let before: Vec<_> = keys
+                    .iter()
+                    .map(|key| (*key, env.svm.get_account(key)))
+                    .collect();
+                let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+                payer.lamports -= FeeStructure::default().lamports_per_signature
+                    * u64::from(tx.message.header.num_required_signatures);
+                let result = env.svm.send_transaction(tx);
+                let meta = if let Some((index, wrappers, transfers)) = failure {
+                    let error =
+                        result.expect_err("consumed withdrawal cannot acquire replacement custody");
+                    assert_eq!(
+                        error.err,
+                        TransactionError::InstructionError(
+                            2 + index,
+                            InstructionError::Custom(PercolatorError::EngineStale as u32)
+                        )
+                    );
+                    for (program, count) in [(env.program_id, wrappers), (spl_token::ID, transfers)]
+                    {
+                        assert_eq!(
+                            error
+                                .meta
+                                .logs
+                                .iter()
+                                .filter(|line| **line == format!("Program {program} success"))
+                                .count(),
+                            count,
+                            "the intended public prefix must execute before rollback"
+                        );
+                    }
+                    for (key, account) in before {
+                        if key != env.payer.pubkey() {
+                            assert_eq!(
+                                env.svm.get_account(&key),
+                                account,
+                                "exact economic rollback at {key}"
+                            );
+                        }
+                    }
+                    rejections += 1;
+                    error.meta
+                } else {
+                    result.expect("current bounded consent must progress")
+                };
+                assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+                assert!(meta.compute_units_consumed > 0);
+                assert_cu_within(
+                    "retained withdrawal/reserve swap",
+                    meta.compute_units_consumed,
+                    CUSTODY_CU_LIMIT,
+                );
+                max_cu = max_cu.max(meta.compute_units_consumed);
+                transactions += 1;
+            };
+
+            let mut paid = [0; 2];
+            check(&env, paid, 0, 0);
+            execute(&mut env, first, None);
+            paid[first_rail] = amount;
+            check(&env, paid, 0, 1);
+            for (tx, swap_first) in ordered {
+                execute(
+                    &mut env,
+                    tx,
+                    Some(if swap_first { (1, 1, 2) } else { (0, 0, 0) }),
+                );
+                check(&env, paid, 0, 1);
+            }
+            let swap_tx = sign(&env, &[swap.clone()]);
+            let market_frame = env.svm.get_account(&env.market);
+            let owner_frame = env.svm.get_account(&portfolios[0]);
+            execute(&mut env, swap_tx, None);
+            assert_eq!(env.svm.get_account(&env.market), market_frame);
+            assert_eq!(env.svm.get_account(&portfolios[0]), owner_frame);
+            check(&env, paid, amount, 1);
+            for tx in after_swap {
+                execute(&mut env, tx, Some((0, 0, 0)));
+                check(&env, paid, amount, 1);
+            }
+
+            let fresh = [withdrawal(&env, 0), withdrawal(&env, 1)];
+            for rail in 0..2 {
+                assert_eq!(fresh[rail].accounts, retained[rail].accounts);
+                assert_eq!(
+                    fresh[rail].data,
+                    ProgInstruction::Withdraw {
+                        portfolio_id: ids[0],
+                        expected_sequence: 2,
+                        amount: amount.into(),
+                    }
+                    .encode(),
+                    "fresh consent changes only the consumed sequence"
+                );
+            }
+            let duplicate = sign(&env, &fresh);
+            let fresh_tx = sign(&env, &[fresh[1 - first_rail].clone()]);
+            let fresh_retries = fresh.each_ref().map(|ix| sign(&env, &[ix.clone()]));
+            execute(&mut env, duplicate, Some((1, 1, 1)));
+            check(&env, paid, amount, 1);
+            execute(&mut env, fresh_tx, None);
+            paid[1 - first_rail] += amount;
+            check(&env, paid, amount, 2);
+
+            let swap_tx = sign(&env, &[swap]);
+            let market_frame = env.svm.get_account(&env.market);
+            let owner_frame = env.svm.get_account(&portfolios[0]);
+            execute(&mut env, swap_tx, None);
+            assert_eq!(env.svm.get_account(&env.market), market_frame);
+            assert_eq!(env.svm.get_account(&portfolios[0]), owner_frame);
+            check(&env, paid, admin_funding, 2);
+            for tx in after_second_swap.into_iter().chain(fresh_retries) {
+                execute(&mut env, tx, Some((0, 0, 0)));
+                check(&env, paid, admin_funding, 2);
+            }
+            assert_eq!(paid, [amount; 2]);
+            assert_eq!(signatures.len(), 15);
+        }
+    }
+    assert_eq!((transactions, rejections), (60, 44));
+    eprintln!("withdrawal/reserve replacement: 4 histories, {transactions} transactions, {rejections} exact stale rollbacks, max CU={max_cu}");
 }
 
 #[test]
