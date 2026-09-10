@@ -867,6 +867,74 @@ rustfmt --edition 2021 --config skip_children=true --check tests/invariants/stat
 git diff --check
 ```
 
+## INV-027 flat withdrawal into first admission (row 413, 2026-09-10)
+
+[`cu/inv_027_protected_principal_seniority.rs`](cu/inv_027_protected_principal_seniority.rs)
+adds `v16_program_flat_withdrawal_fees_precede_first_admission_and_roll_back_custody`.
+This is a bounded coverage increment for
+`all-accrued-liabilities-precede-every-risk-increasing-admission`.
+Two histories exchange which never-traded owner is margin-constrained. System,
+SPL, ATA and wrapper instructions create and fund both flat portfolios at slot 1;
+an empty keeper advances the fixed-price market to slot 4 while both funded
+Accounts remain byte-identical. Each owner owes `3 * 7 = 21` maintenance atoms.
+No program-owned bytes or engine state are injected.
+
+The first admission transaction contains two `Withdraw` instructions followed by
+`TradeNoCpi`, with no explicit fee synchronization or portfolio-refresh prefix.
+Withdrawals pay 7 and 11 SPL atoms and implicitly collect both elapsed fees,
+leaving 100 and 200 capital atoms (reversed in the second history). A first open
+requiring 101 IM atoms rejects at instruction 4 with `EngineInvalidConfig`.
+Both SPL-success logs must exist; all fifteen tracked Accounts then restore
+exactly, including token custody, destinations, fee cursors, certificates and
+economic lamports. The separate transaction payer loses exactly its calculated
+three-signature network fee. Every suffix transaction verifies signatures and
+fits the 1,232-byte packet bound.
+
+Retrying the same withdrawal prefix at 100 IM succeeds. Both first-position
+certificates match the independent health model, including exactly zero initial
+headroom for the constrained owner. Same-slot public closure and final withdrawals
+return every post-fee principal atom: total mint supply remains 360, the owners
+receive 318 in total, and only 42 insurance atoms remain in custody, split 20/22
+across the base domains. Every checked state reconciles capital, OI, PnL, fee
+cursors, SPL custody, stock and reservation censuses, and unrelated Account frames.
+
+The existing flat first-admission witness explicitly synchronizes and refreshes
+fees before risk and has no SPL-moving admission prefix. The joint-liability and
+fee-only certificate witnesses start with live positions. This increment covers
+implicit fee realization through owner withdrawal composed with first risk and
+token-CPI rollback. **Row 413 remains OPEN**: standalone first opens with uncollected
+fees, other admission transports, clipped or rewarded fees, policy changes,
+nonzero PnL and arbitrary histories remain outside this witness. No production
+finding, fix, dependency change, or invariant-status change is claimed. Only local
+protocol docs and invariant tests supplied evidence; no external PR/issue inspection
+or holdout evidence was used.
+
+Validation is on base `f08fef51654addd22cfaea7000282f35dad27fed`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, in worktree
+`/tmp/codex-agent-worktrees/row413-flat-first-risk-20260910-r1`, branch
+`codex/row413-flat-first-risk-20260910-r1`. A fresh locked/offline default-feature
+platform-tools v1.52 build has SBF SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The final new selector passes both worlds with two exact custody rollbacks, two
+first opens and four full owner exits; peak measured CU is 291,871 against a
+400,000 bound. Both adjacent controls and the invariant index pass (2/2 and 1/1).
+The new selector was also run before adding packet/signature/network-fee checks;
+neither run required a production change. No broad suite was run.
+
+Exact build and validation commands (all run in that worktree):
+
+```sh
+env CARGO_TARGET_DIR=/dev/shm/row413-flat-first-risk-20260910-r1-target CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/row413-flat-first-risk-20260910-r1-target/deploy -- --locked
+sha256sum /dev/shm/row413-flat-first-risk-20260910-r1-target/deploy/percolator_prog.so
+cargo fmt --all
+env CARGO_TARGET_DIR=/dev/shm/row413-flat-first-risk-20260910-r1-target PERCOLATOR_FUZZ_SBF=/dev/shm/row413-flat-first-risk-20260910-r1-target/deploy/percolator_prog.so CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::v16_program_flat_withdrawal_fees_precede_first_admission_and_roll_back_custody -- --exact --nocapture
+env CARGO_TARGET_DIR=/dev/shm/row413-flat-first-risk-20260910-r1-target PERCOLATOR_FUZZ_SBF=/dev/shm/row413-flat-first-risk-20260910-r1-target/deploy/percolator_prog.so CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled inv_054_certificate_epoch_completeness::v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom
+env CARGO_TARGET_DIR=/dev/shm/row413-flat-first-risk-20260910-r1-target PERCOLATOR_FUZZ_SBF=/dev/shm/row413-flat-first-risk-20260910-r1-target/deploy/percolator_prog.so CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-027 flat first-admission fee prefix (2026-09-10)
 
 [`cu/inv_027_protected_principal_seniority.rs`](cu/inv_027_protected_principal_seniority.rs)
