@@ -16,6 +16,9 @@ mod used_generation_lifecycle;
 #[path = "inv_012_retained_scope_product.rs"]
 mod retained_scope_product;
 
+#[path = "inv_012_revocation_atomicity.rs"]
+mod revocation_atomicity;
+
 const CAPITAL: u128 = 1_000_000;
 const PRICE: u64 = 100;
 const SLOT: u64 = 1;

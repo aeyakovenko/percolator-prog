@@ -122,6 +122,108 @@ git diff --exit-code 81f7dae8 -- src Cargo.toml Cargo.lock tests/support tests/f
 git diff --cached --check
 ```
 
+## INV-012 committed revocation after bundle rollback (row 412, 2026-09-10)
+
+[`cu/inv_012_revocation_atomicity.rs`](cu/inv_012_revocation_atomicity.rs) adds
+`v16_program_retained_capability_tracks_committed_revocation_after_bundle_rollback`
+under `inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity`.
+Base: local `codex/invariant-fidelity-reopen-20260904` HEAD
+`81f7dae865d16bf5b530143f619950b115c42f09`. Worktree:
+`/tmp/codex-agent-worktrees/percolator-inv012-row412-20260910`; branch:
+`codex/inv012-row412-retained-20260910`. Only local charter, source, tests and
+documentation informed this increment.
+
+The missing relation is **retained capability validity after a successful
+automatic revocation is rolled back by a later instruction**, compared with a
+committed position round trip. Eight public LiteSVM worlds cross single/batch
+bilateral writers, single/one-leg-batch CPI consumers, and both position signs.
+A retained CPI entry is first simulated live. A three-instruction bundle executes
+that entry, then opens a sibling-asset position through a bilateral writer, then
+attempts a CPI exit with both predicted position epochs current. The exit rejects
+with `Unauthorized` at instruction 4. Exactly two wrapper successes and one matcher
+invocation/success establish the successful prefixes and rejection before a second
+CPI. Full tracked Account rollback restores the grant, positions, episodes,
+matcher context, SPL balances/supply and economic lamports. Only the separate
+network fee payer is excluded. The unchanged, previously unsent retained transaction
+then lands with its original signature and blockhash, and its authorized exit lands.
+
+The committed control opens and closes the sibling position through the same
+bilateral route. Exact positions and OI return to zero, while the original matcher
+tuple and config sequence remain unchanged, its enabled bit is clear and expiry
+is zero. Old episode consent rejects with `EngineStale`; repairing only both
+episodes still rejects with `Unauthorized`. Owner reauthorization restores the
+same tuple under the next config sequence. The episode-repaired old-grant request
+still rejects with `EngineStale` before CPI on a new transport; fresh entry and exit
+then succeed. Committed steps reconcile input-derived positions, OI and owner capital.
+Both owners withdraw their full 1,000,000-atom entitlements, leaving zero engine/SPL
+custody. Prices are fixed and fees/PnL are zero.
+
+The existing INV-012 writer, liquidation, owner-episode and cure cases cover
+committed invalidation or rejected writers, and the cross-asset retained-exit case
+keeps the LP grant live throughout its position round trip. INV-014's retained fee
+bundles cover policy-bound rejection after a successful trade prefix; they do not
+compose a current-episode consumer with a revoking writer on that same LP or test
+the original standalone retained request after rollback. This addition reuses the
+existing System/SPL/ATA/wrapper fixture and authenticated matcher. It injects no
+protocol state and makes no direct engine transitions.
+
+**Partial coverage only: row 412 remains OPEN.** INV-012 and the affected
+INV-004/005/010/024/081 statuses are unchanged. This bounded transaction/position
+history is not a generic generator/oracle for all authority-revoking transitions.
+Keeper/lifecycle/recovery writers in bundles, longer words, multi-leg/max-shape
+consumers, nonzero fees/PnL and arbitrary histories remain unverified here.
+
+Validation: the exact new selector passed **1/1** (eight worlds, 4.56s); the seven
+exact adjacent INV-012 controls below passed **7/7** (8.43s). The new selector
+observed eight bundle rollbacks, 24 standalone rejections, 32 committed CPI fills
+and 16 full withdrawals. Peak bundle/preflight/writer/fill/withdrawal CU was
+**770,842 / 109,692 / 216,710 / 435,741 / 137,267**. The three-instruction bundle
+uses the existing 1,400,000-CU transaction limit; individual trades and custody
+retain their existing limits. Initial test development corrected the old-episode
+error expectation and separated the bundle limit from the single-trade limit.
+No production behavior failed. The requested invariant index passed. Two additional
+ledger checks below fail identically on this change and an untouched detached
+checkout of base `81f7dae8`: the status projection expects INV-058 to reference
+row 427, and the reopening checker rejects that row's existing `COVERED` status.
+Those unrelated failures are not changed here. Existing support dead-code and
+`solana-client v1.18.26` future-incompatibility warnings remain; no broad suite or
+Kani run is claimed.
+
+Host compilation and both locked/offline SBF builds used this isolated worktree,
+with a private copy of local cached dependencies. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+auth matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The engine pin remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Exact build and verification commands (shared environment factored out):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv012-row412-20260910-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::v16_program_retained_capability_tracks_committed_revocation_after_bundle_rollback -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::v16_program_matcher_capability_route_roster_binds_every_current_scope \
+  inv_012_capability_and_delegate_scope::v16_program_issue406_signed_trade_routes_invalidate_both_matcher_capabilities \
+  inv_012_capability_and_delegate_scope::v16_program_issue406_matcher_trade_routes_preserve_only_participating_lp_capability \
+  inv_012_capability_and_delegate_scope::retained_cross_asset_episode::v16_program_retained_exit_rejects_cross_asset_episode_under_live_matcher_grant \
+  inv_012_capability_and_delegate_scope::cure_revocation::v16_program_funded_close_cancellation_requires_fresh_matcher_capability \
+  inv_012_capability_and_delegate_scope::v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::retained_scope_product::v16_program_retained_scope_product_separates_admin_epoch_tuple_and_expiry
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+# Supplemental checks: both fail identically on the base and this change.
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-045 trade-origin liquidation through catchup (row 422, 2026-09-10)
 
 [`cu/inv_045_trade_origin_catchup.rs`](cu/inv_045_trade_origin_catchup.rs), mounted

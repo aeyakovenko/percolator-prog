@@ -3,6 +3,11 @@
 # Kind/severity are recorded claims, not impact acceptance under scripts/loop.md; OPEN does not confirm LoF/DoS.
 # status remains OPEN until a generic invariant-owned generator/oracle (not the finding PoC)
 # fails on the vulnerable pin, the production fix lands, and the unchanged oracle passes.
+# Row 412 partial conformance (2026-09-10): cu/inv_012_revocation_atomicity.rs,
+# v16_program_retained_capability_tracks_committed_revocation_after_bundle_rollback.
+# Successful CPI/revoking-writer prefixes roll back on current-episode denial; unchanged
+# retained consent survives, while committed position round trips require a fresh grant.
+# Eight bounded worlds with exact Account rollback and full owner exits; row stays OPEN.
 # Row 422 partial conformance (2026-09-10): cu/inv_045_trade_origin_catchup.rs,
 # v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order.
 # Paid Hybrid mark: unequal stale reports, lagged/caught-up liquidation and catchup order;
