@@ -224,6 +224,100 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-073 absent insurance roles after exact exhaustion (rows 420/421, 2026-09-10)
+
+[`cu/inv_073_absent_insurer_spent_retirement.rs`](cu/inv_073_absent_insurer_spent_retirement.rs)
+adds one selector under `inv_073_no_permanent_user_lock::absent_insurer_spent_retirement`:
+`v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion`.
+Base: `81f7dae865d16bf5b530143f619950b115c42f09`, the current local HEAD of
+`codex/invariant-fidelity-reopen-20260904` in
+`/tmp/codex-agent-worktrees/percolator-invariant-fidelity` when this work began.
+Branch: `codex/inv073-terminal-signature-coverage-20260910`; isolated worktree:
+`/tmp/codex-agent-worktrees/percolator-inv073-terminal-signature-20260910`.
+Only local repository code, docs and tests informed the change. The source worktree
+and main PR135 worktree were not edited; production and Cargo pins are unchanged.
+
+The missing relation is **full retirement after actual insurance exhaustion with
+both the current beneficiary and operator unavailable**. The existing spent-insurance
+selector ends at user disposition with insurance/backing still in custody. The
+former-beneficiary-ledger and absent-provider insurance-exit selectors require the
+current insurance beneficiary's signature. Row 420 already has a distinct full
+absent-provider expiry-retirement witness, so this increment adds no provider axis.
+
+Four public LiteSVM worlds cross asset 0/1 with 100/101 insurance atoms. System,
+SPL, ATA and wrapper instructions construct every protocol account and collateral
+balance. Only signer SOL, Clock and blockhashes are harness inputs. The current
+insurance beneficiary funds its domain; both insurance keypairs are dropped before
+the opening trade, with neither role reassigned later. Authenticated marks move a
+10-unit position from 100 to 120 against capitals `[1000, 100, 137]`. The debtor's
+200-atom loss uses its 100 principal atoms and exactly 100 insurance atoms.
+The source conversion is exactly one half, with no rounding residue. The winner
+receives 1,200 atoms, including its exact 100-atom finalized receipt; the debtor
+receives zero and the idle owner receives 137. Mint authority is publicly revoked.
+
+At slot 40 the payer alone resolves the stale market. The owner window rejects
+unsigned payout at slot 42; at slot 43, debtor-first continuation pays each user in
+one call, within the enforced eight-call-per-user bound. Every call strictly lowers
+the local liability/exposure/source/capital/claim/terminal rank. Exact-once retries
+reject, and materialized portfolios block slab close. The owners then sign three
+mechanical deletions, returning exact portfolio rent into the market.
+
+Both fully exhausted worlds retain 100 atoms of historical domain spend until a
+single administrator-signed `CloseSlab` reaches the typed tombstone and closes the
+canonical vault. Mint supply remains 1,337, all tokens belong to the users, the
+administrator receives only exact vault/market excess rent, and the absent roles'
+wallets and beneficiary destination remain unchanged. Both one-atom controls pay
+the same users but preserve exactly one attributed insurance atom and reject the
+final close with `EngineLockActive` and complete Account rollback. The survivor
+cannot be treated as historical spend. These controls intentionally stop with
+that protected claim outstanding.
+
+Every post-resolution transaction checks its compiled signer set, signatures,
+1,232-byte packet limit, exact network fee and the existing 300,000-CU custody
+bound. Rejections restore all tracked and compiled Accounts except the distinct
+fee payer's exact fee. Successful calls frame unrelated Accounts. Frozen profiles
+and control sequences exclude authority succession; custody, receipt face, domain
+spend, stock, mint supply, destinations and tombstone rent are checked explicitly.
+
+This is partial INV-073 evidence related to INV-018/021/027/064/067/069/070/071/078/082.
+**Rows 420/421 stay OPEN.** The test supplies no generic generator/oracle, provider
+principal or earnings disposition, absent-beneficiary route for a surviving budget,
+arbitrary claimant histories, Recovery/B-loss/ADL matrix, alternate token rail or
+maximum-shape claim. Economic user disposition is permissionless; portfolio deletion
+and market retirement retain their named signatures. No invariant status is promoted.
+
+Validation uses a private copy of cached dependencies and a fresh locked/offline
+default-feature wrapper SBF build with platform-tools v1.52. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Engine pin: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+The final new selector passed 1/1 (four worlds, 2.07s), including two full closes
+and two surviving claim refusals; peak transaction cost was 222,902 CU. All five
+exact adjacent controls passed (7.18s). Formatting and whitespace checks passed.
+Exact commands, including the invariant index and committed-diff check, follow.
+The existing `solana-client v1.18.26` future-incompatibility warning remains;
+no broad suite or Kani campaign was run.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/inv073-terminal-signature-20260910-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cp -a /dev/shm/pr135-row411-route-consent-20260910-target "$CARGO_TARGET_DIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::spent_insurance_terminal_exit::v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts \
+  inv_073_no_permanent_user_lock::absent_provider_expiry_retirement::v16_program_absent_provider_staggered_expiry_reaches_funded_terminal_retirement \
+  inv_073_no_permanent_user_lock::v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_absent_provider_preserves_user_order_and_operator_free_insurance_exit \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_close_slab_refunds_exact_vault_and_market_excess_rent_after_normal_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-045 trade-origin liquidation through catchup (row 422, 2026-09-10)
 
 [`cu/inv_045_trade_origin_catchup.rs`](cu/inv_045_trade_origin_catchup.rs), mounted

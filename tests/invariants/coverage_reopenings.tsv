@@ -25,6 +25,13 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 417	LoF	BLOCKER	INV-067	INV-010,INV-024,INV-029,INV-063,INV-066,INV-067,INV-068,INV-070	receipt+x-late-expiry+x-claimant-order	terminal-claim-identity-survives-every-later-stock-reclassification	OPEN
 418	DoS	BLOCKER	INV-070	INV-018,INV-021,INV-025,INV-069,INV-070,INV-073,INV-077,INV-078,INV-081	token-variant+x-terminal-stock+x-close	all-supported-quote-token-variants-have-a-bounded-terminal-disposition	OPEN
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
+# Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,
+# v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion.
+# Public bankruptcy exhausts insurance with both current beneficiary/operator absent after funding;
+# exact unsigned user payouts precede signed empty-portfolio deletion and full slab retirement.
+# Asset 0/1 one-atom surviving-budget controls preserve the claim and reject close atomically.
+# Row 420's absent-provider expiry axis is already covered; no new provider coverage is claimed.
+# Surviving insurance claims, provider principal/earnings and generic absent-signer progress remain OPEN.
 420	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-026,INV-027,INV-032,INV-063,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	provider-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-provider-signature	OPEN
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN

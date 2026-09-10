@@ -67,6 +67,9 @@
 
 use super::*;
 
+#[path = "inv_073_absent_insurer_spent_retirement.rs"]
+mod absent_insurer_spent_retirement;
+
 #[path = "inv_073_absent_provider_expiry_retirement.rs"]
 mod absent_provider_expiry_retirement;
 
