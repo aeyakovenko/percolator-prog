@@ -746,6 +746,136 @@ rustfmt --edition 2021 --check tests/invariants/stateful/inv_028_source_domain_r
 git diff --check
 ```
 
+## INV-014 retained close and fixed withdrawal under repricing (row 411, 2026-09-10)
+
+[`cu/inv_014_retained_close_withdrawal.rs`](cu/inv_014_retained_close_withdrawal.rs),
+mounted by `inv_014_delayed_policy_and_policy_epoch_safety::retained_close_withdrawal`,
+adds `v16_retained_close_withdrawal_reconciles_repriced_fees_across_all_trade_routes`.
+This is one retained **close plus pre-signed fixed withdrawal** product. Both the fee
+consent and the withdrawal amount must remain valid in the same transaction after a
+policy change; checking the close's cap alone does not establish the bundle's result.
+
+Eight public LiteSVM/SBF histories cross single/batch, CPI/no-CPI, and a base-policy
+change from 19 bps to 7 or 37 bps. System, SPL, ATA and wrapper instructions initialize
+all economic accounts and fund two distinct owners with 100,003 and 200,007 atoms.
+Mint authority is revoked. A nonintegral position opens at an authenticated fixed
+price of 100 and costs each owner 49 atoms. The LP publicly grants a 100-bps matcher
+cap; the close independently signs 100 bps, with an exact 256-atom aggregate cap and
+zero slippage allowance on batch CPI. Before repricing, two different close/withdraw
+bundles and a close-only alternative are signed, packet checked and simulated
+successfully. Their complete serialized transactions, signatures and blockhashes
+are retained unchanged. No program-owned bytes are installed or edited by the test;
+only signer SOL and the external matcher program are supplied by the harness.
+
+An input-only two-ceiling oracle fixes the outcomes:
+
+- At 37 bps, CPI charges 95 close-fee atoms, inside both standing and transaction
+  caps. The 99,905-atom retained withdrawal exceeds the resulting 99,859 capital.
+  Both CPI bundles reject exactly at instruction 3 with `EngineLockActive`, after
+  one successful wrapper close and matcher call. Every tracked and compiled Account
+  rolls back, including positions, fee destinations, matcher context, policy and
+  SPL custody. The separate payer loses exactly the signature fee. The already-signed
+  close-only alternative then succeeds, and fresh exact withdrawals pay 99,859 and
+  199,863 atoms. This is a working bounded exit, not a persistent liveness finding.
+- At 7 bps, CPI charges 18 atoms, and the retained 99,905 payout commits. A distinct
+  31-atom remainder stays with its owner and is withdrawn with fresh consent. Final
+  payouts are 99,936 and 199,940 atoms; the lower policy cannot increase the original
+  fixed withdrawal amount.
+- Both bilateral transports charge their explicit signed 100-bps rate, 256 atoms,
+  under either current policy. Their originally quoted 99,698-atom withdrawal stays
+  exact; the other owner receives 199,702. These controls distinguish a signed rate
+  from CPI's cap on the live rate.
+
+All eight worlds reject the consumed close/withdraw alternative with `EngineStale`
+and exact Account rollback. Every successful prefix checks independent owner
+capital, zero PnL, positions/epochs, OI, side-local insurance, stock/encumbrance
+censuses, fixed mint supply and engine/SPL custody. Passive Accounts remain exact.
+The LP's grant tuple/cap and unchanged sequence are checked before withdrawal, with
+the expected bilateral revocation. Single/batch endpoints agree within each fee
+interpretation. Both owners exit completely and only their precisely earned fees
+remain in custody: 288, 134 or 610 atoms for increased CPI, decreased CPI or bilateral
+fees respectively. The measured suffix is bounded at 325,000 CU per transaction.
+
+The exact local overlap map is:
+
+| Existing selector | Boundary missing the new product |
+| --- | --- |
+| `v16_program_retained_fee_bundle_route_product_rolls_back_authorized_prefix` | Two independent trade prefixes; withdrawals are constructed after the fees are known. |
+| `v16_program_retained_shared_taker_fee_bundle_preserves_each_instruction_bound` | Shared-taker trade epochs and separate fee envelopes; no retained withdrawal amount. |
+| `v16_program_retained_fee_relaxation_must_precede_exit_and_roll_back_with_it` | A policy update and exit in one transaction; withdrawals are separately constructed after exit. |
+| `v16_program_retained_lp_fee_cap_preserves_bilateral_and_delegated_exits` | Retained fee-bearing exits under LP consent, followed by freshly sized withdrawals. |
+| `v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change` | Repriced opening fills, then a fresh zero-fee close and fresh full withdrawals. |
+| `v16_program_retained_withdrawal_rolls_back_fee_resolution_and_paid_prefix` | Flat portfolios, maintenance and Live/Resolved route mismatch; no trade-fee policy or signed close. |
+
+**Row 411 remains OPEN.** This adds bounded INV-014/024/036/047/081 evidence, not
+whole-invariant closure. Both new policies are below both 100-bps consent caps;
+isolated over-cap enforcement is outside this test. Multi-leg batches, partial
+closes, source/movement/funding/maintenance fees, authority succession, terminal
+resolution, alternate quote rails and arbitrary histories remain outside this
+increment. Production, dependencies and every invariant-status row are unchanged.
+Only local repository documentation/tests informed this work; external PR material
+and holdout bugs were not used as evidence.
+
+Private worktree: `/home/anatoly/worktrees/row411-inv014-product-20260910`, branch
+`codex/row411-inv014-product-20260910`, from local requested origin ref at
+`f08fef51654addd22cfaea7000282f35dad27fed`. Fresh locked/offline default-feature
+platform-tools v1.52 builds use engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Wrapper SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+partial-capable fixture: `e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`;
+authenticated fixture: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+The final new selector passes **8 worlds, 2 fee-bearing close-prefix rollbacks,
+8 consumed alternatives and 16 complete owner exits**, with peak suffix CU
+**188,501**. Both adjacent CU selectors pass (2/2); the delegated-exit control passes
+24 worlds, 256 public transactions and 72 exact rejections. The invariant index
+passes (1/1), as do repository formatting and working/staged whitespace checks.
+No production inconsistency was observed. Existing host dead-code, fixture
+deprecation and `solana-client v1.18.26` future-compatibility warnings remain.
+
+Validation commands below use this exact environment prefix on each host Cargo
+invocation (SBF builds use four jobs and the explicit platform-tools `RUSTC`):
+
+```sh
+env CARGO_TARGET_DIR=/dev/shm/row411-inv014-product-20260910-target CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm/row411-inv014-product-20260910-target/tmp PERCOLATOR_FUZZ_SBF=/dev/shm/row411-inv014-product-20260910-target/deploy/percolator_prog.so
+```
+
+Exact worktree/build commands:
+
+```sh
+git worktree add -b codex/row411-inv014-product-20260910 /home/anatoly/worktrees/row411-inv014-product-20260910 origin/codex/invariant-fidelity-reopen-20260904
+mkdir -p /dev/shm/row411-inv014-product-20260910-target/tmp
+env CARGO_TARGET_DIR=/dev/shm/row411-inv014-product-20260910-target CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm/row411-inv014-product-20260910-target/tmp RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/row411-inv014-product-20260910-target/deploy -- --locked
+# The next command's working directory is tests/fixtures/hostile_matcher.
+env CARGO_TARGET_DIR=/dev/shm/row411-inv014-product-20260910-target CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm/row411-inv014-product-20260910-target/tmp RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /home/anatoly/worktrees/row411-inv014-product-20260910/tests/fixtures/hostile_matcher/target/deploy -- --locked
+# Subsequent commands run at the worktree root.
+env CARGO_TARGET_DIR=/dev/shm/row411-inv014-product-20260910-matcher-target CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm/row411-inv014-product-20260910-target/tmp RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+sha256sum /dev/shm/row411-inv014-product-20260910-target/deploy/percolator_prog.so tests/fixtures/hostile_matcher/target/deploy/hostile_matcher.so
+sha256sum tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+```
+
+Exact focused validation commands, with the host environment prefix above on tests.
+The isolated new selector ran twice while tightening its error/passive-frame assertions;
+`rustfmt` ran after each test edit. No broad test suite was run.
+
+```sh
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_close_withdrawal::v16_retained_close_withdrawal_reconciles_repriced_fees_across_all_trade_routes -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_014_delayed_policy_and_policy_epoch_safety::retained_close_withdrawal::v16_retained_close_withdrawal_reconciles_repriced_fees_across_all_trade_routes inv_014_delayed_policy_and_policy_epoch_safety::v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change inv_014_delayed_policy_and_policy_epoch_safety::v16_program_trade_requires_signed_base_fee_consent
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_014_delayed_policy_and_policy_epoch_safety::retained_delegated_fee_exit::v16_program_retained_lp_fee_cap_preserves_bilateral_and_delegated_exits -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 tests/invariants/cu/inv_014_retained_close_withdrawal.rs
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
+The three changed files were staged explicitly and committed after validation:
+
+```sh
+git add tests/invariants/README.md tests/invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs tests/invariants/cu/inv_014_retained_close_withdrawal.rs
+git diff --cached --check
+git commit -m "test(invariants): bind retained close payouts to repriced fees"
+```
+
 ## INV-014 retained fee terms across changed fill capacity (2026-09-10)
 
 [`cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`](cu/inv_014_delayed_policy_and_policy_epoch_safety.rs)
