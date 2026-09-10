@@ -3,6 +3,71 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-027 flat first-admission fee prefix (2026-09-10)
+
+[`cu/inv_027_protected_principal_seniority.rs`](cu/inv_027_protected_principal_seniority.rs)
+adds `v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled`.
+Two public System/SPL/ATA/wrapper histories start with funded, never-traded owners
+holding 121 and 232 atoms. An empty keeper advances the authenticated market from
+slot 1 to 4 at price 100 while both funded portfolios remain byte-identical and
+flat. Each now owes `3 * 7 = 21` atoms of uncollected maintenance.
+
+The first attempted risk transaction includes both owners' `SyncMaintenanceFee`
+and `PermissionlessCrank` instructions before `TradeNoCpi`. A first position
+requiring 101 atoms of IM rejects at instruction 6 with exactly
+`EngineInvalidConfig`: the constrained owner's post-fee equity is only 100.
+All fifteen tracked Accounts restore exactly, including the successful fee/refresh
+prefix, both portfolios, market, SPL accounts and economic lamports. The separate
+network-fee payer is outside this frame. Initial fee cursors, zero positions and
+insurance, and each owner's complete principal are checked again after rejection.
+
+One history retries the complete bundle at exactly 100 IM; the other commits its
+fee/refresh prefix individually before the same first open. Every committed
+prefix has independently derived owner capital, fee cursors/debt, custody and
+insurance, plus the existing stock and encumbrance censuses. Flat refreshed and
+admitted certificates match the independent health oracle; admitted certificates
+also agree across schedules, including zero IM headroom for the constrained owner.
+Same-slot fee-free closure and withdrawals pay exactly 100 and 211 atoms, leaving
+only 42 insurance atoms in custody, split 20/22 between the base asset's domains.
+Unrelated accounts and mint supply stay fixed throughout the checked suffix.
+
+This adds the zero-position to first-position boundary with still-pending fees
+inside an atomic admission transaction. INV-054's fee-only invalidation and
+INV-060/027's accrued/joint-liability histories begin with live positions; INV-081's
+fee-prefix atomicity history ends in resolution and payout without first risk.
+No target-price lag, owner-exit boundary, or maintenance-policy product is added.
+Scope is one asset, one signed no-CPI route, fixed prices/rate, fully collectible
+fees and explicit synchronization/refresh. Standalone flat first opens that omit
+fee synchronization remain uncovered: `collect_maintenance_fee_before_trade_view`
+still defers those fees on this pin. **Reopening 413 and invariant statuses remain
+unchanged.** No inconsistency was observed in the covered composed path; this does
+not certify the documented direct-admission gap or the other affected rows.
+No production, dependency, shared-helper or program-owned account-byte edits.
+
+Validation uses a fresh default-feature SBF built offline with platform-tools
+v1.52 in `/dev/shm/inv027-first-risk-coverage-20260910`, from base
+`c4ebc2b77b047ea8e80f883ad46f80d7f22271ac` and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new selector passes two prefix rollbacks, two first admissions and four exact
+owner payouts; peak admission/rejection bundle cost is 355,035 CU. Development
+runs corrected a stock-census helper signature and the fixture's incompatible
+default price-move cap. The adjacent fee-only selector and invariant index also
+pass (one test each) with the same private host target. Targeted rustfmt and
+whitespace checks pass. No broad suite or matcher build is used.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_054_certificate_epoch_completeness::v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_027_protected_principal_seniority.rs
+git diff --check
+```
+
+
 ## INV-005 funded insurance and oracle role separation (2026-09-10)
 
 [`cu/inv_005_authority_incarnation_binding.rs`](cu/inv_005_authority_incarnation_binding.rs)

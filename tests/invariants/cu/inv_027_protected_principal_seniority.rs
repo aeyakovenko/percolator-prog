@@ -23,6 +23,9 @@
 //! The joint-admission sibling composes uncollected maintenance with rounded nontraded target
 //! lag at an exact risk boundary, comparing direct admission to public crank settlement on
 //! all four transports and either constrained party. It does not cover flat first-risk fees.
+//! The flat first-admission transaction below covers explicit public fee synchronization and
+//! refresh, including rollback of that prefix and exact owner payouts after admission. It does
+//! not certify a standalone first open with uncollected fees (reopening 413 remains open).
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -43,6 +46,424 @@ const ISSUE408_FEE_PER_SLOT: u128 = 1_000;
 const ISSUE408_AGED_SLOT: u64 = 500;
 const ISSUE408_MOVE_SLOT: u64 = 542;
 const ISSUE408_LOTS: i128 = 10;
+
+#[test]
+fn v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled() {
+    use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+    use crate::support::fuzz_model::{
+        assert_current_certificate_matches_independent, assert_market_stock_census,
+        assert_reservation_encumbrance_census,
+    };
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const START: u64 = 1;
+    const ADMISSION: u64 = 4;
+    const PRICE: u64 = 100;
+    const RATE: u128 = 7;
+    const FEE: u128 = (ADMISSION - START) as u128 * RATE;
+    const DEPOSITS: [u128; 2] = [100 + FEE, 211 + FEE];
+    const SIZE: i128 = POS_SCALE as i128;
+    const EXCESS: i128 = SIZE + (POS_SCALE / PRICE as u128) as i128;
+
+    let requirement = |size: i128| (size.unsigned_abs() * PRICE as u128).div_ceil(POS_SCALE);
+    assert_eq!(
+        (FEE, requirement(SIZE), requirement(EXCESS)),
+        (21, 100, 101)
+    );
+    assert!(DEPOSITS[0] > requirement(EXCESS));
+    assert_eq!(DEPOSITS[0] - FEE, requirement(SIZE));
+
+    let mut certificates = None;
+    let mut peak_cu = 0;
+    for atomic in [true, false] {
+        let label = format!("flat first admission/atomic={atomic}");
+        let mut env = inv018_public_spl_market_with_params(
+            0,
+            V16CuMarketParams {
+                maintenance_fee_per_slot: RATE,
+                maintenance_margin_bps: 5_000,
+                initial_margin_bps: 10_000,
+                max_price_move_bps_per_slot: 500,
+                max_abs_funding_e9_per_slot: 0,
+                ..V16CuMarketParams::default()
+            },
+        );
+        env.svm.warp_to_slot(START);
+        env.configure_auth_mark_for_asset_as_admin(0, START, PRICE);
+        let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
+        let portfolios = owners.each_ref().map(|owner| {
+            env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+            let key = Keypair::new();
+            system_create_account_for_test(
+                &mut env.svm,
+                &env.payer,
+                &key,
+                env.portfolio_account_len,
+                env.program_id,
+            );
+            env.send(
+                ProgInstruction::InitPortfolio,
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(key.pubkey(), false),
+                ],
+                &[owner],
+            )
+            .unwrap();
+            env.portfolios.push(key.pubkey());
+            key.pubkey()
+        });
+        let tokens = std::array::from_fn::<_, 2, _>(|party| {
+            let token =
+                create_ata_for_test(&mut env.svm, &env.payer, owners[party].pubkey(), env.mint);
+            send_raw_tx(
+                &mut env.svm,
+                &env.payer,
+                spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &env.mint,
+                    &token,
+                    &env.admin.pubkey(),
+                    &[],
+                    DEPOSITS[party].try_into().unwrap(),
+                )
+                .unwrap(),
+                &[&env.admin],
+            )
+            .unwrap();
+            env.send(
+                env.deposit_ix(portfolios[party], DEPOSITS[party]),
+                vec![
+                    AccountMeta::new(owners[party].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[party], false),
+                    AccountMeta::new(token, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owners[party]],
+            )
+            .unwrap();
+            token
+        });
+        let untouched = portfolios[..2]
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>();
+        for slot in START + 1..=ADMISSION {
+            env.svm.warp_to_slot(slot);
+            env.crank(
+                portfolios[2],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        assert_eq!(
+            portfolios[..2]
+                .iter()
+                .map(|key| env.svm.get_account(key))
+                .collect::<Vec<_>>(),
+            untouched,
+            "{label}: neither funded owner was refreshed while flat"
+        );
+        let group = env.market_state().1;
+        assert_eq!(group.current_slot, ADMISSION);
+        assert_eq!(group.assets[0].slot_last, ADMISSION);
+        assert_eq!(group.assets[0].effective_price, PRICE);
+        assert_eq!(group.assets[0].raw_oracle_target_price, PRICE);
+
+        let tracked = [
+            env.market,
+            portfolios[0],
+            portfolios[1],
+            portfolios[2],
+            env.vault,
+            env.mint,
+            tokens[0],
+            tokens[1],
+            owners[0].pubkey(),
+            owners[1].pubkey(),
+            owners[2].pubkey(),
+            env.admin.pubkey(),
+            env.vault_authority,
+            env.program_id,
+            spl_token::ID,
+        ];
+        let snapshot = |env: &V16CuEnv| tracked.map(|key| env.svm.get_account(&key));
+        let frame = snapshot(&env);
+        let check = |env: &V16CuEnv, charged: [bool; 2], open: bool, paid: [u128; 2]| {
+            let group = env.market_state().1;
+            let accounts = portfolios.map(|key| env.portfolio_state(key));
+            let total = DEPOSITS.iter().sum::<u128>();
+            let fees = charged.iter().filter(|&&yes| yes).count() as u128 * FEE;
+            assert_eq!(group.insurance, fees, "{label}");
+            assert_eq!(
+                group.c_tot,
+                total - fees - paid.iter().sum::<u128>(),
+                "{label}"
+            );
+            assert_eq!(group.vault, total - paid.iter().sum::<u128>(), "{label}");
+            assert_eq!(
+                u128::from(env.token_amount(env.vault)),
+                group.vault,
+                "{label}"
+            );
+            assert_eq!(group.vault, group.c_tot + group.insurance, "{label}");
+            assert_eq!(group.pnl_pos_tot, 0);
+            assert_eq!(group.source_claim_bound_total_num, 0);
+            let payers = fees / FEE;
+            assert_eq!(group.insurance_domain_budget[0], payers * (FEE / 2));
+            assert_eq!(group.insurance_domain_budget[1], payers * (FEE - FEE / 2));
+            for party in 0..2 {
+                let account = &accounts[party];
+                let fee = if charged[party] { FEE } else { 0 };
+                assert_eq!(
+                    account.capital.get(),
+                    DEPOSITS[party] - fee - paid[party],
+                    "{label}"
+                );
+                assert_eq!(
+                    account.last_fee_slot.get(),
+                    if charged[party] { ADMISSION } else { START }
+                );
+                assert_eq!(account.fee_credits.get(), 0);
+                assert_eq!(account.pnl.get(), 0);
+                assert_eq!(u128::from(env.token_amount(tokens[party])), paid[party]);
+                assert_eq!(
+                    percolator::active_bitmap_count_ones(active_bitmap(account)),
+                    u32::from(open)
+                );
+                if open {
+                    let leg = active_leg_for_asset(account, 0);
+                    assert_eq!(leg.basis_pos_q.unsigned_abs(), SIZE as u128);
+                    assert_eq!(
+                        leg.side,
+                        if party == 0 {
+                            SideV16::Long
+                        } else {
+                            SideV16::Short
+                        }
+                    );
+                }
+            }
+            assert_eq!(
+                group.assets[0].oi_eff_long_q,
+                if open { SIZE as u128 } else { 0 }
+            );
+            assert_eq!(
+                group.assets[0].oi_eff_short_q,
+                if open { SIZE as u128 } else { 0 }
+            );
+            assert_market_stock_census(
+                &label,
+                &group,
+                &env.svm.get_account(&env.market).unwrap().data,
+                &accounts,
+                env.token_amount(env.vault).into(),
+            )
+            .unwrap();
+            assert_reservation_encumbrance_census(&label, &group, &accounts).unwrap();
+            for (i, key) in tracked.iter().enumerate() {
+                if ![
+                    env.market,
+                    portfolios[0],
+                    portfolios[1],
+                    env.vault,
+                    tokens[0],
+                    tokens[1],
+                ]
+                .contains(key)
+                {
+                    assert_eq!(
+                        env.svm.get_account(key),
+                        frame[i],
+                        "{label}: untouched {key}"
+                    );
+                }
+            }
+            assert_eq!(
+                Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+                    .unwrap()
+                    .supply as u128,
+                total
+            );
+        };
+        check(&env, [false; 2], false, [0; 2]);
+
+        let program_id = env.program_id;
+        let ix = |instruction: ProgInstruction, accounts| Instruction {
+            program_id,
+            accounts,
+            data: instruction.encode(),
+        };
+        let mut prefix = Vec::new();
+        for portfolio in &portfolios[..2] {
+            prefix.push(ix(
+                ProgInstruction::SyncMaintenanceFee {
+                    now_slot: ADMISSION,
+                },
+                vec![
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(*portfolio, false),
+                ],
+            ));
+            prefix.push(ix(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: ADMISSION,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(owners[2].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(*portfolio, false),
+                ],
+            ));
+        }
+        let trade = |env: &V16CuEnv, size| {
+            ix(
+                env.trade_no_cpi_ix(portfolios[0], portfolios[1], 0, size, PRICE, 0),
+                vec![
+                    AccountMeta::new(owners[0].pubkey(), true),
+                    AccountMeta::new(owners[1].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[0], false),
+                    AccountMeta::new(portfolios[1], false),
+                ],
+            )
+        };
+        let too_large = trade(&env, EXCESS);
+        let exact = trade(&env, SIZE);
+        let submit = |env: &mut V16CuEnv, instructions: &[Instruction]| {
+            env.svm.expire_blockhash();
+            let mut all = vec![heap_ix(), cu_ix()];
+            all.extend_from_slice(instructions);
+            let tx = Transaction::new_signed_with_payer(
+                &all,
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &owners[0], &owners[1], &owners[2]][..],
+                env.svm.latest_blockhash(),
+            );
+            env.svm.send_transaction(tx)
+        };
+        let mut attempt = prefix.clone();
+        attempt.push(too_large);
+        let before = snapshot(&env);
+        let failure = submit(&mut env, &attempt).expect_err("first risk must fit post-fee equity");
+        assert_eq!(
+            failure.err,
+            TransactionError::InstructionError(
+                6,
+                InstructionError::Custom(PercolatorError::EngineInvalidConfig as u32)
+            ),
+            "{label}: {failure:?}"
+        );
+        assert_eq!(
+            snapshot(&env),
+            before,
+            "{label}: successful fee/refresh prefix rolls back too"
+        );
+        check(&env, [false; 2], false, [0; 2]);
+        peak_cu = peak_cu.max(failure.meta.compute_units_consumed);
+
+        if atomic {
+            attempt.pop();
+            attempt.push(exact);
+            let meta = submit(&mut env, &attempt).expect("complete first-admission transaction");
+            peak_cu = peak_cu.max(meta.compute_units_consumed);
+        } else {
+            for (index, instruction) in prefix.iter().enumerate() {
+                let signers: &[&Keypair] = if index % 2 == 0 { &[] } else { &[&owners[2]] };
+                env.svm.expire_blockhash();
+                send_raw_ixs(
+                    &mut env.svm,
+                    &env.payer,
+                    vec![heap_ix(), cu_ix(), instruction.clone()],
+                    signers,
+                )
+                .unwrap();
+                check(&env, [true, index >= 2], false, [0; 2]);
+                if index % 2 == 1 {
+                    let account = env.portfolio_state(portfolios[index / 2]);
+                    assert!(assert_current_certificate_matches_independent(
+                        &label,
+                        &env.market_state().1,
+                        &account,
+                    )
+                    .unwrap());
+                }
+            }
+            env.svm.expire_blockhash();
+            send_raw_ixs(
+                &mut env.svm,
+                &env.payer,
+                vec![heap_ix(), cu_ix(), exact],
+                &[&owners[0], &owners[1]],
+            )
+            .unwrap();
+        }
+        check(&env, [true; 2], true, [0; 2]);
+        let certs = std::array::from_fn::<_, 2, _>(|party| {
+            let account = env.portfolio_state(portfolios[party]);
+            let cert = health_cert(&account);
+            assert!(assert_current_certificate_matches_independent(
+                &label,
+                &env.market_state().1,
+                &account
+            )
+            .unwrap());
+            assert_eq!(cert.certified_equity, (DEPOSITS[party] - FEE) as i128);
+            assert_eq!(cert.certified_initial_req, requirement(SIZE));
+            assert_eq!(cert.certified_maintenance_req, requirement(SIZE) / 2);
+            assert_eq!(cert.certified_liq_deficit, 0);
+            cert
+        });
+        assert_eq!(
+            certs[0].certified_equity,
+            certs[0].certified_initial_req as i128
+        );
+        if let Some(expected) = certificates {
+            assert_eq!(certs, expected, "atomic and committed public refresh agree");
+        } else {
+            certificates = Some(certs);
+        }
+        let close = trade(&env, -SIZE);
+        env.svm.expire_blockhash();
+        send_raw_ixs(
+            &mut env.svm,
+            &env.payer,
+            vec![heap_ix(), cu_ix(), close],
+            &[&owners[0], &owners[1]],
+        )
+        .unwrap();
+        check(&env, [true; 2], false, [0; 2]);
+        let mut paid = [0; 2];
+        for party in 0..2 {
+            let amount = DEPOSITS[party] - FEE;
+            env.send(
+                env.withdraw_ix(portfolios[party], amount),
+                vec![
+                    AccountMeta::new(owners[party].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[party], false),
+                    AccountMeta::new(tokens[party], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owners[party]],
+            )
+            .expect("owner receives only principal remaining after the pre-admission liability");
+            paid[party] = amount;
+            check(&env, [true; 2], false, paid);
+        }
+        assert_eq!(env.token_amount(env.vault) as u128, 2 * FEE);
+    }
+    assert_cu_within("flat first-admission transaction", peak_cu, 1_400_000);
+    println!("INV-027 flat first admission: 2 prefix rollbacks, 2 admissions, 4 exact payouts; peak bundle CU={peak_cu}");
+}
 
 fn issue408_advance_market_without_target_refresh(
     env: &mut V16CuEnv,
