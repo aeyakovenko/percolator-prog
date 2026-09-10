@@ -231,6 +231,15 @@ impl AttributionWorld {
     }
 
     fn check(&self, basis: [i128; 4], pending: [bool; 4]) {
+        self.check_with_deleted_debtor(basis, pending, None);
+    }
+
+    fn check_with_deleted_debtor(
+        &self,
+        basis: [i128; 4],
+        pending: [bool; 4],
+        deleted: Option<usize>,
+    ) {
         let (_, group) = self.env.market_state();
         let mut capital = 0;
         let mut pnl_positive = 0;
@@ -239,6 +248,21 @@ impl AttributionWorld {
         let mut stored = [[0u64; 2]; 3];
         let mut obligations = stored;
         for (i, actor) in self.actors.iter().enumerate() {
+            if Some(i) == deleted {
+                assert!(
+                    i == 1 || i == 3,
+                    "only an explicitly settled debtor is absent"
+                );
+                assert_eq!(basis[i], 0);
+                assert!(!pending[i]);
+                assert!(self
+                    .env
+                    .svm
+                    .get_account(&actor.portfolio)
+                    .map_or(true, |account| account.lamports == 0
+                        && account.data.is_empty()));
+                continue;
+            }
             let account = self.env.portfolio_state(actor.portfolio);
             assert_eq!(account.owner, actor.owner.pubkey().to_bytes());
             capital += account.capital.get();

@@ -4426,6 +4426,80 @@ multi-call transaction peak was **152,863 CU**, below 1,000,000. Repository-wide
 diff checks pass. Only the existing `solana-client` future-incompatibility warning was
 emitted. No production bug was observed in these bounded histories.
 
+## INV-039 resolved debtor deletion before cohort completion (row 419, 2026-09-10)
+
+`cu/inv_039_pending_loss_resolved_histories.rs` adds exactly one public LiteSVM test,
+`v16_program_resolved_debtor_deletion_preserves_unsettled_cohort_attribution`, on
+base `b950cfed533bc13deb1b7d21b58ecbe3c4ce20f0` in the isolated worktree
+`/tmp/codex-agent-worktrees/row419-inv039-coverage-20260910`.
+
+The new axis is mechanical debtor deletion **in Resolved mode while another
+cohort's opposing debt is unbooked**. Existing resolved histories delete only after
+all payouts; the close/reopen test recreates a bankrupt debtor in Live mode; the
+shared-cohort reduction test recreates a paid holder after both B shares settle.
+None crosses this resolved deletion boundary with outstanding cross-domain debt.
+
+Eight worlds cross two side orientations, either debtor deleted first, and that
+debtor's holder detached before or after deletion. Both retained holders cross
+resolution. One debtor settles and receives exactly its deposit less its original
+debt, then `ClosePortfolio` deletes it while both holder claims remain unpaid and
+the other cohort retains a pending holder and a real unbooked debtor. Deletion
+reduces the materialized portfolio count by one and moves exact rent to the market;
+foreign accounts, loss weights/counts, source attribution and custody remain intact.
+The other holder detaches, but its waiting payout retry still rejects with exact
+rollback. The surviving debtor must settle before its holder can receive its claim.
+
+The existing input-derived attribution oracle and census now accept one explicitly
+deleted, already settled debtor. Its absent account must have zero remaining basis
+and obligation, and its destination tokens must still equal its original entitlement.
+All remaining owners retain the same capital/PnL/receipt/token equation at every
+close prefix. Both cohorts complete with exact payouts
+`[200001, 179999, 339998, 210002, 777]`, exact rejected repeated closes, and zero terminal
+vault, capital, position/obligation aggregates and materialized portfolio count.
+The original selectors retain their no-deletion oracle; their public resolution
+setup is shared with the new test. Construction uses only System/SPL/ATA/wrapper
+instructions, authenticated marks and harness Clock advancement.
+
+This is bounded, solvent, integral-quantity evidence with zero fees/funding. It
+does not cover bankruptcy/B-loss or ADL across resolution, mixed roles on one
+account, provider backing, or unbounded histories. **Row 419 remains OPEN and
+INV-039 remains REFUTED_CURRENT.** No production or invariant-status change is made.
+
+Validation commands, run from the isolated worktree with a fresh SBF build:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row419-inv039-coverage-20260910-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::resolved_histories::v16_program_resolved_debtor_deletion_preserves_unsettled_cohort_attribution -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_039_pending_loss_obligation_durability::v16_program_pending_obligation_blocks_close_then_releases \
+  inv_039_pending_loss_obligation_durability::v16_program_pending_obligations_release_only_the_settled_domain_across_payout_orders \
+  inv_039_pending_loss_obligation_durability::v16_program_resolve_with_pending_obligation_defers_claim_until_debtor_settles \
+  inv_039_pending_loss_obligation_durability::resolved_histories::v16_program_pending_resolved_cohorts_preserve_attribution_in_every_close_order \
+  inv_039_pending_loss_obligation_durability::resolved_histories::v16_program_pending_resolved_history_generator_preserves_owner_debt \
+  inv_039_pending_loss_obligation_durability::close_reopen::v16_program_pending_loss_survives_debtor_recreation_and_bystander_payout \
+  inv_039_pending_loss_obligation_durability::transfer_route::v16_program_pending_obligation_cannot_follow_withdraw_transfer_redeposit \
+  inv_039_pending_loss_obligation_durability::cohort_reduction::v16_program_reduced_cohort_keeps_exact_loss_after_paid_holder_transfer_and_recreation
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
+Results: new exact selector **1 passed, 0 failed** (4.15s; eight worlds, eight
+waiting rollbacks and 40 exact payouts); adjacent exact selectors **8 passed,
+0 failed** (93.93s, including the 144-world matrix and 16 generated histories);
+invariant index **1 passed, 0 failed**. Formatting and both Git whitespace checks
+exit 0. Fresh wrapper SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The initial development run reached terminal retries, then failed an assumed
+successful receipt topup because this history has no junior payout snapshot.
+The final test checks exact rejection of repeated resolved closes, matching the
+existing resolved-detach witness; economic assertions were unchanged. Existing
+support dead-code and `solana-client` future-incompatibility warnings remain.
+
 ## INV-039 pending cohorts through resolution (row 419, 2026-09-09)
 
 [`cu/inv_039_pending_loss_resolved_histories.rs`](cu/inv_039_pending_loss_resolved_histories.rs),

@@ -28,9 +28,25 @@ struct AttributionModel {
 
 impl AttributionModel {
     fn assert_matches(&self, world: &AttributionWorld) {
-        world.check(self.basis, self.pending);
+        self.assert_matches_with_deleted_debtor(world, None);
+    }
+
+    fn assert_matches_with_deleted_debtor(&self, world: &AttributionWorld, deleted: Option<usize>) {
+        world.check_with_deleted_debtor(self.basis, self.pending, deleted);
         let group = world.env.market_state().1;
         for (actor, initial) in ATTRIBUTION_DEPOSITS.into_iter().enumerate() {
+            let expected = match actor {
+                0 | 2 => initial + self.debt[actor / 2],
+                1 | 3 if self.basis[actor] == 0 => initial - self.debt[actor / 2],
+                _ => initial,
+            };
+            if Some(actor) == deleted {
+                assert_eq!(
+                    world.env.token_amount(world.actors[actor].token) as u128,
+                    expected
+                );
+                continue;
+            }
             let account = world.env.portfolio_state(world.actors[actor].portfolio);
             let receipt = resolved_receipt(&account);
             let receipt_due = if receipt.present {
@@ -45,11 +61,6 @@ impl AttributionModel {
                 + account.pnl.get()
                 + receipt_due as i128
                 + world.env.token_amount(world.actors[actor].token) as i128;
-            let expected = match actor {
-                0 | 2 => initial + self.debt[actor / 2],
-                1 | 3 if self.basis[actor] == 0 => initial - self.debt[actor / 2],
-                _ => initial,
-            };
             assert_eq!(
                 remaining, expected as i128,
                 "actor {actor}: debt attribution"
@@ -68,6 +79,16 @@ impl AttributionModel {
     }
 
     fn close(&mut self, world: &mut AttributionWorld, actor: usize) {
+        self.close_with_deleted_debtor(world, actor, None);
+    }
+
+    fn close_with_deleted_debtor(
+        &mut self,
+        world: &mut AttributionWorld,
+        actor: usize,
+        deleted: Option<usize>,
+    ) {
+        assert_ne!(Some(actor), deleted);
         let before = world.frame();
         match world.payout(actor, false) {
             Ok(cu) => {
@@ -106,11 +127,11 @@ impl AttributionModel {
                 );
             }
         }
-        self.assert_matches(world);
+        self.assert_matches_with_deleted_debtor(world, deleted);
     }
 }
 
-fn run_history(history: &History) -> [u128; 5] {
+fn resolve_history(history: &History) -> (AttributionWorld, AttributionModel) {
     let mut world = AttributionWorld::new(history.reverse_sides);
     let sign = if history.reverse_sides { -1 } else { 1 };
     for pair in 0..2 {
@@ -204,6 +225,11 @@ fn run_history(history: &History) -> [u128; 5] {
     }
     model.assert_matches(&world);
     world.env.svm.warp_to_slot(25);
+    (world, model)
+}
+
+fn run_history(history: &History) -> [u128; 5] {
+    let (mut world, mut model) = resolve_history(history);
     for actor in history.extra_closes.iter().copied() {
         model.close(&mut world, actor);
     }
@@ -241,6 +267,173 @@ fn run_history(history: &History) -> [u128; 5] {
     }
     assert_eq!(world.env.market_state().1.materialized_portfolio_count, 0);
     expected
+}
+
+#[test]
+fn v16_program_resolved_debtor_deletion_preserves_unsettled_cohort_attribution() {
+    let mut worlds = 0;
+    for reverse_sides in [false, true] {
+        for settled_pair in 0..2 {
+            for detach_first in [false, true] {
+                let history = History {
+                    reverse_sides,
+                    lots: [1, 2],
+                    price_moves: [1, 19_999],
+                    early_debtor: None,
+                    close_order: [0, 1, 2, 3, 4],
+                    extra_closes: Vec::new(),
+                };
+                let (mut world, mut model) = resolve_history(&history);
+                let holder = 2 * settled_pair;
+                let debtor = holder + 1;
+                let other_holder = 2 * (1 - settled_pair);
+                let other_debtor = other_holder + 1;
+                if detach_first {
+                    model.close(&mut world, holder);
+                    assert!(!model.pending[holder]);
+                }
+                model.close(&mut world, debtor);
+                assert!(resolved_portfolio_is_terminal(
+                    &world.env,
+                    world.actors[debtor].portfolio
+                ));
+                assert_eq!(model.basis[debtor], 0);
+                assert_eq!(model.pending[holder], !detach_first);
+                assert!(model.pending[other_holder]);
+                assert_ne!(model.basis[other_debtor], 0);
+                assert!(!world.env.market_state().1.payout_snapshot_captured);
+
+                // Delete in Resolved mode, before either original holder's claim is paid.
+                for actor in [holder, other_holder] {
+                    assert_eq!(world.env.token_amount(world.actors[actor].token), 0);
+                    assert_eq!(
+                        world
+                            .env
+                            .portfolio_state(world.actors[actor].portfolio)
+                            .pnl
+                            .get(),
+                        model.debt[actor / 2] as i128
+                    );
+                }
+                let before = world.frame();
+                let group_before = world.env.market_state().1;
+                let a = &world.actors[debtor];
+                let rent = world.env.svm.get_account(&a.portfolio).unwrap().lamports;
+                let market_lamports = world
+                    .env
+                    .svm
+                    .get_account(&world.env.market)
+                    .unwrap()
+                    .lamports;
+                let cu = world.env.close_portfolio_with_cu(&a.owner, a.portfolio);
+                assert_cu_within(
+                    "INV-039 resolved debtor deletion with outstanding debt",
+                    cu,
+                    CUSTODY_CU_LIMIT,
+                );
+                let group_after = world.env.market_state().1;
+                assert_eq!(
+                    group_after.materialized_portfolio_count,
+                    group_before.materialized_portfolio_count - 1
+                );
+                assert_eq!(group_after.assets, group_before.assets);
+                assert_eq!(group_after.source_credit, group_before.source_credit);
+                assert_eq!(
+                    group_after.source_backing_buckets,
+                    group_before.source_backing_buckets
+                );
+                assert_eq!(
+                    group_after.insurance_domain_spent,
+                    group_before.insurance_domain_spent
+                );
+                assert_eq!(group_after.c_tot, group_before.c_tot);
+                assert_eq!(group_after.pnl_pos_tot, group_before.pnl_pos_tot);
+                assert_eq!(group_after.vault, group_before.vault);
+                assert!(!group_after.payout_snapshot_captured);
+                assert_eq!(
+                    world
+                        .env
+                        .svm
+                        .get_account(&world.env.market)
+                        .unwrap()
+                        .lamports,
+                    market_lamports + rent
+                );
+                for (key, account) in before {
+                    if ![world.env.market, a.portfolio].contains(&key) {
+                        assert_eq!(
+                            world.env.svm.get_account(&key),
+                            account,
+                            "deletion preserves foreign account {key}"
+                        );
+                    }
+                }
+                model.assert_matches_with_deleted_debtor(&world, Some(debtor));
+
+                model.close_with_deleted_debtor(&mut world, other_holder, Some(debtor));
+                assert!(!model.pending[other_holder]);
+                let before_retry = world.frame();
+                let error = world
+                    .payout(other_holder, false)
+                    .expect_err("deletion cannot pay or forgive the surviving debtor's obligation");
+                assert!(is_engine_non_progress_error(&error), "{error}");
+                assert_eq!(world.frame(), before_retry);
+                model.assert_matches_with_deleted_debtor(&world, Some(debtor));
+
+                model.close_with_deleted_debtor(&mut world, other_debtor, Some(debtor));
+                assert_eq!(model.basis[other_debtor], 0);
+                for _ in 0..4 {
+                    for actor in [other_holder, holder, other_debtor, 4] {
+                        if !resolved_portfolio_is_terminal(
+                            &world.env,
+                            world.actors[actor].portfolio,
+                        ) {
+                            model.close_with_deleted_debtor(&mut world, actor, Some(debtor));
+                        }
+                    }
+                }
+                assert_eq!(model.basis, [0; 4]);
+                assert_eq!(model.pending, [false; 4]);
+                model.assert_matches_with_deleted_debtor(&world, Some(debtor));
+                let expected: [u128; 5] = std::array::from_fn(|actor| match actor {
+                    0 | 2 => ATTRIBUTION_DEPOSITS[actor] + model.debt[actor / 2],
+                    1 | 3 => ATTRIBUTION_DEPOSITS[actor] - model.debt[actor / 2],
+                    _ => ATTRIBUTION_DEPOSITS[actor],
+                });
+                assert_eq!(expected, [200_001, 179_999, 339_998, 210_002, 777]);
+                assert_eq!(world.env.market_state().1.vault, 0);
+                assert_eq!(world.env.market_state().1.c_tot, 0);
+                for actor in [other_holder, holder, other_debtor, 4] {
+                    assert!(resolved_portfolio_is_terminal(
+                        &world.env,
+                        world.actors[actor].portfolio
+                    ));
+                    let before_retry = world.frame();
+                    let error = world
+                        .payout(actor, false)
+                        .expect_err("a terminal owner cannot close for a second payout");
+                    assert!(is_engine_non_progress_error(&error), "{error}");
+                    assert_eq!(world.frame(), before_retry);
+                    model.assert_matches_with_deleted_debtor(&world, Some(debtor));
+                }
+                for actor in [4, other_debtor, holder, other_holder] {
+                    let a = &world.actors[actor];
+                    let cu = world.env.close_portfolio_with_cu(&a.owner, a.portfolio);
+                    assert_cu_within("INV-039 remaining cohort deletion", cu, CUSTODY_CU_LIMIT);
+                }
+                for (actor, entitlement) in expected.into_iter().enumerate() {
+                    assert_eq!(
+                        world.env.token_amount(world.actors[actor].token) as u128,
+                        entitlement
+                    );
+                }
+                assert_eq!(world.env.market_state().1.materialized_portfolio_count, 0);
+                worlds += 1;
+            }
+        }
+    }
+    assert_eq!(worlds, 8);
+    println!("INV-039: 8 resolved debtor deletions before global debt settlement; 8 waiting rollbacks; 40 exact owner payouts");
 }
 
 #[test]
