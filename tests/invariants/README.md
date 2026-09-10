@@ -4449,6 +4449,86 @@ run passes **5/5 in 17.12 s**; fmt, diff and production/status identity checks p
 The short selector also passes **1/1** on the rebased head. Cargo emits only its existing
 `solana-client v1.18.26` future-incompatibility warning. No broad suite was run.
 
+## INV-024 terminal handoff through final close (row 410, 2026-09-10)
+
+[`cu/inv_024_terminal_role_handoff.rs`](cu/inv_024_terminal_role_handoff.rs)
+adds `v16_program_terminal_role_handoff_close_order_preserves_reserves_and_surplus`
+on local base `ff8f74d3a01c6bd961544f10f4eec515e2c57d91`. The existing handoff
+selector retains its original reserve-only history; both selectors share the
+public setup and attribution oracle. **Row 410 remains OPEN.**
+
+The new axis is final close ordering after a funded market-authority overlap,
+including a shared reserve-payout and surplus-sweep destination. Twelve worlds
+cross funded asset 0/1, incoming authority equal to backing provider, insurance
+beneficiary, or live insurance operator, and separate payer versus incoming
+authority as payer. Distinct holders publicly fund 41 backing atoms and 59+23
+insurance atoms; the user deposits 31 atoms. The former authority transfers 13
+additional atoms directly through SPL to the vault. These are raw surplus, not
+booked reserve value. Mint authority is disabled at the input-derived supply 167.
+Resolution, permissionless user payout, and owner-signed portfolio deletion
+precede the handoff transaction.
+
+Each world simulates the complete payable handoff, three reserve withdrawals,
+and final `CloseSlab`, then executes three batches:
+
+- Handoff and one valid reserve payout followed by premature close calls reject
+  at `EngineLockActive` within three calls (two configured assets plus a final
+  check). Earlier calls may commit bounded scan progress within the transaction;
+  the exact successful wrapper prefix is checked. A real SPL payout prefix cannot
+  dispose of the remaining other-role reserve, even when the submitter becomes
+  market authority. The stock-gate rejection rolls back the entire prefix.
+- Handoff and all three valid reserve payouts followed by a wrong final surplus
+  destination reject at `InvalidTokenAccount`. Exactly three successful SPL
+  transfers precede the rejection.
+- The original complete batch succeeds after those rollbacks. The provider gets
+  exactly 41 atoms, the insurer gets 82, and the user retains 31. Only the incoming
+  market authority additionally gets 13 surplus atoms and the exact market/vault
+  rent refund; the tombstone retains canonical rent. When the incoming authority
+  is the provider or insurer, its reserve and surplus share an ATA without
+  absorbing the other holder's claim. The operator has no reserve entitlement.
+
+Every rejection checks the complete tracked account frame, including roles,
+epochs, deleted portfolio, mint, token accounts and wallets, adjusted only for
+the independently calculated transaction fee. Successful final balances come
+from funding inputs rather than observed deltas; the fixed mint account, exact
+tombstone rent, closed vault, and unrelated wallet frames are also checked.
+
+This composes a different relation from the existing insurance lifecycle (which
+leaves backing/peer insurance), reserve handoff (which leaves peer insurance),
+and INV-070 mixed-maturity close (which gives all reserve roles to one authority).
+Only canonical System/SPL/ATA/wrapper setup is used, with signer airdrops, Clock
+and blockhash controls. No program-owned bytes are mutated. Coverage is partial:
+provider earnings, shutdown fallback/expiry, absent holder signatures, impaired
+insurance, nonzero fee policies, receipts/Recovery, and alternate quote rails
+remain outside this new selector. No coverage ledger or production file changes.
+
+Validation uses a clean private target and fresh default-feature SBF build in
+`/dev/shm/percolator-pr135-terminal-role-codex`, with locked/offline Cargo.
+SBF SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+
+The new selector passes **1/1**: **12 worlds, 12 payable simulations, 24 exact
+rollbacks, 36 committed reserve payouts and 12 final closes**. Peak rejected /
+successful batch CU is **102,440 / 120,077**, below the 500,000 ceiling. Both
+adjacent exact selectors below pass **1/1**. No production inconsistency was
+observed. Initial test-harness failures were corrected for an unused signer and
+the documented distinction between successful bounded scanning and actual slab
+closure. The final oracle requires stock-gate rejection within the bounded close
+batch, exact rollback, and independent per-role payout amounts.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" TMPDIR="$PWD/target/tmp"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_role_handoff::v16_program_terminal_role_handoff_close_order_preserves_reserves_and_surplus -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_role_handoff::v16_program_terminal_role_handoff_preserves_reserve_beneficiaries_with_aliased_payer -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_insurance_lifecycle::v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attribution -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-024 terminal role handoff (row 410, 2026-09-09)
 
 [`cu/inv_024_terminal_role_handoff.rs`](cu/inv_024_terminal_role_handoff.rs), mounted
