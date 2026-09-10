@@ -1,10 +1,20 @@
 //! Mixed terminal stock: live provider principal, lapsed principal, funded insurance, and
 //! unbooked SPL surplus have different dispositions even after the last user has been paid.
+//! The separate-role selector also owns row 410's attribution across expiry normalization.
 
 use super::*;
 
 #[test]
 fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry() {
+    mixed_maturity_terminal_residue(false);
+}
+
+#[test]
+fn v16_program_terminal_expiry_preserves_separate_reserve_beneficiaries() {
+    mixed_maturity_terminal_residue(true);
+}
+
+fn mixed_maturity_terminal_residue(separate_roles: bool) {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
     use solana_sdk::{
         fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
@@ -27,6 +37,35 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
             },
         );
         let admin = env.admin.insecure_clone();
+        let provider = if separate_roles {
+            Keypair::new()
+        } else {
+            admin.insecure_clone()
+        };
+        let insurer = if separate_roles {
+            Keypair::new()
+        } else {
+            admin.insecure_clone()
+        };
+        if separate_roles {
+            for holder in [&provider, &insurer] {
+                env.svm.airdrop(&holder.pubkey(), 1_000_000_000).unwrap();
+            }
+            for (asset, role, holder) in [
+                (0, processor::ASSET_AUTH_BACKING_BUCKET, &provider),
+                (1, processor::ASSET_AUTH_BACKING_BUCKET, &provider),
+                (1, processor::ASSET_AUTH_INSURANCE, &insurer),
+            ] {
+                env.try_update_per_asset_authority_with_cu(
+                    &admin,
+                    Some(holder),
+                    asset,
+                    role,
+                    holder.pubkey().to_bytes(),
+                )
+                .unwrap();
+            }
+        }
         let owner = Keypair::new();
         env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
         let portfolio_key = Keypair::new();
@@ -51,7 +90,22 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
         env.portfolios.push(portfolio);
         let user_token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
         let admin_token = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
-        for (token, amount) in [(user_token, CAPITAL), (admin_token, SUPPLY - CAPITAL)] {
+        let provider_token = if separate_roles {
+            create_ata_for_test(&mut env.svm, &env.payer, provider.pubkey(), env.mint)
+        } else {
+            admin_token
+        };
+        let insurer_token = if separate_roles {
+            create_ata_for_test(&mut env.svm, &env.payer, insurer.pubkey(), env.mint)
+        } else {
+            admin_token
+        };
+        for (token, amount) in [
+            (user_token, CAPITAL),
+            (admin_token, SURPLUS),
+            (provider_token, LIVE + LAPSED),
+            (insurer_token, INSURANCE),
+        ] {
             send_raw_tx(
                 &mut env.svm,
                 &env.payer,
@@ -98,12 +152,27 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
         .unwrap();
         env.svm.warp_to_slot(1);
         for (domain, amount, expiry_slot) in [(0, LIVE, 100), (3, LAPSED, EXPIRY)] {
-            env.top_up_backing_bucket_from_admin_token_with_cu(
-                admin_token,
-                domain,
-                amount.into(),
-                expiry_slot,
-            );
+            env.send(
+                ProgInstruction::TopUpBackingBucket {
+                    domain,
+                    market_id: env.asset_market_id(domain / 2),
+                    authority_epoch: env.control_sequences((domain / 2) as usize).authority_epoch,
+                    intent_id: 0,
+                    backing_fee_bps: 0,
+                    insurance_share_bps: 0,
+                    amount: amount.into(),
+                    expiry_slot,
+                },
+                vec![
+                    AccountMeta::new(provider.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(provider_token, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&provider],
+            )
+            .unwrap();
         }
         env.send(
             ProgInstruction::TopUpInsuranceDomain {
@@ -114,13 +183,13 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
                 amount: INSURANCE.into(),
             },
             vec![
-                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(insurer.pubkey(), true),
                 AccountMeta::new(env.market, false),
-                AccountMeta::new(admin_token, false),
+                AccountMeta::new(insurer_token, false),
                 AccountMeta::new(env.vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
             ],
-            &[&admin],
+            &[&insurer],
         )
         .unwrap();
         send_raw_tx(
@@ -145,7 +214,14 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
         let vault_rent = lamports(&env, env.vault);
         let owner_lamports = lamports(&env, owner.pubkey());
         let admin_lamports = lamports(&env, admin.pubkey());
-        let token_rents = [lamports(&env, user_token), lamports(&env, admin_token)];
+        let token_keys = [user_token, admin_token, provider_token, insurer_token];
+        let token_rents = token_keys.map(|key| lamports(&env, key));
+        let holder_frames = [&provider, &insurer].map(|key| env.svm.get_account(&key.pubkey()));
+        let profiles = [0, 1].map(|asset| {
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, asset)
+                .unwrap()
+        });
+        let sequences = [env.control_sequences(0), env.control_sequences(1)];
         let tombstone_rent = env
             .svm
             .get_sysvar::<solana_sdk::rent::Rent>()
@@ -162,26 +238,36 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
             let capital = if user_paid { 0 } else { CAPITAL };
             let live = if paid[0] { 0 } else { LIVE };
             let insurance = if paid[1] { 0 } else { INSURANCE };
-            let paid_admin = LIVE - live + INSURANCE - insurance;
             let vault = if closed {
                 0
             } else {
                 capital + live + insurance + LAPSED + SURPLUS
             };
-            let amounts = [
+            let entitlements = [
                 CAPITAL - capital,
-                paid_admin + if closed { SURPLUS } else { 0 },
-                vault,
+                if closed { SURPLUS } else { 0 },
+                LIVE - live,
+                INSURANCE - insurance,
             ];
+            let amounts = token_keys.map(|key| {
+                token_keys
+                    .into_iter()
+                    .zip(entitlements)
+                    .filter(|(destination, _)| *destination == key)
+                    .map(|(_, amount)| amount)
+                    .sum::<u64>()
+            });
             for (index, (key, wallet)) in [
                 (user_token, owner.pubkey()),
                 (admin_token, admin.pubkey()),
+                (provider_token, provider.pubkey()),
+                (insurer_token, insurer.pubkey()),
                 (env.vault, env.vault_authority),
             ]
             .into_iter()
             .enumerate()
             {
-                if closed && index == 2 {
+                if closed && index == 4 {
                     if let Some(account) = env.svm.get_account(&key) {
                         assert_eq!(account.lamports, 0);
                         assert!(account.data.iter().all(|byte| *byte == 0));
@@ -197,10 +283,13 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
                 assert_eq!(token.delegate, COption::None);
                 assert_eq!(token.close_authority, COption::None);
                 assert_eq!(token.is_native, COption::None);
-                assert_eq!(token.amount, amounts[index]);
+                assert_eq!(
+                    token.amount,
+                    if index == 4 { vault } else { amounts[index] }
+                );
                 assert_eq!(
                     account.lamports,
-                    if index == 2 {
+                    if index == 4 {
                         vault_rent
                     } else {
                         token_rents[index]
@@ -216,7 +305,17 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
             assert_eq!(Mint::unpack(&mint.data).unwrap(), expected_mint);
             assert_eq!(mint.lamports, mint_before.lamports);
             assert_eq!(mint.owner, mint_before.owner);
-            assert_eq!(amounts.iter().sum::<u64>(), expected_mint.supply);
+            assert_eq!(
+                entitlements.iter().sum::<u64>() + vault,
+                expected_mint.supply
+            );
+            if separate_roles {
+                assert_eq!(
+                    [&provider, &insurer].map(|key| env.svm.get_account(&key.pubkey())),
+                    holder_frames,
+                    "reserve holders receive tokens, never terminal rent"
+                );
+            }
             assert_eq!(
                 env.vault,
                 canonical_vault_ata(env.vault_authority, env.mint)
@@ -251,6 +350,17 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
                 assert!(expired && !materialized);
                 assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
             } else {
+                for asset in 0..2 {
+                    assert_eq!(
+                        state::read_asset_oracle_profile(
+                            &env.svm.get_account(&env.market).unwrap().data,
+                            asset
+                        )
+                        .unwrap(),
+                        profiles[asset]
+                    );
+                    assert_eq!(env.control_sequences(asset), sequences[asset]);
+                }
                 let group = env.market_state().1;
                 assert_eq!(group.c_tot, capital.into());
                 assert_eq!(group.vault, u128::from(capital + live + insurance + LAPSED));
@@ -308,14 +418,16 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
             BackingBucketStatusV16::Fresh
         );
 
-        let withdrawal_accounts = vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(admin_token, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ];
+        let withdrawal_accounts = |holder: &Keypair, destination| {
+            vec![
+                AccountMeta::new(holder.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ]
+        };
         let wrap = |ix: ProgInstruction, accounts| Instruction {
             program_id: env.program_id,
             accounts,
@@ -329,11 +441,11 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
                     authority_epoch: env.control_sequences(0).authority_epoch,
                     amount: LIVE.into(),
                 },
-                withdrawal_accounts.clone(),
+                withdrawal_accounts(&provider, provider_token),
             ),
             wrap(
-                env.withdraw_insurance_asset_instruction(admin.pubkey(), 1, INSURANCE.into()),
-                withdrawal_accounts,
+                env.withdraw_insurance_asset_instruction(insurer.pubkey(), 1, INSURANCE.into()),
+                withdrawal_accounts(&insurer, insurer_token),
             ),
         ];
         let close = wrap(
@@ -357,76 +469,116 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
             portfolio,
             user_token,
             admin_token,
+            provider_token,
+            insurer_token,
             admin.pubkey(),
+            provider.pubkey(),
+            insurer.pubkey(),
             owner.pubkey(),
             env.payer.pubkey(),
         ];
-        let land =
-            |env: &mut V16CuEnv, instructions: &[Instruction], rejection: Option<(u8, usize)>| {
-                env.svm.expire_blockhash();
-                let mut batch = vec![
-                    heap_ix(),
-                    ComputeBudgetInstruction::set_compute_unit_limit(500_000),
-                ];
-                batch.extend_from_slice(instructions);
-                let tx = Transaction::new_signed_with_payer(
-                    &batch,
-                    Some(&env.payer.pubkey()),
-                    &[&env.payer, &admin],
-                    env.svm.latest_blockhash(),
-                );
-                let fee = u64::from(tx.message.header.num_required_signatures)
-                    * FeeStructure::default().lamports_per_signature;
-                let before = frame_keys.map(|key| env.svm.get_account(&key));
-                let payer_before = lamports(env, env.payer.pubkey());
-                let result = env.svm.send_transaction(tx);
-                assert_eq!(lamports(env, env.payer.pubkey()), payer_before - fee);
-                let meta = if let Some((index, transfers)) = rejection {
-                    let failure = result.expect_err("live residue must block CloseSlab");
-                    assert_eq!(
-                        failure.err,
-                        TransactionError::InstructionError(
-                            index,
-                            InstructionError::Custom(PercolatorError::EngineLockActive as u32)
-                        )
-                    );
-                    assert_eq!(
-                        failure
-                            .meta
-                            .logs
+        let land = |env: &mut V16CuEnv,
+                    instructions: &[Instruction],
+                    rejection: Option<(u8, usize, PercolatorError)>| {
+            env.svm.expire_blockhash();
+            let mut batch = vec![
+                heap_ix(),
+                ComputeBudgetInstruction::set_compute_unit_limit(500_000),
+            ];
+            batch.extend_from_slice(instructions);
+            let mut signers = vec![&env.payer, &admin, &provider, &insurer];
+            signers.retain(|signer| {
+                signer.pubkey() == env.payer.pubkey()
+                    || instructions.iter().any(|ix| {
+                        ix.accounts
                             .iter()
-                            .filter(|line| **line == format!("Program {} success", spl_token::ID))
-                            .count(),
-                        transfers
-                    );
-                    for (key, mut account) in frame_keys.into_iter().zip(before) {
-                        if key == env.payer.pubkey() {
-                            account.as_mut().unwrap().lamports -= fee;
-                        }
-                        assert_eq!(
-                            env.svm.get_account(&key),
-                            account,
-                            "exact rollback for {key}"
-                        );
-                    }
-                    failure.meta
-                } else {
-                    result.expect("public terminal continuation")
-                };
-                assert_cu_within(
-                    "mixed-maturity terminal step",
-                    meta.compute_units_consumed,
-                    500_000,
+                            .any(|meta| meta.is_signer && meta.pubkey == signer.pubkey())
+                    })
+            });
+            signers.sort_by_key(|signer| signer.pubkey());
+            signers.dedup_by_key(|signer| signer.pubkey());
+            if separate_roles && instructions.iter().all(|ix| *ix == close) {
+                assert_eq!(
+                    signers.len(),
+                    2,
+                    "close needs only payer and market authority"
                 );
-                meta.compute_units_consumed
+                assert!(!signers.iter().any(|signer| {
+                    [provider.pubkey(), insurer.pubkey()].contains(&signer.pubkey())
+                }));
+            }
+            let tx = Transaction::new_signed_with_payer(
+                &batch,
+                Some(&env.payer.pubkey()),
+                &signers,
+                env.svm.latest_blockhash(),
+            );
+            let fee = u64::from(tx.message.header.num_required_signatures)
+                * FeeStructure::default().lamports_per_signature;
+            let before = frame_keys.map(|key| env.svm.get_account(&key));
+            let payer_before = lamports(env, env.payer.pubkey());
+            let result = env.svm.send_transaction(tx);
+            assert_eq!(lamports(env, env.payer.pubkey()), payer_before - fee);
+            let meta = if let Some((index, transfers, error)) = rejection {
+                let failure = result.expect_err("terminal stock must retain its disposition");
+                assert_eq!(
+                    failure.err,
+                    TransactionError::InstructionError(
+                        index,
+                        InstructionError::Custom(error as u32)
+                    )
+                );
+                assert_eq!(
+                    failure
+                        .meta
+                        .logs
+                        .iter()
+                        .filter(|line| { **line == format!("Program {} success", env.program_id) })
+                        .count(),
+                    usize::from(index - 2),
+                    "expected successful wrapper prefix before rejection"
+                );
+                assert_eq!(
+                    failure
+                        .meta
+                        .logs
+                        .iter()
+                        .filter(|line| **line == format!("Program {} success", spl_token::ID))
+                        .count(),
+                    transfers
+                );
+                for (key, mut account) in frame_keys.into_iter().zip(before) {
+                    if key == env.payer.pubkey() {
+                        account.as_mut().unwrap().lamports -= fee;
+                    }
+                    assert_eq!(
+                        env.svm.get_account(&key),
+                        account,
+                        "exact rollback for {key}"
+                    );
+                }
+                failure.meta
+            } else {
+                result.expect("public terminal continuation")
             };
+            assert_cu_within(
+                "mixed-maturity terminal step",
+                meta.compute_units_consumed,
+                500_000,
+            );
+            meta.compute_units_consumed
+        };
 
-        let early_cu = land(&mut env, &[close.clone()], Some((2, 0)));
+        let early_cu = land(
+            &mut env,
+            &[close.clone()],
+            Some((2, 0, PercolatorError::EngineLockActive)),
+        );
         // A real insurance transfer precedes the live-backing close rejection; it cannot stick.
         let rollback_cu = land(
             &mut env,
             &[withdrawals[1].clone(), close.clone()],
-            Some((3, 1)),
+            Some((3, 1, PercolatorError::EngineLockActive)),
         );
         stock(&env, true, false, [false; 2], false, false);
         let mut paid = [false; 2];
@@ -441,13 +593,30 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
             paid[role] = true;
             stock(&env, true, false, paid, expired, false);
             if role == 0 {
-                let custody_before = [env.vault, env.mint, user_token, admin_token, admin.pubkey()]
-                    .map(|key| env.svm.get_account(&key));
+                if separate_roles && !paid[1] {
+                    // Expiry normalization can progress without either holder, but
+                    // cannot authorize sweeping the still-funded insurance reserve.
+                    land(
+                        &mut env,
+                        &[close.clone(), close.clone()],
+                        Some((3, 0, PercolatorError::EngineLockActive)),
+                    );
+                    stock(&env, true, false, paid, false, false);
+                }
+                let custody_keys = [
+                    env.vault,
+                    env.mint,
+                    user_token,
+                    admin_token,
+                    provider_token,
+                    insurer_token,
+                    admin.pubkey(),
+                ];
+                let custody_before = custody_keys.map(|key| env.svm.get_account(&key));
                 expiry_cu = land(&mut env, &[close.clone()], None);
                 expired = true;
                 assert_eq!(
-                    [env.vault, env.mint, user_token, admin_token, admin.pubkey()]
-                        .map(|key| env.svm.get_account(&key)),
+                    custody_keys.map(|key| env.svm.get_account(&key)),
                     custody_before,
                     "expiry reclassifies backing without burning, sweeping, or refunding custody"
                 );
@@ -456,14 +625,28 @@ fn v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_ret
                     BackingBucketStatusV16::Expired
                 );
                 stock(&env, true, false, paid, expired, false);
+                if separate_roles && !paid[1] {
+                    let mut wrong_destination = withdrawals[1].clone();
+                    wrong_destination.accounts[2].pubkey = admin_token;
+                    land(
+                        &mut env,
+                        &[wrong_destination],
+                        Some((2, 0, PercolatorError::InvalidTokenAccount)),
+                    );
+                    stock(&env, true, false, paid, expired, false);
+                }
             }
             if step == 0 {
-                land(&mut env, &[close.clone()], Some((2, 0)));
+                land(
+                    &mut env,
+                    &[close.clone()],
+                    Some((2, 0, PercolatorError::EngineLockActive)),
+                );
                 stock(&env, true, false, paid, expired, false);
             }
         }
-        let close_cu = land(&mut env, &[close], None);
+        let close_cu = land(&mut env, &[close.clone()], None);
         stock(&env, true, false, paid, true, true);
-        println!("INV-070 mixed maturity insurance_first={insurance_first}: early={early_cu}, rollback={rollback_cu}, withdrawals={withdrawal_cu:?}, expiry={expiry_cu}, close={close_cu} CU; {SUPPLY} = {CAPITAL} user + {LIVE} provider + {INSURANCE} insurance + {LAPSED} burn + {SURPLUS} sweep");
+        println!("INV-024/070 mixed maturity separate_roles={separate_roles}, insurance_first={insurance_first}: early={early_cu}, rollback={rollback_cu}, withdrawals={withdrawal_cu:?}, expiry={expiry_cu}, close={close_cu} CU; {SUPPLY} = {CAPITAL} user + {LIVE} provider + {INSURANCE} insurance + {LAPSED} burn + {SURPLUS} sweep");
     }
 }

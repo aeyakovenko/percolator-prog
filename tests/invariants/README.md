@@ -4907,6 +4907,91 @@ run passes **5/5 in 17.12 s**; fmt, diff and production/status identity checks p
 The short selector also passes **1/1** on the rebased head. Cargo emits only its existing
 `solana-client v1.18.26` future-incompatibility warning. No broad suite was run.
 
+## INV-024/070 terminal expiry role attribution (row 410, 2026-09-10)
+
+[`cu/inv_070_mixed_maturity_terminal_residue.rs`](cu/inv_070_mixed_maturity_terminal_residue.rs)
+adds exactly one public LiteSVM selector,
+`v16_program_terminal_expiry_preserves_separate_reserve_beneficiaries`, on local
+base `b950cfed`. Worktree:
+`/tmp/codex-agent-worktrees/row410-terminal-reserve-audit-20260910`; branch:
+`codex/row410-terminal-reserve-audit-20260910`. **Row 410 remains OPEN.**
+
+The new relation is **expired backing normalization + independently owned live
+reserves + terminal close without reserve-holder signatures**. The prior mixed
+maturity selector gives backing, insurance, and surplus to the same authority;
+its aggregate wallet expectation cannot distinguish a conserving wrong-holder
+payout. The existing INV-024 handoff/final-close selectors keep backing fresh,
+the insurance lifecycle leaves terminal stock, and funded backing succession
+does not normalize expiry or close the slab. The retained terminal withdrawal
+expiry selector also aliases provider and market authority. The new selector
+shares the existing mixed-maturity fixture and stock oracle, preserving its
+original aliased-role selector as an adjacent control.
+
+Two histories cross provider-first and insurer-first payout orders. Public
+funding supplies 1,009 user atoms, 401 fresh backing atoms, 307 expiring backing
+atoms, 203 insurance atoms, and 17 raw SPL surplus atoms; mint authority is
+disabled at supply 1,937. Provider, terminal insurance beneficiary, market
+authority, user, and fee payer are distinct. Market authority retains the live
+insurance operator role. The user receives its principal and deletes its
+portfolio before backing expiry and terminal disposal.
+
+- Premature close and an insurance-payout/close batch reject atomically while
+  fresh backing remains; the latter checks one successful SPL transfer prefix.
+- In the provider-first history, a close normalizes expired backing, but the
+  next close in the same transaction rejects on unpaid insurance. The complete
+  normalization prefix rolls back, including its successful wrapper call.
+- Normalization then commits without either reserve holder signing and without
+  any token, mint, or beneficiary-wallet change. A beneficiary-signed insurance
+  withdrawal to the market authority's ATA rejects `InvalidTokenAccount` after
+  this transition; the original destination remains payable.
+- Final balances are independently derived: user/provider/insurer/authority =
+  `1009/401/203/17`. Exactly 307 expired backing atoms burn, leaving supply 1,630.
+  Only market authority receives market/vault rent above canonical tombstone
+  rent. Every close-only transaction explicitly excludes both reserve-holder signatures.
+
+The oracle checks separate token owners, mint, balances and rent, engine/SPL
+stocks, domain budgets, backing reservations, unchanged role profiles and
+control sequences, and exact rejected account frames with calculated network
+fees. Only public System/SPL/ATA/wrapper instructions create economic state;
+harness controls are signer SOL, Clock and blockhashes. No program-owned bytes
+are mutated. Live shutdown fallback, provider earnings, liens/impairment,
+receipts/Recovery, nonzero fee policies, alternate quote rails and arbitrary
+histories remain outside this selector. No vulnerable/fixed-pin closure is claimed.
+
+Validation uses a fresh default-feature SBF build and host compilation in this
+worktree, with private target `/dev/shm/row410-terminal-reserve-audit-20260910-target`.
+Engine: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+
+The new exact selector passes **1/1** (1,149 filtered, 0.83 s): **two histories,
+eight successful and eight exactly rejected terminal transactions**. Every
+measured transaction stays below its 500,000 CU ceiling; setup and user exit
+are excluded from these counts. The six adjacent exact selectors pass **6/6**
+(1,144 filtered, 16.85 s). The first adjacent run caught duplicate ATA creation
+in the aliased control; the shared fixture now reuses that existing ATA, and
+both the new selector and all adjacent selectors were rerun successfully.
+Cargo emits its existing `solana-client v1.18.26` future-incompatibility warning.
+No production conformance failure or broad-suite result is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row410-terminal-reserve-audit-20260910-target
+export TMPDIR="$CARGO_TARGET_DIR/tmp" PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_terminal_expiry_preserves_separate_reserve_beneficiaries -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_retained_terminal_withdrawal_revalidates_expiry_after_scan_and_partial_payout \
+  inv_024_attributed_quote_value_conservation::terminal_role_handoff::v16_program_terminal_role_handoff_preserves_reserve_beneficiaries_with_aliased_payer \
+  inv_024_attributed_quote_value_conservation::terminal_role_handoff::v16_program_terminal_role_handoff_close_order_preserves_reserves_and_surplus \
+  inv_024_attributed_quote_value_conservation::terminal_insurance_lifecycle::v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attribution \
+  inv_005_authority_incarnation_binding::funded_backing_succession::v16_program_funded_backing_succession_preserves_paid_prefix_and_terminal_role_partition
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-024 terminal handoff through final close (row 410, 2026-09-10)
 
 [`cu/inv_024_terminal_role_handoff.rs`](cu/inv_024_terminal_role_handoff.rs)
