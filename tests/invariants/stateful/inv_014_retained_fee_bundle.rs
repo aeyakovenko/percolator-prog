@@ -4,6 +4,8 @@
 //! Secondary evidence: INV-005/010/011/024/036/047/081 for authority succession,
 //! ordering, owner-local bounds, fee attribution, transport endpoints and atomicity.
 //! Equal taker/LP caps deliberately do not isolate the single-CPI taker guard.
+//! A shared-taker continuation also binds the second instruction to the first
+//! instruction's advanced epoch while keeping their fee envelopes separate.
 //! No program-owned state is injected or rewritten by this test.
 
 use crate::support::{
@@ -200,6 +202,365 @@ fn successor_policy(env: &V16Svm, payer: &Keypair, bps: u64, nonce: u64) -> Tran
         &[&env.actors[SUCCESSOR].signer],
         nonce,
     )
+}
+
+#[test]
+fn v16_program_retained_shared_taker_fee_bundle_preserves_each_instruction_bound() {
+    const TAKER: usize = 0;
+    const OLD_BPS: u64 = 19;
+    let sizes = [(3 * POS_SCALE + 7) as i128, -((POS_SCALE + 1) as i128)];
+    let mut worlds = 0;
+    let mut transactions = 0;
+    let mut peak_cu = 0;
+    let mut endpoint = None;
+    for first in [TradeRoute::Cpi, TradeRoute::BatchCpi] {
+        for second in [TradeRoute::Cpi, TradeRoute::BatchCpi] {
+            let routes = [first, second];
+            let label = format!("shared taker, routes={routes:?}");
+            let config = MarketConfig {
+                initial_price: PRICE,
+                ..MarketConfig::default()
+            };
+            let mut env = V16Svm::new([0x42; 32], config);
+            let payer = Keypair::from_seed(&[0x15; 32]).unwrap();
+            env.svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
+            let capital: u128 = config.actor_deposits.iter().sum();
+            let supply = env.token_supply_observed();
+            let mut paid = [0u128; PRIMARY_ACTOR_COUNT];
+            let check = |env: &V16Svm,
+                         positions: [i128; 2],
+                         fees: [u128; 2],
+                         paid: &[u128; PRIMARY_ACTOR_COUNT]| {
+                assert_public_stock_census(&label, env).unwrap();
+                assert_public_encumbrance_census(&label, env).unwrap();
+                let group = env.primary_market_state().1;
+                assert_eq!(group.vault, capital - paid.iter().sum::<u128>());
+                assert_eq!(group.insurance, 2 * fees.iter().sum::<u128>());
+                assert_eq!(group.c_tot + group.insurance, group.vault);
+                assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+                assert_eq!(env.token_supply_observed(), supply);
+                assert_eq!(u128::from(env.mint_supply()), supply);
+                for actor in 0..PRIMARY_ACTOR_COUNT {
+                    let account = env.primary_portfolio(actor);
+                    let debit = match actor {
+                        TAKER => fees.iter().sum(),
+                        1 | 2 => fees[actor - 1],
+                        _ => 0,
+                    };
+                    assert_eq!(account.owner, env.actors[actor].signer.pubkey().to_bytes());
+                    assert_eq!(
+                        account.capital.get(),
+                        config.actor_deposits[actor] - debit - paid[actor],
+                        "{label}: actor={actor}"
+                    );
+                    assert_eq!(account.pnl.get(), 0, "{label}: fees cannot hide in PnL");
+                    assert_eq!(
+                        u128::from(env.token_amount(env.actors[actor].destination_token)),
+                        paid[actor]
+                    );
+                    assert_eq!(
+                        u128::from(env.token_amount(env.actors[actor].source_token)),
+                        u128::from(config.actor_token_balances[actor])
+                            - config.actor_deposits[actor]
+                    );
+                    let legs: Vec<_> = account
+                        .legs
+                        .iter()
+                        .map(|leg| leg.try_to_runtime().unwrap())
+                        .filter(|leg| leg.active)
+                        .collect();
+                    let expected = [0, 1].map(|asset| {
+                        if actor == TAKER {
+                            positions[asset]
+                        } else if actor == asset + 1 {
+                            -positions[asset]
+                        } else {
+                            0
+                        }
+                    });
+                    assert_eq!(legs.len(), expected.iter().filter(|q| **q != 0).count());
+                    for asset in 0..2 {
+                        let actual = legs
+                            .iter()
+                            .find(|leg| leg.asset_index as usize == asset)
+                            .map_or(0, |leg| leg.basis_pos_q);
+                        assert_eq!(
+                            actual, expected[asset],
+                            "{label}: actor={actor}, asset={asset}"
+                        );
+                    }
+                }
+                for asset in 0..2 {
+                    assert_eq!(group.assets[asset].effective_price, PRICE);
+                    assert_eq!(
+                        group.assets[asset].oi_eff_long_q,
+                        positions[asset].unsigned_abs()
+                    );
+                    assert_eq!(
+                        group.assets[asset].oi_eff_short_q,
+                        positions[asset].unsigned_abs()
+                    );
+                    assert_eq!(
+                        &group.insurance_domain_budget[2 * asset..2 * asset + 2],
+                        &[fees[asset]; 2]
+                    );
+                }
+            };
+
+            env.begin_public_trace();
+            env.update_trade_fee_policy(OLD_BPS).unwrap();
+            for leg in 0..2 {
+                env.set_matcher_config_with_trade_fee_cap(leg + 1, 1, CAPS[leg] as u16)
+                    .unwrap();
+            }
+            check(&env, [0; 2], [0; 2], &paid);
+            let epochs = [0, 1, 2].map(|actor| env.primary_portfolio_position_epoch(actor));
+            let sequences = [1, 2].map(|actor| env.primary_portfolio_matcher_sequence(actor));
+            let grants = [1, 2].map(|actor| {
+                read_portfolio_matcher_config(&env.primary_portfolio_data(actor)).unwrap()
+            });
+            let policy_sequence = env.primary_control_sequences(0).trade_fee;
+            let instructions: Vec<_> = (0..2)
+                .map(|leg| {
+                    let lp = leg + 1;
+                    let market_id = env.primary_market_state().1.assets[leg].market_id;
+                    let instruction = if routes[leg] == TradeRoute::Cpi {
+                        ProgInstruction::TradeCpi {
+                            account_a_portfolio_id: env.primary_portfolio_id(TAKER),
+                            // The suffix consumes the prefix's public post-state, signed in advance.
+                            account_a_position_epoch: epochs[TAKER] + leg as u64,
+                            account_b_portfolio_id: env.primary_portfolio_id(lp),
+                            account_b_position_epoch: epochs[lp],
+                            account_b_matcher_sequence: sequences[leg],
+                            asset_index: leg as u16,
+                            market_id,
+                            size_q: sizes[leg],
+                            fee_bps: CAPS[leg],
+                            limit_price: PRICE,
+                            backing_fee_cap_bps: 0,
+                        }
+                    } else {
+                        ProgInstruction::BatchTradeCpi {
+                            account_a_portfolio_id: env.primary_portfolio_id(TAKER),
+                            account_a_position_epoch: epochs[TAKER] + leg as u64,
+                            account_b_portfolio_id: env.primary_portfolio_id(lp),
+                            account_b_position_epoch: epochs[lp],
+                            account_b_matcher_sequence: sequences[leg],
+                            max_slippage_atoms: 0,
+                            max_fee_atoms: fee_atoms(sizes[leg], CAPS[leg]),
+                            legs: vec![BatchTradeCpiLeg {
+                                asset_index: leg as u16,
+                                market_id,
+                                size_q: sizes[leg],
+                                fee_bps: CAPS[leg],
+                                limit_price: PRICE,
+                            }],
+                        }
+                    };
+                    Instruction {
+                        program_id: env.program_id,
+                        accounts: vec![
+                            AccountMeta::new(env.actors[TAKER].signer.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(env.actors[TAKER].portfolio, false),
+                            AccountMeta::new(env.actors[lp].portfolio, false),
+                            AccountMeta::new_readonly(env.matcher_program, false),
+                            AccountMeta::new(env.actors[lp].matcher_context, false),
+                            AccountMeta::new_readonly(env.actors[lp].matcher_delegate, false),
+                        ],
+                        data: instruction.encode(),
+                    }
+                })
+                .collect();
+            let retained = [41_301, 41_302, 41_303].map(|nonce| {
+                signed(
+                    &env,
+                    &payer,
+                    instructions.clone(),
+                    &[&env.actors[TAKER].signer],
+                    nonce,
+                )
+            });
+            let retained_bytes = retained
+                .each_ref()
+                .map(|tx| bincode::serialize(tx).unwrap());
+            let mut keys: Vec<_> = env
+                .all_economic_account_lamports()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect();
+            keys.extend(env.actors.iter().map(|actor| actor.signer.pubkey()));
+            keys.extend(
+                retained[0]
+                    .message
+                    .account_keys
+                    .iter()
+                    .copied()
+                    .filter(|key| *key != payer.pubkey()),
+            );
+            keys.sort_unstable();
+            keys.dedup();
+            let frame = |env: &V16Svm| {
+                keys.iter()
+                    .map(|key| env.svm.get_account(key))
+                    .collect::<Vec<_>>()
+            };
+            let before = frame(&env);
+            for tx in &retained {
+                assert_eq!(tx.message.header.num_required_signatures, 2);
+                env.svm
+                    .simulate_transaction(tx.clone().into())
+                    .unwrap_or_else(|error| {
+                        panic!("{label}: initially executable continuation: {error:?}")
+                    });
+                assert_eq!(frame(&env), before);
+            }
+            env.update_trade_fee_policy(CAPS[1] + 1).unwrap();
+            check(&env, [0; 2], [0; 2], &paid);
+            assert!(fee_atoms(sizes[0], CAPS[1] + 1) < fee_atoms(sizes[0], CAPS[0]));
+            assert!(fee_atoms(sizes[1], CAPS[1] + 1) > fee_atoms(sizes[1], CAPS[1]));
+            let before = frame(&env);
+            assert_eq!(bincode::serialize(&retained[0]).unwrap(), retained_bytes[0]);
+            let error = env
+                .land_retained(retained[0].clone())
+                .expect_err("prefix consent cannot fund the shared taker's tighter suffix");
+            assert!(
+                error.contains(&format!(
+                    "InstructionError(4, Custom({}))",
+                    PercolatorError::InvalidInstruction as u32
+                )),
+                "{label}: {error}"
+            );
+            assert_eq!(
+                error
+                    .matches(&format!("Program {} success", env.program_id))
+                    .count(),
+                1,
+                "{label}: prefix must execute: {error}"
+            );
+            assert_eq!(
+                error
+                    .matches(&format!("Program {} success", env.matcher_program))
+                    .count(),
+                1,
+                "{label}: suffix refusal precedes its matcher: {error}"
+            );
+            assert_eq!(
+                frame(&env),
+                before,
+                "{label}: shared capital/epoch and both LPs roll back; network payer excluded"
+            );
+            check(&env, [0; 2], [0; 2], &paid);
+
+            env.update_trade_fee_policy(CAPS[1]).unwrap();
+            assert_eq!(
+                env.primary_control_sequences(0).trade_fee,
+                policy_sequence + 2
+            );
+            assert_eq!(
+                [0, 1, 2].map(|actor| env.primary_portfolio_position_epoch(actor)),
+                epochs
+            );
+            assert_eq!(
+                [1, 2].map(|actor| read_portfolio_matcher_config(
+                    &env.primary_portfolio_data(actor)
+                )
+                .unwrap()),
+                grants
+            );
+            check(&env, [0; 2], [0; 2], &paid);
+            assert_eq!(bincode::serialize(&retained[1]).unwrap(), retained_bytes[1]);
+            peak_cu = peak_cu.max(
+                env.land_retained(retained[1].clone())
+                    .unwrap()
+                    .compute_units,
+            );
+            let fees = sizes.map(|q| fee_atoms(q, CAPS[1]));
+            for leg in 0..2 {
+                assert!(fees[leg] > 0 && fees[leg] <= fee_atoms(sizes[leg], CAPS[leg]));
+                assert_ne!(fees[leg], fee_atoms(sizes[leg], OLD_BPS));
+            }
+            assert!(fees[0] < fee_atoms(sizes[0], CAPS[0]));
+            assert!(
+                fees.iter().sum::<u128>() > fee_atoms(sizes[1], CAPS[1]),
+                "a suffix cap bounds its own charge, not the shared portfolio's cumulative fees"
+            );
+            check(&env, sizes, fees, &paid);
+            assert_eq!(
+                [0, 1, 2].map(|actor| env.primary_portfolio_position_epoch(actor)),
+                [epochs[0] + 2, epochs[1] + 1, epochs[2] + 1]
+            );
+            assert_eq!(
+                [1, 2].map(|actor| env.primary_portfolio_matcher_sequence(actor)),
+                sequences
+            );
+            let before = frame(&env);
+            assert_eq!(bincode::serialize(&retained[2]).unwrap(), retained_bytes[2]);
+            let error = env
+                .land_retained(retained[2].clone())
+                .expect_err("the shared continuation is consumed exactly once");
+            assert!(
+                error.contains(&format!(
+                    "InstructionError(3, Custom({}))",
+                    PercolatorError::EngineStale as u32
+                )),
+                "{label}: {error}"
+            );
+            assert_eq!(frame(&env), before);
+            check(&env, sizes, fees, &paid);
+
+            env.update_trade_fee_policy(0).unwrap();
+            let mut positions = sizes;
+            for leg in 0..2 {
+                env.trade_no_cpi(TAKER, leg + 1, leg as u16, -sizes[leg], PRICE, 0)
+                    .unwrap();
+                positions[leg] = 0;
+                check(&env, positions, fees, &paid);
+            }
+            for actor in 0..PRIMARY_ACTOR_COUNT {
+                let debit = match actor {
+                    TAKER => fees.iter().sum(),
+                    1 | 2 => fees[actor - 1],
+                    _ => 0,
+                };
+                let amount = config.actor_deposits[actor] - debit;
+                env.withdraw_primary(actor, amount).unwrap();
+                paid[actor] = amount;
+                check(&env, [0; 2], fees, &paid);
+            }
+            assert_eq!(
+                u128::from(env.token_amount(env.vault)),
+                2 * fees.iter().sum::<u128>()
+            );
+            let trace = env.finish_public_trace();
+            trace.validate_public_execution().unwrap();
+            assert_eq!(trace.out_of_band_economic_mutations, 0);
+            assert_eq!(trace.steps.len(), 16);
+            assert_eq!(trace.steps.iter().filter(|step| !step.succeeded).count(), 2);
+            transactions += trace.steps.len();
+            peak_cu = peak_cu.max(
+                trace
+                    .steps
+                    .iter()
+                    .filter_map(|step| step.compute_units)
+                    .max()
+                    .unwrap(),
+            );
+            let tokens = env.all_token_account_data();
+            if let Some(expected) = &endpoint {
+                assert_eq!(
+                    &tokens, expected,
+                    "{label}: shared-owner terminal entitlement"
+                );
+            } else {
+                endpoint = Some(tokens);
+            }
+            worlds += 1;
+        }
+    }
+    assert_eq!((worlds, transactions), (4, 64));
+    assert!(peak_cu < TX_CU_LIMIT);
+    eprintln!("INV-014 shared taker fee bundle: {worlds} worlds, {transactions} public transactions, 8 exact rollbacks, 4 shared-prefix rollbacks, peak successful CU={peak_cu}");
 }
 
 #[test]

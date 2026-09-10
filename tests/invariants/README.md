@@ -4049,6 +4049,92 @@ transactions, 12 authorization rejections with exact rollback, four fresh
 economic fills, and peak CU **253,073**. Adjacent INV-012 controls passed
 **2/2**, and formatting/diff checks passed in the source worktree.
 
+## Row 411 retained shared-taker fee continuation (2026-09-10)
+
+[`stateful/inv_014_retained_fee_bundle.rs`](stateful/inv_014_retained_fee_bundle.rs)
+adds exactly one selector,
+`v16_program_retained_shared_taker_fee_bundle_preserves_each_instruction_bound`.
+Four public LiteSVM/SBF histories cross single/batch CPI in each of two successive
+instructions. The same taker trades asset 0 with one LP, then asset 1 with another.
+The suffix signs the taker's expected prefix-advanced position epoch in advance;
+both LPs retain their separate epochs and standing fee grants.
+
+At a fixed authenticated price of 100,003 and a 19-bps base policy, three unchanged,
+packet-sized signed deliveries simulate successfully. The first instruction and
+its LP authorize 503 bps; the second instruction and its LP authorize 37 bps.
+A public hike to 38 bps leaves the prefix authorized. The suffix rejects at exactly
+instruction 4 with `InvalidInstruction`, after one successful wrapper trade and
+matcher call. Full tracked Accounts, including the shared taker's capital and
+advanced epoch, both LPs, both matcher contexts, and SPL custody, roll back.
+Only the separate network payer is excluded from that Account equality.
+
+Restoring policy to 37 bps permits an already-signed delivery to execute. An
+input-only two-ceiling oracle charges the taker the sum of both current-policy
+fees and each LP only its own fee, with exact side-local insurance attribution.
+The taker's cumulative fee deliberately exceeds the suffix's individual cap:
+the cap bounds that instruction's debit, not all fees already paid by the shared
+portfolio. Each charge differs from its signing-time-policy amount; the prefix
+also pays less than its larger signed maximum. The shared epoch advances twice,
+each LP epoch once, and neither matcher sequence changes. A consumed alternative
+rejects at instruction 3 with `EngineStale` and complete rollback. Two public
+zero-fee closes and five full owner withdrawals realize the exact entitlements;
+all four transport combinations converge to the same final SPL account data.
+
+This adds the shared-portfolio dependency missing from the independent-pair atomic
+bundle. A multi-leg batch has one instruction/aggregate cap, while these successive
+instructions have separate fee envelopes and consume a shared intermediate state.
+The existing policy/exit ordering, activation, partial/exact-fill and base-consent
+controls do not assert this cumulative owner debit or the two-step shared epoch.
+The test checks stock/encumbrance censuses, zero PnL, position/OI, fixed mint supply,
+and a public trace with zero out-of-band economic mutations. It uses only public
+wrapper transactions after the existing public fixture setup; no program-owned
+bytes or shared helpers are changed.
+
+Scope is two assets, two one-leg CPI instructions, one shared taker, independent
+LPs, fixed marks, and zero movement/backing/funding/maintenance fees. Shared LPs,
+role reversals, bilateral continuations, arbitrary owner/route/policy histories,
+and whole-invariant closure remain outside this increment. **Row 411 remains OPEN**;
+the ledger and every invariant status are unchanged.
+
+Validation uses forked worktree
+`/tmp/codex-agent-worktrees/percolator-inv014-axis-20260910`, base `9bdaba2b`,
+with fresh locked/offline default-feature SBF builds and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+authenticated matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`;
+partial-fill fixture: `e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`.
+The new selector passes **1/1: 4 worlds, 64 public transactions, 8 exact rollbacks,
+4 shared-prefix rollbacks, 20 owner withdrawals**, peak successful **296,980 CU**.
+The adjacent stateful selectors pass **4/4**, the adjacent CU selectors pass
+**3/3**, and the invariant index passes **1/1**. All three SBF builds, repository-wide
+formatting, and working/staged whitespace checks exit 0. Existing compiler warnings
+remain; no production inconsistency was observed in these histories.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv014-axis-20260910/host
+export TMPDIR=/dev/shm/percolator-inv014-axis-20260910/target/tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv014-axis-20260910/target/deploy/percolator_prog.so
+mkdir -p "$TMPDIR"
+CARGO_TARGET_DIR=/dev/shm/percolator-inv014-axis-20260910/target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/percolator-inv014-axis-20260910/target/deploy -- --locked
+CARGO_TARGET_DIR=/dev/shm/percolator-inv014-axis-20260910/matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+(cd tests/fixtures/hostile_matcher && CARGO_TARGET_DIR=/dev/shm/percolator-inv014-axis-20260910/hostile-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/deploy" -- --locked)
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_014_delayed_policy_and_policy_epoch_safety::retained_fee_bundle::v16_program_retained_shared_taker_fee_bundle_preserves_each_instruction_bound -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_fee_bundle::v16_program_retained_fee_bundle_route_product_rolls_back_authorized_prefix \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_delegated_fee_exit::v16_program_retained_fee_relaxation_must_precede_exit_and_roll_back_with_it \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_delegated_fee_exit::v16_program_retained_lp_fee_cap_preserves_bilateral_and_delegated_exits \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_program_trade_requires_signed_base_fee_consent \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_activation_fee::v16_retained_activation_fee_cap_survives_policy_handoff_and_reuse
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## Row 411 retained policy/exit instruction order (2026-09-10)
 
 [`stateful/inv_014_retained_delegated_fee_exit.rs`](stateful/inv_014_retained_delegated_fee_exit.rs)
