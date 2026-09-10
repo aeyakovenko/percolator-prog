@@ -3,6 +3,69 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-014 retained fee terms across changed fill capacity (2026-09-10)
+
+[`cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`](cu/inv_014_delayed_policy_and_policy_epoch_safety.rs)
+adds `v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change`.
+Four public System/SPL/ATA/wrapper histories cross single and one-leg batch CPI
+with a fee-policy change from 19 to 37 or 7 bps. Two owners fund unequal principal
+of 100,003 and 200,007 atoms, and SPL mint authority is revoked. At a fixed mark of
+100, the taker signs a nonintegral quantity with a 100-bps limit; the LP separately
+grants the same cap. Both retained deliveries simulate successfully with full
+matcher capacity before policy changes. Their serialized bytes, blockhashes and
+signatures remain unchanged through delivery.
+
+The market authority changes the base fee, then the LP uses the existing fixture's
+authenticated public control to offer 127/255 of the signed quantity. Single CPI
+must execute that flagged partial and charge each owner the independently rounded
+fee on actual quantity at the current rate. Assertions distinguish that debit from
+the signing-time rate, signed maximum rate, and full-request charge. Batch CPI
+must reject with exactly `InstructionError(2, InvalidAccountData)` after matcher
+success, restoring all sixteen tracked Accounts, including matcher state, wrapper
+epochs, SPL custody and economic lamports. The separate payer loses exactly the
+two-signature network fee. Restoring full capacity permits the other already-signed
+batch delivery to land under its original per-leg and aggregate fee bounds.
+
+Each history checks owner identity, capital, zero PnL, position quantities, OI,
+side-local insurance, engine/SPL custody, fixed mint supply, passive accounts and
+the existing stock/encumbrance censuses. A fresh zero-fee bilateral close removes
+only executed quantity; eight full withdrawals pay each owner's exact principal
+less the current-policy fee, leaving only earned insurance in custody.
+
+The new dimension is retained fee repricing composed with a matcher-selected
+partial and the exact-fill route's refusal/restoration. Existing fee-consent,
+atomic-bundle, delegated-exit and retained-batch histories use exact fills; the
+retained partial-word owner keeps fee policy fixed; retained mixed transports
+exercise capability/context changes. This test uses one asset and orientation,
+one partial ratio, zero spread and no funding, maintenance or backing fees.
+Both new policies stay below the signed 100-bps cap: no over-cap single-CPI
+enforcement, arbitrary-history coverage, full route equivalence or status closure
+is claimed. **Row 411 remains OPEN**, and INV-005/010/011/014/024/036/047/081 status
+rows are unchanged. No production inconsistency was observed in these histories.
+
+Validation uses fresh default-feature wrapper and fixture SBF builds, locked and
+offline with platform-tools v1.52, inside private worktree
+`/dev/shm/percolator-inv014-fee-consent-20260910`, base `3ff725dc152d1f5462270d500eff3de76f52c19f`.
+Engine pin: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+fixture SHA-256: `e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`.
+The new selector passes four histories, two exact rollbacks, four fills and eight
+payouts; peak trade/refusal CU is 148,109. No program-owned account bytes are
+installed or edited by the new test, and no shared helper is changed.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_BUILD_JOBS=4 cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/deploy" -- --locked
+(cd tests/fixtures/hostile_matcher && RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_BUILD_JOBS=4 cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/deploy" -- --locked)
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture inv_014_delayed_policy_and_policy_epoch_safety::v16_program_trade_requires_signed_base_fee_consent inv_009_partial_fill_and_retry_accounting::retained_partial_words::v16_program_retained_partial_words_preserve_one_shot_and_residual_budgets
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs
+git diff --check
+```
+
+
 ## INV-012 Recovery forfeit revocation (row 412, 2026-09-10)
 
 [`stateful/inv_012_owner_episode_revocation.rs`](stateful/inv_012_owner_episode_revocation.rs)
