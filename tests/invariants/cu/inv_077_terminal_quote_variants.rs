@@ -2,8 +2,444 @@
 //! Empty-vault reclamation and dual-rail provider/expired-stock disposition are separate products.
 //! Empty custody closes immediately; publicly expired last-domain backing requires bounded
 //! scanning, exact primary retirement, and separate primary/secondary surplus and rent payouts.
+//! Freezable primary custody also requires exact rejection frames and successful thawed retirement.
 
 use super::*;
+
+#[test]
+fn v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, system_program,
+        transaction::TransactionError,
+    };
+
+    const BACKING: u64 = 307;
+    const SURPLUS: u64 = 17;
+    const SECONDARY: u64 = 19;
+    const EXPIRY: u64 = 5;
+    const CU_LIMIT: u64 = 150_000;
+
+    for fixed_supply in [false, true] {
+        let mut env = inv018_public_spl_market(6);
+        let admin = env.admin.insecure_clone();
+        let secondary_mint = env.mint;
+        let secondary_vault = env.vault;
+        let primary = Keypair::new();
+        let mut peak_cu = 0;
+        let mut bounded = |label, cu| {
+            assert_cu_within(label, cu, CU_LIMIT);
+            peak_cu = peak_cu.max(cu);
+        };
+        bounded("freezable quote InitMarket", env.init_market_cu);
+        bounded(
+            "public freezable mint creation",
+            send_raw_ixs(
+                &mut env.svm,
+                &env.payer,
+                vec![
+                    system_instruction::create_account(
+                        &env.payer.pubkey(),
+                        &primary.pubkey(),
+                        1_000_000_000,
+                        Mint::LEN as u64,
+                        &spl_token::ID,
+                    ),
+                    spl_token::instruction::initialize_mint(
+                        &spl_token::ID,
+                        &primary.pubkey(),
+                        &admin.pubkey(),
+                        Some(&admin.pubkey()),
+                        6,
+                    )
+                    .unwrap(),
+                ],
+                &[&primary],
+            )
+            .unwrap(),
+        );
+        bounded(
+            "freezable quote public rail admission",
+            env.send(
+                ProgInstruction::UpdateBaseUnitMints {
+                    primary_mint: primary.pubkey().to_bytes(),
+                    secondary_mint: secondary_mint.to_bytes(),
+                    authority_epoch: env.control_sequences(0).authority_epoch,
+                },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new_readonly(primary.pubkey(), false),
+                    AccountMeta::new_readonly(secondary_mint, false),
+                    AccountMeta::new_readonly(secondary_vault, false),
+                ],
+                &[&admin],
+            )
+            .unwrap(),
+        );
+        // Follow the public rail update using host handles only.
+        env.mint = primary.pubkey();
+        env.vault = create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, env.mint);
+        let destination = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+        let secondary_destination =
+            create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), secondary_mint);
+        let mut funding = vec![
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &destination,
+                &admin.pubkey(),
+                &[],
+                BACKING + SURPLUS,
+            )
+            .unwrap(),
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &secondary_mint,
+                &secondary_vault,
+                &admin.pubkey(),
+                &[],
+                SECONDARY,
+            )
+            .unwrap(),
+        ];
+        if fixed_supply {
+            funding.push(
+                spl_token::instruction::set_authority(
+                    &spl_token::ID,
+                    &env.mint,
+                    None,
+                    spl_token::instruction::AuthorityType::MintTokens,
+                    &admin.pubkey(),
+                    &[],
+                )
+                .unwrap(),
+            );
+        }
+        bounded(
+            "freezable quote public funding",
+            send_raw_ixs(&mut env.svm, &env.payer, funding, &[&admin]).unwrap(),
+        );
+        env.svm.warp_to_slot(1);
+        bounded(
+            "freezable quote provider backing",
+            env.top_up_backing_bucket_from_admin_token_with_cu(
+                destination,
+                1,
+                BACKING.into(),
+                EXPIRY,
+            ),
+        );
+        bounded(
+            "freezable quote surplus transfer",
+            send_raw_tx(
+                &mut env.svm,
+                &env.payer,
+                spl_token::instruction::transfer(
+                    &spl_token::ID,
+                    &destination,
+                    &env.vault,
+                    &admin.pubkey(),
+                    &[],
+                    SURPLUS,
+                )
+                .unwrap(),
+                &[&admin],
+            )
+            .unwrap(),
+        );
+        bounded("freezable quote ResolveMarket", env.resolve());
+        env.svm.warp_to_slot(EXPIRY);
+
+        let close = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new(secondary_destination, false),
+                AccountMeta::new(env.mint, false),
+            ],
+            data: ProgInstruction::CloseSlab {
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            }
+            .encode(),
+        };
+        let watched = [
+            env.market,
+            env.mint,
+            secondary_mint,
+            env.vault,
+            secondary_vault,
+            destination,
+            secondary_destination,
+            admin.pubkey(),
+            env.vault_authority,
+        ];
+        let frame = watched.map(|key| env.svm.get_account(&key));
+        let primary_state = Mint::unpack(&frame[1].as_ref().unwrap().data).unwrap();
+        assert_eq!(primary_state.decimals, 6);
+        assert_eq!(primary_state.supply, BACKING + SURPLUS);
+        assert_eq!(
+            primary_state.freeze_authority,
+            COption::Some(admin.pubkey())
+        );
+        assert_eq!(
+            primary_state.mint_authority,
+            if fixed_supply {
+                COption::None
+            } else {
+                COption::Some(admin.pubkey())
+            }
+        );
+        assert_eq!(env.token_amount(env.vault), BACKING + SURPLUS);
+        assert_eq!(env.token_amount(secondary_vault), SECONDARY);
+        assert_eq!(env.token_amount(destination), 0);
+        assert_eq!(env.token_amount(secondary_destination), 0);
+        assert_eq!(
+            Mint::unpack(&frame[2].as_ref().unwrap().data)
+                .unwrap()
+                .supply,
+            SECONDARY
+        );
+        let token_rent = env
+            .svm
+            .minimum_balance_for_rent_exemption(TokenAccount::LEN);
+        for index in 3..=6 {
+            let account = frame[index].as_ref().unwrap();
+            let token = TokenAccount::unpack(&account.data).unwrap();
+            assert_eq!(account.owner, spl_token::ID);
+            assert_eq!(account.lamports, token_rent);
+            assert_eq!(token.state, AccountState::Initialized);
+            assert_eq!(token.is_native, COption::None);
+            assert_eq!(token.delegate, COption::None);
+            assert_eq!(token.close_authority, COption::None);
+        }
+
+        bounded(
+            "freezable quote expiry normalization",
+            send_raw_ixs(
+                &mut env.svm,
+                &env.payer,
+                vec![
+                    heap_ix(),
+                    ComputeBudgetInstruction::set_compute_unit_limit(CU_LIMIT as u32),
+                    close.clone(),
+                ],
+                &[&admin],
+            )
+            .unwrap(),
+        );
+        for (key, before) in watched.iter().zip(&frame).skip(1) {
+            assert_eq!(env.svm.get_account(key), *before);
+        }
+        let normalized_market = env.svm.get_account(&env.market).unwrap();
+        let mut metadata_frame = normalized_market.clone();
+        metadata_frame.data = frame[0].as_ref().unwrap().data.clone();
+        assert_eq!(Some(metadata_frame), frame[0]);
+        let (cfg, group) = env.market_state();
+        assert_eq!(cfg.collateral_mint, env.mint.to_bytes());
+        assert_eq!(cfg.secondary_collateral_mint, secondary_mint.to_bytes());
+        assert_eq!(group.mode, MarketModeV16::Resolved);
+        assert_eq!(
+            (group.c_tot, group.insurance, group.vault),
+            (0, 0, BACKING.into())
+        );
+        assert_eq!(group.materialized_portfolio_count, 0);
+        assert_eq!(
+            group.source_backing_buckets[1].status,
+            BackingBucketStatusV16::Expired
+        );
+        assert_eq!(
+            group.source_backing_buckets[1].fresh_unliened_backing_num,
+            0
+        );
+        assert_eq!(group.source_credit[1].fresh_reserved_backing_num, 0);
+        crate::support::fuzz_model::assert_market_stock_census(
+            "freezable terminal backing",
+            &group,
+            &normalized_market.data,
+            &[],
+            BACKING.into(),
+        )
+        .unwrap();
+        crate::support::fuzz_model::assert_reservation_encumbrance_census(
+            "freezable terminal backing",
+            &group,
+            &[],
+        )
+        .unwrap();
+
+        let reject = |env: &mut V16CuEnv, ix: Instruction, expected: InstructionError| {
+            env.svm.expire_blockhash();
+            let tx = Transaction::new_signed_with_payer(
+                &[
+                    heap_ix(),
+                    ComputeBudgetInstruction::set_compute_unit_limit(CU_LIMIT as u32),
+                    ix,
+                ],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &admin],
+                env.svm.latest_blockhash(),
+            );
+            let fee = u64::from(tx.message.header.num_required_signatures)
+                * FeeStructure::default().lamports_per_signature;
+            let mut keys = tx.message.account_keys.clone();
+            keys.extend(watched);
+            keys.sort_unstable();
+            keys.dedup();
+            let before: Vec<_> = keys.iter().map(|key| env.svm.get_account(key)).collect();
+            let failure = env
+                .svm
+                .send_transaction(tx)
+                .expect_err("invalid close accounts");
+            assert_eq!(failure.err, TransactionError::InstructionError(2, expected));
+            for (key, mut account) in keys.into_iter().zip(before) {
+                if key == env.payer.pubkey() {
+                    account.as_mut().unwrap().lamports -= fee;
+                }
+                assert_eq!(env.svm.get_account(&key), account, "close rollback {key}");
+            }
+            failure.meta.compute_units_consumed
+        };
+        for (token_key, error) in [
+            (env.vault, PercolatorError::InvalidVaultAccount),
+            (destination, PercolatorError::InvalidTokenAccount),
+        ] {
+            let before = watched.map(|key| env.svm.get_account(&key));
+            bounded(
+                "public terminal freeze",
+                send_raw_tx(
+                    &mut env.svm,
+                    &env.payer,
+                    spl_token::instruction::freeze_account(
+                        &spl_token::ID,
+                        &token_key,
+                        &env.mint,
+                        &admin.pubkey(),
+                        &[],
+                    )
+                    .unwrap(),
+                    &[&admin],
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                TokenAccount::unpack(&env.svm.get_account(&token_key).unwrap().data)
+                    .unwrap()
+                    .state,
+                AccountState::Frozen
+            );
+            bounded(
+                "frozen terminal account rollback",
+                reject(
+                    &mut env,
+                    close.clone(),
+                    InstructionError::Custom(error as u32),
+                ),
+            );
+            bounded(
+                "public terminal thaw",
+                send_raw_tx(
+                    &mut env.svm,
+                    &env.payer,
+                    spl_token::instruction::thaw_account(
+                        &spl_token::ID,
+                        &token_key,
+                        &env.mint,
+                        &admin.pubkey(),
+                        &[],
+                    )
+                    .unwrap(),
+                    &[&admin],
+                )
+                .unwrap(),
+            );
+            assert_eq!(watched.map(|key| env.svm.get_account(&key)), before);
+        }
+
+        // The retirement mint is validated after engine normalization. These failures
+        // must preserve the normalized stock for the subsequent complete close.
+        for case in 0..5 {
+            let mut invalid = close.clone();
+            let expected = match case {
+                0 => {
+                    invalid.accounts[5] = AccountMeta::new_readonly(system_program::ID, false);
+                    InstructionError::Custom(PercolatorError::InvalidTokenProgram as u32)
+                }
+                1 => {
+                    invalid.accounts[4] = AccountMeta::new(admin.pubkey(), true);
+                    InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32)
+                }
+                2 => {
+                    invalid.accounts.pop();
+                    InstructionError::NotEnoughAccountKeys
+                }
+                3 => {
+                    invalid.accounts[8].is_writable = false;
+                    InstructionError::Custom(PercolatorError::ExpectedWritable as u32)
+                }
+                4 => {
+                    invalid.accounts[8] = AccountMeta::new(secondary_mint, false);
+                    InstructionError::InvalidArgument
+                }
+                _ => unreachable!(),
+            };
+            bounded(
+                "malformed terminal account rollback",
+                reject(&mut env, invalid, expected),
+            );
+        }
+        env.svm.expire_blockhash();
+        bounded(
+            "thawed freezable quote final close",
+            send_raw_ixs(
+                &mut env.svm,
+                &env.payer,
+                vec![
+                    heap_ix(),
+                    ComputeBudgetInstruction::set_compute_unit_limit(CU_LIMIT as u32),
+                    close,
+                ],
+                &[&admin],
+            )
+            .unwrap(),
+        );
+        let tombstone = env.svm.get_account(&env.market).unwrap();
+        assert_closed_market_tombstone(&tombstone);
+        let rent = env
+            .svm
+            .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
+        assert_eq!(tombstone.lamports, rent);
+        let mut expected = frame;
+        let primary_account = expected[1].as_mut().unwrap();
+        let mut mint = primary_state;
+        mint.supply = SURPLUS;
+        Mint::pack(mint, &mut primary_account.data).unwrap();
+        for (index, amount) in [(5, SURPLUS), (6, SECONDARY)] {
+            let account = expected[index].as_mut().unwrap();
+            let mut token = TokenAccount::unpack(&account.data).unwrap();
+            token.amount = amount;
+            TokenAccount::pack(token, &mut account.data).unwrap();
+        }
+        expected[7].as_mut().unwrap().lamports += expected[0].as_ref().unwrap().lamports - rent
+            + expected[3].as_ref().unwrap().lamports
+            + expected[4].as_ref().unwrap().lamports;
+        for index in [1, 2, 5, 6, 7, 8] {
+            assert_eq!(env.svm.get_account(&watched[index]), expected[index]);
+        }
+        for vault in [env.vault, secondary_vault] {
+            assert!(env.svm.get_account(&vault).is_none_or(
+                |account| account.lamports == 0 && account.data.iter().all(|byte| *byte == 0)
+            ));
+        }
+        println!("INV-070/077 freezable quote: fixed_supply={fixed_supply}, retired={BACKING}, surplus={SURPLUS}/{SECONDARY}, exact_rejections=7, close_calls=2, peak_CU={peak_cu}");
+    }
+}
 
 #[test]
 fn v16_program_dual_quote_provider_expiry_has_bounded_terminal_disposition() {

@@ -23,6 +23,11 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN
 416	LoF	PRIVILEGED	INV-005	INV-005,INV-020,INV-024,INV-027,INV-055	cold-admin+x-funded-role+x-authority-containment	correctly-signed-role-management-cannot-seize-an-incumbent-funded-role	OPEN
 417	LoF	BLOCKER	INV-067	INV-010,INV-024,INV-029,INV-063,INV-066,INV-067,INV-068,INV-070	receipt+x-late-expiry+x-claimant-order	terminal-claim-identity-survives-every-later-stock-reclassification	OPEN
+# Row 418 partial conformance (2026-09-10): cu/inv_077_terminal_quote_variants.rs,
+# v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent.
+# Public freezable SPL primary custody, mintable/fixed supply: expired backing survives
+# frozen-account and malformed-close rejection exactly; thaw permits bounded retirement,
+# both surplus payouts and exact rent. Cooperative thaw only; no generic closure/status promotion.
 418	DoS	BLOCKER	INV-070	INV-018,INV-021,INV-025,INV-069,INV-070,INV-073,INV-077,INV-078,INV-081	token-variant+x-terminal-stock+x-close	all-supported-quote-token-variants-have-a-bounded-terminal-disposition	OPEN
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,

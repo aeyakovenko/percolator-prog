@@ -7963,6 +7963,81 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## Row 418 freezable quote terminal retry (2026-09-10)
+
+[`cu/inv_077_terminal_quote_variants.rs`](cu/inv_077_terminal_quote_variants.rs) adds
+`v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent`, mounted
+under `inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants`.
+Two public LiteSVM/SBF worlds cross retained/revoked primary mint authority with a
+retained SPL freeze authority. System, ATA, SPL and wrapper instructions create
+the accounts, admit the freezable primary mint beside a plain SPL secondary mint,
+fund 307 primary backing atoms and donate 17 primary plus 19 secondary surplus atoms.
+No program-owned or token account bytes are injected or edited.
+
+After resolution and expiry, the first successful `CloseSlab` normalizes the backing
+without moving custody, mint supply, rent or unrelated account state. Public SPL
+instructions then freeze and thaw the primary vault and primary destination in turn.
+Each frozen close rejects with its exact `InvalidVaultAccount` or `InvalidTokenAccount`
+error, and each thaw restores the full pre-freeze account frame. Five additional
+close shapes reject exactly: an executable alternate program in the token-program
+slot, a System wallet as token destination, and missing, readonly or wrong retirement
+mint accounts. The latter three preserve the terminal stock across validation after
+engine normalization. Every rejection frames all compiled transaction accounts and
+all nine tracked market/mint/token/authority accounts, allowing only the separately
+calculated signature fee to leave the network payer.
+
+The second successful `CloseSlab` retires exactly 307 atoms even with mint authority
+revoked, pays 17/19 atoms to the respective destinations, closes both canonical vaults,
+and preserves primary freeze authority and secondary supply. Complete mint, destination,
+authority and rent frames require only the typed market tombstone at exact rent.
+Stock and encumbrance censuses bind the normalized backing independently of engine
+transition helpers. Every measured setup, freeze/thaw, rejection and close is bounded
+by 150,000 CU; each close transaction also installs that compute limit.
+
+The existing provider/expiry and capacity witnesses have no freeze authority. The
+INV-018 frozen-withdrawal check injects token state and does not compose public
+freeze/thaw with booked terminal stock, retirement-mint validation or slab destruction.
+Prefix reuse concerns asset generations and does not cover this token lifecycle.
+This is a **partial** INV-070/018/021/025/069/073/077/078/081 conformance increment.
+**Row 418 remains OPEN**, with all invariant verdicts unchanged. Cooperative thaw is
+required; absent or uncooperative freeze authorities, native-primary booked retirement,
+Token-2022 extensions, arbitrary histories, receipts and maximum-capacity products
+remain outside this witness. It is not a generic invariant-owned generator/oracle.
+
+Validation starts from local HEAD `6baf0bdcd92178b71eb0edac21849fcbe1111c89` in
+`/tmp/codex-agent-worktrees/percolator-row418-terminal-quote-20260910`, branch
+`codex/row418-terminal-quote-20260910`. A fresh default-feature locked/offline SBF
+build with platform-tools v1.52 has SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new exact selector passes **1/1**, covering **2/2 worlds and 14 exact rejections**
+in 0.77s, with peaks **46,178/50,625 CU**. The first host compile required a missing
+test import correction; no runtime conformance failure was observed.
+The four nearby exact controls pass **4/4** in 7.11s and the invariant index passes
+**1/1**. Repository-wide formatting, working/staged whitespace and committed-diff
+checks pass. Only this test file, the README and the partial-coverage ledger note
+change; production code and Cargo pins are unchanged. Existing host dead-code and
+Solana future-compatibility warnings remain.
+
+Exact commands from that isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row418-terminal-quote-20260910-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_dual_quote_provider_expiry_has_bounded_terminal_disposition \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_prefix_reuse::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_public_destination_delegation_is_route_scoped_and_revocation_restores_payout
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## Row 418 dual-rail provider expiry and retirement (2026-09-10)
 
 [`cu/inv_077_terminal_quote_variants.rs`](cu/inv_077_terminal_quote_variants.rs) adds
