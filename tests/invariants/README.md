@@ -3,6 +3,77 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-073 absent provider and operator through ordered terminal exits (2026-09-10)
+
+[`cu/inv_067_terminal_provider_insurance_retries.rs`](cu/inv_067_terminal_provider_insurance_retries.rs)
+adds `v16_program_absent_provider_preserves_user_order_and_operator_free_insurance_exit`.
+It shares the existing cooperative reserve-retry setup and runs two public LiteSVM/SBF
+histories with opposite user payout orders. System/SPL/ATA/wrapper instructions create
+and fund all protocol accounts; signer SOL, Clock and blockhashes are harness inputs.
+The mint authority is revoked. Asset 1 has 401 provider atoms, 204 insurance atoms
+split 101/103 between its domains, and a real 100-atom trading gain against two
+1,000-atom user deposits. Asset 0 holds another 1,000 insurance atoms.
+
+After resolution, both the provider and the distinct insurance operator keypairs are
+dropped. An unsigned provider withdrawal rejects with `ExpectedSigner` and exact
+rollback. At the owner-timeout boundary, the fee payer alone disposes both user claims.
+Each successful call strictly decreases `(remaining user legs, unpaid user entitlement)`;
+both claimant orders reach rank `(0, 0)` and exact payouts 1,100/900 in respectively
+three/two calls, within the enforced 16-call bound. Unrelated Accounts remain exact,
+including reserve owners and the other user's portfolio and destination. Both trading
+legs and user economic stocks are zero before the owners sign mechanical deletion.
+
+Terminal provider backing has a positive consumed-lien history and exactly 401 fresh
+atoms after consumption and replenishment. The insurance beneficiary's 204-atom payout
+then precedes either an unsigned provider withdrawal or an administrator-signed provider
+withdrawal to the administrator's valid destination. Each bundle proves one wrapper and
+one SPL success before the suffix rejects with `ExpectedSigner`/`Unauthorized`.
+Every tracked and compiled Account rolls back exactly, including metadata and lamports;
+the payer loses only the independently calculated signature fee. The unchanged insurance
+payment then succeeds with only the beneficiary and payer signatures. The asset-0 insurance
+recipient also withdraws its exact 1,000 atoms. Both insurance exits preserve the complete
+provider bucket array. Final custody is exactly 401 attributed provider atoms, with zero
+user capital, positive PnL, insurance, provider earnings and materialized portfolios.
+Fixed mint supply and all five token destinations reconcile after every economic call.
+
+The distinct relation is an unavailable provider retaining replenished terminal principal
+while both user orders and other reserve claimants complete, including rollback of an
+actual insurance payment followed by the unavailable/wrong provider route. The cooperative
+control withdraws both reserves and closes the slab; the DrainOnly control leaves idle
+reserves after one user order. Provider-earnings/slab-close and former-beneficiary-ledger
+tests retain their own coverage. This is bounded evidence adjacent to
+INV-018/021/064/067/070/071/073/078/082. **Rows 420/421 remain OPEN**: the current
+beneficiary signs insurance payment, owners sign empty-portfolio deletion, and final slab
+retirement is not exercised. Provider earnings, missing current beneficiaries, spent
+insurance, expiry/reclassification, receipts, alternate quote rails, maximum shapes and
+arbitrary role/claimant histories remain outside this witness. No status is advanced.
+
+Validation uses a fresh locked/offline default-feature SBF build from base
+`6215550c184d6ac51ddd7ff93c82b0b6689aa58d` in private worktree
+`/dev/shm/percolator-pr135-signer-absence-20260910`, with engine `394fd0bf` and
+platform-tools v1.52. SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new exact selector passes both histories and all six exact rollbacks, with peak
+330,362 CU. Individual calls retain the 300,000-CU custody bound; two-instruction
+rollback bundles use the existing adjacent test's 500,000-CU bound. Draft corrections
+gave the wrong signer its own valid token destination and applied the bundle bound
+to bundled work. No production inconsistency was observed.
+Both adjacent exact selectors, the charter/index check, repository-wide formatting,
+and both whitespace checks pass. Production, dependency and invariant-status files
+are unchanged; no broad suite or external PR material was used.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR="$PWD"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_BUILD_JOBS=4 cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_absent_provider_preserves_user_order_and_operator_free_insurance_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements inv_073_no_permanent_user_lock::v16_program_drain_only_stale_exit_does_not_require_reserve_or_counterparty_signers
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-045 pending fractional carry through due trade and resolution (2026-09-10)
 
 [`cu/inv_045_no_free_mark_movement.rs`](cu/inv_045_no_free_mark_movement.rs) adds
