@@ -4602,6 +4602,80 @@ new witnesses. It remains an inherited metadata/review gap, not a changed gate o
 a passing certification. Formatting and diff checks pass. The initial two-test
 development selector also passed (79.23s) before retries moved ahead of the final
 completion schedule; final results above include the stronger unresolved retries.
+## INV-008 fee-shortened withdrawal intent (row 415, 2026-09-10)
+
+`withdrawal_stock_history::v16_program_fee_shortened_withdrawal_consumes_intent_before_passive_replenishment`
+in [`cu/inv_008_withdrawal_stock_history.rs`](cu/inv_008_withdrawal_stock_history.rs)
+adds one public LiteSVM axis: **successful fee-shortened withdraw-all + passive
+capital replenishment + consumed-intent retry**. A nonzero signed withdrawal
+that pays less than its requested amount still consumes the entire authorization,
+including when maintenance consumes all initial capital and the SPL payout is zero.
+The unpaid token amount is not a residual authorization against later capital.
+
+The existing generated stock histories first pay the complete requested amount;
+their half payouts are separately authorized requests. The passive-reward sibling
+explicitly has no recipient elapsed fee. INV-088's account-local fee-cursor test
+checks withdraw-all net of maintenance but has no consumed retry after new capital.
+This test joins those previously separate guarantees at the actual fee-shortening
+boundary. It adds no insurance withdrawal or trade-route replay matrix.
+
+Three worlds sign withdrawals of 22/23/29 atoms. Each first books 22 atoms of
+maintenance and pays 0/1/7 atoms, leaving zero capital and advancing the owner
+sequence exactly once. A separate portfolio later credits 33 atoms through
+permissionless maintenance rewards, preserving recipient sequence, identity,
+position epoch, and all SPL balances. Frozen, signature-distinct requests signed
+and successfully simulated before the first execution must still reject with
+`EngineStale`. The same original amount and destination are payable with fresh
+consent; two fresh withdrawals discharge exactly the 33 new atoms.
+
+An insufficient-funds SPL suffix first rolls back the successful fee-shortened
+execution, including its fee cursor and sequence, leaving the unchanged request
+usable. This checks both a real token-transfer prefix and the zero-payout prefix
+without a token CPI. Both reward/stale-request bundle orders also roll back exactly.
+The shared transaction checker frames all fixture and compiled non-payer accounts,
+checks the exact failing instruction and completed wrapper/SPL prefixes, and accounts
+for the payer's signature fee separately. An input-derived oracle checks capital,
+fees, reward attribution, payouts, custody, supply, identity/sequence/fee cursors,
+control watermarks, and an untouched funded owner after every submitted transaction.
+Public System/SPL/ATA/wrapper instructions construct all economic state; mint authority
+is revoked before the history. Clock and signer SOL are harness-supplied.
+
+This is bounded coverage for one Live SPL market, a fixed maintenance policy, and
+flat portfolios. **Row 415 remains OPEN**: insurance's signed-stock binding and
+general retained withdrawals across stock reclassification remain unverified.
+Production, dependency pins, and invariant/status ledgers are unchanged. Evidence
+comes only from local source, invariant docs, and tests in the isolated worktree
+`/home/anatoly/worktrees/pr135-row415-retained-withdrawal-20260910`.
+
+Validation uses an offline SBF build from this worktree with platform-tools v1.52
+and the existing engine pin. Build dependencies were copied into a private target;
+the wrapper and host tests were compiled locally. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+
+The exact new selector passes 1/1: three worlds, 30 submitted transactions,
+15 exact stale rollbacks, and three late SPL rollbacks. Its maximum measured CU
+is 112,136 against the enforced 300,000 ceiling. The complete INV-008 CU selector
+passes 10/10, and the four adjacent selectors below each pass 1/1. Existing
+`solana-client v1.18.26` future-incompatibility warnings remain. No full suite or
+engine proof was run.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-row415-retained-withdrawal-20260910-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm CARGO_NET_OFFLINE=true
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::withdrawal_stock_history::v16_program_fee_shortened_withdrawal_consumes_intent_before_passive_replenishment -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay:: -- --nocapture
+cargo test --locked --offline --test v16_cu inv_088_global_summaries_are_not_account_local_proofs::account_fee_cursors::v16_program_withdraw_fee_cursor_is_account_local_after_reward_and_global_clock_touches -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_liquidation_spent_insurance_cannot_be_withdrawn_again -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_064_insurance_withdrawal_policy_equivalence::v16_program_insurance_withdrawal_schedules_preserve_asset_allowance_and_exact_retry -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code -- src Cargo.toml Cargo.lock tests/invariants/coverage_reopenings.tsv tests/invariants/invariant_status.tsv
+```
+
 ## INV-005/024/027 funded backing succession (rows 410/416, 2026-09-09)
 
 [`cu/inv_005_funded_backing_succession.rs`](cu/inv_005_funded_backing_succession.rs),

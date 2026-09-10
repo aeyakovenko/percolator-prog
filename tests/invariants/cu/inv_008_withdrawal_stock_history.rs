@@ -1,6 +1,8 @@
 //! INV-008 / row415: consumed withdrawals cannot acquire later-created stock.
 //! Generated histories mix capital replenishment, custody-only replenishment, partial payouts,
 //! and late transaction failure. WithdrawInsuranceAsset's open stock binding is not certified.
+//! Fee-shortened withdraw-all also consumes the entire request, including when fees leave no
+//! SPL payout; later passive rewards cannot fund the apparent unspent signed amount.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -140,6 +142,336 @@ fn checked_send(
     );
     evidence.max_cu = evidence.max_cu.max(meta.compute_units_consumed);
     evidence.transactions += 1;
+}
+
+#[test]
+fn v16_program_fee_shortened_withdrawal_consumes_intent_before_passive_replenishment() {
+    const BIRTHS: [u64; 3] = [0, 1, 1];
+    const EXIT_SLOT: u64 = 3;
+    const SUBJECT: usize = 1;
+    const OWN_FEE: u64 = (EXIT_SLOT - BIRTHS[SUBJECT]) * RATE;
+    const REWARD: u64 = (EXIT_SLOT - BIRTHS[0]) * RATE;
+    let mut evidence = Evidence::default();
+
+    for first_payout in [0, 1, 7] {
+        let initial = OWN_FEE + first_payout;
+        let principals = [101, initial, BYSTANDER];
+        let supply = principals.iter().sum::<u64>();
+        let mut env = inv018_public_spl_market_with_params(
+            6,
+            V16CuMarketParams {
+                maintenance_fee_per_slot: RATE.into(),
+                ..V16CuMarketParams::default()
+            },
+        );
+        env.update_maintenance_fee_policy_with_cu(10_000);
+        let owners: [Keypair; 3] = std::array::from_fn(|_| Keypair::new());
+        let mut portfolios = [Pubkey::default(); 3];
+        let mut tokens = [Pubkey::default(); 3];
+        for actor in 0..3 {
+            env.svm.warp_to_slot(BIRTHS[actor]);
+            env.svm
+                .airdrop(&owners[actor].pubkey(), 1_000_000_000)
+                .unwrap();
+            let portfolio = Keypair::new();
+            system_create_account_for_test(
+                &mut env.svm,
+                &env.payer,
+                &portfolio,
+                env.portfolio_account_len,
+                env.program_id,
+            );
+            portfolios[actor] = portfolio.pubkey();
+            env.send(
+                ProgInstruction::InitPortfolio,
+                vec![
+                    AccountMeta::new(owners[actor].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[actor], false),
+                ],
+                &[&owners[actor]],
+            )
+            .expect("public portfolio initialization");
+            tokens[actor] =
+                create_ata_for_test(&mut env.svm, &env.payer, owners[actor].pubkey(), env.mint);
+            send_raw_tx(
+                &mut env.svm,
+                &env.payer,
+                spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &env.mint,
+                    &tokens[actor],
+                    &env.admin.pubkey(),
+                    &[],
+                    principals[actor],
+                )
+                .unwrap(),
+                &[&env.admin],
+            )
+            .unwrap();
+            env.send(
+                env.deposit_ix(portfolios[actor], principals[actor].into()),
+                vec![
+                    AccountMeta::new(owners[actor].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[actor], false),
+                    AccountMeta::new(tokens[actor], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owners[actor]],
+            )
+            .expect("finite public collateral deposit");
+        }
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::set_authority(
+                &spl_token::ID,
+                &env.mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                &env.admin.pubkey(),
+                &[],
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .unwrap();
+        env.svm.warp_to_slot(EXIT_SLOT);
+        let mint_before = env.svm.get_account(&env.mint).unwrap();
+        let mint = Mint::unpack(&mint_before.data).unwrap();
+        assert_eq!(mint.supply, supply);
+        assert_eq!(mint.mint_authority, COption::None);
+        let ids = portfolios.map(|key| env.portfolio_id(key));
+        let epochs = portfolios.map(|key| env.portfolio_position_epoch(key));
+        let controls = env.control_sequences(0);
+        let untouched = [portfolios[2], tokens[2]].map(|key| (key, env.svm.get_account(&key)));
+        let owner_accounts = owners
+            .each_ref()
+            .map(|owner| env.svm.get_account(&owner.pubkey()));
+        let frame: Vec<_> = portfolios
+            .into_iter()
+            .chain(tokens)
+            .chain(owners.iter().map(Signer::pubkey))
+            .chain([env.market, env.vault, env.mint, env.admin.pubkey()])
+            .collect();
+        let check = |env: &V16CuEnv, executions: u64, credited: bool, paid: u64| {
+            let fee = if executions > 0 { OWN_FEE } else { 0 };
+            let reward = if credited { REWARD } else { 0 };
+            let capital = [
+                principals[0] - reward,
+                initial - fee + reward - paid,
+                BYSTANDER,
+            ];
+            for actor in 0..3 {
+                let p = env.portfolio_state(portfolios[actor]);
+                assert_eq!(p.capital.get(), u128::from(capital[actor]));
+                assert_eq!(p.pnl.get(), 0);
+                assert!(p.active_bitmap.iter().all(|word| word.get() == 0));
+                assert_eq!(env.portfolio_id(portfolios[actor]), ids[actor]);
+                assert_eq!(
+                    env.portfolio_position_epoch(portfolios[actor]),
+                    epochs[actor]
+                );
+                assert_eq!(
+                    env.portfolio_matcher_sequence(portfolios[actor]),
+                    1 + if actor == SUBJECT { executions } else { 0 }
+                );
+                assert_eq!(
+                    p.last_fee_slot.get(),
+                    if (actor == SUBJECT && executions > 0) || (actor == 0 && credited) {
+                        EXIT_SLOT
+                    } else {
+                        BIRTHS[actor]
+                    }
+                );
+                assert_eq!(
+                    env.token_amount(tokens[actor]),
+                    if actor == SUBJECT { paid } else { 0 }
+                );
+                assert_eq!(
+                    env.svm.get_account(&owners[actor].pubkey()),
+                    owner_accounts[actor]
+                );
+            }
+            let group = env.market_state().1;
+            assert_eq!(group.mode, MarketModeV16::Live);
+            assert_eq!(group.c_tot, u128::from(capital.iter().sum::<u64>()));
+            assert_eq!(group.insurance, u128::from(fee));
+            assert_eq!(group.pnl_pos_tot, 0);
+            assert_eq!(group.vault, u128::from(supply - paid));
+            assert_eq!(group.vault, group.c_tot + group.insurance);
+            assert_eq!(env.token_amount(env.vault), supply - paid);
+            assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
+            assert_eq!(env.control_sequences(0), controls);
+            assert_domain_budget_remaining_total_consistent(&group, "fee-shortened withdrawal");
+            for (key, before) in &untouched {
+                assert_eq!(env.svm.get_account(key), *before);
+            }
+        };
+        let (program_id, market, vault, vault_authority) =
+            (env.program_id, env.market, env.vault, env.vault_authority);
+        let withdrawal = |sequence, amount: u64| Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(owners[SUBJECT].pubkey(), true),
+                AccountMeta::new(market, false),
+                AccountMeta::new(portfolios[SUBJECT], false),
+                AccountMeta::new(tokens[SUBJECT], false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new_readonly(vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ProgInstruction::Withdraw {
+                portfolio_id: ids[SUBJECT],
+                expected_sequence: sequence,
+                amount: amount.into(),
+            }
+            .encode(),
+        };
+        let original = withdrawal(1, initial);
+        let retained: Vec<_> = (1..=4)
+            .map(|nonce| signed(&env, &owners[SUBJECT], &[original.clone()], nonce))
+            .collect();
+        assert_eq!(
+            retained
+                .iter()
+                .map(|tx| tx.signatures[0])
+                .collect::<BTreeSet<_>>()
+                .len(),
+            4
+        );
+        for tx in &retained {
+            env.svm
+                .simulate_transaction(tx.clone().into())
+                .expect("nonzero signed withdraw-all is initially admissible");
+        }
+        let fail = spl_token::instruction::transfer(
+            &spl_token::ID,
+            &tokens[SUBJECT],
+            &vault,
+            &owners[SUBJECT].pubkey(),
+            &[],
+            u64::MAX,
+        )
+        .unwrap();
+        let stale = InstructionError::Custom(PercolatorError::EngineStale as u32);
+        let mut nonce = 100;
+        let mut send =
+            |env: &mut V16CuEnv, ixs: &[Instruction], expected, evidence: &mut Evidence| {
+                nonce += 1;
+                let tx = signed(env, &owners[SUBJECT], ixs, nonce);
+                checked_send(env, tx, &frame, expected, evidence);
+            };
+        check(&env, 0, false, 0);
+        send(
+            &mut env,
+            &[original.clone(), fail],
+            Some((
+                1,
+                InstructionError::Custom(spl_token::error::TokenError::InsufficientFunds as u32),
+                [1, usize::from(first_payout > 0)],
+            )),
+            &mut evidence,
+        );
+        evidence.late_failures += 1;
+        check(&env, 0, false, 0);
+        checked_send(&mut env, retained[0].clone(), &frame, None, &mut evidence);
+        check(&env, 1, false, first_payout);
+        assert!(
+            first_payout < initial,
+            "successful withdraw-all leaves an apparent signed residual"
+        );
+        assert_eq!(env.portfolio_state(portfolios[SUBJECT]).capital.get(), 0);
+        checked_send(
+            &mut env,
+            retained[1].clone(),
+            &frame,
+            Some((0, stale.clone(), [0, 0])),
+            &mut evidence,
+        );
+        evidence.stale += 1;
+        check(&env, 1, false, first_payout);
+
+        let credit = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(market, false),
+                AccountMeta::new(portfolios[0], false),
+                AccountMeta::new(portfolios[SUBJECT], false),
+            ],
+            data: ProgInstruction::SyncMaintenanceFee {
+                now_slot: EXIT_SLOT,
+            }
+            .encode(),
+        };
+        for credit_first in [false, true] {
+            let (ixs, index, successes) = if credit_first {
+                (vec![credit.clone(), original.clone()], 1, [1, 0])
+            } else {
+                (vec![original.clone(), credit.clone()], 0, [0, 0])
+            };
+            send(
+                &mut env,
+                &ixs,
+                Some((index, stale.clone(), successes)),
+                &mut evidence,
+            );
+            evidence.stale += 1;
+            check(&env, 1, false, first_payout);
+        }
+        let custody = tokens
+            .into_iter()
+            .chain([vault, env.mint])
+            .map(|key| (key, env.svm.get_account(&key)))
+            .collect::<Vec<_>>();
+        send(&mut env, &[credit], None, &mut evidence);
+        check(&env, 1, true, first_payout);
+        for (key, before) in custody {
+            assert_eq!(env.svm.get_account(&key), before);
+        }
+        assert!(
+            REWARD > initial,
+            "new capital can fund the complete original request"
+        );
+        let fresh = withdrawal(2, initial);
+        let fresh_tx = signed(&env, &owners[SUBJECT], &[fresh.clone()], 50);
+        env.svm
+            .simulate_transaction(fresh_tx.into())
+            .expect("same amount and destination are payable with fresh consent");
+        checked_send(
+            &mut env,
+            retained[2].clone(),
+            &frame,
+            Some((0, stale.clone(), [0, 0])),
+            &mut evidence,
+        );
+        evidence.stale += 1;
+        check(&env, 1, true, first_payout);
+        send(&mut env, &[fresh], None, &mut evidence);
+        check(&env, 2, true, first_payout + initial);
+        send(
+            &mut env,
+            &[withdrawal(3, REWARD - initial)],
+            None,
+            &mut evidence,
+        );
+        check(&env, 3, true, first_payout + REWARD);
+        checked_send(
+            &mut env,
+            retained[3].clone(),
+            &frame,
+            Some((0, stale, [0, 0])),
+            &mut evidence,
+        );
+        evidence.stale += 1;
+        check(&env, 3, true, first_payout + REWARD);
+    }
+    assert_eq!(evidence.transactions, 30);
+    assert_eq!(evidence.stale, 15);
+    assert_eq!(evidence.late_failures, 3);
+    eprintln!("INV-008 fee-shortened withdrawal: 3 worlds, 30 transactions, 15 stale rollbacks, 3 late SPL rollbacks, max CU={}", evidence.max_cu);
 }
 
 fn run_history(history: &History) -> Evidence {
