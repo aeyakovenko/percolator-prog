@@ -74,6 +74,65 @@ rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/i
 git diff --check
 ```
 
+## INV-070 retained terminal withdrawal after cursor progress (2026-09-10)
+
+[`cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs`](cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs)
+adds `v16_program_retained_terminal_withdrawal_revalidates_expiry_after_scan_and_partial_payout`.
+Two public System/SPL/ATA/wrapper histories fund 17 atoms at asset 0, expiring at
+slot 10, and 31 atoms at asset 1, expiring at slot 20. After resolution, `CloseSlab`
+normalizes the earlier bucket and persists cursor `0 -> 1`. A provider withdrawal
+then pays 13 atoms from the later bucket without moving that cursor.
+
+At slot 19, a signed transaction containing the remaining 18-atom withdrawal and
+`CloseSlab` simulates successfully, with two wrapper successes and no account
+mutation. One history delivers it immediately: the provider has exactly 31 atoms
+and exactly the earlier 17 atoms burn. The other advances only authenticated Clock
+to slot 20 and delivers the identical serialized transaction, signatures and
+blockhash. Despite the stored Fresh tag and engine slot 10, withdrawal rejects
+with exact `EngineStale` at instruction 2. Every compiled transaction account
+rolls back exactly except the independently calculated payer signature fee.
+
+The rejected history keeps cursor 1, the earlier residue and the completed
+13-atom payout. Two bounded `CloseSlab` calls then expire the remaining 18 atoms
+and burn exactly 35. Expiry leaves the complete earlier asset slot byte-identical
+and moves no SPL stock or mint supply. Both endpoints check full provider-token
+and mint account frames, closed vault, typed tombstone, and exact vault/market
+rent refund. Input-derived per-domain stock, aggregate custody and existing stock
+and encumbrance censuses run at every committed economic checkpoint.
+
+The new relation is a previously executable signed terminal transaction becoming
+stale after persisted scan progress and a committed partial provider payout.
+The INV-063 principal-expiry matrix has live trader claims and no slab cursor;
+row 424's cursor witness has no retained provider withdrawal; mixed-maturity
+residue keeps its provider withdrawal fresh throughout. This adds no reuse,
+provider earnings, insurance-recredit, or read-contract test. It is sampled
+INV-024/025/063/069/070/071/088 evidence adjacent to row 424, not a finding or
+closure claim. Earlier-slot actionability changes behind the cursor, insurance
+spend/liens, user claims/receipts, other quote rails, maximum shapes and arbitrary
+histories remain outside this two-asset witness. The provider and market authority
+participate; no permissionless administrative cleanup is claimed. Row 424 and
+all invariant statuses remain unchanged. No production inconsistency was observed.
+
+Validation uses a fresh default-feature SBF built locked/offline in private
+worktree `/dev/shm/inv070-cursor-time-coverage-20260910`, branch
+`codex/inv070-cursor-time-coverage-20260910`, based at
+`826bac3d142f4ee9db86fbcaf7dd1a11859f4c7d`. Engine pin: `394fd0bf`.
+Program SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+No matcher or program-owned byte mutation is used. The new test passed both
+histories (peak 54,084 / 63,084 CU, asserted below 150,000); both adjacent tests
+passed. The invariant index and targeted formatting/whitespace checks passed.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_BUILD_JOBS=4 cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$PWD/target/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_retained_terminal_withdrawal_revalidates_expiry_after_scan_and_partial_payout -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_071_crank_progress::terminal_cursor_time::v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs
+git diff --check
+```
+
 ## INV-028 lien-backed admission and new-domain settlement (2026-09-10)
 
 [`stateful/inv_028_source_domain_realizability_cap.rs`](stateful/inv_028_source_domain_realizability_cap.rs)

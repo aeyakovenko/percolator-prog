@@ -32,6 +32,326 @@ use super::*;
 mod mixed_maturity;
 
 #[test]
+fn v16_program_retained_terminal_withdrawal_revalidates_expiry_after_scan_and_partial_payout() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_capacity;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const EARLIER: u64 = 17;
+    const LATER: u64 = 31;
+    const PAID: u64 = 13;
+    const EXPIRY: u64 = 20;
+    const SUPPLY: u64 = EARLIER + LATER;
+    const CU_LIMIT: u64 = 150_000;
+
+    for landing_slot in [EXPIRY - 1, EXPIRY] {
+        let mut env = inv018_public_spl_market_with_capacity(0, V16CuMarketParams::default(), 2);
+        let admin = env.admin.insecure_clone();
+        env.activate_asset(1, 1, 100);
+        let provider = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &provider,
+                &admin.pubkey(),
+                &[],
+                SUPPLY,
+            )
+            .unwrap(),
+            &[&admin],
+        )
+        .unwrap();
+        env.svm.warp_to_slot(1);
+        env.top_up_backing_bucket_from_admin_token_with_cu(provider, 0, EARLIER.into(), 10);
+        env.top_up_backing_bucket_from_admin_token_with_cu(provider, 3, LATER.into(), EXPIRY);
+        env.svm.warp_to_slot(9);
+        env.resolve();
+
+        let close = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(provider, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.mint, false),
+            ],
+            data: ProgInstruction::CloseSlab {
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            }
+            .encode(),
+        };
+        let send_close = |env: &mut V16CuEnv| {
+            env.svm.expire_blockhash();
+            let cu = send_raw_ixs(
+                &mut env.svm,
+                &env.payer,
+                vec![heap_ix(), cu_ix(), close.clone()],
+                &[&admin],
+            )
+            .unwrap();
+            assert_cu_within("INV-070 retained terminal close", cu, CU_LIMIT);
+            cu
+        };
+        let stock = |env: &V16CuEnv, fresh: [u64; 2], paid: u64, cursor: u128| {
+            let (cfg, group) = env.market_state();
+            let market = env.svm.get_account(&env.market).unwrap();
+            assert_eq!(cfg.terminal_slab_scan_progress, cursor);
+            assert_eq!(group.mode, MarketModeV16::Resolved);
+            assert_eq!(
+                (
+                    group.materialized_portfolio_count,
+                    group.c_tot,
+                    group.insurance
+                ),
+                (0, 0, 0)
+            );
+            assert_eq!(group.vault, u128::from(SUPPLY - paid));
+            assert_eq!(env.token_amount(env.vault), SUPPLY - paid);
+            assert_eq!(env.token_amount(provider), paid);
+            assert_eq!(
+                Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+                    .unwrap()
+                    .supply,
+                SUPPLY
+            );
+            for domain in 0..4 {
+                let atoms = match domain {
+                    0 => fresh[0],
+                    3 => fresh[1],
+                    _ => 0,
+                };
+                let bucket = group.source_backing_buckets[domain];
+                let source = group.source_credit[domain];
+                assert_eq!(
+                    bucket.fresh_unliened_backing_num,
+                    u128::from(atoms) * BOUND_SCALE
+                );
+                assert_eq!(
+                    source.fresh_reserved_backing_num,
+                    u128::from(atoms) * BOUND_SCALE
+                );
+                assert_eq!(
+                    (
+                        bucket.utilization_fee_earnings,
+                        source.positive_claim_bound_num,
+                        source.valid_liened_backing_num
+                    ),
+                    (0, 0, 0)
+                );
+            }
+            crate::support::fuzz_model::assert_market_stock_census(
+                "INV-070 retained terminal withdrawal",
+                &group,
+                &market.data,
+                &[],
+                u128::from(SUPPLY - paid),
+            )
+            .unwrap();
+            crate::support::fuzz_model::assert_reservation_encumbrance_census(
+                "INV-070 retained terminal withdrawal",
+                &group,
+                &[],
+            )
+            .unwrap();
+        };
+        stock(&env, [EARLIER, LATER], 0, 0);
+
+        // Normalize the earlier stock, commit a scan past it, then pay only part of the live bucket.
+        env.svm.warp_to_slot(10);
+        let mut peak_cu = send_close(&mut env);
+        stock(&env, [0, LATER], 0, 0);
+        assert_eq!(
+            env.market_state().1.source_backing_buckets[0].status,
+            BackingBucketStatusV16::Expired
+        );
+        peak_cu = peak_cu.max(send_close(&mut env));
+        stock(&env, [0, LATER], 0, 1);
+        peak_cu = peak_cu.max(env.withdraw_backing_bucket_to_admin_token_with_cu(
+            provider,
+            3,
+            PAID.into(),
+        ));
+        stock(&env, [0, LATER - PAID], PAID, 1);
+        let slot_start =
+            MARKET_GROUP_OFF + std::mem::size_of::<percolator::MarketGroupV16HeaderAccount>();
+        let slot_end =
+            slot_start + std::mem::size_of::<percolator::Market<state::AssetOracleStorageV16>>();
+        let earlier_slot =
+            env.svm.get_account(&env.market).unwrap().data[slot_start..slot_end].to_vec();
+        let prefix_market = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(env.market_state().1.current_slot, 10);
+
+        let withdraw = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(provider, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ProgInstruction::WithdrawBackingBucket {
+                domain: 3,
+                market_id: env.asset_market_id(1),
+                authority_epoch: env.withdrawal_authority_epoch(admin.pubkey(), 1, false),
+                amount: (LATER - PAID).into(),
+            }
+            .encode(),
+        };
+        env.svm.warp_to_slot(EXPIRY - 1);
+        env.svm.expire_blockhash();
+        let retained = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), withdraw, close.clone()],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &admin],
+            env.svm.latest_blockhash(),
+        );
+        let retained_bytes = bincode::serialize(&retained).unwrap();
+        let keys = retained.message.account_keys.clone();
+        let frame = |env: &V16CuEnv| {
+            keys.iter()
+                .map(|key| env.svm.get_account(key))
+                .collect::<Vec<_>>()
+        };
+        let before = frame(&env);
+        let preview = env
+            .svm
+            .simulate_transaction(retained.clone().into())
+            .expect("both withdrawal and final slab close are actionable before expiry");
+        assert_eq!(frame(&env), before);
+        let success_log = format!("Program {} success", env.program_id);
+        assert_eq!(
+            preview
+                .logs
+                .iter()
+                .filter(|log| **log == success_log)
+                .count(),
+            2
+        );
+        peak_cu = peak_cu.max(preview.compute_units_consumed);
+
+        // Only authenticated Clock changes between preview and delivery; signatures stay intact.
+        env.svm.warp_to_slot(landing_slot);
+        assert_eq!(env.svm.get_account(&env.market), Some(prefix_market));
+        assert_eq!(
+            env.market_state().1.source_backing_buckets[3].status,
+            BackingBucketStatusV16::Fresh
+        );
+        assert_eq!(bincode::serialize(&retained).unwrap(), retained_bytes);
+        let market_before_close = env.svm.get_account(&env.market).unwrap();
+        let vault_before_close = env.svm.get_account(&env.vault).unwrap();
+        let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
+        let mut expected_provider = env.svm.get_account(&provider).unwrap();
+        let mut expected_mint = env.svm.get_account(&env.mint).unwrap();
+        let fee = u64::from(retained.message.header.num_required_signatures)
+            * FeeStructure::default().lamports_per_signature;
+        let payer_index = keys
+            .iter()
+            .position(|key| *key == env.payer.pubkey())
+            .unwrap();
+        let mut expected_frame = before;
+        expected_frame[payer_index].as_mut().unwrap().lamports -= fee;
+        if landing_slot == EXPIRY {
+            let error = env
+                .svm
+                .send_transaction(retained)
+                .expect_err("elapsed backing cannot pay a retained principal withdrawal");
+            assert_eq!(
+                error.err,
+                TransactionError::InstructionError(
+                    2,
+                    InstructionError::Custom(PercolatorError::EngineStale as u32),
+                )
+            );
+            assert_eq!(
+                error
+                    .meta
+                    .logs
+                    .iter()
+                    .filter(|log| **log == success_log)
+                    .count(),
+                0
+            );
+            assert_eq!(
+                frame(&env),
+                expected_frame,
+                "exact rollback except the signature fee"
+            );
+            peak_cu = peak_cu.max(error.meta.compute_units_consumed);
+            stock(&env, [0, LATER - PAID], PAID, 1);
+            assert_eq!(env.market_state().1.current_slot, 10);
+
+            let provider_before_expiry = env.svm.get_account(&provider);
+            let vault_before_expiry = env.svm.get_account(&env.vault);
+            let mint_before_expiry = env.svm.get_account(&env.mint);
+            peak_cu = peak_cu.max(send_close(&mut env));
+            stock(&env, [0, 0], PAID, 1);
+            assert_eq!(env.market_state().1.current_slot, EXPIRY);
+            assert_eq!(
+                env.market_state().1.source_backing_buckets[3].status,
+                BackingBucketStatusV16::Expired
+            );
+            assert_eq!(env.svm.get_account(&provider), provider_before_expiry);
+            assert_eq!(env.svm.get_account(&env.vault), vault_before_expiry);
+            assert_eq!(env.svm.get_account(&env.mint), mint_before_expiry);
+            assert_eq!(
+                &env.svm.get_account(&env.market).unwrap().data[slot_start..slot_end],
+                earlier_slot.as_slice()
+            );
+            peak_cu = peak_cu.max(send_close(&mut env));
+        } else {
+            let result = env
+                .svm
+                .send_transaction(retained)
+                .expect("unchanged pre-expiry delivery");
+            peak_cu = peak_cu.max(result.compute_units_consumed);
+            assert_eq!(
+                result
+                    .logs
+                    .iter()
+                    .filter(|log| **log == success_log)
+                    .count(),
+                2
+            );
+        }
+
+        let paid = if landing_slot < EXPIRY { LATER } else { PAID };
+        let burned = SUPPLY - paid;
+        let mut provider_token = TokenAccount::unpack(&expected_provider.data).unwrap();
+        provider_token.amount = paid;
+        TokenAccount::pack(provider_token, &mut expected_provider.data).unwrap();
+        let mut mint = Mint::unpack(&expected_mint.data).unwrap();
+        mint.supply = SUPPLY - burned;
+        Mint::pack(mint, &mut expected_mint.data).unwrap();
+        assert_eq!(env.svm.get_account(&provider), Some(expected_provider));
+        assert_eq!(env.svm.get_account(&env.mint), Some(expected_mint));
+        let tombstone = env.svm.get_account(&env.market).unwrap();
+        assert_closed_market_tombstone(&tombstone);
+        assert_eq!(
+            tombstone.lamports,
+            env.svm
+                .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN)
+        );
+        expected_admin.lamports +=
+            market_before_close.lamports + vault_before_close.lamports - tombstone.lamports;
+        assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+        assert!(env.svm.get_account(&env.vault).is_none_or(
+            |account| account.lamports == 0 && account.data.iter().all(|byte| *byte == 0)
+        ));
+        assert_cu_within("INV-070 retained terminal history peak", peak_cu, CU_LIMIT);
+        eprintln!("INV-070 landing={landing_slot}: prior payout={PAID}, final provider={paid}, burn={burned}, peak={peak_cu} CU");
+    }
+}
+
+#[test]
 fn v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition() {
     use super::inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market;
     use crate::support::fuzz_model::{
