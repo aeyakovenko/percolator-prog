@@ -28,6 +28,9 @@
 //! withdraws provider surplus behind a retained claim, then settles two unequal winners after a
 //! second price move in both orders. An input-derived ledger checks the cap as later claims
 //! discount the shared source and loser principal debits restore backing before conversion and exit.
+//! `single_slot_admission` retains one-sided claims across 27 distinct assets. The last vacant
+//! slot admits an old asset's missing opposite domain, rejects an unrelated pair atomically,
+//! and supports exact settlement and payout without reclaiming any historical claim first.
 //!
 //! Secondary coverage: INV-030 credit-rate fail-closed behavior must still provide a terminal
 //! continuation after shared backing becomes impaired; INV-032 requires the exact account-local
@@ -48,6 +51,9 @@ mod historical_latent_capacity;
 
 #[path = "inv_028_deferred_claim_backing.rs"]
 mod deferred_claim_backing;
+
+#[path = "inv_028_single_slot_admission.rs"]
+mod single_slot_admission;
 
 #[test]
 fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {

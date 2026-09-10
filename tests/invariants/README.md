@@ -4500,6 +4500,96 @@ The final test checks exact rejection of repeated resolved closes, matching the
 existing resolved-detach witness; economic assertions were unchanged. Existing
 support dead-code and `solana-client` future-incompatibility warnings remain.
 
+## INV-028 single vacant domain admission (row 423, 2026-09-10)
+
+[`cu/inv_028_single_slot_admission.rs`](cu/inv_028_single_slot_admission.rs), mounted
+by the existing INV-028 CU owner, adds one public LiteSVM coverage axis:
+**one-sided historical claims beyond the active-asset limit, followed by admission
+with exactly one missing future domain**. The audit uses local source, invariant
+docs and test bodies in an isolated worktree at
+`/home/anatoly/worktrees/pr135-row423-admission-audit-20260910`.
+**Row 423 remains OPEN.** No invariant status, production source or dependency changes.
+
+Twenty-seven sequential public position episodes leave the same portfolios flat
+with 27 positive source records on 27 distinct assets and 54 claim atoms. One
+source slot remains vacant. An unrelated asset needs two absent domains and must
+reject with typed `InvalidInstruction`, preserving all ten tracked economic
+accounts exactly, including owners, market authority, portfolios, mint and SPL
+accounts. The separate transaction fee payer and runtime accounts are excluded.
+An opposite-side episode on an old asset needs only its one missing domain and
+must be admitted without changing portfolio identity or any historical claim.
+Its favorable one-atom mark must create exactly seven atoms in the absent domain,
+occupy the 28th record, and preserve all 27 historical claims. Both owners then
+flatten, convert the complete backed claim, withdraw exactly **1,000,061 / 999,939**
+atoms and delete their portfolios. Final principal, PnL, claims, fresh backing,
+OI, vault balance and materialized portfolio count are zero; mint supply is fixed.
+
+This differs from `historical_latent_capacity` and `concurrent_latent_capacity`,
+whose history occupies paired domains within fourteen assets and whose new assets
+need two absent domains; `retained_domain_episodes` reuses two already occupied
+domains. The existing maximum-shape cap test rejects at zero free slots, and the
+INV-077 reclamation continuation clears the complete table before reuse. Here
+**one occupied plus one absent domain** is the admission boundary, history spans
+more assets than can be active simultaneously, and no claim is reclaimed before
+the new settlement. Backing eligibility/depletion, liens and recovery/terminal
+source-lien disposition remain owned by their existing tests.
+
+Four worlds cross mirrored source sides and forward/reverse historical asset
+order. Historical settlement/payout order follows that permutation; the last
+settlement reverses it. A separate input ledger tracks exact claims, debtor
+principal debits, source backing and credit caps, matched quantity/OI, custody
+and supply after every successful post-funding call before conversion. Each
+settlement crank must strictly reduce authenticated accrual plus the distance to
+the input-derived economic endpoint, with at most four cranks per owner. Local
+settlement, conversion and payout frame the peer portfolio. System/SPL/ATA and
+wrapper instructions construct all accounts and economic state; LiteSVM supplies
+only signer funding, Clock and program loading. No program-owned state is injected.
+
+Scope is 28 configured first-generation AuthMark assets, at most one active leg,
+integral quantities, zero fees/funding/liens/external reserves, and single-leg
+no-CPI trades. Owner signatures are required for trades, conversion, withdrawal
+and deletion; only settlement cranks are permissionless. This is a bounded funded
+owner exit witness, not the full permissionless INV-073 theorem. Concurrent latent
+competition, reclamation/refill, generation reuse, fractional arithmetic, other
+resource classes, transport products and arbitrary histories remain open.
+
+Validation uses default-feature wrapper and authenticated-matcher SBF rebuilt
+offline from this worktree with platform-tools v1.52, plus locally compiled host
+tests. Engine pin: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The private target is `/dev/shm/row423-admission-audit-20260910-target`.
+Matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+No broad-suite or engine-proof run is claimed. The existing `solana-client v1.18.26`
+future-incompatibility and metadata-harness dead-code warnings remain.
+
+The new exact selector passes **1/1** (four worlds, 580 successful post-funding
+calls and four exact admission rollbacks), including a second run in **8.83s**.
+Final-run peak CU for trade / mark-crank / conversion / withdrawal / deletion is
+**919,450 / 542,428 / 712,910 / 46,455 / 26,540**. All successful calls after funding
+are measured; market/asset/account setup is excluded. Source paths enforce
+1,375,000 CU and custody/deletion additionally enforce 300,000 CU under the normal
+1,400,000 transaction ceiling. Existing historical, concurrent-latent and
+retained-domain controls pass **3/3** in **61.35s**, full-table admission passes
+**1/1** in **3.67s**, and INV-073 DrainOnly stale exit passes **1/1** in **0.41s**.
+
+Reproduction and final checks from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row423-admission-audit-20260910-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::single_slot_admission::v16_program_single_vacant_domain_admission_preserves_historical_claims_and_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity:: -- --nocapture
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_drain_only_stale_exit_does_not_require_reserve_or_counterparty_signers -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code -- src Cargo.toml Cargo.lock tests/invariants/invariant_status.tsv tests/invariants/coverage_reopenings.tsv
+```
+
 ## INV-039 pending cohorts through resolution (row 419, 2026-09-09)
 
 [`cu/inv_039_pending_loss_resolved_histories.rs`](cu/inv_039_pending_loss_resolved_histories.rs),
