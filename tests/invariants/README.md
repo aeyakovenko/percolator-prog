@@ -3,6 +3,78 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-028 lien-backed admission and new-domain settlement (2026-09-10)
+
+[`stateful/inv_028_source_domain_realizability_cap.rs`](stateful/inv_028_source_domain_realizability_cap.rs)
+adds `v16_program_lien_backed_admission_preserves_new_domain_settlement_and_exit`.
+Two public LiteSVM/SBF histories cross winner-first and loser-first settlement after
+source-backed admission. A 20-unit asset-0 position gains 100 atoms at a 100-to-105
+AuthMark, then closes while retaining its source-1 claim. A separately transferred
+100-atom provider contribution supplies surplus backing. Opening 21 units on asset 1
+requires a real counterparty lien: nominal IM is 210 atoms against 201 cash capital.
+Admission reserves exactly nine atoms and must preserve the old claim's full credit
+rate and exact bucket ownership.
+
+A subsequent 100-to-101 mark creates 21 atoms in previously absent source 3. The
+original account source record, market credit record and backing bucket stay exact
+through every settlement crank. Winner-first settlement must initially leave the
+new claim without usable credit; only the new counterparty debit supplies its own
+21 backing atoms. Loser-first settlement reaches the same endpoint. The resource
+union is independently reconstructed from occupied sources and both future sides
+of each active leg: source IDs `{1, 2, 3}` for the winner and `{2, 3}` for the peer.
+New settlement needs three cranks per world, each strictly reducing pending accrual
+plus input-derived capital/PnL distance, under a four-call bound per owner.
+
+Matched reduction and at most four strictly lien-decreasing public cranks permit
+complete conversion. A 120-atom conversion cap rejects with exact `Custom(21)` and
+restores all tracked economic accounts before the 121-atom conversion succeeds.
+The owners receive exactly **322 / 879 atoms**, both portfolios close, and the
+provider recovers its 100 atoms. The three passive portfolios remain byte-exact,
+each with one atom; final primary principal/vault/insurance are **3 / 3 / 0**.
+Stock and encumbrance censuses run after every public economic attempt, alongside
+fixed SPL supply, independent source/backing amounts, custody and endpoint checks.
+The public trace checks zero out-of-band economic mutation, exact rejected writable
+rollback and a 1,375,000-CU bound on every successful call.
+
+The new relation is a live reservation carried through later, separately backed
+source materialization and complete exit. INV-031's live/shared-lien histories stop
+source growth before reservation; the retained/historical/concurrent capacity
+histories have no liens. This does not duplicate full-table reclamation, source-heavy
+settlement, source reversal, or shared expiry/refill. Scope is two assets used
+sequentially, one simultaneous active leg, one no-CPI route, zero fees/funding,
+fresh backing, honest marks and participating owners/provider. It does not certify
+maximum source occupancy, arbitrary admission histories, Recovery/resolution,
+receipts or generation reuse. **Evidence 423 remains OPEN**, with no status changes.
+No production inconsistency was observed. Development corrected omitted AuthMark
+hints and insufficient surplus backing before obtaining the required live lien;
+the resulting `EngineNonProgress`/`EngineLockActive` setup rejections are not findings.
+
+Validation uses fresh default-feature wrapper and authenticated matcher builds,
+locked/offline with platform-tools v1.52, in private worktree
+`/dev/shm/inv028-source-capacity-coverage-20260910`, based at
+`2f96f1d975099ad7313e0e5aaeb1aaeafa5153b1`. Engine pin:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The existing V16Svm bootstrap initializes economic state through public handlers;
+the test uses existing instruction helpers and never writes program-owned bytes.
+The new selector and adjacent reciprocal-credit control pass (two tests, ten total
+histories); the invariant index, targeted formatting and whitespace checks pass.
+Peak successful-call CU in the new histories is **301,807 / 296,293** for
+winner-first / loser-first settlement. No broad suite or engine proofs were run.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+CARGO_BUILD_JOBS=4 cargo build-sbf --tools-version v1.52 --sbf-out-dir "$PWD/target/deploy" --offline -- --locked
+CARGO_BUILD_JOBS=4 cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture inv_028_source_domain_realizability_cap::v16_program_lien_backed_admission_preserves_new_domain_settlement_and_exit inv_028_source_domain_realizability_cap::v16_program_reciprocal_cross_asset_cycle_cannot_mint_credit
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --check tests/invariants/stateful/inv_028_source_domain_realizability_cap.rs
+git diff --check
+```
+
 ## INV-014 retained fee terms across changed fill capacity (2026-09-10)
 
 [`cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`](cu/inv_014_delayed_policy_and_policy_epoch_safety.rs)
