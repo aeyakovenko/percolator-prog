@@ -3,6 +3,68 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-005 funded insurance and oracle role separation (2026-09-10)
+
+[`cu/inv_005_authority_incarnation_binding.rs`](cu/inv_005_authority_incarnation_binding.rs)
+adds `v16_program_funded_insurance_handoff_preserves_incumbent_oracle_and_operator`.
+One public System/SPL/ATA/wrapper history gives the incumbent both insurance and
+authenticated-oracle authority, with separate incoming, operator, and market-authority
+signers. The incumbent supplies 37 insurance atoms; an unrelated user deposits 23
+capital atoms. Mint authority is revoked, fixing supply at 60.
+
+The incumbent and incoming signer consent to transfer only insurance authority.
+That handoff followed by an incumbent oracle publication at the old shared authority
+epoch rejects instruction 3 with `EngineStale`, after the handoff executes. All
+tracked market, portfolio, mint, vault, wallet and signer Accounts roll back exactly;
+only the separate payer's calculated signature fee changes. The same handoff and
+publication, changing only the publication's authority epoch, then succeed atomically.
+The oracle key remains incumbent and the operator key stays separate. The accepted
+target changes from 100 to 110, advancing the observation sequence and global oracle
+epoch once. Its recorded slot is authenticated Clock slot 2 despite a `u64::MAX` hint.
+The complete decoded engine state otherwise remains identical, including effective
+price, principal, claims, backing and lifecycle.
+
+The incoming insurer's current-epoch publication and live insurance withdrawal each
+reject exactly with `Unauthorized` and complete Account rollback. The unchanged
+operator then receives exactly 37 atoms through the public live withdrawal route.
+Every checkpoint reconciles domain insurance, engine/SPL custody, all five wallets,
+fixed mint supply and the unrelated user's owner, 23 capital and zero PnL. The user
+portfolio remains byte-identical through every management and withdrawal transaction.
+No program-owned bytes are installed or edited by the harness.
+
+This adds the funded role-splitting composition with an unchanged authenticated oracle
+key across another role's shared epoch increment. Existing authority ABA rotates the
+oracle key itself; retained insurance management transfers both insurance roles and
+has no oracle updates. Funded backing succession and terminal stale-ledger histories
+exercise different stock and lifecycle transitions. This is bounded adjacent evidence
+for INV-005/020/024/027 and row 416's role-containment obligation. It does not certify
+cold-admin funded-oracle takeover protection or add an INV-055 lifecycle cell.
+**Row 416 remains OPEN** and invariant statuses are unchanged. Positions, impaired
+claims, telemetry and terminal succession remain outside this test.
+
+Validation uses a fresh default-feature SBF build in private worktree
+`/dev/shm/percolator-inv005-funded-role-coverage-20260910`, base
+`c4ebc2b77b047ea8e80f883ad46f80d7f22271ac`, platform-tools v1.52 and the unchanged
+engine pin `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new test passes one history with three exact rejections, one atomic
+handoff/publication and one payout, peaking at 25,846 CU under the 300,000 custody
+limit. Initial validation corrected the expected global oracle-epoch increment;
+no production inconsistency was observed in this path. The adjacent exact oracle
+rotation and retained-insurance-management controls pass (the latter covers 12 worlds).
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_BUILD_JOBS=4 cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::v16_program_funded_insurance_handoff_preserves_incumbent_oracle_and_operator -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::v16_attack_oracle_authority_rotation_revokes_old_grants_new -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::retained_insurance_management::v16_program_retained_empty_insurance_management_rechecks_stock_before_ordered_succession -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_005_authority_incarnation_binding.rs
+git diff --check
+```
+
 ## INV-008 retained withdrawal across PnL conversion (2026-09-09)
 
 [`cu/inv_008_intent_uniqueness_and_bounded_replay.rs`](cu/inv_008_intent_uniqueness_and_bounded_replay.rs)
