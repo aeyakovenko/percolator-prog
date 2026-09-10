@@ -3,6 +3,118 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-045 trade-origin liquidation through catchup (row 422, 2026-09-10)
+
+[`cu/inv_045_trade_origin_catchup.rs`](cu/inv_045_trade_origin_catchup.rs), mounted
+under `inv_045_no_free_mark_movement::trade_origin_catchup`, adds
+`v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order`.
+Base: local `origin/codex/invariant-fidelity-reopen-20260904`, commit
+`9c433dc3a83b84fb749c7450fb7bf92f9d548c21`. Worktree:
+`/dev/shm/percolator-inv045-trade-origin-20260910`; branch:
+`codex/inv045-trade-origin-20260910`. The full main filesystem required a private
+bare Git directory alongside the worktree, sharing the local repository's objects.
+The source worktree and its existing changes are untouched. Only local code/tests/docs
+informed this increment; no GitHub PR or issue evidence was consulted.
+
+The new relation is **exact fee and owner attribution while a trade-origin target
+is still ahead of engine catchup**, composed with separate versus target-local
+market accrual. Sixteen public LiteSVM worlds cross two reported trade prices,
+two unequal stale Pyth prices, both catchup orders, and early versus fully caught-up
+liquidation. A clock-only crank first advances engine time while retaining the old
+discovery age. A subsequent paid trade accepts 990,400 and stages an internal
+992,320 mark while the engine still values positions at 1,000,000. This price
+prefix originates in a trade, with no fresh external report after configuration.
+
+At the two liquidation boundaries, the engine prices are 997,600 and 992,320.
+Independent two-stage quote/fee rounding charges **5,987 / 6,360 atoms** for the
+observed closes. Each world must distinguish those fees from the caller's raw
+print, the accepted trade print, and both the old price and supplied stale report.
+The early boundary additionally distinguishes the pending internal mark from the
+effective price. The paid trade's fee is checked independently from elapsed-time
+clamping, EWMA weight, existing OI and bilateral fee rounding. A full keeper share
+still pays zero reward and adds no operator-withdrawable domain budget in either
+stale-Hybrid phase. The two stale reports preserve last-good slot 1 and publication
+time 100, even though trade and engine timestamps have advanced.
+
+Separate market catchup cannot move any owner's value. Sixteen duplicate-hint
+rejections after valid observation prefixes restore the complete tracked economic
+Account frame, excluding the distinct network fee payer and runtime sysvars.
+Target liquidation preserves the peer, both mark traders and keeper byte-for-byte;
+subsequent public settlement reconciles each owner's independently calculated PnL
+and fee debit. Every world withdraws exactly the keeper's original 1,000 SPL atoms,
+leaves the other token destinations empty, preserves mint supply and reconciles
+remaining owner value plus insurance to both engine and SPL custody. Normalized
+close quantity, penalty, all owner values, insurance and domain budgets agree
+across the eight histories at each price. Existing CU limits are enforced.
+
+All protocol accounts are created with System/SPL/ATA instructions and initialized
+or funded through wrapper instructions. Only signer SOL, Clock, blockhashes and
+valid external Pyth fixtures come from the harness. No protocol bytes are injected
+or replayed. A live Hybrid observation requires its configured feed count
+(`handle_permissionless_crank_zero_copy`'s observation loop), so both alternatives supply a
+stale feed; omitted-feed fallback is not claimed.
+
+This differs from `accepted_price_reward` / `reward_catchup_order`, which start with
+fresh external reports, and `interleaved_cap_carry`, whose prices remain report-origin.
+`v16_program_caught_up_hybrid_reward_uses_selected_asset_provenance_in_both_hint_orders`
+owns selected-asset attribution after fresh-report catchup. The public-SBF selector
+`v16_program_pr280_trade_driven_liquidation_penalty_is_not_reclaimable` owns the
+trade-driven zero-reward rule and bounded exit, but does not compare exact fee prices
+while effective and internal prices differ, stale-price substitutions, or these
+catchup orders. INV-020's staged active observations and flat stale-withdrawal test
+own different action/evidence boundaries.
+
+Relevant wrapper paths are `accepted_reported_trade_price_view`,
+`hybrid_trade_fee_quote_view`, `update_hybrid_mark_after_trade_view`,
+`stage_trade_driven_mark_target_view`, `hybrid_target_for_crank_view`, and
+`canonical_accrual_path_for_target_view`. The crank passes effective prices into
+the engine, then attributes retained fees using `selected_fee_asset` and
+`liquidation_penalty_reclaimable`. That eligibility still uses
+`profile_updates_mark_from_trade_view`, a mode/freshness predicate. **Row 422 stays
+OPEN and INV-045 stays REFUTED_CURRENT.** Trade-origin attribution surviving a
+new fresh report until catchup remains unverified. This increment has no CPI,
+multi-asset, funding, maintenance, provider-backed claim, terminal retirement,
+complete trader redemption, arbitrary-history, production-fix or status claim.
+
+Validation uses a private copy of the cached host target and wrapper SBF. Wrapper
+SHA-256 is `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+`git diff 30993c0b HEAD -- src Cargo.toml Cargo.lock tests/fixtures/auth_matcher`
+is empty, matching the locally documented artifact provenance. The engine pin is
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Host tests compile from this worktree;
+no fresh wrapper SBF build is claimed. The exact new selector passes 1/1 (16 worlds,
+7.60s), with peak crank/trade/withdrawal **268,838 / 147,001 / 64,088 CU**.
+The auth matcher was freshly built locked/offline with platform-tools v1.52;
+SHA-256 is `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+All nine adjacent selectors below pass (61.02s), covering INV-045/020/024/036/061,
+including the existing 96-world fresh-report catchup matrix. Repository formatting
+and whitespace checks pass. The final invariant index command below also checks
+the updated README/ledger. Cargo emits its existing `solana-client v1.18.26`
+future-incompatibility warning; no broad suite was run.
+
+Focused verification commands, from the worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv045-trade-origin-20260910-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_045_no_free_mark_movement::accepted_price_reward::v16_program_fresh_report_liquidation_rewards_follow_accepted_price_through_spl_exit \
+  inv_045_no_free_mark_movement::accepted_price_reward::reward_catchup_order::v16_program_reward_price_tracks_actual_catchup_across_report_and_crank_orders \
+  inv_045_no_free_mark_movement::interleaved_cap_carry::v16_program_interleaved_trade_routes_preserve_oracle_cap_carry_and_reward_provenance \
+  inv_045_no_free_mark_movement::v16_program_caught_up_hybrid_reward_uses_selected_asset_provenance_in_both_hint_orders \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::v16_program_staged_observations_match_current_liquidation_and_reduction \
+  inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::v16_program_omitted_hybrid_and_stale_fallback_cannot_renew_funded_withdrawal \
+  inv_024_attributed_quote_value_conservation::v16_attack_sequence_with_liquidation_conserves \
+  inv_036_fee_destination_and_policy_version_integrity::v16_program_mixed_direction_fee_allocation_matches_independent_side_ledger \
+  inv_061_deterministic_bounded_liquidation::v16_program_liquidation_cranker_reward_bounded_by_fee
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-039 settled pending cohorts through slab retirement (row 419, 2026-09-10)
 
 [`cu/inv_039_pending_loss_resolved_histories.rs`](cu/inv_039_pending_loss_resolved_histories.rs)

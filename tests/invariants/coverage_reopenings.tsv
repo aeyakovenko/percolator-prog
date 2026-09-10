@@ -3,6 +3,11 @@
 # Kind/severity are recorded claims, not impact acceptance under scripts/loop.md; OPEN does not confirm LoF/DoS.
 # status remains OPEN until a generic invariant-owned generator/oracle (not the finding PoC)
 # fails on the vulnerable pin, the production fix lands, and the unchanged oracle passes.
+# Row 422 partial conformance (2026-09-10): cu/inv_045_trade_origin_catchup.rs,
+# v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order.
+# Paid Hybrid mark: unequal stale reports, lagged/caught-up liquidation and catchup order;
+# exact effective-price fees, owner claims, zero keeper/domain reward and principal SPL exit.
+# Fresh-report handoff of trade-origin provenance remains open; no row/status promotion.
 pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	required_generic_property	status
 410	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-036,INV-081	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	OPEN
 411	LoF	PRIVILEGED	INV-014	INV-005,INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-081	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
