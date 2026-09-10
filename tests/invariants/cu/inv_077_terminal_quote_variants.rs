@@ -1,5 +1,7 @@
 //! Row 418 / INV-070 / INV-077: quote rails crossed with public market capacities.
 //! Empty-vault reclamation and dual-rail provider/expired-stock disposition are separate products.
+//! Empty custody closes immediately; publicly expired last-domain backing requires bounded
+//! scanning, exact primary retirement, and separate primary/secondary surplus and rent payouts.
 
 use super::*;
 
@@ -455,12 +457,24 @@ fn v16_program_dual_quote_provider_expiry_has_bounded_terminal_disposition() {
 
 #[test]
 fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
+    quote_variants_terminal_close_at_capacity(false);
+}
+
+#[test]
+fn v16_program_quote_variants_retire_public_last_domain_backing_at_capacity() {
+    quote_variants_terminal_close_at_capacity(true);
+}
+
+fn quote_variants_terminal_close_at_capacity(terminal_backing: bool) {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::{
         inv018_create_public_spl_mint, inv018_public_spl_market_with_capacity,
     };
     use inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market_with_capacity;
 
     const CAPITAL: u64 = 1_009;
+    const BACKING: u64 = 307;
+    const PRIMARY_SURPLUS: u64 = 17;
+    const SECONDARY_SURPLUS: u64 = 19;
     const CHUNK: usize = percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL;
     const STEP_LIMIT: u64 = 300_000;
 
@@ -479,7 +493,12 @@ fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
         ("native/SPL", true, Some(0), true),
         ("SPL/native", true, Some(1), true),
     ] {
+        // Native primary retirement is outside this witness; native secondary stock is swept.
+        if terminal_backing && native_rail == Some(0) {
+            continue;
+        }
         for slots in [CHUNK - 1, CHUNK, CHUNK + 1, MAX_10M_MARKET_SLOTS] {
+            let expiry = slots as u64 + 5;
             let mut env = if native_rail.is_some() {
                 inv081_public_native_market_with_capacity(slots)
             } else {
@@ -606,6 +625,81 @@ fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
                 "public quote funding",
                 send_raw_ixs(&mut env.svm, &env.payer, funding, &[&admin]).unwrap(),
             );
+            let domain = u16::try_from(2 * (slots - 1) + 1).unwrap();
+            if terminal_backing {
+                bounded(
+                    "public terminal backing funding",
+                    send_raw_tx(
+                        &mut env.svm,
+                        &env.payer,
+                        spl_token::instruction::mint_to(
+                            &spl_token::ID,
+                            &env.mint,
+                            &destinations[0],
+                            &admin.pubkey(),
+                            &[],
+                            BACKING + PRIMARY_SURPLUS,
+                        )
+                        .unwrap(),
+                        &[&admin],
+                    )
+                    .unwrap(),
+                );
+                bounded(
+                    "public last-domain backing",
+                    env.top_up_backing_bucket_from_admin_token_with_cu(
+                        destinations[0],
+                        domain,
+                        BACKING.into(),
+                        expiry,
+                    ),
+                );
+                bounded(
+                    "public primary surplus",
+                    send_raw_tx(
+                        &mut env.svm,
+                        &env.payer,
+                        spl_token::instruction::transfer(
+                            &spl_token::ID,
+                            &destinations[0],
+                            &env.vault,
+                            &admin.pubkey(),
+                            &[],
+                            PRIMARY_SURPLUS,
+                        )
+                        .unwrap(),
+                        &[&admin],
+                    )
+                    .unwrap(),
+                );
+                if dual {
+                    let funding = if native_rail == Some(1) {
+                        vec![
+                            system_instruction::transfer(
+                                &admin.pubkey(),
+                                &vaults[1],
+                                SECONDARY_SURPLUS,
+                            ),
+                            spl_token::instruction::sync_native(&spl_token::ID, &vaults[1])
+                                .unwrap(),
+                        ]
+                    } else {
+                        vec![spl_token::instruction::mint_to(
+                            &spl_token::ID,
+                            &mints[1],
+                            &vaults[1],
+                            &admin.pubkey(),
+                            &[],
+                            SECONDARY_SURPLUS,
+                        )
+                        .unwrap()]
+                    };
+                    bounded(
+                        "public secondary surplus",
+                        send_raw_ixs(&mut env.svm, &env.payer, funding, &[&admin]).unwrap(),
+                    );
+                }
+            }
             if fixed_supply {
                 for mint in mints
                     .iter()
@@ -635,7 +729,21 @@ fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
             for (rail, account) in mint_frame.iter().enumerate() {
                 let mint = Mint::unpack(&account.as_ref().unwrap().data).unwrap();
                 let native = native_rail == Some(rail);
-                assert_eq!(mint.supply, if rail == 0 && !native { CAPITAL } else { 0 });
+                let supply = if native {
+                    0
+                } else if rail == 0 {
+                    CAPITAL
+                        + if terminal_backing {
+                            BACKING + PRIMARY_SURPLUS
+                        } else {
+                            0
+                        }
+                } else if terminal_backing {
+                    SECONDARY_SURPLUS
+                } else {
+                    0
+                };
+                assert_eq!(mint.supply, supply);
                 assert_eq!(
                     mint.mint_authority,
                     if native || fixed_supply {
@@ -664,7 +772,15 @@ fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
                 .unwrap(),
             );
             assert_eq!(env.portfolio_state(portfolio).capital.get(), CAPITAL.into());
-            assert_eq!(env.token_amount(env.vault), CAPITAL);
+            assert_eq!(
+                env.token_amount(env.vault),
+                CAPITAL
+                    + if terminal_backing {
+                        BACKING + PRIMARY_SURPLUS
+                    } else {
+                        0
+                    }
+            );
             bounded("quote variant ResolveMarket", env.resolve());
             bounded(
                 "quote variant permissionless CloseResolved",
@@ -692,9 +808,23 @@ fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
             );
             let (cfg, group) = env.market_state();
             assert_eq!(group.mode, MarketModeV16::Resolved);
-            assert_eq!((group.c_tot, group.vault, group.insurance), (0, 0, 0));
+            let booked = if terminal_backing { BACKING } else { 0 };
+            assert_eq!(
+                (group.c_tot, group.vault, group.insurance),
+                (0, booked.into(), 0)
+            );
             assert_eq!(group.materialized_portfolio_count, 0);
             assert_eq!(cfg.terminal_slab_scan_progress, 0);
+            if terminal_backing {
+                let bucket = group.source_backing_buckets[usize::from(domain)];
+                assert_eq!(bucket.status, percolator::BackingBucketStatusV16::Fresh);
+                assert_eq!(bucket.expiry_slot, expiry);
+                assert_eq!(
+                    bucket.fresh_unliened_backing_num,
+                    u128::from(BACKING) * BOUND_SCALE
+                );
+                env.svm.warp_to_slot(expiry);
+            }
 
             let mut accounts = vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -710,6 +840,9 @@ fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
                     AccountMeta::new(destinations[1], false),
                 ]);
             }
+            if terminal_backing {
+                accounts.push(AccountMeta::new(env.mint, false));
+            }
             let market_before = env.svm.get_account(&env.market).unwrap();
             let vault_frame: Vec<_> = vaults
                 .iter()
@@ -717,7 +850,16 @@ fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
                 .collect();
             for (rail, account) in vault_frame.iter().enumerate() {
                 let token = TokenAccount::unpack(&account.data).unwrap();
-                assert_eq!(token.amount, 0);
+                assert_eq!(
+                    token.amount,
+                    if !terminal_backing {
+                        0
+                    } else if rail == 0 {
+                        BACKING + PRIMARY_SURPLUS
+                    } else {
+                        SECONDARY_SURPLUS
+                    }
+                );
                 assert_eq!(token.is_native.is_some(), native_rail == Some(rail));
                 assert_eq!(
                     vaults[rail],
@@ -731,18 +873,82 @@ fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
                 .map(|key| env.svm.get_account(key))
                 .collect();
             let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
-            // With no booked residue or backing, closure must not require a slot scan.
-            env.svm.expire_blockhash();
-            let close_cu = env
-                .send(
-                    ProgInstruction::CloseSlab {
-                        authority_epoch: env.control_sequences(0).authority_epoch,
-                    },
-                    accounts,
-                    &[&admin],
-                )
-                .unwrap();
-            bounded("quote variant empty CloseSlab", close_cu);
+            let expected_calls = if terminal_backing {
+                slots.div_ceil(CHUNK) + 1
+            } else {
+                1
+            };
+            let authority_epoch = env.control_sequences(0).authority_epoch;
+            let mut close_peak = 0;
+            for call in 1..=expected_calls {
+                env.svm.expire_blockhash();
+                let close_cu = env
+                    .send(
+                        ProgInstruction::CloseSlab { authority_epoch },
+                        accounts.clone(),
+                        &[&admin],
+                    )
+                    .unwrap();
+                bounded("quote variant CloseSlab", close_cu);
+                close_peak = close_peak.max(close_cu);
+                if call == expected_calls {
+                    break;
+                }
+                let (cfg, group) = env.market_state();
+                assert_eq!(
+                    cfg.terminal_slab_scan_progress,
+                    (call * CHUNK).min(slots - 1) as u128
+                );
+                assert_eq!(
+                    (group.c_tot, group.vault, group.insurance),
+                    (0, BACKING.into(), 0)
+                );
+                assert_eq!(group.materialized_portfolio_count, 0);
+                let expired = call == expected_calls - 1;
+                let bucket = group.source_backing_buckets[usize::from(domain)];
+                assert_eq!(
+                    bucket.status,
+                    if expired {
+                        percolator::BackingBucketStatusV16::Expired
+                    } else {
+                        percolator::BackingBucketStatusV16::Fresh
+                    }
+                );
+                assert_eq!(
+                    bucket.fresh_unliened_backing_num,
+                    if expired {
+                        0
+                    } else {
+                        u128::from(BACKING) * BOUND_SCALE
+                    }
+                );
+                assert_eq!(
+                    env.svm.get_account(&admin.pubkey()),
+                    Some(admin_before.clone())
+                );
+                for (key, before) in vaults.iter().zip(&vault_frame) {
+                    assert_eq!(
+                        env.svm.get_account(key),
+                        Some(before.clone()),
+                        "continuation cannot move custody"
+                    );
+                }
+                for (key, before) in mints
+                    .iter()
+                    .zip(&mint_frame)
+                    .chain(framed_keys.iter().zip(&frame))
+                {
+                    assert_eq!(
+                        env.svm.get_account(key),
+                        *before,
+                        "continuation preserves {key}"
+                    );
+                }
+                assert_eq!(
+                    env.svm.get_account(&env.market).unwrap().lamports,
+                    market_before.lamports
+                );
+            }
             let market = env.svm.get_account(&env.market).unwrap();
             assert_closed_market_tombstone(&market);
             let rent = env
@@ -754,7 +960,12 @@ fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
                 + vault_frame
                     .iter()
                     .map(|account| account.lamports)
-                    .sum::<u64>();
+                    .sum::<u64>()
+                - if terminal_backing && native_rail == Some(1) {
+                    SECONDARY_SURPLUS
+                } else {
+                    0
+                };
             assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
             for vault in &vaults {
                 assert!(env
@@ -763,21 +974,47 @@ fn v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity() {
                     .is_none_or(|account| account.lamports == 0
                         && account.data.iter().all(|byte| *byte == 0)));
             }
+            let mut expected_frame = frame;
+            let mut expected_mints = mint_frame;
+            if terminal_backing {
+                for (rail, account) in expected_frame
+                    .iter_mut()
+                    .take(destinations.len())
+                    .enumerate()
+                {
+                    let account = account.as_mut().unwrap();
+                    let mut token = TokenAccount::unpack(&account.data).unwrap();
+                    assert_eq!(token.amount, 0);
+                    token.amount = if rail == 0 {
+                        PRIMARY_SURPLUS
+                    } else {
+                        SECONDARY_SURPLUS
+                    };
+                    if token.is_native.is_some() {
+                        account.lamports += token.amount;
+                    }
+                    TokenAccount::pack(token, &mut account.data).unwrap();
+                }
+                let primary = expected_mints[0].as_mut().unwrap();
+                let mut mint = Mint::unpack(&primary.data).unwrap();
+                mint.supply -= BACKING;
+                Mint::pack(mint, &mut primary.data).unwrap();
+            }
             assert_eq!(
                 framed_keys
                     .iter()
                     .map(|key| env.svm.get_account(key))
                     .collect::<Vec<_>>(),
-                frame
+                expected_frame
             );
             assert_eq!(
                 mints
                     .iter()
                     .map(|mint| env.svm.get_account(mint))
                     .collect::<Vec<_>>(),
-                mint_frame
+                expected_mints
             );
-            println!("INV-070/077 quote={label}, public_assets={slots}, close_calls=1, close_cu={close_cu}, lifecycle_peak={peak_cu}");
+            println!("INV-070/077 quote={label}, public_assets={slots}, terminal_backing={terminal_backing}, close_calls={expected_calls}, close_peak={close_peak}, lifecycle_peak={peak_cu}");
         }
     }
 }

@@ -6558,6 +6558,68 @@ git diff --check
 git diff --cached --check
 ```
 
+## Row 418 public terminal backing at capacity (2026-09-10)
+
+[`cu/inv_077_terminal_quote_variants.rs`](cu/inv_077_terminal_quote_variants.rs) adds
+`v16_program_quote_variants_retire_public_last_domain_backing_at_capacity` under INV-077.
+This one coverage axis crosses publicly funded, expiring backing in the last configured
+short domain with quote variants and terminal scan boundaries. Its 16 worlds use mintable
+SPL, fixed-supply SPL, fixed SPL/SPL, and fixed SPL/native at 255, 256, 257, and the maximum
+5,782 configured assets. The existing empty-custody selector shares construction and the
+terminal oracle, retaining its six configurations and one-call close assertion.
+
+System/ATA/SPL/wrapper instructions create and activate every configured asset, deposit and
+return 1,009 user atoms, fund 307 backing atoms, and supply 17 unbooked primary surplus atoms
+plus 19 secondary surplus atoms when configured. Preallocation supplies only account storage;
+the existing native-mint genesis fixture is the sole supplied token state. Backing expires
+after public activation and before the first terminal call. No market, portfolio, bucket,
+token balance, or mint supply is injected.
+
+The invariant oracle requires exactly `ceil(N / 256) + 1` successful `CloseSlab` calls:
+bounded scanning, one last-domain expiry transition, and final retirement. Every nonfinal
+call checks the exact cursor and fresh/expired backing status, preserves booked custody,
+and leaves all tracked mint/token/owner/authority accounts and market lamports unchanged.
+The final call burns exactly 307 primary atoms, sweeps exactly 17 primary and, when present,
+19 secondary atoms, closes both configured vaults, and retains exact typed-tombstone rent.
+Native secondary principal follows its token destination and is excluded from the authority's
+rent refund. Every measured construction, payout, and close step must stay below 300,000 CU.
+
+This differs from INV-018 token-boundary validation, INV-070's small mixed-maturity and
+dual-quote residue histories, and INV-077's injected 10 MiB claim-free scanner: it composes
+public occupied backing, the last configured domain, the scan/expiry handoff, quote-specific
+stock disposition, and maximum public capacity under one input-derived oracle. It adds one
+selector and no production changes. Row 418 remains OPEN; all affected invariant verdicts
+are unchanged. Native-primary booked-residue retirement, freezable mints, receipts,
+multiple occupied backing domains, secondary user payout at maximum capacity, time changes
+between scan calls, and arbitrary histories remain outside this witness.
+
+Verification uses a fresh default-feature platform-tools v1.52 SBF build with SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new selector passed **1/1 tests, 16/16 worlds** in 185.83 seconds. Close calls were
+exactly 2, 2, 3, and 24 at the four capacities. Peak close cost was **53,670 CU**;
+the measured construction/payout peak was **214,735 CU**, both below 300,000.
+From the isolated worktree, with a private target directory:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row418-inv070-20260910-target
+export CARGO_BUILD_JOBS=8 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_quote_variants_retire_public_last_domain_backing_at_capacity -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity \
+  inv_077_bounded_work_and_maximum_shape_compute::v16_bpf_terminal_claim_free_surplus_close_stays_bounded_on_10m_market \
+  inv_077_bounded_work_and_maximum_shape_compute::v16_bpf_10m_market_last_domain_backing_principal_withdraw_stays_bounded \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_primary_mint_decimals_preserve_exact_raw_atom_accounting
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## Row 418 quote variants at public market capacity (2026-09-09)
 
 [`cu/inv_077_terminal_quote_variants.rs`](cu/inv_077_terminal_quote_variants.rs), mounted
