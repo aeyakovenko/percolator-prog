@@ -3,6 +3,78 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-024 terminal earned-fee succession (row 410, 2026-09-10)
+
+[`cu/inv_024_terminal_earnings_succession.rs`](cu/inv_024_terminal_earnings_succession.rs)
+adds `v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance`,
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession`.
+The local base is `6baf0bdcd92178b71eb0edac21849fcbe1111c89`; the isolated branch is
+`codex/row410-terminal-role-conformance-20260910` in
+`/tmp/codex-agent-worktrees/row410-terminal-role-conformance-20260910`.
+Only local repository code, documentation and tests informed this increment.
+
+The missing relation is consensual backing-role succession when **only earned fees
+remain**, following full principal exit and a partial fee payment. Existing INV-005
+funded backing succession asserts zero utilization earnings. INV-073's terminal
+earnings/lazy-ledger test retains the same provider, and INV-024's terminal insurance
+lifecycle transfers insurance entitlement. This test combines neither a new trade
+route nor a new token rail with those existing witnesses.
+
+One public LiteSVM history uses the existing public fee-creation arithmetic:
+`ceil((1,050 * 105 / 2 - 52,502) * 3,333 / 10,000) = 875` provider-fee atoms.
+After permissionless resolution payouts and owner-signed portfolio deletion, the
+incumbent withdraws all 100,000 principal atoms and 17 fee atoms. Both holders sign
+transfer of the backing role to the distinct live insurance operator. Market
+authority, also the insurance beneficiary, submits and pays for every measured
+terminal transaction but receives no provider value. The successor receives only
+the unpaid 858 fee atoms; the insurer separately receives its original 31 atoms.
+
+A valid 19-atom successor payout initializes a new ledger in a transaction whose
+second payout attaches the former holder's ledger. The suffix rejects
+`Unauthorized` after the first SPL transfer. All tracked and compiled accounts,
+including ledger initialization, roll back exactly except the calculated network
+fee. The unchanged first request and a correctly bound remainder then succeed.
+The old ledger remains byte-identical; the new ledger records only its own payouts
+and opening observation, with zero newly accrued earnings telemetry. Every measured
+step checks input-derived wallet entitlements, remaining principal/earnings,
+insurance budgets, role profiles, epochs, fixed mint supply and vault conservation.
+Final user payouts are 56,627 and 1,995,000 atoms, and booked/raw custody is zero.
+All economic accounts are created through System/SPL/ATA/wrapper instructions;
+harness controls are signer SOL, Clock and blockhashes.
+
+This is partial INV-024/005/036/081 conformance coverage. **Row 410 remains OPEN**:
+there is no generic invariant-owned generator/oracle or invariant-status promotion.
+Arbitrary histories, earnings after succession, live/shutdown succession, other
+assets, expiry/impairment, quote rails and final slab retirement remain outside
+this increment. Production code and Cargo pins are unchanged.
+
+Validation: new selector **1/1**, adjacent controls **4/4**, invariant index **1/1**;
+formatting and whitespace checks pass. The measured history has six successful
+transactions and one exact rollback; peak CU is 420,116, within the two-instruction
+bundle's 600,000 ceiling (standalone steps retain 300,000). Development corrected
+a test-helper ownership error, opening-ledger telemetry and the bundle CU ceiling;
+no production conformance failure was observed. Existing unused-support and
+`solana-client v1.18.26` future-incompatibility warnings remain.
+Commands use a fresh default-feature SBF build and a private host target:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row410-terminal-role-conformance-20260910-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so" TMPDIR=/dev/shm
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_005_authority_incarnation_binding::funded_backing_succession::v16_program_funded_backing_succession_preserves_paid_prefix_and_terminal_role_partition \
+  inv_073_no_permanent_user_lock::v16_program_terminal_provider_earnings_and_lazy_ledger_reach_exact_slab_close \
+  inv_024_attributed_quote_value_conservation::terminal_insurance_lifecycle::v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attribution \
+  inv_024_attributed_quote_value_conservation::terminal_role_handoff::v16_program_terminal_role_handoff_preserves_reserve_beneficiaries_with_aliased_payer
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-028 joint batch admission at one vacant domain (row 423, 2026-09-10)
 
 [`cu/inv_028_single_slot_admission.rs`](cu/inv_028_single_slot_admission.rs) adds

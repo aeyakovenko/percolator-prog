@@ -26,6 +26,9 @@ mod terminal_quote_rails;
 #[path = "inv_024_terminal_insurance_lifecycle.rs"]
 mod terminal_insurance_lifecycle;
 
+#[path = "inv_024_terminal_earnings_succession.rs"]
+mod terminal_earnings_succession;
+
 #[path = "inv_024_pnl_reward_receipt_history.rs"]
 mod pnl_reward_receipt_history;
 

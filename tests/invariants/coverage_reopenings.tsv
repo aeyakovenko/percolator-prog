@@ -14,6 +14,12 @@
 # exact effective-price fees, owner claims, zero keeper/domain reward and principal SPL exit.
 # Fresh-report handoff of trade-origin provenance remains open; no row/status promotion.
 pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	required_generic_property	status
+# Row 410 partial conformance (2026-09-10): cu/inv_024_terminal_earnings_succession.rs,
+# v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance.
+# Public full principal exit and partial earned-fee payout precede consensual backing-role
+# succession; only the unpaid fee tail transfers, separate from submitter insurance value.
+# Former-ledger suffix rolls back SPL payout/new-ledger initialization; valid payouts remain exact.
+# One bounded history, no generic generator/oracle or invariant-status promotion; row stays OPEN.
 410	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-036,INV-081	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	OPEN
 # 411 partial public coverage (2026-09-10): stateful/inv_014_retained_backing_fee_cap.rs::v16_program_retained_backing_fee_caps_follow_participant_and_route_consent retains nonzero backing caps across an owner-signed matcher cap change, both charged roles and CPI/no-CPI alternatives. Exact post-CPI rollback, participant-local consent, provider SPL fees and opposite-route close values compose. Single-source Live evidence only; see README. No row/status promotion.
 411	LoF	PRIVILEGED	INV-014	INV-005,INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-081	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
