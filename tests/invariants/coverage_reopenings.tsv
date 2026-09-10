@@ -35,6 +35,10 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 420	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-026,INV-027,INV-032,INV-063,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	provider-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-provider-signature	OPEN
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
+# 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.
+# Two individually fitting old-asset legs jointly need 29 domains: both batch orders reject atomically;
+# either single-leg batch reserves the last slot, settles new value and reaches exact funded owner exit.
+# Eight bounded no-CPI worlds; existing-active-leg admission and generic resource/liveness closure remain OPEN.
 423	DoS	BLOCKER	INV-028	INV-028,INV-031,INV-057,INV-073,INV-077,INV-078,INV-082,INV-089	historical-capacity+x-latent-domain+x-position-admission	risk-admission-reserves-every-future-settlement-resource-needed-for-exit	OPEN
 # 424 partial public coverage (2026-09-10): cu/inv_070_terminal_prefix_reuse.rs::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback covers admin/permissionless reuse behind cursor 2, live success controls, exact terminal rejection/expiry-prefix rollback, and bounded close. General actionability invalidation remains OPEN; see README's retired-slot reuse entry.
 424	LoF	PRIVILEGED	INV-070	INV-024,INV-025,INV-033,INV-041,INV-063,INV-069,INV-070,INV-071,INV-086,INV-088	persisted-cursor+x-time-reclassification+x-earlier-slot	any-environmental-transition-that-changes-actionability-invalidates-scanned-prefixes	OPEN

@@ -4,6 +4,7 @@
 //! but not both domains of an unrelated asset. The admitted opposite-side episode must settle
 //! new value into that last slot, preserve every historical claim, and pay both owners fully.
 //! This is partial domain overlap, not paired history, reclamation, or a maximum-active-leg test.
+//! Batch admission also must accumulate distinct future domains across individually fitting legs.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_capacity;
@@ -520,4 +521,170 @@ fn v16_program_single_vacant_domain_admission_preserves_historical_claims_and_ex
     }
     assert_eq!(worlds, 4);
     println!("INV-028 single vacant domain: worlds={worlds}, successful post-funding calls={calls}, max CU trade/mark-crank/convert/withdraw/close={maxima:?}");
+}
+
+#[test]
+fn v16_program_batch_admission_cannot_share_last_future_domain_slot() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut worlds = 0;
+    let mut rejections = 0;
+    let mut calls = 0;
+    let mut maxima = [0; 5];
+    let mut max_rejected_cu = 0;
+    for direction in [-1i128, 1] {
+        for constrained_is_b in [false, true] {
+            for accepted in 0..2 {
+                let mut h = SparseHistory::new();
+                let order = if constrained_is_b { [1, 0] } else { [0, 1] };
+                for asset in 0..HISTORY as u16 {
+                    let q = direction * (1 + i128::from(asset % 3)) * POS_SCALE as i128;
+                    h.trade(asset, q);
+                    h.settle_mark((PRICE as i128 + direction) as u64, order);
+                    h.trade(asset, -q);
+                }
+                let historical = h.claims_for(0);
+                let occupied: BTreeSet<_> = historical
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(domain, claim)| (*claim > 0).then_some(domain))
+                    .collect();
+                assert_eq!(occupied.len(), CAPACITY - 1);
+                assert!(h.position.is_none());
+                let candidates = [
+                    (0, -direction * 7 * POS_SCALE as i128),
+                    ((HISTORY - 1) as u16, -direction * 11 * POS_SCALE as i128),
+                ];
+                let mut combined = occupied.clone();
+                for &(asset, _) in &candidates {
+                    let pair = [2 * asset as usize, 2 * asset as usize + 1];
+                    let mut individually = occupied.clone();
+                    individually.extend(pair);
+                    assert_eq!(individually.len(), CAPACITY);
+                    combined.extend(pair);
+                }
+                assert_eq!(combined.len(), CAPACITY + 1);
+                assert!(
+                    candidates.len()
+                        < percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize
+                );
+
+                let send_batch = |h: &mut SparseHistory, legs: &[(u16, i128)]| {
+                    let [a, b] = if constrained_is_b { [1, 0] } else { [0, 1] };
+                    let instruction = h.env.batch_trade_no_cpi_ix(
+                        h.portfolios[a],
+                        h.portfolios[b],
+                        legs.iter()
+                            .map(|&(asset_index, quantity)| BatchTradeLeg {
+                                asset_index,
+                                market_id: h.env.asset_market_id(asset_index),
+                                size_q: quantity * if a == 0 { 1 } else { -1 },
+                                exec_price: h.prices[asset_index as usize],
+                                fee_bps: 0,
+                            })
+                            .collect(),
+                    );
+                    h.env.svm.expire_blockhash();
+                    let tx = Transaction::new_signed_with_payer(
+                        &[
+                            heap_ix(),
+                            cu_ix(),
+                            Instruction {
+                                program_id: h.env.program_id,
+                                accounts: vec![
+                                    AccountMeta::new(h.owners[a].pubkey(), true),
+                                    AccountMeta::new(h.owners[b].pubkey(), true),
+                                    AccountMeta::new(h.env.market, false),
+                                    AccountMeta::new(h.portfolios[a], false),
+                                    AccountMeta::new(h.portfolios[b], false),
+                                ],
+                                data: instruction.encode(),
+                            },
+                        ],
+                        Some(&h.env.payer.pubkey()),
+                        &[&h.env.payer, &h.owners[a], &h.owners[b]],
+                        h.env.svm.latest_blockhash(),
+                    );
+                    tx.verify().expect("public batch signatures");
+                    assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
+                    h.env.svm.send_transaction(tx)
+                };
+
+                let keys = [
+                    h.env.market,
+                    h.portfolios[0],
+                    h.portfolios[1],
+                    h.env.vault,
+                    h.env.mint,
+                    h.tokens[0],
+                    h.tokens[1],
+                    h.owners[0].pubkey(),
+                    h.owners[1].pubkey(),
+                    h.env.admin.pubkey(),
+                ];
+                for legs in [candidates, [candidates[1], candidates[0]]] {
+                    let frame = keys.map(|key| h.env.svm.get_account(&key));
+                    let failure = send_batch(&mut h, &legs)
+                        .expect_err("distinct future domains cannot share the last vacant slot");
+                    assert_eq!(
+                        failure.err,
+                        TransactionError::InstructionError(
+                            2,
+                            InstructionError::Custom(PercolatorError::InvalidInstruction as u32)
+                        )
+                    );
+                    let cu = failure.meta.compute_units_consumed;
+                    assert_cu_within("joint future-domain admission rejection", cu, CU_LIMIT);
+                    max_rejected_cu = max_rejected_cu.max(cu);
+                    assert_eq!(keys.map(|key| h.env.svm.get_account(&key)), frame);
+                    h.check();
+                    rejections += 1;
+                }
+
+                // Each candidate gets its own public world: admission leaves its reserved
+                // domain absent until favorable settlement, without reclaiming old claims.
+                let (asset, q) = candidates[accepted];
+                let missing = 2 * asset as usize + usize::from(q > 0);
+                assert_eq!(historical[missing], 0);
+                let ids = h.portfolios.map(|p| h.env.portfolio_id(p));
+                let meta = send_batch(&mut h, &[(asset, q)])
+                    .expect("either individual batch leg fits the remaining future-domain budget");
+                h.position = Some((asset, q));
+                h.observe_cu(0, meta.compute_units_consumed);
+                h.check();
+                assert_eq!(h.claims_for(0), historical);
+                assert_eq!(h.portfolios.map(|p| h.env.portfolio_id(p)), ids);
+                h.settle_mark(PRICE, [order[1], order[0]]);
+                let gain = q.unsigned_abs() / POS_SCALE;
+                let mut expected = historical;
+                expected[missing] = gain * BOUND_SCALE;
+                assert_eq!(h.claims_for(0), expected);
+                assert_eq!(
+                    expected.iter().filter(|claim| **claim > 0).count(),
+                    CAPACITY
+                );
+                let meta = send_batch(&mut h, &[(asset, -q)])
+                    .expect("full source occupancy preserves batch risk reduction");
+                h.position = None;
+                h.observe_cu(0, meta.compute_units_consumed);
+                h.check();
+                assert_eq!(h.claims_for(0), expected);
+                let historical_gain: u128 = (0..HISTORY).map(|a| 1 + (a % 3) as u128).sum();
+                assert_eq!(
+                    h.payout(order),
+                    [
+                        CAPITAL + historical_gain + gain,
+                        CAPITAL - historical_gain - gain
+                    ]
+                );
+                worlds += 1;
+                calls += h.calls;
+                for (max, cu) in maxima.iter_mut().zip(h.maxima) {
+                    *max = (*max).max(cu);
+                }
+            }
+        }
+    }
+    assert_eq!((worlds, rejections), (8, 16));
+    println!("INV-028 joint batch admission: worlds={worlds}, rejections={rejections}, successful post-funding calls={calls}, max rejected CU={max_rejected_cu}, max CU trade/mark-crank/convert/withdraw/close={maxima:?}");
 }

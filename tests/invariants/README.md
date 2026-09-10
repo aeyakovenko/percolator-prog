@@ -3,6 +3,30 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-028 joint batch admission at one vacant domain (row 423, 2026-09-10)
+
+[`cu/inv_028_single_slot_admission.rs`](cu/inv_028_single_slot_admission.rs) adds
+`v16_program_batch_admission_cannot_share_last_future_domain_slot`, mounted under
+`inv_028_source_domain_realizability_cap::single_slot_admission`. The test covers
+the capacity-boundary case where two individually fitting legs both need the last
+future source domain, but their combined batch demand would exceed the supported
+source-domain budget.
+
+Eight public LiteSVM worlds cross source orientation, constrained account side,
+and the single-leg admission control. The combined batch rejects atomically with
+full economic account rollback; either leg alone admits, materializes its missing
+domain under authenticated marks, reduces, converts, withdraws and deletes within
+the existing CU limits. This is partial INV-028/057/073/077 evidence only:
+nonzero backing reservations, CPI, fractional quantities, fees/funding, expiry,
+Recovery, resolution, generation reuse and arbitrary histories remain outside this
+increment. **Row 423 remains OPEN** and no invariant status is promoted.
+
+Validation used fresh locked/offline wrapper and matcher SBF builds in the isolated
+worktree `codex/inv028-admission-boundary-20260910`. The exact selector passed
+1/1 across eight worlds; six adjacent INV-028/057/073 controls and the invariant
+index passed; formatting and whitespace checks passed. No production or Cargo pin
+files changed.
+
 ## INV-014 retained backing caps across matcher policy (row 411, 2026-09-10)
 
 [`stateful/inv_014_retained_backing_fee_cap.rs`](stateful/inv_014_retained_backing_fee_cap.rs),
