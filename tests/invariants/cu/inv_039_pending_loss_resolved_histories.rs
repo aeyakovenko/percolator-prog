@@ -6,6 +6,8 @@
 //! payout against independently computed debt. A disappearing leg is not debt payment.
 //! This is solvent, integral-quantity, no-fee/funding evidence, not row419 closure or
 //! bankruptcy-residual, exact-partition, crank-rank or arbitrary-history coverage.
+//! The terminal-close witness also carries settled obligations through actual vault
+//! closure and slab retirement, including rollback of a staged debtor SPL payout.
 
 use super::*;
 use proptest::prelude::*;
@@ -434,6 +436,281 @@ fn v16_program_resolved_debtor_deletion_preserves_unsettled_cohort_attribution()
     }
     assert_eq!(worlds, 8);
     println!("INV-039: 8 resolved debtor deletions before global debt settlement; 8 waiting rollbacks; 40 exact owner payouts");
+}
+
+#[test]
+fn v16_program_settled_pending_cohorts_reach_exact_terminal_slab_close() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut peak_cu = 0;
+    for reverse_sides in [false, true] {
+        for last_pair in 0..2 {
+            let history = History {
+                reverse_sides,
+                lots: [1, 2],
+                price_moves: [1, 19_999],
+                early_debtor: None,
+                close_order: [0, 1, 2, 3, 4],
+                extra_closes: Vec::new(),
+            };
+            let (mut world, mut model) = resolve_history(&history);
+            let admin = world.env.admin.insecure_clone();
+            let destination = create_ata_for_test(
+                &mut world.env.svm,
+                &world.env.payer,
+                admin.pubkey(),
+                world.env.mint,
+            );
+            send_raw_tx(
+                &mut world.env.svm,
+                &world.env.payer,
+                spl_token::instruction::set_authority(
+                    &spl_token::ID,
+                    &world.env.mint,
+                    None,
+                    spl_token::instruction::AuthorityType::MintTokens,
+                    &admin.pubkey(),
+                    &[],
+                )
+                .unwrap(),
+                &[&admin],
+            )
+            .unwrap();
+            let destination_frame = world.env.svm.get_account(&destination);
+            let mint_frame = world.env.svm.get_account(&world.env.mint);
+            let close_slab = Instruction {
+                program_id: world.env.program_id,
+                data: ProgInstruction::CloseSlab {
+                    authority_epoch: world.env.control_sequences(0).authority_epoch,
+                }
+                .encode(),
+                accounts: vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(world.env.market, false),
+                    AccountMeta::new(world.env.vault, false),
+                    AccountMeta::new_readonly(world.env.vault_authority, false),
+                    AccountMeta::new(destination, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(world.env.mint, false),
+                ],
+            };
+            let last_debtor = 2 * last_pair + 1;
+            model.close(&mut world, 2 * (1 - last_pair) + 1);
+            for holder in [0, 2] {
+                model.close(&mut world, holder);
+            }
+            assert_eq!(model.pending, [false; 4]);
+            assert_ne!(model.basis[last_debtor], 0);
+            for holder in [0, 2] {
+                assert_eq!(world.env.token_amount(world.actors[holder].token), 0);
+                assert_eq!(
+                    world
+                        .env
+                        .portfolio_state(world.actors[holder].portfolio)
+                        .pnl
+                        .get(),
+                    model.debt[holder / 2] as i128
+                );
+            }
+
+            let debtor = &world.actors[last_debtor];
+            let settle = Instruction {
+                program_id: world.env.program_id,
+                data: ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                }
+                .encode(),
+                accounts: vec![
+                    AccountMeta::new_readonly(debtor.owner.pubkey(), false),
+                    AccountMeta::new(world.env.market, false),
+                    AccountMeta::new(debtor.portfolio, false),
+                    AccountMeta::new(debtor.token, false),
+                    AccountMeta::new(world.env.vault, false),
+                    AccountMeta::new_readonly(world.env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+            };
+            let mut land = |world: &mut AttributionWorld, instructions: &[Instruction]| {
+                world.env.svm.expire_blockhash();
+                let tx = Transaction::new_signed_with_payer(
+                    instructions,
+                    Some(&world.env.payer.pubkey()),
+                    &[&world.env.payer, &admin],
+                    world.env.svm.latest_blockhash(),
+                );
+                assert_eq!(tx.message.header.num_required_signatures, 2);
+                assert!(tx.verify().is_ok());
+                assert!(bincode::serialize(&tx).unwrap().len() <= 1_232);
+                let result = world.env.svm.send_transaction(tx);
+                let meta = match &result {
+                    Ok(meta) => meta,
+                    Err(failure) => &failure.meta,
+                };
+                assert_cu_within(
+                    "INV-039 obligation terminal transaction",
+                    meta.compute_units_consumed,
+                    CUSTODY_CU_LIMIT,
+                );
+                peak_cu = peak_cu.max(meta.compute_units_consumed);
+                result
+            };
+
+            // A successful debt settlement and SPL payout precede the retirement rejection.
+            let before = world.frame();
+            let failure = land(
+                &mut world,
+                &[heap_ix(), cu_ix(), settle, close_slab.clone()],
+            )
+            .expect_err("unpaid holder claims still prevent slab retirement");
+            assert_eq!(
+                failure.err,
+                TransactionError::InstructionError(
+                    3,
+                    InstructionError::Custom(PercolatorError::EngineLockActive as u32)
+                )
+            );
+            for program in [world.env.program_id, spl_token::ID] {
+                assert_eq!(
+                    failure
+                        .meta
+                        .logs
+                        .iter()
+                        .filter(|line| { **line == format!("Program {program} success") })
+                        .count(),
+                    1,
+                    "the rejected bundle must first commit a staged debtor payout"
+                );
+            }
+            assert_eq!(world.frame(), before);
+            assert_eq!(world.env.svm.get_account(&destination), destination_frame);
+            model.assert_matches(&world);
+
+            // Exactly four more resolved calls pay the debtor, both holders and the bystander.
+            for actor in [last_debtor, 2 * last_pair, 2 * (1 - last_pair), 4] {
+                model.close(&mut world, actor);
+                assert!(resolved_portfolio_is_terminal(
+                    &world.env,
+                    world.actors[actor].portfolio
+                ));
+            }
+            assert_eq!(model.basis, [0; 4]);
+            assert_eq!(model.pending, [false; 4]);
+            let expected = [200_001u128, 179_999, 339_998, 210_002, 777];
+            for (actor, entitlement) in world.actors.iter().zip(expected) {
+                assert_eq!(world.env.token_amount(actor.token) as u128, entitlement);
+                assert!(resolved_portfolio_is_terminal(&world.env, actor.portfolio));
+            }
+            let settled = world.env.market_state().1;
+            assert_eq!(
+                (settled.vault, settled.c_tot, settled.pnl_pos_tot),
+                (0, 0, 0)
+            );
+            assert_eq!(settled.insurance, 0);
+            assert_eq!(settled.materialized_portfolio_count, 5);
+            for actor in [
+                last_debtor,
+                2 * last_pair,
+                4,
+                2 * (1 - last_pair),
+                2 * (1 - last_pair) + 1,
+            ] {
+                let before = world.frame();
+                let count = world.env.market_state().1.materialized_portfolio_count;
+                let a = &world.actors[actor];
+                let rent = world.env.svm.get_account(&a.portfolio).unwrap().lamports;
+                let market_rent = world
+                    .env
+                    .svm
+                    .get_account(&world.env.market)
+                    .unwrap()
+                    .lamports;
+                let cu = world.env.close_portfolio_with_cu(&a.owner, a.portfolio);
+                assert_cu_within("INV-039 pre-retirement deletion", cu, CUSTODY_CU_LIMIT);
+                assert_eq!(
+                    world.env.market_state().1.materialized_portfolio_count,
+                    count - 1
+                );
+                assert_eq!(world.env.market_state().1.assets, settled.assets);
+                assert_eq!(
+                    world
+                        .env
+                        .svm
+                        .get_account(&world.env.market)
+                        .unwrap()
+                        .lamports,
+                    market_rent + rent
+                );
+                assert!(world
+                    .env
+                    .svm
+                    .get_account(&a.portfolio)
+                    .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+                for (key, account) in before {
+                    if ![world.env.market, a.portfolio].contains(&key) {
+                        assert_eq!(world.env.svm.get_account(&key), account);
+                    }
+                }
+            }
+            let terminal = world.env.market_state().1;
+            assert_eq!(terminal.materialized_portfolio_count, 0);
+            assert_eq!(
+                (terminal.vault, terminal.c_tot, terminal.pnl_pos_tot),
+                (0, 0, 0)
+            );
+            crate::support::fuzz_model::assert_reservation_encumbrance_census(
+                "INV-039 obligation-complete retirement",
+                &terminal,
+                &[],
+            )
+            .unwrap();
+            let before = world.frame();
+            let market_rent = world
+                .env
+                .svm
+                .get_account(&world.env.market)
+                .unwrap()
+                .lamports;
+            let vault_rent = world
+                .env
+                .svm
+                .get_account(&world.env.vault)
+                .unwrap()
+                .lamports;
+            let mut expected_admin = world.env.svm.get_account(&admin.pubkey()).unwrap();
+            land(&mut world, &[heap_ix(), cu_ix(), close_slab])
+                .expect("settled pending cohorts retire in one bounded slab call");
+            let tombstone = world.env.svm.get_account(&world.env.market).unwrap();
+            assert_closed_market_tombstone(&tombstone);
+            assert_eq!(
+                tombstone.lamports,
+                world
+                    .env
+                    .svm
+                    .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN)
+            );
+            expected_admin.lamports += market_rent + vault_rent - tombstone.lamports;
+            assert_eq!(
+                world.env.svm.get_account(&admin.pubkey()),
+                Some(expected_admin)
+            );
+            assert!(world
+                .env
+                .svm
+                .get_account(&world.env.vault)
+                .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+            for (key, account) in before {
+                if ![world.env.market, world.env.vault, admin.pubkey()].contains(&key) {
+                    assert_eq!(world.env.svm.get_account(&key), account);
+                }
+            }
+            assert_eq!(world.env.svm.get_account(&destination), destination_frame);
+            assert_eq!(world.env.svm.get_account(&world.env.mint), mint_frame);
+            let mint = Mint::unpack(&mint_frame.unwrap().data).unwrap();
+            assert_eq!(mint.mint_authority, COption::None);
+            assert_eq!(mint.supply as u128, expected.iter().sum::<u128>());
+        }
+    }
+    println!("INV-039 terminal retirement: 4 worlds, 4 staged-payout rollbacks, 20 exact payouts, 20 portfolio deletions, 4 single-call slab closes; peak terminal transaction {peak_cu} CU");
 }
 
 #[test]

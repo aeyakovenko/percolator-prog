@@ -3,6 +3,97 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-039 settled pending cohorts through slab retirement (row 419, 2026-09-10)
+
+[`cu/inv_039_pending_loss_resolved_histories.rs`](cu/inv_039_pending_loss_resolved_histories.rs)
+adds one selector,
+`v16_program_settled_pending_cohorts_reach_exact_terminal_slab_close`, under the
+existing `inv_039_pending_loss_obligation_durability::resolved_histories` owner.
+Base: `f08fef51654addd22cfaea7000282f35dad27fed`, the local
+`origin/codex/invariant-fidelity-reopen-20260904` reference. Worktree:
+`/home/anatoly/percolator-row419-20260910`; branch:
+`codex/row419-obligation-durability-20260910`.
+
+The new axis is **bounded terminal slab retirement after pending obligation
+settlement**. The existing INV-039 pending cohorts, resolved histories,
+close/reopen, transfer and resolved-debtor-deletion selectors stop at portfolio
+deletion. INV-070's normal-exit rent test has no pending debt; its Recovery
+force-close test closes both positions before resolution without an unbooked
+price-move debt. This addition follows actual pending cohorts through the final
+canonical SPL vault close and typed market tombstone.
+
+Four worlds cross both side orientations and either asset's debtor settling last.
+The existing public fixture and input-derived attribution model carry two
+zero-basis, nonzero-loss-weight holders and their unbooked opposing debts across
+resolution. One debtor settles, then both holders detach while the other debtor
+remains unsettled. Removing both obligation counters still leaves the exact
+1/39,998-atom credits attributed and unpaid. A two-instruction bundle successfully
+stages the final debtor's settlement and SPL payout before `CloseSlab` rejects at
+instruction 3 with `EngineLockActive`. Wrapper and SPL success logs establish the
+successful prefix; the complete tracked economic Account frame and the added
+administrator destination roll back exactly, excluding only the distinct fee payer.
+This rejection also has funded/materialized portfolios present; it does not isolate
+a pending-counter-only retirement gate.
+
+Retrying through four fixed resolved calls pays the final debtor, both holders
+and the bystander. All five original entitlements are exactly
+`[200001, 179999, 339998, 210002, 777]`. Five owner-signed portfolio deletions
+preserve the zero OI/weight/pending counters and every foreign Account, decrease
+the materialized count exactly once each, and move exact portfolio rent into the
+market. The empty-portfolio reservation census passes before one successful
+`CloseSlab` call closes the vault and retains the canonical tombstone rent. The
+administrator receives exactly the vault rent plus market excess, including the
+returned portfolio rent, and no quote tokens. User destinations, mint and foreign
+Accounts remain exact. Mint authority is publicly revoked and the entire fixed
+930,777-atom supply remains in user destinations, with no burn or residual sweep.
+There are exactly 13 successful post-resolution continuation calls per world:
+seven resolved closes, five portfolio deletions and one slab close. The composed
+rollback and final slab transactions each verify signatures, fit 1,232 bytes and
+stay within the existing 300,000-CU custody bound.
+
+Construction uses only System/SPL/ATA/wrapper instructions, authenticated marks,
+signer SOL airdrops, Clock advancement and blockhash renewal. Only local repository
+docs/tests informed the increment. **Row 419 remains OPEN; INV-039 remains
+REFUTED_CURRENT.** This is bounded, solvent, integral-quantity coverage with zero
+fees/funding. Provider-backed pending claims, backing/insurance consumption or
+expiry during these histories, bankruptcy/B-loss or ADL through resolution,
+mixed debtor/creditor roles on one account, fractional quantities, maximum shapes
+and arbitrary histories remain open. No production or invariant-status change.
+
+Validation: the new selector passed **1/1** (four worlds, 2.17s), the three exact
+adjacent controls passed **3/3** (5.59s), and the invariant index passed **1/1**.
+The new test observed four staged-payout rollbacks, 20 exact payouts, 20 portfolio
+deletions and four single-call slab closes; peak terminal transaction **164,688 CU**.
+Formatting and both Git whitespace checks passed. The local target was privately
+copied to reuse dependencies; the wrapper SBF was rebuilt offline in this worktree.
+Its SHA-256 is `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Existing support dead-code and `solana-client` future-incompatibility warnings
+remain. No broad suite was run. The index was rerun after this README update
+because it embeds the README at compile time.
+
+Exact setup, build and verification commands, run from the worktree (line breaks
+only added for readability; the new selector and adjacent controls ran once):
+
+```sh
+cp -a /dev/shm/row416-local-invariant-audit-20260910-target /dev/shm/row419-terminal-close-20260910-target
+env CARGO_TARGET_DIR=/dev/shm/row419-terminal-close-20260910-target TMPDIR=/dev/shm CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc \
+  cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/row419-terminal-close-20260910-target/deploy -- --locked
+rustfmt --edition 2021 tests/invariants/cu/inv_039_pending_loss_resolved_histories.rs
+env CARGO_TARGET_DIR=/dev/shm/row419-terminal-close-20260910-target PERCOLATOR_FUZZ_SBF=/dev/shm/row419-terminal-close-20260910-target/deploy/percolator_prog.so TMPDIR=/dev/shm CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::resolved_histories::v16_program_settled_pending_cohorts_reach_exact_terminal_slab_close -- --exact --nocapture
+sha256sum /dev/shm/row419-terminal-close-20260910-target/deploy/percolator_prog.so
+env CARGO_TARGET_DIR=/dev/shm/row419-terminal-close-20260910-target PERCOLATOR_FUZZ_SBF=/dev/shm/row419-terminal-close-20260910-target/deploy/percolator_prog.so TMPDIR=/dev/shm CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_039_pending_loss_obligation_durability::v16_program_resolve_with_pending_obligation_defers_claim_until_debtor_settles \
+  inv_039_pending_loss_obligation_durability::resolved_histories::v16_program_resolved_debtor_deletion_preserves_unsettled_cohort_attribution \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_close_slab_refunds_exact_vault_and_market_excess_rent_after_normal_exit
+env CARGO_TARGET_DIR=/dev/shm/row419-terminal-close-20260910-target PERCOLATOR_FUZZ_SBF=/dev/shm/row419-terminal-close-20260910-target/deploy/percolator_prog.so TMPDIR=/dev/shm CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-073 absent provider through full expiry retirement (2026-09-10)
 
 [`cu/inv_073_absent_provider_expiry_retirement.rs`](cu/inv_073_absent_provider_expiry_retirement.rs)
