@@ -3832,6 +3832,87 @@ transactions, 12 authorization rejections with exact rollback, four fresh
 economic fills, and peak CU **253,073**. Adjacent INV-012 controls passed
 **2/2**, and formatting/diff checks passed in the source worktree.
 
+## Row 411 retained policy/exit instruction order (2026-09-10)
+
+[`stateful/inv_014_retained_delegated_fee_exit.rs`](stateful/inv_014_retained_delegated_fee_exit.rs)
+adds `v16_program_retained_fee_relaxation_must_precede_exit_and_roll_back_with_it`.
+The distinct relation is **a retained base-fee policy and delegated exit in the
+same atomic transaction**, with both instruction orders and an independently
+consumed exit. It supplies bounded INV-010/011/014/024/036/047/081 evidence adjacent
+to row 411. **Row 411 remains OPEN; no invariant status is advanced.**
+
+Eight public SBF/LiteSVM histories cross single/batch CPI, a relaxation to 7 or
+37 bps, and whether a separately signed bilateral exit consumes the position
+episode first. Both owners start with a nonintegral position on asset 1 at a
+constant authenticated price of 100,003. The LP grants 37 bps; the taker signs
+503 bps and batch CPI additionally signs the corresponding exact atom ceiling.
+Market authority succession completes before retention. Under a 19-bps policy,
+the policy-before-exit, exit-before-policy, and opposite-CPI-route exit alternatives
+are signed, packet checked, and successfully simulated without changing accounts.
+The retained policy sequence leaves room for one intervening public hike to 38 bps.
+
+- Exit-before-policy rejects at instruction 3 before CPI: a later relaxation
+  cannot authorize an earlier debit above the unchanged LP cap.
+- Policy-before-exit commits if its episode is current, charging precisely the
+  policy's 7/37 bps within both consent bounds.
+- If an independent bilateral exit lands first, the relaxation prefix completes
+  but its stale exit rejects at instruction 4. The entire transaction restores
+  the 38-bps policy and its sequence, as well as all writable economic accounts.
+  The same policy instruction then commits alone. The LP publicly renews the
+  original 37-bps grant after the bilateral exit's expected revocation.
+- The opposite retained CPI alternative rejects against the consumed episode.
+  A fresh bounded CPI trade, matched close, and both owner withdrawals execute.
+
+An input-only two-ceiling fee oracle checks each owner's capital and zero PnL,
+exact asset-1 long/short insurance credits, zero base-asset destination credits,
+positions/OI, vault custody, wallets, mint supply, and independent stock and
+encumbrance censuses after every public transaction. Rejections compare complete
+accounts, including every retained message account except the separate network
+fee payer. Grant scope, cap, expected revocation, position epochs and renewal
+sequence are checked separately from the packed matcher control word.
+Single/batch terminal SPL entitlements agree for each policy and exit order.
+
+This is distinct from the existing retained fee bundle's independent trade
+prefixes, delegated exit's between-transaction policy updates, changed fill
+capacity, multi-asset batch route switch, signed direction matrix, and bilateral
+relaxation's two successful transaction orders. INV-036's redirect bundle rolls
+back a paid trade when its policy suffix is stale; this test instead rolls back
+a completed base-fee relaxation when its exit suffix is stale. It adds an order
+relation, not another claim to route-matrix closure or an isolated taker guard.
+One asset, one leg, one orientation, fixed marks, and zero backing, movement,
+funding and maintenance fees keep the result bounded; every fee-bearing class
+and arbitrary policy/authority histories remain outside this increment.
+
+Validation uses private worktree
+`/dev/shm/percolator-pr135-retained-fee-conformance`, based on local HEAD
+`11ffae5f65693d3ae7b790bae5741ebf9af7e8b0`. Fresh locked/offline default-feature
+production and authenticated-matcher SBF artifacts were built inside it.
+Production SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new selector passes **8 worlds / 108 transactions / 20 exact rollbacks**,
+including **4 completed-policy-prefix rollbacks**, with peak successful cost
+**153,981 CU**. Initial compile/fixture corrections concerned the asset-index
+type, the market-wide policy's asset-0 control lane, and the matcher control word's
+position epoch and canonical bilateral revocation. No production inconsistency
+was observed. The adjacent delegated-exit control passes **24 worlds / 256
+transactions / 72 exact rejections**, and the retained-bundle control passes
+**64 worlds / 1,088 transactions / 128 exact rollbacks**.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" TMPDIR="$PWD/target/tmp"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir target/deploy -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_014_delayed_policy_and_policy_epoch_safety::retained_delegated_fee_exit::v16_program_retained_fee_relaxation_must_precede_exit_and_roll_back_with_it -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_014_delayed_policy_and_policy_epoch_safety::retained_delegated_fee_exit::v16_program_retained_lp_fee_cap_preserves_bilateral_and_delegated_exits -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_014_delayed_policy_and_policy_epoch_safety::retained_fee_bundle::v16_program_retained_fee_bundle_route_product_rolls_back_authorized_prefix -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## Row 411 retained atomic fee bundles (2026-09-09)
 
 [`stateful/inv_014_retained_fee_bundle.rs`](stateful/inv_014_retained_fee_bundle.rs),
