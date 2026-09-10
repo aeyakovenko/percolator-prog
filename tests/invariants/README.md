@@ -465,6 +465,96 @@ rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/i
 git diff --check
 ```
 
+## INV-070 retired-slot reuse behind a persisted terminal scan (row 424, 2026-09-10)
+
+[`cu/inv_070_terminal_prefix_reuse.rs`](cu/inv_070_terminal_prefix_reuse.rs), mounted by
+INV-070 as `terminal_prefix_reuse`, adds
+`v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback`.
+One public System/SPL/ATA/wrapper history creates three assets, retires asset 1,
+and funds 17 backing atoms at asset 2 until slot 20. An independent creator holds
+the one-atom permissionless activation fee; mint authority is publicly revoked.
+No program-owned account bytes or economic state are injected.
+
+At slot 5, both administrator and fee-paying permissionless reactivation of the
+retired slot simulate successfully. Their generation, authority fields, token
+accounts and fee consent are valid; the permissionless preview executes the SPL
+fee transfer. Simulation leaves all compiled and tracked accounts unchanged.
+Resolution then leaves the retired generation and next-generation frontier
+unchanged. `CloseSlab` commits cursor `0 -> 2`, placing retired asset 1 strictly
+behind the prefix while asset 2 still holds Fresh backing.
+
+The same two reactivation instructions, signed with current blockhashes, each
+reject with exact `EngineLockActive` at instruction 2. At authenticated slot 20,
+each is retried after a `CloseSlab` prefix which successfully normalizes the
+later backing. Reactivation rejects at instruction 3; the successful wrapper log
+establishes the completed prefix. Every compiled and tracked Account rolls back
+exactly, including engine time, backing, cursor, generations, free-slot count,
+SPL custody and rent, except the independently calculated signature fee. The
+two-signer and three-signer cases both verify signatures and fit 1,232 bytes.
+
+Two standalone cleanup calls then expire asset 2 and finish closure. All earlier
+asset-slot bytes remain identical during expiry, and neither scanning nor expiry
+moves custody. Exactly 17 atoms burn; the creator retains its complete one-atom
+fee balance, the canonical vault closes, and the administrator receives exactly
+vault rent plus market excess above the canonical typed tombstone rent. The
+existing independent stock and encumbrance censuses run at terminal checkpoints.
+The history has exactly three committed `CloseSlab` calls, two live previews and
+four exact rejected transactions, all bounded by 300,000 CU.
+
+This is a net-new rejected asset-reuse route behind a persisted prefix, composed
+with INV-088's local-versus-global summary obligation. The existing external
+surplus selector changes custody, retained terminal withdrawal changes provider
+eligibility, and INV-071's `terminal_cursor_time` keeps Fresh buckets at or ahead
+of the cursor. INV-069's
+`v16_program_reused_asset_keeps_expired_residue_out_of_new_provider_principal`
+reuses the asset before resolution. INV-088's insurance and resolved-blocker
+summary matrices do not attempt asset reuse behind a terminal prefix.
+
+The code boundary is `handle_update_asset_lifecycle`: valid generation preflight
+is followed by a Live-mode requirement before either admin or permissionless
+reuse can mutate the asset. This test establishes exact rejection of that public
+transition, not a successful mutation or generic cursor invalidation theorem.
+**Row 424 remains OPEN.** Earlier-slot time reclassification, newly introduced
+claims/obligations, insurance recredit, earnings/receipts, other quote rails,
+larger shapes and arbitrary environmental histories remain outside this sample.
+The ledger adds a partial-coverage note without changing its row or status.
+
+Worktree: `/dev/shm/percolator-pr135-inv070-20260910`; branch:
+`codex/pr135-inv070-prefix-20260910`; base:
+`9c433dc3a83b84fb749c7450fb7bf92f9d548c21`, the local requested origin reference.
+Only local code/tests/docs informed this addition; no GitHub PR or issue evidence
+was consulted. Production/Cargo files and invariant statuses are unchanged.
+Validation: new exact selector **1/1 passed** (0.39s), adjacent INV-070/071/088
+controls **7/7 passed** (24.45s), invariant index **1/1 passed**, repository-wide
+formatting and working/staged whitespace checks passed. New-test peak:
+**30,514 CU**, below the 300,000-CU bound. The private target was seeded from the
+local INV-024 cache; a fresh locked/offline default-feature SBF build in this
+worktree produced SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`
+on engine `394fd0bf`. Host tests also compiled in this worktree. Existing support
+dead-code and `solana-client` future-incompatibility warnings remain.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-pr135-inv070-20260910-target
+export TMPDIR="$CARGO_TARGET_DIR"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_prefix_reuse::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_terminal_scan_reconciles_external_surplus_arriving_after_cached_prefix \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_retained_terminal_withdrawal_revalidates_expiry_after_scan_and_partial_payout \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry \
+  inv_071_crank_progress::terminal_cursor_time::v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings \
+  inv_088_global_summaries_are_not_account_local_proofs::v16_program_insurance_budget_global_summary_is_exact_in_every_four_domain_touch_order \
+  inv_088_global_summaries_are_not_account_local_proofs::v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness \
+  inv_088_global_summaries_are_not_account_local_proofs::v16_program_resolved_blocker_summary_is_exact_in_every_two_asset_claimant_order
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git diff --exit-code 9c433dc3a83b84fb749c7450fb7bf92f9d548c21 -- src Cargo.toml Cargo.lock tests/invariants/invariant_status.tsv tests/invariants/open_findings.tsv
+```
+
 ## INV-070 external custody after a persisted terminal scan (2026-09-10)
 
 [`cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs`](cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs)
