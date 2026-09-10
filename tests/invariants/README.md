@@ -3,6 +3,125 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-014 retained backing caps across matcher policy (row 411, 2026-09-10)
+
+[`stateful/inv_014_retained_backing_fee_cap.rs`](stateful/inv_014_retained_backing_fee_cap.rs),
+mounted under `inv_014_delayed_policy_and_policy_epoch_safety::retained_backing_fee_cap`,
+adds `v16_program_retained_backing_fee_caps_follow_participant_and_route_consent`.
+Base: local `origin/codex/invariant-fidelity-reopen-20260904` at
+`81f7dae865d16bf5b530143f619950b115c42f09`. Worktree:
+`/dev/shm/pr135-row411-route-consent-20260910`; branch:
+`codex/pr135-row411-route-consent-20260910`. Only repository code, tests and notes
+informed this PR135 conformance increment; no external PR/issue evidence was used.
+
+The new product retains **nonzero source-fee consent across an owner-signed matcher
+backing-cap change**, then lands a same-route or bilateral alternative. Four public
+LiteSVM worlds cross the charged participant's taker/LP role and CPI/no-CPI landing.
+An independent provider funds 100,000 backing atoms at 3,333 bps. Public trades and
+authenticated marks create a 5,000-atom positive claim. Before changing the matcher
+cap, both bilateral owners sign a 3,333-bps backing cap, and the CPI taker signs its
+own cap; the unsigned LP relies on the matcher's current cap. Every retained
+transaction verifies, fits a packet, and simulates successfully before retention.
+
+The LP then lowers its matcher cap to 3,332 bps without changing the wrapper grant,
+matcher sequence, position epochs, provider policy or either retained transaction:
+
+- When the LP bears the source fee, the retained CPI probe rejects with
+  `Unauthorized` at the trade instruction after a successful matcher invocation.
+  All tracked and compiled Accounts roll back, including matcher context and SPL
+  custody; the separate network payer is excluded. The retained bilateral trade
+  remains admissible under both owners' existing signatures while the matcher cap
+  stays lower. Restoring the LP cap permits the already-signed CPI alternative.
+- When only the taker bears the source fee, its signed 3,333-bps cap continues to
+  authorize the retained CPI trade despite the lower LP cap. Conversely, the LP-fee
+  worlds use a zero taker cap and succeed once the LP's own cap permits its debit.
+  These controls require participant-local consent, including the no-fee side.
+
+Each accepted trade creates 875 provider-fee atoms. An independent ceiling of the
+decoded lien delta times the configured rate reconciles that amount to the charged
+owner's capital and provider earnings, with zero insurance diversion. A public SPL
+withdrawal realizes exactly 875 atoms. Repricing back to 100 and closing through the
+opposite transport gives identical marked owner values of 51,377 and 2,000,250 atoms;
+the new 50-lot position contributes the independently calculated 250-atom PnL transfer.
+The final vault holds 2,151,627 atoms, including the provider's remaining principal.
+Stock/encumbrance censuses, fixed token supply, zero final OI and zero residual
+provider earnings hold in all worlds.
+
+`V16Svm` supplies its existing public-construction fixture. No program-owned bytes
+are installed or edited. Every nonempty wrapper trace segment passes the existing
+reachability validator with zero out-of-band economic mutations. The external
+matcher's signed policy API is outside that validator's program allowlist, so its
+updates are separately framed: only the owner's matcher-context data may change,
+with all tracked protocol/SPL Accounts and context metadata exact. The public-trace
+consumer inventory grows from 108 actual base consumers to 109 without changing
+validator semantics. Its old expected count was 103: `git grep` confirms 103 at
+the last census update (`ec04e4f9`) and 108 at this base. The five intervening
+consumers are the retained policy/exit and shared-taker owners, historical source
+capacity, paid-mark source liens and retained mixed transports. The count update
+includes that existing drift and this test's one new consumer; every consumer's
+validation-window assertion remains active.
+
+Local overlap checks:
+
+| Existing selector | Distinction from this product |
+| --- | --- |
+| `v16_program_retained_source_fee_caps_bind_every_single_trade_role` | Rejects zero caps and builds fresh authorized retries; no retained nonzero consent across a matcher cap change. |
+| `v16_program_retained_source_fees_survive_repricing_policy_and_settlement_orders` | Retains exits after earning source fees; no changed matcher backing cap on the fee-creating trade. |
+| `v16_program_retained_lp_fee_cap_preserves_bilateral_and_delegated_exits` | Changes the market base fee under a wrapper LP trading-fee grant; backing caps remain zero. |
+| `v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider` | Retains aggregate base-fee bounds through authority succession; no source utilization fee. |
+| `v16_program_retained_grants_bind_context_across_mixed_transport_reductions` | Wrapper grant/context revocation and mixed reductions, with no backing-cap policy transition. |
+
+The existing redirect bundle and maintenance/liquidation share-supersession owners
+cover destination policy and keeper attribution. Shared-taker bundles, close/fixed
+withdrawals, partial/exact fills and activation handoff remain separate owners.
+**Row 411 remains OPEN.** This adds sampled INV-014/036/047/081 evidence, not closure.
+Scope excludes batch source fees, provider-policy changes, multiple source domains,
+partial fills, funding/maintenance/liquidation fees, terminal disposal and complete
+owner SPL payouts. The lien amount remains an engine input to the fee oracle, not
+an independent proof of collateral admission. Production, dependencies and invariant
+verdicts are unchanged; the reopening ledger gains only this partial-coverage note.
+
+The exact selector passes **1/1: four worlds, 95 public transactions, two exact
+post-CPI rollbacks**, with peak selected trade CU **649,103**. The program SBF is a
+private copy from `/dev/shm/percolator-inv012-standing-20260910-target`; `src`, Cargo
+inputs and fixture sources are identical between its `9c433dc3` base and this base.
+Wrapper SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+auth matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Both artifacts are reused without rebuilding, with pinned engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Host outputs use a private copied cache.
+Development corrected a mutable simulation borrow, a settled-PnL assertion and the
+external matcher trace boundary. No failing valid conformance history was observed.
+The adjacent stateful controls pass **4/4**, CU controls **4/4**, and public source-fee
+control **1/1**. Formatting and whitespace checks pass. The invariant index and
+corrected trace census pass **2/2** after correcting the independently counted base drift.
+Existing dead-code and `solana-client v1.18.26` future-compatibility warnings remain.
+
+Validation commands from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-row411-route-consent-20260910-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_014_delayed_policy_and_policy_epoch_safety::retained_backing_fee_cap::v16_program_retained_backing_fee_caps_follow_participant_and_route_consent -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture --test-threads=1 \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_delegated_fee_exit::v16_program_retained_lp_fee_cap_preserves_bilateral_and_delegated_exits \
+  inv_036_fee_destination_and_policy_version_integrity::v16_program_retained_source_fees_survive_repricing_policy_and_settlement_orders \
+  inv_047_equivalent_route_semantics::retained_mixed_transport::v16_program_retained_grants_bind_context_across_mixed_transport_reductions
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_program_trade_requires_signed_base_fee_consent \
+  inv_036_fee_destination_and_policy_version_integrity::v16_program_retained_redirect_bundle_preserves_fee_rounding_and_policy_order \
+  inv_047_equivalent_route_semantics::v16_program_fee_charged_close_matches_single_and_one_leg_batch_routes \
+  inv_081_success_state_validity_over_complete_public_routes::fee_resolution_atomicity::v16_program_retained_withdrawal_rolls_back_fee_resolution_and_paid_prefix
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_036_fee_destination_and_policy_version_integrity::v16_program_retained_source_fee_caps_bind_every_single_trade_role \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_every_public_trace_consumer_validates_reachability_evidence
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code 81f7dae8 -- src Cargo.toml Cargo.lock tests/support tests/fixtures tests/invariants/invariant_status.tsv
+git diff --cached --check
+```
+
 ## INV-045 trade-origin liquidation through catchup (row 422, 2026-09-10)
 
 [`cu/inv_045_trade_origin_catchup.rs`](cu/inv_045_trade_origin_catchup.rs), mounted
