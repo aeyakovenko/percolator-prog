@@ -1000,6 +1000,103 @@ git diff --check
 ```
 
 
+## INV-005 funded oracle succession after admin renunciation (row 416, 2026-09-10)
+
+[`cu/inv_005_funded_oracle_succession.rs`](cu/inv_005_funded_oracle_succession.rs),
+mounted by `inv_005_authority_incarnation_binding::funded_oracle_succession`, adds
+`v16_program_funded_oracle_succession_after_admin_burn_preserves_backing_exit`.
+Four public LiteSVM histories cross base/non-base subject assets and both side-domain
+payout orders. The incumbent holds both oracle and backing authority and supplies
+17/29 backing atoms. A distinct user supplies 31 peer-asset backing atoms and deposits
+23 portfolio atoms. System/SPL/ATA/wrapper instructions construct all economic state;
+mint authority is revoked at 100 total atoms. The harness supplies only programs,
+signer SOL, Clock and blockhashes, with no program-state injection or engine transitions.
+
+The correctly signed cold-admin renunciation changes only its own role and the subject
+authority epoch; the complete decoded economic state, funded oracle/backing keys,
+portfolio and custody Accounts remain exact. With the asset admin now zero, the
+incumbent and successor consent to transfer only oracle authority. A bundle first
+pays seven incumbent atoms and executes that handoff, then rejects a one-atom withdrawal
+from the other domain at the old shared epoch with `EngineStale`. Logs establish both
+successful wrapper prefixes and the SPL transfer; every tracked and compiled Account
+rolls back exactly except for the separate payer's calculated signature fee.
+
+Changing only the final withdrawal's epoch admits the same three-instruction bundle.
+The successor gains only oracle authority, the backing key stays incumbent, and exactly
+eight atoms reach the incumbent. At current epochs, the former oracle's publication and
+the successor's backing withdrawal each reject with `Unauthorized` and complete Account
+rollback. The successor then publishes the unchanged price of 100 at authenticated slot
+2 despite a `u64::MAX` hint: only the observation sequence and freshness slot advance;
+the full engine state and other profile fields remain exact. The incumbent withdraws
+both remaining domain balances without admin or successor signatures, and the unrelated
+owner withdraws all 23 portfolio atoms. Every suffix transaction verifies its compiled
+signer set, signatures, packet size, exact payer fee and a 300,000-CU bound. Payouts
+permit only SPL amount changes; checkpoints reconcile input-derived principal, custody,
+all wallets, fixed mint supply, peer attribution, zero claims and zero exposure.
+Final custody is exactly 31 peer atoms, with wallet totals incumbent/successor/admin/user
+of 46/0/0/23. The user's portfolio is byte-exact until its own withdrawal.
+
+This is the funded composition missing from these local selectors:
+
+| Existing selector (under `inv_005_authority_incarnation_binding`) | Boundary |
+| --- | --- |
+| `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable` | Oracle self-succession after admin burn, with no funded backing or user payout. |
+| `v16_attack_oracle_authority_rotation_revokes_old_grants_new` | Oracle revocation/publication with no incumbent principal. |
+| `v16_program_funded_insurance_handoff_preserves_incumbent_oracle_and_operator` | Transfers insurance authority while leaving the oracle key unchanged; no admin burn or oracle succession. |
+| `v16_program_backing_withdrawal_aba_rolls_back_spl_and_ledger_prefix` | Rotates the backing role itself and retains withdrawals across ABA; no split oracle/backing ownership. |
+| `funded_backing_succession::v16_program_funded_backing_succession_preserves_paid_prefix_and_terminal_role_partition` | Transfers funded backing ownership, rather than retaining principal under the outgoing oracle's separate backing role. |
+
+**Row 416 remains OPEN.** This is bounded containment and exit evidence for a current
+funded oracle/backing holder across cold-admin renunciation and incumbent-consented
+oracle succession. It does not establish protection against a cold admin replacing an
+oracle without incumbent consent. Positions, price changes, liens, impaired backing,
+provider earnings, insurance claims, terminal lifecycle states, alternate quote rails,
+maximum shapes and arbitrary histories remain outside this increment. No invariant
+status, production code, engine pin or proof changes are claimed. Only local coverage
+docs and tests supplied the case; no GitHub material or holdout bugs supplied evidence.
+
+Validation uses base `f08fef51654addd22cfaea7000282f35dad27fed`, unchanged engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, and an offline default-feature SBF rebuild
+with platform-tools v1.52. The private target starts from a copy of a local build cache;
+the wrapper and host test compile from this worktree. SBF SHA-256 is
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new selector passes four histories, four admin burns, four SPL/handoff rollbacks,
+four oracle successions, eight exact role rejections and twelve final payouts, with
+peak **73,814 CU**. The first two isolated runs corrected test expectations for an
+unchanged-price publication: neither the engine oracle epoch nor the mark timestamp
+advances. No production inconsistency was observed.
+All three adjacent exact controls pass. The remaining validation commands below cover
+the invariant index, repository formatting and both whitespace checks; no broad suite
+is run.
+
+Exact setup/build commands:
+
+```sh
+git worktree add -b codex/row416-funded-oracle-20260910 /home/anatoly/percolator-row416 origin/codex/invariant-fidelity-reopen-20260904
+cp -a /dev/shm/row416-local-invariant-audit-20260910-target /dev/shm/row416-funded-oracle-20260910-target
+env CARGO_TARGET_DIR=/dev/shm/row416-funded-oracle-20260910-target CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/row416-funded-oracle-20260910-target/deploy -- --locked
+sha256sum /dev/shm/row416-funded-oracle-20260910-target/deploy/percolator_prog.so
+```
+
+Each Cargo test command below uses this exact prefix:
+
+```sh
+env CARGO_TARGET_DIR=/dev/shm/row416-funded-oracle-20260910-target PERCOLATOR_FUZZ_SBF=/dev/shm/row416-funded-oracle-20260910-target/deploy/percolator_prog.so CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+```
+
+Exact focused commands from `/home/anatoly/percolator-row416` (the isolated selector
+ran three times; `cargo fmt --all` followed each test-file edit):
+
+```sh
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::funded_oracle_succession::v16_program_funded_oracle_succession_after_admin_burn_preserves_backing_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_005_authority_incarnation_binding::v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable inv_005_authority_incarnation_binding::v16_attack_oracle_authority_rotation_revokes_old_grants_new inv_005_authority_incarnation_binding::v16_program_funded_insurance_handoff_preserves_incumbent_oracle_and_operator
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-005 funded insurance and oracle role separation (2026-09-10)
 
 [`cu/inv_005_authority_incarnation_binding.rs`](cu/inv_005_authority_incarnation_binding.rs)

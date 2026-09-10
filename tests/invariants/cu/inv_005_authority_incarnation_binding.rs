@@ -45,6 +45,9 @@ mod retained_insurance_management;
 #[path = "inv_005_funded_backing_succession.rs"]
 mod funded_backing_succession;
 
+#[path = "inv_005_funded_oracle_succession.rs"]
+mod funded_oracle_succession;
+
 fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)
