@@ -3,6 +3,77 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-045 selected Hybrid reward provenance after catchup (2026-09-10)
+
+[`cu/inv_045_no_free_mark_movement.rs`](cu/inv_045_no_free_mark_movement.rs)
+adds one public LiteSVM/SBF test:
+`v16_program_caught_up_hybrid_reward_uses_selected_asset_provenance_in_both_hint_orders`.
+Two worlds permute the same complete observation set: an unexposed EWMA asset 0
+and a fresh Hybrid asset 1 holding the target's only position. One retained Pyth
+report moves the Hybrid effective price from 1,000,000 through 997,600 and 995,200
+to 992,800 in three public cranks. Its authenticated publication time and last-good
+slot remain 101 and 2. The EWMA price stays 1,000,000.
+
+The distinct relation is selected-asset reward eligibility and domain attribution
+when the first observation has a different mark provenance. After actual catchup,
+the Hybrid liquidation must pay a nonzero keeper share even when the EWMA hint is
+first. Independent two-stage rounding prices the observed engine-selected close
+at 992,800; using the unrelated EWMA price gives a different fee. Both worlds charge
+**5,899 atoms**, credit **1,966** to the keeper, and retain **3,933** in insurance,
+split **1,966 / 1,967** across Hybrid domains while both EWMA domains remain zero.
+The refreshed target regains health, the peer remains byte-exact during target
+cranks, and effective OI remains balanced. Normalized closed quantity, fees,
+per-actor value, domain budgets and final custody agree across both orders.
+
+Before the final catchup, one duplicate final hint follows both valid observations.
+Its `Custom(9)` rejection restores complete market, portfolio, signer, oracle,
+mint and token accounts; only the separate network fee payer and runtime sysvars
+are outside the frame. The valid prefix then commits. Publication and bounded
+healthy refreshes pay nothing, and the eventual no-progress retry rolls back
+exactly. Peer settlement and matched owner reduction preserve the input-derived
+720,000-atom PnL transfer and target fee debit. The keeper withdraws exactly its
+1,000-atom principal plus reward through SPL; remaining entitlements, insurance,
+engine vault, SPL vault and fixed mint supply reconcile exactly.
+
+All protocol accounts are created through System/ATA instructions and initialized
+or funded through SPL/wrapper instructions, using existing helpers. Clock and
+legitimate external Pyth accounts are harness inputs. No program-owned bytes are
+injected or edited. Development removed redundant activation of an already active
+asset and allowed the target's legitimate certificate refresh after peer settlement.
+Neither setup correction is a production inconsistency.
+
+The existing `accepted_price_reward` and `reward_catchup_order` tests use one
+fresh-Hybrid asset; they cannot distinguish its eligibility from a leading EWMA
+observation. Paid-mark source liens, retained exits, publication matrices and
+trade-driven liquidation penalties own different histories. This test supplies
+the same complete observations in both orders and has no disjoint stale legs.
+It is partial row-422 evidence only: **422 remains OPEN**. It does not test a
+trade-origin effective price surviving a fresh report before catchup, common-owner
+equivalence, funding, source liens, or maximum shape. No status or production
+changes are made, and no production inconsistency was observed in these worlds.
+
+Validation uses a fresh default-feature SBF build from base
+`826bac3d142f4ee9db86fbcaf7dd1a11859f4c7d`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, in private worktree
+`/dev/shm/percolator-inv045-hybrid-reward-coverage-20260910`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The new test passes 1/1 (two worlds), the adjacent catchup/reward controls pass
+2/2 (including 96 catchup worlds), and the invariant index passes 1/1. Targeted
+formatting and whitespace checks pass. Maximum new crank / owner exit / keeper
+withdrawal CU is **323,062 / 146,558 / 56,604**. No broad suite was run.
+Focused validation commands:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::v16_program_caught_up_hybrid_reward_uses_selected_asset_provenance_in_both_hint_orders -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture inv_045_no_free_mark_movement::accepted_price_reward::reward_catchup_order::v16_program_reward_price_tracks_actual_catchup_across_report_and_crank_orders inv_061_deterministic_bounded_liquidation::v16_program_liquidation_cranker_reward_bounded_by_fee
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_045_no_free_mark_movement.rs
+git diff --check
+```
+
 ## INV-028 lien-backed admission and new-domain settlement (2026-09-10)
 
 [`stateful/inv_028_source_domain_realizability_cap.rs`](stateful/inv_028_source_domain_realizability_cap.rs)
