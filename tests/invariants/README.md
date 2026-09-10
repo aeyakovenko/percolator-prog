@@ -275,6 +275,81 @@ rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/i
 git diff --check
 ```
 
+## INV-028 latent capacity across resolution (row 423, 2026-09-10)
+
+[`cu/inv_028_historical_latent_capacity.rs`](cu/inv_028_historical_latent_capacity.rs)
+adds `v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit` on local
+base `6215550c184d6ac51ddd7ff93c82b0b6689aa58d`, in private worktree
+`/dev/shm/percolator-pr135-exit-capacity-20260910`. **Row 423 remains OPEN.**
+Only this CU test file and this documentation change; all construction uses the existing
+public System/SPL/ATA/matcher/wrapper helpers, with no populated economic-state injection.
+
+Twelve two-sided histories retain 24 positive source records and 48 claim atoms. Two new,
+oppositely oriented positions of 7/11 units are admitted with unchanged historical claims:
+24 occupied domains plus their four future sides exactly fill the 28-domain resource budget.
+Favorable one-atom marks materialize two domains and 18 atoms. Reversals to unequal 5/17-unit
+positions leave the other two domains absent. Public cranks commit the return marks while
+the winner's two favorable settlements remain pending. Admin resolution preserves both
+portfolio accounts exactly at this 26-materialized/two-latent boundary.
+
+The first permissionless `CloseResolved` refresh materializes the remaining two domains,
+with all 28 input-derived claims and the full 88-atom PnL intact, before detaching one leg.
+Further bounded calls detach the remaining exposure, dispose of sources and pay the owners
+exactly **1,000,088 / 999,912 atoms**. Every removed claim is a complete single-domain
+disposition, other claim amounts remain exact, each accepted call changes market or portfolio
+state, and both owners terminate within 64 rounds. This is an observed bounded completion,
+not a general rank proof. The oracle checks domain-local usable credit against fresh backing,
+zero lien/insurance reservations, counterpart account/destination isolation, SPL/engine custody,
+fixed mint state and no prefix overpayment. Owner deletion then leaves zero OI, principal,
+insurance, vault balance and materialized portfolios. An earlier signed deletion attempt on
+the funded portfolio must return a program error within the CU bound and restore the full
+market, portfolio, mint, vault, destination, owner and matcher account frame exactly.
+
+The four worlds cross both position orientations with both settlement/terminal claimant orders.
+They execute **126 successful terminal calls**, at a maximum **689,987 CU**, under the
+1,375,000 guardrail and normal 1,400,000 transaction ceiling. Historical construction and
+market-accrual/resolution calls have their own CU assertions but are excluded from that maximum;
+portfolio deletion has the existing 300,000-CU bound. The new exact selector passes in 9.28s.
+
+This relation is distinct from the existing historical/latent and concurrent-cohort live exits,
+retained-domain reuse, lien-backed new-domain settlement, and full-table reclamation: resolution
+occurs before both reserved slots materialize. The existing maximum-shape resolved-close test
+starts with all 28 claims already materialized. Scope is fresh unliened backing, zero fees/funding,
+one no-CPI trade route, two simultaneous legs and admin-assisted resolution. Over-capacity
+admission, expiry/refill, Recovery, native quote, generation reuse (INV-089), maximum market/feed
+products and arbitrary schedules remain outside this increment. No production inconsistency was
+observed. Development corrected test assumptions about non-payout destination validation and
+the overlap of account refresh, leg detach and source disposition during terminal cleanup.
+
+Initial validation used fresh default-feature locked/offline SBF and authenticated matcher builds
+with platform-tools v1.52, and fresh host compilation in the private worktree target. Revalidation
+reuses these hash-verified artifacts because production and build inputs are unchanged. Engine pin:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The adjacent historical/latent selector passes all 32 worlds (4,152 post-funding calls).
+The compatible focused validation set consists of the new selector, that adjacent selector,
+the invariant index, formatting, and both Git whitespace checks listed below. The direct
+maximum-shape `CloseResolved` control is excluded from this set and was not rerun because its
+existing `assert_certified_engine_pin` certifies engine
+`495a5590c97055bd71c6f94d849ff0298f243145`, a different pin from this PR135 head. Its earlier
+attempt stopped at that guard before SBF execution; the guard and dependency pin are unchanged.
+No broad suite, engine proof, or invariant-status advancement is claimed.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" TMPDIR="$PWD/target/tmp"
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$PWD/target/deploy" --offline -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::v16_program_historical_and_latent_domains_share_bounded_settlement_capacity -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-028 lien-backed admission and new-domain settlement (2026-09-10)
 
 [`stateful/inv_028_source_domain_realizability_cap.rs`](stateful/inv_028_source_domain_realizability_cap.rs)

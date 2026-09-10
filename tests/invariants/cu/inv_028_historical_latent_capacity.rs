@@ -2,6 +2,8 @@
 //! domains share one bounded settlement budget. This is a positive boundary
 //! product, not an over-capacity admission or arbitrary-history closure claim.
 //! System/SPL/ATA/matcher/wrapper instructions construct all economic state.
+//! The resolved continuation also crosses the capacity boundary with two domains
+//! still latent at resolution, then accounts for their settlement and owner payout.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -646,4 +648,337 @@ fn v16_program_historical_and_latent_domains_share_bounded_settlement_capacity()
     }
     assert_eq!(worlds, 32);
     println!("INV-028 historical/latent boundary: worlds={worlds}, post-funding calls={calls}, max CU trade/crank/convert/withdraw/close={maxima:?}");
+}
+
+#[test]
+fn v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut worlds = 0;
+    let mut terminal_calls = 0;
+    let mut max_terminal_cu = 0;
+    for direction in [-1i128, 1] {
+        for order in [[0, 1], [1, 0]] {
+            let mut h = History::new();
+            let route = AccountResidualCounterTradePath::TradeNoCpi;
+            for asset in 0..(ASSETS - 2) as u16 {
+                let q = (1 + i128::from(asset % 3)) * POS_SCALE as i128;
+                h.trade(route, &[(asset, q, PRICE)]);
+                h.mark_and_settle(&[(asset, PRICE + 1)], order);
+                h.trade(route, &[(asset, -2 * q, PRICE + 1)]);
+                h.mark_and_settle(&[(asset, PRICE)], order);
+                h.trade(route, &[(asset, q, PRICE)]);
+            }
+            let historical = h.source_claims(0);
+            let assets = [(ASSETS - 2) as u16, (ASSETS - 1) as u16];
+            let first_units = [direction * 7, -direction * 11];
+            let final_units = [-direction * 5, direction * 17];
+            let first_marks = first_units.map(|q| (PRICE as i128 + q.signum()) as u64);
+            h.trade(
+                route,
+                &assets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &asset)| (asset, first_units[i] * POS_SCALE as i128, PRICE))
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                h.source_claims(0),
+                historical,
+                "admission preserves history"
+            );
+            assert_eq!(historical.iter().filter(|c| **c != 0).count() + 4, DOMAINS);
+            h.mark_and_settle(
+                &[(assets[0], first_marks[0]), (assets[1], first_marks[1])],
+                order,
+            );
+            h.trade(
+                route,
+                &assets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &asset)| {
+                        (
+                            asset,
+                            (final_units[i] - first_units[i]) * POS_SCALE as i128,
+                            first_marks[i],
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+
+            // Commit the market marks without refreshing either owner's pending K/F.
+            // Resolution must carry the two absent domains across this boundary.
+            let before_pending = h.source_claims(0);
+            h.previous_claims = h.claims;
+            h.previous_prices = h.prices;
+            h.slot += 1;
+            h.env.svm.warp_to_slot(h.slot);
+            for (i, &asset) in assets.iter().enumerate() {
+                let domain = 2 * asset as usize + usize::from(final_units[i] > 0);
+                assert_eq!(before_pending[domain], 0);
+                h.claims[domain] += final_units[i].unsigned_abs();
+                h.prices[asset as usize] = PRICE;
+                let cu = h
+                    .env
+                    .push_auth_mark_for_asset_as_admin(asset, h.slot, PRICE);
+                assert_cu_within("latent terminal mark", cu, CU_LIMIT);
+                h.assert_accounting();
+            }
+            let pending_slots = |h: &History| {
+                let group = h.env.market_state().1;
+                assets
+                    .iter()
+                    .map(|&a| h.slot - group.assets[a as usize].slot_last)
+                    .sum::<u64>()
+            };
+            for _ in 0..4 {
+                let before = pending_slots(&h);
+                if before == 0 {
+                    break;
+                }
+                h.env.svm.expire_blockhash();
+                let cu = h.env.crank(
+                    h.portfolios[1],
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: h.slot,
+                        observations: crank_observations_for_assets(&assets),
+                    },
+                );
+                assert_cu_within("latent terminal market accrual", cu, CU_LIMIT);
+                assert!(pending_slots(&h) < before);
+                h.assert_accounting();
+                assert_eq!(h.source_claims(0), before_pending);
+            }
+            assert_eq!(pending_slots(&h), 0);
+            assert_eq!(
+                before_pending.iter().filter(|c| **c != 0).count(),
+                DOMAINS - 2
+            );
+            assert_eq!(
+                &before_pending[..2 * (ASSETS - 2)],
+                &historical[..2 * (ASSETS - 2)]
+            );
+            let portfolio_frames = h.portfolios.map(|p| h.env.svm.get_account(&p));
+            let cu = h.env.resolve();
+            assert_cu_within("latent terminal resolution", cu, CU_LIMIT);
+            assert_eq!(h.env.market_state().1.mode, MarketModeV16::Resolved);
+            assert_eq!(
+                h.portfolios.map(|p| h.env.svm.get_account(&p)),
+                portfolio_frames
+            );
+            h.assert_accounting();
+
+            let full_claims = h.claims.map(|c| c * BOUND_SCALE);
+            let gain = h.claims.iter().sum::<u128>();
+            let expected_payouts = [CAPITAL + gain, CAPITAL - gain];
+            let mint = h.env.svm.get_account(&h.env.mint);
+            let keys = [
+                h.env.market,
+                h.portfolios[0],
+                h.portfolios[1],
+                h.env.vault,
+                h.env.mint,
+                h.tokens[0],
+                h.tokens[1],
+                h.owners[0].pubkey(),
+                h.owners[1].pubkey(),
+                h.matcher.0,
+                h.matcher.1,
+                h.matcher.2,
+            ];
+            let frame = |h: &History| keys.map(|key| h.env.svm.get_account(&key));
+            let before = frame(&h);
+            h.env.svm.expire_blockhash();
+            let invalid = Transaction::new_signed_with_payer(
+                &[
+                    heap_ix(),
+                    cu_ix(),
+                    Instruction {
+                        program_id: h.env.program_id,
+                        accounts: vec![
+                            AccountMeta::new(h.owners[0].pubkey(), true),
+                            AccountMeta::new(h.env.market, false),
+                            AccountMeta::new(h.portfolios[0], false),
+                        ],
+                        data: h.env.close_portfolio_ix(h.portfolios[0]).encode(),
+                    },
+                ],
+                Some(&h.env.payer.pubkey()),
+                &[&h.env.payer, &h.owners[0]],
+                h.env.svm.latest_blockhash(),
+            );
+            let failure = h
+                .env
+                .svm
+                .send_transaction(invalid)
+                .expect_err("funded portfolio with pending domains cannot be deleted");
+            assert!(
+                matches!(
+                    failure.err,
+                    TransactionError::InstructionError(2, InstructionError::Custom(_))
+                ),
+                "expected program rejection, got {:?}",
+                failure.err
+            );
+            assert_cu_within(
+                "invalid latent terminal deletion",
+                failure.meta.compute_units_consumed,
+                CU_LIMIT,
+            );
+            assert_eq!(
+                frame(&h),
+                before,
+                "invalid continuation rolls back every economic account"
+            );
+            let close_ix = |h: &History, actor: usize, destination: Pubkey| Instruction {
+                program_id: h.env.program_id,
+                accounts: vec![
+                    AccountMeta::new_readonly(h.owners[actor].pubkey(), false),
+                    AccountMeta::new(h.env.market, false),
+                    AccountMeta::new(h.portfolios[actor], false),
+                    AccountMeta::new(destination, false),
+                    AccountMeta::new(h.env.vault, false),
+                    AccountMeta::new_readonly(h.env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                data: ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                }
+                .encode(),
+            };
+            let mut saw_full_table = false;
+            for round in 0..(2 * DOMAINS + 8) {
+                if h.portfolios
+                    .iter()
+                    .all(|&p| resolved_portfolio_is_terminal(&h.env, p))
+                {
+                    break;
+                }
+                for actor in order {
+                    if resolved_portfolio_is_terminal(&h.env, h.portfolios[actor]) {
+                        continue;
+                    }
+                    let before = h.env.portfolio_state(h.portfolios[actor]);
+                    let claims_before = h.source_claims(actor);
+                    let market_before = h.env.svm.get_account(&h.env.market);
+                    let peer = h.env.svm.get_account(&h.portfolios[1 - actor]);
+                    let peer_token = h.env.svm.get_account(&h.tokens[1 - actor]);
+                    let old_vault = h.env.token_amount(h.env.vault);
+                    let old_paid = h.env.token_amount(h.tokens[actor]);
+                    let ix = close_ix(&h, actor, h.tokens[actor]);
+                    h.env.svm.expire_blockhash();
+                    let cu = send_raw_tx(&mut h.env.svm, &h.env.payer, ix, &[])
+                        .expect("admitted latent domains retain bounded terminal progress");
+                    terminal_calls += 1;
+                    max_terminal_cu = max_terminal_cu.max(cu);
+                    assert_cu_within("latent terminal settlement and payout", cu, CU_LIMIT);
+                    let after = h.env.portfolio_state(h.portfolios[actor]);
+                    let claims_after = h.source_claims(actor);
+                    let active_before =
+                        percolator::active_bitmap_count_ones(active_bitmap(&before));
+                    let active_after = percolator::active_bitmap_count_ones(active_bitmap(&after));
+                    if active_before != 0 {
+                        assert_eq!(active_after + 1, active_before, "one bounded leg detach");
+                        let detached: Vec<_> = assets
+                            .iter()
+                            .copied()
+                            .filter(|&a| {
+                                has_active_leg_for_asset(&before, a as usize)
+                                    && !has_active_leg_for_asset(&after, a as usize)
+                            })
+                            .collect();
+                        assert_eq!(detached.len(), 1);
+                        if actor == 0 && active_before > 1 {
+                            assert_eq!(
+                                claims_after, full_claims,
+                                "terminal refresh materializes both reserved domains exactly"
+                            );
+                            assert_eq!(after.pnl.get(), gain as i128);
+                            assert_eq!(after.capital.get(), CAPITAL);
+                            assert_eq!(
+                                &claims_after[..2 * (ASSETS - 2)],
+                                &historical[..2 * (ASSETS - 2)]
+                            );
+                            saw_full_table = true;
+                        }
+                    }
+                    if active_after == 0 {
+                        let removed: Vec<_> = (0..DOMAINS)
+                            .filter(|&d| claims_before[d] != claims_after[d])
+                            .collect();
+                        assert!(removed.len() <= 1, "bounded source disposition");
+                        for domain in removed {
+                            assert!(claims_before[domain] > 0);
+                            assert_eq!(claims_after[domain], 0);
+                        }
+                    }
+                    assert!(
+                        after != before || h.env.svm.get_account(&h.env.market) != market_before,
+                        "terminal round {round} makes observable progress"
+                    );
+                    assert_eq!(h.env.svm.get_account(&h.portfolios[1 - actor]), peer);
+                    assert_eq!(h.env.svm.get_account(&h.tokens[1 - actor]), peer_token);
+                    let paid = h.env.token_amount(h.tokens[actor]) - old_paid;
+                    assert_eq!(old_vault - h.env.token_amount(h.env.vault), paid);
+                    let group = h.env.market_state().1;
+                    assert_eq!(group.vault, h.env.token_amount(h.env.vault) as u128);
+                    assert_eq!(group.insurance, 0);
+                    assert!(group.vault >= group.c_tot);
+                    assert_eq!(
+                        group.vault
+                            + h.tokens
+                                .iter()
+                                .map(|t| h.env.token_amount(*t) as u128)
+                                .sum::<u128>(),
+                        2 * CAPITAL,
+                    );
+                    assert_eq!(h.env.svm.get_account(&h.env.mint), mint);
+                    for owner in 0..2 {
+                        assert!(
+                            h.env.token_amount(h.tokens[owner]) as u128 <= expected_payouts[owner]
+                        );
+                    }
+                    let claims = h.source_claims(0);
+                    for domain in 0..DOMAINS {
+                        assert!(claims[domain] == 0 || claims[domain] == full_claims[domain]);
+                        let source = &group.source_credit[domain];
+                        let bucket = &group.source_backing_buckets[domain];
+                        let usable =
+                            claims[domain] * source.credit_rate_num / percolator::CREDIT_RATE_SCALE;
+                        assert!(usable <= bucket.fresh_unliened_backing_num);
+                        assert_eq!(source.valid_liened_backing_num, 0);
+                        assert_eq!(source.impaired_liened_backing_num, 0);
+                        assert_eq!(source.insurance_credit_reserved_num, 0);
+                    }
+                }
+            }
+            assert!(
+                saw_full_table,
+                "terminal settlement must actually fill both reserved slots"
+            );
+            for actor in order {
+                assert!(resolved_portfolio_is_terminal(&h.env, h.portfolios[actor]));
+                assert_eq!(
+                    h.env.token_amount(h.tokens[actor]) as u128,
+                    expected_payouts[actor]
+                );
+                h.env.svm.expire_blockhash();
+                let cu = h
+                    .env
+                    .close_portfolio_with_cu(&h.owners[actor], h.portfolios[actor]);
+                assert_cu_within("latent terminal portfolio deletion", cu, CUSTODY_CU_LIMIT);
+            }
+            let group = h.env.market_state().1;
+            assert_eq!((group.vault, group.c_tot, group.insurance), (0, 0, 0));
+            assert_eq!(group.materialized_portfolio_count, 0);
+            assert!(group
+                .assets
+                .iter()
+                .all(|a| a.oi_eff_long_q == 0 && a.oi_eff_short_q == 0));
+            worlds += 1;
+        }
+    }
+    assert_eq!(worlds, 4);
+    println!("INV-028 latent capacity at resolution: worlds={worlds}, terminal calls={terminal_calls}, max terminal CU={max_terminal_cu}");
 }
