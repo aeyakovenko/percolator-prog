@@ -299,6 +299,81 @@ rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/i
 git diff --check
 ```
 
+## INV-070 external custody after a persisted terminal scan (2026-09-10)
+
+[`cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs`](cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs)
+adds `v16_program_terminal_scan_reconciles_external_surplus_arriving_after_cached_prefix`.
+Two public LiteSVM/SBF histories compare a direct SPL transfer before and after
+`CloseSlab` commits a 256-slot scanned prefix in a 257-asset market. System, SPL,
+ATA and wrapper instructions construct every protocol account; only signer SOL,
+Clock and blockhashes are supplied by the harness. Mint authority is revoked.
+
+At slot 400, backing expiry normalizes 17 booked atoms without moving custody.
+The next close advances cursor `0 -> 256`, again without moving custody. In the
+late-transfer history, the retained signed final close first simulates successfully
+with precisely two SPL successes: burn and vault close. A distinct donor then
+transfers 19 existing SPL atoms into the canonical vault with only donor/payer
+signatures. This external transition leaves the complete market, including its
+cursor and scanned slots, byte-identical. Clock advances to 401. The identical
+serialized close transaction, signatures and blockhash now executes three SPL
+operations, including the newly required surplus transfer.
+
+Both schedules finish in exactly three committed wrapper cleanup calls: normalize,
+scan, close. They burn exactly 17 booked atoms and sweep exactly 19 raw atoms,
+leaving mint supply 19, an empty donor source, a closed vault and the typed market
+tombstone. Full destination and mint Account comparisons distinguish burn from
+sweep; exact source/donor frames, payer signature fees and the vault/market rent
+refund account for the remaining effects. Input-derived stocks and the existing
+encumbrance census run at every terminal checkpoint. Simulation frames all compiled
+accounts and commits no effects. Terminal calls and previews stay below the asserted
+500,000-CU bound; observed peak is 132,977 CU in both histories.
+
+The distinct relation is newly actionable external custody after an already persisted
+scan, while the wrapper-owned summary remains unchanged. The existing
+`v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings` holds
+SPL custody fixed during continuation;
+`v16_program_retained_terminal_withdrawal_revalidates_expiry_after_scan_and_partial_payout`
+changes provider withdrawal eligibility; and
+`v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry`
+places raw surplus before terminal scanning. Those selectors do not establish the
+post-scan external-transfer relation exercised here.
+
+This is sampled INV-070 coverage adjacent to row 424 and INV-018/024/025/069/071/088.
+It demonstrates revalidation of current external custody, not invalidation of an
+earlier asset's economic classification. **Row 424 remains OPEN** for earlier-slot
+time reclassification, new claims/obligations behind a scanned prefix, insurance
+recredit, earnings, receipts, other quote rails, maximum shapes and arbitrary
+environmental histories. No production defect or general closure is claimed.
+
+Worktree: `/tmp/codex-agent-worktrees/row424-inv070-terminal-prefix-20260910-r2`;
+branch: `codex/row424-inv070-terminal-prefix-20260910-r2`; base:
+`4677a92316b8897a716ba418fe6c61a3ca18a881`. Validation uses a private copy of the
+local row-418 build cache, with host tests compiled from this worktree. The default
+SBF has SHA-256
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`, matching the
+documented fresh build at `826bac3d`; production/Cargo inputs have no diff from
+that base and the engine pin remains `394fd0bf`. No SBF rebuild, network source,
+external finding material, dependency change or invariant-status change is used.
+An initial setup attempt failed before the scenario because it reused the activation
+slot; the passing fixture follows the adjacent test's sequential activation schedule.
+The new selector passes both histories, all three adjacent exact selectors pass,
+and the invariant index, repository-wide formatting and both whitespace checks pass.
+
+Exact validation commands (the same environment is applied to every Cargo run):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row424-terminal-prefix-20260910-r2-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export TMPDIR="$CARGO_TARGET_DIR"
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_terminal_scan_reconciles_external_surplus_arriving_after_cached_prefix -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_071_crank_progress::terminal_cursor_time::v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_retained_terminal_withdrawal_revalidates_expiry_after_scan_and_partial_payout inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_mixed_maturity_terminal_residue_preserves_partition_and_close_retry
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-070 retained terminal withdrawal after cursor progress (2026-09-10)
 
 [`cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs`](cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs)

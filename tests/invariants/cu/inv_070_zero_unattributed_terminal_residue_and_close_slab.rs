@@ -32,6 +32,269 @@ use super::*;
 mod mixed_maturity;
 
 #[test]
+fn v16_program_terminal_scan_reconciles_external_surplus_arriving_after_cached_prefix() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_capacity;
+
+    const SLOTS: usize = 257;
+    const BOOKED: u64 = 17;
+    const SURPLUS: u64 = 19;
+    const EXPIRY: u64 = 400;
+    const CU_LIMIT: u64 = 500_000;
+
+    for transfer_after_scan in [false, true] {
+        let mut env =
+            inv018_public_spl_market_with_capacity(0, V16CuMarketParams::default(), SLOTS);
+        let admin = env.admin.insecure_clone();
+        let donor = Keypair::new();
+        env.svm.airdrop(&donor.pubkey(), 1_000_000_000).unwrap();
+        let destination = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+        let source = create_ata_for_test(&mut env.svm, &env.payer, donor.pubkey(), env.mint);
+        for asset in 1..SLOTS {
+            env.activate_asset(asset as u16, asset as u64 + 1, 100);
+        }
+        for (token, amount) in [(destination, BOOKED), (source, SURPLUS)] {
+            send_raw_tx(
+                &mut env.svm,
+                &env.payer,
+                spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &env.mint,
+                    &token,
+                    &admin.pubkey(),
+                    &[],
+                    amount,
+                )
+                .unwrap(),
+                &[&admin],
+            )
+            .unwrap();
+        }
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::set_authority(
+                &spl_token::ID,
+                &env.mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                &admin.pubkey(),
+                &[],
+            )
+            .unwrap(),
+            &[&admin],
+        )
+        .unwrap();
+        env.svm.warp_to_slot(300);
+        env.top_up_backing_bucket_from_admin_token_with_cu(destination, 0, BOOKED.into(), EXPIRY);
+        env.svm.warp_to_slot(EXPIRY - 1);
+        env.resolve();
+
+        let close = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.mint, false),
+            ],
+            data: ProgInstruction::CloseSlab {
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            }
+            .encode(),
+        };
+        let send_close = |env: &mut V16CuEnv| {
+            env.svm.expire_blockhash();
+            let cu = send_raw_ixs(
+                &mut env.svm,
+                &env.payer,
+                vec![heap_ix(), cu_ix(), close.clone()],
+                &[&admin],
+            )
+            .expect("public bounded terminal scan");
+            assert_cu_within("INV-070 external surplus scan", cu, CU_LIMIT);
+            cu
+        };
+        let custody_keys = [
+            env.vault,
+            env.mint,
+            destination,
+            source,
+            admin.pubkey(),
+            donor.pubkey(),
+        ];
+        let custody = |env: &V16CuEnv| custody_keys.map(|key| env.svm.get_account(&key));
+        let stock = |env: &V16CuEnv, transferred: bool, cursor: u128| {
+            let (cfg, group) = env.market_state();
+            assert_eq!(cfg.terminal_slab_scan_progress, cursor);
+            assert_eq!(group.mode, MarketModeV16::Resolved);
+            assert_eq!((group.c_tot, group.pnl_pos_tot, group.insurance), (0, 0, 0));
+            assert_eq!(group.materialized_portfolio_count, 0);
+            assert_eq!(group.backing_provider_earnings_total, 0);
+            assert_eq!(group.vault, BOOKED.into());
+            assert_eq!(
+                env.token_amount(env.vault),
+                BOOKED + if transferred { SURPLUS } else { 0 }
+            );
+            assert_eq!(
+                env.token_amount(source),
+                if transferred { 0 } else { SURPLUS }
+            );
+            assert_eq!(env.token_amount(destination), 0);
+            assert!(group.source_backing_buckets.iter().all(|bucket| {
+                bucket.status != BackingBucketStatusV16::Fresh
+                    && bucket.fresh_unliened_backing_num == 0
+                    && bucket.valid_liened_backing_num == 0
+            }));
+            let mint = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data).unwrap();
+            assert_eq!(mint.supply, BOOKED + SURPLUS);
+            assert_eq!(mint.mint_authority, COption::None);
+            crate::support::fuzz_model::assert_reservation_encumbrance_census(
+                "INV-070 external surplus scan",
+                &group,
+                &[],
+            )
+            .unwrap();
+        };
+        let transfer = |env: &mut V16CuEnv| {
+            let market = env.svm.get_account(&env.market);
+            let mint = env.svm.get_account(&env.mint);
+            let recipient = env.svm.get_account(&destination);
+            send_raw_tx(
+                &mut env.svm,
+                &env.payer,
+                spl_token::instruction::transfer(
+                    &spl_token::ID,
+                    &source,
+                    &env.vault,
+                    &donor.pubkey(),
+                    &[],
+                    SURPLUS,
+                )
+                .unwrap(),
+                &[&donor],
+            )
+            .unwrap();
+            assert_eq!(
+                env.svm.get_account(&env.market),
+                market,
+                "external transfer cannot invalidate the stored prefix by writing the market"
+            );
+            assert_eq!(env.svm.get_account(&env.mint), mint);
+            assert_eq!(env.svm.get_account(&destination), recipient);
+        };
+
+        // Expiry creates booked residue without moving tokens; the next call scans 256 slots.
+        env.svm.warp_to_slot(EXPIRY);
+        let before_expiry = custody(&env);
+        let mut peak_cu = send_close(&mut env);
+        assert_eq!(custody(&env), before_expiry);
+        stock(&env, false, 0);
+        if !transfer_after_scan {
+            transfer(&mut env);
+        }
+        let before_scan = custody(&env);
+        peak_cu = peak_cu.max(send_close(&mut env));
+        assert_eq!(custody(&env), before_scan);
+        stock(&env, !transfer_after_scan, 256);
+
+        env.svm.expire_blockhash();
+        let retained = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), close.clone()],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &admin],
+            env.svm.latest_blockhash(),
+        );
+        let retained_bytes = bincode::serialize(&retained).unwrap();
+        let keys = retained.message.account_keys.clone();
+        let frame = |env: &V16CuEnv| {
+            keys.iter()
+                .map(|key| env.svm.get_account(key))
+                .collect::<Vec<_>>()
+        };
+        let before_preview = frame(&env);
+        let preview = env
+            .svm
+            .simulate_transaction(retained.clone().into())
+            .unwrap();
+        assert_eq!(frame(&env), before_preview);
+        let token_success = format!("Program {} success", spl_token::ID);
+        assert_eq!(
+            preview
+                .logs
+                .iter()
+                .filter(|log| **log == token_success)
+                .count(),
+            if transfer_after_scan { 2 } else { 3 },
+            "preview burns and closes; only existing raw surplus enables a transfer"
+        );
+
+        let scanned_market = env.svm.get_account(&env.market).unwrap();
+        if transfer_after_scan {
+            transfer(&mut env);
+        }
+        env.svm.warp_to_slot(EXPIRY + 1);
+        assert_eq!(env.svm.get_account(&env.market), Some(scanned_market));
+        stock(&env, true, 256);
+        assert_eq!(bincode::serialize(&retained).unwrap(), retained_bytes);
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
+        let mut expected_destination = env.svm.get_account(&destination).unwrap();
+        let mut expected_mint = env.svm.get_account(&env.mint).unwrap();
+        let donor_before = env.svm.get_account(&donor.pubkey());
+        let source_before = env.svm.get_account(&source);
+        let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        expected_payer.lamports -= u64::from(retained.message.header.num_required_signatures)
+            * solana_sdk::fee::FeeStructure::default().lamports_per_signature;
+        let result = env
+            .svm
+            .send_transaction(retained)
+            .expect("final close must reconcile current external custody after the persisted scan");
+        peak_cu = peak_cu
+            .max(result.compute_units_consumed)
+            .max(preview.compute_units_consumed);
+        assert_eq!(result.logs.iter().filter(|log| **log == token_success).count(), 3, "final close must burn booked residue, sweep newly actionable surplus, and close the vault");
+
+        let mut token = TokenAccount::unpack(&expected_destination.data).unwrap();
+        token.amount = SURPLUS;
+        TokenAccount::pack(token, &mut expected_destination.data).unwrap();
+        let mut mint = Mint::unpack(&expected_mint.data).unwrap();
+        mint.supply = SURPLUS;
+        Mint::pack(mint, &mut expected_mint.data).unwrap();
+        assert_eq!(
+            env.svm.get_account(&destination),
+            Some(expected_destination)
+        );
+        assert_eq!(env.svm.get_account(&env.mint), Some(expected_mint));
+        assert_eq!(env.svm.get_account(&source), source_before);
+        assert_eq!(env.svm.get_account(&donor.pubkey()), donor_before);
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()),
+            Some(expected_payer)
+        );
+        let tombstone = env.svm.get_account(&env.market).unwrap();
+        assert_closed_market_tombstone(&tombstone);
+        assert_eq!(
+            tombstone.lamports,
+            env.svm
+                .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN)
+        );
+        expected_admin.lamports +=
+            market_before.lamports + vault_before.lamports - tombstone.lamports;
+        assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+        assert!(env.svm.get_account(&env.vault).is_none_or(
+            |account| account.lamports == 0 && account.data.iter().all(|byte| *byte == 0)
+        ));
+        assert_cu_within("INV-070 external surplus history peak", peak_cu, CU_LIMIT);
+        eprintln!("INV-070 transfer_after_scan={transfer_after_scan}: cursor=0->256->tombstone, burn={BOOKED}, sweep={SURPLUS}, peak={peak_cu} CU");
+    }
+}
+
+#[test]
 fn v16_program_retained_terminal_withdrawal_revalidates_expiry_after_scan_and_partial_payout() {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_capacity;
     use solana_sdk::{
