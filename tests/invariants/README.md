@@ -4692,6 +4692,77 @@ new witnesses. It remains an inherited metadata/review gap, not a changed gate o
 a passing certification. Formatting and diff checks pass. The initial two-test
 development selector also passed (79.23s) before retries moved ahead of the final
 completion schedule; final results above include the stronger unresolved retries.
+## INV-012 funded close cancellation (row 412, 2026-09-10)
+
+[`cu/inv_012_cure_revocation.rs`](cu/inv_012_cure_revocation.rs), mounted by the
+existing INV-012 CU owner, adds one public LiteSVM axis: **a matcher grant installed
+during an active close cannot authorize trading after funded `CureAndCancelClose`**.
+Cure consumes the economic episode even when the complete position-leg array is
+unchanged. Refreshing only the request episode does not renew the standing grant.
+
+The close is created by public trade, authenticated marks, cranks, and final
+reduction. Matcher grants are installed afterward, isolating cure from that earlier
+revocation. INV-004 already retains cure consent across close episodes; the existing
+INV-012 owner-episode product covers reduction/conversion. This test instead retains
+CPI consumers across the transition from active close to cured portfolio. It adds
+no recovery-forfeit, liquidation, preserving-keeper, expiry, or scope-product axis.
+
+Four worlds cross single/one-leg-batch CPI and both fill signs on a separate live
+asset. An unfunded cure returns `EngineInvalidConfig` with exact rollback. A funded
+2,000,000-atom cure cancels the close, credits matching internal/SPL custody and
+capital, advances the portfolio episode once, and clears enabled state and expiry
+without changing grant sequence, fee cap, matcher tuple, or position legs. The
+unchanged retained request returns `EngineStale`; changing only its LP episode
+returns `Unauthorized`, both before matcher CPI. Explicit owner reauthorization
+then permits the same nonzero fill with only its grant sequence refreshed, producing
+the exact opposite positions and OI. An untouched funded LP's frozen request
+successfully simulates before and after cure, with its account and matcher framed.
+
+The closing portfolio cannot initially trade: the grant is installed while its
+close is active. Initial consumer liveness is therefore claimed only for the
+untouched LP, and post-cure liveness is demonstrated by four actual fills. All
+retained delivery uses the same authenticated slot and valid blockhash. Rejections
+frame all five portfolios, matcher contexts/delegates, custody, mint, token sources,
+and owner accounts including metadata and lamports; only the separate network fee
+payer is excluded. Existing blank-account and initial token-balance fixtures are
+reused; all initialized wrapper/engine state changes and matcher context creation
+use public instructions. No injected close ledger or post-initialization state edit
+supplies this witness.
+
+**Row 412 remains OPEN.** This is bounded evidence for one additional public writer,
+not closure of arbitrary authority-revoking lifecycle histories. Production,
+dependency pins, shared helpers, and invariant/status ledgers are unchanged.
+Evidence uses only local files in `/home/anatoly/percolator-pr135-inv012-row412`.
+Wrapper and authenticated matcher SBF were built offline from this worktree with
+platform-tools v1.52 and a private target populated from local build dependencies.
+Wrapper SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+The exact selector passes 1/1 (four worlds, four failed-cure rollbacks, eight
+consumer rollbacks, four fresh fills), the full INV-012 CU selector passes 22/22,
+and the four adjacent stateful controls pass 4/4. The final exact run measures
+425,348 CU at most against a 500,000-CU ceiling for the cure/consumer transactions;
+bootstrap, grant installation, and simulations are excluded from that measurement.
+This is not maximum-shape or engine-proof evidence. Adjacent tests also use the
+locally built hostile fixture and the existing sibling `percolator-match` artifact.
+Existing shared-harness dead-code and dependency warnings remain.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-inv012-row412-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm CARGO_NET_OFFLINE=true
+cargo build-sbf --tools-version v1.52 --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir tests/fixtures/auth_matcher/target/deploy --offline -- --locked
+cargo build-sbf --manifest-path tests/fixtures/hostile_matcher/Cargo.toml --tools-version v1.52 --sbf-out-dir tests/fixtures/hostile_matcher/target/deploy --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::cure_revocation::v16_program_funded_close_cancellation_requires_fresh_matcher_capability -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope:: -- --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact inv_012_capability_and_delegate_scope::owner_episode_revocation::v16_program_retained_capability_cannot_cross_owner_episode_revocation inv_012_capability_and_delegate_scope::keeper_preservation::v16_program_retained_capability_survives_non_position_keeper_words inv_012_capability_and_delegate_scope::v16_program_cpi_trades_bind_matcher_capability_incarnation inv_004_position_episode_binding::v16_program_cure_consent_cannot_cross_close_episodes_in_one_portfolio
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code -- src Cargo.toml Cargo.lock tests/support tests/invariants/coverage_reopenings.tsv tests/invariants/invariant_status.tsv
+```
+
 ## INV-008 fee-shortened withdrawal intent (row 415, 2026-09-10)
 
 `withdrawal_stock_history::v16_program_fee_shortened_withdrawal_consumes_intent_before_passive_replenishment`

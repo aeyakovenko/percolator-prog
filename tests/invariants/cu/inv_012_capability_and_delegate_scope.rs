@@ -39,6 +39,9 @@ use super::*;
 #[path = "inv_012_retained_cross_asset_episode.rs"]
 mod retained_cross_asset_episode;
 
+#[path = "inv_012_cure_revocation.rs"]
+mod cure_revocation;
+
 #[path = "inv_012_joint_incarnation_binding.rs"]
 mod joint_incarnation_binding;
 
