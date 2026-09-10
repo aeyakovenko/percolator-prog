@@ -20,6 +20,9 @@ mod recycled_reward_terminal_history;
 #[path = "inv_024_terminal_role_handoff.rs"]
 mod terminal_role_handoff;
 
+#[path = "inv_024_terminal_quote_rails.rs"]
+mod terminal_quote_rails;
+
 #[path = "inv_024_terminal_insurance_lifecycle.rs"]
 mod terminal_insurance_lifecycle;
 

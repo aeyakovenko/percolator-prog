@@ -5034,6 +5034,83 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
+## INV-024 terminal reserve attribution across quote rails (row 410, 2026-09-10)
+
+[`cu/inv_024_terminal_quote_rails.rs`](cu/inv_024_terminal_quote_rails.rs), mounted
+by the INV-024 owner, adds one public LiteSVM selector on local base
+`4677a92316b8897a716ba418fe6c61a3ca18a881`:
+`v16_program_terminal_cross_rail_reserves_preserve_holder_claims_and_surplus`.
+The isolated branch is `codex/row410-inv024-local-coverage-20260910`, in
+`/tmp/codex-agent-worktrees/row410-inv024-local-coverage-20260910`.
+**Row 410 remains OPEN.** This is finite coverage, with no production change,
+independent bug finding, vulnerable-pin result, or invariant-status promotion.
+
+The distinct relation is partial terminal reserve payment across both quote
+rails with separate provider, insurance beneficiary, live operator, user, and
+market authority. The existing INV-070 dual-quote terminal test aliases the
+insurance beneficiary with the final surplus recipient; INV-024's terminal
+handoff and insurance lifecycle histories use one mint. Neither checks the
+separate holder entitlements while secondary payments create primary surplus.
+
+Four histories cross primary-first/secondary-first reserve payments and operator
+versus market authority as submitter/fee payer. Public inputs fund 41 provider
+atoms, 59 insurance atoms, 31 user atoms, 13 raw primary surplus atoms, and 149
+raw secondary atoms. Both mint authorities are disabled at supplies 144 and 149.
+The submitter alone signs the permissionless 31-atom resolved user payment;
+owner-signed portfolio deletion precedes the measured reserve history.
+
+Provider and insurer first receive 11 and 17 atoms on one rail, then 30 and 42
+on the other. Every committed reserve step checks each wallet and remaining
+domain claim from these inputs, along with fixed mint supply, custody, role
+profiles, control sequences, capital, materialization count and rent. Raw
+primary custody equals remaining booked reserves plus 13 plus cumulative
+secondary payments. A provider-payout/early-close batch rejects while the
+insurer remains unpaid. A provider-payout/incorrect-insurer-destination batch
+rejects when the submitter's ATA replaces the beneficiary's. Each rejection
+verifies its successful wrapper prefix and the exact complete tracked account
+frame, adjusted only for the calculated network fee. The unchanged valid
+reserve requests then pay both holders completely.
+
+Final close pays only market authority the residual primary/secondary stock:
+85/77 atoms for primary-first histories or 41/121 for secondary-first histories.
+Provider and insurer still receive exactly 41 and 59 across their own two ATAs;
+the operator receives zero quote value and the user retains 31. Both canonical
+vaults close, all token supply remains attributed, and only market authority
+receives excess market/vault rent above the exact tombstone rent. No program
+account bytes are injected; harness controls are signer SOL, Clock and blockhashes.
+
+The new selector passes **1/1**, with **four histories, 20 successful and eight
+exactly rejected measured transactions**; setup, user payout and portfolio
+deletion are excluded. Peak rejection/success CU is **52,116/45,961**, within
+the enforced 500,000 ceiling. The initial host compile needed an explicit
+closure index type; no runtime conformance failure was observed. Validation
+uses a private copy of the existing host cache and a fresh default-feature SBF
+build from this worktree, engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Program SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+The two adjacent selectors below pass **2/2** (24 combined histories), and the
+invariant index passes **1/1**. Formatting and both diff whitespace checks pass.
+Cargo reports existing unused-support and `solana-client v1.18.26`
+future-incompatibility warnings. No matcher or broad suite is used.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row410-inv024-local-coverage-20260910-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so" TMPDIR=/dev/shm
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_quote_rails::v16_program_terminal_cross_rail_reserves_preserve_holder_claims_and_surplus -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_024_attributed_quote_value_conservation::terminal_role_handoff::v16_program_terminal_role_handoff_close_order_preserves_reserves_and_surplus inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
+Open dimensions include provider earnings, backing expiry/impairment, shutdown
+fallback/escheat, missing reserve-holder signatures, nonzero fee policies,
+Recovery/receipts, native quote rails, asset reuse and arbitrary histories.
+The generic reopening obligation and `coverage_reopenings.tsv` remain unchanged.
+
 ## INV-005/024/036/081 terminal insurance lifecycle (row 410, 2026-09-09)
 
 [`cu/inv_024_terminal_insurance_lifecycle.rs`](cu/inv_024_terminal_insurance_lifecycle.rs),
