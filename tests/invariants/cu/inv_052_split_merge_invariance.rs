@@ -1165,7 +1165,7 @@ fn inv052_source_defines_function(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_split_merge_operation_family_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
     const CLASSES: &[Inv052PartitionClass] = &[
         Inv052PartitionClass {
             class: "trade withdrawal and owner-reduction partitions",
@@ -1271,6 +1271,10 @@ fn v16_program_split_merge_operation_family_composition_is_source_complete() {
                     "v16_program_split_fills_cannot_cross_position_or_side_oi_cap_on_any_route_pair",
                 ),
                 (
+                    "tests/invariants/cu/inv_011_signed_aggregate_economic_bounds.rs",
+                    "v16_program_generated_signed_leg_partitions_are_order_independent",
+                ),
+                (
                     "tests/invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs",
                     "v16_control_sequences_accept_gaps_reject_replays_and_keep_lanes_independent",
                 ),
@@ -1364,7 +1368,7 @@ fn v16_program_split_merge_operation_family_composition_is_source_complete() {
         }
     }
     assert_eq!(classes.len(), 6, "partition class roster drift");
-    assert_eq!(witnesses.len(), 33, "partition witness roster drift");
+    assert_eq!(witnesses.len(), 34, "partition witness roster drift");
 
     // This is the complete INV-023 SIGNED_ECONOMIC/BOUNDED_WORK surface, including inbound and
     // provider operations. A new economic field must receive a split/merge disposition here.
@@ -1376,6 +1380,7 @@ fn v16_program_split_merge_operation_family_composition_is_source_complete() {
         "TradeCpi\tsize_q,fee_bps,limit_price,backing_fee_cap_bps\tSIGNED_ECONOMIC\t",
         "BatchTradeNoCpi\tlegs\tSIGNED_ECONOMIC\t",
         "BatchTradeCpi\tlegs\tSIGNED_ECONOMIC\t",
+        "BatchTradeCpi\tmax_slippage_atoms,max_fee_atoms\tSIGNED_ECONOMIC\t",
         "TopUpInsurance\tamount\tSIGNED_ECONOMIC\t",
         "TopUpInsuranceDomain\tamount\tSIGNED_ECONOMIC\t",
         "TopUpBackingBucket\tamount,expiry_slot\tSIGNED_ECONOMIC\t",
@@ -1408,7 +1413,7 @@ fn v16_program_split_merge_operation_family_composition_is_source_complete() {
         })
         .count();
     assert_eq!(
-        classified_count, 22,
+        classified_count, 23,
         "new signed-economic or bounded-work input requires an INV-052 disposition",
     );
 
