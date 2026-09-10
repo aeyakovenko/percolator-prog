@@ -1,4 +1,4 @@
-//! INV-012: retained authority across owner reduction and released-claim episodes.
+//! INV-012: retained authority across owner reduction, conversion and Recovery episodes.
 //!
 //! Request freshness and standing authority are separate obligations. Even a
 //! conversion that leaves the position vector unchanged consumes an episode and
@@ -361,4 +361,157 @@ fn v16_program_retained_capability_cannot_cross_owner_episode_revocation() {
     assert_eq!(evidence.preserved_fills, 36);
     assert_eq!(evidence.reauthorized_fills, 12);
     eprintln!("INV-012 owner episode revocation: {evidence:?}; two assets, one consumer leg, zero fees; recovery, cure, liquidation, force-close and generation/incarnation histories remain outside this increment");
+}
+
+#[test]
+fn v16_program_recovery_forfeit_revokes_retained_live_sibling_capability() {
+    let mut evidence = Evidence::default();
+    for route in [CpiRoute::Single, CpiRoute::Batch] {
+        for sign in [-1, 1] {
+            eprintln!("Recovery forfeit partition: {route:?}, sign={sign}");
+            let mut env = V16Svm::new(
+                [0x6c; 32],
+                MarketConfig {
+                    initial_price: PRICE,
+                    max_accrual_dt_slots: 1,
+                    min_funding_lifetime_slots: 1,
+                    actor_deposits: [CAPITAL; 5],
+                    actor_token_balances: [2_000_000; 5],
+                    ..MarketConfig::default()
+                },
+            );
+            let mut history = AuthorizationHistory::new(&env);
+            step(&mut env, &mut history, &mut evidence, None, None, |env| {
+                env.configure_permissionless_resolve(1_000, 100)
+            });
+            step(
+                &mut env,
+                &mut history,
+                &mut evidence,
+                Some(AuthorizationEvent::Fill {
+                    taker: LP,
+                    lp: COUNTERPARTY,
+                    asset: 0,
+                    size: sign * QUANTITY,
+                    cpi: false,
+                }),
+                None,
+                |env| env.trade_no_cpi(LP, COUNTERPARTY, 0, sign * QUANTITY, PRICE, 0),
+            );
+            grant_capability(&mut env, &mut history, LP, Some(37), 100);
+            evidence.transactions += 1;
+            let size = sign * POS_SCALE as i128;
+            let opening_request = history.replay();
+            let opening = retain(&mut env, route, 2 * size);
+            consume(
+                &mut env,
+                &mut history,
+                &mut evidence,
+                opening,
+                &opening_request,
+                2 * size,
+            );
+
+            let request = history.replay();
+            let retained = retain(&mut env, route, size);
+            let retained_bytes = bincode::serialize(&retained).unwrap();
+            assert!(
+                !retained.message.account_keys
+                    [..retained.message.header.num_required_signatures as usize]
+                    .contains(&env.actors[LP].signer.pubkey()),
+                "the retained consumer relies on delegated LP authority"
+            );
+            simulate_live(&mut env, &history, &mut evidence, &retained);
+
+            // Asset shutdown alone leaves the portfolio grant untouched. The
+            // owner forfeit must revoke it across the still-live sibling leg.
+            let lp_before = env.primary_portfolio_data(LP);
+            let contexts_before = env.all_matcher_context_data();
+            let tokens_before = env.all_token_account_data();
+            step(&mut env, &mut history, &mut evidence, None, None, |env| {
+                env.shutdown_asset(0, 1)
+            });
+            assert_eq!(env.primary_portfolio_data(LP), lp_before);
+            assert_eq!(
+                env.primary_market_state().1.assets[0].lifecycle,
+                percolator::AssetLifecycleV16::Recovery
+            );
+            step(
+                &mut env,
+                &mut history,
+                &mut evidence,
+                None,
+                Some(PercolatorError::InvalidInstruction),
+                |env| env.forfeit_recovery_leg(LP, 0, 0),
+            );
+            step(
+                &mut env,
+                &mut history,
+                &mut evidence,
+                Some(AuthorizationEvent::OwnerEpisode {
+                    actor: LP,
+                    asset: 0,
+                    position_delta: -sign * QUANTITY,
+                }),
+                None,
+                |env| env.forfeit_recovery_leg(LP, 0, u128::MAX),
+            );
+            assert_eq!(env.all_matcher_context_data(), contexts_before);
+            assert_eq!(env.all_token_account_data(), tokens_before);
+            let current_request = history.replay();
+            assert_eq!(current_request[LP].positions[0], 0);
+            assert_eq!(
+                current_request[LP].positions[CONSUMER_ASSET as usize],
+                -2 * size
+            );
+            assert_eq!(current_request[LP].epoch, request[LP].epoch + 1);
+            assert_eq!(current_request[LP].sequence, request[LP].sequence);
+            assert_eq!(bincode::serialize(&retained).unwrap(), retained_bytes);
+            consume(
+                &mut env,
+                &mut history,
+                &mut evidence,
+                retained,
+                &request,
+                size,
+            );
+
+            // A current request under the unrenewed grant must fail as
+            // Unauthorized, independently of stale request-epoch rejection.
+            let current = retain(&mut env, route, size);
+            consume(
+                &mut env,
+                &mut history,
+                &mut evidence,
+                current,
+                &current_request,
+                size,
+            );
+            grant_capability(&mut env, &mut history, LP, Some(37), 100);
+            evidence.transactions += 1;
+            let fresh_request = history.replay();
+            let fresh = retain(&mut env, route, size);
+            consume(
+                &mut env,
+                &mut history,
+                &mut evidence,
+                fresh,
+                &fresh_request,
+                size,
+            );
+            assert_eq!(
+                history.replay()[LP].positions[CONSUMER_ASSET as usize],
+                -3 * size
+            );
+            evidence.reauthorized_fills += 1;
+            evidence.histories += 1;
+        }
+    }
+    assert_eq!(evidence.histories, 4);
+    assert_eq!(evidence.transactions, 44);
+    assert_eq!(evidence.live_simulations, 4);
+    assert_eq!(evidence.stale_requests, 4);
+    assert_eq!(evidence.revoked_current_requests, 4);
+    assert_eq!(evidence.reauthorized_fills, 4);
+    eprintln!("INV-012 Recovery forfeit revocation: {evidence:?}; two assets, one consumer leg, unchanged prices, zero fees; cure and automatic keeper detachment remain outside this increment");
 }

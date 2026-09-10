@@ -3,6 +3,64 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## INV-012 Recovery forfeit revocation (row 412, 2026-09-10)
+
+[`stateful/inv_012_owner_episode_revocation.rs`](stateful/inv_012_owner_episode_revocation.rs)
+adds `v16_program_recovery_forfeit_revokes_retained_live_sibling_capability` under
+the existing INV-012 owner. Four public LiteSVM histories cross both CPI consumers
+and both position signs. The LP owns a 12-unit asset-0 position and a live two-unit
+asset-1 position; its configured matcher has already executed the sibling fill.
+A retained, unsigned-by-LP request to increase that sibling exposure simulates
+successfully before asset 0 enters Recovery through public shutdown.
+
+Shutdown preserves the LP account and grant. A rejected zero-budget
+`ForfeitRecoveryLeg` rolls back exactly; the valid owner forfeit removes asset 0,
+advances the portfolio episode once, and clears the standing grant and expiry.
+The shared append-only authorization oracle derives that disposition from the
+accepted owner event and checks the unchanged grant sequence, fee cap, identities
+and sibling position against decoded state. Matcher contexts and SPL accounts
+remain unchanged by shutdown/forfeit. Retained bytes reject with `EngineStale`;
+a current-episode request without reauthorization separately rejects with
+`Unauthorized`. Both errors restore the complete tracked economic Account frame,
+including matcher accounts, SPL custody/supply and economic lamports, excluding
+network fee payers. A fresh same-tuple grant then permits a real sibling fill,
+increasing the LP's remaining exposure from two to three units.
+
+This adds the Recovery-forfeit writer expressly excluded by the existing
+reduction/conversion owner matrix. Liquidation, ordered grants and retained mixed
+transport histories own different transitions. It is bounded evidence for
+INV-004/005/010/012/024/081 and counterexample 412, with unchanged prices, zero
+fees, two assets and one consumer leg. Cure, keeper detachment, generation reuse
+and arbitrary lifecycle histories remain outside this increment. **Row 412 and
+all invariant statuses remain unchanged.** No production, dependency, helper or
+program-owned account-byte edits; no inconsistent production behavior was observed
+in this path. The initial fixture run omitted the required public force-close
+delay configuration and correctly rejected shutdown; adding the existing public
+configuration helper completed construction.
+
+The new selector passes **4 histories, 44 public wrapper transactions, 4 live
+simulations, 4 stale rejections, 4 revoked-current rejections and 4 fresh fills**.
+Peak measured success/forfeit CU is **217,447 / 57,002**. Fresh default-feature
+program and authenticated matcher SBF were built locked/offline with platform-tools
+v1.52 in `/dev/shm/percolator-inv012-capability-revocation-20260910`, from base
+`3ff725dc152d1f5462270d500eff3de76f52c19f` and pinned engine `394fd0bf`.
+Their SHA-256 hashes are, respectively,
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e` and
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" -- --locked
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::owner_episode_revocation::v16_program_recovery_forfeit_revokes_retained_live_sibling_capability -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::owner_episode_revocation::v16_program_retained_capability_cannot_cross_owner_episode_revocation -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::v16_capability_history_oracle_rejects_scope_invalidation_and_expiry_mistakes -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/stateful/inv_012_owner_episode_revocation.rs
+git diff --check
+```
+
 ## INV-027 flat first-admission fee prefix (2026-09-10)
 
 [`cu/inv_027_protected_principal_seniority.rs`](cu/inv_027_protected_principal_seniority.rs)
