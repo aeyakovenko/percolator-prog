@@ -81,6 +81,81 @@ cargo fmt --all
 env CARGO_TARGET_DIR=/dev/shm/inv073-row420-421-20260910-target PERCOLATOR_FUZZ_SBF=/dev/shm/inv073-row420-421-20260910-target/deploy/percolator_prog.so CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::absent_provider_expiry_retirement::v16_program_absent_provider_staggered_expiry_reaches_funded_terminal_retirement -- --exact --nocapture
 env CARGO_TARGET_DIR=/dev/shm/inv073-row420-421-20260910-target PERCOLATOR_FUZZ_SBF=/dev/shm/inv073-row420-421-20260910-target/deploy/percolator_prog.so CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_073_no_permanent_user_lock::absent_provider_expiry_retirement::v16_program_absent_provider_staggered_expiry_reaches_funded_terminal_retirement inv_070_zero_unattributed_terminal_residue_and_close_slab::mixed_maturity::v16_program_terminal_expiry_preserves_separate_reserve_beneficiaries inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_absent_provider_preserves_user_order_and_operator_free_insurance_exit
 env CARGO_TARGET_DIR=/dev/shm/inv073-row420-421-20260910-target PERCOLATOR_FUZZ_SBF=/dev/shm/inv073-row420-421-20260910-target/deploy/percolator_prog.so CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+```
+
+## INV-020 omitted Hybrid and stale fallback through withdrawal (row 426, 2026-09-10)
+
+[`cu/inv_020_staged_action_observations.rs`](cu/inv_020_staged_action_observations.rs)
+adds `v16_program_omitted_hybrid_and_stale_fallback_cannot_renew_funded_withdrawal`.
+Twelve public LiteSVM/SBF histories cross omitted Hybrid discovery, an explicitly supplied
+61-second-old Pyth report, and a current same-price report with caller slots `0`/`u64::MAX`
+and withdrawal at the original expiry/expiry+1. System/SPL/ATA/wrapper instructions create
+and fund all economic accounts. Both portfolios publicly open and close both legs before
+withdrawal; the 2,000-atom mint supply is fixed by revoking mint authority. Replay restores
+captured whole Accounts verbatim. Signer SOL, Clock, blockhashes and external reports are
+harness inputs; no initialized protocol fields are fabricated.
+
+At slot 5, one slot before the original Hybrid deadline, a signed AuthMark update moves
+the unrelated mark from 100 to 101 and establishes its fresh observation slot. All three
+crank schedules succeed and advance AuthMark accrual. The supplied stale Hybrid report
+also advances Hybrid accrual through its mature soft-stale fallback. Both incomplete
+histories retain Hybrid's original good slot 1, publish time 100, provider prices/timestamps
+and EWMA mark slot. Neither newer market settlement nor the fresh unrelated AuthMark can
+renew that provenance. The current report has the same Hybrid price 100 but publish time
+162, and commits good slot 5.
+
+At real slots 6 and 7, the omitted/stale histories' 137-atom withdrawals reject exactly with
+`OracleStale`: **eight rejections**, with every tracked and compiled Account preserved
+and the fee payer charged only the independently computed signature fee. The fresh-report
+controls first catch up with the same retained report, explicitly keep good slot 5, and
+then make **four exact 137-atom payouts**. Independent assertions reconcile capital,
+zero PnL/insurance/OI, fixed mint supply, both token destinations and engine/SPL custody.
+All final tracked Accounts match between caller-hint extremes within each evidence/time
+cell. The test enforces the existing 325,000-CU crank bound on every measured step;
+the observed peak is **64,312 CU**.
+
+This adds successful omitted-Hybrid discovery and mature stale-report fallback through
+a funded custody-admission boundary with an unrelated fresh AuthMark. The adjacent
+unchanged-report selector supplies a valid provider report throughout; the soft-stale
+selector checks fallback progress without a withdrawal; the original staged selector
+checks active-account liquidation/reduction with empty or Hybrid-only observations.
+The new test composes the distinct omitted/fallback provenance paths into withdrawal.
+
+**Row 426 remains OPEN.** The earlier omitted-Hybrid **active-account certificate and
+liquidation/reduction comparison remains unresolved**. Flat-account withdrawal coverage
+does not settle it. Corrupt providers/sysvars, standalone EWMA mode, active claim conversion,
+CPI/batch routes, arbitrary histories, maximum shapes and invariant-wide closure are outside
+this increment. No production bug or status promotion is claimed.
+
+The private worktree is `/home/anatoly/percolator-row426-inv020`, branch
+`codex/row426-inv020-hybrid-observations-20260910`, based on the locally available requested
+origin branch at `4677a92316b8897a716ba418fe6c61a3ca18a881`. Validation uses a fresh
+locked/offline default-feature SBF build with platform-tools v1.52 and a private copy of
+cached build dependencies. SBF SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Fixture development corrected the bitmap type, initialization cap, AuthMark freshness setup,
+and the different admission of pre-expiry versus expired cranks. An exploratory attempt
+to repair the expired observation in the same transaction rejected; it is not retained
+as a general repair or liveness claim. Only local repository documentation/tests informed
+this increment. Cargo emits the existing `solana-client v1.18.26` future-compatibility warning.
+
+The new exact selector passes 1/1, the three adjacent exact selectors pass 3/3, and
+the invariant index passes 1/1. Repository formatting and both Git whitespace checks
+pass. The index build also emits existing host dead-code warnings. Production,
+dependency pins and invariant-status files are unchanged; no broad suite was run.
+
+Validation commands (the new selector was also run during fixture development):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row426-inv020-observations-20260910-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR="$CARGO_TARGET_DIR/tmp"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::v16_program_omitted_hybrid_and_stale_fallback_cannot_renew_funded_withdrawal -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::v16_program_staged_observations_match_current_liquidation_and_reduction inv_020_authenticated_clock_slot_and_oracle_provenance::v16_program_hybrid_soft_stale_boundary_uses_clock_not_caller_slot inv_020_authenticated_clock_slot_and_oracle_provenance::v16_program_unchanged_oracle_report_cannot_renew_withdrawal_window
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 tests/invariants/cu/inv_020_staged_action_observations.rs
 cargo fmt --all -- --check
 git diff --check
 git diff --cached --check

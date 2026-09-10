@@ -2,8 +2,10 @@
 //! All economic state is constructed with System/SPL/ATA/wrapper instructions. Snapshot replay
 //! copies captured whole Accounts verbatim; it never fabricates or edits program-owned fields.
 //! Clock and external Pyth fixtures are the only harness-supplied authenticated inputs.
-//! Omission coverage is empty/Hybrid-only, not every single omitted leg; see the row-426
-//! staged-observation entry in ../README.md for the omitted-Hybrid residual gap.
+//! The active-account selector covers empty/Hybrid-only omissions; see the row-426
+//! staged-observation entry in ../README.md for its omitted-Hybrid residual gap.
+//! The separate flat-account withdrawal word below covers omitted Hybrid discovery and mature
+//! stale-report fallback without claiming active-leg certificate or liquidation equivalence.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -450,4 +452,309 @@ fn v16_program_staged_observations_match_current_liquidation_and_reduction() {
     assert_eq!(outcomes, 8);
     assert_eq!(rejections, 8);
     println!("row426 staged observations: {outcomes} equivalent outcomes, {rejections} atomic rejections; prefix={prefix_cu}, refresh={max_refresh}, action={max_action} CU");
+}
+
+fn observation_withdrawal_step(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    instruction: Instruction,
+    tracked: &[Pubkey],
+    rejection: Option<PercolatorError>,
+) -> u64 {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), instruction],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, owner],
+        env.svm.latest_blockhash(),
+    );
+    let mut keys = tracked.to_vec();
+    keys.extend(tx.message.account_keys.iter().copied());
+    keys.sort_unstable();
+    keys.dedup();
+    keys.retain(|key| *key != env.payer.pubkey());
+    let before: Vec<_> = keys.iter().map(|key| env.svm.get_account(key)).collect();
+    let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    payer.lamports -= tx.signatures.len() as u64 * FeeStructure::default().lamports_per_signature;
+    let result = env.svm.send_transaction(tx);
+    let cu = if let Some(error) = rejection {
+        let failure = result.expect_err("incomplete provenance cannot renew a funded withdrawal");
+        assert_eq!(
+            failure.err,
+            TransactionError::InstructionError(2, InstructionError::Custom(error as u32)),
+            "{failure:?}"
+        );
+        for (key, account) in keys.iter().zip(before) {
+            assert_eq!(env.svm.get_account(key), account, "rollback {key}");
+        }
+        failure.meta.compute_units_consumed
+    } else {
+        result
+            .expect("public observation or custody continuation")
+            .compute_units_consumed
+    };
+    assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+    assert_cu_within("observation/withdrawal step", cu, CRANK_CU_LIMIT);
+    cu
+}
+
+#[test]
+fn v16_program_omitted_hybrid_and_stale_fallback_cannot_renew_funded_withdrawal() {
+    const OPEN_SLOT: u64 = 1;
+    const OPEN_TIME: i64 = 100;
+    const STALE_SLOTS: u64 = 5;
+    const NOW: i64 = 162;
+    const MARK: u64 = 100;
+    const AUTH_MARK: u64 = 101;
+    const DEPOSIT: u128 = 1_000;
+    const WITHDRAW: u128 = 137;
+
+    let mut env = inv018_public_spl_market_with_params(
+        0,
+        V16CuMarketParams {
+            max_portfolio_assets: 2,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 8,
+            min_funding_lifetime_slots: 8,
+            ..V16CuMarketParams::default()
+        },
+    );
+    env.configure_permissionless_resolve_with_cu(STALE_SLOTS, 1);
+    set_test_clock(&mut env, OPEN_SLOT, OPEN_TIME);
+    let feed = [0xb7; 32];
+    let initial = env.set_pyth_price_with_conf(&feed, MARK as i64, -6, 0, OPEN_TIME);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0; 32], [0; 32]],
+        &[initial],
+        OPEN_SLOT,
+        OPEN_TIME,
+        0,
+        0,
+        3,
+        100,
+    )
+    .expect("public Hybrid configuration with a three-slot fallback threshold");
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+    let owners = [Keypair::new(), Keypair::new()];
+    let funded = owners
+        .each_ref()
+        .map(|owner| funded_owner(&mut env, owner, DEPOSIT));
+    let portfolios = funded.map(|pair| pair.0);
+    let tokens = funded.map(|pair| pair.1);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &env.mint,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            &env.admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .expect("fix the public collateral supply");
+    for asset in 0..2 {
+        for size in [POS_SCALE as i128, -(POS_SCALE as i128)] {
+            env.trade_asset_with_cu(
+                asset,
+                &owners[0],
+                portfolios[0],
+                &owners[1],
+                portfolios[1],
+                size,
+                MARK,
+                0,
+            );
+        }
+    }
+    for portfolio in portfolios {
+        assert!(active_bitmap(&env.portfolio_state(portfolio))
+            .iter()
+            .all(|word| *word == 0));
+        assert_eq!(env.portfolio_state(portfolio).capital.get(), DEPOSIT);
+    }
+    let old_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(old_profile.last_good_oracle_slot, OPEN_SLOT);
+    let stale_report = env.set_pyth_price_with_conf(&feed, MARK as i64, -6, 0, NOW - 61);
+    let fresh_report = env.set_pyth_price_with_conf(&feed, MARK as i64, -6, 0, NOW);
+    let keys = [
+        env.market,
+        portfolios[0],
+        portfolios[1],
+        env.vault,
+        env.mint,
+        tokens[0],
+        tokens[1],
+        initial,
+        stale_report,
+        fresh_report,
+        owners[0].pubkey(),
+        owners[1].pubkey(),
+        env.admin.pubkey(),
+        solana_sdk::sysvar::clock::ID,
+    ];
+    let initial_frame = frame(&env, &keys);
+    let mut peak = 0;
+    let mut rejected = 0;
+    let mut paid = 0;
+    for real_slot in [OPEN_SLOT + STALE_SLOTS, OPEN_SLOT + STALE_SLOTS + 1] {
+        for report in [None, Some(stale_report), Some(fresh_report)] {
+            let mut reference = None;
+            for caller_slot in [0, u64::MAX] {
+                let fresh = report == Some(fresh_report);
+                replay(&mut env, &initial_frame);
+                let auth_slot = OPEN_SLOT + STALE_SLOTS - 1;
+                set_test_clock(&mut env, auth_slot, NOW);
+                env.push_auth_mark_for_asset_as_admin(1, auth_slot, AUTH_MARK);
+                let auth = state::read_asset_oracle_profile(
+                    &env.svm.get_account(&env.market).unwrap().data,
+                    1,
+                )
+                .unwrap();
+                assert_eq!(auth.last_good_oracle_slot, auth_slot);
+                assert_eq!(auth.mark_ewma_last_slot, auth_slot);
+                assert!(real_slot - auth.last_good_oracle_slot < STALE_SLOTS);
+                let prefix = |env: &V16CuEnv, report: Option<Pubkey>| {
+                    let mut observations = crank_observations(1);
+                    let mut accounts = vec![
+                        AccountMeta::new_readonly(owners[0].pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolios[0], false),
+                    ];
+                    if let Some(report) = report {
+                        observations.extend(crank_observations_with_accounts(0, 1));
+                        accounts.push(AccountMeta::new_readonly(report, false));
+                    }
+                    Instruction {
+                        program_id: env.program_id,
+                        accounts,
+                        data: ProgInstruction::PermissionlessCrank {
+                            now_slot: caller_slot,
+                            observations,
+                        }
+                        .encode(),
+                    }
+                };
+                let withdraw = |env: &V16CuEnv| Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new(owners[0].pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolios[0], false),
+                        AccountMeta::new(tokens[0], false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    data: env.withdraw_ix(portfolios[0], WITHDRAW).encode(),
+                };
+                let before = env.market_state().1;
+                let immutable = frame(&env, &keys[2..]);
+                let observation = prefix(&env, report);
+                peak = peak.max(observation_withdrawal_step(
+                    &mut env,
+                    &owners[0],
+                    observation,
+                    &keys,
+                    None,
+                ));
+                let (cfg, group) = env.market_state();
+                assert_eq!(group.mode, MarketModeV16::Live);
+                assert_eq!(group.current_slot, auth_slot);
+                assert!(group.assets[1].slot_last > before.assets[1].slot_last);
+                assert_eq!(group.assets[1].slot_last, auth_slot);
+                if report.is_some() {
+                    assert!(group.assets[0].slot_last > before.assets[0].slot_last);
+                    assert_eq!(group.assets[0].slot_last, auth_slot);
+                }
+                let good_slot = if fresh { auth_slot } else { OPEN_SLOT };
+                let publish_time = if fresh { NOW } else { OPEN_TIME };
+                assert_eq!(cfg.last_good_oracle_slot, good_slot);
+                let hybrid = state::read_asset_oracle_profile(
+                    &env.svm.get_account(&env.market).unwrap().data,
+                    0,
+                )
+                .unwrap();
+                assert_eq!(hybrid.last_good_oracle_slot, good_slot);
+                assert_eq!(hybrid.oracle_target_publish_time, publish_time);
+                assert_eq!(hybrid.oracle_leg_publish_times, [publish_time, 0, 0]);
+                assert_eq!(
+                    hybrid.oracle_leg_prices_e6,
+                    old_profile.oracle_leg_prices_e6
+                );
+                if !fresh {
+                    assert_eq!(hybrid.mark_ewma_last_slot, old_profile.mark_ewma_last_slot);
+                }
+                assert_eq!(frame(&env, &keys[2..]), immutable);
+
+                // Settlement and the unrelated AuthMark are newer than Hybrid provenance.
+                // The fresh report at the prefix renews this window; settlement alone does not.
+                set_test_clock(&mut env, real_slot, NOW);
+                assert_eq!(real_slot < good_slot + STALE_SLOTS, fresh);
+                if fresh {
+                    let retained = prefix(&env, report);
+                    peak = peak.max(observation_withdrawal_step(
+                        &mut env, &owners[0], retained, &keys, None,
+                    ));
+                }
+                let debit = withdraw(&env);
+                peak = peak.max(observation_withdrawal_step(
+                    &mut env,
+                    &owners[0],
+                    debit,
+                    &keys,
+                    (!fresh).then_some(PercolatorError::OracleStale),
+                ));
+                paid += usize::from(fresh);
+                rejected += usize::from(!fresh);
+                let withdrawn = if fresh { WITHDRAW } else { 0 };
+                let (cfg, group) = env.market_state();
+                assert_eq!(cfg.last_good_oracle_slot, good_slot);
+                assert_eq!(cfg.oracle_target_publish_time, publish_time);
+                assert_eq!(group.mode, MarketModeV16::Live);
+                for asset in &group.assets[..2] {
+                    assert_eq!(asset.oi_eff_long_q, 0);
+                    assert_eq!(asset.oi_eff_short_q, 0);
+                }
+                assert_eq!(
+                    env.portfolio_state(portfolios[0]).capital.get(),
+                    DEPOSIT - withdrawn
+                );
+                assert_eq!(env.portfolio_state(portfolios[1]).capital.get(), DEPOSIT);
+                assert_eq!(env.portfolio_state(portfolios[0]).pnl.get(), 0);
+                assert_eq!(env.token_amount(tokens[0]) as u128, withdrawn);
+                assert_eq!(env.token_amount(tokens[1]), 0);
+                assert_eq!(group.vault, 2 * DEPOSIT - withdrawn);
+                assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+                assert_eq!(group.c_tot, group.vault);
+                assert_eq!(group.insurance, 0);
+                assert_eq!(frame(&env, &keys[6..13]), immutable[4..11]);
+                assert_eq!(env.svm.get_account(&env.mint).unwrap(), initial_frame[4].1);
+                let outcome = frame(&env, &keys);
+                if let Some(reference) = &reference {
+                    assert_eq!(
+                        &outcome, reference,
+                        "caller hints preserve complete withdrawal outcomes"
+                    );
+                } else {
+                    reference = Some(outcome);
+                }
+            }
+        }
+    }
+    assert_eq!(rejected, 8);
+    assert_eq!(paid, 4);
+    println!("row426 omitted Hybrid/fallback withdrawal: 12 histories, {rejected} atomic rejections, {paid} exact funded controls; peak {peak} CU");
 }
