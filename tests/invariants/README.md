@@ -29,6 +29,15 @@ computed-fee partial fills, passive OI, underfunded collection and arbitrary
 histories are outside this increment.
 Holdout labels 411/432 remain OPEN.
 
+The [2026-09-12 pending terminal-fee audit](terminal_pending_fees_audit_20260912.md)
+adds `v16_program_pending_cohort_terminal_fees_stop_at_resolution_and_reach_insurance_exit`
+under `inv_039_pending_loss_obligation_durability::terminal_fees`. Eight public
+LiteSVM histories cross mirrored positions, debtor order and delayed settlement.
+Original cohort debts remain distinct from maintenance capped at resolution;
+fee/payout rollback, exact owner SPL totals and signed insurance extraction compose
+through slab closure. Funding, insolvency and general histories remain untested by
+this increment. Holdouts 417/418/419/424/433 remain OPEN.
+
 The [2026-09-12 standalone first-admission audit](standalone_first_admission_audit_20260912.md)
 covers aged, never-exposed owners opening through a single wrapper instruction,
 without a fee/refresh prefix. Single/batch trades in both directions preserve

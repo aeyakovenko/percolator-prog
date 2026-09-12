@@ -25,6 +25,8 @@
 //! The `close_reopen` sibling instead creates a bankruptcy residual by matched reduction and
 //! deletes/recreates the debtor before the flat holder settles B. A composed bystander payout
 //! must roll back before booking; recreation after booking preserves the holder's exact debit.
+//! The `terminal_fees` sibling carries nonzero maintenance through pending resolved cohorts,
+//! fee/payout rollback, delayed keeper settlement and insurance extraction before slab close.
 
 #[test]
 fn v16_program_pending_obligation_blocks_close_then_releases() {
@@ -45,6 +47,9 @@ mod cohort_reduction;
 
 #[path = "inv_039_pending_loss_resolved_histories.rs"]
 mod resolved_histories;
+
+#[path = "inv_039_pending_loss_terminal_fees.rs"]
+mod terminal_fees;
 
 const ATTRIBUTION_DEPOSITS: [u128; 5] = [200_000, 180_000, 300_000, 250_000, 777];
 const ATTRIBUTION_PRICE_MOVES: [i128; 2] = [30_000, 20_000];
