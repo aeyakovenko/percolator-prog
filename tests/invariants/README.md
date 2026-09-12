@@ -1467,6 +1467,96 @@ cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --n
   inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
 ```
 
+## INV-014 retained CPI/direct policy-history economics (row 432, 2026-09-12)
+
+Owner: [cu/inv_014_retained_single_cpi_policy_history.rs](cu/inv_014_retained_single_cpi_policy_history.rs).
+New exact `v16_cu` selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees`.
+
+Eight public LiteSVM worlds cross both signed directions, `TradeCpi` versus
+bilateral `TradeNoCpi`, and policy histories `19 -> 31 -> 0 -> 7` and
+`19 -> 7 -> 0 -> 31`. Every deposit/trade transaction is signed at 19 bps with
+37-bps fee consent, exact price 100 and 255.5 lots plus one position quantum.
+Its bytes and signatures remain unchanged through all three policy updates.
+Thirty-two successful simulations preserve the complete tracked Account frame.
+The CPI LP grants an independent 137-bps cap and does not sign the retained trade;
+the direct route requires both owners' signatures.
+
+Before delivery, a separate transaction applies a temporary 23-bps policy,
+executes the original 113-atom SPL deposit and trade, then repeats that policy
+instruction. The duplicate rejects at instruction 5 with `EngineStale`. Logs
+require three successful wrapper calls, the SPL transfer, and exactly one matcher
+invocation/return for CPI or none for direct execution. All compiled and tracked fixture
+Accounts roll back exactly, including policy and position epochs, matcher context,
+LP grant, custody and mint. Only the independent payer's exact signature fee is
+charged. The original signed deposit/trade transaction then executes unchanged;
+it was not submitted as the failing transaction, so no failed-signature cache
+bypass, blockhash replacement or economic re-signing is involved.
+
+The input-derived oracle first checks unnormalized owner capital, zero PnL,
+signed positions, both OI lanes, insurance, domain budgets, capital total and
+SPL custody against the fixed 300,123-atom supply. The per-owner fee is 95 atoms
+for explicit 37-bps direct consent, versus 18/80 atoms for the current 7/31-bps
+CPI base policy. Stock and encumbrance censuses run after every policy update,
+rollback and retained success. Across routes and histories, the economic
+projections agree after removing only those independently predicted fees from
+capital/insurance/domain accounting. This is a semantic economic comparison;
+the independently generated world identities are not compared byte-for-byte.
+Route-specific controls have separate assertions: both position epochs advance
+once; the LP tuple, cap and matcher sequence persist; only CPI advances the
+matcher request sequence and preserves grant enabled/expiry state. Direct
+execution disables that grant and clears its expiry, with unchanged context.
+
+**Nonduplicate:** existing row432 coverage rejects above-consent policies before
+matcher CPI; the permitted-policy stateful selector compares single/batch CPI;
+the INV-047 fee-leg comparison uses equal current/signed fees. This increment
+crosses retained direct/CPI consent with unequal route fees and rollback after
+an actual fill. Additional standalone cap hikes, cap-boundary permutations and
+another CPI-only permitted-policy suffix rollback were discarded during overlap
+review. No executed probe was discarded. Development corrected use of a
+nonexistent position-epoch setter; economic assertions were not relaxed.
+
+**Row 432 remains OPEN.** This is bounded INV-010/011/014/024/036/047/080/081
+conformance, with no generic history generator, production fix or status change.
+Dynamic/backing fees, nonzero slippage, partial/multi-asset fills, aggregate batch
+terms, underfunded collection, authority succession, expiry and terminal payouts
+remain outside this selector. Positions remain open. No real bug was found.
+
+Worktree `/tmp/percolator-row432.SdbMC2`, branch
+`codex/astra-row432-retained-rollback-20260912`, exact requested base
+`origin/codex/astra-open-holdout-ledger-20260912`:
+`eaa16d2f78d4426d45f629eeb5be75cf91bbc22b`.
+A private cache was copied from the earlier permitted-policy worker; the wrapper
+and authenticated matcher were then rebuilt from this worktree, offline and
+locked, using platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Engine remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+
+Observed new-selector CU maxima across the focused runs: simulation/CPI success
+**190,901**, direct success **174,891**, post-fill rollback **195,498**, policy
+**2,699**, all below 500,000. The final combined run passes **2/2** in 7.02 s;
+its new-selector peaks are 187,892/167,391/192,489/2,699 respectively. The
+existing selector still covers 8 worlds, 24 simulations, 12 rollbacks and
+8 retained/fresh successes, peaking at 189,392 CU for success/simulation and
+50,885 for rejection. Charter/index passes **1/1**. Formatting, unstaged/staged
+whitespace and committed-patch checks pass. Only existing unused-support and
+Solana future-compatibility warnings remain; no full-suite run is claimed.
+Validation commands from this worktree (only affected selectors and charter/index):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row432-SdbMC2-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-073 depleted reserves through retirement retries (rows 420/421, 2026-09-12)
 
 Owner: [cu/inv_073_absent_insurer_spent_retirement.rs](cu/inv_073_absent_insurer_spent_retirement.rs).

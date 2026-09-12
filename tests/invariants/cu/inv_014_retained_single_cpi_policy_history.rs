@@ -2,6 +2,8 @@
 //! A successful SPL deposit prefix must roll back when the single-CPI taker cap
 //! rejects. Restored policy preserves pre-signed alternatives; a second increase
 //! requires fresh taker consent. The LP cap remains independently permissive.
+//! A second relation compares retained CPI/current-policy and bilateral/explicit
+//! fees after nonmonotone histories and rollback of an already successful fill.
 //! Bounded Live/full-fill conformance, with no economic account-image injection.
 
 use super::super::*;
@@ -170,7 +172,10 @@ impl World {
             self.env.svm.latest_blockhash(),
         );
         tx.verify().unwrap();
-        assert_eq!(tx.message.header.num_required_signatures, 2);
+        assert_eq!(
+            usize::from(tx.message.header.num_required_signatures),
+            signers.len()
+        );
         assert!(
             bincode::serialized_size(&tx).unwrap() <= solana_sdk::packet::PACKET_DATA_SIZE as u64
         );
@@ -178,39 +183,52 @@ impl World {
     }
 
     fn bundle(&self, trade: &ProgInstruction, nonce: u32) -> Transaction {
-        self.sign(
-            &[
-                Instruction {
-                    program_id: self.env.program_id,
-                    accounts: vec![
-                        AccountMeta::new(self.owners[0].pubkey(), true),
-                        AccountMeta::new(self.env.market, false),
-                        AccountMeta::new(self.portfolios[0], false),
-                        AccountMeta::new(self.sources[0], false),
-                        AccountMeta::new(self.env.vault, false),
-                        AccountMeta::new_readonly(spl_token::ID, false),
-                    ],
-                    data: self
-                        .env
-                        .deposit_ix(self.portfolios[0], PREFIX.into())
-                        .encode(),
-                },
-                Instruction {
-                    program_id: self.env.program_id,
-                    accounts: vec![
-                        AccountMeta::new(self.owners[0].pubkey(), true),
-                        AccountMeta::new(self.env.market, false),
-                        AccountMeta::new(self.portfolios[0], false),
-                        AccountMeta::new(self.portfolios[1], false),
-                        AccountMeta::new_readonly(self.matcher, false),
-                        AccountMeta::new(self.context, false),
-                        AccountMeta::new_readonly(self.delegate, false),
-                    ],
-                    data: trade.encode(),
-                },
-            ],
-            nonce,
-        )
+        self.sign(&self.bundle_instructions(trade), nonce)
+    }
+
+    fn bundle_instructions(&self, trade: &ProgInstruction) -> [Instruction; 2] {
+        let trade_accounts = if matches!(trade, ProgInstruction::TradeNoCpi { .. }) {
+            vec![
+                AccountMeta::new(self.owners[0].pubkey(), true),
+                AccountMeta::new(self.owners[1].pubkey(), true),
+                AccountMeta::new(self.env.market, false),
+                AccountMeta::new(self.portfolios[0], false),
+                AccountMeta::new(self.portfolios[1], false),
+            ]
+        } else {
+            assert!(matches!(trade, ProgInstruction::TradeCpi { .. }));
+            vec![
+                AccountMeta::new(self.owners[0].pubkey(), true),
+                AccountMeta::new(self.env.market, false),
+                AccountMeta::new(self.portfolios[0], false),
+                AccountMeta::new(self.portfolios[1], false),
+                AccountMeta::new_readonly(self.matcher, false),
+                AccountMeta::new(self.context, false),
+                AccountMeta::new_readonly(self.delegate, false),
+            ]
+        };
+        [
+            Instruction {
+                program_id: self.env.program_id,
+                accounts: vec![
+                    AccountMeta::new(self.owners[0].pubkey(), true),
+                    AccountMeta::new(self.env.market, false),
+                    AccountMeta::new(self.portfolios[0], false),
+                    AccountMeta::new(self.sources[0], false),
+                    AccountMeta::new(self.env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                data: self
+                    .env
+                    .deposit_ix(self.portfolios[0], PREFIX.into())
+                    .encode(),
+            },
+            Instruction {
+                program_id: self.env.program_id,
+                accounts: trade_accounts,
+                data: trade.encode(),
+            },
+        ]
     }
 
     fn frame(&self, tx: &Transaction) -> BTreeMap<Pubkey, Option<Account>> {
@@ -266,30 +284,45 @@ impl World {
         changed: &[Pubkey],
         calls: [usize; 3],
     ) -> u64 {
+        let error = reject.then_some((
+            3,
+            InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
+        ));
+        self.deliver_with_error(tx, error, changed, calls)
+    }
+
+    fn deliver_with_error(
+        &mut self,
+        tx: Transaction,
+        error: Option<(u8, InstructionError)>,
+        changed: &[Pubkey],
+        calls: [usize; 3],
+    ) -> u64 {
         let before = self.frame(&tx);
         let payer = self.env.payer.pubkey();
         let mut expected_payer = before[&payer].clone().unwrap();
         expected_payer.lamports -= FeeStructure::default().lamports_per_signature
             * u64::from(tx.message.header.num_required_signatures);
         let result = self.env.svm.send_transaction(tx);
-        let meta = if reject {
-            let failure = result.expect_err("retained taker cap rejects after the funded prefix");
+        let reject = error.is_some();
+        let meta = if let Some((index, error)) = error {
+            let failure = result.expect_err("retained bundle must reject at the expected boundary");
             assert_eq!(
                 failure.err,
-                TransactionError::InstructionError(
-                    3,
-                    InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
-                )
+                TransactionError::InstructionError(index, error)
             );
-            assert!(!failure
-                .meta
-                .logs
-                .iter()
-                .any(|log| log.starts_with(&format!("Program {} invoke", self.matcher))));
             failure.meta
         } else {
             result.expect("current consent executes")
         };
+        assert_eq!(
+            meta.logs
+                .iter()
+                .filter(|log| log.starts_with(&format!("Program {} invoke", self.matcher)))
+                .count(),
+            calls[2],
+            "matcher attempts and successful returns agree"
+        );
         for (key, account) in before {
             if key == payer {
                 assert_eq!(self.env.svm.get_account(&key), Some(expected_payer.clone()));
@@ -354,6 +387,18 @@ impl World {
     }
 
     fn check(&self, size: i128, bps: u64) {
+        self.check_economics(size, bps);
+        if size != 0 {
+            let fill = percolator_prog::matcher_abi::read_matcher_return(
+                &self.env.svm.get_account(&self.context).unwrap().data,
+            )
+            .unwrap();
+            assert_eq!(fill.exec_size, size);
+            assert_eq!(fill.exec_price_e6, PRICE);
+        }
+    }
+
+    fn check_economics(&self, size: i128, bps: u64) {
         let filled = size != 0;
         let paid = if filled { fee(bps) } else { 0 };
         let accounts = self.portfolios.map(|key| self.env.portfolio_state(key));
@@ -413,14 +458,6 @@ impl World {
         let mint = Mint::unpack(&self.env.svm.get_account(&self.env.mint).unwrap().data).unwrap();
         assert_eq!(mint.supply, DEPOSITS.iter().sum::<u64>() + PREFIX);
         assert_eq!(mint.mint_authority, COption::None);
-        if filled {
-            let fill = percolator_prog::matcher_abi::read_matcher_return(
-                &self.env.svm.get_account(&self.context).unwrap().data,
-            )
-            .unwrap();
-            assert_eq!(fill.exec_size, size);
-            assert_eq!(fill.exec_price_e6, PRICE);
-        }
     }
 }
 
@@ -454,6 +491,7 @@ fn v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollba
                     .map(|tx| bincode::serialize(tx).unwrap());
                 assert_ne!(retained[0].signatures, retained[1].signatures);
                 for tx in &retained {
+                    assert_eq!(tx.message.header.num_required_signatures, 2);
                     simulation_cu = simulation_cu.max(w.simulate(tx));
                     simulations += 1;
                 }
@@ -544,4 +582,220 @@ fn v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollba
         (8, 24, 12, 4, 4)
     );
     eprintln!("INV-014 row 432: worlds={worlds}, simulations={simulations}, exact_rollbacks={rejections}, rolled_back_SPL_deposits={rejections}, retained_successes={retained_successes}, fresh_successes={fresh_successes}; max CU simulation={simulation_cu}, policy={policy_cu}, rejection={rejection_cu}, success={success_cu}");
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FeeNormalizedRouteEconomics {
+    capital: [u128; 2],
+    pnl: [i128; 2],
+    positions: [i128; 2],
+    position_epochs: [u64; 2],
+    oi: [u128; 2],
+    insurance: u128,
+    domain_budgets: [u128; 2],
+    capital_total: u128,
+    vault: u128,
+    tokens: [u64; 3],
+}
+
+impl World {
+    fn normalized_route_economics(&self, paid: u128) -> FeeNormalizedRouteEconomics {
+        let accounts = self.portfolios.map(|key| self.env.portfolio_state(key));
+        let (_, group) = self.env.market_state();
+        // Remove only the independently predicted route fee, never a measured
+        // residual. The unnormalized accounts have already passed check_economics.
+        FeeNormalizedRouteEconomics {
+            capital: accounts
+                .each_ref()
+                .map(|account| account.capital.get() + paid),
+            pnl: accounts.each_ref().map(|account| account.pnl.get()),
+            positions: accounts
+                .each_ref()
+                .map(|account| active_leg_for_asset(account, 0).basis_pos_q),
+            position_epochs: self
+                .portfolios
+                .map(|key| self.env.portfolio_position_epoch(key)),
+            oi: [
+                group.assets[0].oi_eff_long_q,
+                group.assets[0].oi_eff_short_q,
+            ],
+            insurance: group.insurance - 2 * paid,
+            domain_budgets: [
+                group.insurance_domain_budget[0] - paid,
+                group.insurance_domain_budget[1] - paid,
+            ],
+            capital_total: group.c_tot + 2 * paid,
+            vault: group.vault,
+            tokens: [
+                self.env.token_amount(self.sources[0]),
+                self.env.token_amount(self.sources[1]),
+                self.env.token_amount(self.env.vault),
+            ],
+        }
+    }
+}
+
+#[test]
+fn v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees() {
+    const SIGNED_BPS: u64 = 37;
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).unwrap();
+    let (mut simulation_cu, mut policy_cu, mut rollback_cu) = (0, 0, 0);
+    let mut success_cu = [0; 2];
+    let (mut worlds, mut simulations, mut rollbacks, mut retries) = (0, 0, 0, 0);
+    for direction in [-1, 1] {
+        let mut reference = None;
+        for history in [[31, 0, 7], [7, 0, 31]] {
+            for cpi in [false, true] {
+                let mut w = World::new(&matcher_bytes);
+                let size = direction * QUANTITY;
+                let trade = if cpi {
+                    w.env
+                        .trade_cpi_ix(w.portfolios[0], w.portfolios[1], 0, size, SIGNED_BPS, PRICE)
+                } else {
+                    w.env.trade_no_cpi_ix(
+                        w.portfolios[0],
+                        w.portfolios[1],
+                        0,
+                        size,
+                        PRICE,
+                        SIGNED_BPS,
+                    )
+                };
+                let instructions = w.bundle_instructions(&trade);
+                let retained = w.sign(&instructions, 0);
+                let bytes = bincode::serialize(&retained).unwrap();
+                assert_eq!(
+                    retained.message.header.num_required_signatures,
+                    if cpi { 2 } else { 3 }
+                );
+                simulation_cu = simulation_cu.max(w.simulate(&retained));
+                simulations += 1;
+                let epochs = w.portfolios.map(|key| w.env.portfolio_position_epoch(key));
+                let grant = w.env.portfolio_matcher_config(w.portfolios[1]);
+                let grant_sequence = w.env.portfolio_matcher_sequence(w.portfolios[1]);
+                let grant_expiry = w.env.portfolio_matcher_expiry(w.portfolios[1]);
+                let request_sequence = w.env.market_state().0.matcher_req_seq;
+                for (step, bps) in history.into_iter().enumerate() {
+                    policy_cu = policy_cu.max(w.policy(bps, 10 + step as u32));
+                    w.check_economics(0, 0);
+                    assert_eq!(w.sign(&instructions, 0), retained);
+                    simulation_cu = simulation_cu.max(w.simulate(&retained));
+                    simulations += 1;
+                }
+                let controls = w.env.control_sequences(0);
+                let temporary_policy = Instruction {
+                    program_id: w.env.program_id,
+                    accounts: vec![
+                        AccountMeta::new(w.env.admin.pubkey(), true),
+                        AccountMeta::new(w.env.market, false),
+                    ],
+                    data: ProgInstruction::UpdateTradeFeePolicy {
+                        trade_fee_base_bps: 23,
+                        policy_sequence: controls.trade_fee + 1,
+                        authority_epoch: controls.authority_epoch,
+                    }
+                    .encode(),
+                };
+                // A duplicate policy suffix rejects only after the temporary
+                // policy, SPL deposit and the original trade have succeeded.
+                let failed = w.sign(
+                    &[
+                        temporary_policy.clone(),
+                        instructions[0].clone(),
+                        instructions[1].clone(),
+                        temporary_policy,
+                    ],
+                    20,
+                );
+                rollback_cu = rollback_cu.max(w.deliver_with_error(
+                    failed,
+                    Some((
+                        5,
+                        InstructionError::Custom(PercolatorError::EngineStale as u32),
+                    )),
+                    &[],
+                    [3, 1, usize::from(cpi)],
+                ));
+                rollbacks += 1;
+                w.check_economics(0, 0);
+                assert_eq!(w.env.control_sequences(0), controls);
+                assert_eq!(w.env.market_state().0.trade_fee_base_bps, history[2]);
+                assert_eq!(w.env.market_state().0.matcher_req_seq, request_sequence);
+                assert_eq!(
+                    w.portfolios.map(|key| w.env.portfolio_position_epoch(key)),
+                    epochs
+                );
+                assert_eq!(w.env.portfolio_matcher_config(w.portfolios[1]), grant);
+
+                assert_eq!(w.sign(&instructions, 0), retained);
+                assert_eq!(bincode::serialize(&retained).unwrap(), bytes);
+                let mut changed = vec![
+                    w.env.market,
+                    w.portfolios[0],
+                    w.portfolios[1],
+                    w.env.vault,
+                    w.sources[0],
+                ];
+                if cpi {
+                    changed.push(w.context);
+                }
+                success_cu[usize::from(cpi)] = success_cu[usize::from(cpi)].max(w.deliver(
+                    retained,
+                    false,
+                    &changed,
+                    [2, 1, usize::from(cpi)],
+                ));
+                retries += 1;
+                let charged_bps = if cpi { history[2] } else { SIGNED_BPS };
+                assert!(charged_bps <= SIGNED_BPS);
+                assert!(
+                    fee(history[2]) < fee(SIGNED_BPS),
+                    "route difference must be nonzero"
+                );
+                if cpi {
+                    w.check(size, charged_bps);
+                } else {
+                    w.check_economics(size, charged_bps);
+                }
+                assert_eq!(w.env.control_sequences(0), controls);
+                assert_eq!(
+                    w.env.market_state().0.matcher_req_seq,
+                    request_sequence + u64::from(cpi)
+                );
+                assert_eq!(
+                    w.portfolios.map(|key| w.env.portfolio_position_epoch(key)),
+                    epochs.map(|epoch| epoch + 1)
+                );
+                let mut expected_grant = grant;
+                expected_grant.control = state::next_portfolio_position_control(grant.control)
+                    .unwrap()
+                    .1;
+                expected_grant.set_enabled(u8::from(cpi)).unwrap();
+                assert_eq!(
+                    w.env.portfolio_matcher_config(w.portfolios[1]),
+                    expected_grant
+                );
+                assert_eq!(
+                    w.env.portfolio_matcher_sequence(w.portfolios[1]),
+                    grant_sequence
+                );
+                assert_eq!(
+                    w.env.portfolio_matcher_expiry(w.portfolios[1]),
+                    if cpi { grant_expiry } else { 0 }
+                );
+                let normalized = w.normalized_route_economics(fee(charged_bps));
+                if let Some(reference) = &reference {
+                    assert_eq!(
+                        &normalized, reference,
+                        "policy history and route preserve the fee-normalized economic endpoint"
+                    );
+                } else {
+                    reference = Some(normalized);
+                }
+                worlds += 1;
+            }
+        }
+    }
+    assert_eq!((worlds, simulations, rollbacks, retries), (8, 32, 8, 8));
+    eprintln!("INV-014 row 432 route histories: worlds={worlds}, simulations={simulations}, exact_post_fill_rollbacks={rollbacks}, exact_retained_retries={retries}; max CU simulation={simulation_cu}, policy={policy_cu}, rollback={rollback_cu}, direct_success={}, cpi_success={}", success_cu[0], success_cu[1]);
 }

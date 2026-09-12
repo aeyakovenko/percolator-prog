@@ -414,6 +414,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Live/full-fill/base-fee evidence only: no generic oracle, dynamic/backing fees, authority
 # succession, expiry, partial fills, underfunded collection, cross-route or terminal proof.
 # No production change, vulnerable-pin experiment or invariant-status promotion; row stays OPEN.
+# 432 bounded route-history comparison (2026-09-12): same CU owner,
+# v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees.
+# Eight public worlds compare retained TradeCpi/current-policy and bilateral
+# TradeNoCpi/explicit fees through 19->31->0->7 and 19->7->0->31 histories.
+# Eight duplicate-policy suffixes roll back successful policy/deposit/fill prefixes;
+# unchanged retained transactions then commit. Complete rollback frames, exact
+# payer fees and route-specific grant controls accompany input-derived accounting:
+# direct pays 95 atoms/owner, CPI pays 18/80, and fee-normalized economics agree.
+# See INV-014 README section for exact selectors, CU and base SHA. No generic
+# cross-route proof, authority/expiry/partial/dynamic/backing or terminal coverage;
+# no production fix, new bug or status promotion. Row 432 remains OPEN.
 432	LoF	PRIVILEGED	INV-014	INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-080,INV-081	retained-cpi-fee+x-taker-terms+x-single-route	retained-single-cpi-trades-cannot-charge-fee-terms-outside-signed-taker-consent	OPEN
 # 433 bounded conformance (2026-09-12): cu/inv_073_terminal_reserve_close_retry.rs.
 # Two public classic-SPL/asset-0 histories retain keeper-paid principal/insurance and
