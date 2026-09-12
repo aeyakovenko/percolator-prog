@@ -1,5 +1,79 @@
 # Invariant-owned test coverage
 
+## INV-045 funding reversal and unsettled carry entitlement (row 425, 2026-09-12)
+
+Owner: [cu/inv_045_funding_carry_entitlement.rs](cu/inv_045_funding_carry_entitlement.rs),
+mounted under `inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement`.
+Selector: `v16_program_funding_reversal_preserves_carry_and_unsettled_owner_entitlement`.
+
+Sixteen public System/SPL/wrapper histories compose two opposite AuthMark premiums,
+nonzero funding, and fractional price-cap carry with alternating single/batch
+bilateral and authenticated CPI reductions. Market accrual is committed first;
+the active owners' account cranks occur before or after reductions at slots 2 and
+5. A passive short portfolio remains byte-identical through all eight market
+cranks, retaining unsettled K/F while the other pair changes exposure.
+
+At slot 3, publication reverses both premiums with carry numerators 7,200/9,000.
+Only the price carry resets; previously earned funding remains attributable to
+the original lots. Independent one-slot premium/rate/floor arithmetic and a
+signed-lot ledger check each prefix's carry, K/F indices, latent plus settled
+owner value, OI, capital/PnL totals and fixed-mint SPL custody. Later price atoms
+land at slots 7/8 with carry 2,000/5,000. Every reduction frames the complete
+oracle profiles and absent portfolios, including matcher-grant renewal.
+
+Both signs and all route/settlement orders pay exactly
+`[100108, 199904, 300089, 399965]` to the four owners after signed closes, public
+certificate refresh, released-PnL conversion and SPL withdrawal. All 64 payouts
+reconcile to the original 1,000,066 atoms with zero final vault, capital and PnL.
+Peak measured suffix cost in the final seven-selector run is **460,796 CU**,
+below 1,400,000.
+
+This adds funding-entitlement attribution across a premium reversal and changed
+exposure to the existing zero-funding carry/exit cases. It is not a split-route
+equivalence oracle: every prefix and final owner amount has an independent
+input-derived expectation. Integral lots, unit ADL, zero fees, committed market
+frontiers and this finite two-target schedule are deliberate bounds. Inline
+trade-driven market accrual, pending funding-checkpoint replacement, fractional
+position settlement, fees, ADL and arbitrary economic histories remain outside
+this selector. **Row425 remains OPEN with partial conformance evidence.** Current
+behavior did not violate the tested property; no production correction or
+invariant-status promotion is claimed.
+
+Base `f903e3eb0653b7520ab22d6df4cdbce2011db58f`; isolated worktree
+`/tmp/percolator-row425-20260912`, branch `codex/row425-fractional-carry-20260912`.
+Default-feature wrapper and authenticated matcher SBF were built locked/offline
+with platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Shared `/dev/shm` exhaustion interrupted validation compilation. Only this worker's
+host cache was moved to the ignored `target/row425-host-debug` in its isolated
+worktree, with `/dev/shm/percolator-row425-target/debug` linking to it. The required
+environment paths and private SBF remained unchanged; interrupted checks were rerun.
+Validation:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row425-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row425-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row425-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::v16_program_funding_reversal_preserves_carry_and_unsettled_owner_entitlement \
+  inv_045_no_free_mark_movement::public_carry_order::precrank_carry::v16_program_row425_precrank_reductions_preserve_carry_and_owner_entitlement \
+  inv_045_no_free_mark_movement::public_carry_order::carry_transport_exit::v16_program_row425_matcher_handoffs_preserve_precrank_carry_and_exact_owner_exit \
+  inv_045_no_free_mark_movement::public_carry_order::fractional_position_residue::v16_program_fractional_positions_partition_carry_into_exact_owner_payouts_and_residue \
+  inv_045_no_free_mark_movement::v16_program_pending_fractional_carry_survives_due_trade_and_resolution \
+  inv_052_split_merge_invariance::v16_program_upward_funding_is_crank_partition_invariant \
+  inv_052_split_merge_invariance::v16_program_downward_funding_is_crank_partition_invariant
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-028 latent capacity reuse with retained history (row 423, 2026-09-12)
 
 Owner: [cu/inv_028_latent_capacity_reuse.rs](cu/inv_028_latent_capacity_reuse.rs),

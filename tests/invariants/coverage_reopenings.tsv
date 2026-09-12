@@ -394,6 +394,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # zero recoverable backing/insurance/earnings; 32 trade and 144 SPL prefixes roll back
 # as complete Accounts apart from exact payer signature fees. See README. Finite one-move
 # K family only, no CPI/funding/ADL/replay or generic oracle. Row/status remain OPEN.
+# Row 425 bounded funding-reversal conformance (2026-09-12): cu/inv_045_funding_carry_entitlement.rs,
+# v16_program_funding_reversal_preserves_carry_and_unsettled_owner_entitlement.
+# Sixteen public two-asset histories cross premium reversal, nonzero funding and
+# pending account settlement with alternating single/batch CPI/bilateral reductions.
+# Input-derived carry/K/F and latent owner values reconcile 64 exact SPL payouts;
+# passive account bytes, fixed mint supply and zero terminal vault frame attribution.
+# Market accrual is explicit; inline market accrual, pending funding checkpoints,
+# fractional lots/fees/ADL and arbitrary histories remain outside this finite family.
+# Current behavior conforms in this selector; no production or status promotion. See README.
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.

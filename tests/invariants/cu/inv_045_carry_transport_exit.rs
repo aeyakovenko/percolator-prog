@@ -4,7 +4,7 @@
 
 use super::*;
 
-fn profiles(world: &World) -> [state::AssetOracleProfileV16; 2] {
+pub(super) fn profiles(world: &World) -> [state::AssetOracleProfileV16; 2] {
     let market = world.env.svm.get_account(&world.env.market).unwrap();
     [0, 1].map(|asset| state::read_asset_oracle_profile(&market.data, asset).unwrap())
 }
