@@ -54,6 +54,9 @@ mod terminal_fees;
 #[path = "inv_039_pending_loss_shared_holder.rs"]
 mod shared_holder;
 
+#[path = "inv_039_pending_loss_backing_expiry.rs"]
+mod backing_expiry;
+
 const ATTRIBUTION_DEPOSITS: [u128; 5] = [200_000, 180_000, 300_000, 250_000, 777];
 const ATTRIBUTION_PRICE_MOVES: [i128; 2] = [30_000, 20_000];
 

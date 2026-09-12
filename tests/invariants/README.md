@@ -12,6 +12,16 @@ signed exit. Native stock retirement with insurance remaining, absent reserve
 keys, recredit, claims and maximum-capacity products remain outside this slice;
 rows 418/423 and invariant verdicts are unchanged.
 
+The [pending-loss backing-expiry audit](pending_loss_backing_expiry_audit_20260912.md)
+adds one INV-039 selector with sixteen public LiteSVM histories. Exact/late expiry
+preserves two pending obligations and the original owner debts; later debtor
+settlement creates new backing without reviving the expired 97 atoms. Both claimant
+orders reach exact payouts, debtor deletion, and bounded slab retirement. Thirty-two
+full-Account rollbacks include successful expiry, debtor SPL payment and holder
+detachment. This adds sampled row-419 expiry/order composition; retained receipt
+identity and persisted scan invalidation remain separate. Verdicts and holdout
+labels are unchanged.
+
 The [scanned insurance withdrawal audit](terminal_prefix_insurance_audit_20260912.md)
 adds one INV-071 selector with eight public LiteSVM histories. Two distinct
 beneficiaries withdraw 37 and 53 atoms from assets behind a persisted terminal
