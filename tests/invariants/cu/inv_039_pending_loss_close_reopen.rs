@@ -18,6 +18,9 @@ mod close_preemption;
 #[path = "inv_039_pending_loss_cure_resolution.rs"]
 mod cure_resolution;
 
+#[path = "inv_039_pending_loss_two_domain_resolution.rs"]
+mod two_domain_resolution;
+
 fn pending_bankruptcy(reverse_sides: bool, peak_crank_cu: &mut u64) -> (AttributionWorld, u128) {
     let world = AttributionWorld::new_with_params(
         reverse_sides,

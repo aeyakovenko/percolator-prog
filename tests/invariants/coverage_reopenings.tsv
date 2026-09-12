@@ -254,6 +254,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Twenty-four complete-Account SPL-prefix rollbacks, 40 exact payouts and 40 deletions.
 # One integral pair, zero fees/funding/backing/insurance; no restart, fractional oracle,
 # maximum shape or arbitrary histories. See README; no generic closure/status promotion.
+# Row 419 two-bankruptcy-domain conformance (2026-09-12):
+# cu/inv_039_pending_loss_two_domain_resolution.rs,
+# v16_program_two_bankrupt_domains_preserve_pending_debt_across_resolution_order.
+# Eight side/early-booking/claim-order histories retain unequal obligations across
+# resolution with only one residual booked. Exact domain debits, 24 prefix rollbacks,
+# four premature-claim rollbacks and 40 terminal deletions; no cured-close duplicate.
+# See pending_loss_two_domain_resolution_audit_20260912.md for controls, limits and
+# the engine waiting-retry observation. No LoF/DoS established; row remains OPEN.
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,
 # v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion.

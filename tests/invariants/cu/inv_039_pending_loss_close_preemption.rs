@@ -40,7 +40,7 @@ fn reject_after_close(world: &mut AttributionWorld, actor: usize) -> u64 {
     )
 }
 
-fn reject(
+pub(super) fn reject(
     world: &mut AttributionWorld,
     economic_instructions: &[Instruction],
     error_index: u8,
