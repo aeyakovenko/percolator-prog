@@ -1,5 +1,12 @@
 # PR410-434 are post-hoc holdout/conformance misses; rows left OPEN still affect invariant status.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
+# 411/432 bounded conformance (2026-09-12): stateful/inv_014_retained_fee_expiry.rs,
+# v16_program_retained_fee_prefix_rolls_back_at_grant_expiry_before_bilateral_retry.
+# Policy-authority succession and repricing precede exact/late LP-grant expiry;
+# a successful fee-bearing CPI and optional permitted policy decrease roll back
+# before unchanged retained bilateral/CPI alternatives realize exact owner and
+# insurance payouts. See retained_fee_expiry_audit_20260912.md. Bounded expiry/retry
+# composition only; no generic generator, vulnerable-pin experiment or status promotion.
 # Kind/severity are recorded claims, not impact acceptance under scripts/loop.md; OPEN does not confirm LoF/DoS.
 # status remains OPEN until a generic invariant-owned generator/oracle (not the finding PoC)
 # fails on the vulnerable pin, the production fix lands, and the unchanged oracle passes.

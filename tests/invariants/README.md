@@ -378,6 +378,17 @@ This adds bounded INV-018/021/024/027/064/067/071/073/080/081/082 evidence. Gene
 reserve disposition, mechanical retirement and reachability remain outside this
 increment; rows 420/421/433 remain OPEN and invariant verdicts are unchanged.
 
+## INV-014 retained fee prefix at grant expiry (rows 411/432, 2026-09-12)
+
+The [retained fee expiry audit](retained_fee_expiry_audit_20260912.md) adds one
+invariant-owned selector composing policy-authority succession, a 19-to-37-bps
+change, and exact/late LP-grant expiry. Both CPI transports occur before and at
+the rejected suffix; a retained bilateral alternative and the unaffected retained
+CPI subsequently realize exact owner and insurance-recipient payouts. A permitted
+7-bps policy prefix also rolls back with the earlier paid fill. The test reuses
+the existing INV-014 budget and complete-Account oracles. This is bounded
+INV-010/011/014/024/036/047/080/081 evidence; rows 411/432 remain OPEN.
+
 ## INV-045 unilateral reduction with pending price carry (2026-09-12)
 
 Owner: [cu/inv_045_rebalance_cap_carry.rs](cu/inv_045_rebalance_cap_carry.rs),
