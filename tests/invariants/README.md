@@ -1,5 +1,95 @@
 # Invariant-owned test coverage
 
+## INV-067 repeated receipt stock releases (row 417, 2026-09-12)
+
+Owner: [cu/inv_067_receipt_repeated_stock.rs](cu/inv_067_receipt_repeated_stock.rs),
+selector
+`inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_repeated_stock::v16_program_receipts_preserve_identity_through_two_stock_releases_and_reversed_priority`.
+
+Twelve public LiteSVM histories cross exact/one-slot-late authenticated expiry
+with all six final orders of two retained top-ups and the last bound replacement.
+The older receipts receive their first positive top-ups in the opposite relative
+order. An optional layout in the existing `late_expiry::World` fixture splits the
+last winner's 1,000 face into 400/600 across two assets, the original 250 debtor
+capital into 100/150 across two debtors, and 100 provider backing into 61/39.
+The three-asset, six-portfolio layout preserves the original 3,852-atom endowment;
+existing callers retain their original two-asset construction. All economic state
+comes from System/SPL/ATA/wrapper instructions, including trading at authenticated
+marks from 100 to 150. No economic account images are installed.
+
+| Stock Stage | Residual | 700-Face Receipt Paid | 1,300-Face Receipt Paid |
+| --- | --- | --- | --- |
+| Snapshot at slot 12 | 501 | 116 | 217 |
+| Domain 3 releases 61 + 100 at slot 13/14 | 662 | 154 | 286 |
+| Domain 5 releases 39 + 150 at slot 15/16 | 851 | 198 | 368 |
+
+These floors are calculated from public inputs and the unchanged 3,000 total
+face. Each stock/payment prefix checks the full older receipts, exact and
+unreceipted bounds, both backing classes, provider receivables, separate owner
+balances, custody and fixed supply. Clock and fresh-blockhash zero-due retries
+alone preserve future claims. A rejected transaction executes the second release
+and both positive SPL top-ups, then restores every tracked complete Account and
+the first stage's already-committed payments; the payer loses exactly one signature
+fee. The final two-source close replaces the remaining bound and pays/clears its
+claim in the same call. Portfolio IDs, epochs and provenance survive settlement.
+
+All orders pay owners exactly 1,198 / 1,283 / 1,368 atoms, leave one never-deposited
+provider atom, and burn two rounding atoms. The 72 portfolio deletions and 12
+single-call slab closures reconcile exact rent and preserve unrelated Accounts.
+The new selector passes 12 worlds, 24 releases and 12 rollbacks, with peak measured
+settlement transaction cost **365,364 CU**, below its 600,000-CU ceiling.
+
+The new boundary is two committed stock increases for the same two retained
+receipts, followed by reversed priority and a two-source last-claim replacement.
+The source-realization, late-expiry, partition, rounding-threshold, terminal-
+disposition and provider/insurance selectors keep their existing coverage. Earlier
+stateful two-release coverage uses a different five-owner/two-winner family; it
+does not own this three-claimant permutation, second-release rollback and complete
+slab suffix. This adds bounded INV-010/024/029/063/066/067/068/070 evidence.
+**Row 417 remains OPEN** and invariant statuses are unchanged: there is no generic
+generator/oracle, Recovery/insurance composition, arbitrary claim population or
+claim closure before the last stock release in this increment.
+
+Validation is isolated at `/tmp/percolator-astra-receipt-late-stock-row417-20260912`,
+based on `origin/codex/astra-open-holdout-ledger-20260912` at
+`6ab7856fbe1e2f89ed11c1103fb5282fab404dee`. Private build outputs are in
+`/dev/shm/astra-receipt-late-stock-row417-20260912-target`. The default-feature SBF
+is a private copy of the artifact documented in
+[the public-reserve audit](terminal_public_reserves_audit_20260912.md), SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Production, manifests and dependency pins are unchanged; no SBF rebuild is claimed.
+
+Discarded candidate: an unused-domain reserve layout was rejected before execution
+because receipt-local close does not normalize unrelated backing. No runtime
+history was discarded. Development corrected one host allocation type mismatch
+and a test assumption that the last fully paid receipt must persist; the observed
+1,283-atom payment matched the independent entitlement and the documented immediate
+terminal clear. Neither was an invariant violation or a production fix.
+
+The new exact selector passes **1/1** (12 histories, 16.03 s), and the seven
+adjacent exact controls below pass **7/7** (77.08 s). The charter/index selector
+passes **1/1**; repository formatting, both Git whitespace checks and the unchanged
+production/pin/status checks pass. No full-suite run is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-receipt-late-stock-row417-20260912-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_repeated_stock::v16_program_receipts_preserve_identity_through_two_stock_releases_and_reversed_priority -- --exact --nocapture
+receipt_module=inv_067_terminal_payout_completeness_and_exact_once_settlement
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  "${receipt_module}::late_expiry::v16_program_retained_claim_identity_survives_late_expiry_recipient_rotation_and_atomic_retry" \
+  "${receipt_module}::provider_insurance_retries::v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements" \
+  "${receipt_module}::receipt_partition_confluence::v16_program_receipt_replacement_and_topup_partitions_converge" \
+  "${receipt_module}::receipt_partition_confluence::v16_program_rejected_receipt_partition_suffixes_preserve_terminal_entitlements" \
+  "${receipt_module}::receipt_rounding_threshold::v16_program_late_receipt_rounding_threshold_preserves_zero_vault_settlement" \
+  "${receipt_module}::receipt_source_realization::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry" \
+  "${receipt_module}::receipt_terminal_disposition::v16_program_receipt_terminal_suffix_partitions_rounding_burn_surplus_and_rent"
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-024 terminal insurer merge and separation (row 410, 2026-09-12)
 
 The [terminal role partition audit](terminal_role_partition_audit_20260912.md)

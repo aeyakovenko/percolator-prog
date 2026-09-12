@@ -102,6 +102,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # two rounding atoms; the next leaves one atom for retirement. Complete payment/receipt-clear
 # rollback, zero-vault cleanup, exact owner identity and bounded slab closure compose.
 # Finite INV-029/038/063/066/067/068/070 evidence only; no production fix or status promotion.
+# 417 partial conformance (2026-09-12): cu/inv_067_receipt_repeated_stock.rs,
+# v16_program_receipts_preserve_identity_through_two_stock_releases_and_reversed_priority.
+# Twelve six-owner/three-asset public histories split one 1,000-face winner across
+# two source domains, releasing 161 then 189 atoms to the same older 700/1,300 receipts.
+# Two positive top-ups reverse priority before all six final claimant/replacement
+# orders; second-release/payment rollback preserves the committed first-stage claims.
+# Exact owner payouts, 72 rent-exact portfolio deletions and 12 slab closures burn
+# two atoms; peak measured settlement cost 365,364 CU. Finite coverage only: no generic
+# generator/oracle, Recovery/insurance composition or row/status promotion; see README.
 417	LoF	BLOCKER	INV-067	INV-010,INV-024,INV-029,INV-063,INV-066,INV-067,INV-068,INV-070	receipt+x-late-expiry+x-claimant-order	terminal-claim-identity-survives-every-later-stock-reclassification	OPEN
 # Row 418 partial conformance (2026-09-10): cu/inv_077_terminal_quote_variants.rs,
 # v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent.

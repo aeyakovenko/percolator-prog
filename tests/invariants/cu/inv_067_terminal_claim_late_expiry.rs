@@ -35,27 +35,48 @@ impl World {
     }
 
     pub(crate) fn before_receipts_with_claimant_owners(claimant_owners: [Keypair; 2]) -> Self {
-        Self::build_before_receipts(claimant_owners, None, BACKING)
+        Self::build_before_receipts(claimant_owners, None, BACKING, false)
     }
 
     pub(super) fn before_receipts_with_backing(backing: u128) -> Self {
         assert!(backing > 0 && backing <= BACKING);
-        Self::build_before_receipts([Keypair::new(), Keypair::new()], None, backing)
+        Self::build_before_receipts([Keypair::new(), Keypair::new()], None, backing, false)
     }
 
     pub(super) fn before_receipts_with_setup(setup: fn(&mut V16CuEnv)) -> Self {
-        Self::build_before_receipts([Keypair::new(), Keypair::new()], Some(setup), BACKING)
+        Self::build_before_receipts(
+            [Keypair::new(), Keypair::new()],
+            Some(setup),
+            BACKING,
+            false,
+        )
+    }
+
+    pub(super) fn before_receipts_with_staggered_sources() -> Self {
+        Self::build_before_receipts([Keypair::new(), Keypair::new()], None, BACKING, true)
     }
 
     fn build_before_receipts(
         claimant_owners: [Keypair; 2],
         setup: Option<fn(&mut V16CuEnv)>,
         backing: u128,
+        staggered_sources: bool,
     ) -> Self {
         // Allocate and initialize through System/SPL/wrapper instructions, including the
         // initial collateral endowment. LiteSVM only supplies programs, clock and signer SOL.
+        let asset_count = if staggered_sources { 3 } else { 2 };
+        let mut deposits = DEPOSITS.to_vec();
+        let trades = if staggered_sources {
+            // Split the same 250 debtor capital, 100 backing and 1,000 claim face
+            // across two independent source domains, without changing token supply.
+            deposits[3] = 100;
+            deposits.push(150);
+            vec![(0, 1, 0, 14), (4, 1, 0, 26), (2, 3, 1, 8), (2, 5, 2, 12)]
+        } else {
+            vec![(0, 1, 0, 14), (4, 1, 0, 26), (2, 3, 1, 20)]
+        };
         let params = V16CuMarketParams {
-            max_portfolio_assets: 2,
+            max_portfolio_assets: asset_count,
             maintenance_margin_bps: 1_000,
             initial_margin_bps: 1_000,
             max_price_move_bps_per_slot: 500,
@@ -98,7 +119,7 @@ impl World {
             &mut svm,
             &payer,
             &market,
-            state::market_account_len_for_capacity(2).unwrap(),
+            state::market_account_len_for_capacity(asset_count as usize).unwrap(),
             program_id,
         );
         let vault_authority =
@@ -127,7 +148,10 @@ impl World {
             mint: mint.pubkey(),
             vault,
             vault_authority,
-            portfolio_account_len: state::portfolio_account_len_for_market_slots(2).unwrap(),
+            portfolio_account_len: state::portfolio_account_len_for_market_slots(
+                asset_count as usize,
+            )
+            .unwrap(),
             portfolios: Vec::new(),
         };
         if let Some(setup) = setup {
@@ -135,7 +159,7 @@ impl World {
         }
         let mut actors: Vec<Actor> = Vec::new();
         let mut claimant_owners = claimant_owners.into_iter();
-        for (index, deposit) in DEPOSITS.into_iter().enumerate() {
+        for (index, deposit) in deposits.into_iter().enumerate() {
             let owner = if index == 0 || index == 4 {
                 claimant_owners.next().unwrap()
             } else {
@@ -198,11 +222,16 @@ impl World {
             create_ata_for_test(&mut env.svm, &env.payer, env.admin.pubkey(), env.mint);
         Self::mint(&mut env, provider_token, BACKING + 2);
         env.svm.warp_to_slot(1);
-        for asset in 0..2 {
+        for asset in 0..asset_count {
             env.configure_auth_mark_for_asset_as_admin(asset, 1, 100);
         }
         env.top_up_backing_bucket_from_admin_token_with_cu(provider_token, 1, 1, 12);
-        env.top_up_backing_bucket_from_admin_token_with_cu(provider_token, 3, backing, EXPIRY);
+        if staggered_sources {
+            env.top_up_backing_bucket_from_admin_token_with_cu(provider_token, 3, 61, EXPIRY);
+            env.top_up_backing_bucket_from_admin_token_with_cu(provider_token, 5, 39, EXPIRY + 2);
+        } else {
+            env.top_up_backing_bucket_from_admin_token_with_cu(provider_token, 3, backing, EXPIRY);
+        }
         let accounts = vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -233,30 +262,37 @@ impl World {
             late_backing_topup,
             peak_cu: 0,
         };
-        for (winner, loser, asset, size) in [(0, 1, 0, 14), (4, 1, 0, 26), (2, 3, 1, 20)] {
+        for &(winner, loser, asset, size) in &trades {
             world.trade(winner, loser, asset, size, 100);
         }
         for (offset, mark) in (105..=150).step_by(5).enumerate() {
             let slot = 2 + offset as u64;
             world.env.svm.warp_to_slot(slot);
-            for asset in 0..2 {
+            for asset in 0..asset_count {
                 world
                     .env
                     .push_auth_mark_for_asset_as_admin(asset, slot, mark);
             }
-            for actor in [1, 3, 0, 4, 2] {
+            let actors = if staggered_sources {
+                vec![1, 3, 5, 0, 4, 2]
+            } else {
+                vec![1, 3, 0, 4, 2]
+            };
+            for actor in actors {
                 world.env.crank(
                     world.actors[actor].portfolio,
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        observations: crank_observations_for_assets(&[0, 1]),
+                        observations: crank_observations_for_assets(
+                            &(0..asset_count).collect::<Vec<_>>(),
+                        ),
                     },
                 );
             }
             world.custody();
         }
-        for (winner, loser, asset, size) in [(0, 1, 0, -14), (4, 1, 0, -26), (2, 3, 1, -20)] {
-            world.trade(winner, loser, asset, size, 150);
+        for &(winner, loser, asset, size) in &trades {
+            world.trade(winner, loser, asset, -size, 150);
         }
         for actor in [0, 2, 4] {
             assert_eq!(
@@ -274,7 +310,12 @@ impl World {
         );
         world.env.svm.warp_to_slot(12);
         world.env.resolve();
-        for actor in [1, 3] {
+        let debtors = if staggered_sources {
+            vec![1, 3, 5]
+        } else {
+            vec![1, 3]
+        };
+        for actor in debtors {
             for _ in 0..8 {
                 if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
                     break;
