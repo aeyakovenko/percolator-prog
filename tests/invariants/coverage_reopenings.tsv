@@ -504,6 +504,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # payments, 56 complete-Account rollbacks and exact burn/rent closure cross side, residual bound,
 # expiry boundary and transaction grouping. This covers the asset-local withdrawal consumer;
 # scanner rediscovery/invalidation, retirement/Recovery and generic closure remain OPEN. See README.
+# 424 generated public coverage (2026-09-12): cu/inv_070_generated_prefix_actionability.rs,
+# inv_070_zero_unattributed_terminal_residue_and_close_slab::generated_prefix_actionability::v16_program_generated_scans_recompute_actionability_across_source_deadlines_and_prefixes.
+# Three boundary plus 24 seeded/shrinkable source histories each compare incremental
+# singleton scans with overdue/grouped scans across 256-slot boundaries. The input-owned
+# oracle checks all local Fresh/Expired stocks, persisted prefix exclusion, rank, current
+# time, external surplus and exact burn/sweep/rent closure, with full Account rollbacks
+# after executed scan/custody prefixes. Post-rebase: 54 worlds, 356 commits, 558 exact
+# rollbacks, peak 194318 CU; new selector and both INV-079 metadata selectors pass.
+# README's generated source actionability entry records exact commands/results.
+# No successful earlier-slot restart, insurance recredit
+# rediscovery, new earlier obligations, Recovery/refill/reuse, or generic closure is claimed.
 424	LoF	PRIVILEGED	INV-070	INV-024,INV-025,INV-033,INV-041,INV-063,INV-069,INV-070,INV-071,INV-086,INV-088	persisted-cursor+x-time-reclassification+x-earlier-slot	any-environmental-transition-that-changes-actionability-invalidates-scanned-prefixes	OPEN
 # Row 425 bounded precrank coverage (2026-09-12): README.md#inv-045-precrank-carry-and-entitlement-row-425-2026-09-12.
 # Thirty-two public histories reduce positions before a market crank while carry is nonzero,

@@ -94,6 +94,104 @@ cargo clean --target-dir "$CARGO_TARGET_DIR"
 cargo clean --target-dir "$TMPDIR"
 ```
 
+## INV-070 generated source actionability and persisted prefixes (row 424, 2026-09-12)
+
+Owner: [cu/inv_070_generated_prefix_actionability.rs](cu/inv_070_generated_prefix_actionability.rs),
+mounted as `inv_070_zero_unattributed_terminal_residue_and_close_slab::generated_prefix_actionability`.
+Exact selector:
+`v16_program_generated_scans_recompute_actionability_across_source_deadlines_and_prefixes`.
+
+Three explicit boundary histories and 24 seeded, shrinkable histories each run
+twice through public System/SPL/ATA/wrapper construction and LiteSVM Clock changes.
+Four funded sources occupy both sides of two assets. The first asset and spacing
+vary around the 256-asset scan boundary; the generator permits 4 through 516 slots.
+Funding varies from 1 through 257 atoms per source, deadlines from slots 1,020
+through 1,029, and external surplus from 1 through 101 atoms. Equal deadlines,
+reverse deadline order, a short source overdue while its long sibling is live,
+and later overdue sources behind an earlier live source are included. The first
+scan persists a nonzero prefix before any deadline or external transfer.
+
+An input-derived source-table oracle predicts waits, one-source normalization,
+bounded cursor progress and final readiness without calling engine transition
+or residual helpers. Each singleton step and each committed group independently
+reconciles every decoded source and bucket, Fresh summary, zero claim/insurance/OI
+classes, engine time, booked vault, expired residual, SPL balances and fixed mint
+supply. The decoded rank `(Fresh source count, slots - cursor)` must match the
+oracle and each successful nonterminal scan reduces it. Every persisted prefix
+must exclude all Fresh buckets, even when a later bucket is already overdue;
+previously scanned slot bytes remain exact. Clock changes alone preserve the
+complete market Account and cannot silently normalize stock.
+
+The two executions compare incremental deadline-boundary/singleton scheduling
+with one overdue clock landing and generated groups of one through three scans.
+Before every successful group, a real parked-scan rejection or invalid System
+suffix rolls back its executed prefix. Exact Account comparison covers all
+compiled and tracked accounts, including Clock, with only the calculated payer
+signature fee charged. Wrapper and SPL success counts prove prefix execution.
+A post-prefix SPL donation first rolls back with a parked scan, then commits;
+it changes raw custody without changing booked stock or the persisted prefix.
+Terminal rollback includes burn, surplus transfer, vault deletion and rent.
+Successful closure burns exactly the input backing, sweeps exactly the external
+surplus, deletes the vault and leaves the exact-rent market tombstone.
+
+This adds a reproducible generated deadline/position/cadence/transaction product
+and input-derived scan oracle to the existing fixed three-source cursor-time
+and fixed external-surplus witnesses. No program-owned bytes are installed or
+restored by the probe. **Row 424 remains OPEN**: these source classes preserve
+prefix validity by preventing scans past Fresh state; they do not demonstrate
+a successful cursor restart after an earlier slot becomes newly actionable.
+Scanner rediscovery of insurance recredit, new earlier claims/obligations,
+Recovery, source refill/reuse, receipts, alternate quote rails, arbitrary source
+populations and maximum account shapes remain outside this generator. The
+related INV-024/025/063/069/071/086/088 claims are sampled stock, normalization,
+progress and oracle evidence; INV-033/041 gain no general theorem. Rows
+415/416/417/419/433 and machine invariant statuses are unchanged.
+
+Worktree: `/tmp/percolator-row424-actionability-invalidation-20260912`; branch:
+`codex/row424-actionability-invalidation-20260912`, initially based on `350df938`
+and rebased before final validation onto fetched
+`origin/codex/astra-open-holdout-ledger-20260912` at `fd425093` (including rows
+413/433/415/416/417/419). Existing row notes are preserved. A fresh locked/offline
+default-feature SBF build uses platform-tools v1.52 and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. The rebase changed only invariant
+tests/metadata, so the rebuilt artifact remains applicable.
+SBF SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+
+Final post-rebase selector: **1/1 passed**, 59.53s, **54 worlds, 356 commits,
+558 exact rollbacks** (302 scanner prefixes and 108 custody prefixes; categories
+may overlap), peak **194,318 CU** under the 900,000 transaction bound. The same
+selector passed before rebase with peak 197,305 CU. Two earlier attempts stopped
+in fixture activation: first sparse slot indices, then the activation cooldown.
+Setup now activates contiguous slots at increasing clocks before slot 1,000;
+neither initial failure reached the invariant campaign or proved a program defect.
+Both requested INV-079 selectors pass. No actual implementation violation was
+found, and no production change or other behavioral selector was needed. Existing
+unused-support and Solana future-compatibility warnings remain. Exact commands,
+with the environment used on each Cargo invocation, are below; formatting and
+working/staged/post-commit whitespace checks and private cleanup complete validation.
+
+```bash
+git fetch origin codex/astra-open-holdout-ledger-20260912
+git rebase --autostash origin/codex/astra-open-holdout-ledger-20260912
+export CARGO_TARGET_DIR=/tmp/percolator-row424-actionability-target
+export TMPDIR=/tmp/percolator-row424-actionability-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo fmt --all
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::generated_prefix_actionability::v16_program_generated_scans_recompute_actionability_across_source_deadlines_and_prefixes -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+```
+
 ## INV-067 generated overdue source histories (row 417, 2026-09-12)
 
 Owner: [cu/inv_067_receipt_overdue_history.rs](cu/inv_067_receipt_overdue_history.rs),
