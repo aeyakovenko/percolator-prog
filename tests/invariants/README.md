@@ -3,6 +3,15 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+The [2026-09-12 selected-provider assignment audit](selected_provider_assignment_audit_20260912.md)
+adds eight public LiteSVM worlds selecting Switchboard or Chainlink on either asset
+index with a Pyth sibling. Reversed observation order, exact provider-binding and
+late-action rollback, asset-local insurance attribution, and complete owner/keeper
+SPL payout compose in one mounted INV-020 child. Selection of asset 1 changes the
+liquidated quantity and insurance domains while preserving exact owner entitlements.
+This adds bounded evidence for labels 422/426; pending-observation omission and
+general selection histories remain open. Labels 413/422/423/425/426 remain OPEN.
+
 The [2026-09-12 standalone first-admission audit](standalone_first_admission_audit_20260912.md)
 covers aged, never-exposed owners opening through a single wrapper instruction,
 without a fee/refresh prefix. Single/batch trades in both directions preserve

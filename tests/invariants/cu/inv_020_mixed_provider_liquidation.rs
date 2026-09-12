@@ -10,6 +10,9 @@ use crate::support::fuzz_model::{
 };
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_020_selected_provider_assignment.rs"]
+mod selected_provider_assignment;
+
 // The adjacent staged-action owner budgets two-asset liquidation at 500,000 CU.
 const TWO_ASSET_ACTION_CU_LIMIT: u64 = 500_000;
 
