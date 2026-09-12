@@ -36,6 +36,38 @@ rejected cleanup-plus-redirect bundle **545,062**, successful reserve-tail
 bundle **583,333**, final slab close **26,742**. No production, dependency,
 invariant-status or full-suite claim is made.
 
+## INV-012 mixed batch episode revocation (row 412, 2026-09-12)
+
+Owner: [cu/inv_012_mixed_batch_revocation.rs](cu/inv_012_mixed_batch_revocation.rs),
+mounted under `inv_012_capability_and_delegate_scope::joint_incarnation_binding`.
+Eight public System/SPL/wrapper histories compose a simultaneous leg clear and
+cross-zero flip, restoration of the original two-leg vector, both CPI consumers,
+both leg orders and both signs. An inadmissible batch preserves retained consent;
+each committed batch revokes it once. Current-episode requests cannot bypass
+revocation, and current-episode requests with the old grant sequence still reject
+after same-tuple reauthorization. Fresh consent closes the positions, a stale
+suffix rolls back a completed SPL withdrawal, and both owners recover all capital.
+
+This is a mixed two-asset owner-batch coverage increment, distinct from isolated
+disable/re-enable, same-address portfolio recreation, asset-generation replay,
+one-leg flat round trips, retained same-asset episode coverage, and mixed-batch
+certificate/OI tests. **Row 412 remains OPEN**: arbitrary revocation writers and
+interleavings, asymmetric counterparties, longer capability histories, concurrent
+grants, asset/portfolio/market replacements, alternate matcher programs,
+fees/funding/PnL/backing claims, nonunit ADL ratios, recovery/liquidation, expiry
+and maximum portfolio shape remain outside this selector.
+
+Validation was first run in isolated worktree `/tmp/percolator-row412`;
+coordinator integration reran the new selector, adjacent INV-012 controls,
+charter/index, formatting and Git whitespace checks on the current branch.
+New selector result: **1/1**, with eight histories, sixteen live retained
+simulations, 48 exact rejected transactions, sixteen committed owner batches,
+twenty matcher fills and sixteen complete withdrawals. CU maxima: matcher
+fill/live simulation **464,832**, owner batch/grant **319,034**, rejected
+oversized batch **277,236**, retained rejection including SPL prefix **144,430**,
+final withdrawal **141,767**. No production, dependency, invariant-status or
+full-suite claim is made.
+
 ## INV-058 mixed-CPI side-OI handoff (row 427, 2026-09-12)
 
 Owner: [cu/inv_058_atomic_oi_fee_handoff.rs](cu/inv_058_atomic_oi_fee_handoff.rs),
@@ -184,7 +216,6 @@ git diff --check
 git diff --cached --check
 git show --format= --check HEAD
 ```
-
 ## INV-008 partial reserve payouts and replenished earnings (row 415, 2026-09-12)
 
 Owner: [stateful/inv_008_retained_backing_earnings.rs](stateful/inv_008_retained_backing_earnings.rs),

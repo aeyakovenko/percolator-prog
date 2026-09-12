@@ -19,6 +19,9 @@ mod retained_scope_product;
 #[path = "inv_012_revocation_atomicity.rs"]
 mod revocation_atomicity;
 
+#[path = "inv_012_mixed_batch_revocation.rs"]
+mod mixed_batch_revocation;
+
 #[path = "inv_012_generation_bundle_rollback.rs"]
 mod generation_bundle_rollback;
 
