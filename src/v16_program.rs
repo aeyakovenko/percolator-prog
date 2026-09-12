@@ -9242,6 +9242,10 @@ pub mod processor {
         if stale_matured {
             return Err(PercolatorError::OracleStale.into());
         }
+        // The taker signs fee_bps independently of the LP's matcher capability cap.
+        if cfg_pre.trade_fee_base_bps > fee_bps {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         let fee_floor_pre = core::cmp::max(fee_bps, cfg_pre.trade_fee_base_bps);
         if fee_floor_pre > max_trading_fee_bps {
             return Err(PercolatorError::InvalidInstruction.into());

@@ -692,6 +692,261 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
     assert_eq!(env.control_sequences(0).oracle_observation, 4);
 }
 
+#[test]
+fn v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const DEPOSITS: [u64; 2] = [20_003, 30_007];
+    const OLD_BPS: u64 = 19;
+    const SIGNED_BPS: u64 = 99;
+    const NEW_BPS: u64 = 100;
+    const LP_CAP_BPS: u16 = 137;
+    const PRICE: u64 = 100;
+    const SIZE: i128 = 100 * POS_SCALE as i128;
+    const FEE_PER_OWNER: u128 = 100;
+
+    let mut env =
+        inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market(6);
+    let owners = [Keypair::new(), Keypair::new()];
+    let mut portfolios = [Pubkey::default(); 2];
+    let mut sources = [Pubkey::default(); 2];
+    for (index, owner) in owners.iter().enumerate() {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            system_instruction::transfer(&env.payer.pubkey(), &owner.pubkey(), 1_000_000),
+            &[],
+        )
+        .unwrap();
+        let portfolio = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &portfolio,
+            env.portfolio_account_len,
+            env.program_id,
+        );
+        portfolios[index] = portfolio.pubkey();
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio.pubkey(), false),
+            ],
+            &[owner],
+        )
+        .unwrap();
+        sources[index] = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &sources[index],
+                &env.admin.pubkey(),
+                &[],
+                DEPOSITS[index],
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .unwrap();
+        env.send(
+            env.deposit_ix(portfolio.pubkey(), DEPOSITS[index].into()),
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio.pubkey(), false),
+                AccountMeta::new(sources[index], false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+        .unwrap();
+    }
+    let matcher = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher,
+        &std::fs::read(auth_matcher_program_path()).expect("read authenticated matcher SBF"),
+    );
+    let (context, delegate, _) =
+        env.init_auth_matcher_context_via_system_create(matcher, &owners[1], portfolios[1]);
+    env.set_matcher_config_with_trade_fee_cap(
+        matcher,
+        &owners[1],
+        portfolios[1],
+        context,
+        delegate,
+        1,
+        LP_CAP_BPS,
+    );
+    env.update_trade_fee_policy_with_cu(OLD_BPS);
+    let instruction = env.trade_cpi_ix(portfolios[0], portfolios[1], 0, SIZE, SIGNED_BPS, PRICE);
+    let transaction = |env: &V16CuEnv, instruction: &ProgInstruction| {
+        Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                cu_ix(),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new(owners[0].pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolios[0], false),
+                        AccountMeta::new(portfolios[1], false),
+                        AccountMeta::new_readonly(matcher, false),
+                        AccountMeta::new(context, false),
+                        AccountMeta::new_readonly(delegate, false),
+                    ],
+                    data: instruction.encode(),
+                },
+            ],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &owners[0]],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let retained = transaction(&env, &instruction);
+    retained.verify().unwrap();
+    let signed_bytes = bincode::serialize(&retained).unwrap();
+    assert!(signed_bytes.len() <= solana_sdk::packet::PACKET_DATA_SIZE);
+    let frame_keys = [
+        env.market,
+        portfolios[0],
+        portfolios[1],
+        context,
+        delegate,
+        env.vault,
+        env.mint,
+        sources[0],
+        sources[1],
+        owners[0].pubkey(),
+        owners[1].pubkey(),
+        env.admin.pubkey(),
+        matcher,
+        env.program_id,
+        spl_token::ID,
+    ];
+    let frame = |env: &V16CuEnv| frame_keys.map(|key| env.svm.get_account(&key));
+    let before = frame(&env);
+    env.svm
+        .simulate_transaction(retained.clone().into())
+        .expect("retained single-CPI request is executable under the original policy");
+    assert_eq!(frame(&env), before);
+
+    let policy_sequence = env.control_sequences(0).trade_fee;
+    env.update_trade_fee_policy_with_cu(NEW_BPS);
+    assert_eq!(env.control_sequences(0).trade_fee, policy_sequence + 1);
+    assert_eq!(env.market_state().0.trade_fee_base_bps, NEW_BPS);
+    assert_eq!(
+        env.portfolio_matcher_config(portfolios[1])
+            .trade_fee_cap_bps(),
+        LP_CAP_BPS,
+        "LP consent stays above both policies and cannot mask the taker guard"
+    );
+    assert_eq!(transaction(&env, &instruction), retained);
+    assert_eq!(bincode::serialize(&retained).unwrap(), signed_bytes);
+    let before = frame(&env);
+    let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    let network_fee = FeeStructure::default().lamports_per_signature
+        * u64::from(retained.message.header.num_required_signatures);
+    let rejection = env
+        .svm
+        .send_transaction(retained)
+        .expect_err("policy above the retained taker cap must reject");
+    assert_eq!(
+        rejection.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
+        )
+    );
+    assert!(!rejection
+        .meta
+        .logs
+        .iter()
+        .any(|log| log.starts_with(&format!("Program {matcher} invoke"))));
+    assert_eq!(
+        frame(&env),
+        before,
+        "exact rollback of every non-payer account"
+    );
+    expected_payer.lamports -= network_fee;
+    assert_eq!(
+        env.svm.get_account(&env.payer.pubkey()).unwrap(),
+        expected_payer
+    );
+
+    // Only the taker's signed fee changes; every position and matcher binding is retained.
+    let mut fresh = instruction;
+    let ProgInstruction::TradeCpi { fee_bps, .. } = &mut fresh else {
+        unreachable!()
+    };
+    *fee_bps = NEW_BPS;
+    let success = env
+        .svm
+        .send_transaction(transaction(&env, &fresh))
+        .expect("fresh consent exactly at the new base fee executes");
+    expected_payer.lamports -= network_fee;
+    assert_eq!(
+        env.svm.get_account(&env.payer.pubkey()).unwrap(),
+        expected_payer
+    );
+    let fill = percolator_prog::matcher_abi::read_matcher_return(
+        &env.svm.get_account(&context).unwrap().data,
+    )
+    .unwrap();
+    assert_eq!(fill.exec_size, SIZE);
+    assert_eq!(fill.exec_price_e6, PRICE);
+    for index in 0..2 {
+        let portfolio = env.portfolio_state(portfolios[index]);
+        assert_eq!(portfolio.owner, owners[index].pubkey().to_bytes());
+        assert_eq!(
+            portfolio.capital.get(),
+            u128::from(DEPOSITS[index]) - FEE_PER_OWNER
+        );
+        assert_eq!(portfolio.pnl.get(), 0);
+        assert_eq!(
+            portfolio.legs[0].basis_pos_q.get(),
+            if index == 0 { SIZE } else { -SIZE }
+        );
+        assert_eq!(env.token_amount(sources[index]), 0);
+    }
+    let (_, group) = env.market_state();
+    let total = DEPOSITS.iter().sum::<u64>();
+    assert_eq!(group.insurance, 2 * FEE_PER_OWNER);
+    assert_eq!(group.c_tot, u128::from(total) - 2 * FEE_PER_OWNER);
+    assert_eq!(group.vault, group.c_tot + group.insurance);
+    assert_eq!(env.token_amount(env.vault), total);
+    assert_eq!(group.vault, u128::from(total));
+    let after = frame(&env);
+    for index in [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] {
+        assert_eq!(
+            after[index], before[index],
+            "custody and owner frame {index}"
+        );
+    }
+    assert_cu_within(
+        "single-CPI taker consent rejection",
+        rejection.meta.compute_units_consumed,
+        TRADE_CU_LIMIT,
+    );
+    assert_cu_within(
+        "single-CPI exact fee consent",
+        success.compute_units_consumed,
+        TRADE_CU_LIMIT,
+    );
+    eprintln!(
+        "single-CPI taker consent: rejection CU={}, success CU={}, fee per owner={FEE_PER_OWNER}",
+        rejection.meta.compute_units_consumed, success.compute_units_consumed
+    );
+}
+
 // owner's charge. The default market is manual-priced, so only the configured base fee applies.
 #[test]
 fn v16_program_trade_requires_signed_base_fee_consent() {
