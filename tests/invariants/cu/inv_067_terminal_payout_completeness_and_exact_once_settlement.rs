@@ -59,6 +59,9 @@ mod receipt_expiry_interleavings;
 #[path = "inv_067_receipt_source_realization.rs"]
 mod receipt_source_realization;
 
+#[path = "inv_067_receipt_rounding_threshold.rs"]
+mod receipt_rounding_threshold;
+
 #[test]
 fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {
     late_expiry::verify_receipt_payout_and_portfolio_close_retry();

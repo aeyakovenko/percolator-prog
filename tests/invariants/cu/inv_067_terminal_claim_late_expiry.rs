@@ -35,16 +35,22 @@ impl World {
     }
 
     pub(crate) fn before_receipts_with_claimant_owners(claimant_owners: [Keypair; 2]) -> Self {
-        Self::build_before_receipts(claimant_owners, None)
+        Self::build_before_receipts(claimant_owners, None, BACKING)
+    }
+
+    pub(super) fn before_receipts_with_backing(backing: u128) -> Self {
+        assert!(backing > 0 && backing <= BACKING);
+        Self::build_before_receipts([Keypair::new(), Keypair::new()], None, backing)
     }
 
     pub(super) fn before_receipts_with_setup(setup: fn(&mut V16CuEnv)) -> Self {
-        Self::build_before_receipts([Keypair::new(), Keypair::new()], Some(setup))
+        Self::build_before_receipts([Keypair::new(), Keypair::new()], Some(setup), BACKING)
     }
 
     fn build_before_receipts(
         claimant_owners: [Keypair; 2],
         setup: Option<fn(&mut V16CuEnv)>,
+        backing: u128,
     ) -> Self {
         // Allocate and initialize through System/SPL/wrapper instructions, including the
         // initial collateral endowment. LiteSVM only supplies programs, clock and signer SOL.
@@ -196,7 +202,7 @@ impl World {
             env.configure_auth_mark_for_asset_as_admin(asset, 1, 100);
         }
         env.top_up_backing_bucket_from_admin_token_with_cu(provider_token, 1, 1, 12);
-        env.top_up_backing_bucket_from_admin_token_with_cu(provider_token, 3, BACKING, EXPIRY);
+        env.top_up_backing_bucket_from_admin_token_with_cu(provider_token, 3, backing, EXPIRY);
         let accounts = vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),

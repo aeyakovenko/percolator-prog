@@ -46,6 +46,12 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # either fresh conversion (650 remaining junior face) or expiry release, in both claimant orders.
 # Input-derived payouts, zero-unreceipted-bound top-ups, exact retries and terminal stock checks;
 # bounded four-world coverage only, not a generic generator/oracle. Row/status remain OPEN; see README.
+# 417 partial conformance (2026-09-12): cu/inv_067_receipt_rounding_threshold.rs::v16_program_late_receipt_rounding_threshold_preserves_zero_vault_settlement.
+# Thirty-six public histories cross adjacent backing amounts, all six claimant/replacement
+# orders and exact/late expiry. One extra backing atom raises three owner floors by consuming
+# two rounding atoms; the next leaves one atom for retirement. Complete payment/receipt-clear
+# rollback, zero-vault cleanup, exact owner identity and bounded slab closure compose.
+# Finite INV-029/038/063/066/067/068/070 evidence only; no production fix or status promotion.
 417	LoF	BLOCKER	INV-067	INV-010,INV-024,INV-029,INV-063,INV-066,INV-067,INV-068,INV-070	receipt+x-late-expiry+x-claimant-order	terminal-claim-identity-survives-every-later-stock-reclassification	OPEN
 # Row 418 partial conformance (2026-09-10): cu/inv_077_terminal_quote_variants.rs,
 # v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent.

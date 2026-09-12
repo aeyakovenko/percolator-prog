@@ -1,5 +1,71 @@
 # Invariant-owned test coverage
 
+## INV-067 late receipt rounding threshold (2026-09-12)
+
+Owner: [cu/inv_067_receipt_rounding_threshold.rs](cu/inv_067_receipt_rounding_threshold.rs),
+selector
+`inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_rounding_threshold::v16_program_late_receipt_rounding_threshold_preserves_zero_vault_settlement`.
+
+This adds 36 public LiteSVM histories for row 417: three adjacent backing amounts,
+all six orders of two retained top-ups and the last bound replacement, and exact
+or two-slot-late expiry. The existing System/SPL/ATA/wrapper fixture now accepts a
+bounded backing amount; its original callers still use 100. Its 3,852-atom public
+endowment, five portfolios, 700/1,000/1,300 claim faces, and 501 initial residual
+are preserved. Uncommitted backing stays in the provider's SPL account. No economic
+account state is injected, and no production or dependency changes are included.
+
+| Late Backing | Final Residual | Claimant Payouts Including Capital | Burned Residue | Provider Tokens |
+| --- | --- | --- | --- | --- |
+| 88 | 839 | 1,195 / 1,279 / 1,363 | 2 | 13 |
+| 89 | 840 | 1,196 / 1,280 / 1,364 | 0 | 12 |
+| 90 | 841 | 1,196 / 1,280 / 1,364 | 1 | 11 |
+
+Independent integer arithmetic explains the threshold: one additional backing
+atom raises all three claimant floors by one, consuming two rounding atoms. The
+next backing atom changes none of the floors and must remain for retirement.
+Every row reconciles the original supply with user payouts, provider custody and
+the actual SPL burn. This adds the zero-custody receipt-cleanup boundary missing
+from `receipt_terminal_disposition` and `receipt_source_realization`, whose fixed
+histories leave two atoms, and from `receipt_partition_confluence`, which stops
+before this complete terminal disposition. Claimant permutations and generic
+late-expiry behavior retain their existing coverage owners.
+
+Each transaction checks the input-derived payout, custody delta, immutable receipt
+face/prior bound, paid counter, portfolio identity/provenance, and exact replacement
+of unreceipted bound. Authenticated time alone leaves retained claims unpaid until
+source normalization. Seventy-two rejected suffixes restore complete tracked
+Accounts after either all three SPL payments or both zero-due receipt clears;
+the fee payer is checked separately with exactly its signature fee deducted.
+The successful continuations reach 180 rent-exact portfolio deletions and 36
+single-call slab closures. Fresh-blockhash terminal retries are byte-inert, and
+zero booked custody still permits receipt cleanup and token-account retirement.
+
+The new exact selector passes: 36 worlds, 72 rollbacks, peak 421,873 transaction
+CU under the enforced 600,000-CU bound. Both adjacent CU controls, the charter/index
+selector, changed-file formatting and `git diff --check` also pass.
+Validation reuses the default-feature SBF
+documented in [the current base's reserve audit](terminal_public_reserves_audit_20260912.md),
+SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+no rebuild is needed for these host-only test changes. Commands from the isolated
+worktree, based on `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/astra-terminal-identity-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_rounding_threshold::v16_program_late_receipt_rounding_threshold_preserves_zero_vault_settlement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_067_terminal_payout_completeness_and_exact_once_settlement::late_expiry::v16_program_retained_claim_identity_survives_late_expiry_recipient_rotation_and_atomic_retry inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_terminal_disposition::v16_program_receipt_terminal_suffix_partitions_rounding_burn_surplus_and_rent
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_067_receipt_rounding_threshold.rs tests/invariants/cu/inv_067_terminal_claim_late_expiry.rs tests/invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs
+git diff --check
+```
+
+**Row 417 remains OPEN**, and invariant statuses are unchanged. This finite
+two-asset, classic-SPL family adds the rounding threshold and zero-vault suffix;
+arbitrary claim faces, repeated stock reclassifications, Recovery/insurance
+composition and generic history coverage remain outside its scope. No implemented
+probe was discarded and no public-route production bug was found in this pass.
+
 ## INV-073 public terminal reserve disposition (2026-09-12)
 
 The [public reserve disposition audit](terminal_public_reserves_audit_20260912.md)
