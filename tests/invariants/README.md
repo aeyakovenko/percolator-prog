@@ -365,6 +365,58 @@ maps labels 410/411/413/415/420/421 and adds INV-073 public coverage for absent 
 roles through insurance exhaustion, backing expiry and exact insurance recredit.
 The restored beneficiary claim stays protected; all six labels remain missing.
 
+## INV-024 terminal provider round trip (row 429, 2026-09-12)
+
+[`cu/inv_024_terminal_earnings_roundtrip.rs`](cu/inv_024_terminal_earnings_roundtrip.rs)
+adds one public LiteSVM selector beneath the existing terminal earnings owner:
+`inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_earnings_roundtrip::v16_program_terminal_provider_roundtrip_preserves_intervening_fee_payouts`.
+The sealed local base is `70d92368d275fd1f700f3893d2e1243294bde07e` from
+`origin/codex/astra-open-holdout-ledger-20260912`; work is isolated in
+`/tmp/percolator-wrapper-invariant-d64e`.
+
+| Existing selector | Additional relation in this test |
+| --- | --- |
+| `v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance` | The original provider returns after its successor receives part of the earned fees; the original, previously initialized ledger must resume against the diminished stock. |
+| `v16_program_retained_debit_permutations_preserve_independent_budgets_after_binding_changes` | Real terminal utilization earnings, intervening payout and ledger reuse, beyond the existing principal/insurance ABA product. |
+| `v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal` | Funded authority succession with an unchanged expiry, rather than principal expiry with unchanged holders. |
+
+Two histories publicly earn 875 fee atoms, return all 100,000 backing principal
+atoms, and pay the original provider 17 fees. Both holders consent to each step
+of `A -> B -> A`. B receives either 19 or 830 fees, leaving A a tail of 839 or 28.
+A 29-atom transaction retained and prevalidated before the handoffs rejects after
+return with `EngineStale`. Changing only its epoch either pays 29 or rejects the
+one-atom overclaim; final exact payouts preserve A/B attribution. A's reused
+ledger records only A's withdrawals, B's ledger remains unchanged after departure,
+and neither ledger treats previously existing fees as newly accrued earnings.
+The live insurance operator is B, while the separate terminal insurer receives
+exactly its own 31 atoms.
+
+A rejected bundle executes both handoffs and both fee payouts, including B's
+lazy ledger initialization, before the stale suffix restores every complete
+Account. Separate rejected one-atom insurance-payout prefixes cover overdraw,
+the other holder's ledger, missing provider signature and a readonly ledger.
+The remaining insurance liquidity lets the overdraw reach the earned-fee stock
+gate. The oracle checks exact error indices and completed wrapper/SPL prefixes,
+account presence, economic lamports (apart from actual signature fees),
+input-derived wallet amounts, role profiles, epochs, stock and insurance budgets,
+and fixed supply. Both histories finish with exact reserve payouts and
+rent-accounted slab closure. Construction uses System/SPL/ATA/wrapper instructions;
+account copies serve only as assertion frames.
+
+The new selector passes **1/1** (two histories, 13 exact rollbacks, 11 committed
+reserve transfers, two slab closures). The adjacent succession and expiry
+selectors in the matrix pass **2/2**. A fresh locked/offline default-feature SBF
+build uses platform-tools v1.52 and a private target; wrapper SHA-256:
+`d5f2d3d2c35842aab0979ab24fed415fe36b2b93ed6cc80998fee839ae76343f`.
+The new bundles verify signatures, fit 1,232-byte packets, and stay within their
+1,200,000-CU limit. Development corrected test-only ownership, CU-budget and
+full-state/preflight expectations; no implementation issue was found.
+
+This is bounded INV-005/024/036/080/081 evidence. **Row 429 remains OPEN**, and
+rows 412/433 and all invariant verdicts are unchanged. General role histories,
+new earnings during succession, time-expiry/impairment, alternate quote rails and
+absent-beneficiary economic completion remain outside this increment.
+
 ## INV-024 terminal earned-fee succession (row 410, 2026-09-10)
 
 [`cu/inv_024_terminal_earnings_succession.rs`](cu/inv_024_terminal_earnings_succession.rs)
