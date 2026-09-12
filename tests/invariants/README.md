@@ -1,5 +1,84 @@
 # Invariant-owned test coverage
 
+## INV-070 native denomination after a terminal prefix (row 424, 2026-09-12)
+
+Owner: [cu/inv_070_terminal_native_reclassification.rs](cu/inv_070_terminal_native_reclassification.rs),
+mounted as `inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_native_reclassification`.
+Selector: `v16_program_native_sync_after_terminal_prefix_reclassifies_only_external_surplus`.
+
+Three public LiteSVM histories compare no native synchronization, synchronization
+before scanning, and synchronization after a successful final-close preview. A
+257-asset market has 37 insurance atoms on asset zero, 23 unexpired backing atoms
+on asset 256, and 19 external unsynchronized lamports. CloseSlab persists cursor
+256. An unsigned insurance withdrawal pays the absent beneficiary exactly 37;
+the provider withdraws its 23 before expiry. Both preserve the persisted cursor.
+No portfolios, claims, earnings or booked residue remain.
+
+The same signed final CloseSlab transaction first simulates successfully. In the
+late schedule, a payer-only SPL SyncNative then changes the vault's token amount
+without changing its lamports or any market Account byte. Authenticated time
+advances from 300 to 301; the serialized close, signatures and blockhash stay
+identical. The retained close must now transfer 19 wrapped atoms before closing
+the vault. Without synchronization, those same atoms instead join the authority's
+raw-lamport refund. Every schedule preserves the exact beneficiary totals and
+leaves the canonical typed tombstone with exact rent.
+
+Input-derived native Account images distinguish booked insurance/backing, raw
+lamports, wrapped surplus and rent. Stock and encumbrance censuses, all domain
+budgets, complete compiled/tracked Account frames, exact signature fees, simulation
+nonmutation and total lamport conservation constrain the continuation. The native
+mint genesis account is the existing helper's sole injected fixture; protocol
+state is constructed only with System/ATA/SPL/wrapper instructions. There are six
+committed CloseSlab calls, three insurance payouts, three backing withdrawals,
+two permissionless synchronizations and three successful final-close previews.
+
+The new relation is **denomination change with unchanged custody lamports after
+a persisted scan and successful readiness preview**. The existing post-prefix SPL
+donation adds custody; native surplus and native insurance controls have no
+persisted scan. Standalone donation, expiry, asset-reuse and native-disposal probes
+were rejected during coverage review as duplicates; none were added and removed.
+An initial fixture incorrectly expected insurance alone to trigger a bounded scan.
+Its normal EngineLockActive rejection was corrected by funding the later unexpired
+bucket, not by changing production behavior or weakening the final assertions.
+
+**Row 424 remains OPEN.** This is sampled INV-070 and adjacent conservation,
+classification, allocation and progress evidence. It does not cover earlier-slot
+expiry/recredit discovery, nonzero insurance liens (INV-033), expiry normalization
+(INV-063), receipts, Recovery, user claims, native booked-residue retirement,
+secondary quote rails or arbitrary environmental histories. No production bug,
+fix, engine dependency change or invariant-status promotion is claimed.
+
+Worktree: `/tmp/percolator-row424-20260912`; branch:
+`codex/row424-persisted-reclassification-20260912`; requested origin base:
+`d16e2f01bec53960e74d5efa80448a1a2606aba4`. Private host/deploy outputs were copied
+from `/dev/shm/astra-terminal-public-disposition-target`. Production/Cargo inputs
+match `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`; the deployed default-feature SBF
+SHA-256 is `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Host tests compile in this worktree; no SBF rebuild or full-suite run is claimed.
+The new exact selector passes 1/1 across three histories, peak **32,783 CU** under
+the unchanged 300,000-CU ceiling. The four adjacent exact controls pass 4/4, and
+the charter/index and authoritative-status checks pass 2/2. Repository-wide
+formatting and Git whitespace checks pass. Existing unused-support and Solana
+client future-compatibility warnings remain. Focused validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row424-sync-20260912-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_native_reclassification::v16_program_native_sync_after_terminal_prefix_reclassifies_only_external_surplus -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_terminal_scan_reconciles_external_surplus_arriving_after_cached_prefix \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition \
+  inv_071_crank_progress::terminal_prefix_insurance::v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_late_expiry \
+  inv_077_bounded_work_and_maximum_shape_compute::native_insurance_exit::v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-073 provider custody replacement after partial payment (row 420, 2026-09-12)
 
 Owner: [cu/inv_073_provider_custody_replacement.rs](cu/inv_073_provider_custody_replacement.rs).
