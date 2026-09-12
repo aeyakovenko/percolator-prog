@@ -44,6 +44,10 @@ pub(crate) use frozen_reserve_replacement::verify_frozen_reserve_replacement;
 mod provider_custody_replacement;
 pub(crate) use provider_custody_replacement::verify_provider_custody_replacement;
 
+#[path = "inv_073_native_provider_redemption.rs"]
+mod native_provider_redemption;
+pub(crate) use native_provider_redemption::verify_native_provider_redemption;
+
 #[path = "inv_073_recovery_reserve_cleanup.rs"]
 mod recovery_reserve_cleanup;
 pub(crate) use recovery_reserve_cleanup::verify_recovery_reserve_cleanup;

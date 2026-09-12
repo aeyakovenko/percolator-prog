@@ -106,6 +106,11 @@ fn v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_e
 }
 
 #[test]
+fn v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_native_provider_redemption();
+}
+
+#[test]
 fn v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry(
 ) {
     crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_reserve_close_retry();

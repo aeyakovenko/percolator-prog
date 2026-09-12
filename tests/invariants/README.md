@@ -1,5 +1,77 @@
 # Invariant-owned test coverage
 
+## INV-073 native provider redemption before unsigned remainder (row 420, 2026-09-12)
+
+Owner: [cu/inv_073_native_provider_redemption.rs](cu/inv_073_native_provider_redemption.rs),
+sharing the existing terminal reserve transaction checker and public native-market
+fixture. The INV-073 selector is
+`inv_073_no_permanent_user_lock::v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close`.
+
+Four public LiteSVM histories fund 401 native quote atoms in backing domain 1.
+After resolution, a keeper pays 101 atoms without the provider signature. The
+provider publicly closes that populated wrapped-SOL destination, redeeming both
+the paid atoms and its rent, and its key is dropped with 300 atoms still owed.
+A keeper recreates the same ATA and pays exactly the remainder, either separately
+or in one transaction. Two histories first prefund the missing address with rent
+plus 19 lamports: initialization wraps those 19 atoms without reducing the claim.
+Every continuation requires only the payer, except the market authority's final
+CloseSlab. No provider signature is available after redemption.
+
+The oracle checks full native Account images, exact payer rent and signature fees,
+the redeemed provider wallet, unchanged beneficiary/profile/control sequences,
+fresh reservation and stock censuses, and a rent-exact terminal tombstone. The
+vault closes empty; the administrator's quote destination and native mint remain
+unchanged. Redeemed principal plus the recreated destination balance equals 401
+plus only the independently supplied native value. Each history finishes in two
+to four transactions after the provider disappears, under a 150,000-CU bound;
+the observed peak is 57,885 CU. Account-image edits build expectations only;
+the existing native mint genesis fixture is the only injected account.
+
+This adds native redemption of a *populated* provider payout account while its
+remaining claim is still funded. The classic-SPL row420 custody witness retains
+paid atoms in a reassigned account; the row418 prefunded-custody witness repairs
+user payout accounts; the native dual-quote provider control uses a cooperating
+provider. Another unsigned payout permutation, frozen destination, missing empty
+ATA, or principal-expiry-only route was excluded as duplicate coverage.
+**Row420 remains OPEN**, with finite green conformance for native principal.
+There is no observed property violation or production correction. Earned fees,
+live source claims, economic loss, Recovery, absent market authority, multiple
+provider redemptions and arbitrary histories are outside this increment.
+
+Base: `037a055e8783aa5abf410983ceee99fe38467cd2`; branch
+`codex/row420-provider-terminal-progress-20260912`; worktree
+`/tmp/percolator-row420-20260912`. Dependency artifacts were copied into the private
+target from `/dev/shm/astra-terminal-public-disposition-target`. Shared-memory
+exhaustion interrupted the first SBF build; the private target's host `debug`
+directory was moved under this worktree's ignored `target/row420-cache` and linked
+back. The locked/offline default-feature SBF rebuild then succeeded with
+platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The first test run caught an oracle assumption: full repayment clears an empty
+bucket's expiry. The retained assertion checks both expiry and Empty/Fresh status.
+
+Validation uses the following exact selectors and private environment:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row420-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row420-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row420-tmp CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings \
+  inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders \
+  inv_073_no_permanent_user_lock::absent_provider_expiry_retirement::v16_program_absent_provider_staggered_expiry_reaches_funded_terminal_retirement \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::prefunded_quote_custody::v16_program_prefunded_quote_repair_keeps_terminal_principal_separate_from_wrapping
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-008 fee reclassification and retained insurance retry (row 428, 2026-09-12)
 
 Owner: [stateful/inv_008_insurance_fee_reclassification.rs](stateful/inv_008_insurance_fee_reclassification.rs),
