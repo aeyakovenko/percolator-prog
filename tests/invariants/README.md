@@ -1,5 +1,18 @@
 # Invariant-owned test coverage
 
+## INV-024 coalesced funded roles (rows 416/429, 2026-09-12)
+
+The [coalesced reserve-role audit](terminal_role_coalescence_audit_20260912.md)
+adds one public LiteSVM selector with four histories. Earned backing fees and
+terminal insurance share a holder and destination before either role transfers
+away. Both payout orders preserve separate unpaid claims, exact recipient totals,
+and the unchanged oracle/operator roles. Twenty-eight complete-Account rollbacks
+include successful role-transfer and SPL-payment prefixes. All 32 signed reserve
+payouts agree with input-derived entitlements; peak measured transaction cost is
+379,503 CU on the integrated artifact. Rows 416 and 429 remain OPEN: this bounded
+composition does not add a generic authority/history oracle. No implementation
+change was needed.
+
 ## INV-067 late receipt rounding threshold (2026-09-12)
 
 Owner: [cu/inv_067_receipt_rounding_threshold.rs](cu/inv_067_receipt_rounding_threshold.rs),
