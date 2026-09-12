@@ -8,6 +8,12 @@
 # Successful CPI/revoking-writer prefixes roll back on current-episode denial; unchanged
 # retained consent survives, while committed position round trips require a fresh grant.
 # Eight bounded worlds with exact Account rollback and full owner exits; row stays OPEN.
+# Rows 412/414 partial conformance (2026-09-12): cu/inv_012_grant_writer_order.rs,
+# v16_program_grant_writer_order_binds_atomic_cpi_authority. A 32-world event oracle
+# exhausts owner-grant/revoking-writer order, both writer/CPI routes and two matcher
+# program/context/delegate tuples. Current-identity consumers, exact bundle rollback,
+# unchanged retained-request disposition and full owner exits; see README. No vulnerable-pin
+# red/green experiment or production fix is claimed; both rows stay OPEN, invariant statuses unchanged.
 # Row 422 partial conformance (2026-09-10): cu/inv_045_trade_origin_catchup.rs,
 # v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order.
 # Paid Hybrid mark: unequal stale reports, lagged/caught-up liquidation and catchup order;

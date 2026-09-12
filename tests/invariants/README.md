@@ -701,6 +701,64 @@ git diff --exit-code 81f7dae8 -- src Cargo.toml Cargo.lock tests/support tests/f
 git diff --cached --check
 ```
 
+## INV-012 grant and revoking-writer order (rows 412/414, 2026-09-12)
+
+[`cu/inv_012_grant_writer_order.rs`](cu/inv_012_grant_writer_order.rs) exhausts
+32 public LiteSVM worlds: both orders of an explicit owner grant and a bilateral
+position writer, both single/batch writer routes, both single/batch CPI consumers,
+and two independently chosen granted/consumed matcher program/context/delegate
+tuples. An event oracle predicts the enabled state, grant sequence and position
+epoch before the consumer. Its request binds those predicted current identities,
+so episode/sequence rejection cannot mask the ordered revocation or tuple checks.
+The existing grant-only words omit position writers; `revocation_atomicity` omits
+explicit reauthorization from its transaction. This increment owns their ordered
+composition, including transaction-wide owner signer privileges.
+
+Eight bundles commit only when reauthorization follows the position write and
+the consumer uses the selected tuple. Twenty-four bundles reject with
+`Unauthorized` after exactly two successful wrapper prefixes and before matcher
+invocation. Full transaction and protected Account comparisons restore both
+contexts, grant, episodes, positions, SPL custody and supply, with only the exact
+network fee charged to the separate payer. The original pre-signed CPI request
+then lands unchanged after every rollback; after every committed bundle it rejects
+before CPI. Input-derived position/OI/capital checks, 72 committed CPI fills and
+64 complete owner withdrawals establish funded entry and exit in all worlds.
+System/SPL/ATA, wrapper and external matcher instructions construct every account;
+there is no direct mutation of program-owned state.
+
+**Rows 412/414 remain OPEN.** This bounded order oracle adds conformance evidence
+at base `af97beeac08872b28103feb20b83cf615557f00a`; no production defect or
+vulnerable-pin red/green experiment is claimed. Asset/portfolio replacement,
+market/authority lifecycle, expiry boundaries, liquidation/recovery writers,
+longer words and nonzero fees/PnL retain their separate coverage obligations.
+No open PR/issue branch or diff informed this increment.
+
+Validation uses fresh default-feature SBF artifacts built with platform-tools
+v1.52, `--locked --offline`, and private target
+`/dev/shm/astra-inv012-c8f4-target`. The four exact CU selectors passed (4/4,
+31.11s); the new selector peaked at 668,756 CU per bundle, 463,340 per exit and
+146,267 per withdrawal. Wrapper SHA-256:
+`d5f2d3d2c35842aab0979ab24fed415fe36b2b93ed6cc80998fee839ae76343f`.
+Matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Exact selectors (using the private target and build artifacts above):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-inv012-c8f4-target
+export CARGO_BUILD_JOBS=8 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::matcher_program_generation::grant_writer_order::v16_program_grant_writer_order_binds_atomic_cpi_authority \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::matcher_program_generation::v16_program_matcher_program_roundtrips_compose_with_asset_reuse \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::v16_program_retained_capability_tracks_committed_revocation_after_bundle_rollback \
+  inv_012_capability_and_delegate_scope::v16_program_matcher_capability_route_roster_binds_every_current_scope
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all --check
+git diff --check
+```
+
+The invariant index passed (1/1); formatting and diff checks passed. Production,
+shared support, fixtures and invariant status tables are unchanged.
+
 ## INV-012 committed revocation after bundle rollback (row 412, 2026-09-10)
 
 [`cu/inv_012_revocation_atomicity.rs`](cu/inv_012_revocation_atomicity.rs) adds

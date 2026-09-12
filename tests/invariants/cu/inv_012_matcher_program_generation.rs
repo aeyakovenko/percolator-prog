@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[path = "inv_012_grant_writer_order.rs"]
+mod grant_writer_order;
+
 type Matcher = (Pubkey, Pubkey, Pubkey);
 
 fn alternate_matcher(history: &mut History) -> Matcher {
