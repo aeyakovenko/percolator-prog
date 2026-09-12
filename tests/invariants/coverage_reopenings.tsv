@@ -254,6 +254,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # active claims, Recovery, other rails and generic progress remain outside this witness.
 # No production fix or status promotion; row 420 remains OPEN.
 420	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-026,INV-027,INV-032,INV-063,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	provider-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-provider-signature	OPEN
+# Row 421 bounded conformance (2026-09-12): cu/inv_073_frozen_insurance_remainder.rs,
+# v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement.
+# Four public histories cross asset 0/1 and permanent destination freeze before/after
+# resolution. A 7-atom Live payout remains frozen after operator handoff and both
+# beneficiaries/operators disappear. Keeper-only System/SPL account creation and
+# three unsigned payouts return 40 target/24 peer atoms, crossing both domain budgets;
+# the paid prefix remains unchanged and supply stays 71. Four rent-exact slab closes.
+# Full SPL images, role/control frames, stock/encumbrance censuses and exact payer
+# costs bind each successful prefix. Peak unsigned payout 33993 CU; bound 300000.
+# Distinct from row418 user PnL, depleted 420/421, usable-custody 433 retries and signed
+# INV-024 ATA repair. No production change or status promotion. OPEN: externally
+# frozen atoms/vault, active liabilities, recredit/expiry, missing wallets, native/
+# funded secondary quote, optional ledgers, maximum shape and absent market authority.
+# README records exact selectors, artifact provenance, setup corrections and gaps.
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
 # 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.

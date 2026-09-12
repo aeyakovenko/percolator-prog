@@ -91,6 +91,99 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-073 frozen paid insurance and unsigned remainder (row 421, 2026-09-12)
+
+Owner: [cu/inv_073_frozen_insurance_remainder.rs](cu/inv_073_frozen_insurance_remainder.rs),
+mounted as `inv_073_no_permanent_user_lock::frozen_insurance_remainder`.
+Selector: `v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement`.
+
+Four public LiteSVM histories cross the target asset (0/1) with permanent SPL
+destination freezing before/after resolution. The target's two insurance domains
+receive 19/28 atoms; a distinct peer beneficiary receives 11/13 atoms on the other
+asset. The target beneficiary initially also holds the operator role, takes a
+valid 7-atom Live payout, and transfers the operator role to a distinct key. Both
+beneficiaries and both current operators then stop signing. A separate freeze
+authority freezes the paid target ATA and irrevocably removes its authority.
+The mint authority is also removed, fixing supply at 71 atoms.
+
+After resolution, the keeper creates two ordinary non-ATA SPL accounts owned by
+the original beneficiaries using System/SPL instructions and only its own
+signature. Three unsigned insurance payments interleave 13 target, 24 peer and
+27 target atoms. The first target payment crosses its long/short domain boundary;
+the peer payment preserves the target's remaining 27-atom allowance. Every payment
+strictly reduces outstanding insurance by its input amount. Full SPL account
+images, every domain budget, both authority profiles/control sequences, stock and
+encumbrance censuses, compiled/unrelated Accounts, exact keeper fees and creation
+rent bind each prefix. The canonical vault remains unfrozen. Each world finishes
+with 40/24 atoms in fresh custody, the original 7 atoms still frozen externally,
+zero booked reserves and one administrator-signed slab close. Both empty vaults
+close, and the administrator receives exactly excess slab/vault rent.
+
+The new boundary is **remaining insurance after a funded destination becomes
+permanently frozen**, with neither current reserve role signing. Row418's frozen
+destinations contain no previously paid insurance and exercise user PnL;
+rows420/421's depleted-reserve retirement has no payable remainder; row433's
+reserve-prefix/final-close retries retain usable recipient custody. INV-024's
+destination-repair control recreates missing ATAs with beneficiary signatures.
+Basic unsigned reserve orders, empty/missing destination repair, provider expiry,
+insurance exhaustion/recredit and optional stale-ledger retries were discarded
+as standalone additions because adjacent tests already own those cases. The old
+insurance cooldown field is reserved and required to be zero, so no unsupported
+cooldown policy history is counted as new coverage.
+
+**Row 421 remains OPEN** and invariant statuses are unchanged. This is finite
+insurance-only, classic-SPL primary-quote conformance with an empty secondary
+vault and no portfolios. It does not establish recovery of the externally frozen
+7 atoms, frozen canonical-vault progress, Recovery/ADL, user liabilities, spent
+insurance recredit, backing expiry/provider earnings, missing beneficiary wallets,
+native or funded secondary quote, optional ledgers, maximum shapes, arbitrary
+histories or retirement without the market authority. No production bug or fix
+is claimed. Initial setup attempts used the beneficiary instead of the Live
+operator, then repeated a fixture airdrop; both were corrected before the terminal
+continuation was exercised. No economic case or CU ceiling was discarded.
+
+The exact new selector passes **1/1**, all four histories in 1.62 seconds, with
+12 unsigned payouts, 8 keeper-funded token creations and 4 full retirements.
+Measured transaction maxima: Live prefix **27,178 CU**, destination creation
+**4,662 CU**, unsigned payout **33,993 CU**, slab close **28,201 CU**; all below
+the unchanged **300,000-CU** test ceiling.
+
+The four adjacent exact controls pass **4/4** in 37.01 seconds. Their maxima are
+**359,568 CU** for the frozen-user control (including rejected bundles),
+**226,926 CU** for depleted-reserve retirement, **72,757 CU** for stale-ledger
+insurance exit and **232,994 CU** for public reserve disposition. The charter/index
+and authoritative-status checks pass **2/2**. Formatting and Git whitespace checks
+pass. Existing unused-support and Solana future-compatibility warnings remain.
+
+Validation uses isolated worktree `/tmp/percolator-row421-terminal-coverage-20260912`,
+branch `codex/astra-row421-terminal-coverage-20260912`, based on latest fetched
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`9653404554059f07d030f42c19e190d17ec21a2a`. Private host/deploy cache copies came
+from `/dev/shm/astra-terminal-public-disposition-target`. The reused default-feature
+wrapper SHA-256 is
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+production and dependency files match `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`.
+The engine pin is unchanged. No SBF rebuild, full-suite or Kani run is claimed.
+Exact focused commands:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row421-terminal-coverage-20260912/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::frozen_insurance_remainder::v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger \
+  inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::frozen_destination_exit::v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-008 optional insurance ledger rollback and retry (row 428, 2026-09-12)
 
 Owner: [stateful/inv_008_insurance_ledger_retry.rs](stateful/inv_008_insurance_ledger_retry.rs),

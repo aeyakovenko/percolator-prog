@@ -73,6 +73,9 @@ mod absent_insurer_spent_retirement;
 #[path = "inv_073_absent_provider_expiry_retirement.rs"]
 mod absent_provider_expiry_retirement;
 
+#[path = "inv_073_frozen_insurance_remainder.rs"]
+mod frozen_insurance_remainder;
+
 #[path = "inv_073_mixed_backing_expiry_exit.rs"]
 mod mixed_backing_expiry_exit;
 
