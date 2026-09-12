@@ -1,5 +1,16 @@
 # Invariant-owned test coverage
 
+The [retained same-asset position-episode audit](retained_same_asset_episode_audit_20260912.md)
+adds one INV-012 selector with four public LiteSVM histories. A third portfolio
+closes and reopens the LP's same-asset exposure through its unchanged live matcher
+while the original taker's complete Account stays fixed. Both retained CPI exits
+reject with `EngineStale`, including eight rolled-back native-transfer prefixes;
+fresh consent changing only the LP episode restores both routes and complete owner
+principal payouts. This adds bounded INV-004/010/012/024/081 evidence and an
+unchanged-authority INV-005 control. Automatic revocation, authority rotation,
+asset replacement and general economic histories remain outside this increment;
+holdouts 412/414 and all invariant verdicts remain unchanged.
+
 The [spent receipt conformance audit](receipt_spend_replay_audit_20260912.md) adds
 one INV-067 selector with four public LiteSVM histories. Two unequal claimants spend
 their initial payouts and each later top-up into a settled debtor's SPL account.

@@ -36,6 +36,9 @@
 
 use super::*;
 
+#[path = "inv_012_retained_same_asset_episode.rs"]
+mod retained_same_asset_episode;
+
 #[path = "inv_012_retained_cross_asset_episode.rs"]
 mod retained_cross_asset_episode;
 
