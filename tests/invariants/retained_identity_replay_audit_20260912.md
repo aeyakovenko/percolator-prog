@@ -13,8 +13,8 @@ All five PRs were OPEN with base `main` when inspected:
 | [412](https://github.com/aeyakovenko/percolator-prog/pull/412) | `44c6e4af09d9` | 412 | INV-012, with INV-004/005/010 |
 | [414](https://github.com/aeyakovenko/percolator-prog/pull/414) | `d15592f3ef52` | 414 | INV-012, with INV-002/007/019/089 |
 | [416](https://github.com/aeyakovenko/percolator-prog/pull/416) | `4a011fd9a779` | 416 | INV-005, with INV-020/024/027/055 |
-| [428](https://github.com/aeyakovenko/percolator-prog/pull/428) | `a05ef7d397be` | 415 | INV-008, with INV-010/011/024/031/064 |
-| [432](https://github.com/aeyakovenko/percolator-prog/pull/432) | `630a14b7ba63` | 411 | INV-014, with INV-005/010/011/024/036/047/081 |
+| [428](https://github.com/aeyakovenko/percolator-prog/pull/428) | `a05ef7d397be` | 428 | INV-008, with INV-010/024/031/064/080/081 |
+| [432](https://github.com/aeyakovenko/percolator-prog/pull/432) | `630a14b7ba63` | 432 | INV-014, with INV-010/011/024/036/047/080/081 |
 
 ## Coverage Findings
 
@@ -89,7 +89,7 @@ and terminal obligations depend on each authority; generate management actions a
 those boundaries and require consent from the affected incumbent. Preserve empty
 setup and incumbent-approved succession as positive controls. Row 416 stays OPEN.
 
-### 428 / Row 415: Generic Detection Already Exists on Main
+### 428 / Row 428: Generic Detection Already Exists on Main
 
 `v16_program_retry_operation_matrix_rejects_every_stale_retry` in
 [stateful INV-008](stateful/inv_008_intent_uniqueness_and_bounded_replay.rs) iterates
@@ -105,10 +105,10 @@ failure, but explicitly exclude insurance stock binding. The remaining work is t
 apply a shared first-execution budget oracle to all retained debit families,
 including insurance lifecycle/role/asset variations and exact owner attribution.
 `inv_079_retry_kind_dispositions.tsv` also correctly separates replay evidence from
-independent terminal value attribution. Row 415 stays OPEN; another fixed insurance
+independent terminal value attribution. Row 428 stays OPEN; another fixed insurance
 case would duplicate existing generic detection.
 
-### 432 / Row 411: Generic Taker Fee Detection Already Exists on Main
+### 432 / Row 432: Generic Taker Fee Detection Already Exists on Main
 
 `v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` in
 [stateful INV-014](stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs) iterates
@@ -121,7 +121,7 @@ Main also owns retained fee bundles, delegated exits, backing caps, activation f
 and partial/exact-fill policy cases. Remaining work is a shared participant-local
 fee budget across generated route, policy, partial-fill and landing-order histories,
 with independent fee attribution and rollback. The default retained queue's no-CPI
-restriction remains relevant here too. Row 411 stays OPEN; no second isolated
+restriction remains relevant here too. Row 432 stays OPEN; no second isolated
 single-CPI taker test is needed for detection.
 
 ## New Invariant Test
