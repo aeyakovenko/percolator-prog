@@ -26,11 +26,17 @@
 //! atomic payout rollback against still-funded unrelated insurance, and reconciles every SPL atom.
 //! `v16_program_receipt_terminal_suffix_partitions_rounding_burn_surplus_and_rent` carries
 //! completed receipt floors through the actual mint burn, raw-surplus sweep and slab tombstone.
+//! `v16_program_spent_payouts_do_not_replenish_receipts_across_order_and_atomic_retry`
+//! spends paid value into a zero-claim peer's wallet before replaying the same receipt,
+//! comparing both claimant orders and exact rollback through final custody/rent disposition.
 //!
 //! Guarantee boundary: this is one adversarial public lifecycle matrix, not an exhaustive proof of
 //! every terminal residual partition.
 
 use super::*;
+
+#[path = "inv_067_receipt_spend_replay.rs"]
+mod receipt_spend_replay;
 
 #[path = "inv_067_receipt_partition_confluence.rs"]
 mod receipt_partition_confluence;

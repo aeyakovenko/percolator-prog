@@ -1,5 +1,13 @@
 # Invariant-owned test coverage
 
+The [spent receipt conformance audit](receipt_spend_replay_audit_20260912.md) adds
+one INV-067 selector with four public LiteSVM histories. Two unequal claimants spend
+their initial payouts and each later top-up into a settled debtor's SPL account.
+Both claimant orders and direct/rollback continuations preserve exact entitlements,
+receipt identity, replay idempotence and terminal custody/rent disposition. This
+adds bounded INV-066/067/068/070/080/081 evidence for nonzero claim/receipt state;
+the zero-bound cleanup/static edge remains unresolved and invariant verdicts are unchanged.
+
 The [terminal alternate-custody audit](terminal_custody_alternate_20260912.md) adds
 eight public LiteSVM histories under INV-082. Absent backing and insurance holders
 receive their portfolio principal through keeper-created SPL accounts while their
