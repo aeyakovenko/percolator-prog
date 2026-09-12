@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+The [native insurance exit audit](native_insurance_exit_audit_20260912.md)
+adds one INV-077 selector with four public LiteSVM histories. A separate terminal
+beneficiary withdraws 106 native-quote insurance atoms in two payments, redeems
+each payment to SOL, and publicly recreates custody between payments. Partial
+payments either stay within the long-domain allowance or cross into the short
+domain; exact remaining budgets give a strictly decreasing payout rank. Synced
+and unsynced surplus variants finish in one slab call with exact SOL and rent
+attribution. This adds sampled row-418 evidence for an available beneficiary's
+signed exit. Native stock retirement with insurance remaining, absent reserve
+keys, recredit, claims and maximum-capacity products remain outside this slice;
+rows 418/423 and invariant verdicts are unchanged.
+
 The [scanned insurance withdrawal audit](terminal_prefix_insurance_audit_20260912.md)
 adds one INV-071 selector with eight public LiteSVM histories. Two distinct
 beneficiaries withdraw 37 and 53 atoms from assets behind a persisted terminal
