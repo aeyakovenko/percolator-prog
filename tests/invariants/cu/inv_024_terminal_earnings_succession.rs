@@ -26,6 +26,10 @@ pub(crate) use terminal_public_reserves::{
     verify_terminal_public_reserve_disposition, verify_terminal_public_reserve_seniority,
 };
 
+#[path = "inv_073_terminal_reserve_close_retry.rs"]
+mod terminal_reserve_close_retry;
+pub(crate) use terminal_reserve_close_retry::verify_terminal_reserve_close_retry;
+
 const CAPITAL: [u64; 2] = [52_502, 2_000_000];
 const BACKING: u64 = 100_000;
 const INSURANCE: u64 = 31;

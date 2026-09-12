@@ -262,5 +262,29 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # the fixed wrapper rejects before matcher CPI with exact rollback, while fresh taker consent at the new fee succeeds.
 # Broader retained-fee policy histories remain OPEN; no invariant-status promotion.
 432	LoF	PRIVILEGED	INV-014	INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-080,INV-081	retained-cpi-fee+x-taker-terms+x-single-route	retained-single-cpi-trades-cannot-charge-fee-terms-outside-signed-taker-consent	OPEN
+# 433 bounded conformance (2026-09-12): cu/inv_073_terminal_reserve_close_retry.rs.
+# Two public classic-SPL/asset-0 histories retain keeper-paid principal/insurance and
+# lazy-or-17-atom-paid earnings ledgers with provider/beneficiary/operator keys dropped.
+# Three remaining unsigned reserve payouts and actual vault/slab closure roll back
+# at a repeated-close suffix; byte-identical instructions retry to exact entitlements
+# and rent. Fresh bundle/close replays reject without double payment/refund. Eight exact
+# Account rollbacks; 11 committed and 6 rolled-back reserve payments; two final closures.
+# Passing-run CU maxima: paid prefix 560960, rejection 591113, final-close retry 588908;
+# each bounded at the existing helper's 1200000 CU. Initial provisional 500000-CU bound
+# was too low for a 575960-CU three-payment prefix; all economic assertions passed.
+# New selector 1/1; adjacent controls 2/2 (disposition peak 235994 CU, seniority has no
+# separate reported maximum); charter/index 1/1; formatting and Git whitespace pass.
+# No production change. Basic unsigned payout orders, destination repair and principal
+# expiry were discarded as duplicates. OPEN: generic/native/dual/Recovery/recredit,
+# pending-loss/receipt/maximum-shape histories and absent market authority; owner-signed
+# empty portfolio deletion and authority-signed slab closure remain prerequisites.
+# Commands (environment and artifact provenance in README's row-433 section):
+# cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry -- --exact --nocapture
+# cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders inv_073_no_permanent_user_lock::v16_program_public_reserve_payments_wait_for_resolved_senior_disposition
+# cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+# cargo fmt --all -- --check
+# git diff --check
+# git diff --cached --check
+# git show --format= --check HEAD
 433	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-024,INV-027,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-081,INV-082	terminal-reserve+x-missing-signer+x-public-payout	terminal-economic-progress-does-not-require-an-adversarial-reserve-beneficiary-signature	OPEN
 434	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-055,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-risk-admission	all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history	COVERED

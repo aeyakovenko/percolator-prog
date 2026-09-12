@@ -86,6 +86,12 @@ mod spent_insurance_terminal_exit;
 mod shared_holder_paid_reserves;
 
 #[test]
+fn v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry(
+) {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_reserve_close_retry();
+}
+
+#[test]
 fn v16_program_terminal_public_reserve_disposition_preserves_value_across_orders() {
     crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_public_reserve_disposition();
 }

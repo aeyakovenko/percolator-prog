@@ -88,6 +88,90 @@ cargo fmt --all -- --check
 git diff --check && git diff --cached --check && git show --format= --check HEAD
 ```
 
+## INV-073 absent reserve recipients and final-close retry (row 433, 2026-09-12)
+
+Owner: [cu/inv_073_terminal_reserve_close_retry.rs](cu/inv_073_terminal_reserve_close_retry.rs).
+The INV-073 selector calls a narrow verifier mounted beside the existing INV-024
+earned-fee fixture, reusing its public System/SPL/ATA/wrapper construction:
+`inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry`.
+No initialized economic account bytes are injected, restored or edited in LiteSVM.
+
+Two independently constructed histories distinguish a zeroed, System-created
+earnings ledger from one already recording a committed 17-atom payment. Provider,
+insurance beneficiary, insurance operator, keeper and market authority are separate;
+the provider, beneficiary and operator keys are dropped before measured execution.
+A keeper-only transaction commits 101 principal atoms, 7 insurance atoms and either
+0 or 17 earnings atoms. All reserve account metas remain unsigned, including in
+the later transaction co-signed by the market authority for mechanical closure.
+
+An early close rejects while reserves remain. The next rejected transaction pays
+all three remaining claims, initializes or updates the earnings ledger, closes
+the SPL vault, shrinks the slab to its tombstone and refunds rent before a repeated
+CloseSlab rejects with InvalidAccountLen. Four completed wrapper instructions and
+the exact failing instruction index bind that boundary. Every compiled/tracked
+complete Account is restored, including prior committed payments, ledger state,
+market length, vault, mint, recipients, authority, Clock and rent; only the payer
+loses the exact two-signature fee. Removing the repeated close and refreshing the
+blockhash lets the byte-identical payout/close instructions commit. Fresh retries
+of both the whole bundle and CloseSlab reject without another payment or refund.
+
+Both worlds finish at the fixture's slot 7, before principal expiry at slot 100.
+Input-derived final entitlements are 56,627/1,995,000 user atoms, 100,000 principal
+plus 875 earned-fee atoms to the provider, and 31 insurance atoms to its beneficiary.
+Full SPL account images, authority/control state, stock and reservation censuses,
+ledger attribution, fixed 2,152,533-atom supply and exact tombstone/vault rent
+disposition bind the result. There are 11 committed reserve payments, 6 rolled-back
+reserve payments, 2 rolled-back full closures, 2 committed full closures and
+8 complete-account rejection checks.
+
+The new exact selector passes 1/1 (two histories). Passing-run transaction maxima:
+**560,960 CU** for the unsigned paid prefix, **591,113 CU** for rejection and
+**588,908 CU** for the combined remaining payouts/final close, each under the
+existing transaction helper's **1,200,000-CU** ceiling. The initial run passed all
+economic assertions but exceeded a provisional 500,000-CU test ceiling with a
+575,960-CU three-payment prefix; that ceiling was corrected to match the reused
+helper. No production defect, production edit or red/green production fix is claimed.
+The two adjacent exact controls pass 2/2; the 12-world reserve disposition control
+peaks at **235,994 CU** (the seniority control does not print a separate maximum).
+The charter/index passes 1/1. Formatting and all three requested Git whitespace
+checks pass. Existing unused-support and Solana client future-compatibility
+warnings remain.
+
+Discarded duplicate ideas: another basic unsigned three-reserve payout/order
+matrix, recipient destination repair, and absent-provider principal expiry. Their
+existing selectors already own those cases. This increment instead composes a
+committed payout prefix, lazy/existing ledger, successful full closure rollback,
+unchanged instruction retry and post-retirement replay. The adjacent reserve
+disposition and seniority controls below retain their existing scope.
+
+**Row 433 remains OPEN**; invariant statuses are unchanged. This is finite
+Resolved/classic-SPL/asset-0 evidence, without generic generation, native/dual
+collateral, Recovery/recredit, pending-loss/receipt composition, arbitrary roles
+or maximum shapes. The fixture still requires owner-signed deletion of empty
+portfolios, and the market authority still signs mechanical slab closure.
+Unavailable market authorities and permissionless mechanical retirement remain gaps.
+
+Worktree: `/tmp/percolator-terminal-reserve-20260912`, based on the requested
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`2a7bffd53bcfb4270d3164f41874c0dd8cc83078`. Private host/deploy outputs were copied
+from the standalone `/tmp/astra-terminal-identity-target` cache. The default-feature
+SBF matches the [public-reserve audit](terminal_public_reserves_audit_20260912.md),
+SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+no SBF rebuild or full-suite run is claimed. Production and dependency pins are
+unchanged. Only the following exact selectors and requested checks are validated:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/terminal-reserve-row433-20260912-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders inv_073_no_permanent_user_lock::v16_program_public_reserve_payments_wait_for_resolved_senior_disposition
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-067 repeated receipt stock releases (row 417, 2026-09-12)
 
 Owner: [cu/inv_067_receipt_repeated_stock.rs](cu/inv_067_receipt_repeated_stock.rs),
