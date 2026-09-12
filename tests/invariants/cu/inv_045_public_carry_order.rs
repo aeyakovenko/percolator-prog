@@ -13,6 +13,9 @@ mod precrank_carry;
 #[path = "inv_045_carry_transport_exit.rs"]
 mod carry_transport_exit;
 
+#[path = "inv_045_fractional_position_residue.rs"]
+mod fractional_position_residue;
+
 const ANCHORS: [u64; 2] = [100, 125];
 const CAP_BPS: u64 = 24;
 const PRINCIPAL: [u64; 4] = [100_003, 200_009, 300_017, 400_037];

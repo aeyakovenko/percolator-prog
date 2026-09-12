@@ -68,6 +68,103 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-045 fractional positions and payout residue (row 425, 2026-09-12)
+
+Owner: [cu/inv_045_fractional_position_residue.rs](cu/inv_045_fractional_position_residue.rs),
+mounted under `inv_045_no_free_mark_movement::public_carry_order::fractional_position_residue`.
+Selector: `v16_program_fractional_positions_partition_carry_into_exact_owner_payouts_and_residue`.
+
+Thirty-two public LiteSVM histories cross both target directions, reduction before
+or after the slot-4 market crank, single/two-asset batch no-CPI transport,
+aggregate/two-part reductions, and forward/reverse asset and owner ordering.
+The existing public `World` supplies four unequal deposits and two balanced
+position pairs. With both price-cap carries already nonzero, public quarter-lot
+and half-lot reductions leave the active pair holding 12.75 and 16.5 lots.
+Later reductions leave 10.75 and 14.5 lots. The passive pair stays integral.
+System/SPL/ATA/wrapper instructions construct all economic state; mint authority
+is revoked after the fixed 1,000,066-atom endowment. No program-owned account
+images are injected, restored, or normalized.
+
+The independent input ledger computes each accepted price and cap remainder from
+`anchor * 24 * elapsed / 10000`, then partitions each signed K settlement as
+`quantity * price_delta = floor_atoms * POS_SCALE + nonnegative_remainder`.
+Each asset moves exactly once in this finite family. At every live trade/crank
+boundary, complete decoded legs, raw capital/PnL plus conservatively rounded
+unsettled K, per-owner value, both OI lanes, funding/B, insurance budgets,
+provider fees and fixed SPL supply/custody are checked. Absent owners' complete
+Accounts and both complete oracle profiles are framed across reductions.
+Nonzero unsettled K is required. This is not an assertion that arbitrary
+incremental K settlements must equal one deferred settlement.
+
+For the positive target direction, active-owner PnL is `[-5, +3]` for trade-first
+or `[-7, +5]` for crank-first; the negative direction exchanges those values.
+Passive PnL is `[-4, +4] * direction`. Complementary quarter/three-quarter and
+half/half remainders produce exactly two settlement-residue atoms. The accepted
+prices and owner values agree across routes, partitions and orders within each
+timing schedule; the distinct timing schedules are intentionally not equated.
+
+After public flattening and resolution at slot 5, `CloseResolved` at slot 106
+normalizes the loss-backed sources beyond their slot-104/105 expiries and pays
+all four exact entitlements. The shared matcher-exit helper now accepts an
+explicit payout slot, expected residue and a pre-close callback; its existing
+selector retains slot 100 and zero residue. Live source backing is legitimate
+intermediate stock. At this new test's endpoint, capital, positive PnL,
+insurance, provider earnings and recoverable backing are zero; the remaining
+two SPL atoms equal the input-derived settlement residue, with zero additional
+unallocated surplus. Consumed-backing metadata is not counted again as cash.
+No portfolio deletion, residual burn or slab retirement is claimed.
+
+An empty-instruction suffix rejects at the exact instruction index after 32
+successful trade prefixes and 144 successful SPL payout prefixes. Every compiled
+and tracked complete Account rolls back, with only the calculated payer signature
+fee deducted. Simulation selects payout-bearing closes without changing state;
+the actual rejected transaction must independently log both wrapper and SPL
+success before the suffix error. Unchanged valid instructions then commit.
+
+Distinct coverage: the existing public-order, precrank and matcher-exit owners
+use integral positions; INV-038's B/receipt remainder tests and INV-052's fee
+partition tests cover different rounding origins. Additional integral-lot route
+or ordering variants were discarded during design as duplicates. No executed
+history was discarded. Development corrected fixture assumptions about one-slot
+accrual, loss-backed intermediate stock, immediate live conversion, Resolved
+crank dispatch and the source expiry horizon. No production defect was found.
+
+**Row 425 remains OPEN.** This adds bounded INV-024/038/041/045/052/071/085/086/088
+composition, without new INV-010 replay evidence. Fees/funding, CPI with
+fractional positions, repeated fractional K settlements, trade-driven accrual,
+target replacement, nonunit ADL, external backing providers, liquidation/Recovery,
+maximum shapes and arbitrary histories remain gaps. No generic oracle,
+vulnerable-pin experiment, production fix or invariant-status promotion is claimed.
+
+The worker originally validated this in isolated worktree
+`/tmp/percolator-astra-row425-validation-20260912`; coordinator integration reran
+the new selector, three adjacent INV-045 controls, charter/index, formatting and
+Git whitespace checks on the current invariant branch. No SBF rebuild or
+full-suite claim is made. The new selector passes 32 histories, 176 exact
+rollbacks and 128 owner payouts: peak successful CU **346,701**,
+rejected-bundle CU **346,913**, both below 1,400,000.
+The three adjacent selectors pass **3/3**: matcher handoff **395,617 CU**,
+precrank **376,794 CU**, and public order/partition **376,801 CU**. Charter/index
+passes **1/1**; formatting and all three Git whitespace checks pass. Existing
+regression-harness dead-code and Solana future-incompatibility warnings remain.
+Only focused affected selectors and the checks below were run; no full-suite claim.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row425-validation-20260912/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+module=inv_045_no_free_mark_movement::public_carry_order
+cargo test --locked --offline --test v16_cu ${module}::fractional_position_residue::v16_program_fractional_positions_partition_carry_into_exact_owner_payouts_and_residue -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  ${module}::carry_transport_exit::v16_program_row425_matcher_handoffs_preserve_precrank_carry_and_exact_owner_exit \
+  ${module}::precrank_carry::v16_program_row425_precrank_reductions_preserve_carry_and_owner_entitlement \
+  ${module}::v16_program_row425_public_carry_entitlement_is_partition_and_order_equivalent
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-024 terminal cleanup submitter (row 410, 2026-09-12)
 
 Owner: [cu/inv_024_terminal_cleanup_submitter.rs](cu/inv_024_terminal_cleanup_submitter.rs),

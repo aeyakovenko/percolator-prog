@@ -273,6 +273,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # CPI/bilateral reductions before/after carry cranks, then pay four exact owner entitlements
 # at later-slot resolved close. Integral lots, zero fees/funding; no generic oracle or status
 # promotion. See README.md#inv-045-matcher-handoffs-precrank-carry-and-owner-exit-row-425-2026-09-12.
+# Row 425 bounded fractional-position coverage (2026-09-12): cu/inv_045_fractional_position_residue.rs,
+# v16_program_fractional_positions_partition_carry_into_exact_owner_payouts_and_residue.
+# Thirty-two public two-asset histories combine pending price-cap carry, fractional K
+# settlement, split/aggregate no-CPI reductions and 128 exact resolved owner payouts.
+# Complementary remainders leave exactly two residue atoms after source expiry, with
+# zero recoverable backing/insurance/earnings; 32 trade and 144 SPL prefixes roll back
+# as complete Accounts apart from exact payer signature fees. See README. Finite one-move
+# K family only, no CPI/funding/ADL/replay or generic oracle. Row/status remain OPEN.
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.

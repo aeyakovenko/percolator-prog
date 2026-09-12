@@ -115,9 +115,20 @@ fn cpi_reduce(
 }
 
 fn pay_resolved(world: &mut World, endpoint: &Economics, reverse: bool) -> [u64; 4] {
-    world
-        .trace
-        .push("ResolveMarket at slot 5; CloseResolved at slot 100".into());
+    pay_resolved_with_residue(world, endpoint, reverse, 100, 0, |_, _, _| {})
+}
+
+pub(super) fn pay_resolved_with_residue(
+    world: &mut World,
+    endpoint: &Economics,
+    reverse: bool,
+    payout_slot: u64,
+    settlement_rounding_residue: u128,
+    mut before_close: impl FnMut(&mut World, usize, &Instruction),
+) -> [u64; 4] {
+    world.trace.push(format!(
+        "ResolveMarket at slot 5; CloseResolved at slot {payout_slot}"
+    ));
     let env = &mut world.env;
     let cu = env
         .send(
@@ -176,7 +187,7 @@ fn pay_resolved(world: &mut World, endpoint: &Economics, reverse: bool) -> [u64;
         paid
     };
     check(world);
-    world.env.svm.warp_to_slot(100);
+    world.env.svm.warp_to_slot(payout_slot);
     let keys: Vec<_> = [world.env.market, world.env.mint, world.env.vault]
         .into_iter()
         .chain(world.portfolios)
@@ -204,11 +215,13 @@ fn pay_resolved(world: &mut World, endpoint: &Economics, reverse: bool) -> [u64;
                 .push(format!("CloseResolved(actor={actor}, round={round})"));
             let before = frame(world);
             world.env.svm.expire_blockhash();
-            let result = world.env.send(
-                ProgInstruction::CloseResolved {
+            let ix = Instruction {
+                program_id: world.env.program_id,
+                data: ProgInstruction::CloseResolved {
                     fee_rate_per_slot: 0,
-                },
-                vec![
+                }
+                .encode(),
+                accounts: vec![
                     AccountMeta::new_readonly(world.owners[actor].pubkey(), true),
                     AccountMeta::new(world.env.market, false),
                     AccountMeta::new(world.portfolios[actor], false),
@@ -217,6 +230,12 @@ fn pay_resolved(world: &mut World, endpoint: &Economics, reverse: bool) -> [u64;
                     AccountMeta::new_readonly(world.env.vault_authority, false),
                     AccountMeta::new_readonly(spl_token::ID, false),
                 ],
+            };
+            before_close(world, actor, &ix);
+            let result = send_raw_tx(
+                &mut world.env.svm,
+                &world.env.payer,
+                ix,
                 &[&world.owners[actor]],
             );
             match result {
@@ -248,7 +267,10 @@ fn pay_resolved(world: &mut World, endpoint: &Economics, reverse: bool) -> [u64;
         world.trace
     );
     let group = world.env.market_state().1;
-    assert_eq!((group.vault, group.c_tot, group.pnl_pos_tot), (0, 0, 0));
+    assert_eq!(
+        (group.vault, group.c_tot, group.pnl_pos_tot),
+        (settlement_rounding_residue, 0, 0)
+    );
     for asset in 0..2 {
         assert_eq!(
             (
