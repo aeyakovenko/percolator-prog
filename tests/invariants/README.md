@@ -8216,6 +8216,26 @@ rustfmt --edition 2021 --check tests/invariants/stateful/inv_012_owner_episode_r
 git diff --check
 ```
 
+## INV-028 latent source through peer reset (row 423, 2026-09-12)
+
+[`cu/inv_028_latent_reset_exit.rs`](cu/inv_028_latent_reset_exit.rs) adds a finite
+four-admission-route x two-direction x Active/DrainOnly product. Twenty-six historical
+claims and one settled side remain occupied while the winner skips refresh across
+the peer's half-size owner-only reduction, a further price move at half ADL, and
+the peer's final reduction. Permissionless prior-epoch cleanup must create the last
+source record with exactly nine atoms, preserving the other twenty-seven claims.
+Both owners receive exactly **1,000,065 / 999,935 SPL atoms** and delete their portfolios;
+the unused side is finalized afterward. An input-derived accounting oracle checks
+every suffix call, source-resource unions, exact effective OI and custody. The
+cleanup rank reaches zero within four calls (one observed), without the peer's signature.
+
+This differs from already-materialized maximum-source owner reduction and from
+historical/latent bilateral or resolved exits. It does not certify earlier side
+finalization, arbitrary ADL ratios, missing observations, liens/fees/insolvency,
+maximum simultaneous legs or arbitrary resource histories. **Row 423 remains OPEN**;
+no production fix, vulnerable-pin comparison or invariant-status promotion is claimed.
+See [the audit](latent_reset_exit_audit_20260912.md) for exact selectors and validation.
+
 ## INV-028 retained-domain position episodes (row 423, 2026-09-09)
 
 [`cu/inv_028_retained_domain_episodes.rs`](cu/inv_028_retained_domain_episodes.rs),
