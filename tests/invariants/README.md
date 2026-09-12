@@ -1,5 +1,99 @@
 # Invariant-owned test coverage
 
+## INV-008 paid withdrawal across portfolio stock recreation (row 415, 2026-09-12)
+
+Owner: [cu/inv_008_recreated_withdrawal_stock.rs](cu/inv_008_recreated_withdrawal_stock.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::recreated_withdrawal_stock`.
+Exact selector:
+`v16_paid_withdrawal_cannot_acquire_recreated_portfolio_stock_across_atomic_retries`.
+
+Sixteen public LiteSVM histories cross withdrawal amounts 1/37, one/three portfolio
+recreations, bundled/separate lifecycle transactions, and custody donation before/after
+the lifecycle. Each recreation uses `ClosePortfolio`, a System transfer to fund the
+same address, `InitPortfolio`, and `Deposit`. The same owner, destination, quote rail,
+sequence 1 and withdrawal amount return with a new program-assigned portfolio ID.
+Original instruction bytes/metas and signature-distinct standalone retry transactions
+are retained before each intent's first execution. The instruction codec checks that
+changing only the ID yields the next incarnation's fresh withdrawal.
+
+A first-payment/recreation/replenishment/stale-withdrawal bundle must reject after all
+four wrapper, three SPL and one System prefix instructions succeed. Full rollback
+restores the original unpaid intent, which then pays unchanged once. A second failed
+bundle starts after that committed payment and rolls back just the stock/lifecycle
+prefix. Its unchanged lifecycle then commits, together or step by step. Every older
+paid intent rejects against sufficient new capital at the matching sequence. A final
+fresh-payment/stale-intent bundle rolls back its SPL payout before the unchanged fresh
+intent succeeds. Incarnation mismatches return `EngineProvenanceMismatch`; the consumed
+intent in the final current incarnation returns `EngineStale`.
+
+An input-derived book tracks deposits, payments and sequence separately per incarnation.
+After every transaction, and every separately committed lifecycle step, it checks each
+incarnation's payout bound, current capital, total capital, accounting/SPL vaults, owner
+wallet, custody-only surplus, fixed mint supply, the untouched 103-atom peer, controls,
+portfolio ID allocation, materialized count, and exact portfolio/market/owner lamports.
+Closed incarnations retain no unpaid claim. Every failed transaction compares complete
+fixture and compiled non-payer Accounts, including metadata, lamports and absence;
+the payer loses exactly its signature fee. Logs pin the actual completed prefix, so
+neither early rejection nor validator duplicate caching can supply the witness. System,
+SPL, ATA and wrapper instructions construct all economic state; no program-owned bytes
+are injected, rewritten or restored by the test. The fixture's initial airdrops fund
+the finite schedule, and mint authority is revoked before retained execution.
+
+Net-new coverage is the atomic composition of an already executed withdrawal with
+same-address stock recreation, including rollback of the first payment, rent movement,
+ID allocation and replacement deposit together. The existing INV-003 retained-intent
+matrix checks unexecuted consent after committed A-B-A recreation; the existing INV-008
+stock-history generator keeps the portfolio incarnation fixed. Neither covers this
+paid-intent/lifecycle rollback relation with per-incarnation economic books. This test
+uses no first-risk admission, accrued fees, terminal market mode, reserve beneficiary
+or permissionless terminal payout; row413 and row433 work is not duplicated.
+
+**Row 415 remains OPEN.** This is a finite invariant-owned portfolio generator, not a
+general withdrawal-stock oracle or an unchanged-oracle vulnerable/fixed-pin result.
+Insurance/backing withdrawal stock binding, arbitrary histories, owner changes, other
+stock reclassifications, alternate quote rails, durable nonces, detached signatures and
+maximum shapes remain outside this increment. No production change or status promotion.
+
+The worktree is `/tmp/percolator-row415-retained-withdrawal-stock-retry-20260912`, branch
+`codex/row415-retained-withdrawal-stock-retry-20260912`. It was fetched and rebased onto
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`25d40f1117d07e2007fa0a43cd02a4e1b9262c8c`, preserving the row433 notes. The parent
+worktree was not edited. A private copy of the existing host build cache was used;
+default-feature wrapper SBF was rebuilt locked/offline with platform-tools v1.52 and
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+
+The new selector passes: 16 worlds, 328 transactions, 184 complete rollback checks,
+32 aborted first-payment/lifecycle bundles, 32 aborted replacement-stock bundles,
+and 48 committed payouts. Peak observed CU is 154,796 against the 300,000 custody
+bound; the final run measured 148,796 CU. Both requested INV-079 metadata selectors
+pass, as do formatting and unstaged whitespace checks. Close transfers all portfolio
+lamports to the market slab; the owner separately funds each replacement address.
+Initial test development corrected the expected incarnation-mismatch error code and
+funded the fixture's complete three-recreation lamport schedule. Neither failure was
+an implementation violation. No broad behavioral suite or other row selector was run.
+
+Exact verification commands from the worktree (logs are outside the repository):
+
+```bash
+export CARGO_TARGET_DIR=/tmp/row415-retained-withdrawal-stock-retry-20260912-target
+export TMPDIR=/tmp/row415-retained-withdrawal-stock-retry-20260912-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::recreated_withdrawal_stock::v16_paid_withdrawal_cannot_acquire_recreated_portfolio_stock_across_atomic_retries -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+```
+
 ## INV-027 first batch fee boundary (row 413, 2026-09-12)
 
 Owner: [cu/inv_027_first_batch_fee_boundary.rs](cu/inv_027_first_batch_fee_boundary.rs),

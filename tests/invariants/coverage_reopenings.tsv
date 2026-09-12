@@ -198,6 +198,21 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # exercise only validator caching, not a withdrawal-specific stock sequence.
 # No generic oracle, insurance-policy guarantee, production fix or status promotion;
 # row 415 remains OPEN. See README for the distinct product and remaining limits.
+# 415 bounded public stock-recreation conformance (2026-09-12):
+# cu/inv_008_recreated_withdrawal_stock.rs, mounted under
+# inv_008_intent_uniqueness_and_bounded_replay::recreated_withdrawal_stock::
+# v16_paid_withdrawal_cannot_acquire_recreated_portfolio_stock_across_atomic_retries.
+# Sixteen histories vary amount, recreation count, lifecycle batching and donation
+# order. First SPL payment plus close/refund/init/deposit and a stale suffix roll
+# back together; committed payment then replacement-stock rollback/retry preserves
+# the new incarnation's capital despite matching owner/address/sequence/amount.
+# Per-incarnation input books, 328 transactions, 184 complete Account rollbacks,
+# 48 fresh payouts and custody/rent attribution; peak 154796 CU. Row413/433 are not
+# exercised. Finite portfolio coverage only: insurance/backing stock binding and
+# arbitrary histories remain OPEN; no production fix or status promotion.
+# Exact commands: README section "INV-008 paid withdrawal across portfolio stock
+# recreation" runs this v16_cu selector with --exact --nocapture, both requested
+# INV-079 metadata selectors, fmt and Git whitespace checks using private targets.
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN
 # 416/429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_coalescence.rs,
 # v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements.

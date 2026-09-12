@@ -45,6 +45,9 @@ mod underfunded_rail_retry;
 #[path = "inv_008_insurance_round_trip_retry.rs"]
 mod insurance_round_trip_retry;
 
+#[path = "inv_008_recreated_withdrawal_stock.rs"]
+mod recreated_withdrawal_stock;
+
 fn braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)
