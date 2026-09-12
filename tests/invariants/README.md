@@ -1,5 +1,64 @@
 # Invariant-owned test coverage
 
+## INV-045 unilateral reduction with pending price carry (2026-09-12)
+
+Owner: [cu/inv_045_rebalance_cap_carry.rs](cu/inv_045_rebalance_cap_carry.rs),
+selector
+`inv_045_no_free_mark_movement::rebalance_cap_carry::v16_program_unilateral_reduction_preserves_fractional_cap_and_peer_entitlement`.
+
+This adds one public LiteSVM conformance selector for row 425,
+`all-economic-routes-preserve-canonical-fractional-accrual-carry`. Eight histories
+cross both price directions, the reducing owner, and reduction before/after
+canonical accrual. System, SPL, ATA and wrapper instructions create the market,
+portfolios and fixed-supply custody; signed AuthMark publication and authenticated
+Clock provide the price/time inputs. No economic account state is injected.
+
+| Invariant relation | Executing evidence |
+| --- | --- |
+| Pending price capacity survives unilateral reduction | Entry 100, cap 24 bps/slot, target 80 or 120, and eight lots create carry 2,400 at slot 1. At slot 4, `RebalanceReduce` removes four lots from either owner and halves the opposite ADL multiplier without writing the absent peer's complete Account. Stored carry plus unprocessed capacity remains 9,600 in both schedules. |
+| The remaining exposure owns subsequent movement | Canonical catchup to slot 6 reaches 99 or 101 with carry 4,400 and four effective lots on both sides. Independent input arithmetic requires owner value `[100003 + 4*d, 200009 - 4*d]`, where `d` is the price direction. Funding, social loss and insurance stay zero. |
+| Rejected prefixes preserve the same obligation | Missing owner signature, readonly portfolio, and a duplicate observation after successful reduction or catchup restore every tracked complete Account, with only the exact runtime signature fee subtracted from the payer. Four explicit same-slot `EngineNonProgress` controls also roll back exactly. Total: 36 rejections. |
+| Frozen fractional capacity cannot become terminal value | Resolution at slot 6 followed by signed closes at slot 100 preserves carry 4,400 and yields all 16 exact owner SPL payouts. Custody plus payouts remains 300,012 after every close; final vault, capital, PnL, insurance and OI are zero, and mint supply is unchanged with mint authority revoked. |
+
+Net-new scope relative to existing selectors:
+
+| Existing owner/selector | Existing boundary and new dimension |
+| --- | --- |
+| CU INV-045 `v16_program_pending_fractional_carry_survives_due_trade_and_resolution` and `public_carry_order::v16_program_row425_public_carry_entitlement_is_partition_and_order_equivalent` | Bilateral single/batch fills; this increment uses unilateral ADL against an absent peer while carry is already pending. |
+| CU INV-045 `custody_cap_carry::v16_program_custody_route_words_preserve_pending_fractional_carry` | Flat-owner custody and fee routes frame exposed owners; this increment changes effective exposure and then realizes the affected owners' price entitlement. |
+| Stateful INV-052 `v16_program_unilateral_rebalance_adl_keeps_followup_price_settlement_zero_sum` | Publishes a new 900,000 target after reduction and checks subsequent zero-sum settlement. This increment starts with nonzero fractional carry before reduction, compares due-crank ordering and completes owner payout. |
+| CU INV-073 `v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit` | Social-loss `b_rem` and dust; this increment covers the separate wrapper `price_move_remainder_bps_num`. |
+
+**Row 425 remains OPEN**, with this selector recorded as bounded evidence only.
+It covers one AuthMark asset, an exact half reduction, zero funding/fees, and one
+price atom before resolution. Arbitrary reduction ratios, carry histories, other
+oracle modes, multi-asset composition and the full economic-route product remain
+outside the witness. Rows 413/422 and all invariant/status TSVs are unchanged.
+No wrapper, engine or ABI fix was needed.
+
+Validation uses isolated worktree `/tmp/percolator-carry-conformance-20260912-k4n7`
+at base `70d92368d275fd1f700f3893d2e1243294bde07e`. A fresh locked/offline,
+default-feature SBF build uses platform-tools v1.52 and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; program SHA-256:
+`d5f2d3d2c35842aab0979ab24fed415fe36b2b93ed6cc80998fee839ae76343f`.
+The new selector passes with peak successful transaction compute of 219,432 CU.
+Exact validation commands are:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-carry-k4n7-host
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-carry-k4n7-target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::rebalance_cap_carry::v16_program_unilateral_reduction_preserves_fractional_cap_and_peer_entitlement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_045_no_free_mark_movement::v16_program_pending_fractional_carry_survives_due_trade_and_resolution inv_073_no_permanent_user_lock::v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_052_split_merge_invariance::v16_program_unilateral_rebalance_adl_keeps_followup_price_settlement_zero_sum -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo check --locked --offline --tests
+cargo fmt --all -- --check
+git diff --check
+```
+
+## Other Recent Coverage
+
 The [native insurance exit audit](native_insurance_exit_audit_20260912.md)
 adds one INV-077 selector with four public LiteSVM histories. A separate terminal
 beneficiary withdraws 106 native-quote insurance atoms in two payments, redeems
