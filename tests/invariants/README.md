@@ -1,5 +1,89 @@
 # Invariant-owned test coverage
 
+## INV-027 first batch fee boundary (row 413, 2026-09-12)
+
+Owner: [cu/inv_027_first_batch_fee_boundary.rs](cu/inv_027_first_batch_fee_boundary.rs),
+mounted under
+`inv_027_protected_principal_seniority::joint_admission_liabilities::first_batch_fee_boundary`.
+Selector:
+`v16_program_first_batch_admission_accounts_each_rounded_fee_after_maintenance`.
+
+Eight public LiteSVM histories cross either constrained participant, both distinct
+asset request orders, and committed versus atomic `SyncMaintenanceFee` plus
+`PermissionlessCrank` prefixes. Both portfolios have never held a position. An
+unrelated empty keeper advances slots 1 through 4 at unchanged AuthMark prices;
+both funded portfolio Accounts remain byte-identical, with 21 atoms of elapsed
+maintenance each. Public synchronization and refresh precede the first
+`BatchTradeNoCpi`, either in an earlier transaction or the same transaction.
+
+The constrained owner deposits 120 atoms, leaving 99 after maintenance. Two
+100-bps trade fees on notionals 48 and 49 round separately to one atom each.
+The resulting equity and total initial margin both equal 97. Increasing the
+second asset's quantity by one position quantum raises its notional to 50 and
+total IM to 98, while both trade fees remain one atom. That batch rejects with
+`EngineInvalidConfig` at the trade instruction. Rounding the combined 98-atom
+notional only once would charge one atom and incorrectly leave 98 available;
+omitting either maintenance or a leg's fee also changes the boundary. The exact
+97-atom request succeeds, excluding double collection as well as undercollection.
+
+All eight rejections restore complete tracked economic Accounts, including the
+market, both traders, keeper, fee cursors, insurance, owner lamports, mint, vault,
+and owner SPL accounts. The network fee payer is outside this economic frame.
+The four atomic failures also undo the successful fee/refresh prefix. The
+committed-prefix controls independently validate current flat certificates with
+zero requirements and equity after maintenance. Successful admission checks both
+complete current certificates against the independent health oracle, exact IM/MM,
+zero liquidation deficit and PnL, both signed positions, effective OI, stored-leg
+counts, fee cursors, stock/reservation censuses, and unchanged unrelated Accounts
+and SPL custody. Insurance is exactly 46, with domain budgets `[21, 23, 1, 1]`.
+Sixteen same-slot fee-sync retries leave the tracked Accounts exactly unchanged.
+
+This adds a first-risk **margin decision that depends on the sum of two rounded
+trade fees after elapsed maintenance**. Row 413's flat prefix and withdrawal
+boundaries use one trade leg; its standalone nonzero-fee first opens have ample
+collateral. INV-047's two-asset fee-partition test uses 1,000,000 atoms per owner
+and no elapsed maintenance, so it does not exercise this admission boundary.
+Existing reward mapping, funding, cross-asset credit and joint-liability histories
+are not repeated. **Row 413 remains OPEN.** Standalone admission without fee
+collection, CPI batches, shared owners, changing fee/reward policies, funding or
+target lag, fee exhaustion/debt, fractional settlement carry, nearly-flat prior
+positions, larger batches and later owner exits remain outside this increment.
+No tested property violation, production change or invariant-status change.
+
+Base: `93ed160f164486c5309335d0179ef4614f9bfed7`. Worktree:
+`/tmp/percolator-row413-20260912`; branch:
+`codex/row413-first-risk-liability-admission-20260912`. The parent worktree was
+not edited. Default-feature SBF was rebuilt locked/offline using platform-tools
+v1.52 and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The initial host compilation failed on a test-helper `u16`/`usize` argument
+mismatch; correcting that test call allowed all three exact selectors below to
+pass (3 passed, 0 failed, 1,278 filtered out). The new selector completes eight
+exact rejections, eight exact admissions and sixteen fee-sync no-ops, peak CU
+451,229 within the 600,000 bound including the entire fee/refresh transaction.
+No unfiltered suite was run. Private target/tmp directories were cleaned with
+Cargo immediately after validation (1.6 GiB reclaimed); shared artifacts were
+not removed. Formatting and Git whitespace checks pass.
+
+Exact validation commands:
+
+```bash
+export CARGO_TARGET_DIR=/tmp/percolator-row413-target
+export PERCOLATOR_FUZZ_SBF=/tmp/percolator-row413-target/deploy/percolator_prog.so
+export TMPDIR=/tmp/percolator-row413-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-row413-target/deploy -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::first_batch_fee_boundary::v16_program_first_batch_admission_accounts_each_rounded_fee_after_maintenance inv_027_protected_principal_seniority::v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled inv_054_certificate_epoch_completeness::v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom
+cargo clean --target-dir /tmp/percolator-row413-target
+cargo clean --target-dir /tmp/percolator-row413-tmp
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-045 reward policy succession during catchup (row 422, 2026-09-12)
 
 Owner: [cu/inv_045_reward_policy_catchup.rs](cu/inv_045_reward_policy_catchup.rs),

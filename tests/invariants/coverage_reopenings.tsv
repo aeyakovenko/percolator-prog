@@ -142,6 +142,35 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # increase eventually reserves one exact credit atom, with 48 complete rollbacks
 # and 64 senior SPL payouts. Both constrained roles, leg orders and all four routes;
 # no new bug or production change. Flat uncollected-fee admission remains OPEN.
+# Row 413 first batch fee boundary (2026-09-12):
+# cu/inv_027_first_batch_fee_boundary.rs,
+# v16_program_first_batch_admission_accounts_each_rounded_fee_after_maintenance.
+# Eight public histories cross either constrained owner, both two-asset request
+# orders, and committed/atomic fee-refresh prefixes before first BatchTradeNoCpi.
+# Maintenance leaves equity 99; separately rounded fees [1,1] leave exactly 97 IM.
+# The 98-IM batch rejects (rounding its total notional once would charge only 1).
+# Eight complete economic Account rollbacks, eight exact admissions, sixteen fee
+# sync no-ops; independent current certificates, OI, stock/reservation censuses,
+# insurance 46 and domain budgets [21,23,1,1]. Peak transaction CU 451229/600000.
+# New composition: INV-047 two-leg fee partitions are amply funded with no elapsed
+# maintenance; row413 flat exact-boundary selectors have only one trade leg.
+# Standalone uncollected fees, CPI/shared owners, policy changes, funding/lag,
+# fee exhaustion/debt, settlement carry, nearly-flat history, larger batches and
+# later exits remain gaps. No property violation, production fix or status change.
+# Validation: default SBF rebuilt locked/offline on 93ed160f with platform-tools
+# v1.52. Initial test-helper type mismatch corrected; final exact selectors 3/3.
+# Environment: CARGO_TARGET_DIR=/tmp/percolator-row413-target;
+# PERCOLATOR_FUZZ_SBF=/tmp/percolator-row413-target/deploy/percolator_prog.so;
+# TMPDIR=/tmp/percolator-row413-tmp; CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0
+# CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0. Build command/hash in README.
+# cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::first_batch_fee_boundary::v16_program_first_batch_admission_accounts_each_rounded_fee_after_maintenance inv_027_protected_principal_seniority::v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled inv_054_certificate_epoch_completeness::v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom
+# cargo fmt --all -- --check
+# git diff --check
+# git diff --cached --check
+# git show --format= --check HEAD
+# cargo clean --target-dir /tmp/percolator-row413-target
+# cargo clean --target-dir /tmp/percolator-row413-tmp
+# Private build directories cleaned immediately after validation; 1.6 GiB reclaimed.
 413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
 # Row 414 bounded response conformance (2026-09-12): cu/inv_012_reused_asset_return_binding.rs,
 # v16_program_reused_asset_requires_current_generation_and_fresh_matcher_output.
