@@ -84,6 +84,99 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-073 recreated reserve custody through final-close retry (row 433, 2026-09-12)
+
+Owner: [cu/inv_073_recreated_reserve_close.rs](cu/inv_073_recreated_reserve_close.rs),
+using the existing public terminal-earnings fixture and reserve transaction checker.
+Selector:
+`inv_073_no_permanent_user_lock::v16_program_recreated_reserve_custody_preserves_spent_prefix_through_close_retry`.
+
+Two classic-SPL/asset-0 LiteSVM histories publicly pay 101 backing-principal atoms,
+17 earned-fee atoms and all 31 insurance atoms after user payouts and portfolio
+deletion. The provider spends its 118 received atoms to a separate payee and closes
+its now-empty ATA through SPL instructions. Provider, insurance operator and
+beneficiary keys are then dropped; the market authority and keeper are distinct
+from every reserve recipient. The paid earnings ledger remains initialized while
+the original provider ATA is absent and 99,899 principal plus 858 earnings atoms
+remain due.
+
+A bundle recreates the same ATA, pays principal, then attempts slab close before
+earnings payment. Its exact `EngineLockActive` rejection rolls back creation,
+principal disposition and rent. A second bundle recreates custody, pays both
+remainders and actually closes the vault/slab; a repeated-close suffix rejects
+`InvalidAccountLen`, restoring missing custody, the paid ledger, market/vault
+Accounts and rent. Completed wrapper/ATA prefixes and exact rejection indices
+are checked. Every compiled/tracked Account rolls back except calculated payer
+signature fees.
+
+The retained completion instructions then retry unchanged. One history still has
+absent custody; the other first commits a separate keeper-only ATA repair, making
+the retained creation instruction idempotent. Recreation rent is charged exactly
+once across either successful schedule. Each finishes with 100,757 atoms in the
+recreated provider ATA, 118 at the payee, 31 at the insurance beneficiary, user
+payouts 56,627/1,995,000 and no administrator tokens: fixed supply 2,152,533.
+The full decoded earnings ledger differs from its paid prefix only in cumulative
+withdrawals (875) and remaining observed earnings (zero). Exact tombstone/vault
+closure and administrator rent refund are checked. A fresh delivery after closure
+cannot pay or refund again. Stock/encumbrance censuses, full decoded market/config
+prefixes and SPL custody frames accompany the history. Assertion-only account
+copies are never installed into SVM state.
+
+The distinct obligation is persistence of a spent paid prefix and its earnings
+ledger across same-address custody recreation, rollback of actual closure, and
+an intervening repair before retry. Existing final-close retry retains populated
+custody; frozen/reassigned replacement coverage changes destination; native
+provider redemption has no earned-fee ledger or rollback of recreation together
+with final closure; Recovery repair crosses portfolio deletion with an initially
+unpaid ledger. These existing probes are not repeated here.
+
+**Row 433 remains OPEN.** This finite family does not cover native/dual quote,
+multiple domains, receipts or pending losses, Recovery/recredit, expiry races,
+repeated custody disruption, maximum shape, or an absent market authority.
+Prior owner-signed portfolio deletion and administrator-signed mechanical close
+remain prerequisites. Production code and `invariant_status.tsv` are unchanged.
+
+Base: `1011c0523b8063dd69d6cdc395abfdc07e117ce6`. Worktree:
+`/tmp/percolator-row433b-20260912`; branch:
+`codex/row433-terminal-reserve-conformance-20260912`. The default-feature wrapper
+SBF was built locked/offline in a new isolated target using platform-tools v1.52;
+engine pin `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, wrapper SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector passes 1/1: two histories, six exact rollbacks and two closures.
+Observed peak CU [setup, rejected bundles, separate repair, final retry] is
+[596,963, 512,088, 22,342, 493,804], below the asserted 800,000 ceiling (the reused
+transaction helper allows 1,200,000). The three adjacent exact controls pass 3/3.
+An initial run reached successful retirement but expected `InvalidAccountLen` for
+fresh principal replay; its tombstone preflight reports `InvalidAccountKind`.
+Only that test expectation was corrected; no economic assertion failed and no
+production correction was required. Charter/index and machine-status checks pass
+2/2; formatting and Git whitespace checks pass. Existing unused-support and
+Solana client future-compatibility warnings remain. After validation,
+`cargo clean --target-dir /dev/shm/percolator-row433b-target` removed 6,385 files
+(1.7 GiB); the isolated temporary directory retains only small validation logs.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row433b-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row433b-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row433b-tmp CARGO_BUILD_JOBS=2
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_recreated_reserve_custody_preserves_spent_prefix_through_close_retry -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry \
+  inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings \
+  inv_073_no_permanent_user_lock::v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+cargo clean --target-dir /dev/shm/percolator-row433b-target
+git show --format= --check HEAD # post-commit
+```
+
 ## INV-045 reward policy succession during catchup (row 422, 2026-09-12)
 
 Owner: [cu/inv_045_reward_policy_catchup.rs](cu/inv_045_reward_policy_catchup.rs),

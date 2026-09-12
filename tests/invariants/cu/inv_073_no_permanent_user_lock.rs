@@ -117,6 +117,11 @@ fn v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_clos
 }
 
 #[test]
+fn v16_program_recreated_reserve_custody_preserves_spent_prefix_through_close_retry() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_recreated_reserve_close();
+}
+
+#[test]
 fn v16_program_terminal_public_reserve_disposition_preserves_value_across_orders() {
     crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_public_reserve_disposition();
 }

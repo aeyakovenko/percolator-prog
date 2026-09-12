@@ -36,6 +36,10 @@ pub(crate) use terminal_public_reserves::{
 mod terminal_reserve_close_retry;
 pub(crate) use terminal_reserve_close_retry::verify_terminal_reserve_close_retry;
 
+#[path = "inv_073_recreated_reserve_close.rs"]
+mod recreated_reserve_close;
+pub(crate) use recreated_reserve_close::verify_recreated_reserve_close;
+
 #[path = "inv_073_frozen_reserve_replacement.rs"]
 mod frozen_reserve_replacement;
 pub(crate) use frozen_reserve_replacement::verify_frozen_reserve_replacement;

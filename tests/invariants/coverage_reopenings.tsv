@@ -674,6 +674,31 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # cleanup attribution and depleted-reserve retirement omitted. OPEN: frozen vault,
 # active refreezing, arbitrary roles/rails/history, Recovery/recredit, receipts/pending
 # losses, max shape and absent market authority; mechanical close remains signed.
+# 433 spent-custody recreation through actual close (2026-09-12): cu/inv_073_recreated_reserve_close.rs.
+# Two classic-SPL/asset-0 histories spend a 101-principal/17-earnings public payout to
+# a separate payee and publicly close the provider ATA before dropping reserve keys.
+# The initialized paid ledger persists with 99899 principal and 858 earnings still due.
+# Premature close rolls back recreation/principal payment; a repeated-close suffix
+# restores recreation, both payments, actual vault/slab closure and its rent refund.
+# Identical completion instructions retry with absent custody or after separate
+# keeper-only repair. Same-address recreation never resets claims or paid telemetry;
+# successful rent is charged once, paid/spent value is conserved, post-close replay
+# cannot pay/refund again. Full Account rollback, completed prefixes and stock censuses.
+# New selector passes 1/1 (two histories, six exact rollbacks, two closures); adjacent
+# exact controls pass 3/3. CU maxima [setup,rejection,repair,retry]=[596963,512088,22342,493804],
+# ceiling 800000. Initial post-close replay expectation corrected from InvalidAccountLen
+# to the principal preflight's InvalidAccountKind; no economic failure or production fix.
+# Charter/index and machine-status checks pass 2/2; formatting and Git whitespace pass.
+# cargo clean --target-dir /dev/shm/percolator-row433b-target removed 6385 files (1.7GiB).
+# Existing populated-custody close retry, replacement-address repair, native principal
+# redemption and unpaid-ledger Recovery cleanup do not cover this composition.
+# Exact scope, environment, build hash, commands/results and cleanup are in README's
+# "INV-073 recreated reserve custody through final-close retry" section. New selector:
+# cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_recreated_reserve_custody_preserves_spent_prefix_through_close_retry -- --exact --nocapture --test-threads=1
+# OPEN: native/dual quote, multiple domains, receipts/pending losses, Recovery/recredit,
+# expiry races, repeated disruption, max shape and absent market authority. Earlier
+# owner-signed deletion and admin-signed slab closure remain prerequisites; no change
+# to production or invariant_status.tsv, and no machine-status promotion.
 433	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-024,INV-027,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-081,INV-082	terminal-reserve+x-missing-signer+x-public-payout	terminal-economic-progress-does-not-require-an-adversarial-reserve-beneficiary-signature	OPEN
 # Row 434 bounded extension (2026-09-12): cu/inv_027_flat_reopen_routes.rs,
 # v16_program_flat_reopen_route_switch_preserves_fee_history_and_senior_exit.
