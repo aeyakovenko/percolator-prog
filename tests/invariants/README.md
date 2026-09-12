@@ -3,6 +3,13 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+The [retained permitted-policy history audit](retained_permitted_policy_history_20260912.md)
+adds 32 public LiteSVM histories for two independently retained CPI fills delivered at
+different permitted fees. Direct and nonmonotone histories preserve each owner's exact
+debit and SPL endpoint, including rollback of a policy/fill prefix. Above-consent taker
+execution and successful insurance/backing debit replay remain untested by this increment;
+holdout labels 411/415/428/432 remain OPEN.
+
 The [retained fee/insurance stock audit](retained_value_gap_20260912.md) adds 32 public
 LiteSVM worlds combining retained fee-bearing trades, insurance payouts, policy relaxation,
 fee/top-up replenishment and exact transaction rollback. Per-owner SPL outcomes agree across
