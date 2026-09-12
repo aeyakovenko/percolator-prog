@@ -10,6 +10,17 @@ deferred maintenance through exact rollback, reduction and owner SPL payout.
 This is a sufficiently funded conformance slice only: admission at the
 uncollected-fee margin boundary remains untested. Rows 413/422/423/425/426 remain OPEN.
 
+The [retained taker aggregate-cap audit](retained_taker_aggregate_cap_audit_20260912.md)
+adds `v16_program_retained_taker_aggregate_cap_rolls_back_deposit_and_policy_prefix`
+under `stateful/inv_014_retained_taker_aggregate_cap.rs`, mounted as
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_taker_aggregate_cap`.
+Four public LiteSVM histories isolate a retained two-leg batch CPI taker's signed
+atom cap with a permissive LP grant. Above-cap delivery restores a real SPL deposit
+and optional policy prefix; an independently pre-signed exact-cap continuation
+preserves quantities, fee allocation and complete owner SPL endpoints. This adds
+INV-011/014/024/036/080 evidence. Single-CPI enforcement and general policy/quantity
+histories remain gaps; holdout labels 411/432 remain OPEN.
+
 The [retained permitted-policy history audit](retained_permitted_policy_history_20260912.md)
 adds 32 public LiteSVM histories for two independently retained CPI fills delivered at
 different permitted fees. Direct and nonmonotone histories preserve each owner's exact
