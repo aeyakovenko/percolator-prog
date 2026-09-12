@@ -251,6 +251,97 @@ terminal transaction compute of 180,307 CU. This extends the zero-funding resolv
 cohort coverage; it does not close the generic obligation-history product.
 **Row 419 remains OPEN**, and every invariant verdict is unchanged.
 
+## Row 418 secondary custody repair after expiry (2026-09-12)
+
+Owner: [cu/inv_077_secondary_quote_completion.rs](cu/inv_077_secondary_quote_completion.rs).
+Exact selector:
+`inv_077_bounded_work_and_maximum_shape_compute::secondary_quote_completion::v16_program_secondary_quote_repair_after_expiry_has_atomic_bounded_disposition`.
+
+Six public LiteSVM histories cross secondary-vault freeze, secondary-destination
+freeze, or a late native-vault donation with bundled/separate completion. System,
+SPL, ATA and wrapper instructions create and fund every account. The existing
+canonical native-mint genesis fixture, wallet airdrops and authenticated Clock
+advancement are the only supplied environment state. No economic account bytes
+are injected; token packing constructs expected host snapshots only.
+
+All histories have fixed-supply SPL primary custody: 307 atoms of publicly funded
+backing expire, with 17 unbooked primary atoms and 19 secondary atoms. One
+`CloseSlab` normalizes backing while preserving every other tracked complete
+Account and market metadata. The independent stock and encumbrance censuses
+require 307 booked atoms, no capital/insurance/portfolios, and zero fresh backing
+reservations. Only then does the secondary custody change:
+
+- Freezable fixed-supply SPL: either secondary account is publicly frozen. Close
+  rejects with the exact vault/destination error and complete Account rollback.
+- Native secondary: 23 raw lamports arrive after normalization while the token
+  amount stays 19. Public `SyncNative` classifies all 42 atoms for the token sweep.
+
+Thaw/sync followed by the second successful slab call retires exactly 307 primary
+atoms and sweeps both rails. The owner transfers the 17 primary atoms into
+separate SPL custody, then closes the payout account. Secondary SPL similarly
+moves 19 atoms into separate custody before closing; native custody redeems 42
+lamports directly. Both canonical vaults close, and the market retains its exact
+typed tombstone and rent. The admin receives exactly market excess plus four
+token-account rents, plus 42 redeemed lamports only in the native worlds.
+Primary supply ends at 17; secondary SPL supply stays 19 and native supply stays
+zero. Full mint, sink, vault-authority, admin and payer Accounts are checked.
+
+Each world first submits the entire completion followed by an owner-authorized
+burn requesting 18 atoms from the 17-atom primary sink. The exact final
+`InsufficientFunds` error restores thaw/sync, primary retirement, both sweeps,
+four custody closes and tombstone creation, allowing only the calculated runtime
+signature fee. The identical valid prefix then succeeds. Across the matrix,
+four frozen-close checks and six late-prefix checks give ten exact rollbacks.
+Separate completion also checks the repair and slab-close custody boundaries.
+
+Net-new scope: the existing `terminal_quote_variants` freezable selector freezes
+primary custody and thaws separately; its dual-quote expiry selector has no
+secondary freeze or post-normalization native sync/disposal rollback.
+`terminal_destination_variants` checks existing primary destination capabilities
+on a single SPL rail. `prefunded_quote_custody` repairs user payout accounts before
+empty closure. This selector composes secondary repair after primary expiry with
+both rails' final disposal; none of those selectors is duplicated or modified.
+
+**Row 418 remains OPEN**, and invariant verdicts are unchanged. This is bounded
+INV-018/021/025/069/070/077/080/081 evidence and an administrative lifecycle
+boundary for INV-073/078. It is not a generic generator/oracle or a permissionless
+user-exit theorem. Native-primary booked retirement, absent/uncooperative
+authorities, nonzero user claims, provider earnings, insurance recredit,
+Token-2022, maximum capacity and arbitrary histories remain outside the matrix.
+
+Validation used isolated worktree
+`/home/anatoly/worktrees/astra-terminal-quote-variants-row418-20260912`, branch
+`codex/astra-terminal-quote-variants-row418-20260912`, based on local commit
+`f70a5d4e56dbce3b96c3d6cfdb67ad5db3fda944`. The main checkout was untouched.
+No GitHub PRs/issues/branches or sealed holdout contents were inspected. A fresh
+locked/offline default-feature platform-tools v1.52 build has SHA-256
+`d5f2d3d2c35842aab0979ab24fed415fe36b2b93ed6cc80998fee839ae76343f`.
+The exact selector passes 1/1 with six worlds. Peak measured lifecycle CU is
+**78,054** on the integrated artifact, including rejected bundles, below 150,000;
+measured terminal transactions fit 1,232 bytes. Shared ATA creation helpers do
+not report CU.
+
+No runtime probes were discarded and no implementation violation was observed.
+The first host compile required a temporary-borrow correction; an intermediate
+compile exhausted disk space. Clearing only this worktree's release intermediates
+allowed the unchanged test command to finish. Neither is conformance evidence.
+Native-primary residue and existing empty-native cases were excluded during
+overlap review, not executed or counted as new coverage.
+
+Exact validation commands from the isolated worktree:
+
+```sh
+cargo build-sbf --tools-version v1.52 --sbf-out-dir target/deploy --offline -- --locked
+sha256sum target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::secondary_quote_completion::v16_program_secondary_quote_repair_after_expiry_has_atomic_bounded_disposition -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-045 unilateral reduction with pending price carry (2026-09-12)
 
 Owner: [cu/inv_045_rebalance_cap_carry.rs](cu/inv_045_rebalance_cap_carry.rs),

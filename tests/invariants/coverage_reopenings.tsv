@@ -96,6 +96,13 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # 101/307 principal claims; keeper payouts, exact repair/payment/close rollback and
 # one successful slab close precede token-authorized disposal. See prefunded quote
 # custody audit; native booked-residue retirement and generic closure remain OPEN.
+# Row 418 bounded conformance (2026-09-12): cu/inv_077_secondary_quote_completion.rs,
+# v16_program_secondary_quote_repair_after_expiry_has_atomic_bounded_disposition.
+# Six public worlds cross secondary vault/destination freeze or late native sync
+# after primary backing normalization with bundled/separate completion. Exact 307-atom
+# retirement, both sweeps, four custody closes, rent and ten complete Account rollbacks.
+# Cooperative administration only; native-primary residue, user claims and general
+# histories remain outside this witness. See README; no generic generator/status promotion.
 418	DoS	BLOCKER	INV-070	INV-018,INV-021,INV-025,INV-069,INV-070,INV-073,INV-077,INV-078,INV-081	token-variant+x-terminal-stock+x-close	all-supported-quote-token-variants-have-a-bounded-terminal-disposition	OPEN
 # Row 419 bounded public conformance (2026-09-12): cu/inv_039_pending_loss_funded_resolution.rs,
 # v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders.
