@@ -238,6 +238,21 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # 66 exact rollbacks include 24 SPL payout prefixes followed by unsigned reserve denial.
 # Remaining principal/earnings/insurance stay separately attributed. No generic reserve
 # disposition or retirement claim; all three rows stay OPEN. See shared-holder audit.
+# Row 420 bounded conformance (2026-09-12): cu/inv_073_provider_custody_replacement.rs,
+# v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings.
+# Six public histories retain a paid provider ledger after populated SPL custody is
+# voluntarily reassigned, then drop provider/custodian/operator keys. Keeper-created
+# replacement custody receives exact remaining principal/earnings at expiry-1 or
+# earnings alone at expiry/expiry+1; separate/bundled creation, six full Account
+# rollbacks with eight successful payment prefixes and six rent-exact closures compose.
+# Old paid custody stays exact; surviving fees remain provider-attributed while only
+# expired principal burns. Final success/rejection/close peaks 447764/649316/31080 CU.
+# Existing payout-order, missing-ATA, expiry-only and final-close probes were discarded
+# as duplicates; a standalone stale-destination rejection was removed as marginal.
+# Public fixture and real System/SPL/wrapper validation only. See README for exact
+# selectors, private cached-SBF provenance and limits. Recredit/economic-loss depletion,
+# active claims, Recovery, other rails and generic progress remain outside this witness.
+# No production fix or status promotion; row 420 remains OPEN.
 420	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-026,INV-027,INV-032,INV-063,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	provider-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-provider-signature	OPEN
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN

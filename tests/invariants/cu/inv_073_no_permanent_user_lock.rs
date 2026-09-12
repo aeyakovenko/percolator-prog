@@ -92,6 +92,11 @@ fn v16_program_frozen_reserve_destinations_allow_public_replacement_without_thaw
 }
 
 #[test]
+fn v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_provider_custody_replacement();
+}
+
+#[test]
 fn v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry(
 ) {
     crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_reserve_close_retry();

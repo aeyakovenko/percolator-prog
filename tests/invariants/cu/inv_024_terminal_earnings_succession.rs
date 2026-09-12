@@ -37,6 +37,10 @@ pub(crate) use terminal_reserve_close_retry::verify_terminal_reserve_close_retry
 mod frozen_reserve_replacement;
 pub(crate) use frozen_reserve_replacement::verify_frozen_reserve_replacement;
 
+#[path = "inv_073_provider_custody_replacement.rs"]
+mod provider_custody_replacement;
+pub(crate) use provider_custody_replacement::verify_provider_custody_replacement;
+
 const CAPITAL: [u64; 2] = [52_502, 2_000_000];
 const BACKING: u64 = 100_000;
 const INSURANCE: u64 = 31;

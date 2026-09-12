@@ -1,5 +1,96 @@
 # Invariant-owned test coverage
 
+## INV-073 provider custody replacement after partial payment (row 420, 2026-09-12)
+
+Owner: [cu/inv_073_provider_custody_replacement.rs](cu/inv_073_provider_custody_replacement.rs).
+The verifier shares the existing public terminal-earnings fixture, with its test
+mounted under INV-073:
+`inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings`.
+
+Six public LiteSVM histories cross slot 99/100/101 around principal expiry at 100
+with separate/bundled replacement creation. After unsigned payments of 101 principal
+and 17 earnings atoms, the provider signs an SPL AccountOwner reassignment of that
+populated associated token account to a distinct custodian. Provider, custodian
+and insurance operator keys are then dropped. The existing 118 paid atoms remain
+in the voluntarily reassigned account, whose entire Account stays unchanged.
+Neither custody reassignment nor keeper-funded replacement creation changes the
+market's backing beneficiary, authority epoch or existing provider ledger identity.
+
+A keeper creates a different SPL account owned by the absent provider through
+System CreateAccountWithSeed and SPL InitializeAccount3. At slot 99 the remaining
+99,899 principal and 858 earned-fee atoms reach that account. At exact/late expiry,
+CloseSlab first normalizes the unpaid principal; 858 fees remain payable, and the
+99,899 principal atoms are ultimately burned. The separate 31-atom insurance claim
+is paid exactly. Each history ends with a closed vault, rent-exact tombstone and
+the original users' 56,627/1,995,000 payouts unchanged. Provider reserve account
+metas stay unsigned throughout the continuation. The market authority signs
+normalization and mechanical closure; its signature is not reserve consent.
+
+Each replacement-payment continuation first runs before a stale-destination
+earnings request. That suffix rejects with InvalidTokenAccount after successful
+SPL payment and ledger update. All six transactions restore complete compiled and
+tracked Accounts, apart from exact signature fees; three also restore replacement
+creation and four restore expiry normalization. The unchanged valid instruction
+prefix then commits. There are eight rolled-back provider payments, 26 committed
+reserve payments and six final closures. Input-derived stock/reservation censuses,
+complete SPL and earnings-ledger images, fixed pre-retirement supply, provider
+identity and exact rent accounting constrain every committed stage. Snapshot edits
+construct assertion expectations only; no initialized program-owned bytes are
+injected or restored in LiteSVM.
+
+The new boundary is an unavailable provider with a *populated, reassigned* original
+destination and an already-paid earnings ledger. Row410's destination repair
+recreates empty ATAs and uses reserve-holder signatures; row418/INV-082 replacement
+histories cover user payouts or signed insurance disposal. Row433 retains working
+destinations through final-close rollback. Rows420/421 depleted-reserve retirement
+have no surviving provider fees. Standalone unsigned payout permutations, missing
+ATA repair, expiry-only retirement and another final-close rollback were discarded
+as duplicates. A standalone stale-destination rejection was removed as marginal;
+the retained rejection is tied to successful replacement/payment progress.
+
+**Row 420 remains OPEN.** This is finite Resolved/classic-SPL/asset-0 conformance,
+with solvent user settlement, available market authority and prior owner-signed
+empty-portfolio deletion. Frozen canonical vaults, absent market authority,
+insurance recredit, provider economic-loss exhaustion, active source claims,
+Recovery/ADL, native/dual quotes, multiple custody successions, maximum shapes and
+arbitrary histories remain gaps. No production bug, fix or invariant-status change
+is claimed.
+
+Worktree: `/tmp/percolator-row420-astra.NMC9MX/worktree`, starting at the latest
+requested remote branch when fetched, `96534045`. Production sources and manifests
+match `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`; engine pin remains `394fd0bf`.
+Private host/deploy outputs were copied from
+`/dev/shm/astra-terminal-public-disposition-target`. The cached default-feature SBF
+SHA-256 is `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+No SBF rebuild or unfiltered suite was run, and neither protected checkout was edited.
+
+The initial individual selector passed. The final focused run passes **4/4**:
+new selector success/rejection/close peaks **447,764/649,316/31,080 CU**, under the
+reused 1,200,000-CU transaction ceiling; adjacent signed-expiry, destination-repair
+and unsigned-reserve controls peak at **353,430**, **365,139** and **229,994 CU**.
+The charter/index and authoritative reopening-status checks pass **2/2**;
+formatting and Git whitespace checks pass. Existing unused-support and Solana client
+future-compatibility warnings remain. All Cargo invocations use this private environment:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row420-astra.NMC9MX/worktree/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings \
+  inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_reserve_destination_recovery::v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_value \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_earnings_expiry::v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-008 optional insurance ledger rollback and retry (row 428, 2026-09-12)
 
 Owner: [stateful/inv_008_insurance_ledger_retry.rs](stateful/inv_008_insurance_ledger_retry.rs),
