@@ -21,6 +21,14 @@ preserves quantities, fee allocation and complete owner SPL endpoints. This adds
 INV-011/014/024/036/080 evidence. Single-CPI enforcement and general policy/quantity
 histories remain gaps; holdout labels 411/432 remain OPEN.
 
+The [retained reserve replenishment audit](retained_reserve_replenishment_20260912.md)
+adds eight public LiteSVM histories under INV-008. A retained insurance payout,
+replenishment and operator A-to-B-to-A handoff preserve exact signed-amount and
+domain accounting, including a rolled-back SPL top-up before a stale withdrawal.
+Fresh consent and an unaffected peer's retained consent drain only their own stock.
+This tests rejection after an authority update; standalone withdrawal consumption
+across replenishment without that update remains unproved. Labels 415/428 stay OPEN.
+
 The [retained permitted-policy history audit](retained_permitted_policy_history_20260912.md)
 adds 32 public LiteSVM histories for two independently retained CPI fills delivered at
 different permitted fees. Direct and nonmonotone histories preserve each owner's exact
