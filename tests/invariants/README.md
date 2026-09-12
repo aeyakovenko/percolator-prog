@@ -1,5 +1,97 @@
 # Invariant-owned test coverage
 
+## INV-020 renewed liquidation certificates (row 426, 2026-09-12)
+
+Owner: [cu/inv_020_renewed_liquidation.rs](cu/inv_020_renewed_liquidation.rs),
+mounted under `inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::renewed_liquidation`.
+Exact selector: `v16_program_renewed_observations_preserve_repeated_liquidation_certificates`.
+
+Eight public LiteSVM histories cross forward/reverse Hybrid-Pyth/AuthMark observations,
+caller slot hints `0`/`u64::MAX`, and uninterrupted/interrupted execution. Each history
+renews the same two-leg short twice, advances authenticated Clock by 64 slots per
+episode, completes two bounded market prefixes, recertifies and liquidates. The
+first episode takes one liquidation action; the second takes two, including full
+retirement of the first leg. Public counterparty refresh follows each episode, and
+the keeper withdraws its initial deposit plus all three earned rewards through SPL.
+System/SPL/ATA/wrapper instructions construct all economic state, with mint authority
+revoked at a fixed 10,221,000-atom supply. Only signer SOL, Clock and external Pyth
+reports use existing harness fixtures. There is no program-account byte injection,
+snapshot restoration, production change or engine-pin change.
+
+This increment adds repeated renewal of a previously liquidated target, the next
+episode's multi-action liquidation, and exact withdrawal of accumulated rewards.
+The existing staged-action/interrupted-fee probes use one liquidation episode;
+recipient-to-target coverage changes the target. This does not add fractional K/F
+route coverage or alter row425 or the notes for rows 415/416/417/419/424/433.
+
+The oracle checks every current certificate after each successful tested crank,
+opening trade and final withdrawal against detached full refresh. That existing
+oracle also compares full refresh with the independent raw-state health model,
+requires the cached lanes to be no more favorable, and frames non-cache bytes using
+its documented normalizations. Partial market work must leave every portfolio
+Account unchanged and cannot produce a current target certificate. Completed
+refresh and every liquidation must have a current target certificate; each action
+strictly decreases its independently checked deficit within a four-action bound.
+Both authenticated asset slots/prices and zero funding are checked at the relevant
+prefixes. All worlds compare the complete asset states, certificate lanes/epochs,
+owner capital/PnL/wallet values and aggregate stocks at every scheduled checkpoint.
+Stock and reservation censuses run alongside the certificate oracle. Penalties,
+per-action half-share rewards, insurance, unchanged custody before withdrawal and
+the final exact keeper payment reconcile across the complete sequence.
+
+The interrupted words reject previous-publication reports (`OracleStale`), duplicate
+hints (`InvalidInstruction`), and empty/Hybrid-only observations while AuthMark work
+remains (`EngineNonProgress`). Fresh blockhashes prevent duplicate-cache shortcuts.
+Before every liquidation they also execute a successful liquidation instruction
+followed by a stale-report suffix in one transaction: the suffix must fail at the
+specified index, and program-success logs must prove the prefix ran. All 44 rejected
+transactions restore complete fixture and compiled-message Accounts, including
+metadata, absence and lamports; the separate payer loses exactly the signature fee.
+After full recertification, empty-observation liquidation agrees with the complete
+observation control at the same authenticated slot.
+
+**Row 426 remains OPEN.** This is a bounded conformance product, not a generic
+observation-completeness generator or proof. Funding, maintenance fees, active keeper
+legs, omitted Hybrid evidence, composite/provider changes, arbitrary observation
+orders between steps, longer histories and maximum shapes remain outside this probe.
+Development corrected the assumption that one liquidation always restores health.
+A trial third renewal after full retirement of the first leg returned
+`EngineLockActive` during the final refresh, including with public peer settlement;
+that continuation remains unresolved and is excluded from the passing two-episode
+claim. No implementation violation was proved and no liveness claim is made for it.
+
+Validation uses branch `codex/row426-authenticated-refresh-coverage-20260912` and
+worktree `/tmp/percolator-row426-authenticated-refresh-20260912`, fetched and rebased
+onto `origin/codex/astra-open-holdout-ledger-20260912` at `c94b77a9` before final
+validation, including row425. The default-feature wrapper was freshly built from
+unchanged production sources with platform-tools v1.52; SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+No matcher is needed. The new selector passes: **8 worlds, 16 renewal episodes,
+24 liquidation actions, 44 exact rollbacks and 112 full-refresh comparisons**;
+peak transaction CU **415,681**. Only this new behavioral selector and the two
+requested metadata selectors are run; no broad suite is run.
+
+Exact verification commands, from this worktree (the initial host prebuild used
+the same new selector with `--no-run`):
+
+```bash
+export CARGO_TARGET_DIR=/tmp/row426-authenticated-refresh-20260912-target
+export TMPDIR=/tmp/row426-authenticated-refresh-20260912-tmp
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::renewed_liquidation::v16_program_renewed_observations_preserve_repeated_liquidation_certificates -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+```
+
 ## INV-045 generated fractional K/F routes (row 425, 2026-09-12)
 
 Owner: [cu/inv_045_generated_fractional_routes.rs](cu/inv_045_generated_fractional_routes.rs),

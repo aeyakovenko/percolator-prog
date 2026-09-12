@@ -594,6 +594,21 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # This adds an underwater composite recipient, not another solvent AuthMark keeper.
 # Omitted-Hybrid partial-state certification remains unresolved and excluded. No
 # production fix or generic completeness claim; see README. Row remains OPEN.
+# Row 426 repeated-target renewal conformance (2026-09-12):
+# cu/inv_020_renewed_liquidation.rs, mounted under
+# inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::renewed_liquidation,
+# v16_program_renewed_observations_preserve_repeated_liquidation_certificates.
+# Eight public worlds cross observation order, caller slots 0/MAX and interrupted
+# retries through two renewals of one target: 24 liquidation actions, 44 complete
+# Account rollbacks (12 with successful liquidation prefixes), 112 detached full-
+# refresh comparisons and eight exact accumulated-reward SPL payouts. Per-prefix
+# assets/certificates/owner value/stock agree with uninterrupted complete evidence.
+# Empty hints authorize liquidation only after complete same-slot recertification.
+# This extends single-episode coverage without adding row425 fractional K/F routes.
+# Third renewal after full first-leg retirement reaches an unresolved LockActive
+# boundary; omitted Hybrid, funding, active recipients, provider changes, arbitrary
+# longer histories and maximum shapes remain gaps. No implementation violation or
+# generic completeness proof; row stays OPEN. See README for exact commands/results.
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
 # Row 427 additional bounded conformance (2026-09-12): cu/inv_058_atomic_oi_fee_handoff.rs,
 # v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes.
