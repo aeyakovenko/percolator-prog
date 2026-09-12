@@ -645,7 +645,8 @@ pub mod state {
         /// backing watermark and preserves both old lanes without changing persisted layout.
         pub backing_fee: u64,
         /// Strict per-asset authority incarnation. Every market/asset authority handoff that can
-        /// affect this asset binds the exact value and increments it atomically.
+        /// affect this asset binds the exact value and increments it atomically. Successful
+        /// insurance withdrawals also consume their authorizing epoch to prevent retained replay.
         pub authority_epoch: u64,
         pub trade_fee: u64,
         pub liquidation_fee: u64,
@@ -10875,6 +10876,8 @@ pub mod processor {
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
+            // Consume the withdrawal's authorizing epoch. Any later validation or token-CPI
+            // failure rolls this advance back along with the insurance debit.
             let ledger_authority = if live_mode {
                 let shutdown_drain =
                     live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain)?;
@@ -10887,7 +10890,11 @@ pub mod processor {
                     return Err(PercolatorError::Unauthorized.into());
                 }
                 let epoch_asset_index = if local_authorized { asset_index } else { 0 };
-                require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
+                advance_authority_epoch_view(
+                    &mut group,
+                    epoch_asset_index,
+                    expected_authority_epoch,
+                )?;
                 if admin_shutdown_authorized && !local_authorized {
                     cfg.marketauth
                 } else {
@@ -10902,7 +10909,7 @@ pub mod processor {
                 if !live_authority_matches(&authorities.insurance_authority, operator.key) {
                     return Err(PercolatorError::Unauthorized.into());
                 }
-                require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;
+                advance_authority_epoch_view(&mut group, asset_index, expected_authority_epoch)?;
                 group
                     .recredit_terminal_claim_free_residual_for_asset_not_atomic(asset_index)
                     .map_err(map_v16_error)?;

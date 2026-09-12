@@ -16,6 +16,8 @@
 //! The operation registry also retains two insurance-withdrawal requests before either lands,
 //! executes one, replenishes the same stock through a separate public top-up, and requires the
 //! stale request to reject before it can consume the newly available stock.
+//! The deterministic row-415 probe covers both asset scopes and fresh liveness after that
+//! stale rollback.
 //!
 //! Guarantee boundary: PRs 343/344/350/351/355/362 are fixed-pin certifications of the currently
 //! deployed retained families, not a claim that absent message fields exist. Successful partial
@@ -23,6 +25,123 @@
 //! schema requirements.
 
 use super::*;
+
+#[test]
+fn v16_program_row_415_retained_insurance_withdrawal_rejects_replenished_stock() {
+    use crate::support::v16_svm::{MarketConfig, V16Svm, TX_CU_LIMIT};
+    use percolator_prog::{error::PercolatorError, processor::ASSET_AUTH_INSURANCE_OPERATOR};
+
+    const OPERATOR: usize = 2;
+    const AMOUNT: u128 = 1_000;
+    for asset_index in [0u16, 1] {
+        for refill_side in [0u16, 1] {
+            let mut env = V16Svm::new([0x41; 32], MarketConfig::default());
+            env.begin_public_trace();
+            env.update_asset_authority_from_admin(
+                asset_index,
+                ASSET_AUTH_INSURANCE_OPERATOR,
+                OPERATOR,
+            )
+            .expect("install insurance operator through the wrapper");
+            let snapshot = |env: &V16Svm| {
+                (
+                    env.market_data(false),
+                    env.all_token_account_data(),
+                    env.all_primary_portfolio_data(),
+                    env.all_economic_account_lamports(),
+                )
+            };
+            let before_unfunded = snapshot(&env);
+            env.withdraw_insurance_asset(OPERATOR, asset_index, AMOUNT)
+                .expect_err("unfunded withdrawal must reject without consuming its epoch");
+            assert_eq!(snapshot(&env), before_unfunded);
+
+            let supply = env.token_supply_observed();
+            let destination = env.actors[OPERATOR].destination_token;
+            let destination_before = env.token_amount(destination);
+            let vault_before = env.token_amount(env.vault);
+            let domain = asset_index * 2;
+            env.top_up_insurance_domain(domain, AMOUNT)
+                .expect("fund insurance through the wrapper");
+
+            // Both transactions are signed before either lands. Only their compute-budget
+            // price differs, so runtime signature deduplication cannot mask wrapper replay.
+            let intended =
+                env.build_retained_insurance_withdrawal_for_actor(OPERATOR, asset_index, AMOUNT);
+            let retry =
+                env.build_retained_insurance_withdrawal_for_actor(OPERATOR, asset_index, AMOUNT);
+            assert_ne!(intended.signatures, retry.signatures);
+            assert_eq!(intended.message.account_keys, retry.message.account_keys);
+            assert_eq!(
+                intended.message.recent_blockhash,
+                retry.message.recent_blockhash
+            );
+            assert_eq!(
+                intended.message.instructions.last(),
+                retry.message.instructions.last()
+            );
+            let generation = env.primary_market_state().1.assets[asset_index as usize].market_id;
+            let profile = env.primary_profile(asset_index as usize);
+
+            let first = env
+                .land_retained(intended)
+                .expect("first withdrawal succeeds");
+            assert!(first.compute_units > 0 && first.compute_units < TX_CU_LIMIT);
+            assert_eq!(
+                env.token_amount(destination),
+                destination_before + AMOUNT as u64
+            );
+            assert_eq!(env.token_amount(env.vault), vault_before);
+            assert_eq!(env.primary_market_state().1.insurance, 0);
+
+            env.top_up_insurance_domain(domain + refill_side, AMOUNT)
+                .expect("replenish insurance through the wrapper");
+            let replenished = env.primary_market_state().1;
+            assert_eq!(
+                replenished.assets[asset_index as usize].market_id,
+                generation
+            );
+            assert_eq!(env.primary_profile(asset_index as usize), profile);
+            assert_eq!(replenished.insurance, AMOUNT);
+            assert_eq!(
+                replenished.insurance_domain_budget[(domain + refill_side) as usize],
+                AMOUNT
+            );
+            let before_retry = snapshot(&env);
+            let result = env.land_retained(retry);
+            assert_eq!(
+                (env.token_amount(destination), env.primary_market_state().1.insurance),
+                (destination_before + AMOUNT as u64, AMOUNT),
+                "row 415: retained withdrawal spent replenished insurance: asset={asset_index}, refill_side={refill_side}, result={result:?}"
+            );
+            let error = result.expect_err("retained withdrawal must reject");
+            assert!(
+                error.contains(&format!("Custom({})", PercolatorError::EngineStale as u32)),
+                "retained withdrawal must reject for a consumed epoch: {error}"
+            );
+            assert_eq!(
+                snapshot(&env),
+                before_retry,
+                "stale retry must roll back exactly"
+            );
+
+            let fresh =
+                env.build_retained_insurance_withdrawal_for_actor(OPERATOR, asset_index, AMOUNT);
+            let fresh = env
+                .land_retained(fresh)
+                .expect("fresh withdrawal remains live");
+            assert!(fresh.compute_units > 0 && fresh.compute_units < TX_CU_LIMIT);
+            assert_eq!(
+                env.token_amount(destination),
+                destination_before + 2 * AMOUNT as u64
+            );
+            assert_eq!(env.token_amount(env.vault), vault_before);
+            assert_eq!(env.primary_market_state().1.insurance, 0);
+            assert_eq!(env.token_supply_observed(), supply);
+            assert_eq!(env.finish_public_trace().out_of_band_economic_mutations, 0);
+        }
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {
