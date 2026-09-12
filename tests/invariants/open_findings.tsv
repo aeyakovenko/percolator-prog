@@ -168,4 +168,4 @@
 429	LoF	PRIVILEGED	INV-024	missing	[PRIVILEGED LoF] Preserve shutdown reserve beneficiaries
 432	LoF	PRIVILEGED	INV-014	missing	Enforce retained single-CPI taker fee terms
 433	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Permit unsigned terminal reserve payouts
-434	LoF	BLOCKER	INV-027	missing	Settle flat-account fees before risk admission
+434	LoF	BLOCKER	INV-027	independent-discovery	Settle flat-account fees before risk admission

@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 165, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 22,
+        missing, 21,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 126,
+        independent, 127,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -832,6 +832,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             27,
             &[27, 39],
             include_str!("../stateful/inv_027_protected_principal_seniority.rs"),
+        ),
+        (
+            27,
+            &[27],
+            include_str!("../cu/inv_027_joint_admission_liabilities.rs"),
         ),
         (
             28,
@@ -1061,6 +1066,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "asset-local-bankruptcy-cannot-lock-unrelated-backed-claim"
                     | "unsigned-lp-cannot-inherit-preexisting-settlement-cohort"
                     | "fresh-counterparty-must-not-inherit-preexisting-settlement-cohort"
+                    | "all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history"
             ),
             "unknown independent oracle: {}",
             fields[3]
