@@ -90,6 +90,86 @@ git diff --check
 git diff --cached --check
 ```
 
+## INV-020 partial observation and three-leg reduction routes (row 426, 2026-09-12)
+
+Owner: [cu/inv_020_partial_observation_routes.rs](cu/inv_020_partial_observation_routes.rs),
+mounted under `inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::partial_observation_routes`.
+Selector: `v16_program_partial_observation_three_leg_reductions_match_single_and_batch`.
+
+Sixteen independently constructed public LiteSVM histories cross observation order,
+long/short taker, explicit/trade-time account refresh, and single/two-leg batch
+reduction. The fixture uses System, SPL, ATA and wrapper instructions for all
+economic account construction, revokes mint authority at 20,001,000 atoms, and
+supplies only signer SOL, authenticated Clock and external Pyth reports through
+the harness. No initialized economic state is injected or restored.
+
+Both owners hold three unit positions: one Hybrid and two AuthMark assets, initially
+priced at 1,000,000. Authenticated targets become 1,040,000 / 1,050,000 / 960,000.
+After a bounded 32-slot prefix, a Hybrid-only observation at slot 65 advances that
+asset to slot 64 while both omitted AuthMark siblings remain at slot 32. Every
+portfolio, including both stale certificates, remains byte-identical. Two complete
+observations through the flat keeper then reduce aggregate slot debt from 67 to 2
+to 0, still without settling either owner. Caller slot `u64::MAX` cannot replace
+the real Clock or the omitted asset observations.
+
+The explicit control settles both owners and recertifies the short after the
+long's loss settlement advances source-credit risk epochs. The alternate schedule
+lets the trade perform account refresh after complete market observation. Single
+or two-leg batch reductions close assets 0/1 while the untouched asset-2 loss leg
+remains live; the opposite transport and taker then close that last leg. After
+every reduction, both current certificates must equal the independent raw-state
+health oracle, including every epoch and bitmap. Input-derived margins, positions,
+both OI lanes, zero funding, stock/reservation censuses and decoded layout checks
+bind the result. Exact owner capital/PnL pairs agree across all routes, with
+input-derived total values 10,050,000 and 9,950,000. Mint, SPL custody, reports,
+Clock and non-fee signer Accounts remain unchanged through the account actions.
+
+This adds the composition of partial observation, two-leg batch reduction and an
+untouched third loss leg. It reuses the public funding helper, without duplicating
+the `interrupted_refresh_fees`, `selected_provider_assignment`,
+`mixed_provider_liquidation` or `hybrid_capacity_carry` selectors. Bounded
+INV-020/024/053/054/056/071/072/081/086 evidence is added; **row 426 remains OPEN**.
+There is no generic generator/oracle, production change or invariant-status
+promotion. INV-061 liquidation/rewards, omitted-Hybrid active certification,
+reductions before complete market observation, CPI, fees/funding, arbitrary
+histories and maximum shapes remain outside this increment. All positions close,
+but source claims remain; no claim conversion, SPL payout or terminal-disposition
+coverage is claimed.
+
+Discarded development probe: requiring both certificates to be current after
+exactly one crank per owner. The diagnostic rerun showed the earlier short
+certificate at risk epoch 3 while peer loss settlement had advanced the market
+to epoch 6. That is expected invalidation, not an invariant violation. The final
+explicit control includes the necessary third public crank; no economic history
+was discarded and no production inconsistency was observed.
+
+Validation: the new exact selector passes 1/1 (16 worlds, peak **479,703 CU**),
+and the two adjacent exact controls pass 2/2. The invariant index passes 1/1;
+repository formatting and Git whitespace checks pass. Measured post-setup transactions are
+bounded at 500,000 CU for observations and 750,000 CU for reductions. The worktree
+is `/tmp/percolator-astra-complete-observation-row426-20260912`, branch
+`codex/astra-complete-observation-row426-20260912`, based on requested origin ref
+`codex/astra-open-holdout-ledger-20260912` at
+`9df811a757db64a4f9e5e25da18df5bad2fe2ae0`. Host tests compile in a private target
+copied from the standalone `/tmp/astra-terminal-identity-target` build cache.
+Validation reuses its default-feature SBF artifact, already documented by this
+base's public-reserve audit, with verified SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d` and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No SBF rebuild or full-suite run.
+Existing host dead-code warnings and the `solana-client v1.18.26`
+future-incompatibility warning remain.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-complete-observation-row426-20260912-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::partial_observation_routes::v16_program_partial_observation_three_leg_reductions_match_single_and_batch -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::v16_program_staged_observations_match_current_liquidation_and_reduction inv_020_authenticated_clock_slot_and_oracle_provenance::current_health_evidence::v16_program_mixed_hybrid_auth_mark_requires_current_health_evidence_before_owner_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
 ## INV-024 terminal insurer merge and separation (row 410, 2026-09-12)
 
 The [terminal role partition audit](terminal_role_partition_audit_20260912.md)
