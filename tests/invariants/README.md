@@ -170,6 +170,71 @@ git diff --check
 git diff --cached --check
 ```
 
+## INV-008 retained payout prefix and insurer succession (row 428, 2026-09-12)
+
+Owner: [stateful/inv_008_retained_reserve_replenishment.rs](stateful/inv_008_retained_reserve_replenishment.rs),
+selector
+`inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession`.
+
+Eight public LiteSVM histories cross separate/shared funding-provider and live-operator
+identities, separate/shared target-and-peer payout beneficiaries, and both peer-payout
+orders around a funded insurance-authority transfer. All economic state comes from
+normal System/SPL/wrapper construction. Before any payout, the test retains signed
+137-atom target and 43-atom peer withdrawals, a signature-distinct target retry, and
+the incumbent/incoming insurer's signed handoff. The live operator never changes.
+
+The first rejected transaction successfully pays both withdrawals and transfers the
+insurance authority before its old-epoch target suffix rejects. Complete Account
+rollback restores both SPL payments, every domain budget, and the authority profile
+and epoch. The original standalone target transaction then pays 137, draining the
+101-atom long budget and 36 of the 211 short atoms. A public 137-atom long-side top-up
+restores total target stock to 312 with a different side allocation. The unchanged
+retained handoff can now commit; target retries reject with `EngineStale`, including
+both orders against the peer payout. The peer's original signed request still pays
+43, and fresh target consent pays precisely the remaining 312.
+
+The existing input-derived books check each actor's complete source/destination SPL
+Accounts, all domain budgets, insurance/vault/capital totals, mint supply, authority
+profiles/control sequences and independent stock/encumbrance censuses after every
+delivery. Full tracked-account frames cover rejected transactions and unaffected
+success endpoints; exact signature fees are charged only to the separate payer.
+Final entitlements are 449 target atoms plus 43 peer atoms, summed only when their
+beneficiary keys coincide. The incoming insurer receives no live-operator payout.
+This adds bounded INV-008/010/024/031/064/080/081 composition evidence: 24 simulations,
+40 successful deliveries, 24 exact rollbacks and 20 rolled-back SPL payout CPIs.
+
+Unlike the existing operator-ABA/top-up-prefix test, this witness rolls back two
+actual payouts together with a funded transfer of the other insurance role, proves
+that uncommitted epochs preserve retained consent, and distinguishes per-asset
+authority binding from shared signer or recipient identity. **Row 428 remains OPEN**.
+There is no generic stock-epoch oracle: the stale boundary is a committed authority
+epoch change. Standalone successful withdrawal consumption without that change,
+fee-created or terminal-reclassified stock, policy changes, optional insurance
+ledgers, native collateral, active positions and arbitrary histories remain outside
+this finite Live/classic-SPL test. No production change is included.
+
+The exact selector passes with peak successful/rejected transaction costs of
+37,724/93,067 CU under the existing 300,000-CU bound. No implemented probe was
+discarded and no production bug was established. The wrapper and authenticated
+matcher were built offline from base `f9fdc1e23911dc612ef0140e4f362cd0fd4a8cf8`
+with platform-tools v1.52; their respective SHA-256 hashes are
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d` and
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Validation from the isolated worktree uses private default-feature SBF and host builds:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row428-20260912-target
+export TMPDIR=/dev/shm/astra-row428-20260912-tmp
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_paid_retained_insurance_stays_bound_after_replenishment_and_operator_aba -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-024 terminal insurer merge and separation (row 410, 2026-09-12)
 
 The [terminal role partition audit](terminal_role_partition_audit_20260912.md)

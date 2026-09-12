@@ -216,6 +216,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # see README for the corrected peer-settlement recertification control. Row stays OPEN.
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
 427	Conformance	LIMIT	INV-058	INV-058	disjoint-portfolios+x-side-oi-cap+x-public-trades	side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs	COVERED
+# 428 bounded public conformance (2026-09-12): stateful/inv_008_retained_reserve_replenishment.rs,
+# v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession.
+# Eight role-identity/order worlds restore two real payout prefixes and funded insurer
+# succession exactly, then land unchanged retained consent before committing the handoff.
+# After partial payout and long-side replenishment, the unchanged live operator's stale
+# retry cannot cross that committed epoch; peer consent and fresh target consent pay exact
+# independent entitlements, including shared recipients/providers. See README. Authority
+# epoch composition only; no generic stock-epoch oracle or standalone consumption proof.
 428	LoF	REAL	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
 429	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-025,INV-027,INV-036,INV-070,INV-081	shutdown-reserve+x-beneficiary+x-attribution	terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it	OPEN
 # 432 public red/green coverage (2026-09-12): cu/inv_014_delayed_policy_and_policy_epoch_safety.rs::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase.

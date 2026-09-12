@@ -1,6 +1,8 @@
 //! INV-008/014/024/064/080: a paid reserve request stays bound across replenishment
 //! and operator succession. Authority ABA supplies the stale-request boundary;
 //! standalone withdrawal consumption without an authority update remains unproved.
+//! Funded insurer succession also composes with rolled-back payout prefixes when
+//! the unchanged operator shares a peer asset or the provider's identity.
 
 use crate::support::{
     fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census},
@@ -542,4 +544,211 @@ fn v16_program_paid_retained_insurance_stays_bound_after_replenishment_and_opera
         (8, 32, 56, 16, 8)
     );
     println!("INV-008 retained reserve: 8 worlds, 32 simulations, 56 successes, 16 exact rollbacks, 8 rolled-back SPL top-ups; peak success CU {}, rejection CU {}", evidence.peak_success_cu, evidence.peak_rejection_cu);
+}
+
+#[test]
+fn v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession() {
+    const ASSET: usize = 1;
+    const PARTIAL: u128 = 137;
+    let mut evidence = Evidence::default();
+    let mut worlds = 0;
+    for operator in [OPERATOR, FUNDER] {
+        for peer in [PEER, operator] {
+            for handoff_first in [false, true] {
+                let mut seed = [0xc8; 32];
+                seed[0] = worlds;
+                let mut env = V16Svm::new(
+                    seed,
+                    MarketConfig {
+                        actor_deposits: [0; PRIMARY_ACTOR_COUNT],
+                        ..MarketConfig::default()
+                    },
+                );
+                for (asset, beneficiary) in [(ASSET as u16, operator), (0, peer)] {
+                    for (role, owner) in [
+                        (processor::ASSET_AUTH_INSURANCE, FUNDER),
+                        (processor::ASSET_AUTH_INSURANCE_OPERATOR, beneficiary),
+                    ] {
+                        env.update_asset_authority_from_admin(asset, role, owner)
+                            .unwrap();
+                    }
+                }
+                for (domain, stock) in [(2, INITIAL[0]), (3, INITIAL[1]), (1, PEER_STOCK)] {
+                    env.top_up_insurance_domain_for_actor(FUNDER, domain, stock)
+                        .unwrap();
+                }
+                let mut books = Books::new(&env, ASSET);
+                books.check(&env);
+                let payload = withdraw(&env, ASSET as u16, operator, PARTIAL);
+                let peer_payload = withdraw(&env, 0, peer, PEER_STOCK);
+                let handoff_payload = Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new(env.actors[FUNDER].signer.pubkey(), true),
+                        AccountMeta::new(env.actors[SUCCESSOR].signer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                    ],
+                    data: ProgInstruction::UpdateAssetAuthority {
+                        asset_index: ASSET as u16,
+                        market_id: books.market_ids[ASSET],
+                        authority_epoch: books.sequences[ASSET].authority_epoch,
+                        kind: processor::ASSET_AUTH_INSURANCE,
+                        new_pubkey: env.actors[SUCCESSOR].signer.pubkey().to_bytes(),
+                    }
+                    .encode(),
+                };
+                let partial = sign(&env, &[payload.clone()], 11);
+                let stale = sign(&env, &[payload.clone()], 12);
+                let peer_tx = sign(&env, &[peer_payload.clone()], 13);
+                let handoff = sign(&env, &[handoff_payload.clone()], 14);
+                let retained_wire = [&partial, &stale, &peer_tx, &handoff]
+                    .map(|tx| bincode::serialize(tx).unwrap());
+                assert_ne!(partial.signatures, stale.signatures);
+                assert_eq!(
+                    partial.message.instructions[2],
+                    stale.message.instructions[2]
+                );
+                for tx in [&partial, &peer_tx, &handoff] {
+                    simulate(&mut env, tx, &mut evidence);
+                }
+
+                // Both withdrawals really pay before the stale suffix. The failed
+                // transaction must restore their stock and the insurer's authority epoch.
+                let middle = if handoff_first {
+                    [handoff_payload, peer_payload.clone()]
+                } else {
+                    [peer_payload.clone(), handoff_payload]
+                };
+                let bundle = sign(
+                    &env,
+                    &[
+                        payload.clone(),
+                        middle[0].clone(),
+                        middle[1].clone(),
+                        payload.clone(),
+                    ],
+                    15,
+                );
+                land(&mut env, bundle, &[], Some(5), 2, &mut books, &mut evidence);
+                assert_eq!(bincode::serialize(&partial).unwrap(), retained_wire[0]);
+                let debit_accounts = [
+                    env.market,
+                    env.vault,
+                    env.actors[operator].destination_token,
+                ];
+                books.debit(ASSET, operator, PARTIAL);
+                land(
+                    &mut env,
+                    partial,
+                    &debit_accounts,
+                    None,
+                    1,
+                    &mut books,
+                    &mut evidence,
+                );
+                assert_eq!(&books.budgets[2..4], &[0, 175]);
+                let refill = sign(&env, &[top_up(&env, 2, PARTIAL)], 16);
+                books.credit(2, PARTIAL);
+                let changed = [env.market, env.vault, env.actors[FUNDER].source_token];
+                land(
+                    &mut env,
+                    refill,
+                    &changed,
+                    None,
+                    1,
+                    &mut books,
+                    &mut evidence,
+                );
+                assert_eq!(&books.budgets[2..4], &[137, 175]);
+
+                assert_eq!(bincode::serialize(&handoff).unwrap(), retained_wire[3]);
+                books.sequences[ASSET].authority_epoch += 1;
+                books.profiles[ASSET].insurance_authority =
+                    env.actors[SUCCESSOR].signer.pubkey().to_bytes();
+                let changed = [env.market];
+                land(
+                    &mut env,
+                    handoff,
+                    &changed,
+                    None,
+                    0,
+                    &mut books,
+                    &mut evidence,
+                );
+                assert_eq!(
+                    env.primary_profile(ASSET).insurance_operator,
+                    env.actors[operator].signer.pubkey().to_bytes(),
+                    "the signer and recipient remain authorized; only the bound epoch changed"
+                );
+
+                let (instructions, index, transfers) = if handoff_first {
+                    ([payload.clone(), peer_payload], 2, 0)
+                } else {
+                    ([peer_payload, payload.clone()], 3, 1)
+                };
+                let stale_bundle = sign(&env, &instructions, 17);
+                land(
+                    &mut env,
+                    stale_bundle,
+                    &[],
+                    Some(index),
+                    transfers,
+                    &mut books,
+                    &mut evidence,
+                );
+                assert_eq!(bincode::serialize(&stale).unwrap(), retained_wire[1]);
+                land(&mut env, stale, &[], Some(2), 0, &mut books, &mut evidence);
+                assert_eq!(books.paid[operator], PARTIAL);
+
+                // The peer retains its own asset epoch even when the SPL beneficiary
+                // and funding provider share keys with the superseded target request.
+                assert_eq!(bincode::serialize(&peer_tx).unwrap(), retained_wire[2]);
+                books.debit(0, peer, PEER_STOCK);
+                let changed = [env.market, env.vault, env.actors[peer].destination_token];
+                land(
+                    &mut env,
+                    peer_tx,
+                    &changed,
+                    None,
+                    1,
+                    &mut books,
+                    &mut evidence,
+                );
+                let fresh_amount = INITIAL.iter().sum();
+                let fresh = sign(
+                    &env,
+                    &[withdraw(&env, ASSET as u16, operator, fresh_amount)],
+                    18,
+                );
+                books.debit(ASSET, operator, fresh_amount);
+                land(
+                    &mut env,
+                    fresh,
+                    &debit_accounts,
+                    None,
+                    1,
+                    &mut books,
+                    &mut evidence,
+                );
+                let mut entitlement = [0; PRIMARY_ACTOR_COUNT];
+                entitlement[operator] += PARTIAL + fresh_amount;
+                entitlement[peer] += PEER_STOCK;
+                assert_eq!(books.paid, entitlement);
+                assert_eq!(books.paid[SUCCESSOR], 0);
+                assert_eq!(env.token_amount(env.vault), 0);
+                worlds += 1;
+            }
+        }
+    }
+    assert_eq!(
+        (
+            worlds,
+            evidence.simulations,
+            evidence.successes,
+            evidence.rollbacks,
+            evidence.transfers_rolled_back,
+        ),
+        (8, 24, 40, 24, 20)
+    );
+    println!("INV-008 insurer succession: 8 worlds, 24 simulations, 40 successes, 24 exact rollbacks, 20 rolled-back SPL payouts; peak success CU {}, rejection CU {}", evidence.peak_success_cu, evidence.peak_rejection_cu);
 }
