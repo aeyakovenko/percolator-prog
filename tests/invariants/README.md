@@ -1,5 +1,13 @@
 # Invariant-owned test coverage
 
+The [terminal alternate-custody audit](terminal_custody_alternate_20260912.md) adds
+eight public LiteSVM histories under INV-082. Absent backing and insurance holders
+receive their portfolio principal through keeper-created SPL accounts while their
+original ATAs remain delegated or carry a separate close authority. Timeout and
+late payout errors preserve exact Accounts and creation rent; both terminal payout
+aliases reach the same owner entitlements. Reserve claims remain attributed, and
+unsigned reserve withdrawal and administrative retirement remain outside this witness.
+
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 

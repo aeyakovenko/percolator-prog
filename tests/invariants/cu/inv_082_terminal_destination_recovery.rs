@@ -10,6 +10,9 @@ mod shared_destination_recovery;
 #[path = "inv_082_receipt_destination_recovery.rs"]
 mod receipt_destination_recovery;
 
+#[path = "inv_082_terminal_custody_alternate.rs"]
+mod terminal_custody_alternate;
+
 const DEPOSITS: [u64; 2] = [101, 37];
 const RESOLVE_SLOT: u64 = 100;
 const EXIT_DELAY: u64 = 5;
