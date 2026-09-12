@@ -3,6 +3,11 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+The [2026-09-12 terminal/liveness gap audit](terminal_liveness_gap_audit_20260912.md)
+records the INV-082 shared-destination recovery increment: sixteen public LiteSVM worlds
+cover pre-funded custody, payout ordering, transaction partitions, exact rollback and
+single rent charging. Holdouts 417/418/419/424/433 remain OPEN.
+
 The [2026-09-12 retained capability, identity and replay audit](retained_identity_replay_audit_20260912.md)
 maps the remaining holdouts to main's generators and documents the INV-012 retained joint-grant
 atomicity increment. It adds partial coverage without changing invariant verdicts or closing a holdout.

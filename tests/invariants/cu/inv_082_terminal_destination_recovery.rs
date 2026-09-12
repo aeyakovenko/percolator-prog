@@ -4,6 +4,9 @@
 use super::super::*;
 use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_082_shared_destination_recovery.rs"]
+mod shared_destination_recovery;
+
 const DEPOSITS: [u64; 2] = [101, 37];
 const RESOLVE_SLOT: u64 = 100;
 const EXIT_DELAY: u64 = 5;
