@@ -48,6 +48,9 @@ mod funded_backing_succession;
 #[path = "inv_005_funded_oracle_succession.rs"]
 mod funded_oracle_succession;
 
+#[path = "inv_005_funded_insurer_stale_resolution.rs"]
+mod funded_insurer_stale_resolution;
+
 fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)

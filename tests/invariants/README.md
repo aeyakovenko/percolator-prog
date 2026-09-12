@@ -47,6 +47,18 @@ still requires its named signer. Nonzero receipts, pending losses, absent reserv
 beneficiaries and maximum-capacity histories remain outside this increment, and
 invariant verdicts are unchanged.
 
+The [funded insurer stale-resolution audit](funded_insurer_stale_resolution_audit_20260912.md)
+adds one INV-005 selector with four public LiteSVM histories. Insurance-beneficiary
+handoff at the authenticated stale deadline or one slot before preserves two live
+user positions, the unchanged oracle/operator/backing roles, and the original
+resolution deadline. Seventy-two rejected transactions restore complete Accounts,
+including handoff, resolution, SPL payout and portfolio-rent prefixes. Keeper user
+payouts and admin cleanup precede exact successor/provider reserve exits, with a
+fixed 994-atom supply. This adds bounded INV-005/020/024/027/055/081 evidence plus
+INV-021/080 rollback checks. Moving prices, nonzero claims, funding, reserve liens,
+retained signed ABA requests and slab retirement remain outside this increment;
+invariant verdicts and holdout labels are unchanged.
+
 The [terminal destination-authority variant audit](terminal_destination_variant_audit_20260912.md)
 adds one INV-077 selector with six public LiteSVM histories. A fixed-supply mint
 and an admin-owned non-ATA sweep account cross existing delegation, separate close
