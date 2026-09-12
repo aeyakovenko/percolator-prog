@@ -11,6 +11,17 @@ unchanged-authority INV-005 control. Automatic revocation, authority rotation,
 asset replacement and general economic histories remain outside this increment;
 holdouts 412/414 and all invariant verdicts remain unchanged.
 
+The [timestamp renewal and fee-refresh admission audit](fee_refresh_admission_audit_20260912.md)
+adds one INV-020 selector with eight public LiteSVM histories. Both active-leg and
+Pyth observation orders cross explicit refresh with atomic deposit/refresh/admission
+retry. Stale evidence and one position quantum above the fee-adjusted margin limit
+restore complete economic Accounts; full observations admit exactly at the limit.
+All health lanes match input arithmetic and snapshot recomputation, healthy cranks
+preserve exposure, and owner SPL payouts are exactly 197/160 atoms. This adds bounded
+INV-020/024/053/054/056/061/071/072/081/086 evidence. Moving prices, funding, active
+claims, positive liquidation/rewards and economically pending omissions remain
+outside this increment; invariant verdicts and reopening labels are unchanged.
+
 The [spent receipt conformance audit](receipt_spend_replay_audit_20260912.md) adds
 one INV-067 selector with four public LiteSVM histories. Two unequal claimants spend
 their initial payouts and each later top-up into a settled debtor's SPL account.
