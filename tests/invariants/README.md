@@ -18,6 +18,12 @@ including 40 exact rollbacks and eight keeper SPL payouts. Rows 422/426 gain
 partial coverage; 413/423/425 gain no new evidence. All five remain OPEN, including
 omissions before complete refresh, uncommitted reports and general asset selection.
 
+The [2026-09-12 terminal reserve destination audit](terminal_reserve_gap_audit_20260912.md)
+adds two public LiteSVM histories for backing principal, earned fees and insurance
+beneficiary custody repair. Six rejected bundles preserve exact Accounts and rent;
+signed continuations reconcile each reserve payout and final slab refunds. Repair
+does not remove the reserve signature requirement. Holdouts 417/418/419/424/433 remain OPEN.
+
 The [retained fee/insurance stock audit](retained_value_gap_20260912.md) adds 32 public
 LiteSVM worlds combining retained fee-bearing trades, insurance payouts, policy relaxation,
 fee/top-up replenishment and exact transaction rollback. Per-owner SPL outcomes agree across

@@ -5,19 +5,31 @@
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
-#[test]
-fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance() {
-    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+#[path = "inv_024_terminal_reserve_destination_recovery.rs"]
+mod terminal_reserve_destination_recovery;
 
-    const CAPITAL: [u64; 2] = [52_502, 2_000_000];
-    const BACKING: u64 = 100_000;
-    const INSURANCE: u64 = 31;
-    const RATE: u16 = 3_333;
-    const PROFIT: u64 = 1_000 * (105 - 100);
-    const EARNINGS: u64 = ((1_050 * 105 / 2 - CAPITAL[0]) * RATE as u64).div_ceil(10_000);
-    const PREFIX: u64 = 17;
-    const SUPPLY: u64 = CAPITAL[0] + CAPITAL[1] + BACKING + INSURANCE;
-    const PAYOUTS: [u64; 2] = [CAPITAL[0] + PROFIT - EARNINGS, CAPITAL[1] - PROFIT];
+const CAPITAL: [u64; 2] = [52_502, 2_000_000];
+const BACKING: u64 = 100_000;
+const INSURANCE: u64 = 31;
+const RATE: u16 = 3_333;
+const PROFIT: u64 = 1_000 * (105 - 100);
+const EARNINGS: u64 = ((1_050 * 105 / 2 - CAPITAL[0]) * RATE as u64).div_ceil(10_000);
+const SUPPLY: u64 = CAPITAL[0] + CAPITAL[1] + BACKING + INSURANCE;
+const PAYOUTS: [u64; 2] = [CAPITAL[0] + PROFIT - EARNINGS, CAPITAL[1] - PROFIT];
+
+struct TerminalEarningsWorld {
+    env: V16CuEnv,
+    admin: Keypair,
+    incumbent: Keypair,
+    successor: Keypair,
+    wallets: [Pubkey; 5],
+    tokens: [Pubkey; 5],
+    portfolios: [Pubkey; 2],
+    mint_frame: solana_sdk::account::Account,
+}
+
+fn terminal_earnings_world() -> TerminalEarningsWorld {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
     let mut env = inv018_public_spl_market_with_params(
         0,
@@ -256,8 +268,44 @@ fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insuranc
     for i in 0..2 {
         assert!(resolved_portfolio_is_terminal(&env, portfolios[i]));
         assert_eq!(env.token_amount(tokens[i]), PAYOUTS[i]);
+        let owner = env.svm.get_account(&wallets[i]).unwrap();
+        let slab_lamports = env.svm.get_account(&env.market).unwrap().lamports
+            + env.svm.get_account(&portfolios[i]).unwrap().lamports;
+        let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        payer.lamports -= 2 * FeeStructure::default().lamports_per_signature;
         env.close_portfolio_with_cu(&users[i], portfolios[i]);
+        assert_eq!(env.svm.get_account(&wallets[i]), Some(owner));
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap().lamports,
+            slab_lamports
+        );
+        assert_eq!(env.svm.get_account(&env.payer.pubkey()), Some(payer));
     }
+    TerminalEarningsWorld {
+        env,
+        admin,
+        incumbent,
+        successor,
+        wallets,
+        tokens,
+        portfolios,
+        mint_frame,
+    }
+}
+
+#[test]
+fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance() {
+    const PREFIX: u64 = 17;
+    let TerminalEarningsWorld {
+        mut env,
+        admin,
+        incumbent,
+        successor,
+        wallets,
+        tokens,
+        portfolios,
+        mint_frame,
+    } = terminal_earnings_world();
     let ledgers = [Keypair::new(), Keypair::new()].map(|key| {
         system_create_account_for_test(
             &mut env.svm,
