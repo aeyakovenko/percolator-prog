@@ -1,10 +1,10 @@
-//! INV-024/073/080/082: terminal reserve custody repair preserves signer gates,
+//! INV-024/073/080/082: terminal reserve custody repair preserves beneficiaries,
 //! distinct principal/earned-fee/insurance claims, and keeper-funded rent.
-//! The current reserve routes require signatures even after the user exit window.
+//! Public terminal payments cannot redirect value to another role's destination.
 
 use super::*;
 
-const CU_LIMIT: u64 = 400_000;
+const CU_LIMIT: u64 = 1_200_000;
 
 fn assert_closed(env: &V16CuEnv, key: Pubkey) {
     if let Some(account) = env.svm.get_account(&key) {
@@ -61,7 +61,7 @@ pub(super) fn land(
     let rejected = rejection.is_some();
     let result = env.svm.send_transaction(tx);
     let meta = if let Some((index, error)) = rejection {
-        let failure = result.expect_err("unsigned reserve suffix must reject");
+        let failure = result.expect_err("invalid reserve continuation must reject");
         assert_eq!(
             failure.err,
             TransactionError::InstructionError(index, InstructionError::Custom(error as u32))
@@ -113,7 +113,7 @@ pub(super) fn land(
 }
 
 #[test]
-fn v16_program_terminal_reserve_destination_repair_preserves_signer_gates_and_value() {
+fn v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_value() {
     let mut peak_cu = 0;
     for earnings_first in [false, true] {
         let TerminalEarningsWorld {
@@ -237,8 +237,14 @@ fn v16_program_terminal_reserve_destination_repair_preserves_signer_gates_and_va
                 data: ix.encode(),
             }
         });
-        let unsigned = payouts.clone().map(|mut ix| {
+        let misdirected = payouts.clone().map(|mut ix| {
             ix.accounts[0].is_signer = false;
+            let destination = if ix.accounts.len() == 7 && ix.accounts[2].pubkey == ledgers[0] {
+                3
+            } else {
+                2
+            };
+            ix.accounts[destination].pubkey = tokens[3];
             ix
         });
         let stock = |env: &V16CuEnv, paid: [u64; 3], present: [bool; 2]| {
@@ -382,13 +388,13 @@ fn v16_program_terminal_reserve_destination_repair_preserves_signer_gates_and_va
             for kind in 0..3 {
                 peak_cu = peak_cu.max(land(
                     &mut env,
-                    &[repairs[kind].clone(), unsigned[kind].clone()],
+                    &[repairs[kind].clone(), misdirected[kind].clone()],
                     &[],
                     &tracked,
                     &[],
                     0,
                     None,
-                    Some((3, PercolatorError::ExpectedSigner)),
+                    Some((3, PercolatorError::InvalidTokenAccount)),
                 ));
                 stock(&env, [0; 3], [false; 2]);
                 let other = if kind == 2 { 0 } else { 2 };
@@ -399,14 +405,14 @@ fn v16_program_terminal_reserve_destination_repair_preserves_signer_gates_and_va
                         repairs[kind].clone(),
                         payouts[kind].clone(),
                         repairs[other].clone(),
-                        unsigned[other].clone(),
+                        misdirected[other].clone(),
                     ],
                     &[signer],
                     &tracked,
                     &[],
                     0,
                     None,
-                    Some((5, PercolatorError::ExpectedSigner)),
+                    Some((5, PercolatorError::InvalidTokenAccount)),
                 ));
                 stock(&env, [0; 3], [false; 2]);
             }

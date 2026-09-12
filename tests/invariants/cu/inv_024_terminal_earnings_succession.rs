@@ -14,6 +14,12 @@ mod terminal_earnings_expiry;
 #[path = "inv_024_terminal_earnings_roundtrip.rs"]
 mod terminal_earnings_roundtrip;
 
+#[path = "inv_073_terminal_public_reserves.rs"]
+mod terminal_public_reserves;
+pub(crate) use terminal_public_reserves::{
+    verify_terminal_public_reserve_disposition, verify_terminal_public_reserve_seniority,
+};
+
 const CAPITAL: [u64; 2] = [52_502, 2_000_000];
 const BACKING: u64 = 100_000;
 const INSURANCE: u64 = 31;
@@ -35,6 +41,10 @@ struct TerminalEarningsWorld {
 }
 
 fn terminal_earnings_world() -> TerminalEarningsWorld {
+    terminal_earnings_world_with_exit(true)
+}
+
+fn terminal_earnings_world_with_exit(terminal_exit: bool) -> TerminalEarningsWorld {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
     let mut env = inv018_public_spl_market_with_params(
@@ -240,6 +250,18 @@ fn terminal_earnings_world() -> TerminalEarningsWorld {
         env.portfolio_state(portfolios[0]).capital.get(),
         u128::from(CAPITAL[0] - EARNINGS)
     );
+    if !terminal_exit {
+        return TerminalEarningsWorld {
+            env,
+            admin,
+            incumbent,
+            successor,
+            wallets,
+            tokens,
+            portfolios,
+            mint_frame,
+        };
+    }
     env.resolve();
     env.svm.warp_to_slot(7);
     for _ in 0..8 {

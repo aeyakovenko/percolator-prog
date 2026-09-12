@@ -83,6 +83,16 @@ mod recovery_claim_liability_exit;
 mod spent_insurance_terminal_exit;
 
 #[test]
+fn v16_program_terminal_public_reserve_disposition_preserves_value_across_orders() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_public_reserve_disposition();
+}
+
+#[test]
+fn v16_program_public_reserve_payments_wait_for_resolved_senior_disposition() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_public_reserve_seniority();
+}
+
+#[test]
 fn v16_program_terminal_provider_earnings_and_lazy_ledger_reach_exact_slab_close() {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
     use solana_sdk::{

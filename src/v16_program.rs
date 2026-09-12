@@ -10286,6 +10286,11 @@ pub mod processor {
         let market_data = market_ai.try_borrow_data()?;
         let (cfg, mode, configured_slots, _) =
             state::read_market_config_mode_and_capacity(&market_data)?;
+        // Resolved reserve payments still require full wind-down below and can only
+        // reach the recorded beneficiary. Live reserve management requires consent.
+        if mode != MarketModeV16::Resolved {
+            expect_signer(authority)?;
+        }
         let asset_index = domain / 2;
         if (require_live_mode && mode != MarketModeV16::Live)
             || domain >= configured_slots.saturating_mul(2)
@@ -10320,7 +10325,7 @@ pub mod processor {
             vault_token,
             &vault_authority,
             &cfg,
-            false,
+            !authority.is_signer,
         )?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_balance, amount_u64)?;
@@ -10497,7 +10502,6 @@ pub mod processor {
         let vault_authority_ai = account(accounts, 4)?;
         let token_program = account(accounts, 5)?;
         let ledger_ai = accounts.get(6);
-        expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_writable(dest_token)?;
         expect_writable(vault_token)?;
@@ -10640,7 +10644,6 @@ pub mod processor {
         let vault_token = account(accounts, 4)?;
         let vault_authority_ai = account(accounts, 5)?;
         let token_program = account(accounts, 6)?;
-        expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_writable(ledger_ai)?;
         expect_writable(dest_token)?;
@@ -10824,7 +10827,6 @@ pub mod processor {
         let vault_authority_ai = account(accounts, 4)?;
         let token_program = account(accounts, 5)?;
         let ledger_ai = accounts.get(6);
-        expect_signer(operator)?;
         expect_writable(market_ai)?;
         expect_writable(dest_token)?;
         expect_writable(vault_token)?;
@@ -10846,6 +10848,9 @@ pub mod processor {
             let market_data = market_ai.try_borrow_data()?;
             let (cfg, mode, _, market_id, _, _) =
                 state::read_market_trade_preflight(&market_data, asset_index)?;
+            if mode != MarketModeV16::Resolved {
+                expect_signer(operator)?;
+            }
             if market_id != expected_market_id {
                 return Err(PercolatorError::AssetGenerationMismatch.into());
             }
@@ -10860,7 +10865,7 @@ pub mod processor {
                 vault_token,
                 &vault_authority,
                 &cfg,
-                false,
+                !operator.is_signer,
             )?;
             require_token_balance(vault_balance, amount_u64)?;
         }

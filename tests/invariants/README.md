@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## INV-073 public terminal reserve disposition (2026-09-12)
+
+The [public reserve disposition audit](terminal_public_reserves_audit_20260912.md)
+records a bounded red/green wrapper conformance fix for rows 420/421/433.
+Two INV-073 selectors in [cu/inv_073_terminal_public_reserves.rs](cu/inv_073_terminal_public_reserves.rs)
+reuse the public earned-fee fixture. Twelve worlds cross all reserve payout orders
+with fresh or expired unpaid principal. They complete 66 keeper-only payments of
+principal, earned fees and insurance, preserve senior payouts and reserve recipients,
+check 138 exact rollbacks, and finish 12 separately admin-signed slab closures.
+An additional control preserves live consent and both resolved wind-down gates.
+
+Resolved reserve payments now accept an unsigned recorded beneficiary only with
+an unencumbered beneficiary-owned token destination and the existing full-wind-down
+and stock checks. Nearby signer-denial probes now check destination attribution;
+their signed payout and retry controls remain. Earlier audits documenting an
+unconditional terminal reserve signature barrier describe the pre-fix behavior.
+This finite SPL/asset-0 family does not establish generic missing-signer closure;
+rows 420/421/433 and whole-invariant verdicts remain OPEN/unchanged.
+
 ## INV-045 unilateral reduction with pending price carry (2026-09-12)
 
 Owner: [cu/inv_045_rebalance_cap_carry.rs](cu/inv_045_rebalance_cap_carry.rs),

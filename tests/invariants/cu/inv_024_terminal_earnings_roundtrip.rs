@@ -202,8 +202,9 @@ fn v16_program_terminal_provider_roundtrip_preserves_intervening_fee_payouts() {
         let exact = earnings(2, remaining, sequences.authority_epoch + 2, ledgers[0]);
         let overdraw = earnings(2, remaining + 1, sequences.authority_epoch + 2, ledgers[0]);
         let wrong_ledger = earnings(2, remaining, sequences.authority_epoch + 2, ledgers[1]);
-        let mut unsigned = exact.clone();
-        unsigned.accounts[0].is_signer = false;
+        let mut misdirected = exact.clone();
+        misdirected.accounts[0].is_signer = false;
+        misdirected.accounts[3].pubkey = tokens[3];
         let mut readonly = exact.clone();
         readonly.accounts[2].is_writable = false;
         let insurance = wrap(
@@ -409,7 +410,12 @@ fn v16_program_terminal_provider_roundtrip_preserves_intervening_fee_payouts() {
                 vec![&admin, &incumbent],
                 PercolatorError::Unauthorized,
             ),
-            (7, unsigned, vec![&admin], PercolatorError::ExpectedSigner),
+            (
+                7,
+                misdirected,
+                vec![&admin],
+                PercolatorError::InvalidTokenAccount,
+            ),
             (
                 8,
                 readonly,

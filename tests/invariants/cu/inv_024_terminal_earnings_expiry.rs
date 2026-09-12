@@ -1,5 +1,5 @@
 //! INV-024/063/070/073: expiry releases only the unpaid principal, never earned
-//! provider fees. Reserve signatures remain necessary after bounded normalization.
+//! provider fees. Destination attribution survives bounded normalization.
 
 use super::*;
 use terminal_reserve_destination_recovery::land;
@@ -92,10 +92,12 @@ fn v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal
             let admin_earnings = reserve(4, true, false, EARNINGS);
             let operator_insurance = reserve(3, false, true, INSURANCE);
             let insurance_overdraw = reserve(4, false, true, INSURANCE + 1);
-            let mut unsigned_earnings = earnings.clone();
-            unsigned_earnings.accounts[0].is_signer = false;
-            let mut unsigned_insurance = insurance.clone();
-            unsigned_insurance.accounts[0].is_signer = false;
+            let mut misdirected_earnings = earnings.clone();
+            misdirected_earnings.accounts[0].is_signer = false;
+            misdirected_earnings.accounts[3].pubkey = tokens[3];
+            let mut misdirected_insurance = insurance.clone();
+            misdirected_insurance.accounts[0].is_signer = false;
+            misdirected_insurance.accounts[2].pubkey = tokens[3];
             let close = wrap(
                 ProgInstruction::CloseSlab {
                     authority_epoch: sequences.authority_epoch,
@@ -237,9 +239,13 @@ fn v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal
             // failing suffix must restore both, including lazy earnings telemetry.
             for (ixs, signers, error) in [
                 (
-                    vec![close.clone(), insurance.clone(), unsigned_earnings.clone()],
+                    vec![
+                        close.clone(),
+                        insurance.clone(),
+                        misdirected_earnings.clone(),
+                    ],
                     vec![&admin],
-                    PercolatorError::ExpectedSigner,
+                    PercolatorError::InvalidTokenAccount,
                 ),
                 (
                     vec![close.clone(), earnings.clone(), close.clone()],
@@ -273,17 +279,21 @@ fn v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal
             stock(&env, PRINCIPAL_PAID, true, [false; 2]);
             peak = peak.max(land(
                 &mut env,
-                &[earnings.clone(), unsigned_insurance],
+                &[earnings.clone(), misdirected_insurance],
                 &[&provider],
                 &tracked,
                 &[],
                 0,
                 None,
-                Some((3, PercolatorError::ExpectedSigner)),
+                Some((3, PercolatorError::InvalidTokenAccount)),
             ));
             stock(&env, PRINCIPAL_PAID, true, [false; 2]);
             for (ix, signers, error) in [
-                (unsigned_earnings, vec![], PercolatorError::ExpectedSigner),
+                (
+                    misdirected_earnings,
+                    vec![],
+                    PercolatorError::InvalidTokenAccount,
+                ),
                 (admin_earnings, vec![&admin], PercolatorError::Unauthorized),
                 (
                     operator_insurance,
