@@ -22,6 +22,18 @@ bounded INV-020/024/038/041/045/052/056/061/071/081/086/088 evidence. Funding,
 provider changes, arbitrary liquidation sizing and full peer-claim realization
 remain outside this increment; invariant verdicts are unchanged.
 
+The [first-risk preexisting-lag audit](first_risk_preexisting_lag_audit_20260912.md)
+adds one INV-027 selector with sixteen public LiteSVM histories. Differently aged,
+never-risked portfolios cross shared/separate owners, both constrained parties,
+single/batch admission, and both fee/refresh orders. Preexisting traded-asset lag
+blocks first risk at and above the computed margin boundary with exact rollback.
+An authorized target repair permits a one-quantum margin rejection followed by
+exact admission, per-portfolio overdraw rejection and complete 112/160-atom owner
+payouts. This adds bounded INV-010/024/027/044/053/060/062/081 evidence, with 64 exact
+rollbacks and 32 payouts. Standalone uncollected flat fees, successful admission
+under nonzero lag and general histories remain outside this increment; invariant
+verdicts and reopening labels are unchanged.
+
 The [terminal destination-authority variant audit](terminal_destination_variant_audit_20260912.md)
 adds one INV-077 selector with six public LiteSVM histories. A fixed-supply mint
 and an admin-owned non-ATA sweep account cross existing delegation, separate close

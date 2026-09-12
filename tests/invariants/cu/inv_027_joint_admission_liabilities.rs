@@ -19,6 +19,9 @@ mod reward_recipient_first_risk;
 #[path = "inv_027_standalone_first_admission.rs"]
 mod standalone_first_admission;
 
+#[path = "inv_027_first_risk_preexisting_lag.rs"]
+mod first_risk_preexisting_lag;
+
 const PRICE: u64 = 100;
 const START: u64 = 1;
 const ADMISSION: u64 = 4;
