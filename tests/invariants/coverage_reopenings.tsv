@@ -39,6 +39,15 @@
 # into keeper/domain entitlements; shared owners and publication order agree, including
 # exact fresh-publication bundle rollback, bounded retries and keeper SPL payout.
 # Four sampled public histories; no generic generator/oracle. Row/status remain OPEN.
+# Row 422 retained-penalty conformance (2026-09-12): cu/inv_045_retained_penalty_handoff.rs,
+# v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup.
+# A committed unreclaimable stale-mark liquidation precedes fresh report publication
+# while effective price still exceeds the old paid target. Only the later liquidation's
+# new penalty funds keeper/domain entitlement; discovery fees AND the earlier penalty
+# survive exact fresh-prefix rollback, unchanged retry, full price catchup and keeper
+# SPL exit. This adds a prior liquidation liability to authenticated_reward_handoff;
+# it is not another publication/identity/payout ordering. One bounded public history;
+# general provenance persistence and the generic oracle remain OPEN; no status promotion.
 # Rows 423/425/426 partial conformance (2026-09-12): cu/inv_028_hybrid_capacity_carry.rs,
 # v16_program_historical_capacity_preserves_hybrid_carry_health_and_owner_entitlement.
 # Eight public histories retain 26 old claims while the last live Hybrid leg needs both

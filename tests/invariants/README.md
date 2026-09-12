@@ -184,6 +184,96 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-045 retained liquidation penalty across fresh handoff (row 422, 2026-09-12)
+
+Owner: [cu/inv_045_retained_penalty_handoff.rs](cu/inv_045_retained_penalty_handoff.rs),
+mounted under `inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::retained_penalty_handoff`.
+Selector: `v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup`.
+Exact requested base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`3abff5d2bc6d521d26768c386b847f2b014058e2`. Branch:
+`codex/astra-row422-fresh-reward-20260912`; isolated worktree:
+`/tmp/percolator-astra-row422-fresh-reward-20260912`.
+
+One public LiteSVM history adds an actual previously retained liquidation penalty
+to the fresh-report boundary. The existing `authenticated_reward_handoff` already
+covers paid discovery followed by fresh evidence during lag, including funding and
+reward rollback; `corroborated_mark_fees` preserves discovery fees after full
+catchup. Neither enters fresh liquidation with a committed stale-mark liquidation
+penalty belonging to the earlier episode. No publication-order, common-owner,
+raw-print/share or keeper-payout matrix was added. Standalone stale/equivocal
+rejections and route-order variants were discarded as duplicate candidates.
+
+A paid Hybrid trade stages 992,320 from 1,000,000 and pays 1,540,072 discovery
+atoms. At slot 6, stale evidence advances the effective price to 997,600 and
+liquidation retains 5,987 atoms, with zero reward or domain credit. At slot 7,
+fresh evidence publishes 980,000 while the accepted price is still 995,206,
+above even the old paid target. The target replacement resets the cap anchor to
+997,600; independent integer cap arithmetic gives the 2,394-atom accepted step.
+The next liquidation charges 8,287 atoms at that effective price, rewards 2,762,
+and assigns only its 5,525-atom remainder to domains (2,762/2,763).
+Two-stage fee rounding distinguishes the effective price from the fresh report,
+old paid target, accepted/raw trade prints and initial price. Closed quantity is
+an observed deployed input, not an independent proof of liquidation sizing.
+
+Before each successful fresh target crank, the identical independently simulated
+instruction is followed by same-time equivocal evidence. Rejection at instruction
+3 restores every tracked and compiled complete Account, including the old penalty,
+oracle profile, reward and domain budgets, except the separate payer's exact
+signature fee. The unchanged valid instruction then commits. Public account-local
+settlement obtains independently checked current certificates for all exposed
+owners. At slot 14 the fresh target fully catches up without another liquidation,
+fee or reward. Healthy retries at all three boundaries reject exactly. The keeper
+withdraws precisely 3,762 SPL atoms; 1,546,059 old fee atoms remain outside budgets.
+
+System/SPL/ATA/wrapper instructions construct all economic accounts and revoke mint
+authority at the fixed 125,101,000-atom supply. Clock, signer SOL and external Pyth
+reports are harness inputs; no initialized program Account is injected or restored.
+Stock, reservation and source-rate censuses and independent certificate checks run
+through the history. Unrelated exposed owners and complete mint/vault Accounts are
+framed across liquidation; the keeper payout checks all SPL owner endpoints.
+
+**Row 422 remains OPEN.** This is bounded INV-020/024/036/041/045/061 conformance;
+it adds no independent identity matrix for affected INV-062. It does not establish
+general paid-origin persistence until catchup or that every fresh report can make
+a liquidation reward eligible. Upward moves, AuthMark/CPI, multiple assets/providers,
+funding/maintenance in this retained-penalty history, policy changes, source liens,
+complete exposed-owner/terminal exits and arbitrary compositions remain gaps.
+No production bug, vulnerable-pin experiment, fix or invariant-status promotion is
+claimed. Development corrected the cap-anchor assumption and the expectation of a
+third liquidation: the fresh liquidation already restored health through catchup.
+
+Validation uses a private copy of the host cache and the current default-feature
+wrapper SBF, SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Production and Cargo inputs match documented artifact base
+`6ab7856fbe1e2f89ed11c1103fb5282fab404dee`; host tests rebuild in this worktree.
+No SBF rebuild or broad-suite claim. The new selector passes with two liquidations,
+three late rollbacks (one rewarded), three exact healthy-retry rollbacks and a
+complete keeper payout. CU peaks `[trade, crank, rejected bundle, payout]` are
+`[147001, 319341, 347660, 47588]`, within existing per-operation limits.
+The four-selector run passes **4/4**; adjacent authenticated-handoff, corroborated
+and stale-catchup peaks are **346,435**, **318,071** and **268,838 CU**, respectively.
+Charter/index passes **1/1**. Formatting and all three Git whitespace checks pass.
+Existing unused-support and Solana future-compatibility warnings remain. Only the
+selectors and checks below were run.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row422-fresh-reward-20260912/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+module=inv_045_no_free_mark_movement::trade_origin_catchup
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  ${module}::authenticated_reward_handoff::retained_penalty_handoff::v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup \
+  ${module}::authenticated_reward_handoff::v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit \
+  ${module}::corroborated_mark_fees::v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees \
+  ${module}::v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-008 optional insurance ledger rollback and retry (row 428, 2026-09-12)
 
 Owner: [stateful/inv_008_insurance_ledger_retry.rs](stateful/inv_008_insurance_ledger_retry.rs),
