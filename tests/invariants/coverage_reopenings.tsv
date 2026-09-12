@@ -257,6 +257,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # OI and custody agree across routes. No new liquidation/reward or payout evidence;
 # see README for the corrected peer-settlement recertification control. Row stays OPEN.
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
+# Row 427 additional bounded conformance (2026-09-12): cu/inv_058_atomic_oi_fee_handoff.rs,
+# v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes.
+# Twenty-four public histories cross both signs, six mixed CPI release/refill route
+# pairs and packed/separate transactions. A fresh third pair consumes released
+# aggregate headroom; 48 exact rollbacks include successful CPI/fee prefixes and
+# matcher response bytes. Independent OI/count/stock ledgers and 144 payouts agree.
+# Row stays COVERED; no production/status change. Existing-leg aggregate admission,
+# multi-asset/maximum shapes, PnL/funding/ADL and elapsed rate limits remain gaps.
+# See README for exact selectors, unchanged SBF provenance and setup corrections.
 427	Conformance	LIMIT	INV-058	INV-058	disjoint-portfolios+x-side-oi-cap+x-public-trades	side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs	COVERED
 # 428 bounded public conformance (2026-09-12): stateful/inv_008_retained_reserve_replenishment.rs,
 # v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession.

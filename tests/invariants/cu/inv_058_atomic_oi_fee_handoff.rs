@@ -1,5 +1,6 @@
 //! INV-058/059: transaction partitioning of a fee-bearing OI handoff to a fresh pair.
 //! A later aggregate-cap failure must undo an earlier successful reduction and fee.
+//! Mixed CPI routes additionally frame single-fill matcher responses and batch return-data use.
 //! Public System/SPL/ATA/wrapper construction only; no injected economic state.
 //! Existing-leg increases, liquidation fee episodes and elapsed rate limits are not covered.
 
@@ -57,6 +58,7 @@ impl Ledger {
             [PRICE; 2]
         );
         let mut oi = [0u128; 2];
+        let mut stored = [0u64; 2];
         let mut capital = 0;
         for actor in 0..ACTORS {
             let account = env.portfolio_state(portfolios[actor]);
@@ -96,6 +98,7 @@ impl Ledger {
                     }
                 );
                 oi[usize::from(q < 0)] += q.unsigned_abs();
+                stored[usize::from(q < 0)] += 1;
                 assert!(health_cert(&account).valid);
             }
             let cert = health_cert(&account);
@@ -105,6 +108,10 @@ impl Ledger {
             assert!(notional(q) <= percolator::MAX_ACCOUNT_NOTIONAL);
         }
         assert_eq!([asset.oi_eff_long_q, asset.oi_eff_short_q], oi);
+        assert_eq!(
+            [asset.stored_pos_count_long, asset.stored_pos_count_short],
+            stored
+        );
         assert_eq!(oi[0], oi[1]);
         assert!(oi[0] <= percolator::MAX_OI_SIDE_Q);
         let fees: u128 = self.fees.iter().sum();
@@ -157,6 +164,25 @@ fn check_frame(
 
 #[test]
 fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partitions() {
+    run_handoff(&[
+        (TradeRoute::NoCpi, TradeRoute::BatchNoCpi),
+        (TradeRoute::BatchNoCpi, TradeRoute::NoCpi),
+    ]);
+}
+
+#[test]
+fn v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes() {
+    run_handoff(&[
+        (TradeRoute::Cpi, TradeRoute::BatchNoCpi),
+        (TradeRoute::BatchNoCpi, TradeRoute::Cpi),
+        (TradeRoute::BatchCpi, TradeRoute::NoCpi),
+        (TradeRoute::NoCpi, TradeRoute::BatchCpi),
+        (TradeRoute::Cpi, TradeRoute::BatchCpi),
+        (TradeRoute::BatchCpi, TradeRoute::Cpi),
+    ]);
+}
+
+fn run_handoff(routes: &[(TradeRoute, TradeRoute)]) {
     let max = i128::try_from(percolator::MAX_OI_SIDE_Q).unwrap();
     let half = max / 2;
     let release = i128::try_from(RELEASE_Q).unwrap();
@@ -175,11 +201,11 @@ fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partit
     );
     let mut peak_cu = [0u64; 3]; // rejected bundle, accepted trades, custody
     for direction in [-1i128, 1] {
-        for release_is_batch in [false, true] {
+        for &(release_route, refill_route) in routes {
             let mut packed_outcome = None;
             for packed in [true, false] {
                 let label = format!(
-                    "direction={direction}, release_batch={release_is_batch}, packed={packed}"
+                    "direction={direction}, release={release_route:?}, refill={refill_route:?}, packed={packed}"
                 );
                 let mut env = inv018_public_spl_market_with_params(6, V16CuMarketParams::default());
                 env.configure_auth_mark_with_cu(0, PRICE);
@@ -254,6 +280,16 @@ fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partit
                     assert_cu_within("OI handoff deposit", cu, CUSTODY_CU_LIMIT);
                     peak_cu[2] = peak_cu[2].max(cu);
                 }
+                let mut matchers = [None; 3];
+                for (pair, route) in [(0, release_route), (4, refill_route)] {
+                    if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+                        matchers[pair / 2] = Some(auth_matcher_for_lp_via_system_create(
+                            &mut env,
+                            &owners[pair + 1],
+                            portfolios[pair + 1],
+                        ));
+                    }
+                }
                 send_raw_tx(
                     &mut env.svm,
                     &env.payer,
@@ -278,41 +314,70 @@ fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partit
                 };
                 ledger.check(&env, portfolios, tokens);
 
-                let trade = |env: &V16CuEnv, pair: usize, batch: bool, size: i128, fee_bps: u64| {
-                    let instruction = if batch {
-                        env.batch_trade_no_cpi_ix(
-                            portfolios[pair],
-                            portfolios[pair + 1],
-                            vec![BatchTradeLeg {
-                                asset_index: 0,
-                                market_id: env.asset_market_id(0),
-                                size_q: size,
-                                exec_price: PRICE,
+                let trade =
+                    |env: &V16CuEnv, pair: usize, route: TradeRoute, size: i128, fee_bps: u64| {
+                        let instruction = match route {
+                            TradeRoute::BatchNoCpi => env.batch_trade_no_cpi_ix(
+                                portfolios[pair],
+                                portfolios[pair + 1],
+                                vec![BatchTradeLeg {
+                                    asset_index: 0,
+                                    market_id: env.asset_market_id(0),
+                                    size_q: size,
+                                    exec_price: PRICE,
+                                    fee_bps,
+                                }],
+                            ),
+                            TradeRoute::NoCpi => env.trade_no_cpi_ix(
+                                portfolios[pair],
+                                portfolios[pair + 1],
+                                0,
+                                size,
+                                PRICE,
                                 fee_bps,
-                            }],
-                        )
-                    } else {
-                        env.trade_no_cpi_ix(
-                            portfolios[pair],
-                            portfolios[pair + 1],
-                            0,
-                            size,
-                            PRICE,
-                            fee_bps,
-                        )
-                    };
-                    Instruction {
-                        program_id: env.program_id,
-                        data: instruction.encode(),
-                        accounts: vec![
+                            ),
+                            TradeRoute::Cpi => env.trade_cpi_ix(
+                                portfolios[pair],
+                                portfolios[pair + 1],
+                                0,
+                                size,
+                                fee_bps,
+                                PRICE,
+                            ),
+                            TradeRoute::BatchCpi => env.batch_trade_cpi_ix(
+                                portfolios[pair],
+                                portfolios[pair + 1],
+                                vec![BatchTradeCpiLeg {
+                                    asset_index: 0,
+                                    market_id: env.asset_market_id(0),
+                                    size_q: size,
+                                    fee_bps,
+                                    limit_price: PRICE,
+                                }],
+                            ),
+                        };
+                        let mut accounts = vec![
                             AccountMeta::new(owners[pair].pubkey(), true),
-                            AccountMeta::new(owners[pair + 1].pubkey(), true),
                             AccountMeta::new(env.market, false),
                             AccountMeta::new(portfolios[pair], false),
                             AccountMeta::new(portfolios[pair + 1], false),
-                        ],
-                    }
-                };
+                        ];
+                        if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+                            let (program, context, delegate) = matchers[pair / 2].unwrap();
+                            accounts.extend([
+                                AccountMeta::new_readonly(program, false),
+                                AccountMeta::new(context, false),
+                                AccountMeta::new_readonly(delegate, false),
+                            ]);
+                        } else {
+                            accounts.insert(1, AccountMeta::new(owners[pair + 1].pubkey(), true));
+                        }
+                        Instruction {
+                            program_id: env.program_id,
+                            data: instruction.encode(),
+                            accounts,
+                        }
+                    };
                 let bundle = |env: &V16CuEnv, instructions: Vec<Instruction>| {
                     let mut ixs = vec![heap_ix(), cu_ix()];
                     ixs.extend(instructions);
@@ -343,12 +408,18 @@ fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partit
                 extra.extend(portfolios);
                 extra.extend(tokens);
                 extra.extend(owners.iter().map(Signer::pubkey));
+                for &(program, context, delegate) in matchers.iter().flatten() {
+                    extra.extend([program, context, delegate]);
+                }
                 let network_fee = |tx: &Transaction| {
                     FeeStructure::default().lamports_per_signature
                         * u64::from(tx.message.header.num_required_signatures)
                 };
                 for pair in [0, 2] {
-                    let tx = bundle(&env, vec![trade(&env, pair, false, direction * half, 0)]);
+                    let tx = bundle(
+                        &env,
+                        vec![trade(&env, pair, TradeRoute::NoCpi, direction * half, 0)],
+                    );
                     let before = frame(&env, &tx, &extra);
                     let fee = network_fee(&tx);
                     let meta = env.svm.send_transaction(tx).expect("public half-cap open");
@@ -372,15 +443,26 @@ fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partit
                     percolator::MAX_OI_SIDE_Q
                 );
 
-                let reduce = trade(&env, 0, release_is_batch, -direction * release, FEE_BPS);
-                let refill = trade(&env, 4, !release_is_batch, direction * release, FEE_BPS);
-                let overfill = trade(
-                    &env,
-                    4,
-                    !release_is_batch,
-                    direction * (release + 1),
-                    FEE_BPS,
-                );
+                // The owner-signed opening disabled this LP's earlier matcher grant.
+                if let Some((program, context, delegate)) = matchers[0] {
+                    env.set_matcher_config(
+                        program,
+                        &owners[1],
+                        portfolios[1],
+                        context,
+                        delegate,
+                        1,
+                    );
+                    ledger.check(&env, portfolios, tokens);
+                }
+                let uses_cpi = matchers.iter().any(Option::is_some);
+                if uses_cpi {
+                    env.update_trade_fee_policy_with_cu(FEE_BPS);
+                    ledger.check(&env, portfolios, tokens);
+                }
+                let reduce = trade(&env, 0, release_route, -direction * release, FEE_BPS);
+                let refill = trade(&env, 4, refill_route, direction * release, FEE_BPS);
+                let overfill = trade(&env, 4, refill_route, direction * (release + 1), FEE_BPS);
                 for (instructions, index, successes) in [
                     (vec![refill.clone(), reduce.clone()], 2, 0),
                     (vec![reduce.clone(), overfill], 3, 1),
@@ -398,7 +480,8 @@ fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partit
                             index,
                             InstructionError::Custom(PercolatorError::EngineInvalidLeg as u32)
                         ),
-                        "{label}"
+                        "{label}: {:?}",
+                        error.meta.logs
                     );
                     assert_eq!(
                         error
@@ -410,6 +493,20 @@ fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partit
                         successes,
                         "{label}: late failure follows a successful fee-bearing release"
                     );
+                    if successes == 1 {
+                        if let Some((program, _, _)) = matchers[0] {
+                            assert_eq!(
+                                error
+                                    .meta
+                                    .logs
+                                    .iter()
+                                    .filter(|line| **line == format!("Program {program} success"))
+                                    .count(),
+                                1,
+                                "{label}: the rolled-back release completed its matcher CPI"
+                            );
+                        }
+                    }
                     check_frame(&env, before, fee, &[]);
                     ledger.check(&env, portfolios, tokens);
                     assert_cu_within(
@@ -443,6 +540,46 @@ fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partit
                     };
                     let mut changed = vec![env.market];
                     for &pair in pairs {
+                        let route = if pair == 0 {
+                            release_route
+                        } else {
+                            refill_route
+                        };
+                        if let Some((program, context, _)) = matchers[pair / 2] {
+                            assert_eq!(
+                                meta.logs
+                                    .iter()
+                                    .filter(|line| **line == format!("Program {program} success"))
+                                    .count(),
+                                1,
+                                "{label}: accepted handoff executes the authorized matcher"
+                            );
+                            if matches!(route, TradeRoute::Cpi) {
+                                let old = before
+                                    .iter()
+                                    .find(|(key, _)| *key == context)
+                                    .unwrap()
+                                    .1
+                                    .as_ref()
+                                    .unwrap();
+                                let current = env.svm.get_account(&context).unwrap();
+                                assert_ne!(
+                                    &current.data[..64],
+                                    &old.data[..64],
+                                    "single CPI writes its response"
+                                );
+                                assert_eq!(
+                                    &current.data[64..],
+                                    &old.data[64..],
+                                    "matcher authorization remains unchanged"
+                                );
+                                let size = direction * if pair == 0 { -release } else { release };
+                                assert_eq!(&current.data[8..16], &PRICE.to_le_bytes());
+                                assert_eq!(&current.data[16..32], &size.to_le_bytes());
+                                assert_eq!(&current.data[48..56], &PRICE.to_le_bytes());
+                                changed.push(context);
+                            }
+                        }
                         ledger.trade(
                             pair,
                             if pair == 0 {
@@ -514,9 +651,18 @@ fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partit
                     assert_eq!(Some(observed), packed_outcome, "{label}: decoded economics and epochs do not depend on transaction packing");
                 }
 
+                if uses_cpi {
+                    env.update_trade_fee_policy_with_cu(0);
+                    ledger.check(&env, portfolios, tokens);
+                }
                 for pair in [0, 2, 4] {
                     let size = -ledger.positions[pair];
-                    let tx = bundle(&env, vec![trade(&env, pair, pair == 0, size, 0)]);
+                    let route = if pair == 0 {
+                        TradeRoute::BatchNoCpi
+                    } else {
+                        TradeRoute::NoCpi
+                    };
+                    let tx = bundle(&env, vec![trade(&env, pair, route, size, 0)]);
                     let before = frame(&env, &tx, &extra);
                     let fee = network_fee(&tx);
                     let meta = env
@@ -566,5 +712,6 @@ fn v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partit
             }
         }
     }
-    println!("INV-058/059 OI handoff: 8 worlds, 16 exact rollbacks, 48 payouts; peak CU [reject, trade, custody]={peak_cu:?}");
+    let worlds = 4 * routes.len();
+    println!("INV-058/059 OI handoff: {worlds} worlds, {} exact rollbacks, {} payouts; peak CU [reject, trade, custody]={peak_cu:?}", 2 * worlds, ACTORS * worlds);
 }

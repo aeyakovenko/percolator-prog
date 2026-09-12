@@ -1,5 +1,102 @@
 # Invariant-owned test coverage
 
+## INV-058 mixed-CPI side-OI handoff (row 427, 2026-09-12)
+
+Owner: [cu/inv_058_atomic_oi_fee_handoff.rs](cu/inv_058_atomic_oi_fee_handoff.rs),
+mounted under `inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff`.
+New selector:
+`v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes`.
+
+The existing no-CPI handoff fixture now also runs 24 public LiteSVM histories:
+both signs, packed/separate transactions, and six release/refill route pairs:
+`Cpi/BatchNoCpi`, `BatchNoCpi/Cpi`, `BatchCpi/NoCpi`, `NoCpi/BatchCpi`,
+`Cpi/BatchCpi`, and `BatchCpi/Cpi`. Two disjoint pairs fill the side cap;
+one releases capacity for a third, initially flat pair. Every account and
+proposed fill stays below its own quantity cap, isolating aggregate admission.
+System/SPL/ATA/wrapper instructions construct all economic state and matcher
+contexts. Mint authority is revoked at 120,000,000,000 atoms. No program-owned
+economic bytes are injected or restored.
+
+The release LP's matcher capability is renewed publicly after its owner-signed
+opening. A public 137-bps base-fee update then makes both handoff fills charge
+exactly two atoms per trader on independently ceiled 73-atom notional. Both
+instructions are built after this setup; no policy, capability or epoch is
+rebound between a rejected handoff and its unchanged successful retry.
+
+Refill-before-release rejects at instruction 2; release plus one-atom overfill
+rejects at instruction 3 after a successful fee-bearing release. The latter
+proves completion of the release matcher CPI when applicable. Every compiled
+and tracked complete Account rolls back, including matcher response bytes,
+market request state, all six portfolios, custody and lamports; only the exact
+separate payer signature fee is charged. The successful single-CPI control
+changes its response header to the requested quantity and exact price while
+preserving authorization bytes. Batch-CPI contexts remain byte-identical.
+
+The input-derived ledger checks both OI lanes and stored-position counts,
+positions/epochs, unit ADL indices, ceiled cached risk notional, zero PnL,
+individual capital, both insurance domain budgets, SPL balances and fixed supply
+after every economic prefix and rejection. Packed and separate handoffs have
+identical decoded economics and position epochs. A public fee reset after the
+handoff allows zero-fee flattening and six exact capital payouts per world:
+zero OI/capital, eight insurance/vault atoms and 119,999,999,992 paid atoms.
+
+This is a new INV-058/059 composition: aggregate admission after a successful
+CPI release, writable matcher-response rollback, and switching between context
+and batch-return transports. The existing distinct-owner cap matrix checks
+single rejected instructions; the prior atomic handoff selector has no CPI.
+The recreated-counterparty and same-pair controls do not isolate this product.
+**Row 427 remains COVERED**, with bounded conditional support and no production,
+dependency or invariant-status change. This does not add fee-consent, terminal
+reserve, retained withdrawal, pending-loss or fractional-carry coverage.
+Remaining gaps include existing-leg aggregate admission (including the earlier
+unresolved candidate documented below), arbitrary histories, multi-asset or
+maximum-shape batches, nonzero PnL/funding, partial ADL, liquidation/maintenance,
+elapsed rate limits and a complete route-pair Cartesian product. Batch trades
+here have one leg; return-data persistence outside the executing call is not claimed.
+
+Validation uses isolated worktree `/tmp/percolator-row427-audit-20260912-f6c2`,
+based on `origin/codex/astra-open-holdout-ledger-20260912` at
+`7841287b1b796391073a50d9c79260963bdefb72`, and private copied build outputs at
+`/dev/shm/percolator-row427-f6c2-target`. Wrapper SBF SHA-256 is
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+production, manifests and pins match its documented base `6ab7856fbe1e2f89ed11c1103fb5282fab404dee`.
+The private authenticated matcher copy has SHA-256
+`397cdded3ba64b5e03ea54498a160878dcc81dc844222f3ffbdc4e6210dd2936`;
+its source matches the supplying fixture. Host tests were rebuilt here; no SBF
+rebuild is claimed. The new selector passes 24 worlds, 48 exact rollbacks and
+144 payouts, with peak CU `[rejection, trade, custody] = [258550, 312932, 49376]`.
+Development corrected two setup assumptions: an owner-signed opening disables
+an earlier matcher grant, and single CPI uses the configured base fee rather
+than the no-CPI caller fee. Neither failure was a production defect.
+
+Five of the six adjacent exact controls below pass. The unchanged recreated-
+counterparty selector fails its expected-success branch at line 660 with
+`InstructionError(3, Custom(18))`. Running that selector alone in pristine,
+clean base worktree `/tmp/percolator-row427-base-20260912-f6c2` at `7841287b`,
+with the same SBF artifacts and freshly rebuilt host tests, reproduces the
+identical failure. This inherited control limitation is neither repaired nor
+counted as passing coverage here. No full-suite run is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row427-f6c2-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+module=inv_058_cumulative_position_oi_notional_and_rate_limit_integrity
+cargo test --locked --offline --test v16_cu ${module}::atomic_oi_fee_handoff::v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  ${module}::atomic_oi_fee_handoff::v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partitions \
+  ${module}::v16_program_distinct_owner_pairs_cannot_cross_shared_side_oi_cap \
+  ${module}::v16_program_split_fills_cannot_cross_position_or_side_oi_cap_on_any_route_pair \
+  ${module}::v16_program_post_transition_caps_match_across_reduction_and_cross_zero_histories \
+  ${module}::v16_program_recreated_counterparty_preserves_post_transition_cumulative_limits \
+  ${module}::liquidation_lifecycle::v16_program_liquidation_reset_reopen_reuses_capacity_and_preserves_live_notional
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-008 partial reserve payouts and replenished earnings (row 415, 2026-09-12)
 
 Owner: [stateful/inv_008_retained_backing_earnings.rs](stateful/inv_008_retained_backing_earnings.rs),
