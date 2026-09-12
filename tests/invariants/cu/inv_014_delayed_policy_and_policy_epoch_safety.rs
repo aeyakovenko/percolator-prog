@@ -33,6 +33,9 @@ mod retained_activation_fee;
 #[path = "inv_014_retained_close_withdrawal.rs"]
 mod retained_close_withdrawal;
 
+#[path = "inv_014_retained_single_cpi_taker_fee.rs"]
+mod retained_single_cpi_taker_fee;
+
 #[test]
 fn v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change() {
     use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
