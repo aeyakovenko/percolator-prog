@@ -629,6 +629,23 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # No bug found. Earlier COVERED entries describe narrower evidence; the requested
 # broader family stays OPEN. Existing-leg admission, nonunit ADL, nonzero PnL or
 # funding, elapsed liabilities/rates and maximum shapes remain outside this test.
+# Row 427 generated existing-leg composition (2026-09-12):
+# cu/inv_058_generated_side_oi_composition.rs, mounted under
+# inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::generated_side_oi_composition,
+# v16_program_generated_existing_pair_side_oi_caps_compose_across_split_merge_routes.
+# Four seeds, mirrored sides and merged/partitioned routes generate 16 worlds with
+# three disjoint pairs retaining both asset legs. All six directed pair choices
+# and all sixteen release/refill route pairs compose repeated partial reductions
+# and existing-leg increases. Raw OI/count/notional/stock checks follow every fill;
+# 104 paired economic checkpoints agree and 480 complete Account rollbacks include
+# successful wrapper/CPI prefixes and matcher state. Account-local caps remain slack.
+# The generic probe failed before a 23-line shared single/batch wrapper postcondition
+# fixed an actual aggregate-cap resize violation; unchanged probe passes afterward.
+# Row stays OPEN: fixed marks/unit ADL/zero PnL/funding/fees only. Elapsed rates,
+# liabilities, nonunit ADL, mixed lifecycle states, maximum shapes and arbitrary
+# histories remain open. Existing notes retained; no other row disposition changed.
+# Rebased onto 5f3e33b9 including row426. README records exact commands, SBF hashes,
+# pre-fix failure and passing behavioral/metadata/format/diff verification.
 427	Conformance	LIMIT	INV-058	INV-058	disjoint-portfolios+x-side-oi-cap+x-public-trades	side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs	OPEN
 # 428 bounded public conformance (2026-09-12): stateful/inv_008_retained_reserve_replenishment.rs,
 # v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession.

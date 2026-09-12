@@ -1,5 +1,102 @@
 # Invariant-owned test coverage
 
+## INV-058 generated existing-pair side OI (row 427, 2026-09-12)
+
+Owner: [cu/inv_058_generated_side_oi_composition.rs](cu/inv_058_generated_side_oi_composition.rs),
+mounted under
+`inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::generated_side_oi_composition`.
+Exact selector:
+`v16_program_generated_existing_pair_side_oi_caps_compose_across_split_merge_routes`.
+
+Four deterministic XorShift seeds (`427`, `427058`, `427052`, `427080`) generate
+unequal initial allocations and six-event histories across all six directed
+source/recipient choices among three disjoint owner pairs. Both position signs
+and two equivalent execution schedules give sixteen public LiteSVM worlds. Each
+pair holds both assets throughout the generated history; releases only partially
+reduce live legs, and refills increase existing legs. Random quantities and
+quantities adjacent to a quote-notional atom are partitioned into two or three
+unequal fills. The merged schedule uses bilateral batches; the partitioned
+schedule alternates all four single/batch CPI/bilateral transports and reverses
+asset order. All sixteen release/refill route combinations are exercised.
+
+The existing two-asset `World` fixture constructs the market, six portfolios,
+matcher contexts, SPL mint, ATAs and deposits with System/SPL/ATA/wrapper
+instructions. Its fixed 120,000,000,000-atom supply has no remaining mint authority.
+There are no program-owned account-byte writes. Its independent input ledger
+tracks quantities, position episodes and capital. After every committed fill,
+including each separately submitted single-asset fill, the raw portfolio census
+reconciles both side-OI counters and stored counts, checks account-position and
+ceil-notional limits and health certificates, and reconciles capital, insurance,
+mint supply and vault custody. Grant renewals also run the census. Every successful
+fill frames complete Accounts outside its participants and matcher context.
+
+The histories repeatedly reach cap-minus-one and the exact cap while all six
+accounts stay strictly below their individual position ceilings. Both the current
+recipient and the third pair face shared admission checks. There are 480 exact
+Account rollbacks, including successful wrapper prefixes and completed matcher
+calls, with only the payer's exact signature fee deducted. Local trade-size,
+account-position, notional and collateral checks establish that these attempts
+isolate aggregate admission. At 104 paired checkpoints the independently checked
+raw owner quantities, capital/PnL, certified risk, side OI/counts and market stock
+agree across merged and partitioned schedules. Public closes leave both books
+with zero OI and no stored positions.
+
+**An actual implementation violation was found and repaired.** The first exact
+selector run failed on the original wrapper because an inadmissible aggregate
+resize committed. The unchanged generic probe passes with a 23-line wrapper fix:
+the shared single and batch execution paths check each affected asset's resulting
+long and short OI against `MAX_OI_SIDE_Q`, returning `EngineInvalidLeg` on excess.
+This supplies the missing aggregate postcondition for existing-leg resizes and
+lets Solana roll back the entire transaction. The engine dependency is unchanged.
+No finding-specific replay or separate exploit selector was added.
+
+**Row 427 remains OPEN.** This is bounded generated conformance for fixed marks,
+unit ADL, zero PnL/funding/fees, two assets and three solvent pairs. Elapsed rate
+and maintenance limits, nonunit ADL, nonzero PnL/funding/fees combined with these
+resizes, mixed lifecycle/Recovery states, maximum portfolio shapes and arbitrary
+histories remain open. Historical row notes are retained; their older claims
+describe their respective narrower probes. No row426 or other row's disposition
+is changed. Validation intentionally runs only the new exact behavioral selector
+and the two requested metadata selectors, not the broader production test suite.
+
+Branch `codex/row427-side-oi-cap-conformance-20260912`, worktree
+`/tmp/percolator-row427-side-oi-cap-conformance-20260912`, initially based on
+`c94b77a9` and fetched/rebased onto `5f3e33b9` (including row426) before final
+validation. The first pre-fix behavioral run failed; the fixed run passed all
+sixteen worlds, with final rebased peak rejection/success CU 763,263/285,908 (transaction limit
+1,400,000). The behavioral selector, both metadata selectors and all formatting/
+diff checks pass on the rebased tree. Default-feature SBF was built locked/offline
+with platform-tools v1.52 in private paths. SHA-256: original wrapper
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+repaired wrapper `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Exact verification commands (from the worktree root unless noted):
+
+```bash
+git fetch origin codex/astra-open-holdout-ledger-20260912
+git rebase --autostash origin/codex/astra-open-holdout-ledger-20260912
+export CARGO_TARGET_DIR=/tmp/row427-side-oi-cap-target
+export TMPDIR=/tmp/row427-side-oi-cap-tmp
+export PERCOLATOR_FUZZ_SBF=/tmp/row427-side-oi-cap-target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/row427-side-oi-cap-target/deploy -- --locked
+# Matcher build command, run from tests/fixtures/auth_matcher:
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-row427-side-oi-cap-conformance-20260912/tests/fixtures/auth_matcher/target/deploy -- --locked
+# Return to the worktree root for all remaining commands.
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::generated_side_oi_composition::v16_program_generated_existing_pair_side_oi_caps_compose_across_split_merge_routes -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /tmp/row427-side-oi-cap-target
+cargo clean --target-dir /tmp/percolator-row427-side-oi-cap-conformance-20260912/tests/fixtures/auth_matcher/target
+cargo clean --target-dir /tmp/row427-side-oi-cap-tmp
+```
+
 ## INV-020 renewed liquidation certificates (row 426, 2026-09-12)
 
 Owner: [cu/inv_020_renewed_liquidation.rs](cu/inv_020_renewed_liquidation.rs),

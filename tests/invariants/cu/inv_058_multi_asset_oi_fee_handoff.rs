@@ -10,6 +10,9 @@
 
 use super::*;
 
+#[path = "inv_058_generated_side_oi_composition.rs"]
+mod generated_side_oi_composition;
+
 const ASSETS: usize = 2;
 const HANDOFF_FEE_BPS: u64 = 100;
 type Legs = Vec<(u16, i128)>;

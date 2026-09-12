@@ -8128,6 +8128,7 @@ pub mod processor {
                     )
                     .map_err(map_v16_error)?
             };
+            ensure_trade_side_oi_cap_view(&group, asset_index_usize)?;
             ensure_new_counterparty_backed_liens_fresh_for_trade_view(
                 &group,
                 authenticated_market_slot_or_fallback_view(&group),
@@ -8494,6 +8495,9 @@ pub mod processor {
                     &requests,
                 )
                 .map_err(map_v16_error)?;
+            for request in &requests {
+                ensure_trade_side_oi_cap_view(&group, request.asset_index)?;
+            }
             if max_account_a_fee_atoms.is_some_and(|cap| outcome.fee_a > cap) {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
@@ -14505,6 +14509,25 @@ pub mod processor {
             || cert.active_bitmap_at_cert != active_bitmap
         {
             return Err(PercolatorError::EngineStale.into());
+        }
+        Ok(())
+    }
+
+    fn ensure_trade_side_oi_cap_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> ProgramResult {
+        let asset = &group
+            .markets
+            .get(asset_index)
+            .ok_or(PercolatorError::EngineInvalidLeg)?
+            .engine
+            .asset;
+        // Enforce the aggregate post-state bound for both attachments and resizes.
+        if asset.oi_eff_long_q.get() > percolator::MAX_OI_SIDE_Q
+            || asset.oi_eff_short_q.get() > percolator::MAX_OI_SIDE_Q
+        {
+            return Err(PercolatorError::EngineInvalidLeg.into());
         }
         Ok(())
     }
