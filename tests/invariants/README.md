@@ -165,6 +165,93 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-020 active keeper observations after liquidation (row 426, 2026-09-12)
+
+Owner: [cu/inv_020_active_keeper_observations.rs](cu/inv_020_active_keeper_observations.rs),
+mounted under `inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations`.
+Selector: `v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_refresh`.
+
+Eight public LiteSVM histories cross observation order, single/batch admission,
+and admission before/after complete market observation and explicit recipient
+refresh. Four portfolios separate the liquidation target and its counterparty
+from the active reward recipient and its counterparty. System/SPL/ATA/wrapper
+instructions construct all economic accounts and revoke mint authority at
+20,520,000 atoms. Only signer SOL, authenticated Clock and external Pyth reports
+are harness inputs; no initialized economic Account is injected or restored.
+
+A bounded observation prefix advances the three exposed assets to slot 32.
+The target's two assets then reach authenticated Clock slot 64, while the recipient's separate
+losing AuthMark leg remains at slot 32. Target liquidation charges 8,778 atoms,
+credits 2,925 to the active keeper and invalidates its certificate without
+settling its position or changing its counterparty. A transaction containing
+this real liquidation, a successful new position in a fourth market, and an
+old Pyth report rejects at instruction 4 with `OracleStale`. All compiled and
+tracked complete Accounts roll back, including both position changes, reward,
+insurance and rent; only the exact separate payer signature fee is charged.
+The unchanged liquidation instruction then succeeds. A recipient crank that
+omits its pending loss leg rejects with exact `EngineNonProgress` rollback.
+
+The trade route can admit new risk before all market slots catch up. The test
+therefore checks complete account recomputation against the independent raw-state
+certificate oracle, rather than treating any success as an observation bypass.
+In the partial branch the recipient has 270,925 equity and a 221,200 requirement,
+including the entire 18,000-atom adverse target/effective lag. The opposite long
+has no adverse lag charge. In the fully observed branch the recipient has
+252,925 equity and a 205,000 requirement. Every certificate lane, epoch and bitmap
+is checked. Subsequent complete observations, owner reductions and SPL withdrawal
+converge across all eight histories to identical decoded capital/PnL and OI:
+252,925 paid to the keeper, 121,222 target capital and 5,853 retained insurance,
+split exactly between the liquidation asset's two domains. Layout validation,
+stock/reservation censuses and fixed SPL supply hold throughout.
+
+This adds a stale, exposed reward recipient to the existing target-account
+observation histories, plus rollback across liquidation and recipient admission.
+Discarded duplicates: another omitted-target probe, another flat-keeper reward
+payout and another fee-refresh loop repeat `staged_action_observations`,
+`mixed_provider_liquidation` and `interrupted_refresh_fees`. The initial admission
+fixture reused a market with unsettled losses, so its `EngineLockActive` rejection
+did not isolate observation completeness; the final fixture uses an initially
+flat fourth market. The partial-state success and side-specific lag are expected
+certificate semantics, not a confirmed public LoF/DoS finding.
+
+**Row 426 remains OPEN.** This is bounded INV-020/024/053/054/056/061/071/072/081/086
+evidence, not a proof that every favorable action requires every asset at Clock.
+The difference between current committed-state certification and complete
+elapsed observations remains explicit. CPI, batch fills with multiple legs,
+recipient Hybrid/composite feeds, funding/maintenance, insolvent recipients,
+multiple reward episodes, retained consent, terminal claims and maximum shapes
+remain outside this increment. No production, dependency, pin or status changes.
+
+Validation in isolated worktree `/tmp/percolator-astra-row426-20260912`, branch
+`codex/astra-row426-observations-20260912`, starts from the latest requested remote
+at fetch time, `7c176a13a764cbdfa1c5cd5cb01c4b00b762f765`. Private ignored `target/`
+copies the row-427 build cache. The reused default-feature wrapper SBF SHA-256 is
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+production/manifests/pins match documented artifact base `6ab7856fbe1e2f89ed11c1103fb5282fab404dee`.
+Host tests are rebuilt here; no SBF rebuild or full-suite run is claimed.
+New selector: 1/1, eight histories, sixteen exact rollbacks and eight payouts.
+Observed CU maxima `[observation/liquidation, rejected bundle, trade, payout]`:
+`[396821, 654237, 302049, 61103]`, each below the 900,000 transaction ceiling.
+The final four-selector run passes 4/4; its payout maximum is 56,603 CU
+(fresh public key/PDA construction varies that cost between runs).
+The charter/index passes 1/1; formatting and Git whitespace checks pass.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row426-20260912/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+module=inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  ${module}::active_keeper_observations::v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_refresh \
+  ${module}::v16_program_staged_observations_match_current_liquidation_and_reduction \
+  ${module}::partial_observation_routes::v16_program_partial_observation_three_leg_reductions_match_single_and_batch \
+  ${module}::mixed_provider_liquidation::v16_program_mixed_provider_liquidation_omissions_preserve_exact_entitlements
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-024 terminal cleanup submitter (row 410, 2026-09-12)
 
 Owner: [cu/inv_024_terminal_cleanup_submitter.rs](cu/inv_024_terminal_cleanup_submitter.rs),

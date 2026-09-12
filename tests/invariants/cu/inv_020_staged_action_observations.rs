@@ -19,6 +19,9 @@ mod interrupted_refresh_fees;
 #[path = "inv_020_partial_observation_routes.rs"]
 mod partial_observation_routes;
 
+#[path = "inv_020_active_keeper_observations.rs"]
+mod active_keeper_observations;
+
 const PRICE: u64 = 1_000_000;
 const CURRENT: [u64; 2] = [1_040_000, 1_050_000];
 const DEPOSITS: [u128; 3] = [10_000_000, 220_000, 1_000];
