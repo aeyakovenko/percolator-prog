@@ -9786,6 +9786,36 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_045_custody_cap_carry.rs
 git diff --check
 ```
 
+## INV-012 used-slot response binding (row 414, 2026-09-12)
+
+[`cu/inv_012_reused_asset_return_binding.rs`](cu/inv_012_reused_asset_return_binding.rs)
+adds one bounded regression: a genuine close response survives two public asset-slot
+replacements at the same price under an unchanged matcher grant. Retained single and
+batch requests reject the old generation before CPI; repairing only `market_id` is
+admissible, but suppressing fresh matcher output rejects with exact account rollback.
+Single success changes only the response request ID; batch success uses fresh return
+data while preserving the old single record. Eight worlds cover two slots, both signs
+and both entry routes, with 16 replacements, 64 rejections, 48 fills and 16 complete
+owner SPL withdrawals. No authority-revoking transition occurs after request retention.
+
+This composes INV-002/007/012/019/089 at the used-object response boundary; it does not
+duplicate the existing fresh-output lifecycle, isolated generation guard, or row 412
+revocation histories. **Row 414 remains OPEN.** Standing-grant asset scope and arbitrary
+replacement histories are not established. Whole-market restart, changed-price or
+external-provider oracle composition, permissionless fee-bearing activation, active
+sibling obligations, maximum-shape counters and generic lifecycle histories remain
+outside this bounded selector.
+
+Validation was first run in isolated worktree `/tmp/percolator-row414`;
+coordinator integration reran the new selector, adjacent INV-012/019 controls,
+charter/index, formatting and Git whitespace checks on the current branch. New
+selector result: **1/1**, with eight worlds, 64 live previews, 16 replacements,
+64 committed rejections, 48 committed fills and 16 full withdrawals. CU maxima:
+generation rejection **99,625**, response rejection **219,713**, entry/exit or
+positive preview **438,665**, lifecycle/configuration **112,342**, owner
+withdrawal **147,768**. No production, dependency, invariant-status or full-suite
+claim is made.
+
 ## INV-012 used-generation lifecycle (row 414, 2026-09-09)
 
 [`cu/inv_012_used_generation_lifecycle.rs`](cu/inv_012_used_generation_lifecycle.rs)

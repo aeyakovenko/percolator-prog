@@ -97,6 +97,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # settlement. First-ever flat admission, shared owners, policy changes and general
 # histories remain outside this bounded increment; no production fix or promotion.
 413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
+# Row 414 bounded response conformance (2026-09-12): cu/inv_012_reused_asset_return_binding.rs,
+# v16_program_reused_asset_requires_current_generation_and_fresh_matcher_output.
+# Genuine close responses survive two public used-slot replacements at the same price
+# with unchanged grants/episodes. Both CPI requests reject old market_id before CPI;
+# generation-only repair remains subject to fresh-output validation and exact rollback.
+# Eight worlds, 16 replacements, 64 rejections, 48 fills and 16 full SPL withdrawals.
+# No standing-grant scope theorem, arbitrary lifecycle generator, changed-price/provider
+# composition or maximum-shape coverage; no production fix or row/status promotion.
 414	LoF	PRIVILEGED	INV-012	INV-002,INV-007,INV-012,INV-019,INV-089	capability+x-asset-reuse+x-generation	capabilities-bind-every-replaceable-economic-object-incarnation	OPEN
 # 415 bounded conformance (2026-09-12): stateful/inv_008_retained_backing_earnings.rs,
 # v16_program_partial_reserve_payouts_preserve_replenished_earnings_across_orders.
