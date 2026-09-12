@@ -3,6 +3,13 @@
 # Kind/severity are recorded claims, not impact acceptance under scripts/loop.md; OPEN does not confirm LoF/DoS.
 # status remains OPEN until a generic invariant-owned generator/oracle (not the finding PoC)
 # fails on the vulnerable pin, the production fix lands, and the unchanged oracle passes.
+# Rows 412/414 partial positive conformance (2026-09-12): cu/inv_012_used_scope_succession.rs,
+# v16_program_used_scope_succession_preserves_revocation_and_current_authorized_exit.
+# Eight public histories combine automatic bilateral-close revocation, two used-slot
+# replacements, a live sibling, fresh grants and matcher-context/oracle-authority ABA.
+# Current invocation fields, independent counters and full owner SPL exits compose.
+# No retained replay or generic generator/oracle; both rows stay OPEN. See
+# used_scope_succession_20260912.md for overlap boundaries, commands and limitations.
 # Row 412 partial conformance (2026-09-10): cu/inv_012_revocation_atomicity.rs,
 # v16_program_retained_capability_tracks_committed_revocation_after_bundle_rollback.
 # Successful CPI/revoking-writer prefixes roll back on current-episode denial; unchanged

@@ -642,6 +642,14 @@ adds keeper-only custody repair across paid receipts, late expiry and pending-co
 detachment. Its 24 public worlds check owner attribution, exact rollback and rent.
 Rows 410/417/418/419/420/421/424/433 remain OPEN; 434 is outside the audit.
 
+The [2026-09-12 used-scope succession increment](used_scope_succession_20260912.md)
+adds eight public LiteSVM histories combining bilateral-close automatic revocation,
+two used-slot replacements with a live sibling, explicit owner reauthorization,
+and matcher-context/oracle-authority A-to-B-to-A succession. Current invocation
+records, incarnation counters, displaced contexts and complete owner SPL payouts
+are checked together. This is bounded positive coverage: **rows 412 and 414 remain
+OPEN**, with no standing-grant generation-confinement or retained-replay claim.
+
 The [2026-09-12 capability/incarnation gap audit](capability_incarnation_gap_audit_20260912.md)
 adds twenty public LiteSVM histories for activation/CPI rollback, portfolio/grant rollback,
 and funded oracle ABA across shutdown with separate reserve ledgers and SPL beneficiaries.
