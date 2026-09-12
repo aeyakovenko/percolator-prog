@@ -1,5 +1,65 @@
 # Invariant-owned test coverage
 
+## INV-008 underfunded withdrawal rail and replenishment (row 415, 2026-09-12)
+
+Owner: [cu/inv_008_underfunded_rail_retry.rs](cu/inv_008_underfunded_rail_retry.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::underfunded_rail_retry`.
+The selector `v16_underfunded_withdrawal_retry_preserves_replenished_stock_across_quote_rails`
+checks 1- and 37-atom withdrawals across all six deposit/backing/donation orders.
+A secondary vault one atom short rejects at Withdraw's late custody check,
+rolling back the debit, owner sequence, successful backing SPL transfer, funding
+watermark and first ledger initialization. The unchanged withdrawal bytes then
+pay through the primary rail and exhaust the original capital.
+
+Later public replenishment creates three separately accounted stocks: owner
+capital from Deposit, provider backing from TopUpBackingBucket, and secondary
+custody surplus from a direct SPL transfer. A retained withdrawal suffix on
+either rail aborts all three prefixes; the identical replenishment bundle then
+commits. Both old rails reject with EngineStale despite sufficient capital and
+custody. A fresh partial withdrawal survives both a paid-prefix/stale-suffix
+rollback and a duplicate across rails, then pays through the secondary rail.
+All four consumed variants stay stale while a full same-amount payout remains
+funded. Every rejection checks the complete Account frame and exact payer fee;
+every transaction checks independent capital/backing books, immutable bystander
+state, both fixed mint supplies, and all token destinations and vaults.
+
+This adds late withdrawal failure composed with backing-ledger rollback and
+cross-rail recovery. Standalone redeposit, passive-reward, PnL-conversion and
+insurance round-trip candidates were excluded as existing coverage; no duplicate
+test was added and later removed. Frozen-destination admission was also excluded
+because it rejects before the intended mutation boundary. This is bounded
+INV-008/010/011/024/031/064 evidence, not reserve-withdrawal stock-sequence or
+arbitrary-history certification. **Row415 remains OPEN.** No new public-interface
+LoF/DoS, production fix, engine change or status promotion is claimed.
+
+The new selector passes 12 histories / 168 transactions / 132 exact rollbacks;
+peak **92,247 CU**, within the unchanged 300,000 custody ceiling. Base:
+`575a6a0ee7f4992323facd8f3136203a9da7c029`, isolated worktree
+`/tmp/percolator-row415-20260912`, branch `codex/row415-retained-withdrawal-20260912`.
+Default-feature SBF was rebuilt locked/offline with platform-tools v1.52 into
+`/dev/shm/row415-retained-withdrawal-20260912-target`; wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Host tests use that same private target with debug info and incremental compilation
+disabled. No matcher is needed. Exact validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row415-retained-withdrawal-20260912-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::underfunded_rail_retry::v16_underfunded_withdrawal_retry_preserves_replenished_stock_across_quote_rails -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_008_intent_uniqueness_and_bounded_replay::v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody \
+  inv_008_intent_uniqueness_and_bounded_replay::v16_consumed_withdrawal_rails_stay_stale_across_reserve_replacement \
+  inv_008_intent_uniqueness_and_bounded_replay::withdrawal_stock_history::v16_program_generated_withdrawal_stock_histories_preserve_first_execution_budget
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-012 prior-epoch keeper revocation (row 412, 2026-09-12)
 
 Owner: [cu/inv_012_prior_epoch_cleanup_revocation.rs](cu/inv_012_prior_epoch_cleanup_revocation.rs),
