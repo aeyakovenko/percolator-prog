@@ -11878,7 +11878,11 @@ pub mod processor {
                 backing_has_value(&slot.engine.backing_long)
                     || backing_has_value(&slot.engine.backing_short)
             }
-            ASSET_AUTH_ADMIN | ASSET_AUTH_ORACLE => false,
+            // The oracle owns no token stock directly, but once this asset has exposure it controls
+            // the mark used to settle that stock. Treat that indirect entitlement as funded so a
+            // cold asset admin cannot replace the incumbent oracle without its consent.
+            ASSET_AUTH_ORACLE => asset_local_has_position_or_loss_state_view(group, asset_index),
+            ASSET_AUTH_ADMIN => false,
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         })
     }
