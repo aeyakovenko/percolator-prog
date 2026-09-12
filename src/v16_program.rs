@@ -7230,7 +7230,7 @@ pub mod processor {
                 amount,
             ),
             Instruction::CloseResolved { fee_rate_per_slot } => {
-                handle_close_resolved(program_id, accounts, fee_rate_per_slot, None)
+                handle_close_resolved(program_id, accounts, fee_rate_per_slot, None, None)
             }
             Instruction::UpdateAuthority {
                 authority_epoch,
@@ -13458,6 +13458,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         _fee_rate_per_slot: u128,
         auto_crank_now_slot: Option<u64>,
+        backing_asset_hint: Option<usize>,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -13491,16 +13492,26 @@ pub mod processor {
                 expect_signer(owner)?;
             }
             let insurance_before = group.header.insurance.get();
-            // CloseResolved is a compatibility alias for the sole public engine crank. Routing
-            // both tags through the selector keeps stale/out-of-order calls atomic: a waiting
-            // winner selects NoAction and returns EngineNonProgress instead of landing as a
-            // successful CU-burning no-op.
+            // CloseResolved is a compatibility alias for the sole public engine crank. A resolved
+            // PermissionlessCrank may additionally carry one discovery-only asset hint; the
+            // engine reads the actual backing status and expiry and either advances one bucket or
+            // returns NonProgress atomically.
+            let backing_observation =
+                backing_asset_hint.map(|asset_index| AutoCrankObservationV16 {
+                    asset_index,
+                    effective_price: 0,
+                    funding_rate_e9: 0,
+                });
+            let observations = match backing_observation.as_ref() {
+                Some(observation) => core::slice::from_ref(observation),
+                None => &[],
+            };
             let result = group
                 .permissionless_auto_crank_not_atomic(
                     &mut portfolio,
                     AutoCrankWorkV16 {
                         now_slot: authenticated_slot,
-                        observations: &[],
+                        observations,
                         resolved_close_fee_rate_per_slot: cfg.maintenance_fee_per_slot,
                     },
                 )
@@ -14171,7 +14182,26 @@ pub mod processor {
         let (_, mode, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         if mode == MarketModeV16::Resolved {
-            return handle_close_resolved(program_id, accounts, 0, Some(now_slot));
+            if observation_hints.len() > 1 {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            let backing_asset_hint = match observation_hints.first() {
+                Some(hint)
+                    if hint.oracle_accounts == 0
+                        && usize::from(hint.asset_index) < max_market_slots =>
+                {
+                    Some(usize::from(hint.asset_index))
+                }
+                Some(_) => return Err(PercolatorError::InvalidInstruction.into()),
+                None => None,
+            };
+            return handle_close_resolved(
+                program_id,
+                accounts,
+                0,
+                Some(now_slot),
+                backing_asset_hint,
+            );
         }
         handle_permissionless_crank_zero_copy(
             program_id,
