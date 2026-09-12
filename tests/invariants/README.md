@@ -235,6 +235,102 @@ cargo fmt --all -- --check
 git diff --check && git diff --cached --check && git show --format= --check HEAD
 ```
 
+## INV-045 matcher handoffs, precrank carry, and owner exit (row 425, 2026-09-12)
+
+Owner: [cu/inv_045_carry_transport_exit.rs](cu/inv_045_carry_transport_exit.rs),
+mounted under `inv_045_no_free_mark_movement::public_carry_order::carry_transport_exit`.
+Selector: `v16_program_row425_matcher_handoffs_preserve_precrank_carry_and_exact_owner_exit`.
+
+Twenty-four public LiteSVM histories cross both target directions, early reductions
+on even/odd slots, single/two-asset batch transport, and a bilateral control versus
+both phases of an alternating CPI/bilateral route word. The two mixed words also
+reverse asset hints, active-owner cranks and terminal owner order relative to one
+another. This is a finite comparison, not the full independent ordering product.
+At early slots, one lot reduces before the market crank and one afterward; at
+other slots, two lots reduce after it. Every mixed world executes a CPI reduction
+before accrual while **both** assets already have nonzero fractional carry.
+
+The test reuses the public SPL `World` and independent input ledger from
+`public_carry_order`. System/SPL/ATA/wrapper instructions construct economic state;
+the authenticated matcher context is System-created and initialized by its own
+program. The LP publicly renews its zero-fee delegation after bilateral fills;
+only the taker signs matcher fills. The harness supplies program loading,
+payer/admin SOL bootstrap, authenticated Clock warps and fresh blockhashes.
+No market, portfolio, matcher-context or token economic bytes are injected.
+
+After each renewal, trade and crank, the inherited oracle checks exact owner
+value including unsettled K, capital and positive-PnL summaries, OI, zero
+funding/B/cohorts, and SPL mint/wallet/vault conservation. Both complete oracle
+profiles survive reductions and renewals unchanged; absent owners' portfolios
+are byte-framed across fills. Public inputs determine each price and carry as
+`anchor +/- floor(anchor * 24 * elapsed / 10000)` and its remainder. Only lots
+still held when a price atom commits earn that atom. Final active-owner PnL is
+`direction * -5` for even-slot early reductions or `direction * -7` for odd;
+the peer receives its negative, and passive owners retain `[-4, +4] * direction`.
+Both carries end at `[2000, 5000]`.
+
+Resolution at slot 5 followed by owner-signed `CloseResolved` at slot 100 must
+pay all four independently predicted entitlements into their existing ATAs.
+Every close checks frozen price/carry, payout upper bounds, supply/custody and
+capital totals. Successful closes change the economic frame; non-progress
+rejections preserve complete tracked market/portfolio/mint/vault/wallet Accounts.
+Within 16 rounds, all four portfolios are terminal, both assets have zero OI,
+and vault/capital/positive-PnL totals are zero. Exact final SPL payouts and live
+economics agree across all six route/order variants of each timing schedule.
+
+Distinct coverage: `precrank_carry` excludes CPI/delegation and stops at live
+entitlement; `interleaved_cap_carry` checks one-asset fresh-feed fee/reward
+provenance, not two-asset AuthMark precrank entitlement and exact owner payout;
+`v16_program_pending_fractional_carry_survives_due_trade_and_resolution` uses
+one asset and no CPI. This increment connects valid matcher handoffs and both
+batch legs to the same public-input entitlement oracle and realized custody.
+
+This adds bounded INV-024/038/041/045/052/071/085/086/088 composition, with route
+ordering relevant to INV-010 but no new retained-intent/replay evidence. **Row 425
+remains OPEN.** Integral positions isolate price-cap carry from settlement
+rounding; nonzero fees/funding, fractional-position residue attribution,
+trade-driven accrual, target replacement, nonunit ADL, backing/receipt top-ups,
+liquidation/Recovery, all terminal-order permutations, maximum shapes, arbitrary
+route histories and full-width arithmetic remain outside this test. No generic
+oracle, production fix, invariant-status promotion or broad-suite result is claimed.
+No executed probe was discarded and no production mismatch was observed. Further
+no-CPI split/order-only variations were discarded during design as duplicates.
+
+Validation uses isolated worktree `/home/anatoly/astra-row425-20260912`, branch
+`codex/astra-row425-carry-20260912`, created only from local
+`origin/codex/astra-open-holdout-ledger-20260912` at `f9fdc1e2`.
+The main checkout, GitHub PRs/issues/branches and withheld data were not inspected.
+The copied default-feature SBF SHA-256 is
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256 is
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Source/Cargo/matcher-source comparison with the documented `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`
+artifact baseline is empty. No SBF rebuild was needed. Cached host dependencies
+were copied into a private target; the matching matcher artifact is copied only
+to this worktree's ignored fixture path. The older `5029cc34` wrapper artifact
+was excluded because production source differs from its documented baseline.
+
+The exact new selector passes all 24 histories with peak measured
+trade/crank/resolve/close cost **395,182 CU**, under 1,400,000; setup and delegation
+renewal are excluded from this measurement. All three adjacent selectors, the
+charter/index selector, repository-wide formatting and all three whitespace
+checks pass. The adjacent precrank control passes 32 histories at 376,794 CU;
+the due-trade/resolution control passes eight at 214,785 CU. Existing regression
+harness dead-code warnings and the Solana client future-incompatibility warning
+remain. Reproduction commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row425-20260912-target
+export TMPDIR=/dev/shm/astra-row425-20260912-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::carry_transport_exit::v16_program_row425_matcher_handoffs_preserve_precrank_carry_and_exact_owner_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_045_no_free_mark_movement::public_carry_order::precrank_carry::v16_program_row425_precrank_reductions_preserve_carry_and_owner_entitlement inv_045_no_free_mark_movement::interleaved_cap_carry::v16_program_interleaved_trade_routes_preserve_oracle_cap_carry_and_reward_provenance inv_045_no_free_mark_movement::v16_program_pending_fractional_carry_survives_due_trade_and_resolution
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-024 terminal insurer merge and separation (row 410, 2026-09-12)
 
 The [terminal role partition audit](terminal_role_partition_audit_20260912.md)

@@ -1,13 +1,17 @@
 //! Row425: account-settlement order and signed fill partition at a committed cap frontier.
 //! INV-024/025/038/041/045/052/071/085/086/088, bounded public SBF evidence only.
 //! Integral position lots isolate fractional price-cap carry from settlement rounding.
-//! No pending cohorts, resolution, backing expiry, or residual partition is constructed.
+//! The primary selector constructs no pending cohorts, resolution, backing expiry,
+//! or residual partition. The carry_transport_exit child adds resolved owner payouts.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
 #[path = "inv_045_precrank_carry.rs"]
 mod precrank_carry;
+
+#[path = "inv_045_carry_transport_exit.rs"]
+mod carry_transport_exit;
 
 const ANCHORS: [u64; 2] = [100, 125];
 const CAP_BPS: u64 = 24;
