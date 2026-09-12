@@ -1,5 +1,75 @@
 # Invariant-owned test coverage
 
+## INV-028 latent capacity reuse with retained history (row 423, 2026-09-12)
+
+Owner: [cu/inv_028_latent_capacity_reuse.rs](cu/inv_028_latent_capacity_reuse.rs),
+mounted under `inv_028_source_domain_realizability_cap::single_slot_admission::latent_capacity_reuse`.
+The selector `v16_program_latent_pair_reuse_preserves_historical_claims_and_replacement_exit`
+adds eight public LiteSVM histories using the existing `SparseHistory` fixture.
+System/SPL/wrapper instructions retain 26 detached, one-sided claims across 26
+assets. An unrelated leg occupies the remaining two future-domain slots; a
+partial reduction keeps both domains latent. Its final matched close and a new
+position on the other spare asset execute either as separate trades or as one
+close-then-open `BatchTradeNoCpi`, across both signs and both spare-asset choices.
+
+Admission preserves every historical source record, both capitals, and SPL vault
+custody, with exactly 26 occupied plus two replacement latent domains. Later
+authenticated marks and bounded permissionless cranks create a 7-atom claim,
+then an opposite 11-atom claim after cross-zero admission. All 28 occupied domains
+remain attributable; the abandoned leg's domains stay empty. No conversion
+occurs before this settlement. Final reduction, exact conversion, both complete
+owner payouts (1,000,069 and 999,931 atoms), and both portfolio deletions clear
+every claim and backing reservation, preserve mint supply, and exhaust custody.
+The input-derived fixture oracle checks every successful economic transition;
+each settlement crank must strictly reduce economic/accrual work within four calls.
+
+This adds reuse of an unmaterialized domain pair while historical claims remain.
+INV-077's reclamation control converts the entire historical table before new
+admission; existing row423 single-slot, retained-episode, concurrent-cohort and
+active-increase selectors do not replace a latent pair on an unrelated asset.
+Those existing angles were excluded during review. This finite no-CPI comparison
+does not cover arbitrary admission histories, all future resource classes,
+unrelated risk admitted while the old leg remains active, reverse batch ordering,
+liens, expiry, Recovery, or maximum active-leg combinations. **Row423 remains OPEN**
+with partial INV-028/057/073/077 conformance. Current behavior did not violate the
+property in the retained cases; no production correction or status promotion.
+
+The new selector passes 8/8 worlds and 1,172 successful post-funding calls.
+Peak CU for trade / mark-crank / conversion / withdrawal / close:
+**919,832 / 526,257 / 712,924 / 49,455 / 26,540**, within the existing ceilings.
+Base `2c1842f11337f12e1507137c5977290adac70f1b`; branch
+`codex/row423-historical-capacity-20260912`; worktree
+`/tmp/percolator-row423-20260912`. Host dependency artifacts were copied into the
+private target from `/dev/shm/row415-retained-withdrawal-20260912-target`; the wrapper
+and auth matcher were rebuilt locked/offline with default features and platform-tools
+v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+All four adjacent selectors pass, as does the charter/index check and formatting.
+At worker base, the separate machine-status check failed with `stale
+counterexample projection for INV-058`: row427 was OPEN in `coverage_reopenings.tsv`
+while `invariant_status.tsv` still recorded no counterexamples. This integration
+also records row427 in the machine status as `REFUTED_CURRENT`; that bookkeeping
+fix is independent of the row423 witness. Focused validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row423-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row423-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row423-tmp CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::single_slot_admission::latent_capacity_reuse::v16_program_latent_pair_reuse_preserves_historical_claims_and_replacement_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_028_source_domain_realizability_cap::single_slot_admission::v16_program_single_vacant_domain_admission_preserves_historical_claims_and_exit \
+  inv_028_source_domain_realizability_cap::single_slot_admission::v16_program_batch_admission_cannot_share_last_future_domain_slot \
+  inv_028_source_domain_realizability_cap::historical_latent_capacity::v16_program_historical_and_latent_domains_share_bounded_settlement_capacity \
+  inv_077_bounded_work_and_maximum_shape_compute::v16_program_max_source_capacity_reclamation_restores_funded_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-005 consumed backing after principal repayment (row 416, 2026-09-12)
 
 Owner: [cu/inv_005_consumed_backing_containment.rs](cu/inv_005_consumed_backing_containment.rs),
@@ -19790,7 +19860,7 @@ Verdicts mean:
 | AUDIT-055 | REOPENED | The 28-cell public normal-user matrix covers open, bilateral reduction, owner reduction, Recovery forfeit, deposit, withdraw, and resolved payout across Active, DrainOnly, Recovery, and Resolved with strict successful deltas or exact rollback. Dedicated public products cover all trade transports in ResetPending and Retired/reactivated generations, DrainOnly exit, irreversible close, terminal settlement, reserve and oracle lifecycle, permissionless progress, and the 546-world ResetPending ordering frontier. A new expired-close route reaches market Recovery without state injection and proves fresh portfolio initialization rejects exactly there and in Resolved. The source-complete admission roster assigns every one of the 49 current instructions to one of fifteen tested state-machine owners and verifies its executable witness. Sixteen high-risk wrapper handlers retain their direct mode guards; six delegated routes retain their canonical engine transition. Administrative/current-state controls compose with their authority, policy, reserve, oracle, and ledger invariant owners rather than receiving vacuous asset-lifecycle permutations. A route, owner family, handler gate, or dispatch target change reopens closure. |
 | AUDIT-056 | REOPENED | The source-complete input classification proves PermissionlessCrank is the only public route with caller-supplied discovery hints; withdrawal, conversion, claim, and trade routes therefore need stale-state/flatness/certificate/full-scan coverage, not invented hint permutations. All four trade routes settle stale related legs, all fourteen max-shape active-leg omissions reject exactly, all 40 three-asset zero-tail words through length three are covered, and matched/mismatched two-asset Pyth tail orders are normalized or atomic. Public traces cover Refresh, AdvanceClose, SettleB, expired-close recovery declaration, FinalizeRecovery, and ResolvedClose hint behavior. SettleB's public trace independently found the loss-atom/index-unit CU bug fixed in engine PR155, then composes its fixed action with an authenticated external tail. A max-shape liquidatable state rejects duplicate/permuted three-feed tails exactly before the canonical tail dispatches liquidation. A source-complete 49-route disposition gate now proves that the favorable account surface is exactly the four trade transports plus released-PnL conversion, flat-only withdrawal, two immutable terminal payout rails, refreshing cure, and three stale-safe reductions. Every route in that portfolio-favorable or risk-reduction obligation points to an executable public witness; inbound-only, scoped non-portfolio value, and control/bookkeeping routes are explicit rather than wildcarded. A new public variant fails both this gate and the canonical registry before it can inherit a favorable-action exemption. This closes the current wrapper surface; a new route, hint field, favorable engine callsite, or certificate rule reopens it. |
 | AUDIT-057 | REOPENED | Public matrices cover ordinary owner reduction, bilateral DrainOnly exit, Recovery forfeit and third-party force-close, close-locality, all generated failure frontiers, and exact funded SPL exit. The INV-071 source roster binds every progress class to exact-pin engine continuation postconditions and executable public witnesses. The new assumption-free INV-082 Kani composition executes the actual selector over arbitrary full-width class magnitudes, proves a strict lexicographic decrement for every selected class, and exhausts all `2^8` summary overlaps; INV-077 supplies maximum-shape CU bounds. This closes the current validated-state surface under authenticated-input, fair-submission, rollback, and arithmetic assumptions. A new exposure mode, progress class, exit route, engine pin, or supported shape reopens it. |
-| AUDIT-058 | CONDITIONAL | All sixteen public first/final transport pairs reach the shared position/OI ceiling by split fills on one owner pair; every transport rejects one more same-pair atom with complete rollback and the exact-max position exits. The 2026-09-08 disjoint-owner trace first failed on engine `495a5590`: after two independent owner pairs filled the aggregate side OI to `MAX_OI_SIDE_Q` while all accounts stayed below account cap, a third public trade pushed both side counters to `MAX_OI_SIDE_Q + 1`. Engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336` adds the attach-side cap guard, and the unchanged generic regression now rejects the third trade through every transport with exact rollback. This is bounded conformance evidence, not a proven LoF, persistent DoS, CU failure, or full transition-system proof. Compile-time relationships bind trade, account, side-OI, maximum-price, and account-notional domains. TVL and batch shape boundaries are public and exact. Cross-zero, fee/funding partition, config-rate, arithmetic, and writer-surface obligations compose from INV-009/011/045/049/050/052/059/083/085 without duplicate tests. A new position writer, cap predicate, or distinct hard bound reopens this row. |
+| AUDIT-058 | REOPENED | All sixteen public first/final transport pairs reach the shared position/OI ceiling by split fills on one owner pair; every transport rejects one more same-pair atom with complete rollback and the exact-max position exits. The 2026-09-08 disjoint-owner trace first failed on engine `495a5590`: after two independent owner pairs filled the aggregate side OI to `MAX_OI_SIDE_Q` while all accounts stayed below account cap, a third public trade pushed both side counters to `MAX_OI_SIDE_Q + 1`. Engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336` adds the attach-side cap guard, and the unchanged generic regression now rejects the third trade through every transport with exact rollback. Row427 keeps INV-058 reopened: the latest multi-asset OI/fee handoff coverage remains bounded conformance and explicitly leaves existing-leg admission, nonunit ADL, nonzero PnL/funding, elapsed liabilities/rates, and maximum shapes outside the witness. Compile-time relationships bind trade, account, side-OI, maximum-price, and account-notional domains, but they are not a full transition-system proof. A new position writer, cap predicate, hard bound, or unresolved row427 dimension reopens this row. |
 | AUDIT-059 | CONDITIONAL | `PermissionlessCrank` exposes no close quantity; selection and arithmetic remain pinned-engine obligations. Existing fixed liquidation campaigns check a full-residual minimum, one partial close with sixteen exact-frame retries, and two authenticated deficit episodes across four trade transports with independent per-charge/cumulative fees and projected outcome equality. INV-009 delegates finite execution partitions under consumed one-shot consent and newly signed residuals; exact-fill batch CPI aggregate caps remain INV-011-owned. The [executing evidence and F plan](#inv-059-executing-evidence-and-f-plan) leaves randomized liquidation episode histories and mixed-flow attribution unowned in the scoped evidence. This traceability repair adds no runtime/proof result or status promotion; persistent partial authorization, caller-sized liquidation, or durable-nonce economic consent requires review. |
 | AUDIT-060 | REOPENED | Public IM/MM and lag gates are joined by a four-world metamorphic decomposition and a raw-state independent fresh-certificate model that executes after every generated public transition. The model does not invoke engine refresh and reconstructs every deployed lane from ADL-effective legs, ceil notional, margin floors, target lag, source-credit and lien state, fee debt, PnL, bitmap, and epochs. Cloned engine refresh must match it exactly. A current untouched cache must have the same identity and epochs and may differ only conservatively; the one-lane mutation matrix rejects every healthier direction. Directed all-route/both-side worlds retain exact equality for explicit recertification and nonvacuously cover valid and exact-expiry impaired liens, final-leg pending bankruptcy, and mixed Recovery/Live state. They prove pending residual and impairment alter equity once without becoming duplicate requirement penalties. Terminal `reserved_pnl` and the publicly unwritable cancel escrow are disposition/encumbrance fields owned by INV-067/068 and INV-026/087, not omitted health lanes. A new certificate field or public reserve writer reopens this row. |
 | AUDIT-061 | REOPENED | The current account-local liquidation surface is closed by seven-class composition over eighteen exact-pin engine proofs: total priority dispatch, deterministic first actionable slot, minimum health-restoring sizing, effective-OI mutation, fee/minimum-fee bounds, durable residual admission, Recovery fallback, and cleanup priority. Public evidence independently reconstructs selector arithmetic, crosses three authenticated episodes and unequal multi-asset losses, proves both terminal landing orders, and composes liquidation into a partial receipt and exact terminal custody. `PermissionlessCrank` is the sole ingress and carries discovery hints only; direct or caller-sized liquidation is source-excluded. Maximum-shape worlds cover fourteen legs, twenty-eight sources, both leg/observation orders, and a separate forty-two-feed Hybrid tail below the SVM ceiling. A pin, ingress, selector branch, supported shape, or witness change reopens the row. |
