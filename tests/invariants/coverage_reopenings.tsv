@@ -277,6 +277,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # payouts, full receipt identity, two-atom residue and complete Account rollback agree.
 # Peak measured settlement cost 451,915 CU. Finite coverage only; row remains OPEN.
 # README records duplicate analysis, validation commands and remaining gaps.
+# 417 partial conformance (2026-09-12): cu/inv_067_receipt_overdue_history.rs,
+# inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_overdue_history::v16_program_generated_overdue_source_histories_preserve_receipt_identity_and_attribution.
+# Three boundary and 24 seeded/shrinkable histories compare singleton/generated groups
+# with two overdue source stocks and repeated/deferred claims by two unequal receipt owners.
+# Input-derived cumulative floors, receipt/owner identity, per-source stock/claim bounds,
+# all owner/provider payouts and custody are checked after every commit; rejected groups
+# restore complete fixture Accounts and charge only the payer signature fee. Terminal
+# receipt clearing/retries converge with two rounding atoms. README's matching section
+# records exact new/INV-079 selectors, isolated build paths and verification commands.
+# OPEN: fixed population/amounts/source order; arbitrary histories, Recovery/insurance,
+# conversion mixtures, alternate rails, absent roles, maxima and account retirement omitted.
 417	LoF	BLOCKER	INV-067	INV-010,INV-024,INV-029,INV-063,INV-066,INV-067,INV-068,INV-070	receipt+x-late-expiry+x-claimant-order	terminal-claim-identity-survives-every-later-stock-reclassification	OPEN
 # Row 418 partial conformance (2026-09-10): cu/inv_077_terminal_quote_variants.rs,
 # v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent.

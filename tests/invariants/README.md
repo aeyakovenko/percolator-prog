@@ -1,5 +1,90 @@
 # Invariant-owned test coverage
 
+## INV-067 generated overdue source histories (row 417, 2026-09-12)
+
+Owner: [cu/inv_067_receipt_overdue_history.rs](cu/inv_067_receipt_overdue_history.rs),
+mounted as `inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_overdue_history`.
+Exact selector:
+`v16_program_generated_overdue_source_histories_preserve_receipt_identity_and_attribution`.
+
+The existing public six-owner, three-asset fixture supplies unequal 700/1,300-face
+receipts and a third claimant with 1,000 face across two source domains. This
+increment advances directly past both source deadlines before normalization.
+It generates zero through eight claimant calls in each of five phases around four
+bounded source-close calls, with repeated/deferred/reversed claimant priority,
+one-through-four-instruction transaction groups and optional rejected suffixes.
+Three explicit boundary histories and 24 ChaCha-seeded shrinkable histories each
+run as singleton transactions and as generated groups. Failure-only persistence
+uses `proptest-regressions/inv_067_receipt_overdue_history.txt`; the shrink limit is
+128. Clock landings range from slot 15 (the second deadline) through slot 63.
+
+An action-word oracle derives cumulative floors from public input faces and the
+501 initial residual plus 161/189 released atoms. It does not read engine payout
+rates to choose expected amounts. Every committed transaction checks immutable
+receipt fields, owner/provenance/portfolio ID/position epoch, monotone paid value,
+exact and unreceipted claim bounds, each source's reserve/claim/receivable class,
+all six owner balances, provider attribution, capital, mint supply and vaults.
+In the singleton run every instruction is checked. The first normalization must
+leave the second overdue source Fresh and fully reserved. Clock alone cannot
+increase either receipt's paid value. The same retained requests catch up and
+clear after the final bound replacement; further retries must preserve exact
+tracked Accounts. Each failed group must execute its entire expected wrapper/SPL
+prefix, then restore complete fixture Accounts, with only the separate payer's
+exact signature fee charged. Successful groups frame unrelated Accounts and
+reconcile the exact custody delta and SPL transfer count.
+
+Every history ends with owner payments 1,198 / 1,283 / 1,368, one provider atom,
+two attributed rounding atoms in custody and cleared claims. Split/grouped runs
+compare the complete resolved payout ledger and all owner payments. This adds a
+generated two-overdue-source, multi-receipt cadence/transaction product to the
+fixed separate-deadline `receipt_repeated_stock` and single-source
+`receipt_expiry_interleavings` products. The earlier stateful generated receipt
+drain varies one retained claimant; this probe checks two unequal retained
+receipts through the same independently bounded releases. No program-owned bytes
+are installed or restored by the probe; setup uses System/SPL/ATA/wrapper calls
+and the existing LiteSVM Clock/airdrop facilities.
+
+**Row 417 remains OPEN**, and invariant statuses are unchanged. Population,
+amounts, source order and initial trade/resolve history are fixed. Arbitrary
+reclassification histories, Recovery, insurance, conversion/expiry mixtures,
+alternate collateral rails, absent roles, maximum shapes and portfolio/slab
+retirement remain outside this generator. Rows 415/416/433 retain their existing
+coverage and notes; this increment makes no production change.
+
+Worktree: `/tmp/percolator-row417-receipt-late-expiry-20260912`; branch:
+`codex/row417-receipt-late-expiry-20260912`. Fetched and rebased onto
+`origin/codex/astra-open-holdout-ledger-20260912` at `78aed475`, including the
+row416 handoff commit. The private default-feature SBF build uses platform-tools
+v1.52 and locked engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Its SHA-256 is
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The rebase changed only invariant tests/metadata, so the rebuilt artifact is
+unchanged. The new selector passes on its first run: **54 worlds, 1,139 committed
+transactions and 132 exact rollbacks**, including 63 paying and 28 stock-release
+prefixes (these categories may overlap). Peak settlement cost is **529,178 CU**,
+below the 900,000 bound. Both requested INV-079 selectors pass, as do formatting
+and Git whitespace checks. No actual implementation violation was found; no
+other behavioral selector or broad suite was run. Private target/tmp cleanup
+uses the Cargo commands below. Exact commands, run from this worktree:
+
+```bash
+export CARGO_TARGET_DIR=/tmp/percolator-row417-receipt-late-expiry-target
+export TMPDIR=/tmp/percolator-row417-receipt-late-expiry-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_overdue_history::v16_program_generated_overdue_source_histories_preserve_receipt_identity_and_attribution -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+```
+
 ## INV-008 paid withdrawal across portfolio stock recreation (row 415, 2026-09-12)
 
 Owner: [cu/inv_008_recreated_withdrawal_stock.rs](cu/inv_008_recreated_withdrawal_stock.rs),
