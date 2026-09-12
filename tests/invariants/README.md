@@ -627,6 +627,91 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-024 terminal recredit excludes raw surplus (row 410, 2026-09-12)
+
+Owner: [cu/inv_024_terminal_recredit_surplus.rs](cu/inv_024_terminal_recredit_surplus.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_surplus`.
+Selector: `v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback`.
+Primary INV-024; affected INV-005/024/036/081. Base:
+`810ac694ab50e443fd01594ef916fe45a7939867` from
+`origin/codex/astra-open-holdout-ledger-20260912`. Worktree:
+`/tmp/percolator-astra-row410-20260912`, branch
+`codex/astra-row410-attribution-20260912`.
+
+Two public LiteSVM histories exhaust 100 insurance atoms through actual resolved
+bankruptcy. Inputs fix user capital at 1,000/100/137, a 200-atom gain, and complete
+user payouts of 1,200/0/137. Unused backing of 61 or 137 atoms survives, with one
+settled portfolio still materialized. A separate donor transfers 83 atoms through
+SPL into the vault; the complete market Account remains unchanged. Provider,
+insurer, live operator, donor, market authority, three users and cleanup payer
+are nine distinct identities. Mint authority is revoked before trading.
+
+At expiry slot 44, the market authority deletes the final portfolio and normalizes
+backing. An unsigned insurance withdrawal recredits only booked residual, bounded
+by spent insurance and the 100-atom opposing provider receivable. The 61-atom world
+retains 39 spent atoms even though raw custody could cover them; the 137-atom world
+recovers all 100 and leaves 37 booked atoms for burning. Both final closes sweep
+exactly 83 raw atoms to market authority, pay zero quote atoms to the cleanup
+payer/provider/operator/donor, preserve user payouts and retain exact tombstone
+rent. Portfolio rent enters the slab, and slab/vault rent goes to market authority.
+Reserve holders and users sign none of the cleanup continuation instructions.
+
+Each world first appends a repeated CloseSlab after deletion, expiry, insurer SPL
+payout and final disposal. The final instruction rejects InvalidAccountLen at
+index 6, after four successful wrapper instructions, including the burn when
+nonzero, surplus transfer and vault closure. The shared transaction oracle checks
+all tracked and compiled Accounts, account presence and exact signature fees.
+The unchanged first three instructions then commit, exposing the distinct
+insurance budget/spent counters and booked/raw custody, before the unchanged final
+close commits. Complete SPL Account frames, fixed supply less the exact burn,
+beneficiary identities/epochs, peer source counters and a reconciled stock census
+are asserted. Local Account copies are assertion frames only.
+
+The net-new relation is competition between booked recredit and raw surplus after
+real reserve consumption. Existing `terminal_cleanup_submitter` covers deletion
+with fresh earned reserves; `terminal_prefix_recredit` covers spent-insurance
+recovery without an external donation; the INV-070 external-surplus selector
+burns booked residue without a surviving recredit attribution boundary. The
+stateful expired-backing composition also supplies no raw SPL donation. Additional
+submitter-role permutations, insurer merge/split, provider custody replacement,
+fresh-reserve payout orders and a standalone repeated-close probe were discarded
+during source review; none was added as a separate test.
+
+Validation: new selector **1/1**, adjacent affected selectors **3/3**, invariant
+charter/index **1/1**. Observed CU maxima across isolated and focused runs
+[user settlement, rejected bundle, retry, final close] are
+**[222909, 324592, 286066, 39618]**, each bounded by **400,000**. Adjacent peaks:
+cleanup submitter **590833**, external surplus **131477**, earlier-asset recredit
+**225888** CU. The private
+default-feature SBF rebuild used locked/offline platform-tools v1.52; SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+No production source, engine pin or manifest changed. The first development run
+incorrectly passed raw custody to the strict booked-stock census; the test now
+checks the 83-atom difference independently before reconciling that census.
+No production bug was found. Formatting and all three Git whitespace checks pass.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/tmp
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_surplus::v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_cleanup_submitter::v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submitter \
+  inv_071_crank_progress::terminal_prefix_recredit::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_terminal_scan_reconciles_external_surplus_arriving_after_cached_prefix
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+**Row 410 remains OPEN.** These are two bounded resolution histories, not a generic
+shutdown/resolve attribution oracle. Other quote rails, retained receipts, earned
+fees alongside spent-insurance recovery, multiple recredit beneficiaries, custody
+replacement, arbitrary funding/role histories and all transaction compositions
+remain outside this increment. No vulnerable-pin experiment or status promotion.
+
 ## INV-024 terminal cleanup submitter (row 410, 2026-09-12)
 
 Owner: [cu/inv_024_terminal_cleanup_submitter.rs](cu/inv_024_terminal_cleanup_submitter.rs),
