@@ -5076,6 +5076,27 @@ Results: isolated new selector **1/1**, combined focused run **3/3**, formatting
 and whitespace checks pass. Peak new-test exit CU: **219,404**. The existing
 `solana-client` future-incompatibility warning remains.
 
+## INV-027 flat admission liabilities (row 413, 2026-09-09)
+
+[`cu/inv_027_flat_admission_liabilities.rs`](cu/inv_027_flat_admission_liabilities.rs)
+adds a bounded public conformance matrix and source-order contract for
+`all-accrued-liabilities-precede-every-risk-increasing-admission`. Branch:
+`codex/astra-pr135-row413-inv027-20260909`.
+
+The wrapper fix removes the flat-portfolio exemption from the pre-trade
+maintenance-fee hook by delegating to the existing value-debit fee collector for
+every portfolio shape before single and batch trade admission. Engine-owned loss
+settlement, fee anchoring, debt accounting, pins, and message formats are
+unchanged.
+
+The public matrix covers four transports, two assets, first-open versus
+reopened-flat histories, and direct versus explicit settlement. It checks exact
+capital debits, fee cursors, zero remaining fee debt/PnL, canonical insurance
+credits including odd-fee rounding, OI, positions, current-certificate
+equivalence, fixed SPL custody, and unchanged unrelated asset state. Row 413
+remains OPEN for broader margin-boundary, non-fee-liability, multi-leg,
+selected-asset-time, maximum-shape, and arbitrary-history coverage.
+
 ## INV-017 transaction-wide privileges and account-kind alias (2026-09-09)
 
 [`cu/inv_017_signer_writable_role_and_account_alias_safety.rs`](cu/inv_017_signer_writable_role_and_account_alias_safety.rs)

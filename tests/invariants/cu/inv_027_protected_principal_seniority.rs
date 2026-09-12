@@ -28,6 +28,9 @@
 //! not certify a standalone first open with uncollected fees (reopening 413 remains open).
 //! The withdrawal-prefix first-admission test instead realizes flat fees implicitly while SPL
 //! pays both owners: a later margin rejection must undo those transfers and fee debits together.
+//! The flat-admission sibling owns first-open and reopened-flat histories with asymmetric fee
+//! cursors, comparing direct admission and same-slot resize to explicit public settlement.
+//! Its source contract requires shape-independent collection before both engine admission handlers.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -43,6 +46,9 @@ mod maintenance_terminal_seniority;
 
 #[path = "inv_027_joint_admission_liabilities.rs"]
 mod joint_admission_liabilities;
+
+#[path = "inv_027_flat_admission_liabilities.rs"]
+mod flat_admission_liabilities;
 
 const ISSUE408_FEE_PER_SLOT: u128 = 1_000;
 const ISSUE408_AGED_SLOT: u64 = 500;

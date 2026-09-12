@@ -2,7 +2,7 @@
 //! maintenance and rounded adverse nontraded-leg target lag, on either party.
 //! INV-060 owns fees alone; INV-053 owns lag after explicit fee collection. This
 //! matrix compares direct admission with public settlement while both are pending.
-//! Already-live portfolios only: flat first-risk ordering remains with #430/#413.
+//! Already-live portfolios only: flat histories belong to the flat-admission sibling.
 //! All economic state is constructed through System/SPL/ATA/wrapper instructions.
 
 use super::*;
@@ -24,7 +24,7 @@ fn requirement(size: i128) -> u128 {
     (notional * u128::from(MARGIN_BPS)).div_ceil(10_000)
 }
 
-fn public_portfolio(env: &mut V16CuEnv, owner: &Keypair) -> Pubkey {
+pub(super) fn public_portfolio(env: &mut V16CuEnv, owner: &Keypair) -> Pubkey {
     env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
     let key = Keypair::new();
     system_create_account_for_test(
@@ -48,7 +48,12 @@ fn public_portfolio(env: &mut V16CuEnv, owner: &Keypair) -> Pubkey {
     key.pubkey()
 }
 
-fn public_deposit(env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey, amount: u128) -> Pubkey {
+pub(super) fn public_deposit(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    amount: u128,
+) -> Pubkey {
     let token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
     send_raw_tx(
         &mut env.svm,
