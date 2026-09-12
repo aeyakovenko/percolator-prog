@@ -36,18 +36,17 @@ oracle modes, multi-asset composition and the full economic-route product remain
 outside the witness. Rows 413/422 and all invariant/status TSVs are unchanged.
 No wrapper, engine or ABI fix was needed.
 
-Validation uses isolated worktree `/tmp/percolator-carry-conformance-20260912-k4n7`
-at base `70d92368d275fd1f700f3893d2e1243294bde07e`. A fresh locked/offline,
-default-feature SBF build uses platform-tools v1.52 and engine
+Validation was integrated on the watch branch at `af97beea`. A fresh locked/offline,
+default-feature SBF build used platform-tools v1.52 and engine
 `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; program SHA-256:
 `d5f2d3d2c35842aab0979ab24fed415fe36b2b93ed6cc80998fee839ae76343f`.
-The new selector passes with peak successful transaction compute of 219,432 CU.
-Exact validation commands are:
+The final watch-branch selector passes with peak successful transaction compute
+of 236,727 CU. Exact validation commands are:
 
 ```sh
-export CARGO_TARGET_DIR=/dev/shm/percolator-carry-k4n7-host
-export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-carry-k4n7-target/deploy/percolator_prog.so
-export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+export CARGO_TARGET_DIR=/dev/shm/percolator-watch-verify-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm/percolator-watch-verify-tmp
+cargo build-sbf --no-default-features
 cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::rebalance_cap_carry::v16_program_unilateral_reduction_preserves_fractional_cap_and_peer_entitlement -- --exact --nocapture
 cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_045_no_free_mark_movement::v16_program_pending_fractional_carry_survives_due_trade_and_resolution inv_073_no_permanent_user_lock::v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit
 cargo test --locked --offline --test v16_program_stateful_fuzz inv_052_split_merge_invariance::v16_program_unilateral_rebalance_adl_keeps_followup_price_settlement_zero_sum -- --exact --nocapture
