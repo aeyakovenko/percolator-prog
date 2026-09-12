@@ -3,6 +3,15 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+The [same-program role-switch generation audit](role_switch_generation_audit_20260912.md)
+adds one INV-012 selector with sixteen public LiteSVM histories. An LP signing as
+taker through another owner-bound context of the same matcher program loses its
+grant. Returning to flat and reusing a previously traded asset slot in either
+order cannot restore it. Separate episode, enabled-state, grant-sequence and asset
+generation denials compose with exact rollback, live peer controls, fresh owner
+consent and complete SPL payouts. Holdouts 412/414 remain OPEN; broader authority,
+object-replacement and lifecycle products remain residual gaps.
+
 The [2026-09-12 selected-provider assignment audit](selected_provider_assignment_audit_20260912.md)
 adds eight public LiteSVM worlds selecting Switchboard or Chainlink on either asset
 index with a Pyth sibling. Reversed observation order, exact provider-binding and
