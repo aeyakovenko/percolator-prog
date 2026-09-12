@@ -105,6 +105,95 @@ rollbacks. CU maxima: selected setup fee-trade/principal transactions **437,784*
 rejections **329,432**, successful management/payout transactions **327,621**.
 No production, dependency, invariant-status or full-suite claim is made.
 
+## INV-070 frozen payout destinations with absent freeze authority (row 418, 2026-09-12)
+
+Owner: [cu/inv_070_frozen_destination_exit.rs](cu/inv_070_frozen_destination_exit.rs),
+mounted by INV-070 as `frozen_destination_exit`. Selector:
+`v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority`.
+
+Four public LiteSVM histories cross both assignments of `CloseResolved` and
+`PermissionlessCrank` to a solvent matched pair with retained/revoked SPL freeze
+authority. System/SPL/ATA/wrapper instructions create every economic account.
+Deposits of 1,000 and 1,300 atoms fund a one-lot position at 100; a public
+authenticated-mark observation at 110 precedes resolution. Supply is fixed at
+2,317 atoms, including 17 unbooked vault atoms. A distinct SPL freeze authority
+freezes the two now-empty original user destinations and the administrator's
+empty sweep destination. It either retains its authority and stops signing or
+irrevocably removes that authority. Both user keypairs and the freeze-authority
+keypair are dropped before terminal payouts. The canonical vault stays unfrozen.
+
+After the configured owner window, a keeper creates ordinary non-ATA SPL accounts
+owned by the original beneficiaries and pays the losing leg followed by the
+winning leg in exactly two value-moving wrapper calls. The input-derived payouts
+are 1,290 and 1,010 atoms. No thaw, owner signature or mint-authority signature
+is needed. The two payout aliases trade roles across the matrix. After each
+payment the independent stock/encumbrance censuses reconcile the surviving
+portfolios, booked custody, zero insurance and 17 external surplus atoms. The
+mint, all three frozen original destinations, absent wallets and paid prefixes
+remain unchanged throughout subsequent terminal steps.
+
+Five complete-Account rollback checks per world cover each frozen user payout;
+keeper account creation plus the first successful payout followed by the second
+frozen destination; both portfolio deletions followed by frozen sweep rejection;
+and deletion, surplus transfer, both vault closes and tombstone creation followed
+by an insufficient-balance SPL burn. Failed transactions preserve every compiled
+and tracked Account, including creation rent, portfolio rent and token bytes;
+only the exact separate payer signature fee is charged. Logs confirm the preceding
+wrapper instructions completed before each late rejection. The same valid
+prefixes then succeed. Administrator-signed cleanup deletes both portfolios,
+pays the 17-atom surplus to fresh administrator-owned custody, closes both vaults,
+and refunds exactly slab excess, both portfolio rents and both vault rents while
+retaining canonical tombstone rent. Primary supply remains 2,317. The frozen
+original accounts retain their external token-account rent and zero token value.
+
+Overlap review discarded additional empty/native-capacity closes, cooperative
+thaw retirement, prefunded ATA repair, and delegated/close-authority destination
+probes. Existing `terminal_quote_variants` and `secondary_quote_completion`
+exercise cooperative thaw without funded user claims; INV-082's
+`terminal_custody_alternate` has flat principal and delegated/closable accounts,
+no freeze-authority removal and no final slab close. INV-018's delegated
+destination control restores the original account by owner-signed revocation.
+This increment combines nonzero resolved PnL with permanently frozen destinations
+and final market closure through fresh beneficiary-owned custody.
+
+**Row 418 remains OPEN** and invariant verdicts are unchanged. This is bounded
+INV-018/021/025/069/070/073/077/078/080/081 conformance, conditional on valid unfrozen
+canonical custody, authenticated price/time and administrator cleanup. It does
+not cover a frozen canonical vault, renewed interference by a retained freezer,
+native-primary booked residue, bankrupt/deferred receipts, source/backing or
+insurance retirement, arbitrary claimant orders, maximum shape, Token-2022 or
+arbitrary histories. No production defect or fix is claimed. The initial fixture
+omitted the public observation crank before resolution; its price assertion
+failed and was corrected before any terminal test ran.
+
+The worker originally validated this in isolated worktree
+`/tmp/percolator-astra-row418-terminal-20260912`; coordinator integration reran
+the new selector, four adjacent terminal/token controls, the two metadata
+selectors, formatting and Git whitespace checks on the current invariant branch.
+The new selector passes four worlds, 20 exact rollbacks, eight user payouts and
+four slab closes. Observed peak CU `[payout-with-creation, rejection, cleanup]`
+is `[216006, 349068, 85820]`; trade/observation/resolve use
+`120116/102019/3085` CU. Every measured terminal transaction fits 1,232 bytes and
+500,000 CU; shared setup helpers do not all report CU. No full-suite run,
+production change, dependency change or SBF rebuild is claimed.
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::frozen_destination_exit::v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_public_destination_delegation_is_route_scoped_and_revocation_restores_payout \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_terminal_stock_and_close_slab_composition_is_source_complete \
+  inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent \
+  inv_082_state_indexed_liveness_theorem::terminal_destination_recovery::terminal_custody_alternate::v16_program_absent_reserve_holders_receive_principal_through_alternate_custody
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-058 mixed-CPI side-OI handoff (row 427, 2026-09-12)
 
 Owner: [cu/inv_058_atomic_oi_fee_handoff.rs](cu/inv_058_atomic_oi_fee_handoff.rs),

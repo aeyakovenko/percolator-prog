@@ -172,6 +172,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # retirement, both sweeps, four custody closes, rent and ten complete Account rollbacks.
 # Cooperative administration only; native-primary residue, user claims and general
 # histories remain outside this witness. See README; no generic generator/status promotion.
+# Row 418 bounded conformance (2026-09-12): cu/inv_070_frozen_destination_exit.rs,
+# v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority.
+# Four fixed-supply SPL worlds cross payout aliases with absent/revoked freeze authority.
+# Nonzero resolved PnL pays 1010/1290 through keeper-created beneficiary custody while
+# original user/admin destinations stay frozen; 17 surplus atoms and exact slab/rent
+# disposition follow. Twenty complete Account rollbacks include custody creation,
+# a prior user payout and final close. Unfrozen canonical custody, solvent losing-first
+# order and administrator cleanup only; see README. Native residue/general row stay OPEN.
 418	DoS	BLOCKER	INV-070	INV-018,INV-021,INV-025,INV-069,INV-070,INV-073,INV-077,INV-078,INV-081	token-variant+x-terminal-stock+x-close	all-supported-quote-token-variants-have-a-bounded-terminal-disposition	OPEN
 # Row 419 bounded public conformance (2026-09-12): cu/inv_039_pending_loss_funded_resolution.rs,
 # v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders.

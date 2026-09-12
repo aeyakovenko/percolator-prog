@@ -37,6 +37,9 @@ mod terminal_prefix_reuse;
 #[path = "inv_070_prefunded_quote_custody.rs"]
 mod prefunded_quote_custody;
 
+#[path = "inv_070_frozen_destination_exit.rs"]
+mod frozen_destination_exit;
+
 #[test]
 fn v16_program_terminal_scan_reconciles_external_surplus_arriving_after_cached_prefix() {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_capacity;
