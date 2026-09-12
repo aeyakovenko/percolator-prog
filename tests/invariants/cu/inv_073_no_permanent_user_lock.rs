@@ -82,6 +82,19 @@ mod recovery_claim_liability_exit;
 #[path = "inv_073_spent_insurance_terminal_exit.rs"]
 mod spent_insurance_terminal_exit;
 
+#[path = "inv_073_terminal_provider_earnings.rs"]
+mod terminal_provider_earnings;
+
+#[test]
+fn v16_program_terminal_provider_first_disposition_needs_no_reserve_signatures() {
+    inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::verify_terminal_provider_and_insurance_disposition(false, &[false]);
+}
+
+#[test]
+fn v16_program_terminal_insurance_first_disposition_needs_no_reserve_signatures() {
+    inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::verify_terminal_provider_and_insurance_disposition(false, &[true]);
+}
+
 #[test]
 fn v16_program_terminal_provider_earnings_and_lazy_ledger_reach_exact_slab_close() {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -6598,8 +6611,8 @@ enum Inv073TerminalAuthority {
     PermissionlessEconomic,
     PermissionlessMechanical,
     OwnerOrResolvedMarketAuthority,
-    BackingAuthorityOrShutdownMarketAuthority,
-    InsuranceAuthorityOrShutdownMarketAuthority,
+    LiveBackingConsentOrPublicTerminal,
+    LiveInsuranceConsentOrPublicTerminal,
     MarketAuthority,
 }
 
@@ -6704,19 +6717,25 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
             rank_lane: "provider-cleanup",
             handler: "fn handle_withdraw_backing_bucket<'a>(",
             transition: ".withdraw_fresh_counterparty_backing_not_atomic(",
-            authority: Inv073TerminalAuthority::BackingAuthorityOrShutdownMarketAuthority,
-            witness_path:
-                "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
-            witness: "expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup",
+            authority: Inv073TerminalAuthority::LiveBackingConsentOrPublicTerminal,
+            witness_path: "tests/invariants/cu/inv_073_no_permanent_user_lock.rs",
+            witness: "v16_program_terminal_provider_first_disposition_needs_no_reserve_signatures",
+        },
+        Inv073TerminalPhase {
+            rank_lane: "provider-cleanup",
+            handler: "fn handle_withdraw_backing_bucket_earnings<'a>(",
+            transition: ".withdraw_backing_provider_earnings_not_atomic(",
+            authority: Inv073TerminalAuthority::LiveBackingConsentOrPublicTerminal,
+            witness_path: "tests/invariants/cu/inv_073_terminal_provider_earnings.rs",
+            witness: "v16_program_terminal_earned_fees_have_unsigned_exact_disposition",
         },
         Inv073TerminalPhase {
             rank_lane: "insurance-cleanup",
             handler: "fn handle_withdraw_insurance_asset<'a>(",
             transition: "debit_market_insurance_budget_view(",
-            authority: Inv073TerminalAuthority::InsuranceAuthorityOrShutdownMarketAuthority,
-            witness_path:
-                "tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs",
-            witness: "v16_program_prior_insurance_frames_all_partial_receipt_orders",
+            authority: Inv073TerminalAuthority::LiveInsuranceConsentOrPublicTerminal,
+            witness_path: "tests/invariants/cu/inv_073_no_permanent_user_lock.rs",
+            witness: "v16_program_terminal_insurance_first_disposition_needs_no_reserve_signatures",
         },
         Inv073TerminalPhase {
             rank_lane: "asset-cleanup",
@@ -6791,7 +6810,7 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         "terminal administrative rank lane drift"
     );
     assert_eq!(authorities.len(), 6, "terminal authority-class drift");
-    assert_eq!(witnesses.len(), 9, "terminal public-witness drift");
+    assert_eq!(witnesses.len(), 10, "terminal public-witness drift");
 
     assert_eq!(
         production

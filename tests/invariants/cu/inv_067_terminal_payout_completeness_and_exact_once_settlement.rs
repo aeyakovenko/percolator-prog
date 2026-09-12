@@ -39,7 +39,7 @@ mod receipt_partition_confluence;
 pub(super) mod late_expiry;
 
 #[path = "inv_067_terminal_provider_insurance_retries.rs"]
-mod provider_insurance_retries;
+pub(super) mod provider_insurance_retries;
 
 #[path = "inv_067_receipt_rail_liquidity.rs"]
 mod receipt_rail_liquidity;
