@@ -24,6 +24,9 @@
 
 use super::*;
 
+#[path = "inv_005_retained_debit_matrix.rs"]
+mod retained_debit_matrix;
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,

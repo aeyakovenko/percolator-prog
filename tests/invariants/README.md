@@ -12,6 +12,11 @@ The [2026-09-12 retained capability, identity and replay audit](retained_identit
 maps the remaining holdouts to main's generators and documents the INV-012 retained joint-grant
 atomicity increment. It adds partial coverage without changing invariant verdicts or closing a holdout.
 
+The [mixed retained-debit matrix](retained_debit_matrix_20260912.md) adds 36 public worlds
+crossing portfolio recreation and reserve-authority ABA with all landing orders of portfolio,
+insurance and backing withdrawals. It checks independent budgets, exact rollback, beneficiary
+attribution and complete principal exit. Retained authority/consent holdouts remain open.
+
 ## INV-024 terminal earned-fee succession (row 410, 2026-09-10)
 
 [`cu/inv_024_terminal_earnings_succession.rs`](cu/inv_024_terminal_earnings_succession.rs)
