@@ -20,6 +20,18 @@ generation denials compose with exact rollback, live peer controls, fresh owner
 consent and complete SPL payouts. Holdouts 412/414 remain OPEN; broader authority,
 object-replacement and lifecycle products remain residual gaps.
 
+The [2026-09-12 sibling-generation liveness audit](sibling_generation_liveness_audit_20260912.md)
+adds one INV-028 selector with eight public LiteSVM histories. Fourteen active legs
+and fourteen occupied source domains precede an unrelated asset append, optionally
+followed by sibling retirement and reuse. Bounded, rank-decreasing public refresh
+preserves the fourteen still-latent domains, which subsequently settle to the full
+28-domain shape. Every bilateral owner exit lowers exposure; complete SPL payouts
+are exactly 1,000,054 and 999,946 atoms. This adds partial
+INV-028/057/073/077/082/089 coverage beyond fixed-market latent-domain and market-growth
+reduction controls. INV-078 failure-class recovery, unilateral exits, arbitrary
+configuration histories and permissionless activation fees remain outside this
+increment. No invariant verdict or holdout status changes.
+
 The [2026-09-12 selected-provider assignment audit](selected_provider_assignment_audit_20260912.md)
 adds eight public LiteSVM worlds selecting Switchboard or Chainlink on either asset
 index with a Pyth sibling. Reversed observation order, exact provider-binding and
