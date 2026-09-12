@@ -418,6 +418,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # selectors/CU and the distinction between current certificates and elapsed evidence.
 # CPI, funding, repeated rewards, recipient Hybrid feeds and maximum shapes remain
 # gaps; no generic completeness proof, production fix or status promotion. Row stays OPEN.
+# Row 426 bounded recipient-to-target conformance (2026-09-12):
+# cu/inv_020_reward_recipient_liquidation.rs,
+# v16_program_reward_recipient_becomes_liquidation_target_after_composite_refresh.
+# Four public histories carry the first liquidation reward into a second target's
+# independent composite-feed health, then a second fee/reward/domain allocation.
+# Mixed provider epochs reject before and after complete refresh with eight exact
+# Account rollbacks. Another portfolio commits the recipient's observation; no-tail
+# refresh/liquidation and single/batch owner exit converge to a 69,361-atom payout.
+# This adds an underwater composite recipient, not another solvent AuthMark keeper.
+# Omitted-Hybrid partial-state certification remains unresolved and excluded. No
+# production fix or generic completeness claim; see README. Row remains OPEN.
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
 # Row 427 additional bounded conformance (2026-09-12): cu/inv_058_atomic_oi_fee_handoff.rs,
 # v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes.

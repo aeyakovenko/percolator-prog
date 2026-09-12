@@ -8,6 +8,9 @@ use crate::support::fuzz_model::{
 };
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_020_reward_recipient_liquidation.rs"]
+mod reward_recipient_liquidation;
+
 const ENDOWMENTS: [u128; 4] = [10_000_000, 220_000, 300_000, 10_000_000];
 const KEEPER_PRICE: u64 = 1_050_000;
 const SHARE: u128 = 3_333;

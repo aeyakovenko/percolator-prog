@@ -940,6 +940,91 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-020 composite reward recipient becomes a target (row 426, 2026-09-12)
+
+Owner: [cu/inv_020_reward_recipient_liquidation.rs](cu/inv_020_reward_recipient_liquidation.rs),
+mounted under `inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::reward_recipient_liquidation`.
+Selector: `v16_program_reward_recipient_becomes_liquidation_target_after_composite_refresh`.
+
+Four public System/SPL/ATA/wrapper histories cross full/empty discovery after
+complete refresh with single/batch owner exit. Four separately funded portfolios
+hold three exposed assets. The first liquidation target has a Pyth and an
+AuthMark leg; its active reward recipient holds an unrelated two-Pyth composite
+short. Mint authority is revoked at 20,340,000 atoms. Economic Accounts are never
+injected or replayed; signer SOL, Clock and external provider reports are fixtures.
+
+The bounded catchup call at Clock slot 64 leaves every portfolio byte-identical
+and the three exposed markets at slot 32. Target-only observation then refreshes
+the first target to 130,000 equity and 209,000 margin. Liquidation charges 8,778,
+credits 2,925 to the keeper and leaves its composite leg unsettled at slot 32.
+That credit invalidates its certificate without settling its unrelated loss.
+
+A numerator renewed without the matching denominator epoch rejects atomically,
+even though both reports are individually fresh. The keeper's counterparty then
+commits coherent provider evidence while leaving the keeper Account unchanged;
+the keeper consumes that committed state with no provider tail. Independent
+certificate arithmetic requires 72,925 equity, 105,000 maintenance margin and
+32,075 deficit, explicitly including the first reward once. The same incoherent
+input rejects again before the second liquidation. All eight rejections check
+complete tracked/compiled Accounts and exact payer signature fees, preserving
+the already committed first reward and its fee allocation.
+
+The keeper now becomes the second target. Full or empty hints charge the same
+3,564 penalty, credit 1,187 to its counterparty and leave zero certified deficit.
+The two insurance allocations remain separately attributed to their respective
+asset domains. Owner reduction through either single or batch trade closes the
+recipient's residual position and its full 69,361 capital pays in SPL. The
+counterparty's 50,000 trading gain remains PnL, separate from its capital reward.
+Independent stock/reservation/certificate checks, fixed mint supply, the first
+target's complete Account and the final economic comparison hold in every world.
+Peak is **396,811 CU**, within a **500,000 CU** single-instruction ceiling.
+
+This adds a reward-recipient-to-liquidation-target transition with an independent
+composite epoch. The existing active-keeper selector uses a solvent AuthMark
+recipient; the current-health and liquidation-replay selectors do not carry a
+prior reward into a second target's health and independently attributed fee.
+**Row 426 remains OPEN.** An exploratory omitted-Hybrid partial-state rejection
+expectation encountered the previously documented unresolved schedule; that probe
+was removed and no value-moving continuation from it is retained or certified.
+Funding, CPI, terminal claims, maximum shapes and general observation completeness
+remain outside this increment. No real public-interface LoF/DoS is confirmed and
+no production, dependency or invariant-status change is made.
+
+Base `2c1842f11337f12e1507137c5977290adac70f1b`, branch
+`codex/row426-authenticated-observations-20260912`, isolated worktree
+`/tmp/percolator-row426-20260912`. Default-feature wrapper SBF was rebuilt from
+this worktree with platform-tools v1.52, locked and offline; SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Host tests use the same private target. No matcher is needed. The new selector
+passes 1/1, adjacent controls 4/4 and charter/index 1/1. The additional machine
+status check fails at the unchanged INV-058 projection: `invariant_status.tsv`
+has no counterexample, while row427 is OPEN. A forced host recompile of a pristine
+`git archive` of the base in `/dev/shm/percolator-row426-tmp/baseline` reproduces
+the same `{}` versus `{427}` failure. This pre-existing status mismatch is not
+repaired by row426 coverage. Validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row426-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row426-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row426-tmp CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+m=inv_020_authenticated_clock_slot_and_oracle_provenance
+cargo test --locked --offline --test v16_cu "${m}::staged_action_observations::active_keeper_observations::reward_recipient_liquidation::v16_program_reward_recipient_becomes_liquidation_target_after_composite_refresh" -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  "${m}::staged_action_observations::active_keeper_observations::v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_refresh" \
+  "${m}::current_health_evidence::v16_program_mixed_hybrid_auth_mark_requires_current_health_evidence_before_owner_exit" \
+  "${m}::liquidation_observation_replay::v16_program_liquidation_rejects_rewound_observations_after_authenticated_market_move" \
+  "${m}::staged_action_observations::v16_program_staged_observations_match_current_liquidation_and_reduction"
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-020 active keeper observations after liquidation (row 426, 2026-09-12)
 
 Owner: [cu/inv_020_active_keeper_observations.rs](cu/inv_020_active_keeper_observations.rs),
