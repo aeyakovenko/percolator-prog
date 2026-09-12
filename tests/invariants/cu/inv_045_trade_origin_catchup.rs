@@ -1,6 +1,7 @@
 //! INV-045 / row 422: paid Hybrid discovery through lagged/caught-up liquidation.
 //! Compare raw prints, unequal stale reports and separate/combined market catchup.
-//! Fresh-report handoff and its reward-eligibility transition remain outside this test.
+//! The parent selector excludes fresh-report handoff. The child covers corroboration
+//! only after the paid mark is caught up, including rollback and shared-owner histories.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -8,13 +9,19 @@ use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv01
 #[path = "inv_045_authenticated_reward_handoff.rs"]
 mod authenticated_reward_handoff;
 
+#[path = "inv_045_corroborated_mark_fees.rs"]
+mod corroborated_mark_fees;
+
 const ENTRY: u64 = 1_000_000;
 const ACCEPTED_PRINT: u64 = 990_400;
 const MARK: u64 = 992_320;
 const FUNDS: [u64; 5] = [5_100_000, 100_000_000, 10_000_000, 10_000_000, 1_000];
 
 fn fund(env: &mut V16CuEnv, owner: &Keypair, amount: u64) -> (Pubkey, Pubkey) {
-    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    env.svm.expire_blockhash();
+    if env.svm.get_account(&owner.pubkey()).is_none() {
+        env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    }
     let portfolio = Keypair::new();
     system_create_account_for_test(
         &mut env.svm,
@@ -34,7 +41,13 @@ fn fund(env: &mut V16CuEnv, owner: &Keypair, amount: u64) -> (Pubkey, Pubkey) {
     )
     .expect("public portfolio initialization");
     env.portfolios.push(portfolio.pubkey());
-    let tokens = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+    let tokens = canonical_vault_ata(owner.pubkey(), env.mint);
+    if env.svm.get_account(&tokens).is_none() {
+        assert_eq!(
+            create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint),
+            tokens
+        );
+    }
     send_raw_tx(
         &mut env.svm,
         &env.payer,

@@ -25,7 +25,13 @@
 # v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order.
 # Paid Hybrid mark: unequal stale reports, lagged/caught-up liquidation and catchup order;
 # exact effective-price fees, owner claims, zero keeper/domain reward and principal SPL exit.
-# Fresh-report handoff of trade-origin provenance remains open; no row/status promotion.
+# Fresh-report handoff while the paid mark still lags remains open; no row/status promotion.
+# Row 422 partial conformance (2026-09-12): cu/inv_045_corroborated_mark_fees.rs,
+# v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees.
+# Fresh corroboration only after full paid-mark catchup cannot reclassify old discovery fees
+# into keeper/domain entitlements; shared owners and publication order agree, including
+# exact fresh-publication bundle rollback, bounded retries and keeper SPL payout.
+# Four sampled public histories; no generic generator/oracle. Row/status remain OPEN.
 # Rows 423/425/426 partial conformance (2026-09-12): cu/inv_028_hybrid_capacity_carry.rs,
 # v16_program_historical_capacity_preserves_hybrid_carry_health_and_owner_entitlement.
 # Eight public histories retain 26 old claims while the last live Hybrid leg needs both

@@ -873,6 +873,97 @@ This is bounded INV-005/024/036/080/081 evidence. **Row 429 remains OPEN**, and
 rows 412/433 and all invariant verdicts are unchanged. General role histories,
 new earnings during succession, time-expiry/impairment, alternate quote rails and
 absent-beneficiary economic completion remain outside this increment.
+## INV-045 fresh corroboration preserves previously retained fees (row 422, 2026-09-12)
+
+[`cu/inv_045_corroborated_mark_fees.rs`](cu/inv_045_corroborated_mark_fees.rs),
+mounted under `inv_045_no_free_mark_movement::trade_origin_catchup::corroborated_mark_fees`,
+adds `v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees`.
+Base: local invariant integration commit `ff987a9d0289a571707432fe9d3cb36334b8da17`.
+Worktree: `/tmp/percolator-astra-mark-provenance-row422-20260912`; branch:
+`codex/astra-mark-provenance-row422-20260912`. The requested main checkout and its
+local `main` commit lacked this directory, so the worktree uses the existing local
+invariant baseline. No GitHub PRs/issues/branches or sealed holdouts were inspected;
+the main checkout and existing worker worktrees were not modified.
+
+The new relation is **fresh corroboration cannot reclassify already-retained paid-mark
+fees into keeper rewards or domain budgets**. Four public LiteSVM histories cross
+separate/target-local publication with independent/common ownership of both mark
+traders and the keeper. A paid Hybrid trade stages 992,320 from 1,000,000 and charges
+1,540,072 discovery-fee atoms. A public market-only crank fully catches up before a
+fresh direct-price Pyth report corroborates exactly 992,320. Thus there is no remaining
+price lag at the handoff, and publication itself moves no owner value.
+
+A two-instruction bundle first completes that fresh publication, then rejects a
+duplicate observation suffix. The error index and one wrapper-success log prove the
+completed prefix. All tracked and compiled Accounts restore exactly, including the
+old oracle profile, portfolios, shared ATA, market, mint and vault; the distinct
+network payer is excluded. The valid report then commits separately or through target
+refresh. Bounded liquidation closes 12,817,640 quantity units, charges 6,360 atoms,
+pays the keeper 2,119, and assigns only the remaining 4,241 to the asset's two domains
+(2,120/2,121). The prior discovery fee stays outside those budgets. Independent
+two-stage rounding distinguishes the effective fee price from the initial price,
+accepted trade print and raw print. Peer settlement preserves each owner's PnL;
+common ownership yields the same normalized claims, fees, budgets and custody.
+Healthy retries reach an exact rollback fixed point without another reward. The
+keeper withdraws precisely 3,119 SPL atoms, even when its ATA is shared by the mark
+traders. Remaining claims plus insurance reconcile to engine and SPL vault balances,
+and the mint Account stays exact. All protocol and token accounts use public
+System/ATA/SPL/wrapper construction; harness inputs are signer SOL, Clock, blockhashes
+and valid external Pyth fixtures. The parent's funding helper now reuses an existing
+public ATA and funds an existing signer only once, allowing this shared-owner case.
+
+This is sampled INV-020/024/036/041/045/061/062 evidence. It differs from the selected
+provider test (initially report-origin), trade-origin catchup (no fresh report or
+reward), and fresh-report reward tests (no previously paid discovery fee). It adds no
+row-413 first-risk reward, row-425 precrank carry or terminal reserve selector.
+**Row 422 remains OPEN**: there is no generic generator/oracle, no invariant-status
+promotion, and no coverage of fresh-report arrival while a paid mark still lags.
+Multiple assets/providers, CPI, changing fee policy, funding/maintenance, source
+liens and full trader or terminal redemption are outside this increment.
+
+The new exact selector passes all four histories and four publication rollbacks.
+Peak CU: crank/liquidation **318,071**, paid trade **147,001**, rejected publication
+bundle **64,297**, keeper withdrawal **58,088**, within the existing per-operation
+limits (the two-instruction bundle uses twice the crank limit). Discarded development
+probes: the first fixture inherited inverse pricing, so its fresh input transformed
+to 1,007,739 instead of corroborating 992,320; direct pricing corrects the fixture.
+The next run's common-owner setup repeated a harness airdrop and got `AlreadyProcessed`;
+funding the signer once corrects construction. Neither was an invariant violation.
+An adjacent fresh-report control initially lacked its matcher SBF and stopped before
+protocol execution; the fixture was then built locally. No production inconsistency
+was observed in the completed histories.
+
+Validation uses a private host-cache copy in
+`/run/user/1001/astra-mark-provenance-row422-20260912-target`, copied from the local
+integration target. The copied default-feature SBF SHA-256 is
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`, matching the
+documented artifact; `git diff 30993c0b HEAD -- src Cargo.toml Cargo.lock
+tests/fixtures/auth_matcher` is empty. Engine pin:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Host tests compile from this worktree;
+no fresh wrapper SBF build or broad-suite run is claimed. The adjacent fresh-report
+control additionally uses a locally built auth matcher, with a private copied cache
+at `/run/user/1001/astra-mark-provenance-row422-20260912-matcher-target`. Its SHA-256 is
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`. Production, Cargo
+inputs and invariant verdicts are unchanged.
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/astra-mark-provenance-row422-20260912-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export TMPDIR=/run/user/1001
+# Run this fixture build from tests/fixtures/auth_matcher, then return to the worktree root.
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_TARGET_DIR=/run/user/1001/astra-mark-provenance-row422-20260912-matcher-target cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::corroborated_mark_fees::v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_045_no_free_mark_movement::trade_origin_catchup::v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order \
+  inv_045_no_free_mark_movement::v16_program_caught_up_hybrid_reward_uses_selected_asset_provenance_in_both_hint_orders \
+  inv_045_no_free_mark_movement::accepted_price_reward::v16_program_fresh_report_liquidation_rewards_follow_accepted_price_through_spl_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
 
 ## INV-024 terminal earned-fee succession (row 410, 2026-09-10)
 
