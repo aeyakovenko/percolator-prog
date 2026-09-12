@@ -10296,15 +10296,12 @@ pub mod processor {
         }
         let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
         let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
-        let local_authorized = match authority_kind {
-            DOMAIN_WITHDRAW_AUTH_INSURANCE => {
-                live_authority_matches(&authorities.insurance_operator, authority.key)
-            }
-            DOMAIN_WITHDRAW_AUTH_BACKING => {
-                live_authority_matches(&authorities.backing_bucket_authority, authority.key)
-            }
+        let beneficiary = match authority_kind {
+            DOMAIN_WITHDRAW_AUTH_INSURANCE => authorities.insurance_operator,
+            DOMAIN_WITHDRAW_AUTH_BACKING => authorities.backing_bucket_authority,
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         };
+        let local_authorized = live_authority_matches(&beneficiary, authority.key);
         if !local_authorized && !live_authority_matches(&cfg.marketauth, authority.key) {
             return Err(PercolatorError::Unauthorized.into());
         }
@@ -10312,7 +10309,7 @@ pub mod processor {
         expect_key(vault_authority_ai, &vault_authority)?;
         let vault_balance = verify_withdrawable_token_accounts(
             dest_token,
-            authority.key,
+            &Pubkey::new_from_array(beneficiary),
             vault_token,
             &vault_authority,
             &cfg,
@@ -10552,11 +10549,7 @@ pub mod processor {
                 0
             };
             require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
-            let ledger_authority = if admin_shutdown_authorized && !local_authorized {
-                cfg.marketauth
-            } else {
-                authorities.backing_bucket_authority
-            };
+            let ledger_authority = authorities.backing_bucket_authority;
 
             let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
             if !policy_v16::backing_principal_withdrawal_is_fresh(
@@ -10693,11 +10686,7 @@ pub mod processor {
                 0
             };
             require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
-            let ledger_authority = if admin_shutdown_authorized && !local_authorized {
-                cfg.marketauth
-            } else {
-                authorities.backing_bucket_authority
-            };
+            let ledger_authority = authorities.backing_bucket_authority;
 
             let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
             if amount > bucket.utilization_fee_earnings || amount > group.header.vault.get() {
@@ -10850,9 +10839,17 @@ pub mod processor {
             }
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
+            let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
+            let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
+            // Shutdown authorizes submission, not reassignment of the reserve's beneficiary.
+            let beneficiary = if mode == MarketModeV16::Live {
+                authorities.insurance_operator
+            } else {
+                authorities.insurance_authority
+            };
             let vault_balance = verify_withdrawable_token_accounts(
                 dest_token,
-                operator.key,
+                &Pubkey::new_from_array(beneficiary),
                 vault_token,
                 &vault_authority,
                 &cfg,
@@ -10888,11 +10885,7 @@ pub mod processor {
                 }
                 let epoch_asset_index = if local_authorized { asset_index } else { 0 };
                 require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
-                if admin_shutdown_authorized && !local_authorized {
-                    cfg.marketauth
-                } else {
-                    authorities.insurance_authority
-                }
+                authorities.insurance_authority
             } else {
                 if group.header.materialized_portfolio_count.get() != 0
                     || group.header.c_tot.get() != 0
