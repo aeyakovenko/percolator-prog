@@ -3,6 +3,10 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+The [2026-09-12 retained capability, identity and replay audit](retained_identity_replay_audit_20260912.md)
+maps the remaining holdouts to main's generators and documents the INV-012 retained joint-grant
+atomicity increment. It adds partial coverage without changing invariant verdicts or closing a holdout.
+
 ## INV-024 terminal earned-fee succession (row 410, 2026-09-10)
 
 [`cu/inv_024_terminal_earnings_succession.rs`](cu/inv_024_terminal_earnings_succession.rs)
