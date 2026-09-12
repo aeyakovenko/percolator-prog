@@ -65,6 +65,9 @@ mod receipt_rounding_threshold;
 #[path = "inv_067_receipt_repeated_stock.rs"]
 mod receipt_repeated_stock;
 
+#[path = "inv_067_receipt_aborted_realization.rs"]
+mod receipt_aborted_realization;
+
 #[test]
 fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {
     late_expiry::verify_receipt_payout_and_portfolio_close_retry();

@@ -97,6 +97,58 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-067 aborted realization across the second expiry (row 417, 2026-09-12)
+
+Owner: [cu/inv_067_receipt_aborted_realization.rs](cu/inv_067_receipt_aborted_realization.rs),
+mounted by INV-067 as `receipt_aborted_realization`. Selector:
+`v16_program_aborted_second_source_realization_preserves_receipts_across_expiry_and_order`.
+
+Eighteen public LiteSVM histories first commit a 161-atom expiry release and
+positive top-ups to two existing unequal receipts. At the next source's expiry-1,
+a failed suffix rolls back its Fresh realization, the resulting 189-atom bound
+reduction and all three SPL payments. The same retained instructions then finish
+at expiry-1, expiry or expiry+1, crossing all six claimant orders with reversed
+earlier priority. Complete Account rollback preserves the committed paid prefix;
+only the payer's exact signature fee is lost. Receipt identity, source stocks,
+exact bounds, all owner balances, token supply and full decoded market state on
+terminal retries are checked independently of observed payout rates.
+
+The fresh branch pays 1,164 / 1,379 / 1,306 atoms; the exact/late expiry branches
+both pay 1,198 / 1,283 / 1,368. Every order converges to its branch's complete
+payout ledger, owner payments and two-atom rounding residue. The later Clock
+advance cannot release already-consumed backing or revive a cleared receipt.
+Peak measured settlement transaction cost is **451,915 CU**, below 600,000.
+
+The new boundary is an aborted denominator reduction after a committed stock
+increase and positive receipt catch-up, followed by the second source deadline.
+It extends neither the pure two-release family nor the mixed-support residue
+family with another amount-only case. **Row 417 remains OPEN**: this is a finite
+three-claimant family, without generic histories, Recovery/insurance composition,
+arbitrary claim populations or portfolio/slab retirement.
+
+Validation uses isolated worktree `/tmp/percolator-row417`, based on the
+coordinator branch at `f52dca678136c48eacfc6df9b41a382c235b9fd3`, with private
+target `/dev/shm/percolator-row417-target`. The default-feature wrapper SBF is
+the documented public-reserve artifact,
+SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Production, manifests and dependency pins are unchanged. The new selector passes
+**1/1** (18 histories, 18 rollback probes), with peak measured settlement cost
+**451,915 CU**. The adjacent repeated-stock and source-realization controls pass
+**2/2**, and the charter/index passes **1/1**. Formatting and Git whitespace
+checks pass. No SBF rebuild or full-suite run is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row417-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_aborted_realization::v16_program_aborted_second_source_realization_preserves_receipts_across_expiry_and_order -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_source_realization::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_repeated_stock::v16_program_receipts_preserve_identity_through_two_stock_releases_and_reversed_priority
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-008 partial reserve payouts and replenished earnings (row 415, 2026-09-12)
 
 Owner: [stateful/inv_008_retained_backing_earnings.rs](stateful/inv_008_retained_backing_earnings.rs),

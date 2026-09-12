@@ -129,6 +129,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Exact owner payouts, 72 rent-exact portfolio deletions and 12 slab closures burn
 # two atoms; peak measured settlement cost 365,364 CU. Finite coverage only: no generic
 # generator/oracle, Recovery/insurance composition or row/status promotion; see README.
+# 417 partial conformance (2026-09-12): cu/inv_067_receipt_aborted_realization.rs,
+# v16_program_aborted_second_source_realization_preserves_receipts_across_expiry_and_order.
+# After a committed expiry and positive receipt top-ups, a rejected Fresh realization
+# rolls back the second source's bound reduction and all three payments. Eighteen
+# public histories cross expiry-1/expiry/expiry+1 and six claimant orders; input-derived
+# payouts, full receipt identity, two-atom residue and complete Account rollback agree.
+# Peak measured settlement cost 451,915 CU. Finite coverage only; row remains OPEN.
+# README records duplicate analysis, validation commands and remaining gaps.
 417	LoF	BLOCKER	INV-067	INV-010,INV-024,INV-029,INV-063,INV-066,INV-067,INV-068,INV-070	receipt+x-late-expiry+x-claimant-order	terminal-claim-identity-survives-every-later-stock-reclassification	OPEN
 # Row 418 partial conformance (2026-09-10): cu/inv_077_terminal_quote_variants.rs,
 # v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent.
