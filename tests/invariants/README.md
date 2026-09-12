@@ -34,6 +34,19 @@ rollbacks and 32 payouts. Standalone uncollected flat fees, successful admission
 under nonzero lag and general histories remain outside this increment; invariant
 verdicts and reopening labels are unchanged.
 
+The [reassigned canonical-custody audit](terminal_reassigned_custody_audit_20260912.md)
+adds one INV-082 selector with eight public LiteSVM histories. Original ATAs remain
+occupied under an unavailable different SPL owner while absent portfolio owners
+receive exact net principal through keeper-created non-ATA custody. Both payout
+aliases and claimant orders preserve the transferee's existing tokens and separately
+attribute maintenance fees. Signed beneficiary withdrawal and portfolio cleanup
+compose with bounded backing expiry, burn, surplus sweep and rent-exact slab closure.
+Eighty rejected transactions restore complete Accounts. This adds bounded
+INV-018/021/024/027/067/069/070/071/073/078/081/082 evidence; administrative completion
+still requires its named signer. Nonzero receipts, pending losses, absent reserve
+beneficiaries and maximum-capacity histories remain outside this increment, and
+invariant verdicts are unchanged.
+
 The [terminal destination-authority variant audit](terminal_destination_variant_audit_20260912.md)
 adds one INV-077 selector with six public LiteSVM histories. A fixed-supply mint
 and an admin-owned non-ATA sweep account cross existing delegation, separate close

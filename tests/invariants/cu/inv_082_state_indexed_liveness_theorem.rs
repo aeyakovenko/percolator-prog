@@ -35,6 +35,9 @@ use solana_sdk::{account::Account, pubkey::Pubkey, signature::Signer};
 #[path = "inv_082_terminal_destination_recovery.rs"]
 pub(crate) mod terminal_destination_recovery;
 
+#[path = "inv_082_terminal_reassigned_custody.rs"]
+mod terminal_reassigned_custody;
+
 #[test]
 fn v16_program_public_liveness_survives_bad_hints_retained_route_and_substitutions() {
     let scenario = Scenario {
