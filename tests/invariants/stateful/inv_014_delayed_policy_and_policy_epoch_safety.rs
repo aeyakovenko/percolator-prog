@@ -43,6 +43,9 @@ mod retained_fee_bundle;
 #[path = "inv_014_retained_backing_fee_cap.rs"]
 mod retained_backing_fee_cap;
 
+#[path = "inv_014_retained_fee_stock.rs"]
+mod retained_fee_stock;
+
 #[test]
 fn v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider() {
     use crate::support::{

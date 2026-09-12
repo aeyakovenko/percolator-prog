@@ -3,6 +3,11 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+The [retained fee/insurance stock audit](retained_value_gap_20260912.md) adds 32 public
+LiteSVM worlds combining retained fee-bearing trades, insurance payouts, policy relaxation,
+fee/top-up replenishment and exact transaction rollback. Per-owner SPL outcomes agree across
+direction, payout order and single/batch transports. Rows 411/415/428/432 remain OPEN.
+
 The [2026-09-12 oracle/source composition audit](oracle_source_composition_audit_20260912.md)
 records the INV-028 Hybrid capacity/carry increment: retained historical claims, fractional
 carry, current health certificates and exact owner payouts compose across eight public
