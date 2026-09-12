@@ -832,6 +832,10 @@ The code and test harnesses are the source of truth for counts and exact CU numb
 - wrapper Kani proofs in `kani/v16_kani.rs`
 - engine arithmetic/accounting proofs in the pinned `percolator` crate
 
+The [row-432 retained single-CPI fee coverage](tests/invariants/README.md#inv-014-retained-single-cpi-fee-policy-detours-row-432-2026-09-12)
+records public policy-detour, exact deposit-rollback and fresh-consent controls.
+It is bounded base-fee conformance; the ledger documents remaining gaps and keeps row 432 open.
+
 Before publishing a bounty, run the commands in [Build & test](#build--test) and record the exact output for the current commit.
 
 ---

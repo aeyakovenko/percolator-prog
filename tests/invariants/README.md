@@ -267,6 +267,98 @@ cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-thread
   "${terminal_module}::v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance" \
   inv_024_attributed_quote_value_conservation::shutdown_operator_departure::v16_program_shutdown_operator_departure_preserves_terminal_beneficiary_and_backing
 cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+```
+
+## INV-014 retained single-CPI fee policy detours (row 432, 2026-09-12)
+
+Owner: [cu/inv_014_retained_single_cpi_policy_history.rs](cu/inv_014_retained_single_cpi_policy_history.rs).
+Exact `v16_cu` selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback`.
+
+Eight public LiteSVM worlds cross signed taker caps of 37/99 bps, long/short
+direction, and restored-policy/fresh-consent endings. Both complete transactions
+are signed under a 19-bps policy, before any policy update; their distinct CU
+limits avoid failed-signature caching without changing economic terms. Each
+contains a 113-atom SPL deposit followed by one exact-fill `TradeCpi`. Initial
+capital is 100,003/200,007, price is 100, and quantity is 255.5 lots plus one
+position quantum, so notional and fee rounding are both exercised. The LP's
+137-bps grant stays permissive throughout and the LP does not sign these trades.
+
+The first committed policy becomes the taker cap plus one. Rejection must occur
+at the trade's `InvalidInstruction` guard, after successful deposit and SPL CPI
+logs, before matcher invocation. Every tracked complete Account, including all
+transaction keys, portfolios, policy/control sequences, matcher context, token
+custody, supply and owner Accounts, rolls back; the separate payer loses exactly
+two signature fees. A subsequent policy exactly at the original cap makes the
+unchanged second transaction executable again. Four histories commit that retained
+alternative. The other four raise policy again to cap plus two, require another
+exact funded-prefix rollback, then succeed with a fresh signature changing only
+the trade's fee field. Position epochs and the LP grant sequence stay unchanged
+until the accepted fill; each position epoch advances exactly once.
+
+Input-derived accounting checks each owner's capital and zero PnL, both OI lanes,
+insurance and its two domain budgets, source/destination SPL balances, and stock
+and encumbrance censuses after every committed step. The 300,123-atom supply is
+fixed with mint authority revoked. Successful per-owner fees are 95/253 atoms for
+restored 37/99-bps consent and 100/259 atoms for fresh 39/101-bps consent.
+All economic construction uses System/SPL/ATA/wrapper instructions; the harness
+only funds signer SOL and loads programs. No economic bytes are injected or reset.
+
+This adds repeated above-cap/restored/above-cap policy history and actual SPL
+deposit rollback to the existing standalone taker-cap regression. Discarded
+duplicates: another standalone policy-increase rejection; the existing all-route
+fee/partial-fill matrix; and granted-expiry, delegated-LP, redirect-payout or batch
+aggregate-cap histories. Withdrawal stock replay, terminal reserve attribution,
+missing-beneficiary payout, flat accrued fees, pending close cohorts and fractional
+carry are outside this increment, avoiding rows 415/429/433 and 413/419/425.
+
+**Row 432 remains OPEN**, with bounded INV-010/011/014/024/036/080/081 conformance
+evidence only. There is no generic generator/oracle, invariant-status promotion,
+new vulnerable-pin experiment or production fix. Dynamic/backing fees, partial
+fills, underfunded collection, authority succession, expiry, multi-asset histories,
+cross-route equivalence and arbitrary policy schedules remain gaps. Positions
+remain open; this selector claims no withdrawal or terminal-settlement evidence.
+
+Validation: the new exact selector passes **1/1** (8 worlds, 24 simulations,
+12 complete-Account rollbacks, 4 retained and 4 fresh successes; 3.62 s). The three
+adjacent exact controls below pass **3/3** (2.48 s). New peak CU is **187,901** for
+simulation/success, **49,385** for rejection, and **2,699** for policy updates,
+within a 500,000-CU transaction ceiling. Adjacent standalone taker-cap rejection
+and success cost 4,308/144,303 CU; the oracle-policy bundle peaks at 185,442 CU.
+The charter/index and machine-status selectors pass **2/2**. Repository formatting,
+unstaged/staged whitespace checks and the committed patch check pass. No full-suite
+run is claimed. Development corrected simulation metadata access and mutable
+borrowing for the pinned LiteSVM API; no executed history was discarded and no
+production inconsistency was observed.
+
+Worktree: `/tmp/percolator-row432-fee-consent-20260912`, branch
+`codex/row432-fee-consent-20260912`, based on the requested local remote-tracking
+ref `origin/codex/astra-open-holdout-ledger-20260912` at
+`93860021819ad50997b3a1f15f7db7de4f9a73e3`. A private build cache was seeded from
+`/tmp/astra-terminal-identity-target`. Both the default-feature wrapper and the
+authenticated matcher were then rebuilt offline from this worktree with
+platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Engine remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; production, manifests,
+locks and invariant statuses are unchanged. No GitHub PR/issue/branch inspection
+or withheld comparison data was used. Existing `solana-client v1.18.26`
+future-incompatibility warnings remain.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row432-fee-consent-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_program_trade_requires_signed_base_fee_consent \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_retained_cpi_price_limit_survives_oracle_policy_change
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
 cargo fmt --all -- --check
 git diff --check
 git diff --cached --check

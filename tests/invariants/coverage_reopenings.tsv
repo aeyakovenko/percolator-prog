@@ -271,6 +271,16 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Parent source accepted a retained TradeCpi after trade_fee_base_bps rose above the taker's signed fee_bps;
 # the fixed wrapper rejects before matcher CPI with exact rollback, while fresh taker consent at the new fee succeeds.
 # Broader retained-fee policy histories remain OPEN; no invariant-status promotion.
+# 432 bounded conformance (2026-09-12): cu/inv_014_retained_single_cpi_policy_history.rs,
+# v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback.
+# Eight public worlds cross two taker caps, both directions and restored/fresh consent.
+# Above-cap/restored/above-cap policies preserve retained bytes and permissive LP grants;
+# twelve successful SPL deposit prefixes roll back exactly before matcher invocation.
+# Four retained alternatives and four fee-field-only fresh consents commit exact rounded
+# owner/insurance accounting at fixed supply. See README for selectors and validation.
+# Live/full-fill/base-fee evidence only: no generic oracle, dynamic/backing fees, authority
+# succession, expiry, partial fills, underfunded collection, cross-route or terminal proof.
+# No production change, vulnerable-pin experiment or invariant-status promotion; row stays OPEN.
 432	LoF	PRIVILEGED	INV-014	INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-080,INV-081	retained-cpi-fee+x-taker-terms+x-single-route	retained-single-cpi-trades-cannot-charge-fee-terms-outside-signed-taker-consent	OPEN
 # 433 bounded conformance (2026-09-12): cu/inv_073_terminal_reserve_close_retry.rs.
 # Two public classic-SPL/asset-0 histories retain keeper-paid principal/insurance and
