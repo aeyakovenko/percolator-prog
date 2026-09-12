@@ -10,6 +10,17 @@
 # Kind/severity are recorded claims, not impact acceptance under scripts/loop.md; OPEN does not confirm LoF/DoS.
 # status remains OPEN until a generic invariant-owned generator/oracle (not the finding PoC)
 # fails on the vulnerable pin, the production fix lands, and the unchanged oracle passes.
+# Rows 412/414 shared-owner positive conformance (2026-09-12): cu/inv_012_shared_owner_succession.rs,
+# v16_program_shared_owner_succession_preserves_retained_sibling_exit. Eight public
+# histories share both owners, SPL wallets and matcher program across separate pairs.
+# One LP's bilateral revocation, funded same-address recreation and explicit regrant
+# preserve the other pair's byte-identical signed exit, Account frame and exact value.
+# Fresh initialization clears only the replaced scope; current CPI outputs and all
+# four principal payouts compose. This adds owner/wallet aliasing to retained scope
+# isolation, not another same-portfolio asset lifecycle. Exact commands, artifact
+# provenance and limits: README "INV-012 shared-owner portfolio succession".
+# No stale-consumer rejection, rollback, standing-grant generation theorem, generic
+# oracle, vulnerable-pin experiment or production fix; rows/statuses remain OPEN/unchanged.
 # Rows 412/414 partial positive conformance (2026-09-12): cu/inv_012_used_scope_succession.rs,
 # v16_program_used_scope_succession_preserves_revocation_and_current_authorized_exit.
 # Eight public histories combine automatic bilateral-close revocation, two used-slot

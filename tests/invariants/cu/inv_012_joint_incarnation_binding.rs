@@ -40,6 +40,9 @@ mod funded_owner_roundtrip;
 #[path = "inv_012_role_switch_generation.rs"]
 mod role_switch_generation;
 
+#[path = "inv_012_shared_owner_succession.rs"]
+mod shared_owner_succession;
+
 #[path = "inv_012_reused_asset_return_binding.rs"]
 mod reused_asset_return_binding;
 

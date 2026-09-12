@@ -5307,6 +5307,91 @@ git diff --exit-code 81f7dae8 -- src Cargo.toml Cargo.lock tests/support tests/f
 git diff --cached --check
 ```
 
+## INV-012 shared-owner portfolio succession (rows 412/414, 2026-09-12)
+
+[`cu/inv_012_shared_owner_succession.rs`](cu/inv_012_shared_owner_succession.rs)
+adds one public LiteSVM/CU selector beneath `joint_incarnation_binding`:
+`shared_owner_succession::v16_program_shared_owner_succession_preserves_retained_sibling_exit`.
+Eight worlds cross single/batch CPI opening routes, single/batch bilateral revocation,
+and both position signs. Each owner holds two funded portfolios, uses one shared SPL
+wallet, and selects the same honest matcher program for the two distinct LP contexts
+and delegates. The pairs hold unequal, opposite-signed quantities on different assets.
+
+The sibling pair's complete signed CPI exit is retained before the target pair opens
+and closes bilaterally. Immediate assertions require the target grant to be disabled
+with zero expiry and unchanged tuple/fee cap, while the sibling portfolios, context
+and delegate remain byte-exact. Public withdrawal, close, System refund and same-address
+LP initialization assign a new portfolio ID and clear its grant/episode. Deposit and
+explicit owner authorization then admit target reentry and opposite-transport closure
+through its original, never-reinitialized matcher context. The unchanged sibling exit
+finally executes through the opposite CPI transport from its opening.
+
+An input/event-derived oracle checks each funded stage's portfolio IDs, position epochs,
+owner-control sequences (including deposits/withdrawals), grant fields, exact positions,
+matched OI, capital, zero PnL/insurance, mint supply and owner-indexed shared-wallet stock.
+Each CPI checks every typed return field against the current invocation, delegate,
+asset, supplied size and authenticated price; batch returns preserve the single-return
+context record. Target succession preserves the sibling Account frame. Portfolio rent
+goes exactly to the market slab, and System refunds the address using the existing
+fixture pattern. All four final withdrawals return exactly their portfolio's principal,
+leaving each shared wallet with 2,000,000 atoms and zero engine/SPL custody.
+
+This is distinct from `used_scope_succession`, whose live sibling is another leg of
+the same portfolio and requires renewed consent after portfolio-wide revocation.
+Here shared owner identities and wallets must neither propagate revocation/replacement
+to separate portfolios nor substitute for their grant sequences and delegates.
+`funded_owner_roundtrip` owns an A-B-A holder replacement and stale-grant rejection;
+the existing same-owner delegate substitutions own isolated admission rejection.
+Neither supplies this retained, still-live sibling exit through funded succession.
+
+**Rows 412/414 remain OPEN; invariant statuses are unchanged.** This is bounded
+positive scope isolation, with no stale-consumer rejection, rollback composition,
+standing-grant generation confinement, arbitrary lifecycle generator, maximum shape,
+vulnerable-pin experiment, independent finding discovery or production fix claimed.
+Prices, fees and funding are constant/zero; asset and whole-market replacement are
+outside this increment. All economic construction uses public System/SPL/wrapper
+instructions and the honest matcher's public initialization API; no state injection
+or snapshot repair is added.
+
+Validation: the new selector passed **8 worlds, 8 revocations/replacements, 40 CPI
+fills (including 8 byte-identical retained exits), and 32 final owner payouts**.
+Peak CPI/writer/custody CU was **435,733 / 216,710 / 143,267**, below the enforced
+750,000 / 300,000 / 300,000 bounds. Two initial executions failed on test-model
+assumptions (deposit sequence advancement and the rent beneficiary); both were
+corrected to the existing public contract, with no production property violation.
+The adjacent used-scope control passed **1/1 across 8 worlds**, and the invariant
+index passed **1/1**. Formatting, whitespace and the production/dependency/shared
+harness/status-file diff guard passed. Existing unused-support and Solana-client
+future-incompatibility warnings remain. No broad suite or Kani run is claimed.
+
+Base: `cd986347e02434c082042664431a76fd6b998045`.
+Branch: `codex/row412414-capability-scope-succession-20260912`.
+Worktree: `/tmp/percolator-row412414-20260912`; the parent worktree was not edited.
+Tests use private copies of the base's documented SBF artifacts, not a fresh SBF
+build. Wrapper source/dependencies are unchanged. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+auth matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The wrapper and host cache were copied from `/dev/shm/astra-capability-6d2a-target`;
+the matcher came from the parent checkout's ignored fixture build. Cargo compiled
+the test from this worktree. The private build directories are cleaned after checks.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row412414-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row412414-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row412414-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::shared_owner_succession::v16_program_shared_owner_succession_preserves_retained_sibling_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::used_generation_lifecycle::used_scope_succession::v16_program_used_scope_succession_preserves_revocation_and_current_authorized_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code cd986347e02434c082042664431a76fd6b998045 -- src Cargo.toml Cargo.lock tests/support tests/fixtures tests/invariants/invariant_status.tsv
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /dev/shm/percolator-row412414-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /tmp/percolator-row412414-20260912/tests/fixtures/auth_matcher/target
+```
+
 ## INV-012 grant and revoking-writer order (rows 412/414, 2026-09-12)
 
 [`cu/inv_012_grant_writer_order.rs`](cu/inv_012_grant_writer_order.rs) exhausts
