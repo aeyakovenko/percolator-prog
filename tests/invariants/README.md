@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+The [terminal destination-authority variant audit](terminal_destination_variant_audit_20260912.md)
+adds one INV-077 selector with six public LiteSVM histories. A fixed-supply mint
+and an admin-owned non-ATA sweep account cross existing delegation, separate close
+authority and bundled/split disposal. Two bounded slab calls retire exactly 307
+backing atoms and sweep 17 atoms without expanding the existing 11-atom allowance;
+subsequent SPL spending and custody closure preserve exact token supply and rent
+recipients. Twelve rejected bundles restore complete Accounts, including a late
+failure after both custody closes. This adds bounded INV-018/021/025/069/070/077/080/081
+evidence and an administrative-lifecycle boundary for INV-073/078. User recovery,
+absent authorities and maximum-capacity products remain outside this increment;
+row 418 remains OPEN and invariant verdicts are unchanged.
+
 The [retained same-asset position-episode audit](retained_same_asset_episode_audit_20260912.md)
 adds one INV-012 selector with four public LiteSVM histories. A third portfolio
 closes and reopens the LP's same-asset exposure through its unchanged live matcher

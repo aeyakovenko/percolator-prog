@@ -66,6 +66,9 @@ use super::*;
 #[path = "inv_077_terminal_quote_variants.rs"]
 mod terminal_quote_variants;
 
+#[path = "inv_077_terminal_destination_variants.rs"]
+mod terminal_destination_variants;
+
 #[path = "inv_077_short_side_b_budget.rs"]
 mod short_side_b_budget;
 
