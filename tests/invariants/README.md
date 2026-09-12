@@ -9354,14 +9354,96 @@ while the exact-limit reopen succeeds with full stock, encumbrance, certificate,
 unrelated-account checks. The module-level CU run passes both this selector and the older row-413
 joint-liability matrix, with peak row-434 CU **355,035**.
 
-This is invariant-owned coverage, not the row-434 PR test or fix. It does not close row 413's
-first-risk history, CPI/batch reopen variants, standalone reopening without the public fee/refresh
+This is invariant-owned coverage, not the row-434 PR test or fix. This original selector does not close row 413's
+first-risk history, CPI/batch reopen variants (extended below), standalone reopening without the public fee/refresh
 prefix, other liability classes, arbitrary histories, or maximum-shape claims. The covered row is
 therefore marked `independent-discovery` / `COVERED`, while the affected invariants stay REOPENED
 because other current counterexamples still name them.
 
 ```sh
 cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities -- --nocapture
+```
+
+## INV-027 flat reopen route switch and senior exit (row 434, 2026-09-12)
+
+[`cu/inv_027_flat_reopen_routes.rs`](cu/inv_027_flat_reopen_routes.rs), mounted under
+`inv_027_protected_principal_seniority::joint_admission_liabilities::flat_reopen_routes`,
+adds `v16_program_flat_reopen_route_switch_preserves_fee_history_and_senior_exit`.
+Sixteen public LiteSVM histories cross either constrained party, all four trade
+transports, and atomic versus separately committed fee/refresh settlement. Each
+failed reopening retries through the opposite CPI and batching family, then closes
+through its original route and pays both owners' full post-fee senior principal.
+Matcher authorization is established after the initial owner-signed close and
+renewed publicly when switching from owner-signed reopening back to CPI closure.
+CPI fills themselves do not require the maker's signature.
+
+Both owners open at slot 1 and close flat at slot 2, paying 7 maintenance atoms
+each. An empty keeper advances market time to slot 4 while the closed portfolios
+remain byte-identical, leaving another 14 atoms due per owner. A transaction with
+both `SyncMaintenanceFee`/`PermissionlessCrank` prefixes and reopening at 101 IM
+rejects at instruction 6 with `EngineInvalidConfig`; every tracked and compiled
+transaction Account restores exactly, including economic lamports and matcher
+context, with only the exact runtime signature fee deducted from the payer.
+The opposite route admits at exactly 100 IM after the same fees, either atomically
+or following checked public settlement prefixes. Full current health certificates
+match the independent oracle and agree across transports and settlement schedules.
+
+After closure, the constrained owner and then its peer withdraw exactly 100 and
+200 SPL atoms. Every checked suffix state reconciles capital, zero PnL/claims,
+fee cursors/debt, positions/OI, mint supply, custody, insurance domains, stock,
+reservation encumbrances and source-credit rates, while framing unrelated Accounts.
+The final vault contains only 42 insurance atoms, attributed 20/22 to base domains;
+no historical fee is erased or collected twice. Submitted suffix transactions
+verify signatures and fit the 1,232-byte packet bound.
+
+This extends a distinct boundary: the original row-434 selector has only a no-CPI
+reopen and no payout suffix. Row 413's
+`v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled` and
+`v16_program_flat_withdrawal_fees_precede_first_admission_and_roll_back_custody`
+start with never-traded accounts. Its joint-liability and funding route matrices
+retain old positions at admission. None composes a previously closed fee episode
+with the route-switch retry, certificate equivalence and complete owner exit here.
+
+**Row 434 remains COVERED; all invariant statuses are unchanged.** This is bounded
+conformance coverage, with no production finding/fix or generic completeness claim.
+Standalone reopening with uncollected fees, implicit withdrawal-prefix reopening,
+nonzero trade fees, clipped/rewarded maintenance, policy changes, funding/marked
+losses, preexisting lag, multi-leg batches, arbitrary histories and maximum shapes
+remain outside this increment. Economic state is constructed only through public
+System/SPL/ATA/matcher/wrapper instructions; no program-owned economic bytes are
+mutated. No other reopening row gains evidence from this selector.
+
+Validation uses a fresh locked/offline default-feature wrapper and auth-matcher
+SBF build with platform-tools v1.52 from base
+`570414586f9a5c962c8fce625aae43134ad880b9`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, in isolated worktree
+`/tmp/percolator-row434-coverage-audit-20260912-5704145`.
+Wrapper SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The final exact selector passes **1/1** (16 worlds, 8.01 s), with peak measured
+suffix cost **392,630 CU** under its 600,000-CU bound. All four adjacent controls
+pass **4/4** (10.27 s), and the charter/index passes **1/1**. Repository formatting
+and all three Git whitespace checks pass. No broad suite, maximum-shape benchmark
+or engine proof was run. Cargo reports existing dead-code and `solana-client`
+future-incompatibility warnings.
+The initial host compile corrected a bitmap count type; the first runtime attempt
+corrected setup that authorized a matcher before owner trades revoked its grant.
+Neither changed production or relaxed the economic assertions.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row434-reopen-5704145-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" -- --locked
+export CARGO_TARGET_DIR=/dev/shm/row434-reopen-5704145-host
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities::flat_reopen_routes::v16_program_flat_reopen_route_switch_preserves_fee_history_and_senior_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_flat_reopen_fee_history_precedes_new_exposure inv_027_protected_principal_seniority::v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled inv_027_protected_principal_seniority::v16_program_flat_withdrawal_fees_precede_first_admission_and_roll_back_custody inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_joint_accrued_liabilities_precede_risk_admission
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
 ```
 
 ## INV-008 passive reward stock (row 415, 2026-09-09)

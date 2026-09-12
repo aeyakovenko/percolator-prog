@@ -811,6 +811,11 @@ coverage and explicit gaps are indexed in
 [`tests/invariants/README.md`](tests/invariants/README.md). Passing a finding-specific regression is
 not treated as independent bug discovery or full invariant certification.
 
+Row 434's [flat-reopen route coverage](tests/invariants/README.md#inv-027-flat-reopen-route-switch-and-senior-exit-row-434-2026-09-12)
+composes elapsed-fee settlement, transaction rollback, CPI/batch route switching,
+health certificates and full senior-principal exit through public LiteSVM routes.
+It covers explicit fee/refresh prefixes; standalone admission with deferred fees remains outside scope.
+
 ### Wrapper-level properties (Kani-proven)
 The current Kani suite is in `kani/v16_kani.rs`. It proves wrapper ABI and local validation properties:
 

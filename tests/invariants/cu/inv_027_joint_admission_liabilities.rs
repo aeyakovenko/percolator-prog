@@ -30,6 +30,9 @@ mod first_risk_preexisting_lag;
 #[path = "inv_027_funding_admission.rs"]
 mod funding_admission;
 
+#[path = "inv_027_flat_reopen_routes.rs"]
+mod flat_reopen_routes;
+
 const PRICE: u64 = 100;
 const START: u64 = 1;
 const ADMISSION: u64 = 4;

@@ -327,4 +327,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # git diff --cached --check
 # git show --format= --check HEAD
 433	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-024,INV-027,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-081,INV-082	terminal-reserve+x-missing-signer+x-public-payout	terminal-economic-progress-does-not-require-an-adversarial-reserve-beneficiary-signature	OPEN
+# Row 434 bounded extension (2026-09-12): cu/inv_027_flat_reopen_routes.rs,
+# v16_program_flat_reopen_route_switch_preserves_fee_history_and_senior_exit.
+# Sixteen public close/age/reopen histories cross both constrained parties, four
+# routes and atomic/staged explicit fee settlement. Opposite CPI/batch retries,
+# 16 complete-Account rollbacks, equal health certificates and 32 senior SPL payouts
+# preserve the old fee episode and exact 42-atom insurance stock (20/22 domains).
+# Unlike row 413 first-risk/live-position selectors, these accounts already closed
+# an exposure episode. Standalone deferred-fee admission, other liabilities, fee
+# policies, multi-leg batches and arbitrary histories remain gaps; see README for
+# exact selector, commands and scope. No production fix or status promotion.
 434	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-055,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-risk-admission	all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history	COVERED
