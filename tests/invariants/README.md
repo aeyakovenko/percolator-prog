@@ -1,5 +1,16 @@
 # Invariant-owned test coverage
 
+The [scanned insurance withdrawal audit](terminal_prefix_insurance_audit_20260912.md)
+adds one INV-071 selector with eight public LiteSVM histories. Two distinct
+beneficiaries withdraw 37 and 53 atoms from assets behind a persisted terminal
+prefix. Successful withdrawals preserve the cursor and the peer's allowance;
+exact/late expiry of 61 later backing atoms cannot replenish a paid allowance.
+Forty-eight exact rollbacks include successful payout and expiry prefixes, followed
+by identical-prefix retry and rent-exact slab retirement. This adds bounded
+INV-024/063/070/071/080/081/086/088 evidence. The tested mutations preserve residual;
+general cursor invalidation, earlier-slot insurance recredit, pending loss and
+receipt histories remain separate. Invariant verdicts and holdout labels are unchanged.
+
 The [terminal reserve-backfill audit](terminal_reserve_backfill_audit_20260912.md)
 adds one INV-071 selector with four public LiteSVM histories. Live-valid backing
 and domain-insurance top-ups cannot introduce obligations behind a cached terminal
