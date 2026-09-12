@@ -399,6 +399,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # role exchange entry for selectors/CU. Pre-wind-down transfers, new fee accrual,
 # expiry/recredit, other assets/rails and arbitrary histories remain outside this
 # witness; no generic generator/oracle, production fix or row/status promotion.
+# Row 429 live-accrual increment (2026-09-12): cu/inv_024_live_earnings_terminal_exchange.rs,
+# v16_program_live_successor_accrual_survives_terminal_role_exchange. Funded backing
+# transfers with open positions; a later owner-signed fill earns 327 fresh fee atoms.
+# Terminal insurance exchange and fee payout preserve 17/1185 fee attribution and
+# independently observe new earnings/consumed backing exactly once in the successor
+# ledger. Complete-Account prefix rollback/exact retry and rent-exact closure compose.
+# New selector peak 441987 CU; see README for provenance, controls and discarded
+# duplicates. One bounded live/terminal history; expiry/recredit, other assets/rails
+# and arbitrary accrual/role histories remain unclaimed. Row remains OPEN; no bug fix.
 429	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-025,INV-027,INV-036,INV-070,INV-081	shutdown-reserve+x-beneficiary+x-attribution	terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it	OPEN
 # 432 public red/green coverage (2026-09-12): cu/inv_014_delayed_policy_and_policy_epoch_safety.rs::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase.
 # Parent source accepted a retained TradeCpi after trade_fee_base_bps rose above the taker's signed fee_bps;

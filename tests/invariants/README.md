@@ -1228,6 +1228,109 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-024 live successor accrual through terminal exchange (row 429, 2026-09-12)
+
+Owner: [cu/inv_024_live_earnings_terminal_exchange.rs](cu/inv_024_live_earnings_terminal_exchange.rs).
+Primary INV-024; affected INV-005/025/027/036/070/081. Exact selector:
+`inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::live_earnings_terminal_exchange::v16_program_live_successor_accrual_survives_terminal_role_exchange`.
+
+One public LiteSVM history transfers funded backing **before wind-down**, while
+both users retain positions and a 2,623-atom backing lien. The existing fixture
+now optionally returns its user signers; its original callers and public setup
+are preserved. No production, engine pin, manifest or invariant verdict changes.
+System/SPL/ATA/wrapper instructions create all economic state. Harness controls
+are program installation, signer SOL, Clock and blockhash advancement; copied
+Account/token frames are assertion data and are never installed in LiteSVM.
+
+The old provider A receives 17 of the initially earned 875 atoms, then consents to
+transfer backing to B, the insurance beneficiary and unchanged administrator.
+B receives a 13-atom fee prefix, initializing its ledger against the inherited
+858-atom fee tail. Both portfolios and the complete engine economics remain
+unchanged by the live handoff. A subsequent owner-signed two-lot fill at 105
+increases the lien from 2,623 to 3,603 atoms. The input-derived fee is
+`ceil((3,603 - 2,623) * 3,333 / 10,000) = 327`; it debits the user's capital and
+increases the same backing role's earnings without writing either ledger.
+
+After resolution, two permissionless `CloseResolved` calls pay the users and
+their portfolio closures return rent to the slab. B then transfers insurance to
+A, completing the exchange, and receives its remaining 1,172 fee atoms. That
+payout is the successor ledger's first observation of the intervening 327 earned
+atoms and the 5,000-atom consumed-backing history. The exact ledger oracle checks
+all fields: 1,185 total fees withdrawn, 327 newly observed earnings, 5,000 consumed
+atoms, zero fee remainder and zero deposit/principal history. A's entire ledger
+Account remains frozen at its original 17-atom prefix.
+
+One rejected bundle completes the terminal insurance transfer and a real SPL fee
+payout, including both telemetry updates, before a wrong-role fee suffix rejects
+with `Unauthorized`. Successful wrapper/SPL log counts prove the prefix ran.
+Every tracked and compiled Account rolls back except actual signature fees.
+The identical handoff/payout instruction prefix succeeds on a fresh transaction.
+This adds accrual and consumed-backing observation across live/terminal succession
+to the existing resolved-state exchange coverage; it is not a new payout order.
+
+At every economic step, an input-maintained payout book, complete SPL Account
+frames, fixed mint, role profiles, control sequences and independent stock census
+reconcile custody. Final payouts are:
+
+| Recipient | User Payout | Provider Fees | Backing Principal | Insurance | Total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Long user | 56,300 | 0 | 0 | 0 | 56,300 |
+| Short user | 1,995,000 | 0 | 0 | 0 | 1,995,000 |
+| A, old provider / final insurer | 0 | 17 | 0 | 31 | 48 |
+| B, final provider / administrator | 0 | 1,185 | 100,000 | 0 | 101,185 |
+| Unchanged live insurance operator | 0 | 0 | 0 | 0 | 0 |
+
+The 2,152,533-atom supply is fully attributed. Public `CloseSlab` leaves the
+canonical tombstone, deletes the empty vault, refunds exact rent and frames both
+ledgers, all recipient tokens and the mint.
+
+Discarded duplicate candidates: more resolved payout permutations, fixed-stock
+coalescence/partition, destination repair/replacement and a standalone submitter
+redirect. Existing role-exchange, cleanup, provider-custody and frozen-reserve
+tests already own those relations. A development-only 50-lot second fill hit the
+existing admission limit because its required lien exceeded the user's claim;
+it was replaced by the bounded two-lot fill, without retaining an admission probe.
+Test integration also corrected private-helper placement and the `Live` enum name.
+No real program bug was found.
+
+**Row 429 remains OPEN.** This single asset-0/classic-SPL history does not cover
+arbitrary accrual/handoff histories, insurance-share fee accrual, expiry/recredit,
+other quote rails/assets, authority ABA, recovery, or a generic beneficiary oracle.
+
+Validation worktree: `/tmp/percolator-astra-row429-20260912`, exact requested
+origin base `65c74cbe326febe5d7b1b2f7887a8f3b7616bc1e`.
+Private target: `/tmp/percolator-astra-row429-target-20260912`, seeded by copying
+the existing public-disposition target. Default-feature SBF was rebuilt from this
+worktree using locked/offline platform-tools v1.52; SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector passes **1/1** (0.59 s). CU peaks, excluding fixture construction:
+management/payout **224,884**, new fee trade **441,987**, wind-down **255,637**,
+rejected bundle **415,655**, slab close **22,242**; all bounded by 600,000 CU.
+The four adjacent exact controls below pass **4/4** (12.98 s): earned-fee
+succession peaks at **423,137 CU**, coalescence at **366,532 CU**, resolved role
+exchange at **461,472 CU**, and cleanup submitter at **608,833 CU**, each within
+its existing test limit. Random keys can vary PDA costs. Existing Solana-client
+future-compatibility warnings remain. No full-suite or generic invariant proof
+is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row429-target-20260912
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+terminal_module=inv_024_attributed_quote_value_conservation::terminal_earnings_succession
+cargo test --locked --offline --test v16_cu "${terminal_module}::terminal_role_coalescence::live_earnings_terminal_exchange::v16_program_live_successor_accrual_survives_terminal_role_exchange" -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  "${terminal_module}::v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance" \
+  "${terminal_module}::terminal_role_coalescence::v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements" \
+  "${terminal_module}::terminal_role_coalescence::terminal_role_exchange::v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders" \
+  "${terminal_module}::terminal_cleanup_submitter::v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submitter"
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-024 funded terminal role exchange (row 429, 2026-09-12)
 
 Owner: [cu/inv_024_terminal_role_exchange.rs](cu/inv_024_terminal_role_exchange.rs),

@@ -73,6 +73,13 @@ fn terminal_earnings_world_with_freeze_authority(
     terminal_exit: bool,
     freeze_authority: Option<Pubkey>,
 ) -> TerminalEarningsWorld {
+    terminal_earnings_world_with_user_signers(terminal_exit, freeze_authority).0
+}
+
+fn terminal_earnings_world_with_user_signers(
+    terminal_exit: bool,
+    freeze_authority: Option<Pubkey>,
+) -> (TerminalEarningsWorld, [Keypair; 2]) {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_freeze_authority;
 
     let mut env = inv018_public_spl_market_with_freeze_authority(
@@ -281,16 +288,19 @@ fn terminal_earnings_world_with_freeze_authority(
         u128::from(CAPITAL[0] - EARNINGS)
     );
     if !terminal_exit {
-        return TerminalEarningsWorld {
-            env,
-            admin,
-            incumbent,
-            successor,
-            wallets,
-            tokens,
-            portfolios,
-            mint_frame,
-        };
+        return (
+            TerminalEarningsWorld {
+                env,
+                admin,
+                incumbent,
+                successor,
+                wallets,
+                tokens,
+                portfolios,
+                mint_frame,
+            },
+            users,
+        );
     }
     env.resolve();
     env.svm.warp_to_slot(7);
@@ -339,16 +349,19 @@ fn terminal_earnings_world_with_freeze_authority(
         );
         assert_eq!(env.svm.get_account(&env.payer.pubkey()), Some(payer));
     }
-    TerminalEarningsWorld {
-        env,
-        admin,
-        incumbent,
-        successor,
-        wallets,
-        tokens,
-        portfolios,
-        mint_frame,
-    }
+    (
+        TerminalEarningsWorld {
+            env,
+            admin,
+            incumbent,
+            successor,
+            wallets,
+            tokens,
+            portfolios,
+            mint_frame,
+        },
+        users,
+    )
 }
 
 #[test]
