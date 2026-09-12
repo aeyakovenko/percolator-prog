@@ -125,6 +125,75 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
+## INV-027 reward mapping before first risk (2026-09-12)
+
+Owner: [cu/inv_027_reward_mapping_admission.rs](cu/inv_027_reward_mapping_admission.rs),
+mounted under `inv_027_protected_principal_seniority::joint_admission_liabilities::reward_mapping_admission`.
+Selector: `v16_program_reward_mapping_preserves_owner_local_first_risk_across_routes`.
+
+Thirty-two public LiteSVM histories cross self/reciprocal maintenance rewards,
+both fee orders, the constrained owner as taker/maker, and all four single/batch
+CPI/no-CPI admission routes. System/SPL/ATA/wrapper instructions create all economic
+accounts and revoke mint authority after funding. A stale AuthMark report is
+renewed by its authorized publisher; two bounded cranks restore current effective
+price 100 without touching either never-exposed portfolio or its own fee cursor.
+
+Deposits 231/160, birth slots 1/3, admission slot 7 and rate 7 independently imply
+gross fees 42/28 and floor-rounded 3,333-bps rewards 13/9. Both reward mappings leave
+343 total capital, 48 insurance and domain budgets 23/25. Self rewards leave owner
+equity 202/141; reciprocal rewards leave 198/145. Each committed first fee checks
+the recipient's exact credit and unchanged own fee cursor when it has not paid.
+The second fee and both local refreshes precede admission in one transaction.
+
+An increase of one position quantum rejects at the independently calculated
+owner-local IM boundary, including when the constrained owner is an unsigned CPI
+maker. A valid admission followed by another owner's withdrawal request also
+rejects; all complete transaction/tracked Accounts roll back, including matcher
+context, fee/reward transfers and certificate updates, except the exact runtime
+signature fee. Identical-prefix retry succeeds. Same-slot rewarded-fee retries
+are byte-identical. Current certificates match the independent health oracle,
+and stock, reservation and source-credit censuses accompany every economic prefix.
+
+Each history closes through the other single/batch and CPI/no-CPI family, with
+fresh owner-signed matcher consent when the bilateral opening revoked it. All
+64 owner SPL payouts equal their separate net entitlements; only the 48 insurance
+atoms remain. The selector checks 64 exact rollbacks and peaks at 428,482 CU under
+its 600,000-CU bundle ceiling.
+
+Existing reward-recipient first-risk coverage has one donor reward and no-CPI
+admission. The joint-liability four-route matrix starts with an existing leg;
+maintenance self-reward/fragmentation and policy-entitlement histories stay flat.
+This increment distinguishes equal aggregate stocks with different first-risk
+entitlements and composes both reward branches with CPI admission and owner exit.
+No marginal or duplicate probe was retained. No production fix was needed.
+
+**Rows 413/422 remain OPEN.** This is bounded row-413 evidence after explicit fee
+settlement. Standalone admission with uncollected flat fees, nonzero target lag,
+funding and arbitrary histories remain outside the increment. It adds no row-422
+liquidation-reward provenance coverage; whole-invariant verdicts are unchanged.
+
+Validation uses base `82f44d1146a45f1f0cf07a76fb171a280d5c21e2` in isolated worktree
+`/tmp/percolator-astra-inv027-admission-20260912`. Default-feature SBF and the
+authenticated matcher were built locked/offline with platform-tools v1.52 after
+the shared program artifact changed and the cached matcher failed LiteSVM loading.
+Program SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The new selector and the two row-413 adjacent controls below pass; targeted
+formatting, whitespace and row-status checks pass. No full-suite run was performed.
+The adjacent INV-045 handoff control was attempted on this integration branch and
+currently exceeds its existing CU guardrail (348,484 CU observed against 325,000);
+it is not claimed as validation for this increment.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-inv027-admission-20260912-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/tmp
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities::reward_mapping_admission::v16_program_reward_mapping_preserves_owner_local_first_risk_across_routes -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::reward_recipient_first_risk::v16_program_never_exposed_reward_recipient_settles_own_fees_before_first_risk inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_joint_accrued_liabilities_precede_risk_admission
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_027_reward_mapping_admission.rs tests/invariants/cu/inv_027_joint_admission_liabilities.rs
+git diff --check
+```
+
 ## INV-073 public terminal reserve disposition (2026-09-12)
 
 The [public reserve disposition audit](terminal_public_reserves_audit_20260912.md)

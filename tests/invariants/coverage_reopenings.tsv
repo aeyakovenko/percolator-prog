@@ -37,6 +37,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # 411 partial public coverage (2026-09-10): stateful/inv_014_retained_backing_fee_cap.rs::v16_program_retained_backing_fee_caps_follow_participant_and_route_consent retains nonzero backing caps across an owner-signed matcher cap change, both charged roles and CPI/no-CPI alternatives. Exact post-CPI rollback, participant-local consent, provider SPL fees and opposite-route close values compose. Single-source Live evidence only; see README. No row/status promotion.
 411	LoF	PRIVILEGED	INV-014	INV-005,INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-081	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
 412	LoF	BLOCKER	INV-012	INV-004,INV-005,INV-010,INV-012,INV-024,INV-081	capability+x-automatic-revocation+x-episode	retained-capability-cannot-cross-any-authority-revoking-state-transition	OPEN
+# Row 413 partial conformance (2026-09-12): cu/inv_027_reward_mapping_admission.rs,
+# v16_program_reward_mapping_preserves_owner_local_first_risk_across_routes.
+# Thirty-two public worlds cross self/reciprocal maintenance rewards, both fee orders,
+# constrained taker/maker and four trade routes after authenticated same-price renewal.
+# Equal aggregate stocks preserve distinct owner-local first-risk boundaries; explicit
+# fee/refresh prefixes, 64 exact rollbacks, same-slot reward retries and 64 full SPL
+# payouts compose with opposite-route closure. Standalone uncollected flat fees and
+# general histories remain outside this bounded evidence; no production fix or status
+# promotion. Row 422 gains no evidence from this selector; both rows remain OPEN.
 413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
 414	LoF	PRIVILEGED	INV-012	INV-002,INV-007,INV-012,INV-019,INV-089	capability+x-asset-reuse+x-generation	capabilities-bind-every-replaceable-economic-object-incarnation	OPEN
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN

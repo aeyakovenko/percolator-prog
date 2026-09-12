@@ -16,6 +16,9 @@ use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 #[path = "inv_027_reward_recipient_first_risk.rs"]
 mod reward_recipient_first_risk;
 
+#[path = "inv_027_reward_mapping_admission.rs"]
+mod reward_mapping_admission;
+
 #[path = "inv_027_standalone_first_admission.rs"]
 mod standalone_first_admission;
 
