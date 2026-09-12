@@ -39,6 +39,9 @@ mod passive_reward_stock;
 #[path = "inv_008_withdrawal_stock_history.rs"]
 mod withdrawal_stock_history;
 
+#[path = "inv_008_insurance_round_trip_retry.rs"]
+mod insurance_round_trip_retry;
+
 fn braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)

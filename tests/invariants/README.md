@@ -274,6 +274,73 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-008 atomic insurance round-trip stock retry (row 428, 2026-09-12)
+
+Owner: [cu/inv_008_insurance_round_trip_retry.rs](cu/inv_008_insurance_round_trip_retry.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::insurance_round_trip_retry`.
+Selector: `v16_insurance_round_trip_consumption_survives_cross_route_retry`.
+
+Four public System/SPL/ATA/wrapper histories cross both insurance refill routes
+with absent/lazily initialized telemetry. A fixed 90-atom mint funds 37 target
+atoms and 53 peer atoms. A withdrawal returns all 37 target atoms to its source;
+a refill moves those same atoms back into insurance. Custody returns to identical
+complete SPL Accounts, while the direct route allocates 18/19 long/short atoms
+and the domain route allocates 0/37. Only a committed refill advances the shared
+insurance funding sequence. Authority epochs, generation and profiles stay fixed.
+
+One aborted bundle completes withdrawal/refill/withdrawal before the alternate
+refill rejects its duplicate intent. Another completes withdrawal/refill before
+a trailing SPL transfer fails. Both restore every tracked and compiled Account
+apart from exact payer signature fees, including the domain allocation, shared
+sequence and lazy ledger. An alternate round-trip envelope signed before these
+attempts then commits unchanged. The original retained envelope rejects after
+its successful payout prefix; both old refill routes remain stale after a fresh
+round trip. Full ledger fields, all domain budgets/spend, aggregate insurance,
+vault, fixed mint supply and complete SPL endpoint images are checked throughout.
+The target's final 37 atoms leave through signed live or unsigned resolved
+admission. The opposite admission rejects against the exhausted target budget
+while 53 peer atoms still satisfy custody preflight; the peer then withdraws
+exactly 53, leaving zero custody and no stranded stock.
+
+This adds a committed zero-net-custody stock cycle and an aborted *three-transfer*
+cycle to the existing refund and late-top-up-error controls. Those controls have
+no successful withdrawal/refill round trip inside one transaction. Standalone
+authority ABA, amount-only exhaustion, optional-ledger masks and another
+single-transfer late-error probe were discarded during coverage review as
+duplicates; none was added. The telemetry and exhaustion checks retained here
+constrain the new composed history.
+
+**Row 428 remains OPEN.** The consumed intrinsic sequence is the insurance
+**top-up** lane, not a withdrawal stock sequence. This does not prove standalone
+withdrawal uniqueness against independent replenishment, consume a withdrawal
+policy/window epoch, or cover active liabilities, native quote, lifecycle
+restart or arbitrary histories. The absent withdrawal binding is already an
+explicit gap in this branch. No new public-interface bug was established and
+no production or engine change was made. A future withdrawal-binding contract
+must specify its own consumption and retry semantics; these funding assertions
+must not be cited as that contract's proof.
+
+Validation uses branch `codex/row428-intrinsic-stock-retry-20260912` in
+`/tmp/percolator-row428-intrinsic-stock-retry-20260912`, based on requested origin
+commit `d16e2f01bec53960e74d5efa80448a1a2606aba4`. The default-feature SBF was rebuilt
+from this worktree with platform-tools v1.52; SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector passes **1/1**, with four histories, 24 exact rollbacks and
+32 rolled-back SPL transfers, peaking at **95,699 CU** (limit 300,000).
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row428-intrinsic-stock-retry-20260912-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::insurance_round_trip_retry::v16_insurance_round_trip_consumption_survives_cross_route_retry -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_008_intent_uniqueness_and_bounded_replay::v16_insurance_failed_bundle_retry_stays_consumed_after_alternate_route inv_008_intent_uniqueness_and_bounded_replay::v16_insurance_refund_does_not_revive_consumed_cross_route_intent inv_064_insurance_withdrawal_policy_equivalence::v16_program_insurance_withdrawal_ledger_history_is_economically_transparent
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-008 optional insurance ledger rollback and retry (row 428, 2026-09-12)
 
 Owner: [stateful/inv_008_insurance_ledger_retry.rs](stateful/inv_008_insurance_ledger_retry.rs),
