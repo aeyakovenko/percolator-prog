@@ -33,7 +33,7 @@ use percolator_prog::error::PercolatorError;
 use solana_sdk::{account::Account, pubkey::Pubkey, signature::Signer};
 
 #[path = "inv_082_terminal_destination_recovery.rs"]
-mod terminal_destination_recovery;
+pub(crate) mod terminal_destination_recovery;
 
 #[test]
 fn v16_program_public_liveness_survives_bad_hints_retained_route_and_substitutions() {

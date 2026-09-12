@@ -8,6 +8,11 @@ LiteSVM worlds combining retained fee-bearing trades, insurance payouts, policy 
 fee/top-up replenishment and exact transaction rollback. Per-owner SPL outcomes agree across
 direction, payout order and single/batch transports. Rows 411/415/428/432 remain OPEN.
 
+The [2026-09-12 receipt and pending-destination audit](terminal_receipt_gap_audit_20260912.md)
+adds keeper-only custody repair across paid receipts, late expiry and pending-cohort
+detachment. Its 24 public worlds check owner attribution, exact rollback and rent.
+Rows 410/417/418/419/420/421/424/433 remain OPEN; 434 is outside the audit.
+
 The [2026-09-12 oracle/source composition audit](oracle_source_composition_audit_20260912.md)
 records the INV-028 Hybrid capacity/carry increment: retained historical claims, fractional
 carry, current health certificates and exact owner payouts compose across eight public

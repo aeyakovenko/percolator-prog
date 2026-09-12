@@ -7,6 +7,9 @@ use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 #[path = "inv_082_shared_destination_recovery.rs"]
 mod shared_destination_recovery;
 
+#[path = "inv_082_receipt_destination_recovery.rs"]
+mod receipt_destination_recovery;
+
 const DEPOSITS: [u64; 2] = [101, 37];
 const RESOLVE_SLOT: u64 = 100;
 const EXIT_DELAY: u64 = 5;
@@ -19,13 +22,25 @@ fn account_is_closed(env: &V16CuEnv, key: Pubkey) -> bool {
     })
 }
 
-fn keeper_step(
+pub(crate) fn keeper_step(
     env: &mut V16CuEnv,
     ixs: &[Instruction],
     tracked: &[Pubkey],
     allowed: &[Pubkey],
     rent: u64,
     rejection: Option<(u8, PercolatorError)>,
+) -> u64 {
+    keeper_step_with_limit(env, ixs, tracked, allowed, rent, rejection, 300_000)
+}
+
+pub(crate) fn keeper_step_with_limit(
+    env: &mut V16CuEnv,
+    ixs: &[Instruction],
+    tracked: &[Pubkey],
+    allowed: &[Pubkey],
+    rent: u64,
+    rejection: Option<(u8, PercolatorError)>,
+    limit: u64,
 ) -> u64 {
     env.svm.expire_blockhash();
     let mut instructions = vec![heap_ix(), cu_ix()];
@@ -38,6 +53,8 @@ fn keeper_step(
     );
     assert_eq!(tx.message.header.num_required_signatures, 1);
     assert_eq!(tx.message.account_keys[0], env.payer.pubkey());
+    assert!(tx.verify().is_ok());
+    assert!(bincode::serialize(&tx).unwrap().len() <= 1_232);
     let mut keys = tx.message.account_keys.clone();
     keys.extend_from_slice(tracked);
     keys.sort_unstable();
@@ -74,7 +91,7 @@ fn keeper_step(
     assert_cu_within(
         "INV-082 destination recovery",
         meta.compute_units_consumed,
-        300_000,
+        limit,
     );
     meta.compute_units_consumed
 }
