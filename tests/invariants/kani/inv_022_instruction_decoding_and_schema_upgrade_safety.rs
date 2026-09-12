@@ -406,28 +406,30 @@ fn kani_v16_cure_and_cancel_close_rejects_incarnationless_legacy_payload() {
 fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
     let portfolio_id: u64 = kani::any();
     let expected_sequence: u64 = kani::any();
+    let position_epoch: u64 = kani::any();
     let enabled: u8 = kani::any();
     let trade_fee_cap_bps: u16 = kani::any();
     let expiry_slot: u64 = kani::any();
-    let data = Instruction::SetMatcherConfig {
-        portfolio_id,
-        expected_sequence,
-        enabled,
-        trade_fee_cap_bps,
-        expiry_slot,
-    }
-    .encode();
+    let mut data = [0u8; 35];
+    data[0..8].copy_from_slice(&portfolio_id.to_le_bytes());
+    data[8..16].copy_from_slice(&expected_sequence.to_le_bytes());
+    data[16..24].copy_from_slice(&position_epoch.to_le_bytes());
+    data[24] = enabled;
+    data[25..27].copy_from_slice(&trade_fee_cap_bps.to_le_bytes());
+    data[27..35].copy_from_slice(&expiry_slot.to_le_bytes());
 
-    match Instruction::decode(&data).unwrap() {
+    match Instruction::decode_body_for_proof(68, &data).unwrap() {
         Instruction::SetMatcherConfig {
             portfolio_id: decoded_portfolio_id,
             expected_sequence: decoded_sequence,
+            position_epoch: decoded_position_epoch,
             enabled: decoded_enabled,
             trade_fee_cap_bps: decoded_cap,
             expiry_slot: decoded_expiry,
         } => {
             assert_eq!(decoded_portfolio_id, portfolio_id);
             assert_eq!(decoded_sequence, expected_sequence);
+            assert_eq!(decoded_position_epoch, position_epoch);
             assert_eq!(decoded_enabled, enabled);
             assert_eq!(decoded_cap, trade_fee_cap_bps);
             assert_eq!(decoded_expiry, expiry_slot);
@@ -435,12 +437,24 @@ fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
         _ => unreachable!(),
     }
 
-    let legacy = [68, enabled];
-    assert!(Instruction::decode(&legacy).is_err());
+    let legacy = [enabled];
+    assert!(Instruction::decode_body_for_proof(68, &legacy).is_err());
 
-    let mut trailing = data.clone();
-    trailing.push(0);
-    assert!(Instruction::decode(&trailing).is_err());
+    // The pre-position-epoch tag-68 schema was 28 bytes. It must reject rather than reinterpret
+    // its enabled/cap/expiry suffix as the newly inserted epoch.
+    let mut prior_schema = [0u8; 27];
+    prior_schema[0..8].copy_from_slice(&portfolio_id.to_le_bytes());
+    prior_schema[8..16].copy_from_slice(&expected_sequence.to_le_bytes());
+    prior_schema[16] = enabled;
+    prior_schema[17..19].copy_from_slice(&trade_fee_cap_bps.to_le_bytes());
+    prior_schema[19..27].copy_from_slice(&expiry_slot.to_le_bytes());
+    assert!(Instruction::decode_body_for_proof(68, &prior_schema).is_err());
+
+    let extra: u8 = kani::any();
+    let mut trailing = [0u8; 36];
+    trailing[..35].copy_from_slice(&data);
+    trailing[35] = extra;
+    assert!(Instruction::decode_body_for_proof(68, &trailing).is_err());
 }
 
 #[kani::proof]

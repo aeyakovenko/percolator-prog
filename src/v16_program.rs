@@ -3037,6 +3037,7 @@ pub mod ix {
         SetMatcherConfig {
             portfolio_id: u64,
             expected_sequence: u64,
+            position_epoch: u64,
             enabled: u8,
             trade_fee_cap_bps: u16,
             expiry_slot: u64,
@@ -3519,6 +3520,17 @@ pub mod ix {
             })
         }
 
+        fn decode_set_matcher_config_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
+            Ok(Self::SetMatcherConfig {
+                portfolio_id: read_u64(rest)?,
+                expected_sequence: read_u64(rest)?,
+                position_epoch: read_u64(rest)?,
+                enabled: read_u8(rest)?,
+                trade_fee_cap_bps: read_u16(rest)?,
+                expiry_slot: read_u64(rest)?,
+            })
+        }
+
         #[cfg(kani)]
         fn finish_proof_body(
             input: &[u8],
@@ -3545,6 +3557,7 @@ pub mod ix {
                 61 => Self::decode_swap_secondary_for_primary_body,
                 66 => Self::decode_batch_trade_nocpi_body,
                 67 => Self::decode_batch_trade_cpi_body,
+                68 => Self::decode_set_matcher_config_body,
                 _ => return Err(ProgramError::InvalidInstructionData),
             };
             Self::finish_proof_body(input, decode)
@@ -3587,13 +3600,7 @@ pub mod ix {
                 10 => Self::decode_trade_cpi_body(&mut rest)?,
                 66 => Self::decode_batch_trade_nocpi_body(&mut rest)?,
                 67 => Self::decode_batch_trade_cpi_body(&mut rest)?,
-                68 => Self::SetMatcherConfig {
-                    portfolio_id: read_u64(&mut rest)?,
-                    expected_sequence: read_u64(&mut rest)?,
-                    enabled: read_u8(&mut rest)?,
-                    trade_fee_cap_bps: read_u16(&mut rest)?,
-                    expiry_slot: read_u64(&mut rest)?,
-                },
+                68 => Self::decode_set_matcher_config_body(&mut rest)?,
                 8 => Self::ClosePortfolio {
                     portfolio_id: read_u64(&mut rest)?,
                     expected_sequence: read_u64(&mut rest)?,
@@ -3982,6 +3989,7 @@ pub mod ix {
                 Self::SetMatcherConfig {
                     portfolio_id,
                     expected_sequence,
+                    position_epoch,
                     enabled,
                     trade_fee_cap_bps,
                     expiry_slot,
@@ -3989,6 +3997,7 @@ pub mod ix {
                     out.push(68);
                     push_u64(&mut out, portfolio_id);
                     push_u64(&mut out, expected_sequence);
+                    push_u64(&mut out, position_epoch);
                     out.push(enabled);
                     push_u16(&mut out, trade_fee_cap_bps);
                     push_u64(&mut out, expiry_slot);
@@ -7120,6 +7129,7 @@ pub mod processor {
             Instruction::SetMatcherConfig {
                 portfolio_id,
                 expected_sequence,
+                position_epoch,
                 enabled,
                 trade_fee_cap_bps,
                 expiry_slot,
@@ -7128,6 +7138,7 @@ pub mod processor {
                 accounts,
                 portfolio_id,
                 expected_sequence,
+                position_epoch,
                 enabled,
                 trade_fee_cap_bps,
                 expiry_slot,
@@ -9400,6 +9411,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         portfolio_id: u64,
         expected_sequence: u64,
+        position_epoch: u64,
         enabled: u8,
         trade_fee_cap_bps: u16,
         expiry_slot: u64,
@@ -9428,14 +9440,18 @@ pub mod processor {
         {
             return Err(PercolatorError::Unauthorized.into());
         }
-        let (current_portfolio_id, current_sequence) = {
+        let (current_portfolio_id, current_sequence, current_position_epoch) = {
             let data = lp_portfolio_ai.try_borrow_data()?;
             (
                 state::read_portfolio_id(&data)?,
                 state::read_portfolio_matcher_sequence(&data)?,
+                state::read_portfolio_position_epoch(&data)?,
             )
         };
-        if portfolio_id != current_portfolio_id || expected_sequence != current_sequence {
+        if portfolio_id != current_portfolio_id
+            || expected_sequence != current_sequence
+            || position_epoch != current_position_epoch
+        {
             return Err(PercolatorError::EngineStale.into());
         }
         state::next_portfolio_matcher_sequence(current_sequence, expected_sequence)?;
