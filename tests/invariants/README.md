@@ -1,5 +1,100 @@
 # Invariant-owned test coverage
 
+## INV-008 fee reclassification and retained insurance retry (row 428, 2026-09-12)
+
+Owner: [stateful/inv_008_insurance_fee_reclassification.rs](stateful/inv_008_insurance_fee_reclassification.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::insurance_fee_reclassification`.
+Selector: `v16_program_stale_insurance_retry_restores_fee_stock_and_exhausted_portfolio`.
+
+Two public-wrapper LiteSVM histories pay an original 7-atom insurance request,
+then advance its bound authority epoch through insurer succession while retaining
+the same live operator. Five authenticated slots at 7 atoms/slot reclassify
+35/17 capital atoms into base-asset insurance. The 17-atom case exhausts and
+deletes the fee-paying portfolio, returning its rent to the market. No new
+custody or funding intent supplies this insurance; caller slot MAX cannot
+increase the charge beyond the authenticated interval or available capital.
+
+Both `[SyncMaintenanceFee, retained withdrawal]` and
+`[SyncMaintenanceFee, fresh withdrawal, retained withdrawal]` reject with
+EngineStale after their successful prefixes. Complete tracked/compiled Accounts
+and exact payer fees establish rollback of the fee anchor, source capital,
+insurance allocation, real SPL payout, portfolio deletion and rent transfer.
+The unchanged fresh bundle, signed and successfully simulated before both
+failures, then commits. Its payout differs from the old request only in the
+authority epoch. The original retained envelope still rejects with enough
+asset-local insurance and custody to pay its full amount. Retained peer consent
+pays 43 atoms through the unaffected asset.
+
+Input-derived checks reconcile all domain budgets/spend, aggregate insurance,
+capital and custody, every SPL source/destination Account, fixed mint supply,
+all role profiles/control sequences and unrelated economic Accounts. Existing
+stock/encumbrance censuses run at each checkpoint. The operator receives exactly
+42/24 atoms, the portfolio owner receives 66/0 remaining capital atoms, and the peer
+receives 43; both histories finish at zero custody. V16Svm supplies its existing
+empty allocation/SPL fixtures; initialized economic changes use public wrapper
+routes, with no account repair or snapshot restoration.
+
+This adds passive fee reclassification and rent-bearing source deletion to
+row428. Row415's rail retry restores deposit/backing/donation prefixes; the
+retained-reserve and optional-ledger tests restore funded payouts/top-ups; the
+insurance round-trip test consumes a top-up sequence with zero net custody.
+The retained-fee-stock trade history couples payouts to trade-intent rejection,
+without an epoch-stale insurance suffix or fee-exhausted portfolio deletion.
+Those existing dimensions were not added as standalone tests.
+
+**Row 428 remains OPEN**, with partial INV-008/024/031/064/080/081 conformance.
+Current behavior did not violate the bound authority-epoch cases tested.
+WithdrawInsuranceAsset still has no intrinsic withdrawal stock-sequence field;
+this test does not establish successful-debit consumption without an authority
+change, terminal residual recredit, other quote rails, or arbitrary histories.
+No production correction or status promotion is made.
+
+Base: `037a055e8783aa5abf410983ceee99fe38467cd2`; branch:
+`codex/row428-insurance-stock-epoch-20260912`; worktree:
+`/tmp/percolator-row428-20260912`. Default-feature wrapper and authenticated
+matcher SBF were rebuilt locked/offline with platform-tools v1.52. Wrapper
+SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Build caches were privately copied from
+`/dev/shm/row428-intrinsic-stock-retry-20260912-target`.
+Shared memory filled during cache preparation and the first SBF attempt;
+only this worker's target was moved to its worktree's ignored `target`
+directory, with the requested `/dev/shm/percolator-row428-target` path retained
+as a symlink. The subsequent builds and checks use the environment below.
+
+The new selector passes two histories, four simulations, eight measured
+successes and six exact rollbacks, including two rolled-back SPL payouts and
+two rolled-back portfolio deletions. Peak success/rejection CU:
+**78,493/87,842**, below 300,000. Three adjacent stateful and five CU controls,
+charter/index and machine status pass. Formatting and working/staged whitespace
+checks pass. Existing unused-support and Solana future-compatibility warnings
+remain. Exact commands (no full-suite claim):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row428-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row428-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row428-tmp CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture --test-threads=1 \
+  inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::insurance_fee_reclassification::v16_program_stale_insurance_retry_restores_fee_stock_and_exhausted_portfolio \
+  inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::insurance_ledger_retry::v16_program_retained_insurance_epoch_rejection_restores_optional_ledger_and_fresh_retry \
+  inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_paid_retained_insurance_stays_bound_after_replenishment_and_operator_aba \
+  inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_008_intent_uniqueness_and_bounded_replay::insurance_round_trip_retry::v16_insurance_round_trip_consumption_survives_cross_route_retry \
+  inv_008_intent_uniqueness_and_bounded_replay::underfunded_rail_retry::v16_underfunded_withdrawal_retry_preserves_replenished_stock_across_quote_rails \
+  inv_008_intent_uniqueness_and_bounded_replay::v16_insurance_failed_bundle_retry_stays_consumed_after_alternate_route \
+  inv_008_intent_uniqueness_and_bounded_replay::v16_insurance_refund_does_not_revive_consumed_cross_route_intent \
+  inv_064_insurance_withdrawal_policy_equivalence::v16_program_insurance_withdrawal_ledger_history_is_economically_transparent
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-045 funding reversal and unsettled carry entitlement (row 425, 2026-09-12)
 
 Owner: [cu/inv_045_funding_carry_entitlement.rs](cu/inv_045_funding_carry_entitlement.rs),

@@ -478,6 +478,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # as standalone additions. Authority-epoch binding only: no intrinsic stock sequence,
 # standalone debit consumption, fee/terminal stock, other rails or arbitrary-history claim.
 # See README for exact commands, SBF provenance and remaining gaps. Row remains OPEN.
+# 428 fee-reclassification conformance (2026-09-12):
+# stateful/inv_008_insurance_fee_reclassification.rs,
+# v16_program_stale_insurance_retry_restores_fee_stock_and_exhausted_portfolio.
+# Two histories restore passive insurance creation and fee-exhausted portfolio
+# deletion/rent after an epoch-stale withdrawal suffix, including a completed
+# fresh payout prefix. Unchanged fresh bundles commit; fully funded old envelopes
+# reject. Six exact rollbacks include two SPL payouts and two portfolio deletions.
+# Exact operator/peer/owner exits empty custody. This adds fee-stock/source-deletion
+# composition, not top-up/ledger/rail duplication. Bound authority epochs only;
+# intrinsic withdrawal stock binding remains absent. No violation observed in these
+# bounded cases, production correction or status promotion. See README; row OPEN.
 428	LoF	REAL	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
 # Row 429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_exchange.rs,
 # v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders.

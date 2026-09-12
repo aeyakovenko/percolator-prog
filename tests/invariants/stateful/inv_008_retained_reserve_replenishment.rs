@@ -27,6 +27,9 @@ use std::collections::BTreeSet;
 #[path = "inv_008_insurance_ledger_retry.rs"]
 mod insurance_ledger_retry;
 
+#[path = "inv_008_insurance_fee_reclassification.rs"]
+mod insurance_fee_reclassification;
+
 const FUNDER: usize = 0;
 const OPERATOR: usize = 1;
 const SUCCESSOR: usize = 2;
