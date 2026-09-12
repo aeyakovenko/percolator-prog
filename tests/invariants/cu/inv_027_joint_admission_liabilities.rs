@@ -12,6 +12,9 @@ use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv01
 use crate::support::fuzz_model::{assert_current_certificate_matches_independent, TradeRoute};
 use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_027_reward_recipient_first_risk.rs"]
+mod reward_recipient_first_risk;
+
 const PRICE: u64 = 100;
 const START: u64 = 1;
 const ADMISSION: u64 = 4;

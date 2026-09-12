@@ -18,6 +18,12 @@ adds twenty public LiteSVM histories for activation/CPI rollback, portfolio/gran
 and funded oracle ABA across shutdown with separate reserve ledgers and SPL beneficiaries.
 Holdouts 412/414/416/429 remain OPEN.
 
+The [2026-09-12 first-risk and authenticated reward audit](oracle_liquidation_gap_audit_20260912.md)
+adds never-exposed reward-recipient liability accounting and paid-mark/fresh-report
+liquidation handoff coverage, including independent certificates, exact rollback
+and owner payouts. Rows 413/422/426 gain partial coverage; 423/425 are adjacent
+controls. All five holdouts remain OPEN; the covered row-434 reopen history is unchanged.
+
 The [2026-09-12 oracle/source composition audit](oracle_source_composition_audit_20260912.md)
 records the INV-028 Hybrid capacity/carry increment: retained historical claims, fractional
 carry, current health certificates and exact owner payouts compose across eight public

@@ -5,6 +5,9 @@
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
+#[path = "inv_045_authenticated_reward_handoff.rs"]
+mod authenticated_reward_handoff;
+
 const ENTRY: u64 = 1_000_000;
 const ACCEPTED_PRINT: u64 = 990_400;
 const MARK: u64 = 992_320;
