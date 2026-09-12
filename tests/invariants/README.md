@@ -22,6 +22,16 @@ INV-020/024/053/054/056/061/071/072/081/086 evidence. Moving prices, funding, ac
 claims, positive liquidation/rewards and economically pending omissions remain
 outside this increment; invariant verdicts and reopening labels are unchanged.
 
+The [shared-holder pending-loss audit](pending_loss_shared_holder_audit_20260912.md)
+adds one INV-039 selector with sixteen public LiteSVM histories. One portfolio
+retains two unequal pending domains across resolution, partial detachment and
+both debtor deletion orders. Early settlement creates junior receipt face; late
+settlement realizes source value. Exact owner entitlements agree across these
+payment classes, with transaction rollback and complete portfolio/slab retirement.
+This adds bounded INV-024/039/041/048/066/067/073/081/086 evidence and solvent,
+zero-residual INV-037/076 controls. Bankruptcy, adverse drift, funding and general
+histories remain outside this increment; invariant verdicts are unchanged.
+
 The [spent receipt conformance audit](receipt_spend_replay_audit_20260912.md) adds
 one INV-067 selector with four public LiteSVM histories. Two unequal claimants spend
 their initial payouts and each later top-up into a settled debtor's SPL account.
