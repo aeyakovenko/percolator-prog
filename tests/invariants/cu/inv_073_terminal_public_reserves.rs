@@ -3,7 +3,7 @@
 use super::*;
 use terminal_reserve_destination_recovery::land;
 
-fn reserve_payout(
+pub(super) fn reserve_payout(
     env: &V16CuEnv,
     wallets: [Pubkey; 5],
     tokens: [Pubkey; 5],

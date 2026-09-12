@@ -1,5 +1,30 @@
 # Invariant-owned test coverage
 
+## INV-024 terminal insurer merge and separation (row 410, 2026-09-12)
+
+The [terminal role partition audit](terminal_role_partition_audit_20260912.md)
+adds one selector in [cu/inv_024_terminal_role_partition.rs](cu/inv_024_terminal_role_partition.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_partition`:
+`v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution`.
+Four public LiteSVM histories cross two reserve payment orders with an independent
+keeper or the former insurer/admin paying subsequent terminal transaction fees.
+After partial payments, the insurer consensually transfers its unpaid claim to
+the backing provider, then that provider transfers only the remaining insurance
+to the unchanged live operator. Principal and real utilization earnings stay with
+the provider and its original ledger throughout both funded handoffs.
+
+The finite success-state oracle checks 36 reserve payments, eight role transfers,
+and four rent-exact slab closures. Input-derived SPL entitlements, stock classes,
+insurance budgets, ledger attribution, authority profiles/epochs and full Account
+frames distinguish explicit insurance succession from accidental movement of
+backing value. The former insurer/admin finishes with seven quote atoms; the
+provider receives 100,000 principal, 875 earned fees and five insurance atoms;
+the final beneficiary receives the remaining 19 insurance atoms. No new fees are
+created during these terminal transitions. This adds bounded INV-005/024/036/081
+evidence after full owner disposition, using the existing public fee fixture and
+reserve instruction builder. **Row 410 remains OPEN**: no generic generator/oracle,
+new rejection family or invariant-status promotion is claimed.
+
 ## INV-024 coalesced funded roles (rows 416/429, 2026-09-12)
 
 The [coalesced reserve-role audit](terminal_role_coalescence_audit_20260912.md)

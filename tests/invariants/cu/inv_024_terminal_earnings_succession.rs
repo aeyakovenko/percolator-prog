@@ -17,6 +17,9 @@ mod terminal_earnings_roundtrip;
 #[path = "inv_024_terminal_role_coalescence.rs"]
 mod terminal_role_coalescence;
 
+#[path = "inv_024_terminal_role_partition.rs"]
+mod terminal_role_partition;
+
 #[path = "inv_073_terminal_public_reserves.rs"]
 mod terminal_public_reserves;
 pub(crate) use terminal_public_reserves::{

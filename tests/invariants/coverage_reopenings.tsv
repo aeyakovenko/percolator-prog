@@ -40,6 +40,12 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # succession; only the unpaid fee tail transfers, separate from submitter insurance value.
 # Former-ledger suffix rolls back SPL payout/new-ledger initialization; valid payouts remain exact.
 # One bounded history, no generic generator/oracle or invariant-status promotion; row stays OPEN.
+# Row 410 partial conformance (2026-09-12): cu/inv_024_terminal_role_partition.rs,
+# v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution.
+# Four public histories merge the insurer into the provider, then separate the roles;
+# partial insurance transfers never move provider principal, earned fees or its ledger.
+# Two payment orders cross keeper/former-insurer-admin fee payers through exact slab close.
+# Finite success-state attribution only; no generic generator/oracle. Row remains OPEN.
 410	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-036,INV-081	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	OPEN
 # 411 partial public coverage (2026-09-10): stateful/inv_014_retained_backing_fee_cap.rs::v16_program_retained_backing_fee_caps_follow_participant_and_route_consent retains nonzero backing caps across an owner-signed matcher cap change, both charged roles and CPI/no-CPI alternatives. Exact post-CPI rollback, participant-local consent, provider SPL fees and opposite-route close values compose. Single-source Live evidence only; see README. No row/status promotion.
 # 411/432 bounded conformance (2026-09-12): cu/inv_014_retained_redirect_entitlement.rs,
