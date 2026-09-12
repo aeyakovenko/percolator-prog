@@ -139,6 +139,13 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # owner debts, frozen funding, 96 complete-Account rollbacks and 80 exact SPL payouts;
 # see pending_loss_funded_resolution_audit_20260912.md. No generic generator/oracle,
 # vulnerable-pin experiment, production fix or invariant-status promotion; row stays OPEN.
+# Row 419 additional bounded conformance (2026-09-12): cu/inv_039_pending_loss_close_preemption.rs,
+# v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_across_routes.
+# Eight mirrored side/close-expiry/payout-order histories preserve a retained claimant
+# through active-close Recovery and Resolved before residual booking. Exact original
+# owner entitlements match live-B settlement; 12 staged-prefix rollbacks, 40 terminal
+# retries and 40 portfolio deletions. Single bankruptcy pair, zero fees/funding/close
+# drift/backing/insurance; see README. No generic oracle or status promotion.
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,
 # v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion.

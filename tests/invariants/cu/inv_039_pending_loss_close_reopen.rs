@@ -12,6 +12,74 @@
 use super::*;
 use solana_sdk::{instruction::InstructionError, rent::Rent, transaction::TransactionError};
 
+#[path = "inv_039_pending_loss_close_preemption.rs"]
+mod close_preemption;
+
+fn pending_bankruptcy(reverse_sides: bool, peak_crank_cu: &mut u64) -> (AttributionWorld, u128) {
+    let mut world = AttributionWorld::new_with_params(
+        reverse_sides,
+        V16CuMarketParams {
+            max_portfolio_assets: 3,
+            initial_price: 1_000_000,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_bankrupt_close_lifetime_slots: 1_000,
+            ..V16CuMarketParams::default()
+        },
+    );
+    let q = world.quantities[0];
+    let cu = world.env.trade_asset_with_cu(
+        1,
+        &world.actors[0].owner,
+        world.actors[0].portfolio,
+        &world.actors[1].owner,
+        world.actors[1].portfolio,
+        q,
+        1_000_000,
+        0,
+    );
+    assert_cu_within("INV-039 close/reopen initial trade", cu, TRADE_CU_LIMIT);
+    let mut mark = 1_000_000u64;
+    for slot in 1..=20 {
+        mark = mark * if reverse_sides { 9_500 } else { 10_500 } / 10_000;
+        world.env.svm.warp_to_slot(slot);
+        world.env.push_auth_mark_for_asset_as_admin(1, slot, mark);
+        let cu = world.env.crank(
+            world.actors[4].portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(1),
+            },
+        );
+        *peak_crank_cu = (*peak_crank_cu).max(cu);
+        assert_cu_within(
+            "INV-039 close/reopen authenticated accrual",
+            cu,
+            CRANK_CU_LIMIT,
+        );
+    }
+    assert_eq!(world.env.market_state().1.assets[1].effective_price, mark);
+    let gain = (i128::from(mark) - 1_000_000).unsigned_abs();
+    assert!(gain > ATTRIBUTION_DEPOSITS[1]);
+    let cu = world.env.trade_asset_with_cu(
+        1,
+        &world.actors[0].owner,
+        world.actors[0].portfolio,
+        &world.actors[1].owner,
+        world.actors[1].portfolio,
+        -q,
+        mark,
+        0,
+    );
+    assert_cu_within(
+        "INV-039 matched reduction creates close residual",
+        cu,
+        TRADE_CU_LIMIT,
+    );
+    (world, gain)
+}
+
 fn close_instruction(world: &AttributionWorld, actor: usize) -> Instruction {
     let a = &world.actors[actor];
     Instruction {
@@ -162,72 +230,14 @@ fn v16_program_pending_loss_survives_debtor_recreation_and_bystander_payout() {
     };
 
     for reverse_sides in [false, true] {
-        let mut world = AttributionWorld::new_with_params(
-            reverse_sides,
-            V16CuMarketParams {
-                max_portfolio_assets: 3,
-                initial_price: 1_000_000,
-                maintenance_margin_bps: 1_000,
-                initial_margin_bps: 1_000,
-                max_price_move_bps_per_slot: 500,
-                max_bankrupt_close_lifetime_slots: 1_000,
-                ..V16CuMarketParams::default()
-            },
-        );
+        let (mut world, gain) = pending_bankruptcy(reverse_sides, &mut peak_crank_cu);
         let holder = world.actors[0].portfolio;
         let debtor = world.actors[1].portfolio;
         let bystander = world.actors[4].portfolio;
-        let q = world.quantities[0];
-        let empty_sources = world.env.portfolio_state(debtor).source_domains;
-        let cu = world.env.trade_asset_with_cu(
-            1,
-            &world.actors[0].owner,
-            holder,
-            &world.actors[1].owner,
-            debtor,
-            q,
-            1_000_000,
-            0,
-        );
-        assert_cu_within("INV-039 close/reopen initial trade", cu, TRADE_CU_LIMIT);
-        let mut mark = 1_000_000u64;
-        for slot in 1..=20 {
-            mark = mark * if reverse_sides { 9_500 } else { 10_500 } / 10_000;
-            world.env.svm.warp_to_slot(slot);
-            world.env.push_auth_mark_for_asset_as_admin(1, slot, mark);
-            let cu = world.env.crank(
-                bystander,
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: slot,
-                    observations: crank_observations(1),
-                },
-            );
-            peak_crank_cu = peak_crank_cu.max(cu);
-            assert_cu_within(
-                "INV-039 close/reopen authenticated accrual",
-                cu,
-                CRANK_CU_LIMIT,
-            );
-        }
-        assert_eq!(world.env.market_state().1.assets[1].effective_price, mark);
-        let gain = (i128::from(mark) - 1_000_000).unsigned_abs();
+        // The never-traded bystander retains the freshly initialized source-domain frame.
+        let empty_sources = world.env.portfolio_state(bystander).source_domains;
         let residual = gain.checked_sub(ATTRIBUTION_DEPOSITS[1]).unwrap();
         assert!(residual > 0);
-        let cu = world.env.trade_asset_with_cu(
-            1,
-            &world.actors[0].owner,
-            holder,
-            &world.actors[1].owner,
-            debtor,
-            -q,
-            mark,
-            0,
-        );
-        assert_cu_within(
-            "INV-039 matched reduction creates close residual",
-            cu,
-            TRADE_CU_LIMIT,
-        );
         world.check([0; 4], [true, false, false, false]);
         let original_holder = world.env.portfolio_state(holder);
         let original_leg = active_leg_for_asset(&original_holder, 1);

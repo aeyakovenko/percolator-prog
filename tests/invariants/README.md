@@ -331,6 +331,87 @@ cargo fmt --all -- --check
 git diff --check && git diff --cached --check && git show --format= --check HEAD
 ```
 
+## INV-039 bankruptcy close preemption with retained weight (row 419, 2026-09-12)
+
+Owner: [cu/inv_039_pending_loss_close_preemption.rs](cu/inv_039_pending_loss_close_preemption.rs),
+mounted under `inv_039_pending_loss_obligation_durability::close_reopen::close_preemption`.
+The selector is
+`v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_across_routes`.
+The existing bankruptcy setup in `cu/inv_039_pending_loss_close_reopen.rs` is shared
+without changing its public instruction history. System/SPL/ATA and wrapper calls
+construct every economic account; authenticated marks and Clock advance the world.
+
+Eight histories cross long/short claimant orientation, live residual booking versus
+expired-close preemption, and claimant-first/debtor-first terminal order. Public
+matched reduction leaves one zero-basis, one-lot loss-weight holder and a bankrupt
+debtor with 1,473,287 or 461,518 atoms of unpaid residual. The live control books B
+before resolution but leaves the holder's debit unsettled. The other route expires
+the active close, then permissionless cranks declare Recovery and finalize Resolved
+before any residual is booked. The active ledger, all portfolio Accounts, asset
+indices and source-credit stocks survive both mode transitions. The stale caller
+slot and empty observation list cannot substitute for authenticated close expiry.
+
+**Guarantee.** An input-derived prefix oracle checks each owner's capital, signed
+PnL and exact SPL payout, the complete debtor close ledger, and the market's
+pending counts, loss weights, stored positions, OI, aggregate capital/PnL and SPL
+conservation. In the expired route the first claimant call refreshes terminal state:
+the original leg, loss weight, full PnL and unpaid entitlement remain intact. Debtor
+settlement books exactly the original residual into B without consuming the holder's
+weight. The claimant's next call settles that debit, removes the weight and pays
+exactly 200,000 principal plus the debtor's 180,000 collectible atoms. Its finalized
+receipt records exactly 180,000 face and paid atoms. The live route reaches the same
+owner payouts: `[380000, 0, 300000, 250000, 777]`. Each unrelated owner keeps its full
+principal. No counter or leg disappearance is accepted as evidence of debt payment.
+
+Twelve rejected suffixes follow successful B booking or claimant debit/payment;
+forty terminal retries reject exactly. Each compares complete tracked and transaction
+Accounts, including payer lamports minus the exact signature fee. Positive retries
+complete the prescribed five or six terminal calls per history and delete all forty
+portfolios with zero remaining booked/SPL custody, capital, positive PnL and retained
+weight. Successful calls also frame every unrelated tracked Account.
+
+This adds bounded INV-024/037/039/041/048/066/067/073/076/081 evidence. The funded
+resolution and shared-holder selectors use solvent debts and do not cross an active
+bankruptcy close's expiration. The original close/reopen selector settles B before
+resolution; INV-071's expired-close/B-stale witness owns scheduler priority on a
+different account shape. This selector instead reconciles the pending claimant's
+original entitlement across live and preempted bankruptcy settlement. INV-086's
+generic reference/deployed equivalence requirement is not discharged by this finite
+oracle. **Row 419 remains OPEN; invariant statuses are unchanged.**
+
+Limits: one bankrupt pair on asset 1, integral one-lot quantities, two fixed price
+histories, zero fees/funding, no adverse drift after close start, and no insurance,
+backing, cross-domain pending cohort, maximum-shape or arbitrary-history product.
+There is no generic generator/oracle or production fix. Funding-only, shared-holder
+and backing-expiry candidates were discarded at source review as existing coverage;
+no executable candidate was discarded. Temporary diagnostic output was removed.
+
+Validation uses isolated worktree `/home/anatoly/astra-row419-pending-bankruptcy-20260912`,
+branch `codex/astra-row419-pending-bankruptcy-20260912`, based only on
+`f9fdc1e23911dc612ef0140e4f362cd0fd4a8cf8`. Private default-feature SBF rebuild with
+platform-tools v1.52 reproduces the current documented artifact's SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Measured continuation peak: 216,130 CU (setup trades/admin/token calls are outside
+this peak); crank/custody/rejected-transaction bounds are 325,000/300,000/600,000 CU.
+The exact selector, four adjacent selectors, charter/index, workspace formatting and
+all three Git whitespace checks pass with the following commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row419-pending-bankruptcy-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::close_reopen::close_preemption::v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_across_routes -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_039_pending_loss_obligation_durability::close_reopen::v16_program_pending_loss_survives_debtor_recreation_and_bystander_payout \
+  inv_039_pending_loss_obligation_durability::resolved_histories::funded_resolution::v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders \
+  inv_039_pending_loss_obligation_durability::shared_holder::v16_program_shared_holder_pending_domains_survive_partial_detach_and_debtor_close_orders \
+  inv_071_crank_progress::v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_progress
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-024 terminal insurer merge and separation (row 410, 2026-09-12)
 
 The [terminal role partition audit](terminal_role_partition_audit_20260912.md)
