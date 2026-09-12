@@ -18,6 +18,13 @@ adds twenty public LiteSVM histories for activation/CPI rollback, portfolio/gran
 and funded oracle ABA across shutdown with separate reserve ledgers and SPL beneficiaries.
 Holdouts 412/414/416/429 remain OPEN.
 
+The [2026-09-12 whole-market retirement audit](market_retirement_gap_audit_20260912.md)
+adds four public LiteSVM histories under INV-012. A rejected same-address market
+initialization restores both funded portfolios, the live market, vault and retained
+signed CPI consent after a complete retirement prefix. Successful continuations check
+owner principal, market-authority rent refunds and fresh-market isolation exactly.
+This is bounded INV-001/007/012/021/024/080 evidence; holdouts 412/414/416/429 remain OPEN.
+
 The [2026-09-12 first-risk and authenticated reward audit](oracle_liquidation_gap_audit_20260912.md)
 adds never-exposed reward-recipient liability accounting and paid-mark/fresh-report
 liquidation handoff coverage, including independent certificates, exact rollback

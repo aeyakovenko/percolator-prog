@@ -25,6 +25,9 @@ mod generation_bundle_rollback;
 #[path = "inv_012_portfolio_grant_rollback.rs"]
 mod portfolio_grant_rollback;
 
+#[path = "inv_012_market_retirement_rollback.rs"]
+mod market_retirement_rollback;
+
 const CAPITAL: u128 = 1_000_000;
 const PRICE: u64 = 100;
 const SLOT: u64 = 1;
