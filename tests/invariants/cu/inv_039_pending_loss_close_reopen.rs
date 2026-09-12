@@ -15,8 +15,11 @@ use solana_sdk::{instruction::InstructionError, rent::Rent, transaction::Transac
 #[path = "inv_039_pending_loss_close_preemption.rs"]
 mod close_preemption;
 
+#[path = "inv_039_pending_loss_cure_resolution.rs"]
+mod cure_resolution;
+
 fn pending_bankruptcy(reverse_sides: bool, peak_crank_cu: &mut u64) -> (AttributionWorld, u128) {
-    let mut world = AttributionWorld::new_with_params(
+    let world = AttributionWorld::new_with_params(
         reverse_sides,
         V16CuMarketParams {
             max_portfolio_assets: 3,
@@ -28,6 +31,19 @@ fn pending_bankruptcy(reverse_sides: bool, peak_crank_cu: &mut u64) -> (Attribut
             ..V16CuMarketParams::default()
         },
     );
+    let mut mark = 1_000_000u64;
+    let marks = (1..=20).map(move |_| {
+        mark = mark * if reverse_sides { 9_500 } else { 10_500 } / 10_000;
+        mark
+    });
+    enter_pending_bankruptcy(world, marks, peak_crank_cu)
+}
+
+fn enter_pending_bankruptcy(
+    mut world: AttributionWorld,
+    marks: impl IntoIterator<Item = u64>,
+    peak_crank_cu: &mut u64,
+) -> (AttributionWorld, u128) {
     let q = world.quantities[0];
     let cu = world.env.trade_asset_with_cu(
         1,
@@ -41,8 +57,9 @@ fn pending_bankruptcy(reverse_sides: bool, peak_crank_cu: &mut u64) -> (Attribut
     );
     assert_cu_within("INV-039 close/reopen initial trade", cu, TRADE_CU_LIMIT);
     let mut mark = 1_000_000u64;
-    for slot in 1..=20 {
-        mark = mark * if reverse_sides { 9_500 } else { 10_500 } / 10_000;
+    for (index, next_mark) in marks.into_iter().enumerate() {
+        let slot = index as u64 + 1;
+        mark = next_mark;
         world.env.svm.warp_to_slot(slot);
         world.env.push_auth_mark_for_asset_as_admin(1, slot, mark);
         let cu = world.env.crank(

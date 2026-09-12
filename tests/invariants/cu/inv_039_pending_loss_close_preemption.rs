@@ -9,7 +9,7 @@
 use super::*;
 use solana_sdk::fee::FeeStructure;
 
-fn terminal_instruction(world: &AttributionWorld, actor: usize) -> Instruction {
+pub(super) fn terminal_instruction(world: &AttributionWorld, actor: usize) -> Instruction {
     let a = &world.actors[actor];
     Instruction {
         program_id: world.env.program_id,

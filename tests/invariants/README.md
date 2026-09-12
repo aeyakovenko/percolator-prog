@@ -436,6 +436,107 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-039 canceled residual through resolution (row 419, 2026-09-12)
+
+Owner: [cu/inv_039_pending_loss_cure_resolution.rs](cu/inv_039_pending_loss_cure_resolution.rs),
+mounted under `inv_039_pending_loss_obligation_durability::close_reopen::cure_resolution`.
+Selector:
+`v16_program_canceled_close_keeps_debt_through_pending_release_and_resolution`.
+
+Eight public LiteSVM histories cross mirrored sides, immediate resolution versus
+live claimant refresh after funded cancellation, and both debtor/claimant payout
+orders. System/SPL/ATA/wrapper instructions construct all economic accounts. Before
+opening, a consenting third owner withdraws and transfers 100,000 of its own
+principal into the debtor's token account. Mint authority is then revoked at a
+fixed supply of 930,777 atoms. Five authenticated 40,000-atom price moves and a
+one-lot matched reduction leave a 200,000-atom claimant gain, a 20,000-atom debtor
+residual, and one zero-basis retained loss-weight leg.
+
+The funded `CureAndCancelClose` cancels the reversible close and credits 100,000
+capital, but leaves exactly -20,000 PnL on the original debtor. The claimant's
+complete Account and original weight remain unchanged. The canceled ledger keeps
+its original residual partition through resolution and all subsequent settlement;
+neither B index increases, no insurance is consumed, and no loss shifts to the
+donor or the two unrelated owners. An independent per-owner equation reconciles
+capital, signed PnL, unpaid receipt face and SPL payouts after each economic
+prefix. The existing portfolio census independently checks aggregate capital,
+positive PnL, OI, loss weights, stored legs, pending counts, booked/SPL custody and
+fixed supply. Successful instructions also frame all unrelated tracked Accounts.
+
+In claimant-first schedules, the first terminal call makes bounded progress
+without paying the claimant while the debtor remains unsettled. All eight worlds
+complete within two prescribed passes, with exact payouts
+`[400000, 80000, 200000, 250000, 777]`, zero remaining custody, and five portfolio
+deletions each. Twenty-four deliberately rejected transaction suffixes follow
+successful cure, debtor-settlement/payment, or claimant-payment prefixes. Logs
+confirm each wrapper and SPL prefix completed; all compiled and tracked complete
+Accounts roll back, including token bytes, canceled-ledger state, sequences and
+lamports, apart from the exact separate payer signature fee. The same valid
+prefixes subsequently succeed. No simulation selects the final test's schedule.
+
+This is bounded INV-024/037/039/041/048/066/067/073/076/081 evidence. Existing
+INV-037 cure and INV-071 obligation-release witnesses stop at live release and
+operation admission. INV-086's active-close frontier checks transitions and a
+positive aggregate exit; it does not require these exact per-owner terminal
+entitlements across immediate resolution and both payout orders. The existing
+row419 bankruptcy-preemption test finalizes residual into B instead of funding
+and canceling it. Funding-only resolution, debtor recreation, shared-holder
+domains, cohort reduction, backing expiry, zero-cure rejection and capability
+revocation were discarded as duplicate candidate directions at source review.
+
+**Row 419 remains OPEN; invariant verdicts are unchanged.** Limits include one
+asset and bankruptcy pair, integral quantities and divisible prices, one funded
+cancellation before irreversible progress, no close restart, no adverse drift
+during the close, zero fees/funding/insurance/backing, and no arbitrary histories
+or maximum-shape claim. Generic INV-086 equivalence is not established. During
+development, geometric price inputs produced a one-atom entitlement mismatch;
+the retained fixture uses an exactly divisible 200,000-atom gain and makes no
+fractional-rounding claim. A presumed early nonprogress rejection was corrected
+to the observed valid, nonpaying terminal refresh. No production defect or fix is
+claimed, and no production code, dependency, pin or tracked artifact changed.
+
+Validation worktree: `/tmp/percolator-row419-astra-20260912`, branch
+`codex/astra-row419-obligation-20260912`, starting from the freshly fetched
+coordinator head `231c6d46382274c1011c7152cae82485e244a8d8`.
+Private copied build outputs are under this worktree's `target`; host tests were
+rebuilt here. Wrapper SBF SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+its documented source base `6ab7856fbe1e2f89ed11c1103fb5282fab404dee` has no
+production/manifest/pin difference from this head. The private matcher copy has
+SHA-256 `397cdded3ba64b5e03ea54498a160878dcc81dc844222f3ffbdc4e6210dd2936`
+and unchanged fixture source. No SBF rebuild or full-suite run is claimed.
+The new selector (1/1), adjacent CU controls (4/4), stateful cure controls (2/2),
+charter/index checks (2/2), formatting and Git whitespace checks pass. The new
+selector covers eight worlds, 24 prefix rollbacks, 40 payouts and 40 deletions.
+Its observed peak CU for selected setup, cure/rollback, and terminal/
+rollback transactions is `[144943, 264391, 177849]`. Shared setup helpers do not
+all report CU. Every transaction measured by the new helper fits 1,232 bytes
+and its 600,000-CU ceiling; public accrual and deletion retain existing bounds.
+
+Exact focused commands (including adjacent controls and charter/index checks):
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row419-astra-20260912/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::close_reopen::cure_resolution::v16_program_canceled_close_keeps_debt_through_pending_release_and_resolution -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_039_pending_loss_obligation_durability::close_reopen::v16_program_pending_loss_survives_debtor_recreation_and_bystander_payout \
+  inv_039_pending_loss_obligation_durability::close_reopen::close_preemption::v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_across_routes \
+  inv_039_pending_loss_obligation_durability::resolved_histories::funded_resolution::v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders \
+  inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_public_close_zero_cure_rejects_atomically_and_terminal_progress_remains
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture --test-threads=1 \
+  inv_037_exact_residual_partition::inv037_public_cure_preserves_exact_partition_across_routes_and_sides \
+  inv_071_crank_progress::v16_program_cured_close_releases_counterparty_obligation
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-024 terminal cleanup submitter (row 410, 2026-09-12)
 
 Owner: [cu/inv_024_terminal_cleanup_submitter.rs](cu/inv_024_terminal_cleanup_submitter.rs),
