@@ -48,6 +48,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Asset 0/1 one-atom surviving-budget controls preserve the claim and reject close atomically.
 # Row 420's absent-provider expiry axis is already covered; no new provider coverage is claimed.
 # Surviving insurance claims, provider principal/earnings and generic absent-signer progress remain OPEN.
+# Rows 420/421 partial conformance (2026-09-12): cu/inv_073_absent_insurer_spent_retirement.rs,
+# v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry.
+# Four public worlds compose absent provider/beneficiary/operator roles, exact user payouts,
+# unused backing expiry, and restoration of 100 spent insurance atoms. Recredit-plus-close
+# rolls back its successful prefix; restored insurance blocks final disposal and stays attributed.
+# This is claim preservation and bounded public progress, not beneficiary-independent reserve
+# payment or generic closure. All six audited historical labels remain missing; see
+# legacy_missing_gap_audit_20260912.md for selector overlap and remaining obligations.
 420	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-026,INV-027,INV-032,INV-063,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	provider-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-provider-signature	OPEN
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN

@@ -17,6 +17,11 @@ crossing portfolio recreation and reserve-authority ABA with all landing orders 
 insurance and backing withdrawals. It checks independent budgets, exact rollback, beneficiary
 attribution and complete principal exit. Retained authority/consent holdouts remain open.
 
+The [2026-09-12 historical missing-row audit](legacy_missing_gap_audit_20260912.md)
+maps labels 410/411/413/415/420/421 and adds INV-073 public coverage for absent reserve
+roles through insurance exhaustion, backing expiry and exact insurance recredit.
+The restored beneficiary claim stays protected; all six labels remain missing.
+
 ## INV-024 terminal earned-fee succession (row 410, 2026-09-10)
 
 [`cu/inv_024_terminal_earnings_succession.rs`](cu/inv_024_terminal_earnings_succession.rs)

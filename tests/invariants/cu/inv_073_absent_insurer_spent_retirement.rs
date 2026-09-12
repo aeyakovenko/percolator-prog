@@ -1,6 +1,9 @@
 //! INV-073: fully consumed insurance needs neither reserve signature through retirement.
 //! Exact loss settlement exhausts the budget; a one-atom surviving claim must still block close.
 //! Economic continuation is permissionless; empty-portfolio deletion and slab close are signed.
+//! The mixed-reserve selector adds unused backing on the insurance-funded side. All three
+//! reserve roles disappear after funding; expiry releases backing and restores spent insurance.
+//! The restored beneficiary claim must remain protected, so this is not signer-free retirement.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -8,16 +11,29 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 
 #[test]
 fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion() {
+    absent_reserve_progress(false);
+}
+
+#[test]
+fn v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry() {
+    absent_reserve_progress(true);
+}
+
+fn absent_reserve_progress(with_backing: bool) {
     const CAPITAL: [u64; 3] = [1_000, 100, 137];
     const GAIN: u64 = 10 * (120 - 100);
     const DEFICIT: u64 = GAIN - CAPITAL[1];
     const PAYOUTS: [u64; 3] = [CAPITAL[0] + GAIN, 0, CAPITAL[2]];
     const CALL_BOUND: usize = 8;
+    const EXPIRY: u64 = 44;
+    let backing = if with_backing { 307u64 } else { 0 };
 
     for asset in [0usize, 1] {
         for remainder in [0u64, 1] {
             let insurance = DEFICIT + remainder;
-            let supply = CAPITAL.iter().sum::<u64>() + insurance;
+            let supply = CAPITAL.iter().sum::<u64>() + insurance + backing;
+            let backing_asset = asset;
+            let backing_domain = 2 * backing_asset;
             let mut env = inv018_public_spl_market_with_params(
                 0,
                 V16CuMarketParams {
@@ -31,6 +47,7 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
             let admin = env.admin.insecure_clone();
             let beneficiary = Keypair::new();
             let operator = Keypair::new();
+            let provider = Keypair::new();
             for (kind, incoming) in [
                 (processor::ASSET_AUTH_INSURANCE, &beneficiary),
                 (processor::ASSET_AUTH_INSURANCE_OPERATOR, &operator),
@@ -42,6 +59,17 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
                     asset as u16,
                     kind,
                     incoming.pubkey().to_bytes(),
+                )
+                .unwrap();
+            }
+            if with_backing {
+                env.svm.airdrop(&provider.pubkey(), 1_000_000_000).unwrap();
+                env.try_update_per_asset_authority_with_cu(
+                    &admin,
+                    Some(&provider),
+                    backing_asset as u16,
+                    processor::ASSET_AUTH_BACKING_BUCKET,
+                    provider.pubkey().to_bytes(),
                 )
                 .unwrap();
             }
@@ -81,10 +109,14 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
                 create_ata_for_test(&mut env.svm, &env.payer, beneficiary.pubkey(), env.mint);
             let admin_token =
                 create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+            let provider_token = with_backing.then(|| {
+                create_ata_for_test(&mut env.svm, &env.payer, provider.pubkey(), env.mint)
+            });
             for (token, amount) in tokens
                 .into_iter()
                 .zip(CAPITAL)
                 .chain([(reserve_token, insurance)])
+                .chain(provider_token.map(|token| (token, backing)))
             {
                 send_raw_tx(
                     &mut env.svm,
@@ -150,11 +182,36 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
                 &[&beneficiary],
             )
             .unwrap();
-            let absent = [beneficiary.pubkey(), operator.pubkey()];
+            if let Some(token) = provider_token {
+                env.send(
+                    ProgInstruction::TopUpBackingBucket {
+                        domain: backing_domain as u16,
+                        market_id: env.asset_market_id(backing_asset as u16),
+                        authority_epoch: env.control_sequences(backing_asset).authority_epoch,
+                        intent_id: 0,
+                        backing_fee_bps: 0,
+                        insurance_share_bps: 0,
+                        amount: backing.into(),
+                        expiry_slot: EXPIRY,
+                    },
+                    vec![
+                        AccountMeta::new(provider.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(token, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&provider],
+                )
+                .unwrap();
+            }
+            let absent = [beneficiary.pubkey(), operator.pubkey(), provider.pubkey()];
             drop(beneficiary);
             drop(operator);
+            drop(provider);
             let absent_frame = absent.map(|key| env.svm.get_account(&key));
             let reserve_frame = env.svm.get_account(&reserve_token);
+            let provider_token_frame = provider_token.map(|key| env.svm.get_account(&key));
 
             env.trade_asset_with_cu(
                 asset as u16,
@@ -204,6 +261,12 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
             let sequences = [0, 1].map(|index| env.control_sequences(index));
             assert_eq!(profiles[asset].insurance_authority, absent[0].to_bytes());
             assert_eq!(profiles[asset].insurance_operator, absent[1].to_bytes());
+            if with_backing {
+                assert_eq!(
+                    profiles[backing_asset].backing_bucket_authority,
+                    absent[2].to_bytes()
+                );
+            }
             let mint_frame = env.svm.get_account(&env.mint).unwrap();
             let mint = Mint::unpack(&mint_frame.data).unwrap();
             assert_eq!(mint.supply, supply);
@@ -218,6 +281,7 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
                 admin.pubkey(),
             ];
             tracked.extend(absent);
+            tracked.extend(provider_token);
             tracked.extend(portfolios);
             tracked.extend(tokens);
             tracked.extend(owners.each_ref().map(Signer::pubkey));
@@ -271,9 +335,19 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
                             InstructionError::Custom(error as u32)
                         )
                     );
+                    assert_eq!(
+                        failure
+                            .meta
+                            .logs
+                            .iter()
+                            .filter(|line| **line == format!("Program {} success", env.program_id))
+                            .count(),
+                        usize::from(index - 2),
+                        "the intended successful wrapper prefix must execute before rollback"
+                    );
                     failure.meta
                 } else {
-                    result.expect("bounded continuation with absent insurance roles")
+                    result.expect("bounded continuation with absent reserve roles")
                 };
                 for (key, account) in keys.into_iter().zip(before) {
                     if key != env.payer.pubkey() && (rejected || !changed.contains(&key)) {
@@ -287,6 +361,10 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
                 assert_eq!(env.svm.get_account(&env.payer.pubkey()), Some(payer));
                 assert_eq!(absent.map(|key| env.svm.get_account(&key)), absent_frame);
                 assert_eq!(env.svm.get_account(&reserve_token), reserve_frame);
+                assert_eq!(
+                    provider_token.map(|key| env.svm.get_account(&key)),
+                    provider_token_frame
+                );
                 assert_eq!(env.svm.get_account(&env.mint), Some(mint_frame.clone()));
                 assert_cu_within(
                     "INV-073 absent insurance roles",
@@ -305,6 +383,9 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
                 );
                 assert_eq!(env.token_amount(admin_token), 0);
                 assert_eq!(env.token_amount(reserve_token), 0);
+                if let Some(token) = provider_token {
+                    assert_eq!(env.token_amount(token), 0);
+                }
                 assert!(paid
                     .into_iter()
                     .zip(PAYOUTS)
@@ -420,7 +501,7 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
             let paid = env.market_state().1;
             assert_eq!(
                 (paid.vault, paid.c_tot, paid.pnl_pos_tot),
-                (remainder.into(), 0, 0)
+                ((remainder + backing).into(), 0, 0)
             );
             assert_eq!(paid.source_claim_bound_total_num, 0);
             assert_eq!(paid.backing_provider_earnings_total, 0);
@@ -429,11 +510,26 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
                 remainder.into()
             );
             assert_eq!(paid.insurance_domain_budget[2 * asset], insurance.into());
-            assert!(paid
-                .source_backing_buckets
-                .iter()
-                .all(|bucket| bucket.fresh_unliened_backing_num == 0
-                    && bucket.valid_liened_backing_num == 0));
+            for (domain, bucket) in paid.source_backing_buckets.iter().enumerate() {
+                let fresh = if with_backing && domain == backing_domain {
+                    assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+                    assert_eq!(bucket.expiry_slot, EXPIRY);
+                    u128::from(backing) * BOUND_SCALE
+                } else {
+                    0
+                };
+                assert_eq!(bucket.fresh_unliened_backing_num, fresh);
+                assert_eq!(bucket.valid_liened_backing_num, 0);
+                assert_eq!(bucket.utilization_fee_earnings, 0);
+                let source = paid.source_credit[domain];
+                assert_eq!(source.fresh_reserved_backing_num, fresh);
+                assert_eq!(source.valid_liened_backing_num, 0);
+                if with_backing && domain == backing_domain {
+                    assert_eq!(bucket.consumed_liened_backing_num, 0);
+                    assert_eq!(source.provider_receivable_num, 0);
+                    assert_eq!(source.spent_backing_num, 0);
+                }
+            }
             assert!(paid
                 .assets
                 .iter()
@@ -499,6 +595,126 @@ fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhausti
                     market_rent + portfolio_rent
                 );
                 custody(&env);
+            }
+            if with_backing {
+                // Scanning an empty prefix may progress; it cannot dispose the funded asset.
+                if backing_asset != 0 {
+                    let before = env.market_state();
+                    let changed = [env.market];
+                    peak = peak.max(land(&mut env, &[close.clone()], &[&admin], &changed, None));
+                    let after = env.market_state();
+                    assert!(
+                        after.0.terminal_slab_scan_progress > before.0.terminal_slab_scan_progress
+                    );
+                    assert_eq!(after.1, before.1);
+                    custody(&env);
+                }
+                peak = peak.max(land(
+                    &mut env,
+                    &[close.clone()],
+                    &[&admin],
+                    &[],
+                    Some((2, PercolatorError::EngineLockActive)),
+                ));
+                let before = env.market_state().1;
+                env.svm.warp_to_slot(EXPIRY);
+                let changed = [env.market];
+                peak = peak.max(land(&mut env, &[close.clone()], &[&admin], &changed, None));
+                let normalized = env.market_state().1;
+                assert_eq!(normalized.vault, before.vault);
+                assert_eq!(normalized.insurance, before.insurance);
+                let mut expected_ledger = before.resolved_payout_ledger;
+                expected_ledger.snapshot_residual += u128::from(backing);
+                assert_eq!(normalized.resolved_payout_ledger, expected_ledger);
+                assert_eq!(
+                    normalized.insurance_domain_budget,
+                    before.insurance_domain_budget
+                );
+                assert_eq!(
+                    normalized.insurance_domain_spent,
+                    before.insurance_domain_spent
+                );
+                for domain in 0..normalized.source_backing_buckets.len() {
+                    if domain != backing_domain {
+                        assert_eq!(
+                            normalized.source_backing_buckets[domain],
+                            before.source_backing_buckets[domain]
+                        );
+                        assert_eq!(
+                            normalized.source_credit[domain],
+                            before.source_credit[domain]
+                        );
+                    }
+                }
+                let bucket = normalized.source_backing_buckets[backing_domain];
+                let source = normalized.source_credit[backing_domain];
+                assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
+                assert_eq!(bucket.expiry_slot, EXPIRY);
+                assert_eq!(bucket.fresh_unliened_backing_num, 0);
+                assert_eq!(bucket.valid_liened_backing_num, 0);
+                assert_eq!(bucket.utilization_fee_earnings, 0);
+                assert_eq!(source.fresh_reserved_backing_num, 0);
+                assert_eq!(source.provider_receivable_num, 0);
+                assert_eq!(source.valid_liened_backing_num, 0);
+                assert_eq!(source.spent_backing_num, 0);
+                custody(&env);
+
+                // The debtor's paid capital overlaps historical insurance spend. Once backing
+                // expires, its unallocated residue restores that overlap to the beneficiary.
+                let recovered = CAPITAL[1].min(DEFICIT).min(backing);
+                assert_eq!(recovered, 100);
+                assert_eq!(
+                    normalized.source_credit[2 * asset + 1].provider_receivable_num,
+                    u128::from(CAPITAL[1]) * BOUND_SCALE
+                );
+                peak = peak.max(land(
+                    &mut env,
+                    &[close.clone(), close.clone()],
+                    &[&admin],
+                    &[],
+                    Some((3, PercolatorError::EngineLockActive)),
+                ));
+                peak = peak.max(land(&mut env, &[close.clone()], &[&admin], &changed, None));
+                let restored = env.market_state().1;
+                assert_eq!(restored.insurance, u128::from(remainder + recovered));
+                assert_eq!(
+                    restored.insurance_domain_spent[2 * asset],
+                    u128::from(DEFICIT - recovered)
+                );
+                assert_eq!(
+                    restored.insurance_domain_budget_remaining_total,
+                    u128::from(remainder + recovered)
+                );
+                assert_eq!(
+                    restored.insurance_domain_budget,
+                    normalized.insurance_domain_budget
+                );
+                assert_eq!(restored.source_credit, normalized.source_credit);
+                assert_eq!(
+                    restored.source_backing_buckets,
+                    normalized.source_backing_buckets
+                );
+                assert_eq!(
+                    restored.resolved_payout_ledger,
+                    normalized.resolved_payout_ledger
+                );
+                assert_eq!(restored.vault, u128::from(backing + remainder));
+                assert_eq!(restored.c_tot, 0);
+                assert_eq!(restored.materialized_portfolio_count, 0);
+                assert_eq!(restored.backing_provider_earnings_total, 0);
+                custody(&env);
+                peak = peak.max(land(
+                    &mut env,
+                    &[close],
+                    &[&admin],
+                    &[],
+                    Some((2, PercolatorError::EngineLockActive)),
+                ));
+                assert_eq!(env.market_state().1, restored);
+                assert_eq!(tokens.map(|key| env.token_amount(key)), PAYOUTS);
+                custody(&env);
+                println!("INV-073 absent mixed reserves asset={asset}, remainder={remainder}: calls={calls:?}/{CALL_BOUND}, paid={PAYOUTS:?}, expired={backing}, recredited={recovered}, peak={peak} CU, beneficiary claim preserved");
+                continue;
             }
             let terminal = env.market_state().1;
             assert_eq!(terminal.insurance_domain_spent[2 * asset], DEFICIT.into());
