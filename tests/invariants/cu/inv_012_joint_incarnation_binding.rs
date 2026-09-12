@@ -28,6 +28,9 @@ mod portfolio_grant_rollback;
 #[path = "inv_012_market_retirement_rollback.rs"]
 mod market_retirement_rollback;
 
+#[path = "inv_012_funded_owner_roundtrip.rs"]
+mod funded_owner_roundtrip;
+
 const CAPITAL: u128 = 1_000_000;
 const PRICE: u64 = 100;
 const SLOT: u64 = 1;

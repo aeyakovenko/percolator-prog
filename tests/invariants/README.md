@@ -38,6 +38,17 @@ fee/payout rollback, exact owner SPL totals and signed insurance extraction comp
 through slab closure. Funding, insolvency and general histories remain untested by
 this increment. Holdouts 417/418/419/424/433 remain OPEN.
 
+The [2026-09-12 funded owner roundtrip audit](funded_owner_roundtrip_audit_20260912.md)
+adds one INV-012 selector with four public LiteSVM histories. A funded, CPI-active
+B incarnation sits between two A incarnations at the same portfolio address.
+Restoring A's original matcher context/delegate and grant sequence cannot revive
+its old signed grant. Standalone rejection and a late rejection after a current
+CPI fill preserve complete Accounts, while fresh consent and all three owners'
+principal payouts remain live. This extends the existing empty A-B-A and failed
+reincarnation cases; rows 412/414/416/429 remain OPEN, including automatic-revocation
+grant admission, standing asset-generation scope and funded management/shutdown
+fallback beneficiary rules.
+
 The [2026-09-12 standalone first-admission audit](standalone_first_admission_audit_20260912.md)
 covers aged, never-exposed owners opening through a single wrapper instruction,
 without a fee/refresh prefix. Single/batch trades in both directions preserve
