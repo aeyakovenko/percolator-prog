@@ -5,6 +5,9 @@
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_012_context_generation_rollback.rs"]
+mod context_generation_rollback;
+
 pub(super) fn sign(h: &History, instructions: &[Instruction]) -> Transaction {
     let mut ixs = vec![heap_ix(), cu_ix()];
     ixs.extend_from_slice(instructions);

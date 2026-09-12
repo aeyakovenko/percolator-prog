@@ -11574,6 +11574,61 @@ positive preview **438,665**, lifecycle/configuration **112,342**, owner
 withdrawal **147,768**. No production, dependency, invariant-status or full-suite
 claim is made.
 
+## INV-012 joint context/asset replacement rollback (row 414, 2026-09-12)
+
+[`cu/inv_012_context_generation_rollback.rs`](cu/inv_012_context_generation_rollback.rs)
+adds eight public histories: both CPI transports, both signs, and context recreation
+before/after used-asset activation. A committed close supplies the old context response.
+After retirement and cooldown, one transaction closes/refunds/recreates the same external
+context and activates the replacement asset before its CPI consumer. A silent matcher
+rejects at return validation; the identical economic bundle with fresh output is admissible.
+Exact `Account` snapshots include every transaction account, SPL custody and owner rent;
+only the separate payer's exact signature fee changes. The old response, request counter,
+generation frontier and pre-signed sibling trade all survive. That unchanged trade executes,
+then a fresh-response bundle commits both replacements without an owner regrant. Mixed
+two-leg batch returns bind the replacement and live sibling independently; opposite-transport
+exits and sixteen complete owner withdrawals reconcile positions, OI, capital and SPL.
+
+The activation-rollback parent already owns a stale management suffix after successful CPI;
+the used-slot response test leaves the context incarnation unchanged; INV-019's context
+incarnation matrix does not replace an asset. Those isolated probes were discarded as
+duplicate candidates. The new assertion concerns their joint replacement/rollback boundary.
+All setup uses public System/SPL/ATA/wrapper/fixture instructions, with no protocol state
+injection. **Row 414 remains OPEN.** No new public-interface LoF/DoS or production fix is
+claimed; standing-grant asset scope, arbitrary histories, nonzero fees and maximum shapes
+remain outside this bounded evidence.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`3daaf713e877bd18d431eeaf53d67f376f5f65ec`. Worktree:
+`/tmp/percolator-row414-20260912-capabilities`; local branch:
+`codex/row414-capability-asset-generation-20260912`. The coordinator was not edited.
+Fresh locked/offline default-feature SBF builds use platform-tools v1.52, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, and private host/build targets.
+Wrapper SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+auth matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`;
+return-policy fixture: `e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`.
+The new exact selector passes 1/1: eight rejected bundles, eight unchanged retained fills,
+eight committed replacements and sixteen full owner withdrawals. Maximum bundle CU:
+528,329; maximum packet: 1,206 bytes. Initial setup corrected the SBF compiler PATH and
+reran the selector after fixture compilation finished; neither failure was a program finding.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row414-20260912-host
+export PERCOLATOR_FUZZ_SBF=/tmp/percolator-row414-20260912-target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=8 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::generation_bundle_rollback::context_generation_rollback::v16_program_context_recreation_and_asset_activation_roll_back_at_cpi_return
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::generation_bundle_rollback::v16_program_failed_asset_activation_restores_retained_sibling_cpi_and_frontier \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::reused_asset_return_binding::v16_program_reused_asset_requires_current_generation_and_fresh_matcher_output \
+  inv_019_cpi_invocation_and_return_data_binding::v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-012 used-generation lifecycle (row 414, 2026-09-09)
 
 [`cu/inv_012_used_generation_lifecycle.rs`](cu/inv_012_used_generation_lifecycle.rs)
