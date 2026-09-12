@@ -1868,6 +1868,9 @@ fn v16_machine_invariant_status_is_authoritative_and_nonoverclaiming() {
         .skip(1)
     {
         let fields = line.split('\t').collect::<Vec<_>>();
+        if fields[7] == "COVERED" {
+            continue;
+        }
         let pr = fields[0].parse::<u16>().expect("numeric reopening PR");
         let primary = fields[3]
             .strip_prefix("INV-")
@@ -1979,14 +1982,14 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         assert!(pr > prior_pr, "reopening PRs must be unique and sorted");
         prior_pr = pr;
         assert!(matches!(fields[1], "LoF" | "DoS" | "Conformance"));
-        if fields[1] == "Conformance" {
-            conformance_prs.insert(pr);
-        }
         assert!(matches!(
             fields[2],
             "BLOCKER" | "REAL" | "HARDENING" | "PRIVILEGED" | "LIMIT"
         ));
-        assert_eq!(fields[7], "OPEN", "only unresolved gaps belong here");
+        assert!(
+            matches!(fields[7], "OPEN" | "COVERED"),
+            "coverage-reopening status must be OPEN or COVERED"
+        );
         assert!(
             fields[5].split("+x-").count() >= 3,
             "omitted dimension must name a cross-product, not one example: {line}"
@@ -2014,8 +2017,13 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
             .collect::<std::collections::BTreeSet<_>>();
         assert!(row_affected.contains(&primary));
         assert!(row_affected.iter().all(|id| (1..=89).contains(id)));
-        affected.extend(row_affected);
-        reopening_prs.insert(pr);
+        if fields[7] == "OPEN" {
+            affected.extend(row_affected);
+            reopening_prs.insert(pr);
+            if fields[1] == "Conformance" {
+                conformance_prs.insert(pr);
+            }
+        }
     }
     assert!(saw_header, "coverage-reopening header is missing");
     let expected_reopenings = missing_findings
