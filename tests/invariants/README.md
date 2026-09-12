@@ -575,6 +575,84 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
+## INV-027 funding and maintenance before new-asset risk (row 413, 2026-09-12)
+
+Owner: [cu/inv_027_funding_admission.rs](cu/inv_027_funding_admission.rs), mounted
+under `inv_027_protected_principal_seniority::joint_admission_liabilities::funding_admission`.
+Selector: `v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback`.
+
+Sixteen public LiteSVM histories cross the funding debtor as taker or unsigned CPI
+maker, all four rejected transports, and direct admission versus explicit public
+settlement. A rejected single/batch CPI/no-CPI request retries through the opposite
+batching and CPI family. All economic accounts use System/SPL/ATA/wrapper creation.
+
+Both owners first hold 10.1 units on asset 1 at price 100. An authenticated target
+of 99 starts at slot 2. Empty-keeper cranks advance through slot 4 without changing
+either portfolio, its capital, or its slot-1 fee cursor. The one-bps price cap
+accumulates exact remainder numerators 100/200/300 while effective price and K stay
+unchanged. The first segment has zero funding; each later segment applies the
+negative 10,000-e9 rate. Independent signed floor arithmetic gives minus one atom
+per lot per segment, then the cumulative 20.2-atom position amount rounds to a
+21-atom short debit and a 20-atom long claim. Maintenance independently costs
+`3 * 7 = 21` atoms per owner. These are real nonzero F indices and stale funding
+certificates, not marked-price losses or injected portfolio state.
+
+The debtor's 153-atom deposit leaves exactly 111 senior atoms after both liabilities:
+101 old-leg IM plus 10 first-asset-0 IM. One extra position quantum requires 112
+and rejects with `EngineInvalidConfig`; omitting either liability or flooring the
+funding debt would admit it. All tracked and transaction Accounts roll back,
+including matcher context, with only the independently calculated signature fee.
+The other route then admits the exact boundary. Explicit settlement includes a
+bounded follow-up refresh when booking the peer's claim invalidates the earlier
+certificate. Both admission certificates are current, match the independent health
+oracle, and are identical across the direct/settled schedules and route pairs.
+
+The test checks owner-local capital/PnL, fee cursors/debt, exact positions/OI,
+42 insurance atoms in canonical asset-0 budgets 20/22, custody and unrelated frames,
+plus stock, reservation and source-credit censuses. Funding indices and the
+300-unit carry remain exact through admission, same-slot two-asset close and both
+principal withdrawals. All 32 SPL payouts equal the separate senior entitlements
+111/9,979 (swapped with the debtor). The peer's 20-atom junior claim stays
+unconverted; final capital is zero and custody retains 63 atoms, the two maintenance
+fees plus the original debtor's 21-atom loss. Peak measured transaction CU is
+433,143 under a 600,000-CU ceiling.
+
+This adds bounded INV-024/027/044/053/060/081 evidence: the adjacent joint-liability
+matrix explicitly isolates funding at zero, while reward mapping and standalone
+first admission have never-exposed accounts and zero funding. The retained test
+adds the joint rounded-funding/maintenance boundary, stale-to-current certificates,
+cross-route retry and senior payout before junior conversion. A preliminary
+10,000,000-e9 configuration rejected at market initialization and was discarded;
+the initial two-crank control was corrected to account for peer-driven certificate
+invalidation. Reward-only and flat-first-open variants were screened out as
+duplicates; no production bug or fix is claimed.
+
+**Row 413 remains OPEN.** This is first risk on a new asset for already-exposed
+accounts, not standalone first-ever admission with uncollected flat fees. Positive
+premium, partitioned account settlement, nonzero price movement, shared owners,
+reward/policy changes, more assets, junior conversion/terminal disposal, maximum
+shapes and arbitrary histories remain outside this increment. INV-010/062 and
+whole-invariant verdicts gain no generic closure from it.
+
+Validation uses isolated worktree `/home/anatoly/percolator-inv027-astra-20260912`,
+branch `codex/astra-row413-principal-20260912`, from local base
+`1f1cbedccdefe89e09d5c9cb27f12897d7951319`. With no current program artifact in the
+main checkout, default-feature SBF and authenticated matcher artifacts were built
+locked/offline using platform-tools v1.52 and private target directories.
+Program SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row413-20260912-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities::funding_admission::v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_joint_accrued_liabilities_precede_risk_admission inv_027_protected_principal_seniority::joint_admission_liabilities::reward_mapping_admission::v16_program_reward_mapping_preserves_owner_local_first_risk_across_routes
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-027 reward mapping before first risk (2026-09-12)
 
 Owner: [cu/inv_027_reward_mapping_admission.rs](cu/inv_027_reward_mapping_admission.rs),

@@ -80,6 +80,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # payouts compose with opposite-route closure. Standalone uncollected flat fees and
 # general histories remain outside this bounded evidence; no production fix or status
 # promotion. Row 422 gains no evidence from this selector; both rows remain OPEN.
+# Row 413 funding composition (2026-09-12): cu/inv_027_funding_admission.rs,
+# v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback.
+# Sixteen public worlds combine 21-atom rounded funding debt, 21-atom maintenance,
+# stale certificates and nonzero price-cap carry before first exposure on a new
+# asset. Either debtor role and all four routes preserve the exact IM boundary,
+# complete-account rollback, opposite-route retry and 32 senior SPL payouts while
+# the peer's junior funding claim stays unconverted. Direct admission equals public
+# settlement. First-ever flat admission, shared owners, policy changes and general
+# histories remain outside this bounded increment; no production fix or promotion.
 413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
 414	LoF	PRIVILEGED	INV-012	INV-002,INV-007,INV-012,INV-019,INV-089	capability+x-asset-reuse+x-generation	capabilities-bind-every-replaceable-economic-object-incarnation	OPEN
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN

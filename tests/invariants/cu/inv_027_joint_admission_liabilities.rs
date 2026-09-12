@@ -6,6 +6,8 @@
 //! prefix on previously exposed flat accounts, including rollback and exact IM.
 //! The standalone sibling covers sufficiently funded first admission and deferred
 //! fee disposition; admission at the uncollected-fee margin boundary remains open.
+//! The funding sibling adds nonzero rounded funding debt and price-cap carry,
+//! opposite-route rollback/retry, and senior principal exit ahead of a junior claim.
 //! All economic state is constructed through System/SPL/ATA/wrapper instructions.
 
 use super::*;
@@ -24,6 +26,9 @@ mod standalone_first_admission;
 
 #[path = "inv_027_first_risk_preexisting_lag.rs"]
 mod first_risk_preexisting_lag;
+
+#[path = "inv_027_funding_admission.rs"]
+mod funding_admission;
 
 const PRICE: u64 = 100;
 const START: u64 = 1;
