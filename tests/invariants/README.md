@@ -282,6 +282,19 @@ git diff --check
 
 ## Other Recent Coverage
 
+The [retained redirect entitlement audit](retained_redirect_entitlement_audit_20260912.md)
+adds one INV-014 selector with twenty public LiteSVM histories. Four exact trade
+routes and an equivalent partial single-CPI fill cross direction and payout order.
+Retained 37-bps consent survives base-policy changes; distinct recipients exhaust
+opening fees before a retained close changes the redirect policy. A withdrawal
+that fits global insurance but includes the peer's final atom rolls back the
+successful policy, close and SPL payout prefix. Input-derived per-side rounding,
+twenty complete-Account rollbacks and all eighty final owner/recipient entitlements
+agree across routes, with fixed supply and empty custody. This adds bounded
+INV-010/011/014/024/036/047/080/081 evidence. Dynamic fees, multi-leg batches,
+underfunded collection, role succession and consumed withdrawal replay remain
+outside the increment; rows 411/432 stay OPEN. No production fix was needed.
+
 The [prefunded quote custody audit](prefunded_quote_custody_audit_20260912.md)
 adds one INV-070 selector with sixteen public LiteSVM histories. Native wSOL and
 fixed-supply SPL principal exits cross pre-funding below/above token-account rent,
