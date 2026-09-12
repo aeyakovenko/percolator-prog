@@ -306,6 +306,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # retry cannot cross that committed epoch; peer consent and fresh target consent pay exact
 # independent entitlements, including shared recipients/providers. See README. Authority
 # epoch composition only; no generic stock-epoch oracle or standalone consumption proof.
+# 428 additional bounded conformance (2026-09-12): stateful/inv_008_insurance_ledger_retry.rs,
+# v16_program_retained_insurance_epoch_rejection_restores_optional_ledger_and_fresh_retry.
+# Three omitted/lazy/previously-paid ledger histories restore completed current-epoch
+# payout prefixes and ledger initialization/updates before unchanged fresh consent pays.
+# Both attachment orders and original retained envelopes reject after epoch changes and
+# subsequent replenishment. Twelve exact rollbacks include six SPL payouts; independent
+# books and all telemetry fields preserve 449 target/43 peer atoms and zero final custody.
+# Peak success/rejection CU 37718/55330. Existing plain ABA/refill/mask cases were discarded
+# as standalone additions. Authority-epoch binding only: no intrinsic stock sequence,
+# standalone debit consumption, fee/terminal stock, other rails or arbitrary-history claim.
+# See README for exact commands, SBF provenance and remaining gaps. Row remains OPEN.
 428	LoF	REAL	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
 # Row 429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_exchange.rs,
 # v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders.

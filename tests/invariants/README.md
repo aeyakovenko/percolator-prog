@@ -1,5 +1,73 @@
 # Invariant-owned test coverage
 
+## INV-008 optional insurance ledger rollback and retry (row 428, 2026-09-12)
+
+Owner: [stateful/inv_008_insurance_ledger_retry.rs](stateful/inv_008_insurance_ledger_retry.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::insurance_ledger_retry`.
+Selector:
+`v16_program_retained_insurance_epoch_rejection_restores_optional_ledger_and_fresh_retry`.
+
+Three public LiteSVM histories compare omitted, lazily initialized and previously
+paid insurance telemetry. Both attached and omitted 137-atom withdrawal requests
+are signed and successfully simulated before a partial payout. Public operator
+succession advances the asset epoch twice; only afterward does short-side funding
+restore its stock to 312 atoms. A current-epoch 17-atom payout then completes before
+the retained request rejects with `EngineStale`. Both attachment orders restore
+complete Accounts, including the SPL payout, lazy ledger initialization or existing
+ledger update; only exact signature fees remain charged to the separate payer.
+Both original stale envelopes also reject.
+The separately signed fresh envelope remains byte-identical and pays 17; fresh
+consent without telemetry pays the remaining 295. The independent peer receives
+43 atoms, and all histories end with exactly 449 target atoms paid and zero custody.
+
+The input-derived books check every domain budget, complete SPL endpoints and mint,
+fixed supply, all authority profiles/control sequences, stock and encumbrance
+censuses, and the separate payer's exact fees. The successful ledger retry checks
+every decoded field: previously observed funding contributes 137 profit atoms only
+in the already-paid history; the lazy history starts at the current stock. Later
+unobserved payouts leave that record unchanged. A System instruction allocates the
+new ledger. The existing V16Svm fixture supplies empty program allocations and SPL
+endowments; all initialized economic transitions use public instructions, with no
+program-state repair or snapshot restoration.
+
+This adds an optional-account initialization/update and attachment-switch retry
+dimension to row428. Existing operator ABA, replenishment-order, amount-only and
+preinitialized ledger-mask cases were discarded as standalone additions because
+their boundaries are already covered. The absent-ledger world here is the paired
+economic control. **Row 428 remains OPEN**: this is authority-epoch conformance,
+without an intrinsic withdrawal stock sequence or standalone successful-debit
+consumption proof. Fee-created/terminal-reclassified stock, other assets or quote
+rails, insurer changes, policy histories, active liabilities, resolution and
+arbitrary compositions remain gaps. No production bug was established.
+
+The worker originally validated this in isolated worktree
+`/tmp/percolator-row428-astra-20260912`; coordinator integration reran the new
+selector, adjacent retained-reserve controls, INV-064 ledger control,
+charter/index, formatting and Git whitespace checks on the current invariant
+branch. No SBF rebuild or full-suite claim is made. The new selector passes
+**1/1** with 3 histories, 9 simulations, 21 successes, 12 exact rollbacks and
+6 rolled-back SPL payouts. Peak success/rejection CU is **37,718/55,330**,
+below 300,000.
+The two adjacent retained-reserve selectors pass **2/2**, with success/rejection
+peaks **49,718/64,212** and **37,724/93,067**. The INV-064 ledger control passes
+**1/1**, peaking at **36,181 CU**; charter/index passes **1/1**. Formatting and
+Git whitespace checks pass. Existing unused-support and Solana future-compatibility
+warnings remain.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row428-astra-20260912/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::insurance_ledger_retry::v16_program_retained_insurance_epoch_rejection_restores_optional_ledger_and_fresh_retry -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture --test-threads=1 inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_paid_retained_insurance_stays_bound_after_replenishment_and_operator_aba inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession
+cargo test --locked --offline --test v16_cu inv_064_insurance_withdrawal_policy_equivalence::v16_program_insurance_withdrawal_ledger_history_is_economically_transparent -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-024 terminal cleanup submitter (row 410, 2026-09-12)
 
 Owner: [cu/inv_024_terminal_cleanup_submitter.rs](cu/inv_024_terminal_cleanup_submitter.rs),

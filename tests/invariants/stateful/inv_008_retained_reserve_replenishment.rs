@@ -24,6 +24,9 @@ use solana_sdk::{
 use spl_token::state::Account as TokenAccount;
 use std::collections::BTreeSet;
 
+#[path = "inv_008_insurance_ledger_retry.rs"]
+mod insurance_ledger_retry;
+
 const FUNDER: usize = 0;
 const OPERATOR: usize = 1;
 const SUCCESSOR: usize = 2;
