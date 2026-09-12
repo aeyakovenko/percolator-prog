@@ -367,6 +367,17 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+The [shared-holder paid-reserve audit](shared_holder_paid_reserves_audit_20260912.md)
+adds one INV-073 selector with four public LiteSVM histories. Exposed portfolio
+owners also hold provider and insurance claims; live partial reserve payouts and
+spent provider earnings precede their departure. Keeper-only terminal steps reach
+exact 56,627/1,995,000-atom user payouts in two or three calls while preserving
+99,983 principal, 856 earned-fee and 24 insurance atoms. Sixty-six exact rollbacks
+include 24 successful SPL payout prefixes followed by unsigned reserve rejection.
+This adds bounded INV-018/021/024/027/064/067/071/073/080/081/082 evidence. Generic
+reserve disposition, mechanical retirement and reachability remain outside this
+increment; rows 420/421/433 remain OPEN and invariant verdicts are unchanged.
+
 ## INV-045 unilateral reduction with pending price carry (2026-09-12)
 
 Owner: [cu/inv_045_rebalance_cap_carry.rs](cu/inv_045_rebalance_cap_carry.rs),

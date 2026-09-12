@@ -82,6 +82,9 @@ mod recovery_claim_liability_exit;
 #[path = "inv_073_spent_insurance_terminal_exit.rs"]
 mod spent_insurance_terminal_exit;
 
+#[path = "inv_073_shared_holder_paid_reserves.rs"]
+mod shared_holder_paid_reserves;
+
 #[test]
 fn v16_program_terminal_public_reserve_disposition_preserves_value_across_orders() {
     crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_public_reserve_disposition();

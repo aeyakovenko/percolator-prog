@@ -147,6 +147,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # live consent remains required. Clean af97beea rejects the unchanged earnings-prefix oracle.
 # Generic stock/asset/quote histories and the mechanical portfolio-deletion dependency remain
 # outside this finite family. No status promotion; see terminal_public_reserves_audit_20260912.md.
+# Rows 420/421/433 bounded conformance (2026-09-12): cu/inv_073_shared_holder_paid_reserves.rs,
+# v16_program_absent_shared_holders_keep_paid_reserves_separate_from_public_user_exit.
+# Four public worlds combine exposed user/reserve role overlap, live partial reserve
+# payouts and spent provider earnings before all holders/operator stop signing. Both
+# unsigned user aliases/orders complete exact entitlements in two or three calls;
+# 66 exact rollbacks include 24 SPL payout prefixes followed by unsigned reserve denial.
+# Remaining principal/earnings/insurance stay separately attributed. No generic reserve
+# disposition or retirement claim; all three rows stay OPEN. See shared-holder audit.
 420	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-026,INV-027,INV-032,INV-063,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	provider-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-provider-signature	OPEN
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
