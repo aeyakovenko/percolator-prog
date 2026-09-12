@@ -13,6 +13,11 @@ adds keeper-only custody repair across paid receipts, late expiry and pending-co
 detachment. Its 24 public worlds check owner attribution, exact rollback and rent.
 Rows 410/417/418/419/420/421/424/433 remain OPEN; 434 is outside the audit.
 
+The [2026-09-12 capability/incarnation gap audit](capability_incarnation_gap_audit_20260912.md)
+adds twenty public LiteSVM histories for activation/CPI rollback, portfolio/grant rollback,
+and funded oracle ABA across shutdown with separate reserve ledgers and SPL beneficiaries.
+Holdouts 412/414/416/429 remain OPEN.
+
 The [2026-09-12 oracle/source composition audit](oracle_source_composition_audit_20260912.md)
 records the INV-028 Hybrid capacity/carry increment: retained historical claims, fractional
 carry, current health certificates and exact owner payouts compose across eight public

@@ -19,6 +19,12 @@ mod retained_scope_product;
 #[path = "inv_012_revocation_atomicity.rs"]
 mod revocation_atomicity;
 
+#[path = "inv_012_generation_bundle_rollback.rs"]
+mod generation_bundle_rollback;
+
+#[path = "inv_012_portfolio_grant_rollback.rs"]
+mod portfolio_grant_rollback;
+
 const CAPITAL: u128 = 1_000_000;
 const PRICE: u64 = 100;
 const SLOT: u64 = 1;
