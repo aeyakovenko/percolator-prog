@@ -13,6 +13,9 @@ use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv01
 #[path = "inv_020_mixed_provider_liquidation.rs"]
 mod mixed_provider_liquidation;
 
+#[path = "inv_020_interrupted_refresh_fees.rs"]
+mod interrupted_refresh_fees;
+
 const PRICE: u64 = 1_000_000;
 const CURRENT: [u64; 2] = [1_040_000, 1_050_000];
 const DEPOSITS: [u128; 3] = [10_000_000, 220_000, 1_000];

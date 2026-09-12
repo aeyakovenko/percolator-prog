@@ -121,6 +121,12 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # scanner rediscovery/invalidation, retirement/Recovery and generic closure remain OPEN. See README.
 424	LoF	PRIVILEGED	INV-070	INV-024,INV-025,INV-033,INV-041,INV-063,INV-069,INV-070,INV-071,INV-086,INV-088	persisted-cursor+x-time-reclassification+x-earlier-slot	any-environmental-transition-that-changes-actionability-invalidates-scanned-prefixes	OPEN
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
+# Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
+# v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.
+# Sixteen public worlds compare explicit/automatic maintenance collection after
+# interrupted catchup: complete certificates, liquidation-only rewards, keeper SPL
+# payout and exact fee/domain attribution agree across evidence order and omission.
+# See interrupted_refresh_fees_audit_20260912.md. No vulnerable-pin replay; row stays OPEN.
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
 427	Conformance	LIMIT	INV-058	INV-058	disjoint-portfolios+x-side-oi-cap+x-public-trades	side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs	COVERED
 428	LoF	REAL	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN

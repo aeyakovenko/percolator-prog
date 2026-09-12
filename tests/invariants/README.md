@@ -212,6 +212,17 @@ their signed payout and retry controls remain. Earlier audits documenting an
 unconditional terminal reserve signature barrier describe the pre-fix behavior.
 This finite SPL/asset-0 family does not establish generic missing-signer closure;
 rows 420/421/433 and whole-invariant verdicts remain OPEN/unchanged.
+## INV-020 interrupted refresh and fee entitlement (2026-09-12)
+
+The [interrupted-refresh audit](interrupted_refresh_fees_audit_20260912.md)
+records sixteen independently constructed public LiteSVM histories. Bounded
+market catchup, omitted/replayed/duplicate evidence, and a Clock advance compose
+with explicit `SyncMaintenanceFee` or crank-internal collection, full current
+certification, paid liquidation and the keeper's maintenance-adjusted SPL exit.
+The routes preserve independently calculated fees, rewards and domain attribution;
+incomplete successful discovery cannot pay or certify the account. This adds
+bounded row-426 evidence beyond the existing zero-maintenance staged test.
+**Row 426 remains OPEN**; no production defect or invariant-status promotion is claimed.
 
 ## INV-045 unilateral reduction with pending price carry (2026-09-12)
 
