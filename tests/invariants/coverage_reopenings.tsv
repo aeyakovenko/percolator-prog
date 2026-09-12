@@ -558,6 +558,22 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # See INV-014 README section for exact selectors, CU and base SHA. No generic
 # cross-route proof, authority/expiry/partial/dynamic/backing or terminal coverage;
 # no production fix, new bug or status promotion. Row 432 remains OPEN.
+# 432 bounded authority-epoch composition (2026-09-12): cu/inv_014_retained_fee_authority_epoch.rs,
+# v16_retained_cpi_fee_terms_survive_authority_aba_and_stale_policy_bundles.
+# Four public SBF worlds cross signed direction and unchanged-trade/renewed-policy
+# continuations after A->B->A. Old-epoch 31-bps controls still ahead at sequence s+7
+# cannot lower B's 41-bps policy before a retained fill or persist after a successful
+# fill at restored 23 bps. Eight exact deposit/fill rollbacks preserve policy state; 20
+# nonmutating simulations and four live fills reconcile 59/80 fee atoms per owner at fixed SPL
+# supply. Renewing only policy epoch is a live control; the taker field bytes persist.
+# README's retained CPI fee consent across authority ABA section gives exact scope,
+# base, selectors, build/check/clean commands, CU and the corrected packed-epoch test
+# expectation. Prior fixed-authority policy detours and one-way standalone authority
+# controls do not cover this composition. No property violation or production fix.
+# Arbitrary histories, separate fee-authority succession, dynamic/backing fees,
+# slippage/partials/multi-asset/aggregate batches, expiry/underfunding/terminal payout
+# remain gaps. No generic oracle, route-comparison increment or status promotion;
+# invariant_status.tsv is unchanged and row 432 remains OPEN.
 432	LoF	PRIVILEGED	INV-014	INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-080,INV-081	retained-cpi-fee+x-taker-terms+x-single-route	retained-single-cpi-trades-cannot-charge-fee-terms-outside-signed-taker-consent	OPEN
 # 433 bounded conformance (2026-09-12): cu/inv_073_terminal_reserve_close_retry.rs.
 # Two public classic-SPL/asset-0 histories retain keeper-paid principal/insurance and

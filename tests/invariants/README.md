@@ -2998,6 +2998,114 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-014 retained CPI fee consent across authority ABA (row 432, 2026-09-12)
+
+Owner: [cu/inv_014_retained_fee_authority_epoch.rs](cu/inv_014_retained_fee_authority_epoch.rs),
+a child of the existing row432 policy-history owner that reuses its public SPL
+fixture, complete-Account delivery checks and independent rounded-fee census.
+Exact `v16_cu` selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_fee_authority_epoch::v16_retained_cpi_fee_terms_survive_authority_aba_and_stale_policy_bundles`.
+
+Four public LiteSVM/SBF worlds cross both signed directions and two successful
+continuations. At 19 bps, each world signs and successfully simulates three
+envelopes: deposit/policy/trade, deposit/trade/policy and deposit/trade. The signed
+taker cap is 37 bps, quantity is 255.5 lots plus one position quantum, and price
+limit is exactly 100. The retained policy is 31 bps at sequence `s+7`, epoch `e`.
+Neither retained policy bundle nor the trade-only envelope has an LP signature;
+the independent LP grant permits 137 bps.
+
+Public `UpdateAuthority` instructions transfer A -> B -> A, with both incoming
+signatures. B is the LP owner and, while authorized, sets the base fee to 41 bps
+at sequence `s+1`. After A returns, its key is again the live fee authority, but
+its original epoch is obsolete. The retained policy-prefix bundle rejects at
+instruction 3 with `EngineStale`: the SPL deposit succeeded, matcher invocation
+count is zero, and the current 41-bps policy survives. Sequence `s+7` is still
+ahead, so sequence supersession cannot explain the refusal. A separately signed
+bundle changing only that policy instruction's epoch to `e+2` simulates
+successfully, isolating the stale-epoch boundary.
+
+A then publicly restores 23 bps at sequence `s+2`. The retained policy-suffix
+bundle reaches a successful deposit and actual CPI fill before `EngineStale` at
+instruction 4. Complete tracked and compiled Accounts roll back, including SPL
+custody, matcher return/request sequence, policy state, both position epochs and
+the LP grant. Only the payer's exact signature fee is charged. The original
+trade-only envelope remains byte-identical and simulates successfully. Two
+worlds deliver it unchanged at 23 bps; two deliver the epoch-renewed policy-prefix
+bundle at 31 bps with sequence `s+7`. The latter bundle has new signatures,
+including the taker's; its encoded trade data and all message fields except the
+policy instruction data match the original prefix bundle.
+
+Input-derived accounting charges **59 or 80 atoms per owner**, with matching
+insurance/domain budgets, capital, positions, OI and fixed 300,123-atom SPL supply.
+The fee-policy lane advances only on successful policy writes; authority epoch
+stays `e+2`, and only a committed fill advances both position epochs and the
+matcher request sequence once. The complete expected LP config includes its
+packed position-epoch increment, with grant tuple, enabled bit, fee cap, expiry
+and matcher sequence preserved. The run covers **4 worlds, 20 nonmutating
+simulations, 8 exact rollbacks, 2 unchanged retained fills and 2 renewed-policy
+fills**. CU maxima: simulation/fill **187,291**, controls **2,699**, rollback
+**187,027**, each below the fixture's 500,000-CU envelope.
+
+**Nonduplicate:** prior row432 tests keep the authority epoch fixed, including
+their duplicate-policy rejection after a fill. The INV-010 policy/handoff owner
+covers one-way authority changes and standalone controls, not an authority key
+returning with still-forward retained policy sequences around a retained CPI
+fill. This increment distinguishes policy-epoch revocation from unchanged taker
+consent and proves their transaction composition before and after matcher work.
+Standalone fee/price-cap and route permutations were not added. The initial new
+selector failed only because the test expected the packed LP position epoch to
+remain unchanged after success; the corrected expectation uses the established
+position-control increment. No economic assertions were weakened.
+
+**Row 432 remains OPEN.** This adds bounded INV-010/011/014/024/036/080/081
+conformance, not generic closure or a new INV-047 route comparison. There was no
+property violation, production fix or machine-status change. Arbitrary authority
+and policy histories, separate per-asset fee-authority succession, dynamic/backing
+fees, nonzero slippage, partial/multi-asset fills, aggregate batch terms, expiry,
+underfunded collection and terminal payout remain outside this selector. Positions
+remain open.
+
+Worktree `/tmp/percolator-row432-20260912`, branch
+`codex/row432-retained-cpi-fee-terms-20260912`, exact base
+`b5006413139cabb5ab1ea572f7d615430652e836`. The parent worktree was not edited.
+Because `/dev/shm` and `/tmp` had little free space, private target/tmp directories
+use `/run/user/1001`. An existing row432 build cache was copied there, then the
+wrapper and authenticated matcher were rebuilt from this worktree, locked and
+offline with platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Engine remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+
+Focused CU validation passes **3/3**, including both existing row432 controls;
+charter/index and machine-status validation passes **2/2** with the exact selectors
+below. Formatting and whitespace checks pass. Only existing unused-support and
+Solana future-compatibility warnings remain. No full-suite result is claimed.
+Commands, including post-commit patch validation and private artifact cleanup:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/percolator-row432-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/run/user/1001/percolator-row432-tmp
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+CARGO_TARGET_DIR=/run/user/1001/percolator-row432-matcher-target cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_fee_authority_epoch::v16_retained_cpi_fee_terms_survive_authority_aba_and_stale_policy_bundles \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /run/user/1001/percolator-row432-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /run/user/1001/percolator-row432-matcher-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir tests/fixtures/auth_matcher/target
+```
+
 ## INV-073 depleted reserves through retirement retries (rows 420/421, 2026-09-12)
 
 Owner: [cu/inv_073_absent_insurer_spent_retirement.rs](cu/inv_073_absent_insurer_spent_retirement.rs).

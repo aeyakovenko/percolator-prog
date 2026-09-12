@@ -13,6 +13,9 @@ use crate::support::fuzz_model::{
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 use std::collections::BTreeMap;
 
+#[path = "inv_014_retained_fee_authority_epoch.rs"]
+mod retained_fee_authority_epoch;
+
 const DEPOSITS: [u64; 2] = [100_003, 200_007];
 const PREFIX: u64 = 113;
 const PRICE: u64 = 100;
