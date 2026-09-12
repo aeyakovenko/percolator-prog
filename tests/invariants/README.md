@@ -1,5 +1,15 @@
 # Invariant-owned test coverage
 
+The [terminal reserve-backfill audit](terminal_reserve_backfill_audit_20260912.md)
+adds one INV-071 selector with four public LiteSVM histories. Live-valid backing
+and domain-insurance top-ups cannot introduce obligations behind a cached terminal
+prefix. Twenty exact rollbacks compose donated SPL surplus with authenticated
+expiry; identical-prefix retries preserve the 101-atom user payout and finish in
+three slab calls, burning 31 atoms and sweeping 7 with exact rent. This adds bounded
+INV-063/069/070/071/073/080/086/088 evidence. Successful cursor-invalidating mutations,
+claims, insurance recredit and maximum-capacity scans remain outside this increment;
+invariant verdicts and holdout labels are unchanged.
+
 The [terminal destination-authority variant audit](terminal_destination_variant_audit_20260912.md)
 adds one INV-077 selector with six public LiteSVM histories. A fixed-supply mint
 and an admin-owned non-ATA sweep account cross existing delegation, separate close

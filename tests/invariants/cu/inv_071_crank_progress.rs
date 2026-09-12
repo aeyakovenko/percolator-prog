@@ -21,6 +21,9 @@ use super::*;
 #[path = "inv_071_terminal_cursor_time.rs"]
 mod terminal_cursor_time;
 
+#[path = "inv_071_terminal_reserve_backfill.rs"]
+mod terminal_reserve_backfill;
+
 #[path = "inv_071_recovery_obligation_finalization.rs"]
 mod recovery_obligation_finalization;
 
