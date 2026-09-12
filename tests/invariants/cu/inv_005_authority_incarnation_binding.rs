@@ -28,6 +28,9 @@
 //! correctly authorized role as economically hostile. It source-locks all configured, matcher,
 //! delegate, and permissionless callsites to explicit maximum/forbidden effects and independent
 //! public principal/claim containment witnesses.
+//! `cold_admin_earned_reserve` composes cold-admin succession with live liened backing,
+//! earned fees, policy renewal, and partial principal repayment. Correct current signers
+//! cannot substitute the funded holder or destination, or reclassify its earned stock.
 //!
 //! Guarantee boundary: authentication alone does not protect users from a compromised configured
 //! authority. The role matrix proves only the deployed protocol envelope stated for each role;
@@ -50,6 +53,9 @@ mod funded_oracle_succession;
 
 #[path = "inv_005_funded_insurer_stale_resolution.rs"]
 mod funded_insurer_stale_resolution;
+
+#[path = "inv_005_cold_admin_earned_reserve.rs"]
+mod cold_admin_earned_reserve;
 
 fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source

@@ -68,6 +68,43 @@ oversized batch **277,236**, retained rejection including SPL prefix **144,430**
 final withdrawal **141,767**. No production, dependency, invariant-status or
 full-suite claim is made.
 
+## INV-005 cold-admin succession with earned reserves (row 416, 2026-09-12)
+
+Owner: [cu/inv_005_cold_admin_earned_reserve.rs](cu/inv_005_cold_admin_earned_reserve.rs),
+mounted under `inv_005_authority_incarnation_binding::cold_admin_earned_reserve`.
+Selector:
+`v16_program_cold_admin_rotation_preserves_earned_reserve_after_partial_principal_repayment`.
+
+Four public LiteSVM histories cross asset 0/1 with both orders of cold-admin
+succession and unchanged backing-policy renewal. After 97,377 principal atoms
+have been repaid, the original provider still owns 2,623 liened principal atoms
+and 875 earned atoms; a separate 5,000-atom reserve supports the user's live claim.
+Correctly signed role substitution, fee reclassification and destination
+substitution reject atomically. The 24 exact rollback checks include four
+completed SPL payout prefixes. Current incumbent instructions then pay all 875
+earned atoms to the same provider, while both administrators receive zero.
+Full market economics, provider telemetry, both portfolios, fixed SPL supply,
+authority epochs, policy sequence and the unaffected asset are checked.
+
+**Row 416 remains OPEN.** This is bounded nonterminal cold-admin containment,
+with no funded-role exchange, new fee-consent claim, or production change. It is
+distinct from row429 funded-role exchange, row410 terminal submitter attribution,
+rows420/421/433 absent-role terminal payout, rows432/411 fee consent, existing
+two-domain depletion/refunding and existing retained insurance-management
+coverage. Remaining gaps include generic role/state combinations, earnings-only
+buckets, both backing sides simultaneously, nonconsensual funded-oracle changes,
+admin burn/re-enable, key coalescence, authority ABA, nonzero funding, insurance
+earnings, impaired or consumed liens, expiry, recovery, terminal progress and
+arbitrary histories.
+
+Validation was first run in isolated worktree `/tmp/percolator-row416`;
+coordinator integration reran the three exact INV-005 selectors, charter/index,
+formatting and Git whitespace checks on the current branch. New selector result:
+**1/1**, with four histories, 24 rollback probes and four completed SPL-prefix
+rollbacks. CU maxima: selected setup fee-trade/principal transactions **437,784**,
+rejections **329,432**, successful management/payout transactions **327,621**.
+No production, dependency, invariant-status or full-suite claim is made.
+
 ## INV-058 mixed-CPI side-OI handoff (row 427, 2026-09-12)
 
 Owner: [cu/inv_058_atomic_oi_fee_handoff.rs](cu/inv_058_atomic_oi_fee_handoff.rs),
