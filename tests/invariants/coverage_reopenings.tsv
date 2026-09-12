@@ -410,7 +410,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Row stays COVERED; no production/status change. Existing-leg aggregate admission,
 # multi-asset/maximum shapes, PnL/funding/ADL and elapsed rate limits remain gaps.
 # See README for exact selectors, unchanged SBF provenance and setup corrections.
-427	Conformance	LIMIT	INV-058	INV-058	disjoint-portfolios+x-side-oi-cap+x-public-trades	side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs	COVERED
+# Row 427 broader atomic OI/fee coverage reopened (2026-09-12):
+# cu/inv_058_multi_asset_oi_fee_handoff.rs,
+# v16_program_two_asset_oi_fee_handoff_is_atomic_across_clear_resize_and_route_switch.
+# Sixteen public histories cross two capped assets, both signs/orders, full-clear
+# plus partial-resize releases, and mixed CPI/no-CPI batch/single handoffs. Late
+# aggregate-cap and SPL tails produce 32 exact whole-account rollbacks; unchanged
+# instruction retries agree on OI/counts, four fee domains and 96 owner payouts.
+# No bug found. Earlier COVERED entries describe narrower evidence; the requested
+# broader family stays OPEN. Existing-leg admission, nonunit ADL, nonzero PnL or
+# funding, elapsed liabilities/rates and maximum shapes remain outside this test.
+427	Conformance	LIMIT	INV-058	INV-058	disjoint-portfolios+x-side-oi-cap+x-public-trades	side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs	OPEN
 # 428 bounded public conformance (2026-09-12): stateful/inv_008_retained_reserve_replenishment.rs,
 # v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession.
 # Eight role-identity/order worlds restore two real payout prefixes and funded insurer

@@ -8,6 +8,9 @@ use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_058_multi_asset_oi_fee_handoff.rs"]
+mod multi_asset;
+
 const PRICE: u64 = 100;
 const CAPITAL: u128 = 20_000_000_000;
 const ACTORS: usize = 6;

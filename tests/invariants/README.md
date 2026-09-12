@@ -1341,6 +1341,94 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-048/051/058/080/081 two-asset OI/fee handoff (row 427, 2026-09-12)
+
+Owner: [cu/inv_058_multi_asset_oi_fee_handoff.rs](cu/inv_058_multi_asset_oi_fee_handoff.rs),
+mounted under `inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset`.
+Selector: `v16_program_two_asset_oi_fee_handoff_is_atomic_across_clear_resize_and_route_switch`.
+
+Sixteen public LiteSVM histories cross both mixed-position signs, both asset
+orders, and release/refill routes `BatchCpi/NoCpi`, `Cpi/BatchNoCpi`,
+`BatchNoCpi/Cpi`, and `NoCpi/BatchCpi`. Two disjoint pairs fill both assets'
+side-OI caps. One pair fully clears its asset-0 leg and partially reduces its
+asset-1 leg; a fresh third pair takes the unequal released capacity. The
+two-leg batches and two signed singles use identical fills and 100-bps fees.
+Singles sign the next position epoch in advance within the same transaction.
+All accounts, tokens and matcher contexts are constructed through public
+System/SPL/ATA/wrapper routes; mint authority is revoked at 120,000,000,000
+atoms. There is no injected or restored program-owned economic state.
+
+Each world rejects two histories before accepting the unchanged handoff
+instruction bytes. A last-leg aggregate cap+1 fails after the complete
+fee-bearing release (and the first refill when delivered as singles). Every
+proposed quantity and account notional remains below its local cap. A separate
+SPL transfer from an empty owner source fails after all three wrapper trade
+instructions have succeeded. Exact instruction errors and wrapper/matcher
+success counts establish both tail locations. Complete compiled and fixture
+Accounts roll back, including the market, all six portfolios, matcher response
+bytes, owners and SPL custody, with only the exact payer signature fee deducted.
+
+An input-derived ledger checks signed quantities, matched long/short OI, stored
+position counts, per-instruction position epochs, canonical leg identity, cached
+risk notional, each owner's fee debit, four insurance domain credits, capital,
+zero PnL and fixed SPL supply. Both ADL indices and each leg's basis index are
+asserted to equal one, so the INV-051 contribution is restricted to this
+effective-quantity boundary. Route and asset-order outcomes agree after the
+handoff. Public fee reset, flattening and six withdrawals per world leave zero
+OI/capital and exactly the earned insurance fees in engine and SPL custody.
+
+**Non-duplicate:** the existing atomic handoff tests have one asset and one-leg
+batches. INV-047's two-asset fee partition opens flat portfolios and rejects a
+fee cap, without clear/resize transitions or release-dependent admission into
+two full books. This test combines those transitions with cross-route late
+failures and exact final owner entitlements. Plain one-asset handoff and flat
+two-asset fee-equivalence candidates were discarded after source comparison;
+no marginal runtime probes were retained. Row413 risk admission and row425
+fractional carry are excluded.
+
+**Row 427 is OPEN.** The base marked its narrower conformance row `COVERED`;
+this task explicitly reopens the broader atomic OI/fee family. No public LoF/DoS
+bug was found, and no wrapper, engine, manifest or pin changed. Existing-leg
+aggregate increases, nonunit ADL, nonzero PnL/funding, elapsed fee/rate histories,
+arbitrary route schedules and maximum shapes remain gaps. This adds sampled
+coverage without changing the invariant-status table or claiming family closure.
+
+Validation worktree: `/tmp/percolator-row427`, branch
+`codex/row427-atomic-oi-fee-20260912`, based on
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`575a6a0ee7f4992323facd8f3136203a9da7c029`. Build outputs were privately copied
+from `/dev/shm/percolator-row427-f6c2-target`; the authenticated matcher was
+privately copied from `/tmp/percolator-row427-audit-20260912-f6c2`.
+Production sources, manifests, pins and matcher source match the documented
+artifact checkpoint `6ab7856fbe1e2f89ed11c1103fb5282fab404dee` (`git diff --quiet`
+on `src Cargo.toml Cargo.lock tests/fixtures/auth_matcher` passes).
+Wrapper SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Matcher SHA-256: `397cdded3ba64b5e03ea54498a160878dcc81dc844222f3ffbdc4e6210dd2936`.
+Host tests were rebuilt here; no fresh SBF build or full-suite run is claimed.
+The new selector passes **16 worlds / 32 exact rollbacks / 96 payouts**;
+across both passing runs, peak CU `[rejection, trade, custody]` is
+`[601620, 597297, 58382]`.
+All five nearest exact controls below pass, as does the charter/index selector.
+Formatting and unstaged, staged and committed whitespace checks pass.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row427/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::v16_program_two_asset_oi_fee_handoff_is_atomic_across_clear_resize_and_route_switch -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partitions \
+  inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes \
+  inv_047_equivalent_route_semantics::fee_leg_partition::v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles \
+  inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::v16_program_post_transition_caps_match_across_reduction_and_cross_zero_histories \
+  inv_048_matched_trade_and_open_interest_coherence::v16_program_all_trade_routes_keep_oi_equal_to_active_leg_scan
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-058 mixed-CPI side-OI handoff (row 427, 2026-09-12)
 
 Owner: [cu/inv_058_atomic_oi_fee_handoff.rs](cu/inv_058_atomic_oi_fee_handoff.rs),
