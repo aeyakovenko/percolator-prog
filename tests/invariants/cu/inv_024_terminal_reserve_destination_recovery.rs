@@ -15,7 +15,7 @@ fn assert_closed(env: &V16CuEnv, key: Pubkey) {
     }
 }
 
-fn land(
+pub(super) fn land(
     env: &mut V16CuEnv,
     ixs: &[Instruction],
     signers: &[&Keypair],

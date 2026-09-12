@@ -8,6 +8,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 #[path = "inv_024_terminal_reserve_destination_recovery.rs"]
 mod terminal_reserve_destination_recovery;
 
+#[path = "inv_024_terminal_earnings_expiry.rs"]
+mod terminal_earnings_expiry;
+
 const CAPITAL: [u64; 2] = [52_502, 2_000_000];
 const BACKING: u64 = 100_000;
 const INSURANCE: u64 = 31;

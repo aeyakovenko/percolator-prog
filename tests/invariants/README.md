@@ -22,6 +22,16 @@ This adds bounded row-422 evidence; provider changes, arbitrary liquidation sizi
 and complete exposed-owner exits remain outside the increment, and all invariant
 and holdout dispositions are unchanged.
 
+The [terminal earned-fee expiry audit](terminal_earnings_expiry_audit_20260912.md)
+adds one INV-024 selector with four public LiteSVM histories. A partial principal
+payout precedes backing expiry with real utilization earnings still unpaid. Exact
+and one-slot-late normalization preserve those earnings and the separate insurance
+claim; both signed payout orders finish with precisely 99,899 expired atoms burned.
+Forty rejected transactions restore complete Accounts, including expiry, SPL payout
+and lazy-ledger prefixes. This adds bounded INV-024/063/070/073/080 evidence for
+terminal attribution and required reserve signatures. Rows 410/416/420/421/429/433
+remain OPEN; shutdown and funded handoff receive no new coverage from this selector.
+
 The [terminal reserve-backfill audit](terminal_reserve_backfill_audit_20260912.md)
 adds one INV-071 selector with four public LiteSVM histories. Live-valid backing
 and domain-insurance top-ups cannot introduce obligations behind a cached terminal
