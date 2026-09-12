@@ -1,5 +1,41 @@
 # Invariant-owned test coverage
 
+## INV-024 terminal cleanup submitter (row 410, 2026-09-12)
+
+Owner: [cu/inv_024_terminal_cleanup_submitter.rs](cu/inv_024_terminal_cleanup_submitter.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_cleanup_submitter`.
+Selector: `v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submitter`.
+
+Four public LiteSVM histories leave one settled portfolio materialized, then pair
+the market authority's mechanical deletion with an actual provider-fee payout.
+The keeper, market authority, insurance operator and asset admin each pay one
+history's transactions. None holds either reserve role during these transitions.
+For each payer and each principal/earnings/insurance class, destination-only and
+authority-plus-destination substitutions fail after the deletion and fee payout
+complete. All 24 suffix failures restore complete Accounts, including portfolio
+rent and the lazily initialized provider ledger, apart from exact signature fees.
+The valid continuation pays 100,000 principal and 875 earned fees to the provider,
+31 insurance atoms to its beneficiary, and zero quote atoms to all four submitters.
+It ends with exact rent disposition and a closed market tombstone.
+
+The new boundary is transaction-local reserve admission when the final portfolio
+count falls from one to zero. This differs from funded-role exchange (row 429),
+absent-recipient/final-slab-close retry (row 433), depleted-reserve retirement
+(rows 420/421), and retained-fee detours (row 432). **Row 410 remains OPEN**:
+generic shutdown/resolve attribution, missing/depleted reserves, expiry,
+raw SPL surplus, other assets or quote rails, arbitrary payout/role histories
+and all transaction compositions remain outside this finite regression.
+
+Validation was first run in isolated worktree
+`/tmp/percolator-row410-submitter-attribution-20260912-r2`; coordinator
+integration reran the new selector, adjacent INV-024 controls, charter/index,
+formatting and Git whitespace checks on the current branch. New selector result:
+**1/1**, with four histories, 24 exact failed suffixes, four admission-gate
+controls and four final closures. CU maxima: blocked payout **208,609**,
+rejected cleanup-plus-redirect bundle **545,062**, successful reserve-tail
+bundle **583,333**, final slab close **26,742**. No production, dependency,
+invariant-status or full-suite claim is made.
+
 ## INV-058 mixed-CPI side-OI handoff (row 427, 2026-09-12)
 
 Owner: [cu/inv_058_atomic_oi_fee_handoff.rs](cu/inv_058_atomic_oi_fee_handoff.rs),
